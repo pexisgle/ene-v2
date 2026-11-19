@@ -1,0 +1,412 @@
+{
+  "version": 1,
+  "model": "kimodo-soma-rp-v1.2",
+  "fps": 30,
+  "motions": [
+    {
+      "preset": "idle_sway",
+      "file": "idle-sway.vrma",
+      "mode": "loop",
+      "posture": "standing",
+      "duration_sec": 6.0,
+      "seed": 101,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": true,
+      "hand_style": "relaxed",
+      "gaze_mode": "follow_head",
+      "expressions": [
+        { "name": "relaxed", "peak": 0.25, "start_ratio": 0.1, "end_ratio": 0.9 }
+      ],
+      "prompt": "A person stands in place facing forward with relaxed arms at their sides, gently swaying their weight smoothly from left to right and back with calm natural breathing."
+    },
+    {
+      "preset": "idle_hands_behind",
+      "file": "idle-hands-behind.vrma",
+      "mode": "loop",
+      "posture": "standing",
+      "duration_sec": 6.0,
+      "seed": 202,
+      "num_samples": 4,
+      "anchor_ends": false,
+      "pin_mid_root": false,
+      "pin_heading": true,
+      "hand_style": "relaxed",
+      "gaze_mode": "follow_head",
+      "expressions": [
+        { "name": "relaxed", "peak": 0.22, "start_ratio": 0.1, "end_ratio": 0.9 }
+      ],
+      "prompt": "A person stands upright in place facing forward with both hands clasped together behind their lower back throughout the entire clip, gently rocking their weight slightly side to side and looking calmly left and right."
+    },
+    {
+      "preset": "yawn",
+      "file": "yawn.vrma",
+      "mode": "once",
+      "posture": "standing",
+      "duration_sec": 4.5,
+      "seed": 203,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": true,
+      "hand_style": "relaxed",
+      "gaze_mode": "forward",
+      "expressions": [
+        { "name": "relaxed", "peak": 0.55, "start_ratio": 0.18, "end_ratio": 0.85 }
+      ],
+      "prompt": "A person stands in place facing forward, raises their right hand politely to cover their mouth while tilting their head slightly back during a sleepy yawn, then lowers their arm smoothly back to their side."
+    },
+    {
+      "preset": "deep_breath",
+      "file": "deep-breath.vrma",
+      "mode": "once",
+      "posture": "standing",
+      "duration_sec": 5.0,
+      "seed": 204,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": true,
+      "hand_style": "relaxed",
+      "gaze_mode": "forward",
+      "expressions": [
+        { "name": "relaxed", "peak": 0.60, "start_ratio": 0.15, "end_ratio": 0.88 }
+      ],
+      "prompt": "A person stands upright in place facing forward, takes a slow deep calming breath while smoothly raising both arms out slightly to waist height and lifting their chest and chin upward, then exhales slowly and relaxes both arms and shoulders back down."
+    },
+    {
+      "preset": "shrug",
+      "file": "shrug.vrma",
+      "mode": "once",
+      "posture": "standing",
+      "duration_sec": 3.5,
+      "seed": 205,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": true,
+      "hand_style": "open",
+      "gaze_mode": "follow_head",
+      "expressions": [],
+      "prompt": "A person stands in place facing forward, gives a clear friendly shrug by raising both shoulders high and bending both elbows to spread both open hands outward at chest height while tilting their head slightly, then drops their arms back to their sides."
+    },
+    {
+      "preset": "bow",
+      "file": "polite-bow.vrma",
+      "mode": "once",
+      "posture": "standing",
+      "duration_sec": 3.5,
+      "seed": 106,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": false,
+      "hand_style": "relaxed",
+      "gaze_mode": "follow_head",
+      "expressions": [
+        { "name": "relaxed", "peak": 0.38, "start_ratio": 0.15, "end_ratio": 0.85 }
+      ],
+      "prompt": "A person stands upright in place facing forward with hands neatly in front, bends forward smoothly from the waist into a polite gentle bow, pauses briefly, and rises smoothly back upright."
+    },
+    {
+      "preset": "goodbye",
+      "file": "goodbye-wave.vrma",
+      "mode": "once",
+      "posture": "standing",
+      "duration_sec": 4.0,
+      "seed": 107,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": true,
+      "hand_style": "open",
+      "gaze_mode": "forward",
+      "expressions": [
+        { "name": "happy", "peak": 0.55, "start_ratio": 0.12, "end_ratio": 0.88 }
+      ],
+      "prompt": "A person stands in place facing forward, raises their right arm up high near head height and waves their hand warmly side to side to say goodbye, then smoothly lowers their arm back down."
+    },
+    {
+      "preset": "peek",
+      "file": "peek-curious.vrma",
+      "mode": "once",
+      "posture": "standing",
+      "duration_sec": 4.0,
+      "seed": 108,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": false,
+      "hand_style": "relaxed",
+      "gaze_mode": "forward",
+      "expressions": [],
+      "prompt": "A person stands in place facing forward, leans their upper body slightly forward and tilts their head curiously to the side to peer closely at something in front of them, then leans back upright."
+    },
+    {
+      "preset": "beckon",
+      "file": "beckon.vrma",
+      "mode": "once",
+      "posture": "standing",
+      "duration_sec": 3.5,
+      "seed": 109,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": true,
+      "hand_style": "open",
+      "gaze_mode": "forward",
+      "expressions": [
+        { "name": "happy", "peak": 0.48, "start_ratio": 0.12, "end_ratio": 0.88 }
+      ],
+      "prompt": "A person stands in place facing forward, lifts their right hand near shoulder height and waves it inward twice in a friendly beckoning gesture toward the viewer, then lowers their arm smoothly."
+    },
+    {
+      "preset": "head_pat",
+      "file": "head-pat.vrma",
+      "mode": "once",
+      "posture": "standing",
+      "duration_sec": 4.0,
+      "seed": 210,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": true,
+      "hand_style": "relaxed",
+      "gaze_mode": "forward",
+      "expressions": [
+        { "name": "happy", "peak": 0.62, "start_ratio": 0.15, "end_ratio": 0.88 },
+        { "name": "relaxed", "peak": 0.35, "start_ratio": 0.2, "end_ratio": 0.85 }
+      ],
+      "prompt": "A person stands in place facing forward, brings both hands lightly together in front of their waist, tilts their head sweetly to the right and sways their shoulders happily from side to side as if enjoying a gentle head pat, then returns upright."
+    },
+    {
+      "preset": "surprised",
+      "file": "tap-surprise.vrma",
+      "mode": "once",
+      "posture": "standing",
+      "duration_sec": 3.0,
+      "seed": 211,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": false,
+      "hand_style": "open",
+      "gaze_mode": "forward",
+      "expressions": [
+        { "name": "surprised", "peak": 0.65, "start_ratio": 0.08, "end_ratio": 0.72 }
+      ],
+      "prompt": "A person stands in place facing forward, jumps slightly backward in sudden surprise throwing both hands up quickly to shoulder height in front of their chest, then lowers both hands and relaxes."
+    },
+    {
+      "preset": "shy",
+      "file": "shy-fidget.vrma",
+      "mode": "once",
+      "posture": "standing",
+      "duration_sec": 4.0,
+      "seed": 212,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": true,
+      "hand_style": "relaxed",
+      "gaze_mode": "shy",
+      "expressions": [
+        { "name": "happy", "peak": 0.45, "start_ratio": 0.15, "end_ratio": 0.88 }
+      ],
+      "prompt": "A person stands in place facing forward, shyly brings both hands up clasped together in front of their chest, tucks their chin slightly and twists their upper body gently left and right in a bashful sway, then lowers their hands."
+    },
+    {
+      "preset": "happy_bounce",
+      "file": "happy-bounce.vrma",
+      "mode": "once",
+      "posture": "standing",
+      "duration_sec": 3.5,
+      "seed": 213,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": false,
+      "hand_style": "relaxed",
+      "gaze_mode": "forward",
+      "expressions": [
+        { "name": "happy", "peak": 0.65, "start_ratio": 0.1, "end_ratio": 0.88 }
+      ],
+      "prompt": "A person stands in place facing forward, cheerfully bounces up and down twice in place with both arms lifted happily in celebration, then lands softly and lowers both arms."
+    },
+    {
+      "preset": "clap",
+      "file": "clap.vrma",
+      "mode": "once",
+      "posture": "standing",
+      "duration_sec": 3.5,
+      "seed": 214,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": true,
+      "hand_style": "open",
+      "gaze_mode": "forward",
+      "expressions": [
+        { "name": "happy", "peak": 0.58, "start_ratio": 0.12, "end_ratio": 0.88 }
+      ],
+      "prompt": "A person stands in place facing forward, raises both hands in front of their chest and claps their hands together warmly four times with a joyful posture, then lowers both arms back down."
+    },
+    {
+      "preset": "cheer",
+      "file": "cheer-encourage.vrma",
+      "mode": "once",
+      "posture": "standing",
+      "duration_sec": 3.5,
+      "seed": 215,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": true,
+      "hand_style": "fist",
+      "gaze_mode": "forward",
+      "expressions": [
+        { "name": "happy", "peak": 0.62, "start_ratio": 0.1, "end_ratio": 0.88 }
+      ],
+      "prompt": "A person stands in place facing forward, bends both elbows and pumps both clenched fists enthusiastically up and down in front of their shoulders twice to cheer someone on, then lowers their arms."
+    },
+    {
+      "preset": "music_groove",
+      "file": "music-groove.vrma",
+      "mode": "loop",
+      "posture": "standing",
+      "duration_sec": 5.0,
+      "seed": 316,
+      "num_samples": 4,
+      "anchor_ends": false,
+      "pin_mid_root": false,
+      "pin_heading": true,
+      "hand_style": "relaxed",
+      "gaze_mode": "follow_head",
+      "expressions": [
+        { "name": "happy", "peak": 0.45, "start_ratio": 0.08, "end_ratio": 0.92 }
+      ],
+      "prompt": "A person dances happily in place facing forward to upbeat pop music, bending their elbows with forearms lifted near chest height, swaying their shoulders and hips rhythmically left and right and bouncing lightly to the beat."
+    },
+    {
+      "preset": "sit_idle",
+      "file": "perch-idle.vrma",
+      "mode": "loop",
+      "posture": "seated",
+      "duration_sec": 5.5,
+      "seed": 217,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": true,
+      "hand_style": "relaxed",
+      "gaze_mode": "follow_head",
+      "expressions": [
+        { "name": "relaxed", "peak": 0.35, "start_ratio": 0.08, "end_ratio": 0.92 }
+      ],
+      "prompt": "A person sits upright on the edge of a high bench facing forward with both legs hanging down off the edge and hands resting calmly on their thighs, breathing softly and swaying gently."
+    },
+    {
+      "preset": "sit_swing_legs",
+      "file": "perch-kick.vrma",
+      "mode": "loop",
+      "posture": "seated",
+      "duration_sec": 4.5,
+      "seed": 318,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "no_postprocess": true,
+      "elevate_root_y": 0.35,
+      "pin_mid_root": false,
+      "pin_heading": true,
+      "hand_style": "relaxed",
+      "gaze_mode": "follow_head",
+      "expressions": [
+        { "name": "happy", "peak": 0.42, "start_ratio": 0.08, "end_ratio": 0.92 }
+      ],
+      "prompt": "A person sits high up on a tall ledge facing forward with both feet dangling well above the ground, playfully swinging and kicking their left and right lower legs alternately forward and backward in the air."
+    },
+    {
+      "preset": "sit_wave",
+      "file": "perch-greet.vrma",
+      "mode": "once",
+      "posture": "seated",
+      "duration_sec": 4.0,
+      "seed": 119,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": false,
+      "hand_style": "open",
+      "gaze_mode": "forward",
+      "expressions": [
+        { "name": "happy", "peak": 0.55, "start_ratio": 0.12, "end_ratio": 0.88 }
+      ],
+      "prompt": "A person sits upright on the edge of a high bench facing forward with both legs hanging down, raises their right hand happily to wave hello, and smoothly lowers their hand back beside their thigh."
+    },
+    {
+      "preset": "drag_held",
+      "file": "drag-held.vrma",
+      "mode": "loop",
+      "posture": "dangling",
+      "duration_sec": 3.5,
+      "seed": 120,
+      "num_samples": 4,
+      "anchor_ends": false,
+      "pin_mid_root": false,
+      "hand_style": "relaxed",
+      "gaze_mode": "follow_head",
+      "expressions": [
+        { "name": "surprised", "peak": 0.25, "start_ratio": 0.12, "end_ratio": 0.88 }
+      ],
+      "prompt": "A person is lifted gently off the ground facing forward with knees slightly bent and both legs dangling loosely swinging softly side to side while arms balance lightly in mid-air."
+    },
+    {
+      "preset": "listen",
+      "file": "listen-active.vrma",
+      "mode": "once",
+      "posture": "standing",
+      "duration_sec": 4.5,
+      "seed": 121,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": true,
+      "hand_style": "relaxed",
+      "gaze_mode": "forward",
+      "expressions": [],
+      "prompt": "A person stands in place facing forward, leans their upper torso slightly forward attentively, tilts their head slightly as they listen closely, gives two soft understanding nods, and relaxes upright."
+    },
+    {
+      "preset": "explain",
+      "file": "speak-explain.vrma",
+      "mode": "once",
+      "posture": "standing",
+      "duration_sec": 4.5,
+      "seed": 122,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": true,
+      "hand_style": "open",
+      "gaze_mode": "forward",
+      "expressions": [],
+      "prompt": "A person stands in place facing forward, gestures smoothly with both open hands in front of their chest and waist while calmly explaining an idea, then lowers both hands back to their sides."
+    },
+    {
+      "preset": "shake_head",
+      "file": "disagree.vrma",
+      "mode": "once",
+      "posture": "standing",
+      "duration_sec": 3.5,
+      "seed": 123,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": true,
+      "hand_style": "open",
+      "gaze_mode": "follow_head",
+      "expressions": [],
+      "prompt": "A person stands in place facing forward, politely shakes their head gently from left to right while waving one hand slightly in front of their chest to disagree gently, then lowers their hand."
+    },
+    {
+      "preset": "aha",
+      "file": "aha.vrma",
+      "mode": "once",
+      "posture": "standing",
+      "duration_sec": 3.5,
+      "seed": 124,
+      "num_samples": 4,
+      "anchor_ends": true,
+      "pin_mid_root": true,
+      "hand_style": "point_right",
+      "gaze_mode": "forward",
+      "expressions": [
+        { "name": "surprised", "peak": 0.45, "start_ratio": 0.12, "end_ratio": 0.45 },
+        { "name": "happy", "peak": 0.55, "start_ratio": 0.35, "end_ratio": 0.88 }
+      ],
+      "prompt": "A person stands in place facing forward, suddenly perks up upright as if having a bright idea, raises their right hand near shoulder height with index finger raised briefly, then lowers their arm back down."
+    }
+  ]
+}

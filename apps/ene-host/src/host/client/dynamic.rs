@@ -54,6 +54,9 @@ const WORK_AGENT_TOOLS: &[&str] = &[
     "mind_read",
     "mind_recall",
     "report",
+    "skill_list",
+    "skill_read",
+    "skill_save",
     crate::host::web_search::NAME,
 ];
 
@@ -385,7 +388,8 @@ pub(crate) fn hand_names(host: &std::collections::HashSet<String>) -> Vec<String
 
 /// Initial `ToolAccess` for a newly spawned or restored work agent.
 pub(crate) fn hand_tool_access(world: &mut World) -> ToolAccess {
-    let host = crate::host::mcp::tool_names(world);
+    let mut host = crate::host::mcp::tool_names(world);
+    host.extend(crate::host::providers::extensions::tool_names(world));
     ToolAccess::Only(hand_names(&host))
 }
 
@@ -401,7 +405,8 @@ fn sync_access(world: &mut World, entities: &HashMap<String, Entity>) {
             .map(|(entity, agent)| (entity, agent.companion_id.clone()))
             .collect()
     };
-    let host = crate::host::mcp::tool_names(world);
+    let mut host = crate::host::mcp::tool_names(world);
+    host.extend(crate::host::providers::extensions::tool_names(world));
     for (entity, companion) in parents {
         let granted: &[String] = granted.get(&companion).map_or(&[], Vec::as_slice);
         let names = parent_names(granted);

@@ -271,18 +271,22 @@ fn local_target(command: &str, input: &str) -> Target {
     if command.is_empty() {
         return Ok(None);
     }
-    let args = if input.starts_with('[') {
-        serde_json::from_str::<Vec<String>>(input)
-            .map_err(|_| "引数を文字列の JSON 配列で入力してください。")?
-    } else {
-        split_args(input)?
-    };
+    let args = parse_process_args(input)?;
     let command = command.trim_matches('"');
     if command.is_empty() {
         return Err("実行ファイルを入力してください。");
     }
     let name = command.rsplit(['/', '\\']).next().unwrap_or(command);
     Ok(Some(process_target(command, args, name)))
+}
+
+pub(super) fn parse_process_args(input: &str) -> Result<Vec<String>, &'static str> {
+    let input = input.trim();
+    if input.starts_with('[') {
+        serde_json::from_str(input).map_err(|_| "引数を文字列の JSON 配列で入力してください。")
+    } else {
+        split_args(input)
+    }
 }
 
 fn npx_target(input: &str) -> Target {

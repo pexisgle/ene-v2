@@ -249,10 +249,9 @@ fn local_host_command(host: &std::path::Path) -> std::process::Command {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut command = Command::new(host);
     if std::env::var_os("ENE_HOST_ALLOWED_CAPABILITIES").is_none() {
-        let capabilities = ene_desktop::WORKSPACE_FILE_CAPABILITIES.join(",");
         command.env(
             "ENE_HOST_ALLOWED_CAPABILITIES",
-            format!("body.motion,{capabilities},{}", ene_rpc::COMPUTER_USE),
+            ene_desktop::default_allowed_capabilities(),
         );
     }
     command.creation_flags(CREATE_NO_WINDOW);
@@ -301,11 +300,16 @@ fn restart_desktop(reset_error: Option<String>) -> std::io::Result<()> {
     command.spawn().map(|_| ())
 }
 
-/// The client's identity and renderer, from the environment.
+/// The client's identity and renderer, from the environment or persistent data dir.
 fn options() -> Options {
     let defaults = Options::default();
+    let id = std::env::var("ENE_DESKTOP_CLIENT_ID")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(ene_desktop::persistent_client_id);
     Options {
-        id: std::env::var("ENE_DESKTOP_CLIENT_ID").unwrap_or(defaults.id),
+        id,
         name: std::env::var("ENE_DESKTOP_CLIENT_NAME").unwrap_or(defaults.name),
         platform: defaults.platform,
         renderer: std::env::var_os("ENE_DESKTOP_RENDERER")

@@ -10,7 +10,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-ene-rpc = { workspace = true, features = ["client"] }
+ene-avatar-ipc.workspace = true
+ene-plugin.workspace = true
+ene-plugin-runtime.workspace = true
+ene-rpc = { workspace = true, features = ["client", "client-tls"] }
 base64.workspace = true
 buffa.workspace = true
 cap-std.workspace = true
@@ -25,6 +28,7 @@ serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "process", "io-util", "sync", "time"] }
+tokio-util.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 cpal = "0.18"

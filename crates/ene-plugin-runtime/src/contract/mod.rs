@@ -76,6 +76,26 @@ impl Events {
             Event::Character { target, action } => self.accept_character(target, action)?,
             Event::Harness { event } => self.accept_harness(event)?,
             Event::Models { .. } => self.accept_llm(event)?,
+            Event::Audio {
+                data_base64,
+                sample_rate,
+                done,
+            } => {
+                if data_base64.len() > crate::limits::MAX_CHUNK || *sample_rate > 192_000 {
+                    return Err(Error::Protocol);
+                }
+                if *done {
+                    self.terminal = true;
+                }
+            }
+            Event::Transcription { text, is_final } => {
+                if text.len() > 16_384 {
+                    return Err(Error::Protocol);
+                }
+                if *is_final {
+                    self.terminal = true;
+                }
+            }
             _ => {}
         }
         self.count += 1;
@@ -200,5 +220,69 @@ mod tests {
             assert!(events.accept(&event(other)).is_err());
         }
         events.accept(&event(target)).unwrap();
+    }
+
+    #[test]
+    fn f22_streaming_audio_and_transcription_events_validate_bounds_and_terminal() {
+        let mut tts = Events::new(&Operation::Synthesize {
+            request: SynthesisRequest {
+                endpoint: "http://127.0.0.1".into(),
+                options: serde_json::json!({}),
+                model: "m".into(),
+                text: "hi".into(),
+                voice: "v".into(),
+                speed: 1.0,
+                format: AudioFormat::Pcm16,
+            },
+        });
+        tts.accept(&Event::Audio {
+            data_base64: "AAAA".into(),
+            sample_rate: 24_000,
+            done: false,
+        })
+        .unwrap();
+        tts.accept(&Event::Audio {
+            data_base64: String::new(),
+            sample_rate: 24_000,
+            done: true,
+        })
+        .unwrap();
+        // Events after `done: true` must be rejected.
+        assert!(
+            tts.accept(&Event::Audio {
+                data_base64: "AAAA".into(),
+                sample_rate: 24_000,
+                done: false,
+            })
+            .is_err()
+        );
+
+        let mut stt = Events::new(&Operation::Transcribe {
+            request: TranscriptionRequest {
+                endpoint: "http://127.0.0.1".into(),
+                options: serde_json::json!({}),
+                model: "m".into(),
+                pcm_base64: "AAAA".into(),
+                sample_rate: 16_000,
+                language: None,
+            },
+        });
+        stt.accept(&Event::Transcription {
+            text: "こんに".into(),
+            is_final: false,
+        })
+        .unwrap();
+        stt.accept(&Event::Transcription {
+            text: "こんにちは".into(),
+            is_final: true,
+        })
+        .unwrap();
+        assert!(
+            stt.accept(&Event::Transcription {
+                text: "extra".into(),
+                is_final: false,
+            })
+            .is_err()
+        );
     }
 }

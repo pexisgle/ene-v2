@@ -5,8 +5,10 @@ mod audio;
 mod character;
 mod embedding;
 mod harness;
+mod hook;
 mod http;
 mod llm;
+mod tool;
 mod wire;
 
 pub use audio::{
@@ -22,6 +24,8 @@ pub use harness::{
     TextContent, ToolCall, ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus,
     ToolCallUpdate, ToolCallUpdateFields, ToolKind, text_block,
 };
+pub use hook::{HookDecision, HookEvent};
 pub use http::{HttpChunk, HttpRequest};
 pub use llm::LlmCapabilities;
+pub use tool::{PluginToolDefinition, ToolInvokeRequest, ToolInvokeResult};
 pub use wire::{Event, Operation, ServiceRequest};

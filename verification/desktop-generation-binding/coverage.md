@@ -1,10 +1,11 @@
 # Coverage: desktop device binding
 
-guard-sha256: 10c73767a0b32c26ddb19b9e532f0372a2722d37dce6082afa0e5b350952813a
+guard-sha256: db8fb68c1eb72c77be0a674b33b61c3603853b9e05e1511da6e48282df2843da
 
 Property: **an operation executes, and reports its result, only when it names
-this client's identity and current device stream, and this client is the active
-device for a companion.**
+this client's identity and current device stream, and either names a work
+session bound to this client or this client is the active device for a
+companion.**
 The harm if it breaks: a motion or eye-watch addressed to another client, or sent
 on a device stream this client has already replaced, runs anyway, so a stale or
 wrong device acts as if it owns the character.
@@ -32,8 +33,9 @@ The test enumerates the product of:
 - the operation's client id: `desktop`, `other`, `""`
 - the operation's subscription id: `sub-1`, `sub-2`, `""`
 - whether we hold the companion: no, yes
+- the operation's work id: `None`, `Some("")`, `Some("work-1")`
 
-2 × 2 × 3 × 3 × 2 = 72 cases. Every distinguishable input of the decision
+2 × 2 × 3 × 3 × 2 × 3 = 216 cases. Every distinguishable input of the decision
 function is in that set, so this is a complete check of the guard, not a sample.
 The test asserts the count, so widening the domain without updating the
 expectation fails loudly.

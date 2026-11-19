@@ -26,6 +26,9 @@ actions!(ene_desktop, [Submit, CancelOrStop]);
 enum ChatControl {
     Companions,
     Microphone { ready: bool },
+    CaptureMode,
+    PttToggle,
+    PttCancel,
     Speaker { ready: bool },
     History,
     Settings,
@@ -1862,6 +1865,8 @@ impl CompanionPod {
         let speaker_ready = matches!(hub.model.devices.output, Device::Ready(_))
             && hub.has_audio_connection(w::ConnectionKind::Tts);
         let mic_on = mic_ready && !hub.model.mic_muted;
+        let is_ptt = hub.model.capture_mode == crate::audio::CaptureMode::Ptt;
+        let ptt_active = hub.model.ptt_active;
         let speaker_on = hub.live() && speaker_ready && !hub.model.output_muted;
         let expanded = hub.pod_mode == PodMode::ExpandedChat;
         let button = |id, label, icon, tone, action| {
@@ -1961,6 +1966,43 @@ impl CompanionPod {
                         ChatControl::History,
                     ))
                     .child(button(
+                        "pod-control-capture-mode",
+                        if is_ptt {
+                            "PTT モード"
+                        } else {
+                            "VAD モード"
+                        },
+                        Icon::Mic,
+                        if is_ptt { Tone::Primary } else { Tone::Ghost },
+                        ChatControl::CaptureMode,
+                    ))
+                    .when(is_ptt && mic_on, |row| {
+                        row.child(button(
+                            "pod-control-ptt-toggle",
+                            if ptt_active {
+                                "送信 (話す終了)"
+                            } else {
+                                "押して話す"
+                            },
+                            Icon::Mic,
+                            if ptt_active {
+                                Tone::Mint
+                            } else {
+                                Tone::Primary
+                            },
+                            ChatControl::PttToggle,
+                        ))
+                        .when(ptt_active, |row| {
+                            row.child(button(
+                                "pod-control-ptt-cancel",
+                                "キャンセル",
+                                Icon::Close,
+                                Tone::Danger,
+                                ChatControl::PttCancel,
+                            ))
+                        })
+                    })
+                    .child(button(
                         "pod-control-settings",
                         "設定",
                         Icon::Settings,
@@ -1994,6 +2036,9 @@ impl CompanionPod {
                     hub.open_settings(SettingsSection::Device, cx)
                 }
             }),
+            ChatControl::CaptureMode => self.hub.update(cx, |hub, cx| hub.toggle_capture_mode(cx)),
+            ChatControl::PttToggle => self.hub.update(cx, |hub, cx| hub.ptt_toggle(cx)),
+            ChatControl::PttCancel => self.hub.update(cx, |hub, cx| hub.ptt_cancel(cx)),
             ChatControl::Speaker { ready } => self.hub.update(cx, |hub, cx| {
                 if ready {
                     hub.toggle_output_mute(cx)
@@ -2020,11 +2065,13 @@ impl CompanionPod {
             .map(|s| s.companions.clone())
             .unwrap_or_default();
         let active_id = hub.model.companion_id().map(str::to_owned);
+        let client_id = hub.options.id.clone();
 
         let mut rows: Vec<AnyElement> = Vec::new();
         for comp in companions {
             let cid = comp.id.clone();
             let active = active_id.as_deref() == Some(cid.as_str());
+            let resident = hub.model.is_resident(&cid, &client_id);
             let persona = comp
                 .persona
                 .as_deref()
@@ -2032,6 +2079,8 @@ impl CompanionPod {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "話し方未設定".to_owned());
             let pick_id = cid.clone();
+            let toggle_id = cid.clone();
+            let hub_res = self.hub.clone();
             rows.push(
                 div()
                     .id(SharedString::from(format!("pod-roster-{}", comp.id)))
@@ -2063,7 +2112,7 @@ impl CompanionPod {
                         &comp.name,
                         &cid,
                         28.,
-                        active.then_some(theme.mint),
+                        (active || resident).then_some(theme.mint),
                         theme,
                     ))
                     .child(
@@ -2088,6 +2137,24 @@ impl CompanionPod {
                                     .child(persona),
                             ),
                     )
+                    .child(pill_button(
+                        SharedString::from(format!("pod-roster-res-{cid}")),
+                        if resident { "常駐中" } else { "常駐" },
+                        None,
+                        if resident { Tone::Mint } else { Tone::Ghost },
+                        true,
+                        theme,
+                        move |_, cx| {
+                            cx.stop_propagation();
+                            hub_res.update(cx, |hub, cx| {
+                                if resident {
+                                    hub.release_companion(toggle_id.clone(), cx);
+                                } else {
+                                    hub.activate_companion(toggle_id.clone(), cx);
+                                }
+                            });
+                        },
+                    ))
                     .when(active, |this| {
                         this.child(icon(Icon::Check, 14., theme.accent))
                     })
@@ -2330,22 +2397,42 @@ fn active_mini_speech_text(model: &crate::state::Model) -> String {
         .unwrap_or_else(|| "こんにちは。まずはひとこと送ってみてください。".to_owned())
 }
 
-fn preview_text(raw: &str) -> String {
-    // Hold an unfinished control line or table until its shape is known.
-    let (complete, tail) = raw.rsplit_once('\n').unwrap_or(("", raw));
-    let (prefix, previous) = complete.rsplit_once('\n').unwrap_or(("", complete));
-    if previous.trim_start().starts_with('|')
-        && (tail.is_empty() || tail.trim_matches(['|', '-', ':', ' ']).is_empty())
-        && !prefix
-            .lines()
-            .any(|line| line.starts_with('|') && line.contains("---"))
-    {
-        return w::plain_reply(prefix);
-    }
-    if tail.trim_start().starts_with(['[', '|']) {
-        w::plain_reply(complete)
+fn is_motion_leak_line(line: &str) -> bool {
+    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(line) else {
+        return false;
+    };
+    !items.is_empty()
+        && items.iter().all(|item| {
+            item.as_object().is_some_and(|obj| {
+                !obj.is_empty()
+                    && obj.iter().all(|(key, value)| {
+                        matches!(key.as_str(), "motion" | "expression") && value.is_string()
+                    })
+            })
+        })
+}
+
+fn strip_motion_leak(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let first = trimmed.lines().next().unwrap_or("");
+    if is_motion_leak_line(first) {
+        trimmed[first.len()..].trim_start().to_owned()
     } else {
-        w::plain_reply(raw)
+        trimmed.to_owned()
+    }
+}
+
+fn preview_text(raw: &str) -> String {
+    // Hold an unfinished leading motion-control JSON line until its shape is known,
+    // while preserving Markdown, URLs, code blocks and emojis verbatim.
+    let (complete, tail) = raw.rsplit_once('\n').unwrap_or(("", raw));
+    if complete.is_empty() && tail.trim_start().starts_with('[') {
+        return String::new();
+    }
+    if tail.trim_start().starts_with('[') && !tail.trim_end().ends_with(']') {
+        strip_motion_leak(complete)
+    } else {
+        strip_motion_leak(raw)
     }
 }
 
@@ -2588,25 +2675,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preview_waits_for_table_columns_and_motion_data() {
-        for partial in [
-            "|価格|幅|",
-            "|価格|幅|\n",
-            "|価格|幅|\n|--",
-            "[{\"motion\":",
-        ] {
-            assert_eq!(preview_text(partial), "");
-        }
+    fn preview_holds_partial_motion_data_and_preserves_markdown() {
+        assert_eq!(preview_text("[{\"motion\":"), "");
+        assert_eq!(
+            preview_text("[{\"motion\":\"nod\"}]\nこんにちは！"),
+            "こんにちは！"
+        );
     }
 
     #[test]
-    fn clean_display_text_and_extract_urls_handle_markdown_links() {
-        let raw = "### 結果\n- **公式**: [Antigravity](https://example.com/docs) を確認\nhttps://example.com/raw。";
+    fn preview_preserves_markdown_links_and_extract_urls_parses_them() {
+        let raw = "### 結果\n- **公式**: [Antigravity](https://example.com/docs) を確認 👍\nhttps://example.com/raw。";
         let clean = preview_text(raw);
+        assert!(clean.contains("**公式**"), "{clean}");
         assert!(
-            clean.contains("公式: Antigravity (https://example.com/docs) を確認"),
+            clean.contains("[Antigravity](https://example.com/docs)"),
             "{clean}"
         );
+        assert!(clean.contains("👍"), "{clean}");
         let urls = extract_urls(raw);
         assert_eq!(
             urls,

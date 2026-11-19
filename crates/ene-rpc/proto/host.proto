@@ -418,6 +418,8 @@ message SubmitApprovalRequest {
 message SubmitApprovalResponse {
   bool acknowledged = 1;
   ApprovalStatus status = 2;
+  bool rule_saved = 3;
+  optional string rule_error = 4;
 }
 message ApprovalRequested { ApprovalRequest request = 1; }
 
@@ -458,6 +460,7 @@ enum ConnectionKind {
   CONNECTION_KIND_EMBEDDING = 4;
   CONNECTION_KIND_MCP = 5;
   CONNECTION_KIND_ACP = 6;
+  CONNECTION_KIND_SEARCH = 7;
 }
 
 // 全接続種別に共通のヘッダー。種別固有の設定は ConnectionConfig の oneof で表す。
@@ -479,6 +482,7 @@ message ConnectionConfig {
     EmbeddingConnection embedding = 4;
     McpConnection mcp = 5;
     AcpConnection acp = 6;
+    SearchConnection search = 7;
   }
 }
 message ConnectionEndpoint {
@@ -509,11 +513,20 @@ message McpConnection {
   repeated string allowed_tools = 2;
   string command = 3;        // stdio transport: the program to run
   repeated string args = 4;  // stdio transport: its arguments
+  string cwd = 5;            // stdio transport: working directory
+  map<string, string> env = 6;        // stdio transport: extra environment variables
+  map<string, string> headers = 7;    // HTTP transport: extra static headers
+  string auth_header = 8;             // HTTP transport: header name for registered secret
+  string secret_env_var = 9;          // stdio transport: env var receiving registered secret
 }
 message AcpConnection {
   ConnectionEndpoint endpoint = 1;
   string command = 2;
   repeated string args = 3;
+}
+message SearchConnection {
+  ConnectionEndpoint endpoint = 1;
+  uint32 max_results = 2;
 }
 message ConnectionCheck {
   bool healthy = 1;
@@ -620,6 +633,7 @@ message AudioInputChunk {
   bytes pcm_data = 2; // 24kHz / 16kHz 16-bit mono PCM
   uint32 sample_rate = 3;
   bool is_companion_speaking = 4;
+  bool barge_in = 5; // 発話中割り込み検出フラグ (FlushReason::BARGE_IN)
 }
 message TranscriptionEvent {
   string transcription_id = 1;
@@ -634,6 +648,7 @@ message SubscribeAudioRequest {
 message SpeakRequest {
   string client_id = 1;
   string text = 2;
+  optional string companion_id = 3;
 }
 message AudioOutputEvent {
   oneof event {
@@ -649,6 +664,7 @@ message AudioChunkEnvelope {
   bytes pcm_data = 4;
   uint32 sample_rate = 5;
   bool is_final_chunk = 6;
+  string companion_id = 7;
 }
 enum FlushReason {
   FLUSH_REASON_UNSPECIFIED = 0;
@@ -660,11 +676,13 @@ message FlushControl {
   string utterance_id = 1;
   uint64 flush_generation_id = 2;
   FlushReason reason = 3;
+  string companion_id = 4;
 }
 message UtteranceFinished {
   string utterance_id = 1;
   uint64 generation_id = 2;
   uint32 total_sentences = 3;
+  string companion_id = 4;
 }
 
 // Client Service -----------------------------------------------------------
@@ -738,6 +756,7 @@ message DeviceOperation {
   string client_id = 5;             // 受付時に束縛した対象クライアント
   optional string work_id = 7;      // 手からの操作の場合のWorkSession
   optional string run_id = 8;       // Computer Use を発行した実行中の Run
+  string companion_id = 9;          // 操作を要求したコンパニオン
 }
 message DeviceReady { string subscription_id = 1; }
 message DeviceEvent {
@@ -776,8 +795,23 @@ message PerceptionEvent {
     ScreenFrame screen_frame = 6;
     WatchMatch watch_match = 7;
     bool enabled = 8;
+    AvatarInteraction avatar_interaction = 11;
   }
   string subscription_id = 9; // DeviceReady の購読 ID。旧形式では空。
+  optional string companion_id = 10; // 明示ルーティング先のコンパニオン
+}
+
+enum AvatarInteractionKind {
+  AVATAR_INTERACTION_KIND_UNSPECIFIED = 0;
+  AVATAR_INTERACTION_KIND_CLICK = 1;
+  AVATAR_INTERACTION_KIND_DOUBLE_CLICK = 2;
+  AVATAR_INTERACTION_KIND_DRAG = 3;
+}
+
+message AvatarInteraction {
+  AvatarInteractionKind kind = 1;
+  string character_id = 2;
+  string region = 3;
 }
 
 message ScreenFrame { bytes jpeg = 1; }
@@ -811,6 +845,32 @@ message PerceptionSummary {
 
 // Service RPCs -------------------------------------------------------------
 
+message CompanionTemplate {
+  uint32 format_version = 1;
+  string id = 2;
+  string name = 3;
+  string mind = 4;
+  optional string persona = 5;
+  MindProfile profile = 6;
+  JsonDocument body = 7;
+  JsonDocument voice = 8;
+  optional string voice_identifier = 9;
+}
+message CompanionTemplates { repeated CompanionTemplate items = 1; }
+message ImportCompanionRequest {
+  CompanionTemplate template = 1;
+  ModelAssignments assignments = 2;
+}
+message PreviewCompanionRequest {
+  string name = 1;
+  string mind = 2;
+  optional string persona = 3;
+  MindProfile profile = 4;
+  ModelAssignment model = 5;
+  string user_message = 6;
+}
+message PreviewCompanionResponse { string reply = 1; }
+
 service HostService {
   rpc GetSnapshot(Empty) returns (Snapshot);
   rpc Subscribe(SubscribeRequest) returns (stream Notification);
@@ -820,6 +880,10 @@ service HostService {
   rpc CreateCompanion(CreateCompanionRequest) returns (Companion);
   rpc UpdateCompanion(UpdateCompanionRequest) returns (Companion);
   rpc DeleteCompanion(Id) returns (Empty);
+  rpc ListCompanionTemplates(Empty) returns (CompanionTemplates);
+  rpc ExportCompanion(Id) returns (CompanionTemplate);
+  rpc ImportCompanion(ImportCompanionRequest) returns (Companion);
+  rpc PreviewCompanion(PreviewCompanionRequest) returns (PreviewCompanionResponse);
   rpc GetMind(Id) returns (MindView);
   rpc UpdateMindProfile(UpdateMindProfileRequest) returns (MindView);
   rpc ControlMemory(MemoryControlRequest) returns (MemoryControlResult);
@@ -851,6 +915,39 @@ service SettingsService {
   rpc RevokeCredentials(Id) returns (Empty);
   // 接続種別（LLM/TTS/STT/Embedding/MCP/ACP）に共通の接続チェック。
   rpc CheckConnection(CheckRequest) returns (CheckResult);
+  // プラグイン管理 (`F12`)
+  rpc ListPlugins(Empty) returns (PluginList);
+  rpc InstallPlugin(InstallPluginRequest) returns (PluginInfo);
+  rpc SetPluginEnabled(SetPluginEnabledRequest) returns (PluginInfo);
+  rpc RemovePlugin(RemovePluginRequest) returns (Empty);
+}
+
+message PluginInfo {
+  string id = 1;
+  string name = 2;
+  string version = 3;
+  string description = 4;
+  bool enabled = 5;
+  repeated string extensions = 6;
+  string path = 7;
+  string installed_at = 8;
+}
+
+message PluginList {
+  repeated PluginInfo plugins = 1;
+}
+
+message InstallPluginRequest {
+  string source_path = 1;
+}
+
+message SetPluginEnabledRequest {
+  string plugin_id = 1;
+  bool enabled = 2;
+}
+
+message RemovePluginRequest {
+  string plugin_id = 1;
 }
 
 service WorkService {

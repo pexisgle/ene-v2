@@ -9,10 +9,9 @@ publish.workspace = true
 workspace = true
 [features]
 client = ["connectrpc/client", "dep:http", "dep:url"]
+client-tls = ["client", "connectrpc/client-tls", "dep:rustls-native-certs"]
 
 [dependencies]
-pulldown-cmark = { version = "0.13", default-features = false }
-regex = "1"
 serde_json.workspace = true
 serde.workspace = true
 buffa.workspace = true
@@ -20,6 +19,7 @@ buffa.workspace = true
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 http = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
 connectrpc.workspace = true
 
 [build-dependencies]

@@ -513,7 +513,13 @@ impl Harness {
             seen: Arc::clone(&self.seen),
         });
         let broker = http_broker(recording as Arc<dyn HttpGrants>).unwrap();
-        plugin_completion(Arc::clone(&self.running), model.into(), broker, false)
+        let context = crate::host::providers::ProviderInvocationContext::with_broker(
+            &self.running,
+            &connection,
+            &self.providers,
+            broker,
+        );
+        plugin_completion(Arc::clone(&self.running), context, model.into(), false)
     }
 
     fn seen(&self) -> Vec<HeaderMap> {

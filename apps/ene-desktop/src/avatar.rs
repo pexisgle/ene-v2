@@ -11,109 +11,55 @@
 //! The renderer has no network and no host connection. It knows a character id,
 //! a model path and a motion path; everything else is this client's job.
 
-use serde::Deserialize;
-use serde_json::{Value, json};
+use ene_avatar_ipc::{
+    AvatarEvent, AvatarMessage, AvatarStatus, CharacterConfig, Command, RendererSnapshot, Request,
+};
+use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, Command, Stdio},
-    sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
+    process::{Child, ChildStdin, Stdio},
+    sync::{Arc, Mutex},
     thread,
+    time::Duration,
 };
+use tokio::sync::{mpsc, oneshot};
 
-/// The renderer's own line limit (`control.rs` `read_request`).
-pub const MAX_LINE: usize = 65_536;
+pub const AVATAR_CALL_TIMEOUT: Duration = Duration::from_secs(5);
+const AVATAR_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
+const MAX_EVENT_QUEUE: usize = 256;
 
-/// A reply to one request, or a notification the renderer emitted.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum Message {
-    Reply {
-        id: u64,
-        #[serde(default)]
-        ok: Value,
-        #[serde(default)]
-        error: Option<String>,
-    },
-    Event(Value),
-}
-
-/// The character configuration this client last sent.
-///
-/// This mirrors `Character::Config` in `apps/ene-avatar/src/character.rs`, which
-/// is a binary crate that a GUI must not link. Every field is carried so a
-/// motion change cannot reset the placement.
-#[derive(Clone, Debug, PartialEq)]
-struct Shown {
-    model: String,
-    motion: Option<String>,
-    looping: bool,
-    monitor: Option<String>,
-    position: Option<[f32; 2]>,
-    size_percent: f32,
-}
-
-impl Shown {
-    fn new(model: &Path) -> Self {
-        Self {
-            model: model.to_string_lossy().into_owned(),
-            motion: None,
-            looping: true,
-            monitor: None,
-            position: None,
-            size_percent: 100.,
-        }
-    }
-
-    fn config(&self) -> Value {
-        json!({
-            "model": self.model,
-            "motion": self.motion,
-            "playing": true,
-            "looping": self.looping,
-            "monitor": self.monitor,
-            "position": self.position,
-            "size_percent": self.size_percent,
-        })
-    }
-
-    fn with_scale(&self, size_percent: f32) -> Self {
-        let mut next = self.clone();
-        next.size_percent = size_percent.clamp(50., 200.);
-        next
-    }
-}
-
-/// The request body for a face change. `None` is the renderer's "clear it".
-fn expression_request(character: &str, name: Option<&str>) -> Value {
-    json!({"character": character, "name": name})
-}
-
-/// One mouth amplitude as the renderer's one-way line.
-///
-/// No `id`: the renderer answers nothing for this op, which is what lets it be
-/// sent at the audio rate without a reply queue.
 fn lip_sync_line(character: &str, rms: f32) -> Result<String, String> {
-    let mut line = serde_json::to_string(&json!({
-        "op": "lip_sync",
-        "character": character,
-        "rms": rms.clamp(0., 1.),
-    }))
-    .map_err(|error| error.to_string())?;
-    line.push('\n');
-    Ok(line)
+    Request {
+        id: None,
+        command: Command::LipSync {
+            character: character.to_owned(),
+            rms: rms.clamp(0., 1.),
+        },
+    }
+    .encode_line()
 }
-/// The renderer process and the channels to its stdio.
+
+enum WriteItem {
+    Request { id: u64, line: String },
+    OneWay(String),
+}
+
+type PendingReplies = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+
+/// The renderer process and non-blocking async channels to its stdio workers.
 pub struct Avatar {
     child: Child,
-    stdin: ChildStdin,
-    replies: Receiver<Result<Message, String>>,
-    finished: Vec<Value>,
+    write_tx: Option<mpsc::Sender<WriteItem>>,
+    events_rx: mpsc::UnboundedReceiver<AvatarEvent>,
+    pending: PendingReplies,
+    events: VecDeque<AvatarEvent>,
     next_id: u64,
-    /// What each character was last configured to, so a repeated request is a
-    /// no-op and a partial change stays partial.
-    shown: HashMap<String, Shown>,
+    healthy: bool,
+    shown: HashMap<String, CharacterConfig>,
+    base_motion: HashMap<String, String>,
+    last_motion: HashMap<String, String>,
 }
 
 impl Avatar {
@@ -125,12 +71,10 @@ impl Avatar {
     /// Spawns the renderer. `program` is the `ene-avatar` binary; the caller
     /// resolves it so a missing binary is an error before any model loads.
     pub fn spawn(program: &Path) -> Result<Self, String> {
-        let mut command = Command::new(program);
+        let mut command = std::process::Command::new(program);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // The renderer logs to stderr; inherit it so its diagnostics are
-            // visible next to this client's own.
             .stderr(Stdio::inherit());
         #[cfg(windows)]
         {
@@ -143,83 +87,147 @@ impl Avatar {
             .map_err(|error| format!("{}: {error}", program.display()))?;
         let stdin = child.stdin.take().ok_or("the renderer has no stdin")?;
         let stdout = child.stdout.take().ok_or("the renderer has no stdout")?;
-        let (tx, replies) = mpsc::sync_channel(64);
-        thread::spawn(move || read(stdout, tx));
+        let (write_tx, write_rx) = mpsc::channel(64);
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let pending: PendingReplies = Arc::new(Mutex::new(HashMap::new()));
+        let writer_pending = Arc::clone(&pending);
+        thread::spawn(move || write_loop(stdin, write_rx, writer_pending));
+        let reader_pending = Arc::clone(&pending);
+        thread::spawn(move || read_loop(stdout, events_tx, reader_pending));
         Ok(Self {
             child,
-            stdin,
-            replies,
-            finished: Vec::new(),
+            write_tx: Some(write_tx),
+            events_rx,
+            pending,
+            events: VecDeque::new(),
             next_id: 1,
+            healthy: true,
             shown: HashMap::new(),
+            base_motion: HashMap::new(),
+            last_motion: HashMap::new(),
         })
     }
 
-    /// Sends one command and returns its reply. The renderer answers in order,
-    /// so a reply with another id is a protocol error rather than a reordering.
-    pub fn call(&mut self, op: &str, body: Value) -> Result<Value, String> {
+    pub fn is_healthy(&self) -> bool {
+        self.healthy
+    }
+
+    fn push_event(&mut self, event: AvatarEvent) {
+        if self.events.len() >= MAX_EVENT_QUEUE {
+            self.events.pop_front();
+        }
+        self.events.push_back(event);
+    }
+
+    fn drain_incoming_events(&mut self) {
+        while let Ok(event) = self.events_rx.try_recv() {
+            self.push_event(event);
+        }
+    }
+
+    /// Sends one command and awaits its reply with a bounded timeout so a stalled
+    /// renderer never freezes the Tokio thread.
+    pub async fn call(&mut self, command: Command) -> Result<Value, String> {
+        if !self.healthy {
+            return Err("the renderer is no longer healthy".into());
+        }
         let id = self.next_id;
         self.next_id += 1;
-        let mut request = json!({"id": id, "op": op});
-        if let (Some(target), Some(fields)) = (request.as_object_mut(), body.as_object()) {
-            for (key, value) in fields {
-                target.insert(key.clone(), value.clone());
+        let line = Request {
+            id: Some(id),
+            command,
+        }
+        .encode_line()?;
+        let Some(write_tx) = self.write_tx.clone() else {
+            return Err("the renderer input closed".into());
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.pending.lock().unwrap().insert(id, reply_tx);
+        if write_tx
+            .send(WriteItem::Request { id, line })
+            .await
+            .is_err()
+        {
+            self.pending.lock().unwrap().remove(&id);
+            self.healthy = false;
+            return Err("the renderer input closed".into());
+        }
+        match tokio::time::timeout(AVATAR_CALL_TIMEOUT, reply_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => {
+                self.healthy = false;
+                Err("the renderer exited".into())
             }
-        }
-        let mut line = serde_json::to_string(&request).map_err(|error| error.to_string())?;
-        line.push('\n');
-        if line.len() > MAX_LINE {
-            return Err("the request exceeds the renderer's 64 KiB line limit".into());
-        }
-        self.stdin
-            .write_all(line.as_bytes())
-            .and_then(|()| self.stdin.flush())
-            .map_err(|error| format!("the renderer input closed: {error}"))?;
-        loop {
-            match self.replies.recv() {
-                Ok(Ok(Message::Reply { id: got, ok, error })) if got == id => {
-                    return match error {
-                        Some(error) => Err(error),
-                        None => Ok(ok),
-                    };
-                }
-                Ok(Ok(Message::Reply { id: got, .. })) => {
-                    return Err(format!("the renderer answered id {got}, expected {id}"));
-                }
-                // A notification that arrived mid-call is not this call's answer.
-                Ok(Ok(Message::Event(event))) => self.keep_finished(event),
-                Ok(Err(error)) => return Err(error),
-                Err(_) => return Err("the renderer exited".into()),
+            Err(_) => {
+                self.pending.lock().unwrap().remove(&id);
+                self.healthy = false;
+                let _ = self.child.kill();
+                Err("the renderer timed out answering an IPC command".into())
             }
         }
     }
 
-    /// Drains notifications that arrived since the last call, so the renderer's
-    /// output queue never fills.
-    pub fn notifications(&mut self) -> Vec<Value> {
-        let mut events = std::mem::take(&mut self.finished);
-        loop {
-            match self.replies.try_recv() {
-                Ok(Ok(Message::Event(event))) => events.push(event),
-                Ok(Ok(Message::Reply { .. })) => continue,
-                Ok(Err(_)) | Err(TryRecvError::Disconnected) => break,
-                Err(TryRecvError::Empty) => break,
-            }
-        }
-        events
+    /// Drains all buffered notifications without dropping click or state events.
+    pub fn notifications(&mut self) -> Vec<AvatarEvent> {
+        self.drain_incoming_events();
+        self.events.drain(..).collect()
     }
 
-    fn keep_finished(&mut self, event: Value) {
-        if event["event"] == "finished" {
-            self.finished.push(event);
+    pub fn shown_characters(&self) -> Vec<String> {
+        self.shown.keys().cloned().collect()
+    }
+
+    /// Removes `character` from the renderer when its companion is released.
+    pub async fn remove_character(&mut self, character: &str) -> Result<(), String> {
+        self.base_motion.remove(character);
+        self.last_motion.remove(character);
+        if self.shown.remove(character).is_some() {
+            self.call(Command::Remove {
+                character: character.to_owned(),
+            })
+            .await?;
         }
+        Ok(())
+    }
+
+    /// Shows `character` applying a `Companion.body` configuration (`model`, `monitor`,
+    /// `position`, `size_percent`).
+    pub async fn show_with_body(
+        &mut self,
+        character: &str,
+        model: &Path,
+        motion: Option<&Path>,
+        body: &ene_rpc::BodyBinding,
+        default_scale: f32,
+    ) -> Result<bool, String> {
+        let existing = self.shown.get(character).cloned();
+        let mut next = existing
+            .clone()
+            .unwrap_or_else(|| CharacterConfig::for_model(model.to_string_lossy()));
+        next.model = model.to_string_lossy().into_owned();
+        if existing.is_none() {
+            next.motion = motion.map(|p| p.to_string_lossy().into_owned());
+            next.looping = true;
+        }
+        if body.monitor.is_some() {
+            next.monitor = body.monitor.clone();
+        }
+        if body.position.is_some() {
+            next.position = body.position;
+        }
+        next.size_percent = body.size_percent.unwrap_or(default_scale).clamp(50., 200.);
+        if existing.as_ref() == Some(&next) {
+            return Ok(false);
+        }
+        let loads_model = existing
+            .as_ref()
+            .is_none_or(|shown| shown.model != next.model);
+        self.configure(character, next).await?;
+        Ok(loads_model)
     }
 
     /// Shows `motion` on `character`, adding it first if it is not there.
-    ///
-    /// Returns whether the renderer has to load the model.
-    /// A repeated gesture restarts with a fade. An already-looping idle stays in place.
-    pub fn show(
+    pub async fn show(
         &mut self,
         character: &str,
         model: &Path,
@@ -228,7 +236,9 @@ impl Avatar {
     ) -> Result<bool, String> {
         let motion = motion.map(|path| path.to_string_lossy().into_owned());
         let existing = self.shown.get(character);
-        let mut next = existing.cloned().unwrap_or_else(|| Shown::new(model));
+        let mut next = existing
+            .cloned()
+            .unwrap_or_else(|| CharacterConfig::for_model(model.to_string_lossy()));
         next.model = model.to_string_lossy().into_owned();
         next.motion = motion;
         next.looping = looping;
@@ -237,63 +247,104 @@ impl Avatar {
         }
         let loads_model = existing.is_none_or(|shown| shown.model != next.model);
         if loads_model {
-            self.configure(character, next)?;
+            self.configure(character, next).await?;
         } else {
-            self.call(
-                "motion",
-                json!({"character": character, "motion": next.motion, "looping": looping}),
-            )?;
+            self.call(Command::Motion {
+                character: character.to_owned(),
+                motion: next.motion.clone(),
+                looping,
+            })
+            .await?;
             self.shown.insert(character.to_owned(), next);
         }
-        // Everything received before the new configuration's reply was for the old motion.
-        self.finished
-            .retain(|event| event["character"] != character);
+        self.drain_incoming_events();
+        self.events.retain(|event| {
+            !(matches!(event, AvatarEvent::Finished { .. }) && event.character() == character)
+        });
         Ok(loads_model)
     }
 
-    pub fn return_to_idle(&mut self, character: &str, model: &Path) -> Result<(), String> {
+    /// Shows a declared motion preset, tracking looping resting postures for return-to-idle.
+    pub async fn show_preset(
+        &mut self,
+        character: &str,
+        model: &Path,
+        preset: &str,
+        clip: Option<&Path>,
+    ) -> Result<bool, String> {
+        let looping = is_looping_motion(preset);
+        let loads_model = self.show(character, model, clip, looping).await?;
+        self.last_motion
+            .insert(character.to_owned(), preset.to_owned());
+        if is_persistent_idle(preset) {
+            self.base_motion
+                .insert(character.to_owned(), preset.to_owned());
+        }
+        Ok(loads_model)
+    }
+
+    pub async fn return_to_idle(&mut self, character: &str, model: &Path) -> Result<(), String> {
         if self
             .shown
             .get(character)
             .is_some_and(|shown| !shown.looping)
         {
-            self.show(character, model, motion("idle").as_deref(), true)?;
+            let preset = idle_return_preset(
+                self.base_motion.get(character).map(String::as_str),
+                self.last_motion.get(character).map(String::as_str),
+            );
+            self.show_preset(character, model, preset, motion(preset).as_deref())
+                .await?;
         }
         Ok(())
     }
 
-    fn configure(&mut self, character: &str, next: Shown) -> Result<(), String> {
-        let mut config = next.config();
-        let op = if self.shown.contains_key(character) {
-            // Dragging happens inside the renderer, which owns the live placement.
-            let state = self.call("get", json!({}))?;
-            if let Some(actor) = state["characters"]
-                .as_array()
-                .and_then(|actors| actors.iter().find(|actor| actor["character"] == character))
+    async fn configure(
+        &mut self,
+        character: &str,
+        mut next: CharacterConfig,
+    ) -> Result<(), String> {
+        let existing = self.shown.contains_key(character);
+        if existing {
+            let state = self.call(Command::Get {}).await?;
+            if let Ok(snapshot) = serde_json::from_value::<RendererSnapshot>(state)
+                && let Some(actor) = snapshot
+                    .characters
+                    .into_iter()
+                    .find(|actor| actor.character == character)
             {
-                config["monitor"] = actor["config"]["monitor"].clone();
-                config["position"] = actor["config"]["position"].clone();
+                next.monitor = actor.config.monitor;
+                next.position = actor.config.position;
             }
-            "set"
+        }
+        let command = if existing {
+            Command::Set {
+                character: character.to_owned(),
+                config: next.clone(),
+            }
         } else {
-            "add"
+            Command::Add {
+                character: character.to_owned(),
+                config: next.clone(),
+            }
         };
-        self.call(op, json!({"character": character, "config": config}))?;
+        self.call(command).await?;
         self.shown.insert(character.to_owned(), next);
         Ok(())
     }
 
     /// Sets the character's face, or clears it with `None`.
-    ///
-    /// Unlike a motion this does not change the configuration the renderer was
-    /// given, so it survives a later motion change.
-    pub fn expression(&mut self, character: &str, name: Option<&str>) -> Result<(), String> {
-        self.call("expression", expression_request(character, name))?;
+    pub async fn expression(&mut self, character: &str, name: Option<&str>) -> Result<(), String> {
+        self.call(Command::Expression {
+            character: character.to_owned(),
+            name: name.map(str::to_owned),
+        })
+        .await?;
         Ok(())
     }
 
     /// Updates the character's display scale while keeping motion and placement.
-    pub fn set_scale(
+    pub async fn set_scale(
         &mut self,
         character: &str,
         model: &Path,
@@ -302,28 +353,77 @@ impl Avatar {
         let clamped = size_percent.clamp(50., 200.);
         let next = match self.shown.get(character) {
             Some(current) => current.with_scale(clamped),
-            None => Shown::new(model).with_scale(clamped),
+            None => CharacterConfig::for_model(model.to_string_lossy()).with_scale(clamped),
         };
-        self.configure(character, next)
+        self.configure(character, next).await
     }
 
     /// Centers the character on the primary monitor.
-    pub fn center(&mut self, character: &str) -> Result<(), String> {
-        self.call("center", json!({"character": character}))?;
+    pub async fn center(&mut self, character: &str) -> Result<(), String> {
+        self.call(Command::Center {
+            character: character.to_owned(),
+            monitor: None,
+        })
+        .await?;
         Ok(())
     }
 
-    /// Sends one mouth amplitude, with no id and no reply.
-    ///
-    /// This runs at the audio rate, so it must never wait for the renderer: a
-    /// fire-and-forget line is the whole point of the `lip_sync` op.
-    pub fn lip_sync(&mut self, character: &str, rms: f32) -> Result<(), String> {
-        let line = lip_sync_line(character, rms)?;
-        self.stdin
-            .write_all(line.as_bytes())
-            .and_then(|()| self.stdin.flush())
-            .map_err(|error| format!("the renderer input closed: {error}"))
+    /// Sets or clears direct gaze angles in degrees (`None` returns gaze to animation/neutral).
+    pub async fn look_at(
+        &mut self,
+        character: &str,
+        yaw_deg: Option<f32>,
+        pitch_deg: Option<f32>,
+    ) -> Result<(), String> {
+        self.call(Command::LookAt {
+            character: character.to_owned(),
+            yaw_deg,
+            pitch_deg,
+        })
+        .await?;
+        Ok(())
     }
+
+    /// Places the character's foot position on an optional monitor (logical pixels).
+    pub async fn place(
+        &mut self,
+        character: &str,
+        monitor: Option<String>,
+        position: [f32; 2],
+    ) -> Result<(), String> {
+        self.call(Command::Place {
+            character: character.to_owned(),
+            monitor: monitor.clone(),
+            position,
+        })
+        .await?;
+        if let Some(shown) = self.shown.get_mut(character) {
+            if monitor.is_some() {
+                shown.monitor = monitor;
+            }
+            shown.position = Some(position);
+        }
+        Ok(())
+    }
+
+    /// Queues one mouth amplitude non-blockingly; drops frames when congested.
+    pub fn lip_sync(&mut self, character: &str, rms: f32) -> Result<(), String> {
+        if !self.healthy {
+            return Err("the renderer is no longer healthy".into());
+        }
+        let Some(write_tx) = &self.write_tx else {
+            return Err("the renderer input closed".into());
+        };
+        let line = lip_sync_line(character, rms)?;
+        match write_tx.try_send(WriteItem::OneWay(line)) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.healthy = false;
+                Err("the renderer input closed".into())
+            }
+        }
+    }
+
     /// What the renderer is showing, for the device footer.
     pub fn describe(&self, character: &str) -> Option<String> {
         self.shown.get(character).map(|shown| {
@@ -344,86 +444,169 @@ impl Avatar {
         })
     }
 
-    /// Waits for the renderer to say whether the character actually loaded.
-    ///
-    /// `add` and `set` answer as soon as they are accepted; the model and motion
-    /// finish loading later and the renderer publishes `state` events. Reporting
-    /// the reply alone would call a failed load a success, so the operation waits
-    /// for the terminal state. A slow load that is still in progress when the
-    /// wait ends is not a failure, so it is reported as accepted.
-    pub fn await_state(
-        &mut self,
-        character: &str,
-        wait: std::time::Duration,
-    ) -> Result<(), String> {
-        let deadline = std::time::Instant::now() + wait;
+    /// Waits for the renderer to publish a terminal `state` event without
+    /// discarding unrelated notifications or blocking the async runtime.
+    pub async fn await_state(&mut self, character: &str, wait: Duration) -> Result<(), String> {
+        let deadline = tokio::time::Instant::now() + wait;
+        self.drain_incoming_events();
+        if let Some(result) = self.take_terminal_state(character) {
+            return result;
+        }
         loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
                 return Ok(());
             }
-            match self.replies.recv_timeout(remaining) {
-                Ok(Ok(Message::Event(event))) => {
-                    if event.get("event").and_then(Value::as_str) != Some("state")
-                        || event.get("character").and_then(Value::as_str) != Some(character)
-                    {
-                        self.keep_finished(event);
-                        continue;
-                    }
-                    match event.get("status").and_then(Value::as_str) {
-                        Some("ready") | Some("suspended") => return Ok(()),
-                        Some("error") => {
-                            let reason = event
-                                .get("error")
-                                .and_then(Value::as_str)
-                                .unwrap_or("the renderer did not load the model");
-                            return Err(reason.to_owned());
+            match tokio::time::timeout(deadline - now, self.events_rx.recv()).await {
+                Ok(Some(event)) => match &event {
+                    AvatarEvent::State {
+                        character: got,
+                        status,
+                        error,
+                    } if got == character => match status {
+                        AvatarStatus::Ready | AvatarStatus::Suspended => {
+                            self.push_event(event);
+                            return Ok(());
                         }
-                        _ => continue,
-                    }
-                }
-                // A stray reply is not ours to interpret here.
-                Ok(Ok(Message::Reply { .. })) => continue,
-                Ok(Err(error)) => return Err(error),
-                Err(_) => return Ok(()),
+                        AvatarStatus::Error => {
+                            let reason = error
+                                .clone()
+                                .unwrap_or_else(|| "the renderer did not load the model".into());
+                            self.push_event(event);
+                            return Err(reason);
+                        }
+                        AvatarStatus::Loading => {}
+                    },
+                    _ => self.push_event(event),
+                },
+                Ok(None) | Err(_) => return Ok(()),
             }
         }
     }
 
-    /// Asks the renderer to exit and waits for it.
+    fn take_terminal_state(&mut self, character: &str) -> Option<Result<(), String>> {
+        let pos = self.events.iter().position(|event| {
+            matches!(
+                event,
+                AvatarEvent::State {
+                    character: got,
+                    status: AvatarStatus::Ready | AvatarStatus::Suspended | AvatarStatus::Error,
+                    ..
+                } if got == character
+            )
+        })?;
+        match &self.events[pos] {
+            AvatarEvent::State {
+                status: AvatarStatus::Ready | AvatarStatus::Suspended,
+                ..
+            } => Some(Ok(())),
+            AvatarEvent::State {
+                status: AvatarStatus::Error,
+                error,
+                ..
+            } => Some(Err(error
+                .clone()
+                .unwrap_or_else(|| "the renderer did not load the model".into()))),
+            _ => None,
+        }
+    }
+
+    /// Sends `quit` without waiting indefinitely; kills the child if it does
+    /// not exit within the bounded shutdown budget.
     pub fn shutdown(mut self) {
-        let _ = self.call("quit", json!({}));
-        let _ = self.child.wait();
+        if let Some(write_tx) = self.write_tx.take()
+            && let Ok(line) = (Request {
+                id: Some(self.next_id),
+                command: Command::Quit {},
+            })
+            .encode_line()
+        {
+            let _ = write_tx.try_send(WriteItem::OneWay(line));
+        }
+        let deadline = std::time::Instant::now() + AVATAR_SHUTDOWN_TIMEOUT;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(15));
+                }
+                _ => {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    return;
+                }
+            }
+        }
     }
 }
 
 impl Drop for Avatar {
     fn drop(&mut self) {
+        self.write_tx.take();
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
-/// Reads the renderer's stdout until it closes, forwarding each line.
-fn read(stdout: impl std::io::Read, tx: SyncSender<Result<Message, String>>) {
+fn write_loop(mut stdin: ChildStdin, mut rx: mpsc::Receiver<WriteItem>, pending: PendingReplies) {
+    while let Some(item) = rx.blocking_recv() {
+        let (id, line) = match item {
+            WriteItem::Request { id, line } => (Some(id), line),
+            WriteItem::OneWay(line) => (None, line),
+        };
+        if let Err(error) = stdin
+            .write_all(line.as_bytes())
+            .and_then(|()| stdin.flush())
+        {
+            let reason = format!("the renderer input closed: {error}");
+            if let Some(id) = id
+                && let Some(tx) = pending.lock().unwrap().remove(&id)
+            {
+                let _ = tx.send(Err(reason));
+            }
+            break;
+        }
+    }
+}
+
+fn read_loop(
+    stdout: impl std::io::Read,
+    events_tx: mpsc::UnboundedSender<AvatarEvent>,
+    pending: PendingReplies,
+) {
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
+    let mut fail_reason = "the renderer exited".to_owned();
     loop {
         line.clear();
         match reader.read_line(&mut line) {
             Ok(0) => break,
-            Ok(_) => {
-                let parsed = serde_json::from_str::<Message>(&line)
-                    .map_err(|error| format!("the renderer sent invalid JSON: {error}"));
-                if tx.send(parsed).is_err() {
+            Ok(_) => match serde_json::from_str::<AvatarMessage>(&line) {
+                Ok(AvatarMessage::Reply { id, ok, error }) => {
+                    if let Some(tx) = pending.lock().unwrap().remove(&id) {
+                        let _ = tx.send(match error {
+                            Some(error) => Err(error),
+                            None => Ok(ok),
+                        });
+                    }
+                }
+                Ok(AvatarMessage::Event(event)) => {
+                    let _ = events_tx.send(event);
+                }
+                Err(error) => {
+                    fail_reason = format!("the renderer sent invalid JSON: {error}");
                     break;
                 }
-            }
+            },
             Err(error) => {
-                let _ = tx.send(Err(format!("the renderer output failed: {error}")));
+                fail_reason = format!("the renderer output failed: {error}");
                 break;
             }
         }
+    }
+    let waiters: Vec<_> = pending.lock().unwrap().drain().map(|(_, tx)| tx).collect();
+    for tx in waiters {
+        let _ = tx.send(Err(fail_reason.clone()));
     }
 }
 
@@ -534,6 +717,57 @@ pub fn bundled_ene_model() -> Option<PathBuf> {
         .find_map(|path| normalize_path(&path))
 }
 
+/// Resolves a `Companion.body` model reference (`"ENE.vrm"`, `"Seed-san.vrm"`, or an
+/// existing `.vrm` path without parent traversal) with fallback to the default model.
+pub fn resolve_model_path(spec: Option<&str>, fallback: Option<&Path>) -> Option<PathBuf> {
+    if let Some(raw) = spec.map(str::trim).filter(|s| !s.is_empty()) {
+        let candidate_path = Path::new(raw);
+        let has_parent = candidate_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir));
+        if !has_parent && raw.to_ascii_lowercase().ends_with(".vrm") {
+            if candidate_path.is_absolute() && candidate_path.is_file() {
+                if let Some(clean) = normalize_path(candidate_path) {
+                    return Some(clean);
+                }
+            } else if candidate_path.components().count() == 1 {
+                let file_name = candidate_path.file_name()?;
+                if file_name.eq_ignore_ascii_case("ENE.vrm")
+                    && let Some(found) = bundled_ene_model()
+                {
+                    return Some(found);
+                }
+                let mut dirs = Vec::new();
+                if let Some(bundled) =
+                    bundled_ene_model().and_then(|p| p.parent().map(Path::to_path_buf))
+                {
+                    dirs.push(bundled);
+                }
+                if let Some(cache) = asset_cache() {
+                    dirs.push(cache.join("models"));
+                }
+                #[cfg(windows)]
+                for var in ["APPDATA", "LOCALAPPDATA"] {
+                    if let Some(root) = std::env::var_os(var) {
+                        let base = PathBuf::from(root).join("ene");
+                        dirs.push(base.join("data").join("models"));
+                        dirs.push(base.join("models"));
+                    }
+                }
+                for dir in dirs {
+                    let full = dir.join(file_name);
+                    if full.is_file()
+                        && let Some(clean) = normalize_path(&full)
+                    {
+                        return Some(clean);
+                    }
+                }
+            }
+        }
+    }
+    fallback.map(Path::to_path_buf)
+}
+
 /// The default model: the bundled `ENE.vrm` first, then the fetched sample cache.
 pub fn default_model() -> Option<PathBuf> {
     if let Some(path) = bundled_ene_model() {
@@ -560,6 +794,7 @@ pub fn default_renderer() -> Option<PathBuf> {
 }
 
 pub const MOTIONS: &[(&str, &str)] = &[
+    // Existing 11 core motions
     ("idle", "idle-breath.vrma"),
     ("look_around", "idle-look-around.vrma"),
     ("adjust_posture", "guarded-idle.vrma"),
@@ -571,7 +806,71 @@ pub const MOTIONS: &[(&str, &str)] = &[
     ("ask_question", "ask-question.vrma"),
     ("task_complete", "task-complete.vrma"),
     ("apologize", "apologize.vrma"),
+    // Expanded Kimodo DesktopMate & companion motions (24)
+    ("idle_sway", "idle-sway.vrma"),
+    ("idle_hands_behind", "idle-hands-behind.vrma"),
+    ("yawn", "yawn.vrma"),
+    ("deep_breath", "deep-breath.vrma"),
+    ("shrug", "shrug.vrma"),
+    ("bow", "polite-bow.vrma"),
+    ("goodbye", "goodbye-wave.vrma"),
+    ("peek", "peek-curious.vrma"),
+    ("beckon", "beckon.vrma"),
+    ("head_pat", "head-pat.vrma"),
+    ("surprised", "tap-surprise.vrma"),
+    ("shy", "shy-fidget.vrma"),
+    ("happy_bounce", "happy-bounce.vrma"),
+    ("clap", "clap.vrma"),
+    ("cheer", "cheer-encourage.vrma"),
+    ("music_groove", "music-groove.vrma"),
+    ("sit_idle", "perch-idle.vrma"),
+    ("sit_swing_legs", "perch-kick.vrma"),
+    ("sit_wave", "perch-greet.vrma"),
+    ("drag_held", "drag-held.vrma"),
+    ("listen", "listen-active.vrma"),
+    ("explain", "speak-explain.vrma"),
+    ("shake_head", "disagree.vrma"),
+    ("aha", "aha.vrma"),
 ];
+
+pub const LOOPING_MOTIONS: &[&str] = &[
+    "idle",
+    "idle_sway",
+    "idle_hands_behind",
+    "music_groove",
+    "sit_idle",
+    "sit_swing_legs",
+    "drag_held",
+];
+
+pub fn is_looping_motion(name: &str) -> bool {
+    LOOPING_MOTIONS.contains(&name)
+}
+
+fn is_persistent_idle(name: &str) -> bool {
+    matches!(
+        name,
+        "idle" | "idle_sway" | "idle_hands_behind" | "sit_idle" | "sit_swing_legs"
+    )
+}
+
+fn is_seated_motion(name: &str) -> bool {
+    matches!(name, "sit_idle" | "sit_swing_legs" | "sit_wave")
+}
+
+fn idle_return_preset(base: Option<&str>, finished: Option<&str>) -> &'static str {
+    if finished.is_some_and(is_seated_motion) {
+        return match base {
+            Some("sit_swing_legs") => "sit_swing_legs",
+            _ => "sit_idle",
+        };
+    }
+    match base {
+        Some("idle_sway") => "idle_sway",
+        Some("idle_hands_behind") => "idle_hands_behind",
+        _ => "idle",
+    }
+}
 
 /// The selected VRMAs ship beside the bundled ENE model.
 pub fn motion(name: &str) -> Option<PathBuf> {
@@ -587,15 +886,18 @@ mod tests {
 
     #[test]
     fn a_reply_and_a_notification_are_distinguished() {
-        let reply: Message = serde_json::from_str(r#"{"id":1,"ok":null}"#).unwrap();
-        assert!(matches!(reply, Message::Reply { id: 1, .. }));
-        let failed: Message =
+        let reply: AvatarMessage = serde_json::from_str(r#"{"id":1,"ok":null}"#).unwrap();
+        assert!(matches!(reply, AvatarMessage::Reply { id: 1, .. }));
+        let failed: AvatarMessage =
             serde_json::from_str(r#"{"id":2,"error":"unknown character"}"#).unwrap();
-        assert!(matches!(failed, Message::Reply { error: Some(_), .. }));
-        let event: Message =
+        assert!(matches!(
+            failed,
+            AvatarMessage::Reply { error: Some(_), .. }
+        ));
+        let event: AvatarMessage =
             serde_json::from_str(r#"{"event":"state","character":"ene","status":"ready"}"#)
                 .unwrap();
-        assert!(matches!(event, Message::Event(_)));
+        assert!(matches!(event, AvatarMessage::Event(_)));
     }
 
     #[test]
@@ -619,28 +921,77 @@ mod tests {
         assert!(motion("no-such-motion").is_none());
     }
 
+    #[test]
+    fn looping_postures_and_idle_return_preserve_resting_state() {
+        assert!(is_looping_motion("idle"));
+        assert!(is_looping_motion("idle_sway"));
+        assert!(is_looping_motion("idle_hands_behind"));
+        assert!(is_looping_motion("sit_idle"));
+        assert!(is_looping_motion("sit_swing_legs"));
+        assert!(is_looping_motion("music_groove"));
+        assert!(is_looping_motion("drag_held"));
+        assert!(!is_looping_motion("nod"));
+        assert!(!is_looping_motion("sit_wave"));
+
+        for &preset in LOOPING_MOTIONS {
+            assert!(
+                MOTIONS.iter().any(|&(name, _)| name == preset),
+                "looping preset {preset} must be declared in MOTIONS"
+            );
+        }
+
+        assert_eq!(idle_return_preset(None, Some("nod")), "idle");
+        assert_eq!(
+            idle_return_preset(Some("idle_sway"), Some("nod")),
+            "idle_sway"
+        );
+        assert_eq!(
+            idle_return_preset(Some("idle_hands_behind"), Some("clap")),
+            "idle_hands_behind"
+        );
+        assert_eq!(
+            idle_return_preset(Some("sit_idle"), Some("sit_wave")),
+            "sit_idle"
+        );
+        assert_eq!(
+            idle_return_preset(Some("sit_swing_legs"), Some("sit_wave")),
+            "sit_swing_legs"
+        );
+        // A standing gesture played from a seated base returns to standing idle.
+        assert_eq!(idle_return_preset(Some("sit_idle"), Some("wave")), "idle");
+    }
+
     /// The renderer's `set` replaces the whole configuration, so changing the
     /// motion must carry the placement that was already there.
     #[test]
     fn changing_a_motion_keeps_the_placement_fields() {
-        let mut shown = Shown::new(Path::new("/models/ene.vrm"));
+        let mut shown = CharacterConfig::for_model("/models/ene.vrm");
         shown.monitor = Some("eDP-1".into());
         shown.position = Some([100., 200.]);
         shown.size_percent = 140.;
         let mut next = shown.clone();
         next.motion = Some("/motions/nod.vrma".into());
-        let config = next.config();
+        let config = serde_json::to_value(&next).unwrap();
         assert_eq!(config["monitor"], "eDP-1");
         assert_eq!(config["position"][1], 200.0);
         assert_eq!(config["size_percent"], 140.0);
         assert_eq!(config["motion"], "/motions/nod.vrma");
     }
+
     #[test]
     fn a_face_request_can_be_set_and_cleared() {
-        let set = expression_request("ene", Some("happy"));
+        let set = serde_json::to_value(Command::Expression {
+            character: "ene".into(),
+            name: Some("happy".into()),
+        })
+        .unwrap();
         assert_eq!(set["character"], "ene");
         assert_eq!(set["name"], "happy");
-        let clear = expression_request("ene", None);
+        let clear = serde_json::to_value(Command::Expression {
+            character: "ene".into(),
+            name: None,
+        })
+        .unwrap();
         assert!(clear["name"].is_null());
     }
 
@@ -661,7 +1012,7 @@ mod tests {
 
     #[test]
     fn scaling_keeps_motion_and_placement_fields() {
-        let mut shown = Shown::new(Path::new("/models/ene.vrm"));
+        let mut shown = CharacterConfig::for_model("/models/ene.vrm");
         shown.motion = Some("/motions/nod.vrma".into());
         shown.monitor = Some("eDP-1".into());
         shown.position = Some([120., 240.]);
@@ -673,6 +1024,45 @@ mod tests {
 
         let min_scaled = shown.with_scale(10.0);
         assert_eq!(min_scaled.size_percent, 50.0);
+    }
+
+    #[test]
+    fn b09_read_loop_resolves_pending_and_preserves_all_event_kinds() {
+        let input = concat!(
+            r#"{"event":"click","character":"ene"}"#,
+            "\n",
+            r#"{"event":"state","character":"ene","status":"ready"}"#,
+            "\n",
+            r#"{"event":"finished","character":"ene"}"#,
+            "\n",
+            r#"{"id":7,"ok":{"status":"done"}}"#,
+            "\n"
+        );
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let pending: PendingReplies = Arc::new(Mutex::new(HashMap::new()));
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        pending.lock().unwrap().insert(7, reply_tx);
+        let (waiter_tx, mut waiter_rx) = oneshot::channel();
+        pending.lock().unwrap().insert(8, waiter_tx);
+
+        read_loop(input.as_bytes(), events_tx, Arc::clone(&pending));
+
+        let mut events = Vec::new();
+        while let Ok(ev) = events_rx.try_recv() {
+            events.push(ev);
+        }
+        assert_eq!(events.len(), 3);
+        assert!(matches!(events[0], AvatarEvent::Click { .. }));
+        assert!(matches!(events[1], AvatarEvent::State { .. }));
+        assert!(matches!(events[2], AvatarEvent::Finished { .. }));
+        assert_eq!(
+            reply_rx.try_recv().unwrap().unwrap(),
+            serde_json::json!({"status":"done"})
+        );
+        assert!(
+            waiter_rx.try_recv().unwrap().is_err(),
+            "EOF must wake unfinished pending waiters"
+        );
     }
 
     #[test]

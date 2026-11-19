@@ -819,14 +819,16 @@ impl Store {
         Ok(row.map(|(dimensions, bytes)| (dimensions as usize, bytes)))
     }
 
-    /// Memories whose vector is absent or stale for `space`, oldest first.
+    /// Memories whose vector is absent or stale for `space` and visible to
+    /// `companion`, oldest first.
     pub(crate) fn memories_missing_embedding(
         &self,
+        companion: &str,
         space: &str,
         limit: usize,
     ) -> Result<Vec<PendingEmbedding>> {
         let connection = self.conn()?;
-        missing_embeddings(&connection, space, limit)
+        missing_embeddings(&connection, companion, space, limit)
     }
 
     /// The candidate memories shown to the consolidation model: the memories
@@ -1051,31 +1053,37 @@ impl Store {
     }
 }
 
-/// Memories whose vector is absent or stale for `space`, oldest first, on the
-/// caller's connection. The embedding backfill calls this with its own
-/// connection so the ECS thread's store is not locked while it runs.
+/// Memories whose vector is absent or stale for `space` and visible to
+/// `companion`, oldest first, on the caller's connection. The embedding
+/// backfill calls this with its own connection so the ECS thread's store is
+/// not locked while it runs, and scoping by companion prevents one companion's
+/// backfill from overwriting another companion's private memories.
 pub(crate) fn missing_embeddings(
     connection: &rusqlite::Connection,
+    companion: &str,
     space: &str,
     limit: usize,
 ) -> Result<Vec<PendingEmbedding>> {
     let Some(dimensions) = dimensions_of_space(space) else {
         return Ok(Vec::new());
     };
-    let mut statement = connection.prepare_cached(
-        "SELECT id, content, content_revision FROM memories \
-         WHERE (embedding IS NULL OR embedding_model IS NOT ?1 \
-         OR embedding_dimensions IS NOT ?2 OR embedding_content_revision IS NULL \
-         OR embedding_content_revision != content_revision) \
-         ORDER BY rowid LIMIT ?3",
+    let mut statement = connection.prepare_cached(&format!(
+        "SELECT m.id, m.content, m.content_revision FROM memories m \
+         WHERE {VISIBLE} AND (m.embedding IS NULL OR m.embedding_model IS NOT ?2 \
+         OR m.embedding_dimensions IS NOT ?3 OR m.embedding_content_revision IS NULL \
+         OR m.embedding_content_revision != m.content_revision) \
+         ORDER BY m.rowid LIMIT ?4",
+    ))?;
+    let rows = statement.query_map(
+        params![companion, space, dimensions as i64, limit as i64],
+        |row| {
+            Ok(PendingEmbedding {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                content_revision: row.get(2)?,
+            })
+        },
     )?;
-    let rows = statement.query_map(params![space, dimensions as i64, limit as i64], |row| {
-        Ok(PendingEmbedding {
-            id: row.get(0)?,
-            content: row.get(1)?,
-            content_revision: row.get(2)?,
-        })
-    })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
 }
@@ -1207,29 +1215,24 @@ fn correct_memory_tx(
 
 /// The profile lines `recall.rs` injects into the dynamic tail. This alpha has
 /// one user profile, so the most recently updated row is the one shown.
-pub(crate) fn profile_lines(store: &Store) -> Vec<String> {
-    let Ok(connection) = store.conn() else {
-        return Vec::new();
-    };
-    let Ok(mut statement) = connection.prepare_cached(
+pub(crate) fn profile_lines(store: &Store) -> Result<Vec<String>> {
+    let connection = store.conn()?;
+    let mut statement = connection.prepare_cached(
         "SELECT name, preferences, static_constraints FROM user_profiles \
          ORDER BY updated_at DESC, id LIMIT 1",
-    ) else {
-        return Vec::new();
-    };
+    )?;
     let row: Option<(String, String, String)> = statement
         .query_row([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .optional()
-        .unwrap_or(None);
+        .optional()?;
     let Some((name, preferences, static_constraints)) = row else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     // A corrupt profile is dropped rather than half-injected.
     let (Ok(preferences), Ok(static_constraints)) = (
         serde_json::from_str::<Vec<String>>(&preferences),
         serde_json::from_str::<Vec<String>>(&static_constraints),
     ) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut lines = Vec::new();
     if !name.trim().is_empty() {
@@ -1241,7 +1244,7 @@ pub(crate) fn profile_lines(store: &Store) -> Vec<String> {
     if !static_constraints.is_empty() {
         lines.push(format!("制約: {}", static_constraints.join("、")));
     }
-    lines
+    Ok(lines)
 }
 
 /// The result of a hybrid recall: the ranked items plus whether a semantic

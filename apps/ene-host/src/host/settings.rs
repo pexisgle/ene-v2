@@ -2,10 +2,11 @@
 //! header and differ only in their config oneof (docs/api.md §7).
 use super::error::{Failure, HostError, Result};
 use super::model::agent_platform;
-use super::providers::Providers;
+use crate::host::providers::Providers;
 use ene_plugin::{Extension, provider::AuthProfile};
 use ene_rpc as w;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -16,6 +17,7 @@ pub(crate) enum ConnectionKind {
     Embedding,
     Mcp,
     Acp,
+    Search,
 }
 
 impl ConnectionKind {
@@ -27,6 +29,7 @@ impl ConnectionKind {
             Self::Embedding => "embedding",
             Self::Mcp => "mcp",
             Self::Acp => "acp",
+            Self::Search => "search",
         }
     }
 }
@@ -78,7 +81,7 @@ impl Endpoint {
 macro_rules! connection_bodies {
     ($($variant:ident($name:ident) { $($field:ident: $ty:ty),* $(,)? }),+ $(,)?) => {
         $(
-            #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+            #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
             pub(crate) struct $name {
                 pub(crate) endpoint: Endpoint,
                 $(#[serde(default)] pub(crate) $field: $ty,)*
@@ -114,8 +117,28 @@ connection_bodies! {
     Tts(TtsConnection) { voice_ids: Vec<String> },
     Stt(SttConnection) { language_hints: Vec<String> },
     Embedding(EmbeddingConnection) { model_id: String, dimensions: u32 },
-    Mcp(McpConnection) { allowed_tools: Vec<String>, command: String, args: Vec<String> },
+    Mcp(McpConnection) {
+        allowed_tools: Vec<String>,
+        command: String,
+        args: Vec<String>,
+        cwd: String,
+        env: BTreeMap<String, String>,
+        headers: BTreeMap<String, String>,
+        auth_header: String,
+        secret_env_var: String,
+    },
     Acp(AcpConnection) { command: String, args: Vec<String> },
+    Search(SearchConnection) { max_results: u32 },
+}
+
+fn is_valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        && name.len() <= 128
 }
 
 impl ConnectionConfig {
@@ -150,15 +173,75 @@ impl ConnectionConfig {
             // carries, or falls back to its legacy `command`/`args`; the
             // common endpoint validation already requires the adapter.
             Self::Acp(_) => {}
-            Self::Mcp(config)
-                if config.command.trim().is_empty()
-                    && config.endpoint.endpoint.trim().is_empty() =>
-            {
-                // A connection the host cannot open would be a setting that
-                // saves and then silently contributes no tools.
-                return Err(HostError::Invalid(
-                    ("MCP connections need a command or an endpoint").into(),
-                ));
+            Self::Mcp(config) => {
+                if config.command.trim().is_empty() && config.endpoint.endpoint.trim().is_empty() {
+                    // A connection the host cannot open would be a setting that
+                    // saves and then silently contributes no tools.
+                    return Err(HostError::Invalid(
+                        ("MCP connections need a command or an endpoint").into(),
+                    ));
+                }
+                if config.cwd.chars().count() > 2_048 || config.cwd.contains('\0') {
+                    return Err(HostError::Invalid(
+                        ("MCP working directory is invalid").into(),
+                    ));
+                }
+                if config.env.len() > 64 || config.headers.len() > 64 {
+                    return Err(HostError::Invalid(
+                        ("too many MCP environment variables or headers").into(),
+                    ));
+                }
+                for (key, value) in &config.env {
+                    if key.trim().is_empty()
+                        || key.contains(['=', '\0', '\r', '\n'])
+                        || value.contains('\0')
+                    {
+                        return Err(HostError::Invalid(
+                            ("MCP environment variable entry is invalid").into(),
+                        ));
+                    }
+                }
+                for (name, value) in &config.headers {
+                    let trimmed = name.trim();
+                    if trimmed.is_empty()
+                        || reqwest::header::HeaderName::from_bytes(trimmed.as_bytes()).is_err()
+                        || reqwest::header::HeaderValue::from_str(value).is_err()
+                    {
+                        return Err(HostError::Invalid(format!("invalid MCP header `{name}`")));
+                    }
+                }
+                let auth_header = config.auth_header.trim();
+                if !auth_header.is_empty()
+                    && reqwest::header::HeaderName::from_bytes(auth_header.as_bytes()).is_err()
+                {
+                    return Err(HostError::Invalid(
+                        ("MCP auth_header must be a valid HTTP header name").into(),
+                    ));
+                }
+                let secret_env_var = config.secret_env_var.trim();
+                if !secret_env_var.is_empty() && !is_valid_env_name(secret_env_var) {
+                    return Err(HostError::Invalid(
+                        ("MCP secret_env_var must be a valid environment variable name").into(),
+                    ));
+                }
+            }
+            Self::Search(config) => {
+                let adapter = config.endpoint.adapter.trim();
+                if !matches!(adapter, "mwmbl" | "searxng" | "brave" | "tavily") {
+                    return Err(HostError::Invalid(format!(
+                        "unsupported search adapter `{adapter}`"
+                    )));
+                }
+                if adapter == "searxng" && config.endpoint.endpoint.trim().is_empty() {
+                    return Err(HostError::Invalid(
+                        ("SearXNG search connections require an endpoint URL").into(),
+                    ));
+                }
+                if config.max_results > 20 {
+                    return Err(HostError::Invalid(
+                        ("search max_results must be between 1 and 20").into(),
+                    ));
+                }
             }
             _ => {}
         }

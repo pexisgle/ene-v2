@@ -12,550 +12,22 @@
 //!
 //! A server that is disabled, deleted, re-configured or disconnected loses its
 //! tools: the connection closes and the tool entities despawn.
-use crate::host::{
-    db::Store,
-    resources::HostRuntime,
-    settings::{ConnectionConfig, ConnectionKind},
-};
+mod projection;
+mod supervisor;
+
+pub(crate) use projection::{tool_names, tool_servers};
+pub(crate) use supervisor::{CheckState, McpServers, check_state, request_reconnect};
+
 use bevy_ecs::prelude::*;
-use rig_agent::tool::{
-    ToolCatalog,
-    server::{ToolServer, ToolServerHandle},
-};
-use rig_core::{
-    effect::{Key, family},
-    message::ToolName,
-};
 use rig_ecs::prelude::*;
-use rig_rmcp::{
-    McpClientHandler, McpConnection,
-    rmcp::{
-        model::ClientConfig,
-        transport::{
-            child_process::TokioChildProcess,
-            streamable_http_client::{
-                StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
-            },
-        },
-    },
-};
-use std::collections::{HashMap, HashSet};
-use tokio::sync::mpsc;
-use tokio_util::task::AbortOnDropHandle;
-
-/// How many connect results may queue before a producer waits. A connect
-/// happens once per server, so this is a bound, not a throughput target.
-const QUEUE: usize = 32;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Launch {
-    revision: u64,
-    owner: String,
-}
-
-/// The registration an MCP tool entity came from: the library generation that
-/// keeps a stale refresh from replacing a newer handler, and the server that
-/// owns it. The entity carries this, so no side map has to stay in step.
-#[derive(Component)]
-struct McpTool {
-    server: String,
-    key: Key<family::Tool>,
-}
-
-/// One connected server and the tool entities it owns.
-struct Server {
-    connection: McpConnection,
-    launch: Launch,
-    registry: ToolServerHandle,
-    label: String,
-    allowed: Vec<String>,
-}
-
-/// The servers that are up right now, keyed by connection id.
-#[derive(Resource, Default)]
-pub(crate) struct McpServers(HashMap<String, Server>);
-
-/// Connection ids a connect task is running for.
-#[derive(Resource, Default)]
-struct Connecting(HashMap<String, Pending>);
-
-struct Pending {
-    launch: Launch,
-    _task: AbortOnDropHandle<()>,
-}
-
-enum Event {
-    Connected {
-        id: String,
-        launch: Launch,
-        connection: McpConnection,
-        registry: ToolServerHandle,
-    },
-    Failed {
-        id: String,
-        launch: Launch,
-        reason: String,
-    },
-}
-
-#[derive(Resource)]
-struct McpEvents {
-    sender: mpsc::Sender<Event>,
-    receiver: mpsc::Receiver<Event>,
-}
-
-impl Default for McpEvents {
-    fn default() -> Self {
-        let (sender, receiver) = mpsc::channel(QUEUE);
-        Self { sender, receiver }
-    }
-}
 
 pub(crate) fn register(app: &mut App) {
     app.init_resource::<McpServers>()
-        .init_resource::<Connecting>()
-        .init_resource::<McpEvents>()
-        .init_resource::<McpSettings>()
-        .add_systems(Update, sync.after(AgentLoop));
-}
-
-/// What one settings row asks the host to connect to.
-#[derive(Clone)]
-struct Desired {
-    revision: u64,
-    name: String,
-    command: String,
-    args: Vec<String>,
-    endpoint: String,
-    allowed: Vec<String>,
-}
-
-#[derive(Resource, Default)]
-struct McpSettings {
-    revision: Option<u64>,
-    desired: Vec<(String, Desired)>,
-}
-
-fn desired(store: &Store) -> Vec<(String, Desired)> {
-    let Ok(settings) = store.settings() else {
-        return Vec::new();
-    };
-    settings
-        .connections
-        .iter()
-        .filter(|connection| connection.enabled && connection.kind == ConnectionKind::Mcp)
-        .filter_map(|connection| {
-            let ConnectionConfig::Mcp(config) = &connection.config else {
-                return None;
-            };
-            Some((
-                connection.id.clone(),
-                Desired {
-                    revision: connection.revision,
-                    name: connection.name.clone(),
-                    command: config.command.trim().to_owned(),
-                    args: config.args.clone(),
-                    endpoint: config.endpoint.endpoint.trim().to_owned(),
-                    allowed: config.allowed_tools.clone(),
-                },
-            ))
-        })
-        .collect()
-}
-
-/// Connects what the settings ask for, retires what they no longer do, and
-/// attaches the tools a handler listed.
-fn sync(world: &mut World) {
-    let closing = world
-        .get_resource::<crate::host::resources::HostState>()
-        .is_some_and(|state| state.closing || state.failed.is_some());
-    if closing {
-        world.resource_mut::<Connecting>().0.clear();
-        let ids: Vec<String> = world.resource::<McpServers>().0.keys().cloned().collect();
-        for id in ids {
-            retire_one(world, &id);
-        }
-        if let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) {
-            for event in drain(world) {
-                if let Event::Connected { connection, .. } = event {
-                    runtime.spawn(async move { connection.close().await });
-                }
-            }
-        }
-        return;
-    }
-    let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) else {
-        return;
-    };
-    let store = world.resource::<Store>().clone();
-    let Ok(revision) = store.settings_revision() else {
-        return;
-    };
-    if world.resource::<McpSettings>().revision != Some(revision) {
-        let desired = desired(&store);
-        *world.resource_mut::<McpSettings>() = McpSettings {
-            revision: Some(revision),
-            desired,
-        };
-    }
-    let wanted = world.resource::<McpSettings>().desired.clone();
-
-    world.resource_mut::<Connecting>().0.retain(|id, pending| {
-        wanted
-            .iter()
-            .any(|(wanted, want)| wanted == id && want.revision == pending.launch.revision)
-    });
-    for event in drain(world) {
-        accept_event(world, &wanted, event, &runtime);
-    }
-
-    let wanted_ids: HashSet<&str> = wanted.iter().map(|(id, _)| id.as_str()).collect();
-    let retire: Vec<String> = world
-        .resource::<McpServers>()
-        .0
-        .iter()
-        .filter(|(id, server)| {
-            server.connection.is_closed()
-                || !wanted_ids.contains(id.as_str())
-                || wanted
-                    .iter()
-                    .find(|(wanted, _)| wanted == *id)
-                    .is_some_and(|(_, want)| want.revision != server.launch.revision)
-        })
-        .map(|(id, _)| id.clone())
-        .collect();
-    for id in retire {
-        retire_one(world, &id);
-    }
-
-    project_servers(world);
-
-    let sender = world.resource::<McpEvents>().sender.clone();
-    let wake = world.get_resource::<Wake>().cloned();
-    for (id, want) in wanted {
-        if world.resource::<McpServers>().0.contains_key(&id)
-            || world.resource::<Connecting>().0.contains_key(&id)
-        {
-            continue;
-        }
-        let registry = ToolServer::new().run();
-        let launch = Launch {
-            revision: want.revision,
-            owner: registry.owner(),
-        };
-        let event_id = id.clone();
-        let event_launch = launch.clone();
-        let sender = sender.clone();
-        let wake = wake.clone();
-        let task = runtime.spawn(async move {
-            let event = match open(&want, registry.clone()).await {
-                Ok(connection) => Event::Connected {
-                    id: event_id,
-                    launch: event_launch,
-                    connection,
-                    registry,
-                },
-                Err(reason) => Event::Failed {
-                    id: event_id,
-                    launch: event_launch,
-                    reason,
-                },
-            };
-            let connected = matches!(event, Event::Connected { .. });
-            match sender.send(event).await {
-                Ok(()) if connected => {
-                    if let Some(wake) = wake {
-                        wake.wake();
-                    }
-                }
-                Err(error) => {
-                    if let Event::Connected { connection, .. } = error.0 {
-                        connection.close().await;
-                    }
-                }
-                Ok(()) => {}
-            }
-        });
-        world.resource_mut::<Connecting>().0.insert(
-            id,
-            Pending {
-                launch,
-                _task: AbortOnDropHandle::new(task),
-            },
-        );
-    }
-}
-
-fn accept_event(
-    world: &mut World,
-    wanted: &[(String, Desired)],
-    event: Event,
-    runtime: &tokio::runtime::Handle,
-) {
-    let (id, launch) = match &event {
-        Event::Connected { id, launch, .. } | Event::Failed { id, launch, .. } => (id, launch),
-    };
-    let current = world
-        .resource::<Connecting>()
-        .0
-        .get(id)
-        .is_some_and(|pending| &pending.launch == launch)
-        && wanted
-            .iter()
-            .any(|(wanted, want)| wanted == id && want.revision == launch.revision);
-    if !current {
-        if let Event::Connected { connection, .. } = event {
-            runtime.spawn(async move { connection.close().await });
-        }
-        return;
-    }
-    world.resource_mut::<Connecting>().0.remove(id);
-    match event {
-        Event::Connected {
-            id,
-            launch,
-            connection,
-            registry,
-        } => {
-            let want = &wanted.iter().find(|(wanted, _)| wanted == &id).unwrap().1;
-            attach(world, &id, launch, connection, registry, want);
-        }
-        Event::Failed { id, reason, .. } => {
-            tracing::warn!(connection = %id, "the MCP server did not connect: {reason}");
-        }
-    }
-}
-
-fn drain(world: &mut World) -> Vec<Event> {
-    let mut events = world.resource_mut::<McpEvents>();
-    let mut out = Vec::new();
-    while let Ok(event) = events.receiver.try_recv() {
-        out.push(event);
-    }
-    out
-}
-
-async fn open(want: &Desired, registry: ToolServerHandle) -> Result<McpConnection, String> {
-    let handler = McpClientHandler::new(ClientConfig::default(), registry);
-    let connection = if !want.command.is_empty() {
-        // A stdio server is a child process the host owns.
-        let mut command = tokio::process::Command::new(&want.command);
-        #[cfg(windows)]
-        if want.command.eq_ignore_ascii_case("npx") || want.command.eq_ignore_ascii_case("npx.cmd")
-        {
-            command = rig_rmcp::rmcp::transport::which_command("npx.cmd")
-                .map_err(|error| format!("npx.cmd was not found on PATH: {error}"))?;
-        }
-        command.args(&want.args);
-        let mut wrap = process_wrap::tokio::CommandWrap::from(command);
-        // One process group, killed on drop, so a host that exits does not
-        // orphan the server.
-        #[cfg(unix)]
-        wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
-        #[cfg(windows)]
-        wrap.wrap(process_wrap::tokio::JobObject);
-        wrap.wrap(process_wrap::tokio::KillOnDrop);
-        let transport = TokioChildProcess::new(wrap).map_err(|error| error.to_string())?;
-        handler
-            .connect(transport)
-            .await
-            .map_err(|error| error.to_string())?
-    } else if !want.endpoint.is_empty() {
-        // The host's one HTTP client, so the server shares its connection pool
-        // with every other endpoint the host calls.
-        let client = crate::host::net::client()?;
-        let transport = StreamableHttpClientTransport::with_client(
-            client,
-            StreamableHttpClientTransportConfig::with_uri(want.endpoint.clone()),
-        );
-        handler
-            .connect(transport)
-            .await
-            .map_err(|error| error.to_string())?
-    } else {
-        return Err("the MCP connection names neither a command nor an endpoint".to_owned());
-    };
-    Ok(connection)
-}
-
-/// The managed registry owns generations and liveness. ECS owns exposed names.
-fn attach(
-    world: &mut World,
-    id: &str,
-    launch: Launch,
-    connection: McpConnection,
-    registry: ToolServerHandle,
-    want: &Desired,
-) {
-    retire_one(world, id);
-    world.resource_mut::<McpServers>().0.insert(
-        id.to_owned(),
-        Server {
-            connection,
-            launch,
-            registry,
-            label: want.name.clone(),
-            allowed: want.allowed.clone(),
-        },
-    );
-}
-
-fn project_servers(world: &mut World) {
-    let ids: Vec<String> = world.resource::<McpServers>().0.keys().cloned().collect();
-    let mut changed = false;
-    for id in ids {
-        let Some(server) = world.resource_mut::<McpServers>().0.remove(&id) else {
-            continue;
-        };
-        let catalog = server.registry.snapshot();
-        changed |= project(world, &id, &server, Some(&catalog));
-        world.resource_mut::<McpServers>().0.insert(id, server);
-    }
-    if changed {
-        refresh_access(world);
-    }
-}
-
-fn project(world: &mut World, id: &str, server: &Server, catalog: Option<&ToolCatalog>) -> bool {
-    let mut desired = HashMap::new();
-    for definition in catalog.into_iter().flat_map(ToolCatalog::definitions) {
-        let raw = definition.name.as_str();
-        if !server.allowed.is_empty() && !server.allowed.iter().any(|name| name == raw) {
-            continue;
-        }
-        let Some(exposed) = exposed_name(&server.label, id, raw) else {
-            continue;
-        };
-        let Ok(name) = ToolName::new(exposed.clone()) else {
-            continue;
-        };
-        let registration = catalog.unwrap().get(raw).unwrap();
-        let mut definition = (**definition).clone();
-        definition.name = name;
-        desired.insert(exposed, (definition, registration));
-    }
-    let mut current: HashMap<String, (Entity, Key<family::Tool>)> = {
-        let mut query = world.query::<(Entity, &ToolDef, &McpTool)>();
-        query
-            .iter(world)
-            .filter(|(_, _, tool)| tool.server == id)
-            .map(|(entity, definition, tool)| {
-                (
-                    definition.0.name.as_str().to_owned(),
-                    (entity, tool.key.clone()),
-                )
-            })
-            .collect()
-    };
-    let mut changed = false;
-    for (name, (definition, tool)) in desired {
-        let existing = current.remove(&name);
-        if existing.as_ref().is_some_and(|(_, key)| key == tool.key()) {
-            continue;
-        }
-        if let Some((entity, _)) = existing {
-            if let Ok(entity) = world.get_entity_mut(entity) {
-                entity.despawn();
-            }
-            changed = true;
-        }
-        if let Some(entity) =
-            world.spawn_tool(definition, tool.handler().clone(), ToolOptions::default())
-        {
-            world.entity_mut(entity).insert(McpTool {
-                server: id.to_owned(),
-                key: tool.key().clone(),
-            });
-            changed = true;
-        }
-    }
-    for (_, (entity, _)) in current {
-        if let Ok(entity) = world.get_entity_mut(entity) {
-            entity.despawn();
-            changed = true;
-        }
-    }
-    changed
-}
-
-/// The model-facing names MCP servers contribute right now. The tool entities
-/// are the only owner: the gate and the per-agent access read this set instead
-/// of a second table kept in step with them.
-pub(crate) fn tool_names(world: &mut World) -> HashSet<String> {
-    let mut query = world.query::<(&ToolDef, &McpTool)>();
-    query
-        .iter(world)
-        .map(|(definition, _)| definition.0.name.as_str().to_owned())
-        .collect()
-}
-
-/// Raw tool names currently registered for a specific connected MCP server id.
-pub(crate) fn server_tool_names(world: &World, id: &str, revision: u64) -> Option<Vec<String>> {
-    let server = world.resource::<McpServers>().0.get(id)?;
-    if server.launch.revision != revision || server.connection.is_closed() {
-        return None;
-    }
-    let catalog = server.registry.snapshot();
-    let mut names: Vec<String> = catalog
-        .definitions()
-        .iter()
-        .map(|def| def.name.as_str().to_owned())
-        .collect();
-    names.sort();
-    names.dedup();
-    Some(names)
-}
-
-fn refresh_access(world: &mut World) {
-    if let Err(error) = crate::host::client::dynamic::sync_tools(world) {
-        tracing::warn!(%error, "the MCP tools are not offered");
-    }
-}
-
-/// Closes one server and removes the tools it contributed.
-fn retire_one(world: &mut World, id: &str) {
-    let Some(server) = world.resource_mut::<McpServers>().0.remove(id) else {
-        return;
-    };
-    if project(world, id, &server, None) {
-        refresh_access(world);
-    }
-    // Closing waits for the transport, so it runs off the host thread.
-    if let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) {
-        let connection = server.connection;
-        runtime.spawn(async move { connection.close().await });
-    }
-}
-
-/// The model-facing name for one server's tool: `mcp_<server>_<tool>`. The
-/// server part keeps two servers that offer the same tool name apart. A part
-/// the provider grammar cannot carry is refused rather than rewritten onto
-/// another tool.
-fn exposed_name(label: &str, id: &str, tool: &str) -> Option<String> {
-    let mut name = String::from("mcp_");
-    if !push_allowed(&mut name, label) {
-        let short: String = id.chars().take(8).collect();
-        if !push_allowed(&mut name, &short) {
-            return None;
-        }
-    }
-    name.push('_');
-    if !push_allowed(&mut name, tool) || name.len() > 64 {
-        return None;
-    }
-    Some(name)
-}
-
-fn push_allowed(out: &mut String, text: &str) -> bool {
-    if text.is_empty()
-        || !text.chars().all(|character| {
-            character.is_ascii_alphanumeric() || character == '_' || character == '-'
-        })
-    {
-        return false;
-    }
-    out.push_str(text);
-    true
+        .init_resource::<supervisor::Connecting>()
+        .init_resource::<supervisor::McpFailures>()
+        .init_resource::<supervisor::McpEvents>()
+        .init_resource::<supervisor::McpSettings>()
+        .add_systems(Update, supervisor::sync.after(AgentLoop));
 }
 
 /// The plugin the host adds once.
@@ -567,18 +39,40 @@ impl Plugin for McpPlugin {
         register(app);
     }
 }
+
 #[cfg(test)]
 mod tests {
+    use super::projection::*;
+    use super::supervisor::{Event, *};
     use super::*;
+    use crate::host::{
+        db::Store,
+        model::Credentials,
+        resources::HostRuntime,
+        settings::{Connection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint},
+    };
+    use rig_agent::tool::server::{ToolServer, ToolServerHandle};
+    use rig_core::message::ToolName;
     use rig_core::tool::{DynamicTool, ManagedToolSink, ToolContext, ToolOutput};
+    use rig_ecs::prelude::{ToolDef, ToolOptions};
+    use rig_rmcp::{McpClientHandler, McpConnection, rmcp::model::ClientConfig};
+    use std::collections::BTreeMap;
+    use tokio_util::task::AbortOnDropHandle;
 
     fn want(name: &str) -> Desired {
         Desired {
             revision: 1,
+            credential_generation: None,
             name: name.into(),
             command: String::new(),
             args: Vec::new(),
+            cwd: String::new(),
+            env: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            auth_header: String::new(),
+            secret_env_var: String::new(),
             endpoint: String::new(),
+            secret: None,
             allowed: Vec::new(),
         }
     }
@@ -756,7 +250,7 @@ mod tests {
 
         fn config(&self) -> crate::host::settings::McpConnection {
             crate::host::settings::McpConnection {
-                endpoint: crate::host::settings::Endpoint {
+                endpoint: Endpoint {
                     adapter: "mcp".into(),
                     options: "{}".into(),
                     ..Default::default()
@@ -768,7 +262,7 @@ mod tests {
                     "owned-mcp-peer".into(),
                     self.marker.to_str().unwrap().into(),
                 ],
-                allowed_tools: Vec::new(),
+                ..Default::default()
             }
         }
 
@@ -823,10 +317,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn pending_launch_invalidation_reaps_never_initialized_children() {
-        use crate::host::{
-            resources::HostState,
-            settings::{Connection, CredentialState},
-        };
+        use crate::host::resources::HostState;
 
         for action in ["disable", "revision", "shutdown", "failure", "world drop"] {
             let root = tempfile::tempdir().unwrap();
@@ -849,6 +340,7 @@ mod tests {
             world.init_resource::<HostState>();
             world.init_resource::<McpServers>();
             world.init_resource::<Connecting>();
+            world.init_resource::<McpFailures>();
             world.init_resource::<McpSettings>();
             world.init_resource::<McpEvents>();
             sync(&mut world);
@@ -896,6 +388,7 @@ mod tests {
                         id: row.id.clone(),
                         launch: old_launch,
                         reason: "late failure".into(),
+                        config_error: false,
                     },
                     &tokio::runtime::Handle::current(),
                 );
@@ -943,6 +436,7 @@ mod tests {
             connection: connection.clone(),
             launch: Launch {
                 revision: 1,
+                credential_generation: None,
                 owner: registry.owner(),
             },
             registry: registry.clone(),
@@ -1038,6 +532,7 @@ mod tests {
             "c1",
             Launch {
                 revision: 1,
+                credential_generation: None,
                 owner: registry.owner(),
             },
             first.clone(),
@@ -1058,6 +553,7 @@ mod tests {
             "c2",
             Launch {
                 revision: 1,
+                credential_generation: None,
                 owner: other_registry.owner(),
             },
             second.clone(),
@@ -1086,10 +582,12 @@ mod tests {
         let (new, new_registry, _, task2) = connect_echo(Echo::new()).await;
         let old_launch = Launch {
             revision: 1,
+            credential_generation: None,
             owner: old_registry.owner(),
         };
         let new_launch = Launch {
             revision: 1,
+            credential_generation: None,
             owner: new_registry.owner(),
         };
         assert_ne!(old_launch, new_launch);
@@ -1097,6 +595,7 @@ mod tests {
         let world = harness.app.world_mut();
         world.init_resource::<McpServers>();
         world.init_resource::<Connecting>();
+        world.init_resource::<McpFailures>();
         let runtime = tokio::runtime::Handle::current();
         world.insert_resource(HostRuntime(runtime.clone()));
         world.resource_mut::<Connecting>().0.insert(
@@ -1114,6 +613,7 @@ mod tests {
                 id: "c1".into(),
                 launch: old_launch.clone(),
                 reason: "old failure".into(),
+                config_error: false,
             },
             &runtime,
         );
@@ -1134,6 +634,7 @@ mod tests {
                 id: "c1".into(),
                 launch: new_launch.clone(),
                 reason: "obsolete revision".into(),
+                config_error: false,
             },
             &runtime,
         );
@@ -1234,6 +735,7 @@ mod tests {
             "c1",
             Launch {
                 revision: 1,
+                credential_generation: None,
                 owner: registry.owner(),
             },
             connection,
@@ -1263,6 +765,8 @@ mod tests {
         )
         .expect("work session starts");
 
+        // Without a saved Allow rule or Decision engine allow, Stage::Gate holds
+        // the MCP call for explicit approval rather than running unapproved.
         harness.run_until(|world| {
             let hand_allows_mcp = world
                 .query_filtered::<&ToolAccess, With<WorkAgent>>()
@@ -1271,6 +775,31 @@ mod tests {
             if !hand_allows_mcp {
                 return false;
             }
+            !world
+                .resource::<Store>()
+                .approvals(crate::host::permission::ApprovalStatus::Pending)
+                .unwrap()
+                .is_empty()
+        });
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "unapproved MCP tool must not execute before approval"
+        );
+        let pending_id = harness
+            .store()
+            .approvals(crate::host::permission::ApprovalStatus::Pending)
+            .unwrap()[0]
+            .request_id
+            .clone();
+        crate::host::permission::submit(
+            harness.app.world_mut(),
+            &pending_id,
+            crate::host::permission::ApprovalDecision::Approve,
+        )
+        .unwrap();
+
+        harness.run_until(|world| {
             world
                 .query_filtered::<&Conversation, With<WorkAgent>>()
                 .iter(world)
@@ -1327,6 +856,227 @@ mod tests {
         })
         .await
         .expect("list_changed removes the tool from the host");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn b17_mcp_backoff_prevents_tight_retry_and_recovers_on_reconnect_request() {
+        use axum::{Json, Router, response::IntoResponse, routing::post};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        let hits = Arc::new(AtomicUsize::new(0));
+        let fail_requests = Arc::new(AtomicBool::new(true));
+        let req_hits = Arc::clone(&hits);
+        let req_fail = Arc::clone(&fail_requests);
+        let app = Router::new().route(
+            "/mcp",
+            post(move |Json(request): Json<serde_json::Value>| {
+                req_hits.fetch_add(1, Ordering::SeqCst);
+                let should_fail = req_fail.load(Ordering::SeqCst);
+                async move {
+                    if should_fail {
+                        return http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    let Some(id) = request.get("id") else {
+                        return http::StatusCode::ACCEPTED.into_response();
+                    };
+                    let result = match request["method"].as_str().unwrap() {
+                        "initialize" => serde_json::json!({
+                            "protocolVersion": request["params"]["protocolVersion"],
+                            "capabilities": {"tools": {}},
+                            "serverInfo": {"name": "loopback", "version": "1"}
+                        }),
+                        "tools/list" => serde_json::json!({
+                            "tools": [{"name": "ping", "description": "Ping", "inputSchema": {"type": "object"}}]
+                        }),
+                        _ => serde_json::json!({}),
+                    };
+                    Json(serde_json::json!({"jsonrpc":"2.0","id":id,"result":result})).into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut harness = crate::host::tests::Harness::new([]);
+        let rev = harness.store().settings_revision().unwrap();
+        let conn = Connection {
+            id: "mcp-backoff".into(),
+            name: "notes".into(),
+            enabled: true,
+            kind: ConnectionKind::Mcp,
+            credential_state: CredentialState::Absent,
+            revision: 0,
+            last_check: None,
+            config: ConnectionConfig::Mcp(crate::host::settings::McpConnection {
+                endpoint: Endpoint {
+                    adapter: "mcp".into(),
+                    endpoint: format!("http://{addr}/mcp"),
+                    options: "{}".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        };
+        harness.store().update_settings(rev, &[(conn, 0)]).unwrap();
+        let world = harness.app.world_mut();
+        world.insert_resource(HostRuntime(tokio::runtime::Handle::current()));
+        world.init_resource::<McpServers>();
+        world.init_resource::<Connecting>();
+        world.init_resource::<McpFailures>();
+        world.init_resource::<McpSettings>();
+        world.init_resource::<McpEvents>();
+
+        // First attempt hits server and enters transient backoff.
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                sync(harness.app.world_mut());
+                if harness
+                    .app
+                    .world()
+                    .resource::<McpFailures>()
+                    .0
+                    .contains_key("mcp-backoff")
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let hits_after_failure = hits.load(Ordering::SeqCst);
+
+        // Stepping sync multiple times inside the 1s backoff window must NOT spawn retries.
+        for _ in 0..5 {
+            sync(harness.app.world_mut());
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), hits_after_failure);
+
+        // Recovery via explicit reconnect request connects immediately once healthy.
+        fail_requests.store(false, Ordering::SeqCst);
+        request_reconnect(harness.app.world_mut(), "mcp-backoff");
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                sync(harness.app.world_mut());
+                if matches!(
+                    check_state(harness.app.world(), "mcp-backoff", 1),
+                    CheckState::Connected(ref names) if names == &["ping".to_owned()]
+                ) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn f24_http_mcp_sends_auth_header_and_custom_headers_and_recovers_after_credential() {
+        use axum::{Json, Router, response::IntoResponse, routing::post};
+        let app = Router::new().route(
+            "/mcp",
+            post(|headers: http::HeaderMap, Json(request): Json<serde_json::Value>| async move {
+                let auth = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok());
+                let tenant = headers.get("x-tenant").and_then(|v| v.to_str().ok());
+                if auth != Some("Bearer mcp-token") || tenant != Some("acme") {
+                    return http::StatusCode::UNAUTHORIZED.into_response();
+                }
+                let Some(id) = request.get("id") else {
+                    return http::StatusCode::ACCEPTED.into_response();
+                };
+                let result = match request["method"].as_str().unwrap() {
+                    "initialize" => serde_json::json!({
+                        "protocolVersion": request["params"]["protocolVersion"],
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "auth-mcp", "version": "1"}
+                    }),
+                    "tools/list" => serde_json::json!({
+                        "tools": [{"name": "secret_tool", "description": "Auth tool", "inputSchema": {"type": "object"}}]
+                    }),
+                    _ => serde_json::json!({}),
+                };
+                Json(serde_json::json!({"jsonrpc":"2.0","id":id,"result":result})).into_response()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut harness = crate::host::tests::Harness::new([]);
+        let rev = harness.store().settings_revision().unwrap();
+        let mut custom_headers = BTreeMap::new();
+        custom_headers.insert("x-tenant".into(), "acme".into());
+        let conn = Connection {
+            id: "mcp-auth".into(),
+            name: "authmcp".into(),
+            enabled: true,
+            kind: ConnectionKind::Mcp,
+            credential_state: CredentialState::Absent,
+            revision: 0,
+            last_check: None,
+            config: ConnectionConfig::Mcp(crate::host::settings::McpConnection {
+                endpoint: Endpoint {
+                    adapter: "mcp".into(),
+                    endpoint: format!("http://{addr}/mcp"),
+                    options: "{}".into(),
+                    ..Default::default()
+                },
+                headers: custom_headers,
+                ..Default::default()
+            }),
+        };
+        harness.store().update_settings(rev, &[(conn, 0)]).unwrap();
+        let world = harness.app.world_mut();
+        world.insert_resource(HostRuntime(tokio::runtime::Handle::current()));
+        world.init_resource::<McpServers>();
+        world.init_resource::<Connecting>();
+        world.init_resource::<McpFailures>();
+        world.init_resource::<McpSettings>();
+        world.init_resource::<McpEvents>();
+
+        // Without credentials, 401 places the connection on ConfigHold.
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                sync(harness.app.world_mut());
+                if matches!(
+                    check_state(harness.app.world(), "mcp-auth", 1),
+                    CheckState::Failed(_)
+                ) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // Registering the secret bumps Credentials::generation() without touching settings.revision,
+        // automatically clearing ConfigHold and authenticating with Bearer + X-Tenant.
+        let creds = harness.app.world().resource::<Credentials>().clone();
+        crate::host::model::save_secret(&creds, "mcp-auth", "mcp-token").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                sync(harness.app.world_mut());
+                if matches!(
+                    check_state(harness.app.world(), "mcp-auth", 1),
+                    CheckState::Connected(ref names) if names == &["secret_tool".to_owned()]
+                ) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(tool_names(harness.app.world_mut()).contains("mcp_authmcp_secret_tool"));
         server.abort();
     }
 }

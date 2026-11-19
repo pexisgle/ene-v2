@@ -20,6 +20,8 @@ pub struct SettingsStudio {
     initialized: bool,
     // Companions state
     pub(crate) creating_companion: bool,
+    pub(crate) importing_template: bool,
+    pub(crate) preview_pending: bool,
     pub(crate) expanded_companion_id: Option<String>,
     pub(crate) mind_disclosure_open: bool,
     pub(crate) delete_armed_companion: Option<String>,
@@ -41,6 +43,9 @@ pub struct SettingsStudio {
     pub(crate) delete_armed_policy: Option<String>,
     pub(crate) adding_policy_open: bool,
     pub(crate) new_policy_effect: w::PolicyEffect,
+    pub(crate) delete_armed_policy_text: Option<String>,
+    pub(crate) editing_policy_text_id: Option<String>,
+    pub(crate) adding_policy_text_open: bool,
     _observe: Subscription,
 }
 
@@ -52,6 +57,8 @@ impl SettingsStudio {
             drafts: BTreeMap::new(),
             initialized: false,
             creating_companion: false,
+            importing_template: false,
+            preview_pending: false,
             expanded_companion_id: None,
             mind_disclosure_open: false,
             delete_armed_companion: None,
@@ -71,6 +78,9 @@ impl SettingsStudio {
             delete_armed_policy: None,
             adding_policy_open: false,
             new_policy_effect: w::PolicyEffect::Allow,
+            delete_armed_policy_text: None,
+            editing_policy_text_id: None,
+            adding_policy_text_open: false,
             _observe,
         }
     }
@@ -133,14 +143,18 @@ impl SettingsStudio {
     }
 
     fn sync_hub_events(&mut self, cx: &mut Context<Self>) {
-        let (created_ping, cleared, active_comp) = {
+        let (created_ping, cleared, active_comp, has_preview) = {
             let hub = self.hub.read(cx);
             (
                 hub.created_ping,
                 hub.cleared_secret_for.clone(),
                 hub.model.companion_id().map(str::to_owned),
+                hub.model.preview_reply.is_some(),
             )
         };
+        if has_preview {
+            self.preview_pending = false;
+        }
         if !self.initialized {
             self.initialized = true;
             self.expanded_companion_id = active_comp;
@@ -151,8 +165,10 @@ impl SettingsStudio {
         if created_ping != self.last_created_ping {
             self.last_created_ping = created_ping;
             self.creating_companion = false;
+            self.importing_template = false;
+            self.preview_pending = false;
             self.expanded_companion_id = active_comp;
-            for key in ["new:name", "new:mind", "new:persona"] {
+            for key in ["new:name", "new:mind", "new:persona", "import:json"] {
                 if let Some(d) = self.drafts.get(key).cloned() {
                     d.update(cx, |draft, cx| draft.clear(cx));
                 }
@@ -273,7 +289,9 @@ impl SettingsStudio {
                         });
                         hub.update(cx, |hub, cx| {
                             hub.settings_section = section;
-                            if section == SettingsSection::Connections {
+                            if section == SettingsSection::Companions {
+                                hub.load_companion_templates(cx);
+                            } else if section == SettingsSection::Connections {
                                 hub.load_providers(cx);
                                 hub.load_models(cx);
                             } else if section == SettingsSection::Voice {

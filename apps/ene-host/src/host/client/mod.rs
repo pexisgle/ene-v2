@@ -8,22 +8,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) const WORKSPACE_CAPABILITY_PREFIX: &str = "work.";
 
 /// Tools the host itself owns. A client capability may not shadow one.
-pub(crate) const BUILTIN_TOOLS: &[&str] = &[
-    "mind_recall",
-    "mind_read",
-    "mind_update",
-    "start_work",
-    "send_work",
-    "stop_work",
-    "device_request",
-    "resolve_approval",
-    "noop",
-    "schedule_create",
-    "schedule_list",
-    "schedule_cancel",
-    "report",
-    super::web_search::NAME,
-];
+pub(crate) const BUILTIN_TOOLS: &[&str] = ene_rpc::BUILTIN_TOOLS;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -352,14 +337,84 @@ impl CapabilityPolicy {
     }
 
     pub(crate) fn allows(&self, capability: &str) -> bool {
-        self.all || self.allowed.iter().any(|allowed| allowed == capability)
+        self.all
+            || self.allowed.iter().any(|allowed| {
+                allowed == capability
+                    || allowed
+                        .strip_suffix('*')
+                        .is_some_and(|prefix| !prefix.is_empty() && capability.starts_with(prefix))
+            })
+    }
+
+    /// Dynamically allows a capability pattern (`exact` or `prefix.*`) at runtime (`F11`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn allow_pattern(&mut self, pattern: impl Into<String>) {
+        let pattern = pattern.into();
+        let trimmed = pattern.trim();
+        if trimmed == "*" {
+            self.all = true;
+        } else if !trimmed.is_empty() && !self.allowed.iter().any(|p| p == trimmed) {
+            self.allowed.push(trimmed.to_owned());
+        }
+    }
+
+    /// Dynamically revokes a capability pattern at runtime (`F11`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn revoke_pattern(&mut self, pattern: &str) {
+        let trimmed = pattern.trim();
+        if trimmed == "*" {
+            self.all = false;
+        } else {
+            self.allowed.retain(|p| p != trimmed);
+        }
     }
 
     /// The declared capabilities this policy grants, in declaration order.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn grants(&self, declared: &[String]) -> Vec<String> {
         declared
             .iter()
             .filter(|capability| self.allows(capability))
+            .cloned()
+            .collect()
+    }
+
+    /// Grants declared capabilities allowed by either the static env policy or
+    /// saved `PolicyRule`s targeting `client_capability` (`F11`).
+    pub(crate) fn grants_with_rules(
+        &self,
+        declared: &[String],
+        rules: &[super::permission::PolicyRule],
+    ) -> Vec<String> {
+        use super::permission::PolicyEffect;
+        declared
+            .iter()
+            .filter(|capability| {
+                let mut denied = false;
+                let mut rule_allowed = false;
+                for rule in rules
+                    .iter()
+                    .filter(|r| r.tool_name == "client_capability" || r.tool_name == "*")
+                {
+                    let matches = rule.pattern == "*"
+                        || rule.pattern == **capability
+                        || rule.pattern.strip_suffix('*').is_some_and(|prefix| {
+                            !prefix.is_empty() && capability.starts_with(prefix)
+                        });
+                    if !matches {
+                        continue;
+                    }
+                    match rule.effect {
+                        PolicyEffect::Deny => {
+                            denied = true;
+                            break;
+                        }
+                        PolicyEffect::Allow => rule_allowed = true,
+                        PolicyEffect::Confirm => {}
+                    }
+                }
+                !denied && (self.allows(capability) || rule_allowed)
+            })
             .cloned()
             .collect()
     }
@@ -461,7 +516,10 @@ fn declarations(
 /// Publishes the client view, refreshes the capability tools and returns it.
 fn publish(world: &mut World, client: &Client) -> Result<w::Client> {
     let connected = world.resource::<DeviceHub>().connected(&client.id);
-    let view = wire::client(client, connected, Vec::new());
+    let active = world
+        .resource::<Store>()
+        .active_companions_for_client(&client.id)?;
+    let view = wire::client(client, connected, active);
     dynamic::sync_tools(world)?;
     if !client.is_granted(w::COMPUTER_USE) {
         computer::invalidate_client(world, &client.id, None);
@@ -476,9 +534,10 @@ fn publish(world: &mut World, client: &Client) -> Result<w::Client> {
 pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> Result<w::Client> {
     let store = world.resource::<Store>().clone();
     let specs = declarations(&request.capability_specs, &request.capabilities)?;
+    let rules = store.policy_rules()?;
     let granted = world
         .resource::<CapabilityPolicy>()
-        .grants(&request.capabilities);
+        .grants_with_rules(&request.capabilities, &rules);
     let previous = store.client(&request.id)?;
     let client = store.register_client_with_grants(
         &super::db::clients::ClientDeclaration {
@@ -516,9 +575,10 @@ pub(crate) fn set_capabilities(
             ("a client cannot grant capabilities to itself").into(),
         ));
     }
+    let rules = store.policy_rules()?;
     let granted = world
         .resource::<CapabilityPolicy>()
-        .grants(&request.capabilities);
+        .grants_with_rules(&request.capabilities, &rules);
     let previous = store.client(&request.client_id)?;
     let client = store.set_capabilities(
         &request.client_id,
@@ -593,11 +653,12 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
         // The old client keeps its stream but is no longer the active one.
         if let Some(old) = store.client(&old_client)? {
             let hub = world.resource::<DeviceHub>();
-            notify_client(
-                world,
-                &wire::client(&old, hub.connected(&old.id), Vec::new()),
-            );
+            let active = store.active_companions_for_client(&old.id)?;
+            notify_client(world, &wire::client(&old, hub.connected(&old.id), active));
         }
+    }
+    if !request.release {
+        super::voice::on_client_activated(world, &request.companion_id, &request.client_id);
     }
     world.resource_mut::<Notifier>().push(
         Some(&request.companion_id),
@@ -614,10 +675,20 @@ pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) ->
     let client = store
         .client(&event.client_id)?
         .ok_or_else(|| HostError::NotFound(("client not found").into()))?;
-    let Some(companion_id) = store.activation_for_client(&event.client_id)? else {
+    let active_companions = store.active_companions_for_client(&event.client_id)?;
+    if active_companions.is_empty() {
         // A connected client that is not active produces nothing the head may
         // act on. Not an error: the event is simply discarded.
         return Ok(());
+    }
+    let targets: Vec<String> = match event.companion_id.as_deref().filter(|id| !id.is_empty()) {
+        Some(target) => {
+            if !active_companions.iter().any(|id| id == target) {
+                return Ok(());
+            }
+            vec![target.to_owned()]
+        }
+        None => active_companions,
     };
     if !event.subscription_id.is_empty() {
         if matches!(
@@ -627,15 +698,49 @@ pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) ->
         {
             return Ok(());
         }
-        return super::eyes::report(world, companion_id, event);
+        for companion_id in targets {
+            super::eyes::report(world, companion_id, event.clone())?;
+        }
+        return Ok(());
     }
     let Some(summary) = perception_summary(&event) else {
         return Ok(());
     };
-    world
-        .resource_mut::<Perception>()
-        .events
-        .insert(companion_id, PerceptionEvent { summary });
+    let avatar_interaction = match &event.event {
+        Some(w::perception_event::Event::AvatarInteraction(interaction)) => Some((
+            format!("{:?}", interaction.kind),
+            interaction.character_id.clone(),
+            interaction.region.clone(),
+        )),
+        _ => None,
+    };
+    {
+        let mut perception = world.resource_mut::<Perception>();
+        for companion_id in &targets {
+            perception.events.insert(
+                companion_id.clone(),
+                PerceptionEvent {
+                    summary: summary.clone(),
+                },
+            );
+        }
+    }
+    if let Some((kind, character_id, region)) = avatar_interaction {
+        for companion_id in targets {
+            super::providers::extensions::trigger_character_event(
+                world,
+                &companion_id,
+                ene_plugin::CharacterEvent::Custom {
+                    name: "avatar_interaction".into(),
+                    data: serde_json::json!({
+                        "kind": kind,
+                        "character_id": character_id,
+                        "region": region,
+                    }),
+                },
+            );
+        }
+    }
     Ok(())
 }
 
@@ -659,6 +764,21 @@ fn perception_summary(event: &w::PerceptionEvent) -> Option<String> {
                 return None;
             }
             summary.summary.clone()
+        }
+        w::perception_event::Event::AvatarInteraction(interaction) => {
+            let kind_label = match interaction.kind.as_known() {
+                Some(w::AvatarInteractionKind::DoubleClick) => "ダブルクリック",
+                Some(w::AvatarInteractionKind::Drag) => "ドラッグ",
+                _ => "クリック",
+            };
+            if interaction.region.trim().is_empty() {
+                format!("ユーザーがアバターを{kind_label}しました")
+            } else {
+                format!(
+                    "ユーザーがアバター({})を{kind_label}しました",
+                    interaction.region.trim()
+                )
+            }
         }
         _ => return None,
     };
@@ -724,5 +844,43 @@ mod tests {
             ..motion()
         };
         assert!(validate_declarations(&["body.motion".into()], &[shadow]).is_err());
+    }
+
+    #[test]
+    fn f11_dynamic_capability_policy_prefix_and_rules() {
+        let mut policy = CapabilityPolicy::parse("body.motion");
+        let declared = vec![
+            "body.motion".to_owned(),
+            "plugin.echo.run".to_owned(),
+            "plugin.other.run".to_owned(),
+        ];
+        assert_eq!(policy.grants(&declared), vec!["body.motion"]);
+        policy.allow_pattern("plugin.echo.*");
+        assert_eq!(
+            policy.grants(&declared),
+            vec!["body.motion", "plugin.echo.run"]
+        );
+        policy.revoke_pattern("plugin.echo.*");
+        assert_eq!(policy.grants(&declared), vec!["body.motion"]);
+        let rules = vec![
+            super::super::permission::PolicyRule {
+                id: "allow-plugins".into(),
+                tool_name: "client_capability".into(),
+                pattern: "plugin.*".into(),
+                effect: super::super::permission::PolicyEffect::Allow,
+                created_at: "2026-11-20T00:00:00Z".into(),
+            },
+            super::super::permission::PolicyRule {
+                id: "deny-other".into(),
+                tool_name: "client_capability".into(),
+                pattern: "plugin.other.*".into(),
+                effect: super::super::permission::PolicyEffect::Deny,
+                created_at: "2026-11-20T00:00:00Z".into(),
+            },
+        ];
+        assert_eq!(
+            policy.grants_with_rules(&declared, &rules),
+            vec!["body.motion", "plugin.echo.run"]
+        );
     }
 }

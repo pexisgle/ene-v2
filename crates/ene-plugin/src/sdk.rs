@@ -39,3 +39,39 @@ pub fn http_close(handle: String) -> Result<(), extism_pdk::Error> {
 pub fn audio_read(handle: String) -> Result<HttpChunk, extism_pdk::Error> {
     service(ServiceRequest::AudioRead { handle })
 }
+/// Emits a structured log message to the host (`Service::Log`).
+pub fn log(message: impl Into<String>) -> Result<(), extism_pdk::Error> {
+    let _: serde_json::Value = service(ServiceRequest::Log {
+        message: message.into(),
+    })?;
+    Ok(())
+}
+/// Reads this plugin's saved configuration document (`Service::Configuration`).
+pub fn configuration() -> Result<serde_json::Value, extism_pdk::Error> {
+    service(ServiceRequest::Configuration)
+}
+/// Reads a value from this plugin's isolated key-value state (`Service::State`).
+pub fn state_read(key: impl Into<String>) -> Result<Option<serde_json::Value>, extism_pdk::Error> {
+    service(ServiceRequest::StateRead { key: key.into() })
+}
+/// Writes a value into this plugin's isolated key-value state (`Service::State`).
+pub fn state_write(
+    key: impl Into<String>,
+    value: serde_json::Value,
+) -> Result<(), extism_pdk::Error> {
+    let _: serde_json::Value = service(ServiceRequest::StateWrite {
+        key: key.into(),
+        value,
+    })?;
+    Ok(())
+}
+/// Calls an authorized host tool (`Service::Tools`).
+pub fn call_tool(
+    name: impl Into<String>,
+    arguments: serde_json::Value,
+) -> Result<serde_json::Value, extism_pdk::Error> {
+    service(ServiceRequest::Tool {
+        name: name.into(),
+        arguments,
+    })
+}

@@ -127,6 +127,80 @@ impl w::HostService for Services {
         mind::update
     );
     discard_id!(delete_companion, w::Id, id, mind::delete);
+
+    async fn list_companion_templates(
+        &self,
+        _: RequestContext,
+        _: ServiceRequest<'_, w::Empty>,
+    ) -> ServiceResult<w::CompanionTemplates> {
+        Response::ok(mind::list_templates())
+    }
+
+    read_id!(
+        export_companion,
+        w::CompanionTemplate,
+        mind::export_template
+    );
+    request!(
+        import_companion,
+        w::ImportCompanionRequest,
+        w::Companion,
+        mind::import_template
+    );
+
+    async fn preview_companion(
+        &self,
+        _: RequestContext,
+        request: ServiceRequest<'_, w::PreviewCompanionRequest>,
+    ) -> ServiceResult<w::PreviewCompanionResponse> {
+        let req = request.to_owned_message();
+        let system_prompt = mind::preview_system_prompt(&req).map_err(ConnectError::from)?;
+        let requested_model = req
+            .model
+            .as_option()
+            .map(|m| mind::Assignment {
+                connection_id: m.connection_id.clone(),
+                model_id: m.model_id.clone(),
+            })
+            .unwrap_or_default();
+        let user_message = req.user_message;
+        let model = self
+            .runtime
+            .read(move |app| {
+                let world = app.world();
+                let store = world.resource::<Store>();
+                let catalog = world
+                    .resource::<rig_ecs::model::Models>()
+                    .0
+                    .catalog()
+                    .clone();
+                let credentials = world.resource::<host::model::Credentials>();
+                let providers = world
+                    .get_resource::<host::providers::Providers>()
+                    .cloned()
+                    .unwrap_or_default();
+                let assignment =
+                    host::model::preview_assignment(store, &catalog, &requested_model)?;
+                host::model::connect_assignment(
+                    store,
+                    credentials,
+                    &catalog,
+                    &assignment,
+                    mind::Role::Companion,
+                    &providers,
+                )
+            })
+            .await
+            .map_err(ConnectError::from)?;
+        let reply = host::model::preview_reply(model, system_prompt, user_message)
+            .await
+            .map_err(ConnectError::from)?;
+        Response::ok(w::PreviewCompanionResponse {
+            reply,
+            ..Default::default()
+        })
+    }
+
     read_id!(get_mind, w::MindView, mind::mind_view);
     request!(
         update_mind_profile,
@@ -273,6 +347,217 @@ mod tests {
         assert!(live.cursor.as_option().unwrap().seq > replayed.cursor.as_option().unwrap().seq);
         shutdown.cancel();
         assert!(stream.next().await.is_none());
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn f03_export_and_import_template_strips_host_local_connection_ids() {
+        let state = tempfile::tempdir().unwrap();
+        let runtime = Runtime::start(state.path()).await.unwrap();
+        runtime
+            .call(|app| {
+                let store = app.world().resource::<Store>().clone();
+                let mut ene = store.companion("ene")?.unwrap();
+                ene.voice = host::json::JsonDoc::new(
+                    "ene.voice.v1",
+                    serde_json::json!({
+                        "connection_id": "local-secret-conn-1",
+                        "voice_id": "3",
+                        "speed": 1.1
+                    }),
+                );
+                store.update_companion(&ene, 1)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let shutdown = CancellationToken::new();
+        let service = Services {
+            runtime: runtime.clone(),
+            shutdown: shutdown.clone(),
+        };
+
+        let export_msg = StreamMessage::from_message(&w::Id {
+            id: "ene".into(),
+            ..Default::default()
+        });
+        let template = service
+            .export_companion(
+                RequestContext::new(http::HeaderMap::new()),
+                ServiceRequest::from_parts(export_msg.view(), export_msg.bytes()),
+            )
+            .await
+            .unwrap()
+            .body;
+        assert_eq!(template.format_version, 1);
+        let voice_doc: w::VoiceBinding =
+            serde_json::from_str(&template.voice.as_option().unwrap().json).unwrap();
+        assert_eq!(voice_doc.connection_id, None);
+        assert_eq!(voice_doc.voice_id.as_deref(), Some("3"));
+        assert_eq!(voice_doc.speed, Some(1.1));
+
+        let mut imported_template = template;
+        imported_template.name = "エネ・クローン".into();
+        let import_msg = StreamMessage::from_message(&w::ImportCompanionRequest {
+            template: Some(imported_template).into(),
+            assignments: Some(w::ModelAssignments {
+                companion: Some(w::ModelAssignment {
+                    connection_id: "c1".into(),
+                    model_id: "gpt-4o-mini".into(),
+                    ..Default::default()
+                })
+                .into(),
+                task: Some(w::ModelAssignment {
+                    connection_id: "c1".into(),
+                    model_id: "gpt-4o-mini".into(),
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        });
+        let created = service
+            .import_companion(
+                RequestContext::new(http::HeaderMap::new()),
+                ServiceRequest::from_parts(import_msg.view(), import_msg.bytes()),
+            )
+            .await
+            .unwrap()
+            .body;
+        assert_eq!(created.name, "エネ・クローン");
+        assert_ne!(created.id, "ene");
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn f05_preview_companion_replies_without_persisting_companion_or_messages() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 2048];
+            loop {
+                let n = stream.read(&mut tmp).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&buf[..pos]);
+                    let cl = headers
+                        .lines()
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.eq_ignore_ascii_case("content-length")
+                                .then(|| v.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if buf.len() >= pos + 4 + cl {
+                        break;
+                    }
+                }
+            }
+            let body = serde_json::json!({
+                "id": "resp_preview",
+                "object": "response",
+                "created_at": 1,
+                "status": "completed",
+                "model": "gpt-4o-mini",
+                "output": [{
+                    "type": "message",
+                    "id": "msg_preview",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "はじめまして、プレビュー応答です！",
+                        "annotations": []
+                    }]
+                }],
+                "usage": {
+                    "input_tokens": 5,
+                    "output_tokens": 5,
+                    "total_tokens": 10
+                }
+            })
+            .to_string();
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(reply.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        });
+
+        let state = tempfile::tempdir().unwrap();
+        let runtime = Runtime::start(state.path()).await.unwrap();
+        runtime
+            .call(move |app| {
+                let store = app.world().resource::<Store>().clone();
+                let conn = host::settings::Connection {
+                    id: "llm-preview".into(),
+                    name: "Preview LLM".into(),
+                    enabled: true,
+                    kind: host::settings::ConnectionKind::Llm,
+                    config: host::settings::ConnectionConfig::Llm(host::settings::LlmConnection {
+                        endpoint: host::settings::Endpoint {
+                            adapter: "openai".into(),
+                            endpoint: format!("http://{addr}/v1"),
+                            options_schema: String::new(),
+                            options: "{}".into(),
+                        },
+                        model_ids: vec!["gpt-4o-mini".into()],
+                    }),
+                    credential_state: host::settings::CredentialState::Absent,
+                    revision: 1,
+                    last_check: None,
+                };
+                store.update_settings(1, &[(conn, 0)])?;
+                app.world()
+                    .resource::<host::model::Credentials>()
+                    .remember("llm-preview", "test-key".into());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let shutdown = CancellationToken::new();
+        let service = Services {
+            runtime: runtime.clone(),
+            shutdown: shutdown.clone(),
+        };
+        let req = StreamMessage::from_message(&w::PreviewCompanionRequest {
+            name: "テスト相棒".into(),
+            mind: "短く元気にあいさつするテスト用の相棒。".into(),
+            user_message: "よろしく！".into(),
+            model: Some(w::ModelAssignment {
+                connection_id: "llm-preview".into(),
+                model_id: "gpt-4o-mini".into(),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        });
+        let resp = service
+            .preview_companion(
+                RequestContext::new(http::HeaderMap::new()),
+                ServiceRequest::from_parts(req.view(), req.bytes()),
+            )
+            .await
+            .unwrap()
+            .body;
+        assert_eq!(resp.reply, "はじめまして、プレビュー応答です！");
+        let count = runtime
+            .read(|app| Ok(app.world().resource::<Store>().companions()?.len()))
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "preview must not create a companion row");
         runtime.shutdown().await.unwrap();
     }
 }

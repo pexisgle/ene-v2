@@ -78,6 +78,7 @@ enum Step {
 #[derive(Clone)]
 pub(crate) struct Runtime {
     handle: Arc<Handle>,
+    state_dir: std::path::PathBuf,
     credentials: Credentials,
     hub: DeviceHub,
     providers: providers::Providers,
@@ -141,8 +142,9 @@ impl Runtime {
         if !installed.is_empty() {
             tracing::info!(plugins = %installed.join(","), "provider plugins loaded");
         }
-        let ((), (models, catalog_refresh)) = tokio::join!(
+        let ((), initial_plugin_tools, (models, catalog_refresh)) = tokio::join!(
             providers.start_used(&store),
+            providers::extensions::discover_plugin_tools(&providers, &store),
             model::catalog::Refresh::initial()
         );
         let thread_credentials = credentials.clone();
@@ -183,6 +185,7 @@ impl Runtime {
                         work::WorkPlugin,
                         mind::MindPlugin,
                         mcp::McpPlugin,
+                        providers::extensions::ExtensionPlugin,
                         autonomy::AutonomyPlugin,
                         compaction::CompactionPlugin,
                         voice::VoicePlugin,
@@ -194,6 +197,10 @@ impl Runtime {
                 }
                 let result = (|| -> Result<()> {
                     restore(app.world_mut())?;
+                    providers::extensions::register_plugin_tools(
+                        app.world_mut(),
+                        initial_plugin_tools,
+                    );
                     tick(&mut app);
                     restore_after_first_frame(app.world_mut())?;
                     Ok(())
@@ -250,11 +257,16 @@ impl Runtime {
                 shutdown,
                 thread: Mutex::new(Some(thread)),
             }),
+            state_dir: state.to_path_buf(),
             credentials,
             hub,
             providers: runtime_providers,
             voicevox,
         })
+    }
+
+    pub(crate) fn state_dir(&self) -> &Path {
+        &self.state_dir
     }
 
     pub(crate) fn providers(&self) -> providers::Providers {
@@ -412,7 +424,10 @@ pub(crate) fn tick(app: &mut App) {
 
 /// A sticky host failure: it stops the agent loop and refuses new work.
 pub(crate) fn fail(world: &mut World, reason: String) {
-    if world.resource::<HostState>().failed.is_some() {
+    if world
+        .get_resource::<HostState>()
+        .is_some_and(|state| state.failed.is_some())
+    {
         return;
     }
     tracing::error!(%reason, "the host stopped");
@@ -426,8 +441,12 @@ pub(crate) fn fail(world: &mut World, reason: String) {
             reason: Some("host failure".into()),
         });
     }
-    world.resource_mut::<HostState>().failed = Some(reason.clone());
-    world.resource_mut::<Notifier>().fail(&reason);
+    if let Some(mut state) = world.get_resource_mut::<HostState>() {
+        state.failed = Some(reason.clone());
+    }
+    if let Some(mut notifier) = world.get_resource_mut::<Notifier>() {
+        notifier.fail(&reason);
+    }
 }
 
 /// Restores state that must not wait for the ECS frame: stale approvals and
@@ -467,12 +486,12 @@ pub(crate) fn snapshot(app: &mut App) -> Result<w::Snapshot> {
         .iter()
         .find(|activation| activation.client_id.is_some())
         .map(|activation| activation.companion_id.clone());
-    let work_sessions: Vec<w::WorkSession> = companions
-        .iter()
-        .filter_map(|companion| store.work_sessions(&companion.id).ok())
-        .flatten()
-        .map(|session| wire::work_session(&session))
-        .collect();
+    let mut work_sessions = Vec::new();
+    for companion in &companions {
+        for session in store.work_sessions(&companion.id)? {
+            work_sessions.push(wire::work_session(&session));
+        }
+    }
     let mut seen = std::collections::HashSet::new();
     let work_sessions = work_sessions
         .into_iter()

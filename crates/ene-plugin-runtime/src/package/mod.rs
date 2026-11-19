@@ -56,13 +56,13 @@ impl Package {
                         && e.uses.is_empty()
                         && e.provider.is_none()
                 }
-                Target::Host => relative(&e.file) && e.command.is_empty(),
+                Target::Host | Target::Client => relative(&e.file) && e.command.is_empty(),
             };
             if !identifier(&e.id)
                 || !ids.insert(&e.id)
                 || !target_valid
                 || e.provides.is_empty()
-                || e.provides.len() > 6
+                || e.provides.len() > 8
                 || e.uses.len() > 8
                 || e.provides.iter().collect::<BTreeSet<_>>().len() != e.provides.len()
                 || e.uses.iter().collect::<BTreeSet<_>>().len() != e.uses.len()

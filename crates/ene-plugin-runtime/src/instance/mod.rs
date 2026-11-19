@@ -90,11 +90,20 @@ impl Instance {
         entrypoint: String,
         cancel: &CancellationToken,
     ) -> Result<Self> {
+        Self::load_for_target(package, entrypoint, Target::Host, cancel).await
+    }
+
+    pub async fn load_for_target(
+        package: Package,
+        entrypoint: String,
+        expected_target: Target,
+        cancel: &CancellationToken,
+    ) -> Result<Self> {
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
         let entry = package.entry(&entrypoint)?;
-        if entry.target != Target::Host {
+        if entry.target != expected_target || entry.target == Target::Acp {
             return Err(Error::Unsupported);
         }
         let file = entry.file.clone();

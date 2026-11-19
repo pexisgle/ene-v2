@@ -93,6 +93,7 @@ pub enum Update {
     /// An approval was resolved by this window.
     Resolved {
         request_id: String,
+        rule_warning: Option<String>,
     },
     /// A companion no longer exists on the host.
     Gone {
@@ -144,27 +145,61 @@ pub enum Update {
     },
     /// The host's permission policy rules, refetched or updated.
     PolicyRules(Vec<w::PolicyRule>),
+    /// The host's free-text permission policies, refetched or updated.
+    PolicyTexts(Vec<w::PolicyText>),
     /// Avatar scale confirmed by the renderer session.
     AvatarScaleChanged(f32),
+    /// Epoch- and sequence-tagged RPC response so stale replies after reconnect drop.
+    Scoped {
+        epoch: u64,
+        seq: u64,
+        inner: Box<Update>,
+    },
+    /// Built-in starter companion templates from the host.
+    CompanionTemplates(Vec<w::CompanionTemplate>),
+    /// Sanitized JSON template exported for one companion.
+    CompanionExported {
+        companion_id: String,
+        json: String,
+    },
+    /// Ephemeral preview reply before saving a companion.
+    CompanionPreview {
+        reply: Option<String>,
+        error: Option<String>,
+    },
+    /// Microphone capture mode / PTT state confirmed by the session (`F07`).
+    CaptureModeChanged {
+        mode: crate::audio::CaptureMode,
+        ptt_active: bool,
+    },
+    /// Installed host plugins from `SettingsService.ListPlugins` (`F12`).
+    Plugins(Vec<w::PluginInfo>),
 }
 
 /// What the window asks the session to do, because the session owns it.
 #[derive(Debug)]
 pub enum Command {
-    /// Serve this companion: release the previous one, then activate this one.
+    /// Focus and ensure this companion is resident on this client without releasing
+    /// other resident companions.
     Serve(String),
-    /// StopPlayback,
-    /// Stop the current playback now. This is the explicit barge-in path: the
-    /// client has no echo cancellation, so it never truncates on microphone
-    /// energy.
+    /// Activate (mount) this companion onto this client alongside existing ones.
+    ActivateCompanion(String),
+    /// Release (unmount) only this companion from this client.
+    ReleaseCompanion(String),
+    /// Stop the current playback now.
     StopPlayback,
-    /// Reconnect so streams that depend on settings are reopened. The audio
-    /// subscription only exists while a TTS connection is configured, and it is
-    /// opened once per connection, so a connection added while the window is
-    /// open is invisible until the session reconnects.
+    /// Re-sync declared client capabilities in place.
     Refresh,
     /// Mute or unmute local microphone capture.
     SetMicMuted(bool),
+    /// Switch between VAD and Push-to-Talk capture mode (`F07`).
+    SetCaptureMode(crate::audio::CaptureMode),
+    /// Begin capturing in Push-to-Talk mode (`F07`).
+    PttStart,
+    /// Commit the current Push-to-Talk utterance (`F07`).
+    PttCommit,
+    /// Cancel and discard the current Push-to-Talk utterance (`F07`).
+    PttCancel,
     /// Mute or unmute local speaker playback.
     SetOutputMuted(bool),
     SetEyesEnabled(bool),
@@ -174,9 +209,11 @@ pub enum Command {
     SetAvatarScale(f32),
     /// Center the avatar on screen.
     CenterAvatar,
-    /// Speak `text` through the host's TTS connection. The host synthesizes it
-    /// outside any turn, so this is a probe and not a message to the companion.
-    Speak(String),
+    /// Speak `text` through the host's TTS connection, optionally naming the companion.
+    Speak {
+        companion_id: Option<String>,
+        text: String,
+    },
     /// Stop serving and exit. Sent when the window closes.
     Quit,
 }

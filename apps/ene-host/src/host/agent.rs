@@ -398,14 +398,10 @@ pub(crate) fn reconcile(world: &mut World) -> Result<()> {
     for companion in &companions {
         spawn_companion(world, companion);
         // Work agents for runs that are still open.
-        let Ok(sessions) = store.work_sessions(&companion.id) else {
-            continue;
-        };
-        for session in sessions {
-            let Ok(Some(run)) = store.active_run(&session.id) else {
-                continue;
-            };
-            spawn_work_agent(world, companion, &session.id, &run.run_id, &run.instruction);
+        for session in store.work_sessions(&companion.id)? {
+            if let Some(run) = store.active_run(&session.id)? {
+                spawn_work_agent(world, companion, &session.id, &run.run_id, &run.instruction);
+            }
         }
     }
     // Retire the kernel's default agent and any agent without a role.
@@ -538,14 +534,24 @@ fn publish_messages(
             // a fragment can arrive after its call settled and be dropped.
             if companion.is_some() && message.role == w::MessageRole::Assistant {
                 let voice_companion = companion_id.to_owned();
-                let voice_text = message.text.clone();
+                let voice_text = super::voice::speech::for_speech(&message.text);
+                let finished_text = message.text.clone();
                 commands.queue(move |world: &mut World| {
-                    super::voice::on_stream_text(world, &voice_companion, &voice_text);
+                    if !voice_text.is_empty() {
+                        super::voice::on_stream_text(world, &voice_companion, &voice_text);
+                    }
                     // The reply is complete, so this turn's utterance is too.
                     // Without this the host never sends `UtteranceFinished`, the
                     // window never reports playback, and the speech floor stays
                     // held until the next turn flushes it as cancelled.
                     super::voice::on_turn_end(world, &voice_companion);
+                    super::providers::extensions::trigger_character_event(
+                        world,
+                        &voice_companion,
+                        ene_plugin::CharacterEvent::ConversationFinished {
+                            text: finished_text,
+                        },
+                    );
                 });
             }
             notifier.push(
@@ -712,7 +718,7 @@ fn eye_report_result(
             .skip(conversation.start_of(turn.start))
             .filter(|entry| role_of(entry) == w::MessageRole::Assistant)
             .filter_map(|entry| entry_text(&entry))
-            .map(|text| w::plain_reply(&text))
+            .map(|text| super::voice::speech::strip_motion_leak(&text))
             .rfind(|text| !text.is_empty())
             .map(|text| super::db::truncate(&text, 1500))
     });

@@ -3,6 +3,7 @@ pub(crate) mod approvals;
 pub(crate) mod clients;
 pub(crate) mod companions;
 pub(crate) mod memories;
+pub(crate) mod plugins;
 pub(crate) mod policies;
 pub(crate) mod schedules;
 pub(crate) mod settings;
@@ -350,6 +351,7 @@ mod tests {
             ConnectionKind::Embedding,
             ConnectionKind::Mcp,
             ConnectionKind::Acp,
+            ConnectionKind::Search,
         ]);
         check(&[WorkStatus::Idle, WorkStatus::Active, WorkStatus::Closed]);
         check(&[

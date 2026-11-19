@@ -8,8 +8,7 @@ use bevy::{
     prelude::*,
     world_serialization::WorldInstanceReady,
 };
-use ene_vrm::{ExpressionWeights, SpringRig, Vrm, VrmSystems};
-use serde::{Deserialize, Serialize};
+use ene_vrm::{ExpressionWeights, GazeOverride, SpringRig, Vrm, VrmSystems};
 use serde_json::{Value, json};
 
 const MOTION_FADE_SECS: f32 = 0.3;
@@ -35,6 +34,8 @@ pub struct Character {
     /// smoothed value the blendshape actually uses.
     pub lip: f32,
     pub lip_level: f32,
+    /// Optional direct eye gaze angles `(yaw_deg, pitch_deg)` overriding clip look-at.
+    pub gaze: Option<(f32, f32)>,
     spawned: bool,
     retrying: bool,
 }
@@ -74,56 +75,28 @@ impl AvatarState {
     }
 }
 
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Config {
-    pub model: String,
-    pub motion: Option<String>,
-    pub playing: bool,
-    pub looping: bool,
-    pub monitor: Option<String>,
-    /// Foot position in logical pixels from the monitor's top-left corner.
-    pub position: Option<[f32; 2]>,
-    /// 100 draws 1 m as 320 logical pixels.
-    pub size_percent: f32,
-}
+pub use ene_avatar_ipc::CharacterConfig as Config;
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            model: String::new(),
-            motion: None,
-            playing: true,
-            looping: true,
-            monitor: None,
-            position: None,
-            size_percent: 100.,
-        }
+pub fn validate_config(config: &Config) -> Result<(), String> {
+    for path in std::iter::once(&config.model).chain(config.motion.iter()) {
+        bevy::asset::AssetPath::try_parse(path).map_err(|error| error.to_string())?;
     }
-}
-
-impl Config {
-    pub fn validate(&self) -> Result<(), String> {
-        for path in std::iter::once(&self.model).chain(self.motion.iter()) {
-            bevy::asset::AssetPath::try_parse(path).map_err(|error| error.to_string())?;
-        }
-        if !(50. ..=200.).contains(&self.size_percent)
-            || self
-                .position
-                .is_some_and(|p| p.iter().any(|v| !v.is_finite() || v.abs() > 1_000_000.))
-        {
-            return Err("invalid size or position".into());
-        }
-        if !self.model.ends_with(".vrm")
-            || self
-                .motion
-                .as_ref()
-                .is_some_and(|path| !path.ends_with(".vrma"))
-        {
-            return Err("expected .vrm or .vrma path".into());
-        }
-        Ok(())
+    if !(50. ..=200.).contains(&config.size_percent)
+        || config
+            .position
+            .is_some_and(|p| p.iter().any(|v| !v.is_finite() || v.abs() > 1_000_000.))
+    {
+        return Err("invalid size or position".into());
     }
+    if !config.model.ends_with(".vrm")
+        || config
+            .motion
+            .as_ref()
+            .is_some_and(|path| !path.ends_with(".vrma"))
+    {
+        return Err("expected .vrm or .vrma path".into());
+    }
+    Ok(())
 }
 
 #[derive(Message)]
@@ -209,6 +182,11 @@ pub fn setup(app: &mut App) {
                 .before(VisibilitySystems::VisibilityPropagate),
         )
         .add_systems(PostUpdate, notify_finished.after(AnimationSystems))
+        // Sync direct gaze overrides before VRM look-at computes eye bone / morph targets.
+        .add_systems(
+            PostUpdate,
+            sync_gaze.after(AnimationSystems).before(VrmSystems::LookAt),
+        )
         // The mouth and the face are written after the animation reset of the
         // frame, and before ene-vrm turns weights into morph values.
         .add_systems(
@@ -425,6 +403,24 @@ fn update(
         }
         if let Some(mut spring) = spring {
             spring.paused = !running;
+        }
+    }
+}
+
+/// Syncs each character's direct gaze override onto its VRM root entity.
+fn sync_gaze(characters: Query<&Character>, mut commands: Commands) {
+    for c in &characters {
+        let Some(root) = c.root else { continue };
+        match c.gaze {
+            Some((yaw_deg, pitch_deg)) if yaw_deg.is_finite() && pitch_deg.is_finite() => {
+                commands.entity(root).try_insert(GazeOverride {
+                    yaw_deg: yaw_deg.clamp(-90., 90.),
+                    pitch_deg: pitch_deg.clamp(-60., 60.),
+                });
+            }
+            _ => {
+                commands.entity(root).try_remove::<GazeOverride>();
+            }
         }
     }
 }

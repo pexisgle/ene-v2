@@ -41,6 +41,8 @@ jiff.workspace = true
 keyring = { version = "4", default-features = false, features = ["v1"] }
 private-fs = "0.2.1"
 process-wrap.workspace = true
+pulldown-cmark = { version = "0.13", default-features = false }
+regex = "1"
 reqwest.workspace = true
 rig-core.workspace = true
 rig-agent.workspace = true

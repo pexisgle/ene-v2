@@ -1,6 +1,6 @@
 //! The parent's explicit memory tools.
 use crate::host::{
-    agent::CompanionAgent,
+    agent::{CompanionAgent, WorkAgent},
     background::{self, AbortOnDropHandle},
     db::{
         Result, Store,
@@ -91,6 +91,20 @@ fn companion(world: &World, agent: Entity) -> Result<String> {
         .ok_or_else(|| HostError::Internal(("this tool belongs to a companion").into()))
 }
 
+/// Companion owner for tools available to both the companion head and its work hands
+/// (`mind_recall` and `mind_read`, `F06`).
+fn companion_of_any(world: &World, agent: Entity) -> Result<String> {
+    if let Some(agent) = world.get::<CompanionAgent>(agent) {
+        return Ok(agent.companion_id.clone());
+    }
+    if let Some(work) = world.get::<WorkAgent>(agent) {
+        return Ok(work.companion_id.clone());
+    }
+    Err(HostError::Internal(
+        ("this tool belongs to a companion or work agent").into(),
+    ))
+}
+
 enum RecallWork {
     Ready(String),
     Running(AbortOnDropHandle<Result<String>>),
@@ -136,7 +150,7 @@ fn complete_recall(mut commands: Commands, mut pending: Query<(Entity, &mut Pend
 }
 
 fn recall(world: &mut World, agent: Entity, args: RecallArgs) -> Result<RecallWork> {
-    let companion = companion(world, agent)?;
+    let companion = companion_of_any(world, agent)?;
     if args.query.chars().count() > 4_000 {
         return Err(HostError::Invalid(("query is too long").into()));
     }
@@ -195,7 +209,7 @@ fn recall_result(
 }
 
 fn read(world: &mut World, agent: Entity, args: ReadArgs) -> Result<String> {
-    let companion = companion(world, agent)?;
+    let companion = companion_of_any(world, agent)?;
     let store = world.resource::<Store>().clone();
     let memory = store
         .memory(&args.id)?

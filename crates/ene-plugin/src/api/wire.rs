@@ -1,7 +1,7 @@
 //! Shared wire enums for operations, events and service requests.
 use super::{
     CharacterAction, CharacterEvent, CharacterTarget, EmbeddingRequest, HarnessEvent, HarnessInput,
-    HttpChunk, HttpRequest, SynthesisRequest, TranscriptionRequest,
+    HookEvent, HttpChunk, HttpRequest, SynthesisRequest, ToolInvokeRequest, TranscriptionRequest,
 };
 use crate::manifest::{Extension, Service};
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,13 @@ pub enum Operation {
     Harness {
         input: HarnessInput,
     },
+    Hook {
+        event: HookEvent,
+    },
+    ListTools,
+    InvokeTool {
+        request: ToolInvokeRequest,
+    },
 }
 
 impl Operation {
@@ -46,6 +53,8 @@ impl Operation {
             Self::Transcribe { .. } => Extension::Stt,
             Self::Character { .. } => Extension::Character,
             Self::Harness { .. } => Extension::Harness,
+            Self::Hook { .. } => Extension::Hook,
+            Self::ListTools | Self::InvokeTool { .. } => Extension::Tool,
         }
     }
 }
@@ -71,6 +80,20 @@ pub enum Event {
     Harness {
         event: HarnessEvent,
     },
+    /// Streamed PCM16 audio chunk emitted by a TTS plugin (`F22`).
+    Audio {
+        data_base64: String,
+        #[serde(default)]
+        sample_rate: u32,
+        #[serde(default)]
+        done: bool,
+    },
+    /// Partial or final transcript event emitted by an STT plugin (`F22`).
+    Transcription {
+        text: String,
+        #[serde(default)]
+        is_final: bool,
+    },
 }
 
 impl Event {
@@ -79,6 +102,8 @@ impl Event {
             Self::Models { .. } | Self::Http { .. } => Extension::Llm,
             Self::Character { .. } => Extension::Character,
             Self::Harness { .. } => Extension::Harness,
+            Self::Audio { .. } => Extension::Tts,
+            Self::Transcription { .. } => Extension::Stt,
         }
     }
 }

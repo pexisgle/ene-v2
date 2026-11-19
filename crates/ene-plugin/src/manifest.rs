@@ -10,6 +10,8 @@ pub const CONTRACT_VERSION: u32 = 8;
 #[serde(rename_all = "snake_case")]
 pub enum Target {
     Host,
+    /// Client-side desktop plugin providing device capabilities (`F11`).
+    Client,
     /// An external ACP agent launched as an explicit subprocess.
     Acp,
 }
@@ -23,6 +25,8 @@ pub enum Extension {
     Stt,
     Character,
     Harness,
+    Hook,
+    Tool,
 }
 
 impl Extension {

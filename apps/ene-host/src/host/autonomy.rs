@@ -6,20 +6,18 @@
 //! and a one-shot row is disabled (docs/features/autonomy/schedule.md).
 use crate::host::{
     agent::{self, CompanionAgent},
-    db::{
-        Result, Store,
-        schedules::{ScheduleClock, next_occurrence},
-    },
+    db::{Result, Store, schedules::ScheduleClock},
     error::HostError,
     tools::run_tool,
 };
 use bevy_ecs::prelude::*;
 use jiff::Timestamp;
-use rig_core::conversation::Author;
+use rig_core::conversation::{Author, RequestId};
 use rig_ecs::prelude::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashSet;
 use std::time::Duration;
 
 /// The firing loop runs at most once per this real-time interval, so a burst
@@ -153,11 +151,81 @@ fn cancel(world: &mut World, agent: Entity, args: CancelArgs) -> Result<String> 
     Ok(json!({"schedule_id": args.schedule_id, "removed": removed}).to_string())
 }
 
-/// Delivers every schedule due at `now` and records the firing. Returns how
-/// many fired. The stored `next_run_at` is compared in SQL, so a poll does no
-/// per-row parsing; the next time of a repeating row is computed once, after
-/// it fires. The firing is recorded before the message is sent, so a storage
-/// failure delays a schedule instead of repeating it.
+fn schedule_author(occurrence_key: &str) -> Author {
+    let mut author = Author::plugin("ene-host");
+    author.request = Some(RequestId(occurrence_key.to_owned()));
+    author
+}
+
+fn conversation_has_occurrence(world: &World, agent: Entity, occurrence_key: &str) -> bool {
+    world.get::<Conversation>(agent).is_some_and(|conv| {
+        conv.entries().any(|entry| {
+            entry
+                .author
+                .and_then(|author| author.request.as_ref())
+                .is_some_and(|req| req.0 == occurrence_key)
+        })
+    })
+}
+
+fn inbox_has_occurrence(world: &mut World, agent: Entity, occurrence_key: &str) -> bool {
+    let mut query = world.query::<(&ForAgent, &Incoming)>();
+    query.iter(world).any(|(of, incoming)| {
+        of.0 == agent
+            && incoming
+                .author
+                .request
+                .as_ref()
+                .is_some_and(|req| req.0 == occurrence_key)
+    })
+}
+
+/// Confirms any pending schedule occurrences that have already landed in their
+/// companion's conversation log.
+fn confirm_delivered_schedules(world: &mut World) {
+    let Some(store) = world.get_resource::<Store>().cloned() else {
+        return;
+    };
+    let pending = match store.pending_schedule_occurrences() {
+        Ok(pending) => pending,
+        Err(error) => {
+            if error.is_storage() {
+                super::fail(world, error.to_string());
+            } else {
+                tracing::warn!(%error, "pending schedule occurrences could not be read");
+            }
+            return;
+        }
+    };
+    if pending.is_empty() {
+        return;
+    }
+    let now = world
+        .get_resource::<ScheduleClock>()
+        .map_or_else(Timestamp::now, ScheduleClock::now);
+    for occ in pending {
+        let Some(agent) = agent::agent_of(world, &occ.companion_id) else {
+            continue;
+        };
+        if conversation_has_occurrence(world, agent, &occ.occurrence_key)
+            && let Err(error) = store.mark_occurrence_delivered(&occ.occurrence_key, now)
+            && error.is_storage()
+        {
+            super::fail(world, error.to_string());
+            return;
+        }
+    }
+}
+
+/// Materializes due schedules into idempotent occurrences and delivers pending
+/// ones to their companion's head. Returns how many new messages were queued.
+///
+/// An occurrence stays `pending` until confirmed in the companion's
+/// `Conversation` (matched by `Author.request = Some(RequestId(occurrence_key))`):
+/// - Transient delivery failures (such as an unbound model) keep the occurrence
+///   pending and retry cleanly once the model is bound.
+/// - Restarts after the conversation persisted the message mark the occurrence
+///   `delivered` without queuing a duplicate.
 pub(crate) fn poll_schedules(world: &mut World, now: Timestamp) -> usize {
     let Some(store) = world.get_resource::<Store>().cloned() else {
         return 0;
@@ -166,61 +234,64 @@ pub(crate) fn poll_schedules(world: &mut World, now: Timestamp) -> usize {
         tracing::warn!("schedules cannot fire without the host's wall clock");
         return 0;
     };
-    let schedules = match store.due_schedules(now) {
-        Ok(schedules) => schedules,
+    let ready_companions: HashSet<String> = {
+        let mut query = world.query::<&CompanionAgent>();
+        query
+            .iter(world)
+            .map(|agent| agent.companion_id.clone())
+            .collect()
+    };
+    let occurrences = match store.materialize_due_occurrences(now, &clock, &ready_companions) {
+        Ok(occurrences) => occurrences,
         Err(error) => {
-            tracing::warn!(%error, "schedules could not be read");
+            if error.is_storage() {
+                super::fail(world, error.to_string());
+            } else {
+                tracing::warn!(%error, "schedules could not be materialized");
+            }
             return 0;
         }
     };
     let mut fired = 0;
-    for schedule in schedules {
-        let Some(agent) = agent::agent_of(world, &schedule.companion_id) else {
+    for occ in occurrences {
+        let Some(agent) = agent::agent_of(world, &occ.companion_id) else {
             continue;
         };
-        // A one-shot ends now; a repeating row moves to its first occurrence
-        // after this firing, so missed occurrences are not fired one by one.
-        let next_run_at = if schedule.one_shot() {
-            None
-        } else {
-            match schedule
-                .cron_expr
-                .as_deref()
-                .map(|expression| next_occurrence(expression, now, clock.zone()))
-            {
-                Some(Ok(at)) => Some(at),
-                Some(Err(error)) => {
-                    tracing::warn!(%error, schedule = %schedule.id, "a repeating schedule exhausted its expression");
-                    None
+        if conversation_has_occurrence(world, agent, &occ.occurrence_key) {
+            if let Err(error) = store.mark_occurrence_delivered(&occ.occurrence_key, now) {
+                if error.is_storage() {
+                    super::fail(world, error.to_string());
+                    return fired;
                 }
-                None => None,
+                tracing::warn!(%error, key = %occ.occurrence_key, "delivered schedule occurrence was not recorded");
             }
-        };
-        match store.mark_schedule_fired(&schedule.id, now, next_run_at) {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(error) => {
-                tracing::warn!(%error, schedule = %schedule.id, "a firing schedule was not recorded");
-                continue;
-            }
+            continue;
+        }
+        if inbox_has_occurrence(world, agent, &occ.occurrence_key) {
+            continue;
         }
         // The head decides what to do; the reason is the only extra context it
         // gets, and the message waits for a running turn instead of cutting in.
-        let text = format!(
-            "[スケジュール実行: {}] {}",
-            schedule.title, schedule.instruction
-        );
-        // The row records its firing either way; the notice says when the
-        // companion's model is not bound and the turn does not start.
-        agent::deliver(
+        let text = format!("[スケジュール実行: {}] {}", occ.title, occ.instruction);
+        if agent::deliver(
             world,
             agent,
-            &schedule.companion_id,
+            &occ.companion_id,
             text,
             DeliveryMode::Queue,
-            Author::plugin("ene-host"),
-        );
-        fired += 1;
+            schedule_author(&occ.occurrence_key),
+        ) {
+            // Flush the deferred `Deliver` spawn so a back-to-back poll in the
+            // same frame sees the queued `Incoming` entity and stays idempotent.
+            world.flush();
+            fired += 1;
+        } else if let Err(error) =
+            store.record_occurrence_attempt(&occ.occurrence_key, "model unavailable")
+            && error.is_storage()
+        {
+            super::fail(world, error.to_string());
+            return fired;
+        }
     }
     fired
 }
@@ -244,9 +315,12 @@ impl Plugin for AutonomyPlugin {
         register(app);
         app.init_resource::<ScheduleClock>().add_systems(
             Update,
-            fire_due_schedules
-                .after(AgentLoop)
-                .run_if(on_real_timer(POLL_INTERVAL).or_else(run_once)),
+            (
+                confirm_delivered_schedules,
+                fire_due_schedules.run_if(on_real_timer(POLL_INTERVAL).or_else(run_once)),
+            )
+                .chain()
+                .after(AgentLoop),
         );
     }
 }
@@ -459,5 +533,94 @@ mod tests {
         assert_eq!(last, None);
         assert_eq!(next.as_deref(), Some("2000-01-01T00:00:00Z"));
         assert_eq!(incoming(harness.app.world_mut()), 0);
+    }
+
+    #[test]
+    fn b10_one_shot_survives_unbound_model_and_delivers_once_when_bound() {
+        let clock = ScheduleClock::fixed(jiff::tz::TimeZone::UTC, utc(2026, 11, 14, 8, 0));
+        let mut harness = Harness::with_clock([], clock.clone());
+        // Make model binding fail so delivery cannot start a turn yet.
+        harness
+            .app
+            .world_mut()
+            .insert_resource(crate::host::model::ModelFactory::default());
+        let schedule = harness
+            .store()
+            .insert_schedule(
+                &harness.companion,
+                "大事な予定",
+                "会議が始まるよ",
+                Some("2026-11-14T08:00:00Z"),
+                None,
+                &clock,
+            )
+            .unwrap();
+        let now = utc(2026, 11, 14, 8, 5);
+        assert_eq!(poll_schedules(harness.app.world_mut(), now), 0);
+        let pending = harness.store().pending_schedule_occurrences().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].schedule_id, schedule.id);
+        assert_eq!(pending[0].attempts, 1);
+        assert_eq!(incoming(harness.app.world_mut()), 0);
+
+        // Restart with a working model bound: the pending occurrence must deliver once.
+        harness.restart([text_turn("会議の時間だね")]);
+        harness.app.world_mut().insert_resource(clock);
+        assert_eq!(poll_schedules(harness.app.world_mut(), now), 1);
+        // Immediate re-poll stays idempotent while in inbox.
+        assert_eq!(poll_schedules(harness.app.world_mut(), now), 0);
+
+        let agent = harness.companion_agent();
+        harness.run_until(|world| {
+            let Some(conv) = world.get::<Conversation>(agent) else {
+                return false;
+            };
+            conv.entries().any(|entry| {
+                super::agent::entry_text(&entry).is_some_and(|t| t.contains("会議の時間だね"))
+            })
+        });
+        assert!(
+            harness
+                .store()
+                .pending_schedule_occurrences()
+                .unwrap()
+                .is_empty(),
+            "confirmed occurrence must transition to delivered"
+        );
+        // Simulate a crash right before SQLite ACK: resetting status back to pending
+        // and restarting must NOT duplicate the occurrence in Conversation.
+        let key = pending[0].occurrence_key.clone();
+        harness
+            .store()
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE schedule_occurrences SET status = 'pending', delivered_at = NULL \
+                 WHERE occurrence_key = ?1",
+                [&key],
+            )
+            .unwrap();
+        harness.restart([]);
+        assert_eq!(poll_schedules(harness.app.world_mut(), now), 0);
+        assert!(
+            harness
+                .store()
+                .pending_schedule_occurrences()
+                .unwrap()
+                .is_empty(),
+            "restart must reconcile delivered occurrence from Conversation without duplicating"
+        );
+        let agent = harness.companion_agent();
+        let matches = harness
+            .conversation(agent)
+            .entries()
+            .filter(|entry| {
+                entry
+                    .author
+                    .and_then(|author| author.request.as_ref())
+                    .is_some_and(|req| req.0 == key)
+            })
+            .count();
+        assert_eq!(matches, 1);
     }
 }

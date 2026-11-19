@@ -29,7 +29,7 @@ cargo run --locked -p ene-host
 | `ENE_HOST_SESSION_CREDENTIALS` | 設定時、登録した資格情報をOSキーリングではなくメモリだけに保持する |
 | `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` | 登録済み資格情報がない場合のフォールバック |
 
-`connection.json` のendpointとtokenを `ene_rpc::connect` に渡し、生成された `HostServiceClient` / `ChatServiceClient` / `SettingsServiceClient` / `WorkServiceClient` / `ClientServiceClient` を使います。
+`connection.json` のendpointとtokenを `ene_rpc::connect`（ループバック平文HTTP/2）へ、遠隔HTTPS入口の場合は `ene_rpc::connect_remote`（`client-tls` 機能、HTTPS固定・Bearer必須）へ渡し、生成された `HostServiceClient` / `ChatServiceClient` / `SettingsServiceClient` / `VoiceServiceClient` / `WorkServiceClient` / `ClientServiceClient` を使います。
 
 ホストは起動時と稼働中に Models.dev の公開カタログを取得し、Rig の同梱カタログにないモデルの入出力形式とツール対応を補います。設定画面と「手」のモデル接続は同じカタログを参照します。取得できない場合は、稼働中に取得済みの情報または同梱カタログを使います。
 
@@ -82,7 +82,7 @@ RPC では LLM 接続の `adapter` に `google-agent-platform` を指定し、�
 
 ## データベース
 
-`host.sqlite3` は `PRAGMA user_version = 5` の単一baselineです。主なテーブルは `companions` / `connections` / `settings_state` / `policy_rules` / `approval_requests` / `clients` / `activations` / `work_sessions` / `work_runs` / `device_operations` / `memories` / `memories_fts` / `memory_edges` / `mind_operations` / `memory_injections` / `schedules` です。`approval_requests` は端末能力の承認を `client_id` / `work_id` に束縛します。未知の新しい版のDBは起動時に拒否します。開発用のstateディレクトリを削除して作り直してください。
+`host.sqlite3` は `PRAGMA user_version = 6` の単一baselineです。主なテーブルは `companions` / `connections` / `settings_state` / `policy_rules` / `approval_requests` / `clients` / `activations` / `work_sessions` / `work_runs` / `device_operations` / `memories` / `memories_fts` / `memory_edges` / `mind_operations` / `memory_injections` / `schedules` / `schedule_occurrences` / `skills` / `plugin_config` / `plugin_state` / `plugin_entries` です。`approval_requests` は端末能力の承認を `client_id` / `work_id` に束縛します。未知の新しい版のDBは起動時に拒否します。開発用のstateディレクトリを削除して作り直してください。
 
 - `activations` がコンパニオンごとのアクティブクライアントを持ちます。移動は最後の `Activate` が勝ち、旧クライアントには音声の `FlushControl` を送ります。
 - 承認は `approval_requests` に残し、起動時に未解決分を失効させます。端末能力の承認は `client_id` / `capability` も保存します。
@@ -92,14 +92,12 @@ RPC では LLM 接続の `adapter` に `google-agent-platform` を指定し、�
 
 `crates/ene-rpc/proto/host.proto` が正本で、`docs/api.md` §7 と一致します。有限の状態はenum、イベント詳細は `oneof`、自由形式の値は `JsonDocument`（schema + JSON text）で運びます。`Subscribe` は `Notification` の単一ストリームで、`activation_updated` や `device_operation` もここを流れます。実際の端末操作の配送は `ClientService.DeviceStream` だけです。
 
-## 現時点で実装していないもの
+## 実装状況と境界
 
-- スキルファイル（`SKILL.md`）は未実装です。Wasmプロバイダーはホストへ組み込み済みで、`ene-plugin-runtime` のExtism実行基盤を使用します。MCPサーバーのツール登録は `rig-rmcp` と `ToolServerHandle` を使用します。
-- スケジュール発火は`Queue`で親へ直接注入し、`cron_expr`/`run_at`はホストのローカル時刻で評価して`next_run_at`を保持します。
-
-- Barge-inは明示操作で行います。
-- クライアント能力ツールは `world.spawn_tool` で動的登録し、能力変更・有効化変更・切断に追随して入れ替えます。同名ツールは宣言（説明・入力スキーマ）が一致する限り1つの定義を複数コンパニオンで共有し、一致しない宣言は暗黙に切り捨てず明示的な競合エラーにします。親エージェントには会話用の組み込みツールと、アクティブクライアントが許可した能力ツールを公開します。組み込みの「手」は `report`、`device_request`、`mind_read`、`mind_recall`、`web_search` と、接続済みの MCP ツールを使えます。
-- `web_search` は [Mwmbl の公開検索 API](https://developer.mwmbl.org/) に検索語を送り、タイトル・出典 URL・抜粋を返します。API キーは不要です。既定は5件、最大10件で、匿名利用枠のレート・件数上限が適用されます。
+- **手順スキルとプラグイン**: 手順スキル（`skill_list` / `skill_read` / `skill_save`）は `skills` テーブルに永続化され、作業エージェントから再利用できます。Wasm プラグインはプロバイダーだけでなく `character` / `hook` / `tool` 拡張および `target = "client"`（デスクトップ側ツール実行）をサポートし、`ListPlugins` / `InstallPlugin` / `SetPluginEnabled` / `RemovePlugin` RPC でライフサイクルを管理します。外部 ACP プロセスとは `src/host/work/acp.rs` の stdio JSON-RPC 2.0 ブリッジで連携します。
+- **スケジュール配送**: `schedule_occurrences` テーブルへ予定発生を実体化してから会話キューへ配送し、モデル未接続時にも一回限りの予定を失わず、復旧後に重複なく1回だけ届けます。
+- **音声と割込み**: VAD に加え Push-to-Talk（PTT）と再生エコー抑止付き自動 Barge-in（`AudioInputChunk.barge_in`）、および逐次 TTS/STT ストリーミングイベント（`Event::Audio` / `Event::Transcription`）に対応します。双方向低遅延の Realtime 音声セッション（WebRTC/WebSocket 単一セッション）は今後の拡張対象です。
+- **クライアント能力と検索**: クライアント能力ツールは `world.spawn_tool` で動的登録し、能力変更・有効化変更・切断に追随して入れ替えます（`body.motion` / `body.look_at` / `body.perch` / `eye.watch` / ワークスペース操作 / クライアントプラグイン）。組み込みの「手」は `report`、`device_request`、`mind_read`、`mind_recall`、`skill_list`、`skill_read`、`skill_save`、`web_search` と、接続済みの MCP ツールを使えます。`web_search` は権限パイプラインを通過し、利用者が有効な検索接続（`CONNECTION_KIND_SEARCH`）を設定している場合のみその接続先へ送信し、未設定・無効・拒否時は外部 HTTP 送信を行わず拒否します。
 
 ## 検証
 

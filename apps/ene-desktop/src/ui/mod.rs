@@ -14,6 +14,7 @@ pub mod studio;
 pub mod theme;
 mod voice;
 mod widgets;
+mod workflows;
 
 pub use icons::EmbeddedAssets;
 pub use pod::{
@@ -212,6 +213,7 @@ pub struct Hub {
     pub pending_setup_models: Vec<String>,
     pub checking_connections: HashSet<String>,
     auto_assigned_revisions: BTreeMap<String, u64>,
+    request_seq: std::sync::atomic::AtomicU64,
     tray: Option<TrayHandle>,
     _tray_pump: Option<Task<()>>,
     _pump: Task<()>,
@@ -273,6 +275,7 @@ impl Hub {
             pending_setup_models: Vec::new(),
             checking_connections: HashSet::new(),
             auto_assigned_revisions: BTreeMap::new(),
+            request_seq: std::sync::atomic::AtomicU64::new(1),
             tray,
             _tray_pump: tray_pump,
             _pump: pump,
@@ -461,16 +464,35 @@ impl Hub {
         E: FnOnce(&'static str, connectrpc::ConnectError) -> Update + Send + 'static,
     {
         let updates = self.updates.clone();
+        let epoch = self.model.link_epoch;
+        let seq = self
+            .request_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.runtime.spawn(async move {
-            let update = match future.await {
+            let inner = match future.await {
                 Ok(value) => done(value),
                 Err(failed) => error(context, failed),
             };
-            let _ = updates.send(update);
+            let _ = updates.send(Update::Scoped {
+                epoch,
+                seq,
+                inner: Box::new(inner),
+            });
         });
     }
 
-    fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
+    fn apply(&mut self, mut update: Update, cx: &mut Context<Self>) {
+        if let Update::Scoped {
+            epoch,
+            seq: _,
+            inner,
+        } = update
+        {
+            if epoch != self.model.link_epoch {
+                return;
+            }
+            update = *inner;
+        }
         match &update {
             Update::CredentialRegistered { connection_id } => {
                 let next_seq = self
@@ -616,6 +638,7 @@ impl Hub {
         if selected_now {
             self.load_models(cx);
             self.load_policy_rules(cx);
+            self.load_policy_texts(cx);
         }
         self.sync_tray_state();
         cx.notify();
@@ -724,6 +747,7 @@ impl Hub {
         self.load_models(cx);
         self.load_mind(cx);
         self.load_policy_rules(cx);
+        self.load_policy_texts(cx);
     }
 
     pub(crate) fn resnapshot(&self) {
@@ -854,6 +878,10 @@ impl Hub {
             "message sent"
         );
         let updates = self.updates.clone();
+        let epoch = self.model.link_epoch;
+        let seq = self
+            .request_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.runtime.spawn(async move {
             let outcome = match host
                 .chat
@@ -884,7 +912,11 @@ impl Hub {
                     reason,
                 },
             };
-            let _ = updates.send(update);
+            let _ = updates.send(Update::Scoped {
+                epoch,
+                seq,
+                inner: Box::new(update),
+            });
         });
         self.pod_scroll_ping = self.pod_scroll_ping.saturating_add(1);
         cx.notify();
@@ -947,6 +979,34 @@ impl Hub {
         cx.notify();
     }
 
+    pub(crate) fn toggle_capture_mode(&mut self, cx: &mut Context<Self>) {
+        let next = match self.model.capture_mode {
+            crate::audio::CaptureMode::Vad => crate::audio::CaptureMode::Ptt,
+            crate::audio::CaptureMode::Ptt => crate::audio::CaptureMode::Vad,
+        };
+        self.model.capture_mode = next;
+        self.model.ptt_active = false;
+        let _ = self.commands.send(Command::SetCaptureMode(next));
+        cx.notify();
+    }
+
+    pub(crate) fn ptt_toggle(&mut self, cx: &mut Context<Self>) {
+        if self.model.ptt_active {
+            self.model.ptt_active = false;
+            let _ = self.commands.send(Command::PttCommit);
+        } else {
+            self.model.ptt_active = true;
+            let _ = self.commands.send(Command::PttStart);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn ptt_cancel(&mut self, cx: &mut Context<Self>) {
+        self.model.ptt_active = false;
+        let _ = self.commands.send(Command::PttCancel);
+        cx.notify();
+    }
+
     pub(crate) fn set_eyes_enabled(&self, enabled: bool) {
         let _ = self.commands.send(Command::SetEyesEnabled(enabled));
     }
@@ -985,7 +1045,8 @@ impl Hub {
             return;
         }
         self.model.speech_report = None;
-        let _ = self.commands.send(Command::Speak(text));
+        let companion_id = self.model.companion_id().map(str::to_owned);
+        let _ = self.commands.send(Command::Speak { companion_id, text });
         cx.notify();
     }
 
@@ -1002,6 +1063,16 @@ impl Hub {
         };
         self.model.selected = Some(id.clone());
         let _ = self.commands.send(Command::Serve(id));
+        cx.notify();
+    }
+
+    pub(crate) fn activate_companion(&mut self, companion_id: String, cx: &mut Context<Self>) {
+        let _ = self.commands.send(Command::ActivateCompanion(companion_id));
+        cx.notify();
+    }
+
+    pub(crate) fn release_companion(&mut self, companion_id: String, cx: &mut Context<Self>) {
+        let _ = self.commands.send(Command::ReleaseCompanion(companion_id));
         cx.notify();
     }
 
@@ -1029,6 +1100,7 @@ impl Hub {
         self.load_providers(cx);
         self.load_models(cx);
         self.load_mind(cx);
+        self.load_companion_templates(cx);
         self.load_policy_rules(cx);
         cx.notify();
 
@@ -1161,20 +1233,43 @@ impl Hub {
         cx.notify();
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn update_companion_profile(
         &mut self,
+        companion_id: String,
         name: String,
         persona: String,
         mind: String,
-        voice_identifier: String,
+        body: w::BodyBinding,
+        voice: w::VoiceBinding,
         cx: &mut Context<Self>,
     ) {
-        let Some(companion) = self.model.companion().cloned() else {
+        let Some(companion) = self
+            .model
+            .snapshot()
+            .and_then(|s| s.companions.iter().find(|c| c.id == companion_id))
+            .cloned()
+        else {
             return;
         };
         let Some(host) = self.host() else {
             return;
         };
+        let voice_identifier = voice.voice_id.clone().unwrap_or_default();
+        let body_doc = serde_json::to_string(&body)
+            .ok()
+            .map(|json| w::JsonDocument {
+                schema: "ene.body.v1".into(),
+                json,
+                ..Default::default()
+            });
+        let voice_doc = serde_json::to_string(&voice)
+            .ok()
+            .map(|json| w::JsonDocument {
+                schema: "ene.voice.v1".into(),
+                json,
+                ..Default::default()
+            });
         self.request(
             "コンパニオンの保存",
             async move {
@@ -1186,6 +1281,8 @@ impl Hub {
                         name: (!name.is_empty() && name != companion.name).then_some(name),
                         persona: Some(persona),
                         mind: (mind != companion.mind).then_some(mind),
+                        body: body_doc.into(),
+                        voice: voice_doc.into(),
                         voice_identifier: Some(voice_identifier),
                         ..Default::default()
                     })
@@ -1199,6 +1296,117 @@ impl Hub {
                     ..Default::default()
                 }))
             },
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn load_companion_templates(&mut self, _cx: &mut Context<Self>) {
+        let Some(host) = self.host() else {
+            return;
+        };
+        self.request(
+            "テンプレート一覧の取得",
+            workflows::list_companion_templates(host),
+            Update::CompanionTemplates,
+        );
+    }
+
+    pub(crate) fn export_companion(&mut self, companion_id: String, cx: &mut Context<Self>) {
+        let Some(host) = self.host() else {
+            return;
+        };
+        let target = companion_id.clone();
+        self.request(
+            "テンプレートの書き出し",
+            workflows::export_companion(host, companion_id),
+            move |json| Update::CompanionExported {
+                companion_id: target,
+                json,
+            },
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn import_companion_json(&mut self, raw: String, cx: &mut Context<Self>) {
+        let template = match workflows::parse_template_json(&raw) {
+            Ok(template) => template,
+            Err(message) => {
+                self.model
+                    .notice(NoticeKind::Failed, "テンプレートの読み込み", message);
+                cx.notify();
+                return;
+            }
+        };
+        self.import_companion_template(template, cx);
+    }
+
+    pub(crate) fn import_companion_template(
+        &mut self,
+        template: w::CompanionTemplate,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = self.host() else {
+            return;
+        };
+        let assignments = self
+            .model_choices()
+            .into_iter()
+            .next()
+            .map(|(conn_id, model_id, _)| w::ModelAssignments {
+                companion: Some(w::ModelAssignment {
+                    connection_id: conn_id.clone(),
+                    model_id: model_id.clone(),
+                    ..Default::default()
+                })
+                .into(),
+                task: Some(w::ModelAssignment {
+                    connection_id: conn_id,
+                    model_id,
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            });
+        self.request(
+            "テンプレートから作成",
+            workflows::import_companion(host, template, assignments),
+            |companion| Update::Created(companion.id),
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn preview_companion(
+        &mut self,
+        name: String,
+        mind: String,
+        persona: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = self.host() else {
+            return;
+        };
+        self.model.preview_reply = None;
+        let model = self
+            .model_choices()
+            .into_iter()
+            .next()
+            .map(|(connection_id, model_id, _)| w::ModelAssignment {
+                connection_id,
+                model_id,
+                ..Default::default()
+            });
+        let request = w::PreviewCompanionRequest {
+            name,
+            mind,
+            persona: (!persona.trim().is_empty()).then_some(persona),
+            model: model.into(),
+            user_message: "はじめまして！短く自己紹介してください。".into(),
+            ..Default::default()
+        };
+        self.request(
+            "コンパニオンのプレビュー",
+            async move { Ok(workflows::preview_companion(host, request).await) },
+            |update| update,
         );
         cx.notify();
     }
@@ -1287,6 +1495,10 @@ impl Hub {
         let Some(companion_id) = self.model.companion_id().map(str::to_owned) else {
             return;
         };
+        self.load_mind_for(companion_id);
+    }
+
+    pub(crate) fn load_mind_for(&mut self, companion_id: String) {
         let Some(host) = self.host() else {
             return;
         };
@@ -1426,19 +1638,27 @@ impl Hub {
         let request = request_id.to_owned();
         let resolved = request_id.to_owned();
         let stale = request_id.to_owned();
+        let always_approve = decision == w::ApprovalDecision::AlwaysApprove;
         self.request_with(
             "承認の送信",
             async move {
-                host.settings
+                let response = host
+                    .settings
                     .submit_approval(w::SubmitApprovalRequest {
                         request_id: request,
                         decision: decision.into(),
                         ..Default::default()
                     })
-                    .await
+                    .await?;
+                response.view().to_owned_message().map_err(decode)
             },
-            move |_| Update::Resolved {
+            move |reply| Update::Resolved {
                 request_id: resolved,
+                rule_warning: (always_approve && !reply.rule_saved).then(|| {
+                    reply
+                        .rule_error
+                        .unwrap_or_else(|| "常に許可ルールを保存できませんでした。".into())
+                }),
             },
             move |context, error| match error.code {
                 connectrpc::ErrorCode::Aborted => Update::ApprovalStale {
@@ -1515,6 +1735,136 @@ impl Hub {
                 response.view().to_owned_message().map_err(decode)
             },
             |rules| Update::PolicyRules(rules.items),
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn load_policy_texts(&mut self, _cx: &mut Context<Self>) {
+        let Some(host) = self.host() else {
+            return;
+        };
+        self.request(
+            "自由文ポリシーの取得",
+            async move {
+                let response = host.settings.list_policy_texts(w::Empty::default()).await?;
+                response.view().to_owned_message().map_err(decode)
+            },
+            |texts| Update::PolicyTexts(texts.items),
+        );
+    }
+
+    pub(crate) fn load_plugins(&mut self, _cx: &mut Context<Self>) {
+        let Some(host) = self.host() else {
+            return;
+        };
+        self.request(
+            "プラグイン一覧の取得",
+            async move {
+                let response = host.settings.list_plugins(w::Empty::default()).await?;
+                response.view().to_owned_message().map_err(decode)
+            },
+            |list| Update::Plugins(list.plugins),
+        );
+    }
+
+    pub(crate) fn set_plugin_enabled(
+        &mut self,
+        plugin_id: String,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = self.host() else {
+            return;
+        };
+        self.request(
+            "プラグイン状態の更新",
+            async move {
+                let _ = host
+                    .settings
+                    .set_plugin_enabled(w::SetPluginEnabledRequest {
+                        plugin_id,
+                        enabled,
+                        ..Default::default()
+                    })
+                    .await?;
+                let list = host.settings.list_plugins(w::Empty::default()).await?;
+                list.view().to_owned_message().map_err(decode)
+            },
+            |list| Update::Plugins(list.plugins),
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn remove_plugin(&mut self, plugin_id: String, cx: &mut Context<Self>) {
+        let Some(host) = self.host() else {
+            return;
+        };
+        self.request(
+            "プラグインの削除",
+            async move {
+                let _ = host
+                    .settings
+                    .remove_plugin(w::RemovePluginRequest {
+                        plugin_id,
+                        ..Default::default()
+                    })
+                    .await?;
+                let list = host.settings.list_plugins(w::Empty::default()).await?;
+                list.view().to_owned_message().map_err(decode)
+            },
+            |list| Update::Plugins(list.plugins),
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn upsert_policy_text(
+        &mut self,
+        id: Option<String>,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let entry = w::PolicyText {
+            id: id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            text,
+            ..Default::default()
+        };
+        self.update_policy_texts(
+            "自由文ポリシーの保存",
+            w::UpdatePolicyTextsRequest {
+                add_or_update: vec![entry],
+                ..Default::default()
+            },
+            cx,
+        );
+    }
+
+    pub(crate) fn remove_policy_text(&mut self, id: String, cx: &mut Context<Self>) {
+        self.update_policy_texts(
+            "自由文ポリシーの削除",
+            w::UpdatePolicyTextsRequest {
+                remove_ids: vec![id],
+                ..Default::default()
+            },
+            cx,
+        );
+    }
+
+    fn update_policy_texts(
+        &mut self,
+        context: &'static str,
+        request: w::UpdatePolicyTextsRequest,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = self.host() else {
+            return;
+        };
+        self.request(
+            context,
+            async move {
+                let response = host.settings.update_policy_texts(request).await?;
+                response.view().to_owned_message().map_err(decode)
+            },
+            |texts| Update::PolicyTexts(texts.items),
         );
         cx.notify();
     }
@@ -1705,63 +2055,12 @@ impl Hub {
         self.setup_pending = true;
         self.setup_error = None;
         self.setup_error_detail = None;
-        self.request_with(
+        self.request(
             "AI接続",
             async move {
-                if create {
-                    host.settings
-                        .update_settings(w::UpdateSettingsRequest {
-                            expected_revision: revision,
-                            connections: vec![input],
-                            ..Default::default()
-                        })
-                        .await?;
-                }
-                if !secret.is_empty() {
-                    host.settings
-                        .register_credentials(w::CredentialRequest {
-                            id: id.clone(),
-                            secret: Some(secret),
-                            ..Default::default()
-                        })
-                        .await?;
-                }
-                let probe = host
-                    .settings
-                    .check_connection(w::CheckRequest {
-                        id: id.clone(),
-                        request_key: uuid::Uuid::new_v4().to_string(),
-                        ..Default::default()
-                    })
-                    .await?
-                    .view()
-                    .to_owned_message()
-                    .map_err(decode)?;
-                let check = probe.check.into_option();
-                let healthy = check.as_ref().is_some_and(|c| c.healthy);
-                let models = check
-                    .as_ref()
-                    .map(|c| c.resources.clone())
-                    .unwrap_or_default();
-                let error = check
-                    .as_ref()
-                    .and_then(|c| c.failure.as_option())
-                    .map(|f| f.message.clone())
-                    .filter(|msg| !msg.trim().is_empty());
-                Ok(Update::SetupFinished {
-                    ok: healthy,
-                    connection_id: Some(id),
-                    models,
-                    error,
-                })
+                Ok(workflows::quick_connect_llm(host, revision, id, create, input, secret).await)
             },
             |outcome| outcome,
-            |_, err| Update::SetupFinished {
-                ok: false,
-                connection_id: None,
-                models: Vec::new(),
-                error: Some(err.to_string()),
-            },
         );
         cx.notify();
     }
@@ -1803,89 +2102,18 @@ impl Hub {
 
         self.request(
             "初期設定の完了",
-            async move {
-                if let Some(conn) = conn {
-                    let mut cfg = conn.config.as_option().cloned().unwrap_or_default();
-                    if let Some(w::connection_config::Config::Llm(llm)) = cfg.config.as_mut() {
-                        llm.model_ids = vec![model_id.clone()];
-                    }
-                    let input = w::ConnectionInput {
-                        id: conn.id.clone(),
-                        name: conn.name,
-                        enabled: true,
-                        expected_revision: conn.revision,
-                        kind: conn.kind,
-                        config: Some(cfg).into(),
-                        ..Default::default()
-                    };
-                    let _ = host
-                        .settings
-                        .update_settings(w::UpdateSettingsRequest {
-                            expected_revision: settings.revision,
-                            connections: vec![input],
-                            ..Default::default()
-                        })
-                        .await?;
-                }
-                let patch = w::AssignmentPatch {
-                    change: Some(w::assignment_patch::Change::Set(Box::new(
-                        w::ModelAssignment {
-                            connection_id: connection_id.clone(),
-                            model_id: model_id.clone(),
-                            ..Default::default()
-                        },
-                    ))),
-                    ..Default::default()
-                };
-                if let Some(comp) = existing_comp {
-                    let response = host
-                        .host
-                        .update_companion(w::UpdateCompanionRequest {
-                            id: comp.id,
-                            revision: comp.revision,
-                            companion_assignment: Some(patch.clone()).into(),
-                            task_assignment: Some(patch).into(),
-                            voice_identifier: voice_clean,
-                            ..Default::default()
-                        })
-                        .await?;
-                    let updated = response.view().to_owned_message().map_err(decode)?;
-                    Ok(Update::Notification(Box::new(w::Notification {
-                        kind: "companion".into(),
-                        event: Some(w::notification::Event::Companion(Box::new(updated))),
-                        ..Default::default()
-                    })))
-                } else {
-                    let assignments = w::ModelAssignments {
-                        companion: Some(w::ModelAssignment {
-                            connection_id: connection_id.clone(),
-                            model_id: model_id.clone(),
-                            ..Default::default()
-                        })
-                        .into(),
-                        task: Some(w::ModelAssignment {
-                            connection_id,
-                            model_id,
-                            ..Default::default()
-                        })
-                        .into(),
-                        ..Default::default()
-                    };
-                    let response = host
-                        .host
-                        .create_companion(w::CreateCompanionRequest {
-                            name: name_clean,
-                            mind: "相手を思いやりながら率直に対話する。".into(),
-                            persona: Some("柔らかく親しみやすい口調で会話します。".into()),
-                            voice_identifier: voice_clean,
-                            assignments: Some(assignments).into(),
-                            ..Default::default()
-                        })
-                        .await?;
-                    let created = response.view().to_owned_message().map_err(decode)?;
-                    Ok(Update::Created(created.id))
-                }
-            },
+            workflows::complete_setup_selection(
+                host,
+                workflows::SetupSelection {
+                    settings_revision: settings.revision,
+                    conn,
+                    connection_id,
+                    model_id,
+                    existing_comp,
+                    companion_name: name_clean,
+                    voice_identifier: voice_clean,
+                },
+            ),
             |update| update,
         );
         cx.notify();
@@ -2293,26 +2521,10 @@ impl Hub {
             return;
         }
         self.checking_connections.insert(connection_id.clone());
-        let id = connection_id.clone();
-        let companion = self.model.companion_id().map(str::to_owned);
         self.request(
             "接続確認",
-            async move {
-                let response = host
-                    .settings
-                    .check_connection(w::CheckRequest {
-                        id: connection_id,
-                        request_key: uuid::Uuid::new_v4().to_string(),
-                        companion_id: companion,
-                        ..Default::default()
-                    })
-                    .await?;
-                response.view().to_owned_message().map_err(decode)
-            },
-            move |result| Update::Checked {
-                connection_id: id,
-                check: result.check.into_option().unwrap_or_default(),
-            },
+            async move { Ok(workflows::probe_connection(host, connection_id).await) },
+            |update| update,
         );
         cx.notify();
     }
@@ -2770,21 +2982,19 @@ impl Hub {
         cx.notify();
     }
 
-    /// Discovered TTS voice identifiers `(voice_id, display_name, connection_name)`
-    /// from enabled TTS connections.
-    pub(crate) fn tts_voice_choices(&self) -> Vec<(String, String, String)> {
+    /// Discovered TTS voice choices `(connection_id, voice_id, display_name, connection_name)`
+    /// from enabled TTS connections, keeping duplicate `voice_id`s across connections distinct.
+    pub(crate) fn tts_voice_choices(&self) -> Vec<(String, String, String, String)> {
         let Some(settings) = self.model.settings() else {
             return Vec::new();
         };
-        let mut voices: Vec<(String, String, String)> = Vec::new();
+        let mut voices: Vec<(String, String, String, String)> = Vec::new();
         for conn in &settings.connections {
             if conn.kind != w::ConnectionKind::Tts || !conn.enabled {
                 continue;
             }
             for (vid, label) in self.voice_choices_for_connection(&conn.id) {
-                if !voices.iter().any(|(existing, _, _)| existing == &vid) {
-                    voices.push((vid, label, conn.name.clone()));
-                }
+                voices.push((conn.id.clone(), vid, label, conn.name.clone()));
             }
         }
         voices
@@ -3456,6 +3666,7 @@ pub(crate) fn is_sakura_conn(conn: &w::Connection) -> bool {
         Some(w::connection_config::Config::Embedding(c)) => c.endpoint.as_option(),
         Some(w::connection_config::Config::Mcp(c)) => c.endpoint.as_option(),
         Some(w::connection_config::Config::Acp(c)) => c.endpoint.as_option(),
+        Some(w::connection_config::Config::Search(c)) => c.endpoint.as_option(),
         None => None,
     };
     ep.is_some_and(|e| {

@@ -363,6 +363,22 @@ pub(crate) fn report(
             );
             return Ok(());
         }
+        Event::AvatarInteraction(interaction) => {
+            let kind_label = match interaction.kind.as_known() {
+                Some(w::AvatarInteractionKind::DoubleClick) => "ダブルクリック",
+                Some(w::AvatarInteractionKind::Drag) => "ドラッグ",
+                _ => "クリック",
+            };
+            session.pending = Some(Reaction {
+                summary: format!("ユーザーがアバターを{kind_label}しました"),
+                kind: ReportKind::Automatic,
+                at: now,
+            });
+            Some((
+                "avatar_interaction",
+                json!({"kind": kind_label, "region": interaction.region}),
+            ))
+        }
         Event::Enabled(_) => unreachable!(),
     };
     session.dirty = true;

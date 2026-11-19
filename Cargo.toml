@@ -13,6 +13,7 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.dependencies]
 ene-rpc = { path = "crates/ene-rpc" }
+ene-avatar-ipc = { path = "crates/ene-avatar-ipc" }
 ene-plugin = { path = "crates/ene-plugin" }
 ene-plugin-runtime = { path = "crates/ene-plugin-runtime" }
 # A Wasm guest cannot depend on the full ACP SDK, because the SDK pulls `uuid`

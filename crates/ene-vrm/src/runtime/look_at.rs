@@ -14,8 +14,18 @@ pub(crate) struct Gaze {
     pub(crate) input: Entity,
 }
 
+/// Direct gaze angles in degrees (`yaw_deg`: +left/-right, `pitch_deg`: +up/-down).
+/// When present on a VRM root entity, overrides [`GazeInput`] from animation clips.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Reflect)]
+#[reflect(Component, Clone)]
+pub struct GazeOverride {
+    pub yaw_deg: f32,
+    pub pitch_deg: f32,
+}
+
 pub(crate) fn setup(app: &mut App) {
     app.register_type::<Gaze>()
+        .register_type::<GazeOverride>()
         .add_systems(PostUpdate, look_at.in_set(VrmSystems::LookAt));
 }
 
@@ -41,18 +51,33 @@ pub(crate) fn remap(
 
 #[allow(clippy::type_complexity)]
 fn look_at(
-    roots: Query<(&super::Vrm, &Gaze, Option<&expressions::Binds>)>,
+    roots: Query<(
+        &super::Vrm,
+        &Gaze,
+        Option<&GazeOverride>,
+        Option<&expressions::Binds>,
+    )>,
     rests: Query<&RestPose>,
     gazes: Query<&GazeInput>,
     mut inputs: Query<&mut ExpressionInput>,
     mut transforms: Query<&mut Transform>,
 ) {
-    for (vrm, gaze, binds) in &roots {
-        let Some(rotation) = gazes.get(gaze.input).ok().and_then(|input| input.rotation) else {
-            continue;
+    for (vrm, gaze, gaze_override, binds) in &roots {
+        let angles = if let Some(over) = gaze_override
+            && over.yaw_deg.is_finite()
+            && over.pitch_deg.is_finite()
+        {
+            Vec2::new(
+                over.yaw_deg.clamp(-90., 90.),
+                over.pitch_deg.clamp(-60., 60.),
+            )
+        } else {
+            let Some(rotation) = gazes.get(gaze.input).ok().and_then(|input| input.rotation) else {
+                continue;
+            };
+            let (yaw, pitch, _) = rotation.to_euler(EulerRot::YXZ);
+            Vec2::new(yaw.to_degrees(), -pitch.to_degrees())
         };
-        let (yaw, pitch, _) = rotation.to_euler(EulerRot::YXZ);
-        let angles = Vec2::new(yaw.to_degrees(), -pitch.to_degrees());
         let kind = gaze
             .definition
             .look_at_type
@@ -208,6 +233,79 @@ mod tests {
                 .unwrap()
                 .rotation
                 .abs_diff_eq(Quat::from_rotation_x(0.5), 1e-6)
+        );
+    }
+
+    #[test]
+    fn f14_gaze_override_rotates_eye_bones_within_range_map() {
+        let mut app = App::new();
+        animation::setup(&mut app);
+        setup(&mut app);
+        app.configure_sets(PostUpdate, VrmSystems::Pose.before(VrmSystems::LookAt));
+        let eye = app
+            .world_mut()
+            .spawn((
+                Transform::default(),
+                Pose::default(),
+                RestPose {
+                    local: Transform::default(),
+                    frame: RestFrame {
+                        local: Quat::IDENTITY,
+                        global: Quat::IDENTITY,
+                    },
+                    translation_from_normalized: bevy::math::Mat3A::IDENTITY,
+                },
+            ))
+            .id();
+        let input = app.world_mut().spawn(GazeInput::default()).id();
+        let root = app
+            .world_mut()
+            .spawn((
+                super::super::Vrm {
+                    bones: HashMap::from([(schema::HumanBoneName::LeftEye, eye)]),
+                    meta: serde_json::from_value(serde_json::json!({
+                        "name": "test",
+                        "authors": ["test"],
+                        "licenseUrl": "https://vrm.dev/licenses/1.0/"
+                    }))
+                    .unwrap(),
+                },
+                Gaze {
+                    definition: serde_json::from_value(serde_json::json!({"type": "bone"}))
+                        .unwrap(),
+                    input,
+                },
+                GazeOverride {
+                    yaw_deg: 45.,
+                    pitch_deg: 30.,
+                },
+            ))
+            .id();
+        app.update();
+        let rotated = app.world().get::<Transform>(eye).unwrap().rotation;
+        let (yaw, pitch, _) = rotated.to_euler(EulerRot::YXZ);
+        // Default VRM bone range map scales 90 deg -> 10 deg: 45 deg -> 5 deg yaw, 30 deg -> ~3.33 deg pitch.
+        assert!(
+            (yaw.to_degrees() - 5.0).abs() < 0.05,
+            "yaw={}",
+            yaw.to_degrees()
+        );
+        assert!(
+            ((-pitch).to_degrees() - (30.0 / 9.0)).abs() < 0.05,
+            "pitch={}",
+            (-pitch).to_degrees()
+        );
+
+        // Removing GazeOverride lets the eye rest at neutral when no clip gaze is present.
+        app.world_mut().entity_mut(root).remove::<GazeOverride>();
+        app.world_mut().get_mut::<Transform>(eye).unwrap().rotation = Quat::IDENTITY;
+        app.update();
+        assert!(
+            app.world()
+                .get::<Transform>(eye)
+                .unwrap()
+                .rotation
+                .abs_diff_eq(Quat::IDENTITY, 1e-6)
         );
     }
 }

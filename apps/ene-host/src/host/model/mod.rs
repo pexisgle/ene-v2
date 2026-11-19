@@ -356,6 +356,18 @@ pub(crate) fn connect(
     let assignment = companion
         .model(role)
         .ok_or_else(|| HostError::Unavailable(("no model is assigned to this role").into()))?;
+    connect_assignment(store, credentials, catalog, assignment, role, providers)
+}
+
+/// Builds a rig completion model directly from one `Assignment`.
+pub(crate) fn connect_assignment(
+    store: &Store,
+    credentials: &Credentials,
+    catalog: &Catalog,
+    assignment: &super::mind::Assignment,
+    role: Role,
+    providers: &super::providers::Providers,
+) -> Result<DynModel<Completion>> {
     let connection = store
         .connection(&assignment.connection_id)?
         .ok_or_else(|| HostError::Unavailable(("the assigned connection does not exist").into()))?;
@@ -373,23 +385,17 @@ pub(crate) fn connect(
     // A plugin that serves this connection's adapter answers instead of the
     // catalog, so a provider rig does not ship needs no host change.
     if let Some(running) = providers.running(&endpoint.adapter, ene_plugin::Extension::Llm) {
-        let grant = super::providers::Grant::new(
-            running.provider(),
+        let context = super::providers::ProviderInvocationContext::from_connection(
+            &running,
             &connection,
             Some(credentials),
             providers,
+            Some(super::net::MODEL_TIMEOUT),
         )?;
-        // A streamed generation may outlast the short transport budget; the
-        // model call gets the same end-to-end deadline as a built-in one.
-        let broker =
-            super::providers::http_broker_with_deadline(Arc::new(grant), super::net::MODEL_TIMEOUT)
-                .map_err(|error| {
-                    HostError::Unavailable(format!("plugin HTTP transport: {error}"))
-                })?;
         return Ok(plugin_completion(
             running,
+            context,
             assignment.model_id.clone(),
-            broker,
             catalog
                 .resolve(&assignment.model_id)
                 .is_ok_and(|entry| entry.spec.input.image),
@@ -454,6 +460,62 @@ pub(crate) fn connect(
         .connect_with(spec.as_ref(), options)
         .map_err(|error| HostError::Unavailable(format!("model connection: {error}")))?;
     Ok(model)
+}
+
+/// Picks either the requested `Assignment` or the first enabled LLM connection + model
+/// for ephemeral preview without mutating companion/session state.
+pub(crate) fn preview_assignment(
+    store: &Store,
+    catalog: &Catalog,
+    requested: &super::mind::Assignment,
+) -> Result<super::mind::Assignment> {
+    if requested.is_set() {
+        return Ok(requested.clone());
+    }
+    let settings = store.settings()?;
+    let connection = settings
+        .connections
+        .into_iter()
+        .find(|conn| conn.enabled && conn.kind == ConnectionKind::Llm)
+        .ok_or_else(|| {
+            HostError::FailedPrecondition(
+                ("an enabled LLM connection is required for preview").into(),
+            )
+        })?;
+    let model_id = models(&connection, catalog)
+        .into_iter()
+        .map(|(id, _)| id)
+        .next()
+        .ok_or_else(|| {
+            HostError::FailedPrecondition(("no model is available on the LLM connection").into())
+        })?;
+    Ok(super::mind::Assignment {
+        connection_id: connection.id,
+        model_id,
+    })
+}
+
+/// Runs a single stateless, tool-less completion call for companion preview.
+pub(crate) async fn preview_reply(
+    model: DynModel<Completion>,
+    system_prompt: String,
+    user_message: String,
+) -> Result<String> {
+    use rig_core::completion::CompletionRequest;
+
+    let prompt = if user_message.trim().is_empty() {
+        "はじめまして！自己紹介と最初の挨拶を1〜2文でお願いします。".to_owned()
+    } else {
+        user_message
+    };
+    let request = CompletionRequest::new(prompt)
+        .preamble(system_prompt)
+        .max_tokens(512);
+    let response = tokio::time::timeout(Duration::from_secs(20), model.call(request))
+        .await
+        .map_err(|_| HostError::Unavailable(("the preview model request timed out").into()))?
+        .map_err(|error| HostError::Unavailable(format!("preview completion failed: {error}")))?;
+    Ok(response.text().trim().to_owned())
 }
 
 /// Adapter-default model candidates when neither `model_ids` nor `last_check`
@@ -676,19 +738,15 @@ async fn list_models(
                 .start(adapter, ene_plugin::Extension::Llm)
                 .await
                 .map_err(|error| error.to_string())?;
-            let grant = super::providers::Grant::new(
-                running.provider(),
+            let context = super::providers::ProviderInvocationContext::from_connection(
+                &running,
                 connection,
                 Some(credentials),
                 providers,
+                Some(super::net::MODEL_TIMEOUT),
             )
             .map_err(|error| error.to_string())?;
-            let broker = super::providers::http_broker_with_deadline(
-                Arc::new(grant),
-                super::net::MODEL_TIMEOUT,
-            )
-            .map_err(|error| format!("plugin HTTP transport: {error}"))?;
-            plugin_models(running, base, broker).await
+            plugin_models(running, context).await
         })
         .await
         .map_err(|_| format!("the plugin did not answer in {}s", PROBE_TIMEOUT.as_secs()))?;
@@ -739,17 +797,16 @@ async fn list_models(
 /// the call produced.
 async fn plugin_models(
     running: Arc<super::providers::Running>,
-    base: &str,
-    broker: Arc<ene_plugin_runtime::service::HttpBroker>,
+    context: super::providers::ProviderInvocationContext,
 ) -> std::result::Result<Vec<String>, String> {
     let (sender, mut events) = tokio::sync::mpsc::channel(16);
-    let provider = running.provider().id.clone();
-    let endpoint = base.to_owned();
-    let options = running.provider().options.clone();
-    let services = super::providers::BrokerServices::new(broker, provider);
+    let services = context.services();
     let (result, models) = tokio::join!(
         running.invoke_streaming(
-            ene_plugin::Operation::ListModels { endpoint, options },
+            ene_plugin::Operation::ListModels {
+                endpoint: context.endpoint,
+                options: context.options,
+            },
             services,
             sender,
         ),

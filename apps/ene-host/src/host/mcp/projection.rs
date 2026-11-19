@@ -1,0 +1,197 @@
+//! ECS tool projection for connected MCP servers.
+use super::supervisor::{Desired, Launch, McpServers, Server};
+use crate::host::resources::HostRuntime;
+use bevy_ecs::prelude::*;
+use rig_agent::tool::{ToolCatalog, server::ToolServerHandle};
+use rig_core::{
+    effect::{Key, family},
+    message::ToolName,
+};
+use rig_ecs::prelude::*;
+use rig_rmcp::McpConnection;
+use std::collections::{HashMap, HashSet};
+
+/// The registration an MCP tool entity came from: the library generation that
+/// keeps a stale refresh from replacing a newer handler, and the server that
+/// owns it. The entity carries this, so no side map has to stay in step.
+#[derive(Component)]
+pub(super) struct McpTool {
+    pub(super) server: String,
+    pub(super) key: Key<family::Tool>,
+}
+
+/// The managed registry owns generations and liveness. ECS owns exposed names.
+pub(super) fn attach(
+    world: &mut World,
+    id: &str,
+    launch: Launch,
+    connection: McpConnection,
+    registry: ToolServerHandle,
+    want: &Desired,
+) {
+    retire_one(world, id);
+    world.resource_mut::<McpServers>().0.insert(
+        id.to_owned(),
+        Server {
+            connection,
+            launch,
+            registry,
+            label: want.name.clone(),
+            allowed: want.allowed.clone(),
+        },
+    );
+}
+
+pub(super) fn project_servers(world: &mut World) {
+    let ids: Vec<String> = world.resource::<McpServers>().0.keys().cloned().collect();
+    let mut changed = false;
+    for id in ids {
+        let Some(server) = world.resource_mut::<McpServers>().0.remove(&id) else {
+            continue;
+        };
+        let catalog = server.registry.snapshot();
+        changed |= project(world, &id, &server, Some(&catalog));
+        world.resource_mut::<McpServers>().0.insert(id, server);
+    }
+    if changed {
+        refresh_access(world);
+    }
+}
+
+pub(super) fn project(
+    world: &mut World,
+    id: &str,
+    server: &Server,
+    catalog: Option<&ToolCatalog>,
+) -> bool {
+    let mut desired = HashMap::new();
+    for definition in catalog.into_iter().flat_map(ToolCatalog::definitions) {
+        let raw = definition.name.as_str();
+        if !server.allowed.is_empty() && !server.allowed.iter().any(|name| name == raw) {
+            continue;
+        }
+        let Some(exposed) = exposed_name(&server.label, id, raw) else {
+            continue;
+        };
+        let Ok(name) = ToolName::new(exposed.clone()) else {
+            continue;
+        };
+        let registration = catalog.unwrap().get(raw).unwrap();
+        let mut definition = (**definition).clone();
+        definition.name = name;
+        desired.insert(exposed, (definition, registration));
+    }
+    let mut current: HashMap<String, (Entity, Key<family::Tool>)> = {
+        let mut query = world.query::<(Entity, &ToolDef, &McpTool)>();
+        query
+            .iter(world)
+            .filter(|(_, _, tool)| tool.server == id)
+            .map(|(entity, definition, tool)| {
+                (
+                    definition.0.name.as_str().to_owned(),
+                    (entity, tool.key.clone()),
+                )
+            })
+            .collect()
+    };
+    let mut changed = false;
+    for (name, (definition, tool)) in desired {
+        let existing = current.remove(&name);
+        if existing.as_ref().is_some_and(|(_, key)| key == tool.key()) {
+            continue;
+        }
+        if let Some((entity, _)) = existing {
+            if let Ok(entity) = world.get_entity_mut(entity) {
+                entity.despawn();
+            }
+            changed = true;
+        }
+        if let Some(entity) =
+            world.spawn_tool(definition, tool.handler().clone(), ToolOptions::default())
+        {
+            world.entity_mut(entity).insert(McpTool {
+                server: id.to_owned(),
+                key: tool.key().clone(),
+            });
+            changed = true;
+        }
+    }
+    for (_, (entity, _)) in current {
+        if let Ok(entity) = world.get_entity_mut(entity) {
+            entity.despawn();
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// The model-facing names MCP servers contribute right now. The tool entities
+/// are the only owner: the gate and the per-agent access read this set instead
+/// of a second table kept in step with them.
+pub(crate) fn tool_names(world: &mut World) -> HashSet<String> {
+    let mut query = world.query::<(&ToolDef, &McpTool)>();
+    query
+        .iter(world)
+        .map(|(definition, _)| definition.0.name.as_str().to_owned())
+        .collect()
+}
+
+pub(crate) fn tool_servers(world: &mut World) -> HashMap<String, String> {
+    let mut query = world.query::<(&ToolDef, &McpTool)>();
+    query
+        .iter(world)
+        .map(|(definition, tool)| (definition.0.name.as_str().to_owned(), tool.server.clone()))
+        .collect()
+}
+
+fn refresh_access(world: &mut World) {
+    if let Err(error) = crate::host::client::dynamic::sync_tools(world) {
+        tracing::warn!(%error, "the MCP tools are not offered");
+    }
+}
+
+/// Closes one server and removes the tools it contributed.
+pub(super) fn retire_one(world: &mut World, id: &str) {
+    let Some(server) = world.resource_mut::<McpServers>().0.remove(id) else {
+        return;
+    };
+    if project(world, id, &server, None) {
+        refresh_access(world);
+    }
+    // Closing waits for the transport, so it runs off the host thread.
+    if let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) {
+        let connection = server.connection;
+        runtime.spawn(async move { connection.close().await });
+    }
+}
+
+/// The model-facing name for one server's tool: `mcp_<server>_<tool>`. The
+/// server part keeps two servers that offer the same tool name apart. A part
+/// the provider grammar cannot carry is refused rather than rewritten onto
+/// another tool.
+fn exposed_name(label: &str, id: &str, tool: &str) -> Option<String> {
+    let mut name = String::from("mcp_");
+    if !push_allowed(&mut name, label) {
+        let short: String = id.chars().take(8).collect();
+        if !push_allowed(&mut name, &short) {
+            return None;
+        }
+    }
+    name.push('_');
+    if !push_allowed(&mut name, tool) || name.len() > 64 {
+        return None;
+    }
+    Some(name)
+}
+
+fn push_allowed(out: &mut String, text: &str) -> bool {
+    if text.is_empty()
+        || !text.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '-'
+        })
+    {
+        return false;
+    }
+    out.push_str(text);
+    true
+}

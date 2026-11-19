@@ -15,6 +15,7 @@ mod computer;
 mod host;
 mod input;
 mod perception;
+mod plugins;
 mod session;
 mod state;
 mod tray;
@@ -23,8 +24,9 @@ mod update;
 mod work_tools;
 
 pub use avatar::{bundled_ene_model, default_model, default_renderer};
+pub use capabilities::default_allowed_capabilities;
 pub use host::{Connect, Discovery, Host};
-pub use session::{Connection, Options, Session};
+pub use session::{Connection, Options, Session, persistent_client_id};
 pub use state::{Link, Model};
 pub use tray::{Tray, TrayAction, TrayHandle, TrayState};
 pub use ui::{

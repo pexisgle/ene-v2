@@ -53,54 +53,159 @@ impl Declaration {
     pub fn specs(&self) -> Vec<w::ClientCapabilitySpec> {
         let mut specs = Vec::new();
         if !self.motions.is_empty() {
-            let allowed = self
-                .motions
-                .iter()
-                .map(|motion| format!("\"{motion}\""))
-                .collect::<Vec<_>>()
-                .join(",");
-            let expression = if self.expressions.is_empty() {
-                String::new()
-            } else {
-                let names = self
+            let mut properties = serde_json::Map::new();
+            properties.insert(
+                "motion".into(),
+                serde_json::json!({
+                    "type": "string",
+                    "enum": self.motions,
+                }),
+            );
+            if !self.expressions.is_empty() {
+                let mut expr_enum: Vec<serde_json::Value> = self
                     .expressions
                     .iter()
-                    .map(|expression| format!("\"{expression}\""))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!(
-                    r#","expression":{{"type":["string","null"],"enum":[{names},null],"description":"A face to hold, or null to keep the current one. Use neutral to clear."}}"#
-                )
-            };
+                    .map(|name| serde_json::Value::String((*name).to_owned()))
+                    .collect();
+                expr_enum.push(serde_json::Value::Null);
+                properties.insert(
+                    "expression".into(),
+                    serde_json::json!({
+                        "type": ["string", "null"],
+                        "enum": expr_enum,
+                        "description": "A face to hold, or null to keep the current one. Use neutral to clear.",
+                    }),
+                );
+            }
+            let schema = serde_json::json!({
+                "type": "object",
+                "required": ["motion"],
+                "properties": properties,
+            });
             specs.push(w::ClientCapabilitySpec {
                 name: "body.motion".into(),
                 tool_name: "body_motion".into(),
-                description: "Play a gesture once and return to idle, or choose idle to resume \
-                              resting now. For quiet waiting, vary between look_around, \
-                              adjust_posture, stretch, and sleepy_nod after a long absence, \
-                              choosing only motions listed in the schema. \
-                              Use nod to acknowledge, tilt_head while thinking, \
-                              stretch for a break, wave to greet, ask_question when asking back, \
-                              task_complete to celebrate a result, or apologize for a correction. \
-                              An optional expression sets the face separately."
+                description: "Control the avatar's body motion, choosing only motions listed in the \
+                              schema. Looping postures stay active until changed: idle, idle_sway, \
+                              idle_hands_behind (standing rest), sit_idle and sit_swing_legs \
+                              (perched/seated rest), music_groove (rhythmic sway), and drag_held \
+                              (suspended). One-shot gestures play once and return to the active \
+                              resting posture: ambient (look_around, adjust_posture, sleepy_nod, \
+                              yawn, deep_breath, stretch), greetings/presence (wave, bow, goodbye, \
+                              peek, beckon, sit_wave while seated), reactions (head_pat, surprised, \
+                              shy, happy_bounce, clap, cheer), and conversation/work (nod, \
+                              shake_head, listen, explain, tilt_head, ask_question, aha, shrug, \
+                              task_complete, apologize). An optional expression sets the face \
+                              separately."
                     .into(),
-                input_schema: format!(
-                    r#"{{"type":"object","required":["motion"],"properties":{{"motion":{{"type":"string","enum":[{allowed}]}}{expression}}}}}"#
-                ),
-                presets: self.motions.iter().map(|motion| (*motion).to_owned()).collect(),
+                input_schema: schema.to_string(),
+                presets: self
+                    .motions
+                    .iter()
+                    .map(|motion| (*motion).to_owned())
+                    .collect(),
                 // A motion is reversible and cosmetic, so it runs without a card.
+                approval: w::CapabilityApproval::Auto.into(),
+                ..Default::default()
+            });
+
+            let look_at_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "yaw_deg": {
+                        "type": "number",
+                        "minimum": -90.0,
+                        "maximum": 90.0,
+                        "description": "Horizontal gaze angle in degrees (+left, -right)."
+                    },
+                    "pitch_deg": {
+                        "type": "number",
+                        "minimum": -60.0,
+                        "maximum": 60.0,
+                        "description": "Vertical gaze angle in degrees (+up, -down)."
+                    },
+                    "reset": {
+                        "type": "boolean",
+                        "description": "When true, clears any gaze override back to animation/neutral."
+                    }
+                }
+            });
+            specs.push(w::ClientCapabilitySpec {
+                name: "body.look_at".into(),
+                tool_name: "body_look_at".into(),
+                description:
+                    "Direct the avatar's eye gaze using yaw/pitch degrees, or reset to neutral."
+                        .into(),
+                input_schema: look_at_schema.to_string(),
+                presets: Vec::new(),
+                approval: w::CapabilityApproval::Auto.into(),
+                ..Default::default()
+            });
+
+            let perch_schema = serde_json::json!({
+                "type": "object",
+                "required": ["x", "y"],
+                "properties": {
+                    "x": {
+                        "type": "number",
+                        "description": "Logical X coordinate on the monitor."
+                    },
+                    "y": {
+                        "type": "number",
+                        "description": "Logical Y coordinate on the monitor."
+                    },
+                    "monitor": {
+                        "type": ["string", "null"],
+                        "description": "Optional target monitor name."
+                    },
+                    "posture": {
+                        "type": ["string", "null"],
+                        "enum": ["sit_idle", "sit_swing_legs", "idle", null],
+                        "description": "Optional resting posture to pair with the perch position."
+                    }
+                }
+            });
+            specs.push(w::ClientCapabilitySpec {
+                name: "body.perch".into(),
+                tool_name: "body_perch".into(),
+                description: "Move the avatar to logical screen coordinates (e.g. a window edge) and optionally sit."
+                    .into(),
+                input_schema: perch_schema.to_string(),
+                presets: Vec::new(),
                 approval: w::CapabilityApproval::Auto.into(),
                 ..Default::default()
             });
         }
         if self.eyes {
+            let schema = serde_json::json!({
+                "type": "object",
+                "required": ["target_pattern", "match_kind", "notify_on", "enabled"],
+                "properties": {
+                    "target_pattern": {
+                        "type": "string",
+                        "description": "A substring or regular expression matched against the window title or app id.",
+                    },
+                    "match_kind": {
+                        "type": "string",
+                        "enum": ["title", "app_id"],
+                    },
+                    "notify_on": {
+                        "type": "string",
+                        "enum": ["focus", "blur", "title_change"],
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                    },
+                },
+            });
             specs.push(w::ClientCapabilitySpec {
                 name: "eye.watch".into(),
                 tool_name: "set_eye_watch".into(),
-                description: "Watch for a window becoming active, losing focus, or changing title, \
+                description:
+                    "Watch for a window becoming active, losing focus, or changing title, \
                               and report it as soon as it matches."
-                    .into(),
-                input_schema: r#"{"type":"object","required":["target_pattern","match_kind","notify_on","enabled"],"properties":{"target_pattern":{"type":"string","description":"A substring or regular expression matched against the window title or app id."},"match_kind":{"type":"string","enum":["title","app_id"]},"notify_on":{"type":"string","enum":["focus","blur","title_change"]},"enabled":{"type":"boolean"}}}"#.into(),
+                        .into(),
+                input_schema: schema.to_string(),
                 presets: Vec::new(),
                 // Watching is read-only perception, never an action on the machine.
                 approval: w::CapabilityApproval::Auto.into(),
@@ -114,6 +219,16 @@ impl Declaration {
 /// The capability names of one declaration.
 pub fn names(specs: &[w::ClientCapabilitySpec]) -> Vec<String> {
     specs.iter().map(|spec| spec.name.clone()).collect()
+}
+
+/// Capabilities a bundled desktop-launched `ene-host` accepts by default.
+pub fn default_allowed_capabilities() -> String {
+    let files = crate::WORKSPACE_FILE_CAPABILITIES.join(",");
+    let shell = crate::work_tools::WORKSPACE_SHELL_CAPABILITY;
+    format!(
+        "body.motion,body.look_at,body.perch,eye.watch,{files},{shell},{}",
+        ene_rpc::COMPUTER_USE
+    )
 }
 
 #[cfg(test)]
@@ -150,24 +265,9 @@ mod tests {
     /// (`host/client/mod.rs` `BUILTIN_TOOLS`).
     #[test]
     fn no_tool_name_shadows_a_host_tool() {
-        const HOST_TOOLS: &[&str] = &[
-            "mind_recall",
-            "mind_read",
-            "mind_update",
-            "start_work",
-            "send_work",
-            "list_works",
-            "stop_work",
-            "device_request",
-            "noop",
-            "schedule_create",
-            "schedule_list",
-            "schedule_cancel",
-            "report",
-        ];
         for spec in declaration(&["idle", "nod"]).specs() {
             assert!(
-                !HOST_TOOLS.contains(&spec.tool_name.as_str()),
+                !ene_rpc::BUILTIN_TOOLS.contains(&spec.tool_name.as_str()),
                 "{} shadows a host tool",
                 spec.tool_name
             );

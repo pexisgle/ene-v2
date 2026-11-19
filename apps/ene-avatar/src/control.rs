@@ -1,11 +1,13 @@
-use crate::character::{AvatarState, Character, Config, Notification, queue_motion, reload};
+use crate::character::{
+    AvatarState, Character, Config, Notification, queue_motion, reload, validate_config,
+};
 use crate::desktop::Output;
 use bevy::{
     app::{AppExit, MainScheduleOrder},
     ecs::schedule::ScheduleLabel,
     prelude::*,
 };
-use serde::Deserialize;
+use ene_avatar_ipc::{Command, MAX_LINE, Request};
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, Read, Write},
@@ -42,7 +44,10 @@ pub fn run(mut app: App) -> AppExit {
 /// Reads one bounded JSON line. The flag marks EOF, an overlong line, or an unreadable stream.
 fn read_request(input: &mut impl BufRead) -> (Result<Request, String>, bool) {
     let mut line = String::new();
-    match (&mut *input).take(65_537).read_line(&mut line) {
+    match (&mut *input)
+        .take((MAX_LINE + 1) as u64)
+        .read_line(&mut line)
+    {
         Ok(0) => (
             Ok(Request {
                 id: None,
@@ -50,7 +55,7 @@ fn read_request(input: &mut impl BufRead) -> (Result<Request, String>, bool) {
             }),
             true,
         ),
-        Ok(n) if n <= 65_536 => (
+        Ok(n) if n <= MAX_LINE => (
             serde_json::from_str(&line).map_err(|error| error.to_string()),
             false,
         ),
@@ -102,55 +107,6 @@ pub fn setup(app: &mut App) {
         .insert_after(Last, FrameEnd);
 }
 
-#[derive(Deserialize)]
-struct Request {
-    /// Absent on one-way notifications such as `lip_sync`.
-    #[serde(default)]
-    id: Option<u64>,
-    #[serde(flatten)]
-    command: Command,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-enum Command {
-    Add {
-        character: String,
-        config: Config,
-    },
-    Set {
-        character: String,
-        config: Config,
-    },
-    Motion {
-        character: String,
-        motion: Option<String>,
-        looping: bool,
-    },
-    Get {},
-    Remove {
-        character: String,
-    },
-    Center {
-        character: String,
-        monitor: Option<String>,
-    },
-    Fps {
-        value: u32,
-    },
-    Expression {
-        character: String,
-        /// `null` clears the face back to neutral.
-        name: Option<String>,
-    },
-    /// One-way: playback amplitude, sent without an id and never answered.
-    LipSync {
-        character: String,
-        rms: f32,
-    },
-    Quit {},
-}
-
 /// Exclusive on purpose: a batch that arrives in one frame is applied to the
 /// World immediately, so `add` followed by `get` in the same batch is coherent
 /// and no artificial one-request-per-frame throttle is needed.
@@ -180,14 +136,16 @@ fn requests(world: &mut World, avatars: &mut QueryState<(Entity, &mut Character)
                 | Command::Remove { character }
                 | Command::Center { character, .. }
                 | Command::Expression { character, .. }
-                | Command::LipSync { character, .. } => {
+                | Command::LipSync { character, .. }
+                | Command::LookAt { character, .. }
+                | Command::Place { character, .. } => {
                     avatars.iter_mut(world).find(|(_, c)| c.id == *character)
                 }
                 _ => None,
             };
             match request.command {
                 Command::Add { character, config } | Command::Set { character, config } => {
-                    config.validate()?;
+                    validate_config(&config)?;
                     let entity = match (add, target) {
                         (true, None) if !character.is_empty() && character.len() <= 128 => {
                             world.spawn(Character::new(character, config)).id()
@@ -221,7 +179,7 @@ fn requests(world: &mut World, avatars: &mut QueryState<(Entity, &mut Character)
                         looping,
                         ..old.config.clone()
                     };
-                    config.validate()?;
+                    validate_config(&config)?;
                     old.config = config;
                     if matches!(old.state, AvatarState::Error(_)) {
                         reload(world, entity);
@@ -263,6 +221,43 @@ fn requests(world: &mut World, avatars: &mut QueryState<(Entity, &mut Character)
                     }
                     let (_, mut character) = target.ok_or("unknown character")?;
                     character.lip = rms.clamp(0., 1.);
+                }
+                Command::LookAt {
+                    yaw_deg, pitch_deg, ..
+                } => {
+                    let (_, mut character) = target.ok_or("unknown character")?;
+                    match (yaw_deg, pitch_deg) {
+                        (None, None) => {
+                            character.gaze = None;
+                        }
+                        (yaw, pitch) => {
+                            let yaw = yaw.unwrap_or(0.);
+                            let pitch = pitch.unwrap_or(0.);
+                            if !yaw.is_finite()
+                                || !pitch.is_finite()
+                                || yaw.abs() > 90.
+                                || pitch.abs() > 60.
+                            {
+                                return Err(
+                                    "look_at requires finite angles within yaw [-90, 90] and pitch [-60, 60]"
+                                        .into(),
+                                );
+                            }
+                            character.gaze = Some((yaw, pitch));
+                        }
+                    }
+                }
+                Command::Place {
+                    monitor, position, ..
+                } => {
+                    if position.iter().any(|v| !v.is_finite() || v.abs() > 1_000_000.) {
+                        return Err("place requires finite logical coordinates".into());
+                    }
+                    let (_, mut character) = target.ok_or("unknown character")?;
+                    if monitor.is_some() {
+                        character.config.monitor = monitor;
+                    }
+                    character.config.position = Some(position);
                 }
                 Command::Quit {} => {
                     world.write_message(AppExit::Success);

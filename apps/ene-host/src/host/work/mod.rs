@@ -5,9 +5,11 @@
 //! assignment picks. A `Run` is one instruction turn that rebinds the rig
 //! agent to its run id. Only a closed session, a failed start, or a restart
 //! retires the agent, never an ordinary run end.
+pub(crate) mod acp;
 mod hand;
 #[cfg(test)]
 mod hand_tests;
+mod skills;
 mod tools;
 
 use super::{
@@ -252,16 +254,26 @@ fn restore(world: &mut World) {
     };
     let mut kept: HashMap<String, Entity> = HashMap::new();
     for (entity, work_id, run_id) in &agents {
-        let active = store
-            .active_run(work_id)
-            .ok()
-            .flatten()
-            .map(|run| run.run_id);
-        let open = store
-            .work_session(work_id)
-            .ok()
-            .flatten()
-            .is_some_and(|session| session.status != WorkStatus::Closed);
+        let active = match store.active_run(work_id) {
+            Ok(active) => active.map(|run| run.run_id),
+            Err(error) => {
+                if error.is_storage() {
+                    super::fail(world, error.to_string());
+                    return;
+                }
+                None
+            }
+        };
+        let open = match store.work_session(work_id) {
+            Ok(session) => session.is_some_and(|session| session.status != WorkStatus::Closed),
+            Err(error) => {
+                if error.is_storage() {
+                    super::fail(world, error.to_string());
+                    return;
+                }
+                false
+            }
+        };
         if open && (active.as_deref() == Some(run_id.as_str()) || !kept.contains_key(work_id)) {
             kept.insert(work_id.clone(), *entity);
         }
@@ -271,17 +283,45 @@ fn restore(world: &mut World) {
             retire_entity(world, entity);
         }
     }
-    for companion in store.companions().unwrap_or_default() {
+    let companions = match store.companions() {
+        Ok(companions) => companions,
+        Err(error) => {
+            if error.is_storage() {
+                super::fail(world, error.to_string());
+            }
+            return;
+        }
+    };
+    for companion in companions {
         let plugin = hand::selected(world, &companion).is_some();
-        for session in store.work_sessions(&companion.id).unwrap_or_default() {
-            if let Ok(Some(run)) = store.active_run(&session.id) {
-                if plugin {
-                    // A restart lost the harness guest's session state, so an
-                    // open plugin-hand run settles failed instead of keeping
-                    // a stall clock that can never tick again.
-                    hand::settle_restarts(world, run);
-                } else {
-                    world.resource_mut::<Runs>().begin(&run.run_id);
+        let sessions = match store.work_sessions(&companion.id) {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                if error.is_storage() {
+                    super::fail(world, error.to_string());
+                    return;
+                }
+                continue;
+            }
+        };
+        for session in sessions {
+            match store.active_run(&session.id) {
+                Ok(Some(run)) => {
+                    if plugin {
+                        // A restart lost the harness guest's session state, so an
+                        // open plugin-hand run settles failed instead of keeping
+                        // a stall clock that can never tick again.
+                        hand::settle_restarts(world, run);
+                    } else {
+                        world.resource_mut::<Runs>().begin(&run.run_id);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    if error.is_storage() {
+                        super::fail(world, error.to_string());
+                        return;
+                    }
                 }
             }
         }
@@ -293,6 +333,7 @@ pub(crate) struct WorkPlugin;
 impl Plugin for WorkPlugin {
     fn build(&self, app: &mut App) {
         tools::register(app);
+        skills::register(app);
         super::web_search::register(app);
         app.init_resource::<Runs>()
             .init_resource::<Receipts>()
@@ -684,7 +725,15 @@ pub(crate) fn settle_run(world: &mut World, run_id: String, outcome: TurnOutcome
 
 fn finish_run(world: &mut World, mut run: Run, state: RunState, text: Option<String>) {
     let store = world.resource::<Store>().clone();
-    let active = store.active_run(&run.work_id).ok().flatten();
+    let active = match store.active_run(&run.work_id) {
+        Ok(active) => active,
+        Err(error) => {
+            if error.is_storage() {
+                super::fail(world, error.to_string());
+            }
+            return;
+        }
+    };
     let was_active = active.is_some_and(|active| active.run_id == run.run_id);
     let run_id = run.run_id.clone();
     run.state = state;
@@ -700,7 +749,15 @@ fn finish_run(world: &mut World, mut run: Run, state: RunState, text: Option<Str
         return;
     }
     super::client::computer::invalidate_run(world, &run_id);
-    let session = store.work_session(&run.work_id).ok().flatten();
+    let session = match store.work_session(&run.work_id) {
+        Ok(session) => session,
+        Err(error) => {
+            if error.is_storage() {
+                super::fail(world, error.to_string());
+            }
+            return;
+        }
+    };
     if was_active && let Some(session) = &session {
         if session.status != WorkStatus::Closed {
             let _ = store.set_work_status(&session.id, WorkStatus::Idle);

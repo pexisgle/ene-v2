@@ -75,7 +75,28 @@ impl w::VoiceService for Services {
                             {
                                 continue;
                             }
-                            if chunk.is_companion_speaking {
+                            if chunk.barge_in {
+                                if let Some(binding) = recognition.binding.as_ref() {
+                                    let client_id = binding.client_id.clone();
+                                    let _ = runtime
+                                        .call(move |app| {
+                                            let companions = app
+                                                .world()
+                                                .resource::<Store>()
+                                                .active_companions_for_client(&client_id)
+                                                .unwrap_or_default();
+                                            for companion_id in companions {
+                                                let _ = voice::flush(
+                                                    app.world_mut(),
+                                                    &companion_id,
+                                                    w::FlushReason::BargeIn,
+                                                );
+                                            }
+                                            Ok(())
+                                        })
+                                        .await;
+                                }
+                            } else if chunk.is_companion_speaking {
                                 recognition.pending.clear();
                                 recognition.speaking = false;
                                 recognition.transcription_id.clear();
@@ -177,8 +198,9 @@ impl w::VoiceService for Services {
         let stream = async_stream::stream! {
             loop {
                 let event = tokio::select! {
-                    event = receiver.recv() => event,
+                    biased;
                     event = control.recv() => event,
+                    event = receiver.recv() => event,
                 };
                 let Some(event) = event else { break };
                 yield Ok(event);
@@ -195,6 +217,10 @@ impl w::VoiceService for Services {
         request: ServiceRequest<'_, w::SpeakRequest>,
     ) -> ServiceResult<w::Empty> {
         let client_id = request.client_id.to_owned();
+        let requested_companion = request
+            .companion_id
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
         let text = request.text.trim().to_owned();
         // Validation at the trust boundary, so a malformed probe never reaches
         // the network as a 503 from the engine.
@@ -209,36 +235,39 @@ impl w::VoiceService for Services {
         }
         // Synthesis is a network call, so it happens here rather than on the
         // ECS thread; only the store lookups and the dispatch run inside it.
-        let source = self
-            .runtime
-            .read(|app| {
-                voice::tts_source(app.world()).map_err(|error| match error {
-                    SetupError::Missing => {
-                        HostError::FailedPrecondition(voice::VOICE_UNAVAILABLE.into())
-                    }
-                    SetupError::Disabled(message)
-                    | SetupError::Broken(message)
-                    | SetupError::Unsupported(message) => HostError::FailedPrecondition(message),
-                })
-            })
-            .await
-            .map_err(ConnectError::from)?;
-        let (voice_name, companion) = self
+        let (source, voice_name, companion) = self
             .runtime
             .read({
                 let client_id = client_id.clone();
+                let requested_companion = requested_companion.clone();
                 move |app| {
                     let store = app.world().resource::<Store>();
-                    let companion = store.activation_for_client(&client_id)?.ok_or_else(|| {
-                        HostError::FailedPrecondition(
-                            "the client is not the active client of any companion".into(),
-                        )
-                    })?;
-                    let voice = store
-                        .companion(&companion)?
-                        .and_then(|companion| companion.voice_identifier)
+                    let companion = match requested_companion {
+                        Some(id) => id,
+                        None => store.activation_for_client(&client_id)?.ok_or_else(|| {
+                            HostError::FailedPrecondition(
+                                "the client is not the active client of any companion".into(),
+                            )
+                        })?,
+                    };
+                    let companion_record = store.companion(&companion)?;
+                    let source =
+                        voice::companion_tts_source(app.world(), companion_record.as_ref())
+                            .map_err(|error| match error {
+                                SetupError::Missing => {
+                                    HostError::FailedPrecondition(voice::VOICE_UNAVAILABLE.into())
+                                }
+                                SetupError::Disabled(message)
+                                | SetupError::Broken(message)
+                                | SetupError::Unsupported(message) => {
+                                    HostError::FailedPrecondition(message)
+                                }
+                            })?;
+                    let voice = companion_record
+                        .as_ref()
+                        .and_then(|record| voice::parse_binding(record).voice_id)
                         .unwrap_or_default();
-                    Ok((voice, companion))
+                    Ok((source, voice, companion))
                 }
             })
             .await

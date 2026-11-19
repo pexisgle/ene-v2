@@ -39,6 +39,10 @@ GUARDS = (
         r"if !our_subscription\.is_empty\(\)\s*&&\s*claim\.subscription_id != our_subscription",
     ),
     (
+        "work session",
+        r"if claim\.work_id\.is_some_and\(",
+    ),
+    (
         "active device",
         r"None => Err\(\"this client is not the active device for any companion\"\.into\(\)\)",
     ),

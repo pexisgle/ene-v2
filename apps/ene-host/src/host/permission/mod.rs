@@ -31,12 +31,12 @@ impl PolicyEffect {
     }
 }
 
-/// A saved rule ("always approve" is one-shot in the alpha and saves no rule).
+/// A saved rule (`AlwaysApprove` saves an exact-invocation allow rule).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PolicyRule {
     pub(crate) id: String,
     pub(crate) tool_name: String,
-    /// Exact normalised arguments text, or an exact string argument value.
+    /// `*`, an exact canonical JSON invocation, `exact_sha256:<hex>`, or a typed target pattern.
     pub(crate) pattern: String,
     pub(crate) effect: PolicyEffect,
     pub(crate) created_at: String,
@@ -101,25 +101,226 @@ pub(crate) struct Approval {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Verdict {
     Allow,
-    Confirm { target: String },
+    HumanRequired { target: String },
+    NeedsDecision { target: String },
     Deny { reason: String },
+}
+
+/// Canonical external action evaluated by `Stage::Gate`.
+#[derive(Clone, Debug)]
+pub(crate) enum CandidateAction {
+    DeviceCapability {
+        capability: String,
+        spec: Option<Box<CapabilitySpec>>,
+        tool_name: String,
+        input: Value,
+        raw_arguments: Value,
+    },
+    McpTool {
+        server_id: String,
+        tool_name: String,
+        input: Value,
+    },
+    PluginTool {
+        plugin_id: String,
+        tool_name: String,
+        input: Value,
+    },
+    WebSearch {
+        endpoint: String,
+        query: String,
+        input: Value,
+    },
+}
+
+/// Typed target extracted from a `CandidateAction` at the permission boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ActionTarget {
+    Path(String),
+    Command(String),
+    Url { url: String, host: Option<String> },
+    Pattern(String),
+    None,
+}
+
+impl ActionTarget {
+    fn from_path(raw: &str) -> Self {
+        let normalized = normalize_path_str(raw);
+        if normalized.is_empty() {
+            Self::None
+        } else {
+            Self::Path(normalized)
+        }
+    }
+
+    fn from_url(raw: &str) -> Self {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Self::None;
+        }
+        let host = url::Url::parse(trimmed)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase));
+        Self::Url {
+            url: trimmed.to_owned(),
+            host,
+        }
+    }
+
+    fn matches_pattern(&self, pattern: &str) -> bool {
+        match self {
+            Self::Path(path) => {
+                let pat = normalize_path_str(pattern);
+                !pat.is_empty() && wildcard_matches(&pat, path)
+            }
+            Self::Command(cmd) => {
+                let pat = pattern.trim();
+                !pat.is_empty() && wildcard_matches(pat, cmd.trim())
+            }
+            Self::Url { url, host } => {
+                let pat = pattern.trim();
+                !pat.is_empty()
+                    && (wildcard_matches(pat, url)
+                        || host
+                            .as_deref()
+                            .is_some_and(|h| wildcard_matches(&pat.to_ascii_lowercase(), h)))
+            }
+            Self::Pattern(value) => {
+                let pat = pattern.trim();
+                !pat.is_empty() && wildcard_matches(pat, value.trim())
+            }
+            Self::None => false,
+        }
+    }
+}
+
+fn normalize_path_str(raw: &str) -> String {
+    let replaced = raw.trim().replace('\\', "/");
+    replaced.strip_prefix("./").unwrap_or(&replaced).to_owned()
+}
+
+fn wildcard_matches(pattern: &str, value: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return !prefix.is_empty() && value.starts_with(prefix);
+    }
+    if let Some(suffix) = pattern.strip_prefix('*') {
+        return !suffix.is_empty() && value.ends_with(suffix);
+    }
+    pattern == value
+}
+
+fn first_string_field(object: &Value, keys: &[&str]) -> Option<String> {
+    let map = object.as_object()?;
+    keys.iter().find_map(|key| {
+        map.get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+pub(crate) fn extract_target(action: &CandidateAction) -> ActionTarget {
+    match action {
+        CandidateAction::DeviceCapability {
+            capability, input, ..
+        } => {
+            if capability == "device.files"
+                || matches!(
+                    capability.as_str(),
+                    "work.read" | "work.write" | "work.edit" | "work.delete" | "work.list"
+                )
+            {
+                return first_string_field(input, &["path", "file", "file_path"])
+                    .map_or(ActionTarget::None, |p| ActionTarget::from_path(&p));
+            }
+            if matches!(
+                capability.as_str(),
+                "work.powershell" | "work.shell" | "device.shell"
+            ) {
+                return first_string_field(input, &["command", "cmd"])
+                    .map_or(ActionTarget::None, ActionTarget::Command);
+            }
+            if capability == "body.motion" {
+                return first_string_field(input, &["motion"])
+                    .map_or(ActionTarget::None, ActionTarget::Pattern);
+            }
+            if capability == "eye.watch" {
+                return first_string_field(input, &["target_pattern"])
+                    .map_or(ActionTarget::None, ActionTarget::Pattern);
+            }
+            if capability == w::COMPUTER_USE {
+                return ActionTarget::None;
+            }
+            if let Some(url) = first_string_field(input, &["url", "uri", "endpoint"]) {
+                return ActionTarget::from_url(&url);
+            }
+            if let Some(path) = first_string_field(input, &["path", "file", "file_path"]) {
+                return ActionTarget::from_path(&path);
+            }
+            if let Some(cmd) = first_string_field(input, &["command", "cmd"]) {
+                return ActionTarget::Command(cmd);
+            }
+            ActionTarget::None
+        }
+        CandidateAction::McpTool { input, .. } | CandidateAction::PluginTool { input, .. } => {
+            if let Some(url) = first_string_field(input, &["url", "uri", "endpoint"]) {
+                return ActionTarget::from_url(&url);
+            }
+            if let Some(path) =
+                first_string_field(input, &["path", "file", "file_path", "directory", "dir"])
+            {
+                return ActionTarget::from_path(&path);
+            }
+            if let Some(cmd) = first_string_field(input, &["command", "cmd"]) {
+                return ActionTarget::Command(cmd);
+            }
+            ActionTarget::None
+        }
+        CandidateAction::WebSearch { endpoint, .. } => ActionTarget::from_url(endpoint),
+    }
 }
 
 /// Capability names the host never offers, whatever a client declares.
 const HARD_DENIED: &[&str] = &["payment.", "securities.", "banking.", "crypto.transfer."];
 
-/// Tools that belong to the host process itself. The permission docs never
-/// gate them: they are conversation, memory and work management. The generic
-/// device dispatcher is the one builtin that is gated.
-pub(crate) fn is_host_tool(tool_name: &str) -> bool {
-    tool_name != "device_request" && BUILTIN_TOOLS.contains(&tool_name)
-}
+const SYSTEM_MUTATION_PATHS: &[&str] = &[
+    "/etc/passwd",
+    "/etc/shadow",
+    "/etc/sudoers",
+    "/boot/",
+    "/dev/sd",
+    "/dev/nvme",
+    "/dev/hd",
+    "c:/windows/system32",
+    "c:/windows/syswow64",
+    "c:/windows/boot",
+    "/system/library/",
+];
 
-/// Whether a call skips the capability pipeline: a built-in host tool, or a
-/// tool the host serves itself, such as one an MCP server contributed (the
-/// operator configured it, so no client approval applies).
-fn host_owned(tool_name: &str, host_tools: &std::collections::HashSet<String>) -> bool {
-    is_host_tool(tool_name) || host_tools.contains(tool_name)
+const DESTRUCTIVE_COMMAND_TOKENS: &[&str] = &[
+    "rm -rf /",
+    "rm -fr /",
+    "mkfs.",
+    ":(){ :|:& };:",
+    "format c:",
+    "diskpart",
+    "bcdedit /delete",
+    "del /f /s /q c:\\windows",
+    "del /f /s /q c:/windows",
+    "remove-item -recurse -force c:\\windows",
+    "remove-item -recurse -force c:/windows",
+];
+
+/// Tools that belong to the host process itself (internal conversation,
+/// memory, and work management). External-effect built-ins (`device_request`,
+/// `web_search`) and MCP tools are NOT host-owned and always enter `Stage::Gate`.
+pub(crate) fn is_host_tool(tool_name: &str) -> bool {
+    !matches!(tool_name, "device_request" | super::web_search::NAME)
+        && BUILTIN_TOOLS.contains(&tool_name)
 }
 
 pub(crate) fn hard_denied(capability: &str) -> Option<&'static str> {
@@ -127,6 +328,82 @@ pub(crate) fn hard_denied(capability: &str) -> Option<&'static str> {
         .iter()
         .find(|prefix| capability.starts_with(**prefix))
         .copied()
+}
+
+pub(crate) fn hard_denied_action(
+    action: &CandidateAction,
+    target: &ActionTarget,
+) -> Option<String> {
+    if let CandidateAction::DeviceCapability { capability, .. } = action
+        && let Some(prefix) = hard_denied(capability)
+    {
+        return Some(format!(
+            "`{capability}` is hard-blocked by the host ({prefix}*)"
+        ));
+    }
+    let is_file_mutation = match action {
+        CandidateAction::DeviceCapability { capability, .. } => matches!(
+            capability.as_str(),
+            "work.write" | "work.edit" | "work.delete" | "device.files"
+        ),
+        CandidateAction::McpTool { tool_name, .. }
+        | CandidateAction::PluginTool { tool_name, .. } => {
+            let lower = tool_name.to_ascii_lowercase();
+            lower.contains("write")
+                || lower.contains("edit")
+                || lower.contains("delete")
+                || lower.contains("remove")
+        }
+        CandidateAction::WebSearch { .. } => false,
+    };
+    if is_file_mutation && let ActionTarget::Path(path) = target {
+        let lower = path.to_ascii_lowercase();
+        for forbidden in SYSTEM_MUTATION_PATHS {
+            if lower == *forbidden
+                || lower.starts_with(forbidden)
+                || (forbidden.ends_with('/') && lower.starts_with(forbidden))
+            {
+                return Some(format!(
+                    "system path `{path}` is hard-blocked from modification"
+                ));
+            }
+        }
+    }
+    if let ActionTarget::Command(cmd) = target {
+        let collapsed: String = cmd
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        for pattern in DESTRUCTIVE_COMMAND_TOKENS {
+            let hit = if *pattern == "rm -rf /" || *pattern == "rm -fr /" {
+                collapsed == *pattern
+                    || collapsed.starts_with(&format!("{pattern} "))
+                    || collapsed.starts_with(&format!("{pattern}*"))
+                    || collapsed.contains(&format!("; {pattern}"))
+                    || collapsed.contains(&format!("&& {pattern}"))
+            } else {
+                collapsed.contains(pattern)
+            };
+            if hit {
+                return Some(format!(
+                    "destructive command pattern `{pattern}` is hard-blocked by the host"
+                ));
+            }
+        }
+        if collapsed.contains("dd ") && collapsed.contains(" of=/dev/") {
+            return Some("raw block-device write via `dd of=/dev/` is hard-blocked".into());
+        }
+    }
+    if matches!(action, CandidateAction::WebSearch { .. })
+        && let ActionTarget::Url { url, host } = target
+        && (url.to_ascii_lowercase().starts_with("file://")
+            || host.as_deref() == Some("169.254.169.254")
+            || host.as_deref() == Some("metadata.google.internal"))
+    {
+        return Some(format!("web_search destination `{url}` is hard-blocked"));
+    }
+    None
 }
 
 /// Canonical tool arguments and their SHA-256. Key order is canonical because
@@ -137,51 +414,107 @@ pub(crate) fn canonicalise(tool_name: &str, arguments: &Value) -> (String, Vec<u
     (normalized, hash)
 }
 
-/// The decision for a capability operation before the card is shown.
-///
-/// `spec` is the declared capability (absent for the generic dispatcher when
-/// the capability was never declared). `rules` are the saved policy rules.
-pub(crate) fn decide_capability(
-    rules: &[PolicyRule],
-    spec: Option<&CapabilitySpec>,
-    capability: &str,
-    tool_name: &str,
-    call_arguments: &Value,
-) -> Verdict {
-    if let Some(prefix) = hard_denied(capability) {
-        return Verdict::Deny {
-            reason: format!("`{capability}` is hard-blocked by the host ({prefix}*)"),
-        };
+fn hex_digest(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
     }
-    let empty = serde_json::json!({});
-    let arguments = if tool_name == "device_request" {
-        call_arguments.get("input").unwrap_or(&empty)
-    } else {
-        call_arguments
-    };
-    let normalized = canonical_json(arguments);
-    let target_summary = target(spec, capability, arguments);
+    out
+}
+
+/// Evaluates any `CandidateAction` against Hard Deny, saved `PolicyRule`s, and
+/// default approval policy (`docs/design/permissions.md` §3).
+pub(crate) fn decide_action(rules: &[PolicyRule], action: &CandidateAction) -> Verdict {
+    let typed_target = extract_target(action);
+    if let Some(reason) = hard_denied_action(action, &typed_target) {
+        return Verdict::Deny { reason };
+    }
+    let (tool_name, capability, server_id, raw_args, target_summary, default_approval) =
+        match action {
+            CandidateAction::DeviceCapability {
+                capability,
+                spec,
+                tool_name,
+                input,
+                raw_arguments,
+            } => {
+                let approval = match spec.as_deref() {
+                    Some(spec) if spec.approval == CapabilityApproval::Auto => {
+                        DefaultActionApproval::Auto
+                    }
+                    _ if capability == w::COMPUTER_USE => DefaultActionApproval::HumanRequired,
+                    _ => DefaultActionApproval::NeedsDecision,
+                };
+                (
+                    tool_name.as_str(),
+                    Some(capability.as_str()),
+                    None,
+                    raw_arguments,
+                    target(spec.as_deref(), capability, input),
+                    approval,
+                )
+            }
+            CandidateAction::McpTool {
+                server_id,
+                tool_name,
+                input,
+            } => (
+                tool_name.as_str(),
+                None,
+                Some(server_id.as_str()),
+                input,
+                format!("{tool_name} {}", truncate(&input.to_string(), 200)),
+                DefaultActionApproval::NeedsDecision,
+            ),
+            CandidateAction::PluginTool {
+                plugin_id,
+                tool_name,
+                input,
+            } => (
+                tool_name.as_str(),
+                Some(plugin_id.as_str()),
+                None,
+                input,
+                format!(
+                    "plugin:{plugin_id}/{tool_name} {}",
+                    truncate(&input.to_string(), 180)
+                ),
+                DefaultActionApproval::NeedsDecision,
+            ),
+            CandidateAction::WebSearch {
+                endpoint,
+                query,
+                input,
+            } => {
+                let host = match &typed_target {
+                    ActionTarget::Url { host: Some(h), .. } => h.as_str(),
+                    _ => endpoint.as_str(),
+                };
+                (
+                    super::web_search::NAME,
+                    None,
+                    None,
+                    input,
+                    format!("web_search {host} ({})", truncate(query, 80)),
+                    DefaultActionApproval::NeedsDecision,
+                )
+            }
+        };
+    let (_, raw_hash) = canonicalise(tool_name, raw_args);
+    let raw_hash_hex = hex_digest(&raw_hash);
     let mut denied: Option<&PolicyRule> = None;
     let mut confirm = false;
     let mut allowed = false;
     for rule in rules.iter().filter(|rule| {
-        // The approval card stores the whole device request, including the capability.
-        if tool_name == "device_request"
-            && rule.tool_name == tool_name
-            && rule.effect == PolicyEffect::Allow
-            && rule.pattern.starts_with('{')
-            && let Ok(saved) = serde_json::from_str::<Value>(&rule.pattern)
-            && saved.get("capability").is_some()
-        {
-            return &saved == call_arguments;
-        }
-        matches(
+        matches_action(
             rule,
-            capability,
             tool_name,
-            &normalized,
-            &target_summary,
-            arguments,
+            capability,
+            server_id,
+            raw_args,
+            &raw_hash_hex,
+            &typed_target,
         )
     }) {
         match rule.effect {
@@ -193,73 +526,95 @@ pub(crate) fn decide_capability(
             PolicyEffect::Allow => allowed = true,
         }
     }
-    // A saved deny always wins. An explicit every-time-confirm rule outranks a
-    // saved allow, and an allow bypasses only the capability's default need
-    // for confirmation (not a hard block or a confirm rule).
     if let Some(rule) = denied {
         return Verdict::Deny {
             reason: format!("saved rule `{}` denies this operation", rule.id),
         };
     }
     if confirm {
-        return Verdict::Confirm {
+        return Verdict::HumanRequired {
             target: target_summary,
         };
     }
     if allowed {
         return Verdict::Allow;
     }
-    match spec {
-        Some(spec) if spec.approval == CapabilityApproval::Auto => Verdict::Allow,
-        // A declared capability that expects confirmation, an undeclared one
-        // and an unknown approval all fail safe to the card.
-        _ => Verdict::Confirm {
+    match default_approval {
+        DefaultActionApproval::Auto => Verdict::Allow,
+        DefaultActionApproval::HumanRequired => Verdict::HumanRequired {
+            target: target_summary,
+        },
+        DefaultActionApproval::NeedsDecision => Verdict::NeedsDecision {
             target: target_summary,
         },
     }
 }
 
-fn matches(
-    rule: &PolicyRule,
+#[derive(Clone, Copy)]
+enum DefaultActionApproval {
+    Auto,
+    HumanRequired,
+    NeedsDecision,
+}
+
+/// The decision for a capability operation before the card is shown.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn decide_capability(
+    rules: &[PolicyRule],
+    spec: Option<&CapabilitySpec>,
     capability: &str,
     tool_name: &str,
-    normalized: &str,
-    target_summary: &str,
-    arguments: &Value,
+    call_arguments: &Value,
+) -> Verdict {
+    let empty = serde_json::json!({});
+    let input = if tool_name == "device_request" {
+        call_arguments.get("input").unwrap_or(&empty).clone()
+    } else {
+        call_arguments.clone()
+    };
+    let action = CandidateAction::DeviceCapability {
+        capability: capability.to_owned(),
+        spec: spec.cloned().map(Box::new),
+        tool_name: tool_name.to_owned(),
+        input,
+        raw_arguments: call_arguments.clone(),
+    };
+    decide_action(rules, &action)
+}
+
+fn matches_action(
+    rule: &PolicyRule,
+    tool_name: &str,
+    capability: Option<&str>,
+    server_id: Option<&str>,
+    raw_arguments: &Value,
+    raw_hash_hex: &str,
+    typed_target: &ActionTarget,
 ) -> bool {
     let tool_matches = rule.tool_name == "*"
         || rule.tool_name == tool_name
-        || rule.tool_name == capability
+        || capability.is_some_and(|cap| rule.tool_name == cap)
+        || server_id.is_some_and(|srv| rule.tool_name == format!("mcp:{srv}"))
         || rule.tool_name.strip_suffix('*').is_some_and(|prefix| {
-            !prefix.is_empty() && (tool_name.starts_with(prefix) || capability.starts_with(prefix))
+            !prefix.is_empty()
+                && (tool_name.starts_with(prefix)
+                    || capability.is_some_and(|cap| cap.starts_with(prefix)))
         });
     if !tool_matches {
         return false;
     }
-    let pattern_matches = |value: &str| {
-        rule.pattern == "*"
-            || rule.pattern == value
-            || rule
-                .pattern
-                .strip_suffix('*')
-                .is_some_and(|prefix| !prefix.is_empty() && value.starts_with(prefix))
-    };
-    pattern_matches(normalized)
-        || pattern_matches(target_summary)
-        || json_contains_matching_str(arguments, &pattern_matches)
-}
-
-fn json_contains_matching_str(value: &Value, predicate: &impl Fn(&str) -> bool) -> bool {
-    match value {
-        Value::String(s) => predicate(s),
-        Value::Array(items) => items
-            .iter()
-            .any(|item| json_contains_matching_str(item, predicate)),
-        Value::Object(map) => map
-            .values()
-            .any(|item| json_contains_matching_str(item, predicate)),
-        _ => false,
+    if rule.pattern == "*" {
+        return true;
     }
+    if let Some(expected_hex) = rule.pattern.strip_prefix("exact_sha256:") {
+        return expected_hex == raw_hash_hex;
+    }
+    if rule.pattern.starts_with('{') {
+        return serde_json::from_str::<Value>(&rule.pattern)
+            .ok()
+            .is_some_and(|saved| canonical_json(&saved) == canonical_json(raw_arguments));
+    }
+    typed_target.matches_pattern(&rule.pattern)
 }
 
 fn target(spec: Option<&CapabilitySpec>, capability: &str, arguments: &Value) -> String {
@@ -274,7 +629,7 @@ fn target(spec: Option<&CapabilitySpec>, capability: &str, arguments: &Value) ->
 pub(crate) enum ApprovalDecision {
     Unspecified,
     Approve,
-    /// One-shot in this alpha; the caller may add a rule explicitly later.
+    /// Persists an exact-invocation allow rule for future matching calls.
     AlwaysApprove,
     Deny,
 }
@@ -324,7 +679,7 @@ mod tests {
         assert!(matches!(denied, Verdict::Deny { .. }));
         let undeclared =
             decide_capability(&[], None, "device.screen", "device_request", &json!({}));
-        assert!(matches!(undeclared, Verdict::Confirm { .. }));
+        assert!(matches!(undeclared, Verdict::NeedsDecision { .. }));
         let auto = decide_capability(
             &[],
             Some(&spec(CapabilityApproval::Auto)),
@@ -346,7 +701,7 @@ mod tests {
             "device_request",
             &json!({"capability":"device.files","input":{"path": "/tmp/x"}}),
         );
-        assert!(matches!(verdict, Verdict::Confirm { .. }));
+        assert!(matches!(verdict, Verdict::HumanRequired { .. }));
         let allow_only = decide_capability(
             std::slice::from_ref(&allow),
             Some(&spec(CapabilityApproval::Auto)),
@@ -362,7 +717,7 @@ mod tests {
             "body_motion",
             &json!({"motion": "nod"}),
         );
-        assert!(matches!(wildcard, Verdict::Confirm { .. }));
+        assert!(matches!(wildcard, Verdict::HumanRequired { .. }));
         let mut deny = rule(PolicyEffect::Deny, "device_request", "*");
         deny.id = "r2".into();
         let verdict = decide_capability(
@@ -383,6 +738,106 @@ mod tests {
             &json!({"capability":"device.files","input":{"path": "/tmp/x"}}),
         );
         assert_eq!(verdict, Verdict::Allow);
+    }
+
+    #[test]
+    fn b02_rules_never_match_arbitrary_content_or_workspace_strings() {
+        let allow_tmp = rule(PolicyEffect::Allow, "work.write", "/tmp/safe/*");
+        let write_with_decoy_content = json!({
+            "capability": "work.write",
+            "input": {
+                "path": "/etc/secret",
+                "workspace": "/tmp/safe/ws",
+                "content": "/tmp/safe/decoy"
+            }
+        });
+        let verdict = decide_capability(
+            &[allow_tmp],
+            Some(&spec(CapabilityApproval::Confirm)),
+            "work.write",
+            "device_request",
+            &write_with_decoy_content,
+        );
+        assert!(
+            matches!(verdict, Verdict::NeedsDecision { .. }),
+            "content/workspace must not trigger target rule match: {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn b19_hard_denied_blocks_system_paths_and_destructive_commands() {
+        let allow_all = rule(PolicyEffect::Allow, "*", "*");
+        let sys_write = decide_capability(
+            std::slice::from_ref(&allow_all),
+            Some(&spec(CapabilityApproval::Auto)),
+            "work.write",
+            "device_request",
+            &json!({"capability": "work.write", "input": {"path": "C:\\Windows\\System32\\drivers\\etc\\hosts"}}),
+        );
+        assert!(matches!(sys_write, Verdict::Deny { .. }));
+
+        let nuke_cmd = decide_capability(
+            std::slice::from_ref(&allow_all),
+            Some(&spec(CapabilityApproval::Auto)),
+            "work.powershell",
+            "device_request",
+            &json!({"capability": "work.powershell", "input": {"command": "rm  -rf   / --no-preserve-root"}}),
+        );
+        assert!(matches!(nuke_cmd, Verdict::Deny { .. }));
+
+        let mcp_sys = decide_action(
+            &[allow_all],
+            &CandidateAction::McpTool {
+                server_id: "fs".into(),
+                tool_name: "mcp_fs_write_file".into(),
+                input: json!({"path": "/etc/passwd"}),
+            },
+        );
+        assert!(matches!(mcp_sys, Verdict::Deny { .. }));
+    }
+
+    #[test]
+    fn b03_b04_mcp_and_web_search_require_gate_and_respect_rules() {
+        let mcp_action = CandidateAction::McpTool {
+            server_id: "notes".into(),
+            tool_name: "mcp_notes_read".into(),
+            input: json!({"path": "/notes/a.md"}),
+        };
+        assert!(matches!(
+            decide_action(&[], &mcp_action),
+            Verdict::NeedsDecision { .. }
+        ));
+        assert_eq!(
+            decide_action(
+                &[rule(PolicyEffect::Allow, "mcp:notes", "/notes/*")],
+                &mcp_action
+            ),
+            Verdict::Allow
+        );
+        assert!(matches!(
+            decide_action(
+                &[rule(PolicyEffect::Confirm, "mcp_notes_read", "*")],
+                &mcp_action
+            ),
+            Verdict::HumanRequired { .. }
+        ));
+
+        let search_action = CandidateAction::WebSearch {
+            endpoint: "https://api.mwmbl.org/api/v2/search/".into(),
+            query: "rust".into(),
+            input: json!({"query": "rust"}),
+        };
+        assert!(matches!(
+            decide_action(&[], &search_action),
+            Verdict::NeedsDecision { .. }
+        ));
+        assert!(matches!(
+            decide_action(
+                &[rule(PolicyEffect::Deny, "web_search", "api.mwmbl.org")],
+                &search_action
+            ),
+            Verdict::Deny { .. }
+        ));
     }
 }
 
@@ -442,9 +897,17 @@ pub(crate) struct CallBinding {
 }
 
 /// A held tool call and the marker that keeps it from running.
+#[derive(Clone, Copy)]
 pub(crate) struct Hold {
     pub(crate) call: Entity,
     pub(crate) hold: Entity,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SubmitOutcome {
+    pub(crate) approval: Approval,
+    pub(crate) rule_saved: bool,
+    pub(crate) rule_error: Option<String>,
 }
 
 /// The approvals that are currently attached to a live tool call.
@@ -478,8 +941,9 @@ impl Plugin for GatePlugin {
 }
 
 /// Applies the decision pipeline to every tool call that is about to start.
-/// Host-owned tools pass; device capabilities are resolved to a client,
-/// checked against the saved rules and, when needed, held for approval.
+/// Internal host tools pass; device capabilities, MCP tools, and web_search
+/// enter `Stage::Gate`, are checked against saved rules and, when needed, held
+/// for Decision API evaluation or user approval.
 fn gate(world: &mut World) {
     let calls: Vec<(Entity, String, String, Value, Entity, Option<EffectId>)> = {
         let mut query = world.query_filtered::<
@@ -489,10 +953,6 @@ fn gate(world: &mut World) {
         query
             .iter(world)
             .filter(|(call, _, _, _)| world.get::<Approved>(*call).is_none())
-            // A decision already answered the call (a denial, or the head's
-            // own refusal): it is settled for the kernel and must not be
-            // judged again. Without this filter a denial releases the hold,
-            // the call is `ReadyToStart` again, and a second decision runs.
             .filter(|(call, _, _, _)| {
                 world
                     .get::<Decision>(*call)
@@ -513,8 +973,6 @@ fn gate(world: &mut World) {
     if calls.is_empty() {
         return;
     }
-    // Count the calls of each model reply. A reply spawns its calls together,
-    // so every call of the reply sees the same total in this pass.
     let mut reply_calls: HashMap<EffectId, usize> = HashMap::new();
     {
         let mut spawned = world.query::<(&Effect, &ToolRequest)>();
@@ -525,8 +983,9 @@ fn gate(world: &mut World) {
         }
     }
     let store = world.resource::<Store>().clone();
-    let rules = store.policy_rules().unwrap_or_default();
-    let host_tools = crate::host::mcp::tool_names(world);
+    let mcp_tools = crate::host::mcp::tool_servers(world);
+    let plugin_tools = crate::host::providers::extensions::tool_owners(world);
+    let mut cached_rules: Option<Vec<PolicyRule>> = None;
     for (call, call_id, tool_name, arguments, agent, parent) in calls {
         let asked = parent
             .and_then(|parent| reply_calls.get(&parent).copied())
@@ -539,64 +998,244 @@ fn gate(world: &mut World) {
             );
             continue;
         }
-        // Built-in host tools and the tools an MCP server contributed belong to
-        // the host process; the operator configured them.
-        if host_owned(&tool_name, &host_tools) {
+        if is_host_tool(&tool_name) {
             continue;
         }
+        let rules = if let Some(rules) = &cached_rules {
+            rules.clone()
+        } else {
+            match store.policy_rules() {
+                Ok(rules) => {
+                    cached_rules = Some(rules.clone());
+                    rules
+                }
+                Err(error) => {
+                    if error.is_storage() {
+                        super::fail(world, error.to_string());
+                        return;
+                    }
+                    refuse(
+                        world,
+                        call,
+                        "policy rules could not be read; failing closed",
+                    );
+                    continue;
+                }
+            }
+        };
         let (companion_id, work_id, run_id) = binding_of(world, agent);
-        let Some(client_id) = target_client(&companion_id, &store, work_id.as_deref()) else {
-            refuse(
-                world,
-                call,
-                "no_active_client: no client is bound to this agent",
-            );
-            continue;
-        };
-        let Some(client) = store.client(&client_id).ok().flatten() else {
-            refuse(world, call, "the bound client is not registered");
-            continue;
-        };
-        // A tool that is neither a host tool nor a declared capability is
-        // refused: a future tool must opt into one of the two paths.
-        let resolved = match resolve_capability(world, agent, &client, &tool_name, &arguments) {
-            Ok(resolved) => resolved,
-            Err(error) => {
+        if let Some(providers) = world.get_resource::<super::providers::Providers>().cloned()
+            && !providers
+                .with_extension(ene_plugin::Extension::Hook)
+                .is_empty()
+            && let Some(runtime) = world
+                .get_resource::<super::resources::HostRuntime>()
+                .map(|r| r.0.clone())
+        {
+            let hook_store = store.clone();
+            let hook_event = ene_plugin::HookEvent::PreTool {
+                companion_id: companion_id.clone(),
+                tool_name: tool_name.clone(),
+                arguments: arguments.clone(),
+            };
+            let outcome = tokio::task::block_in_place(|| {
+                runtime.block_on(super::providers::extensions::run_hooks(
+                    &providers,
+                    &hook_store,
+                    hook_event,
+                ))
+            });
+            if let Some(reason) = outcome.blocked {
+                refuse(world, call, &reason);
+                continue;
+            }
+        }
+        let (action, bound_client_id, bound_capability) = if let Some(server_id) =
+            mcp_tools.get(&tool_name)
+        {
+            (
+                CandidateAction::McpTool {
+                    server_id: server_id.clone(),
+                    tool_name: tool_name.clone(),
+                    input: arguments.clone(),
+                },
+                None,
+                None,
+            )
+        } else if let Some(plugin_id) = plugin_tools.get(&tool_name) {
+            (
+                CandidateAction::PluginTool {
+                    plugin_id: plugin_id.clone(),
+                    tool_name: tool_name.clone(),
+                    input: arguments.clone(),
+                },
+                None,
+                None,
+            )
+        } else if tool_name == super::web_search::NAME {
+            let providers = world
+                .get_resource::<super::providers::Providers>()
+                .cloned()
+                .unwrap_or_default();
+            let resolved = match super::web_search::resolve(
+                &store,
+                world.get_resource::<super::model::Credentials>(),
+                &providers,
+            ) {
+                Ok(resolved) => resolved,
+                Err(reason) => {
+                    refuse(world, call, &reason);
+                    continue;
+                }
+            };
+            let query = arguments
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            (
+                CandidateAction::WebSearch {
+                    endpoint: resolved.endpoint,
+                    query,
+                    input: arguments.clone(),
+                },
+                None,
+                None,
+            )
+        } else {
+            let client_id = match store.target(&companion_id, work_id.as_deref()) {
+                Ok(Some(client_id)) => client_id,
+                Ok(None) => {
+                    refuse(
+                        world,
+                        call,
+                        "no_active_client: no client is bound to this agent",
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    if error.is_storage() {
+                        super::fail(world, error.to_string());
+                        return;
+                    }
+                    refuse(
+                        world,
+                        call,
+                        "client binding could not be read; failing closed",
+                    );
+                    continue;
+                }
+            };
+            let client = match store.client(&client_id) {
+                Ok(Some(client)) => client,
+                Ok(None) => {
+                    refuse(world, call, "the bound client is not registered");
+                    continue;
+                }
+                Err(error) => {
+                    if error.is_storage() {
+                        super::fail(world, error.to_string());
+                        return;
+                    }
+                    refuse(
+                        world,
+                        call,
+                        "client record could not be read; failing closed",
+                    );
+                    continue;
+                }
+            };
+            let resolved = match resolve_capability(world, agent, &client, &tool_name, &arguments) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    refuse(world, call, error.message());
+                    continue;
+                }
+            };
+            let Some((capability, spec)) = resolved else {
+                refuse(world, call, &format!("unknown device tool `{tool_name}`"));
+                continue;
+            };
+            if !client.is_granted(&capability) {
+                refuse(
+                    world,
+                    call,
+                    &format!("capability `{capability}` is not granted"),
+                );
+                continue;
+            }
+            let empty = serde_json::json!({});
+            let input = if tool_name == "device_request" {
+                arguments.get("input").unwrap_or(&empty).clone()
+            } else {
+                arguments.clone()
+            };
+            if (capability.starts_with(super::client::WORKSPACE_CAPABILITY_PREFIX)
+                || capability == w::COMPUTER_USE)
+                && let Some(spec) = &spec
+                && let Err(error) = super::client::validate_input(spec, &input)
+            {
                 refuse(world, call, error.message());
                 continue;
             }
+            (
+                CandidateAction::DeviceCapability {
+                    capability: capability.clone(),
+                    spec: spec.map(Box::new),
+                    tool_name: tool_name.clone(),
+                    input,
+                    raw_arguments: arguments.clone(),
+                },
+                Some(client_id),
+                Some(capability),
+            )
         };
-        let Some((capability, spec)) = resolved else {
-            refuse(world, call, &format!("unknown device tool `{tool_name}`"));
-            continue;
-        };
-        if !client.is_granted(&capability) {
-            refuse(
-                world,
-                call,
-                &format!("capability `{capability}` is not granted"),
-            );
-            continue;
-        }
-        if (capability.starts_with(super::client::WORKSPACE_CAPABILITY_PREFIX)
-            || capability == w::COMPUTER_USE)
-            && let Some(spec) = &spec
-            && let Err(error) = super::client::validate_input(spec, &arguments["input"])
+        let verdict = decide_action(&rules, &action);
+        if let (Some(client_id), Some(capability)) =
+            (bound_client_id.clone(), bound_capability.clone())
         {
-            refuse(world, call, error.message());
-            continue;
+            world.entity_mut(call).insert(CallBinding {
+                client_id,
+                capability: capability.clone(),
+                computer_run: (capability == w::COMPUTER_USE).then(|| run_id.clone()),
+            });
         }
-        let verdict = decide_capability(&rules, spec.as_ref(), &capability, &tool_name, &arguments);
-        world.entity_mut(call).insert(CallBinding {
-            client_id: client_id.clone(),
-            capability: capability.clone(),
-            computer_run: (capability == w::COMPUTER_USE).then(|| run_id.clone()),
-        });
         match verdict {
             Verdict::Allow => {}
             Verdict::Deny { reason } => refuse(world, call, &reason),
-            Verdict::Confirm { target } => {
-                let hold = world.spawn(HoldOf(call)).id();
+            Verdict::HumanRequired { target } => {
+                let request_id = uuid::Uuid::new_v4().to_string();
+                let (normalized, hash) = canonicalise(&tool_name, &arguments);
+                let approval = Approval {
+                    request_id: request_id.clone(),
+                    session_id: companion_id.clone(),
+                    run_id: run_id.clone(),
+                    work_id: work_id.clone(),
+                    action_payload_hash: hash,
+                    tool_name: tool_name.clone(),
+                    normalized_arguments: normalized,
+                    status: ApprovalStatus::Pending,
+                    created_at: super::db::now(),
+                    resolved_at: None,
+                    client_id: bound_client_id,
+                    capability: bound_capability,
+                };
+                if let Err(error) = issue_hold(world, &store, approval, call) {
+                    if error.is_storage() {
+                        super::fail(world, error.to_string());
+                        return;
+                    }
+                    refuse(world, call, "approval persistence failed; failing closed");
+                    return;
+                }
+                let pending = Pending {
+                    request: request_id,
+                    companion: companion_id.clone(),
+                    target,
+                };
+                push_card(world, &pending);
+            }
+            Verdict::NeedsDecision { target } => {
                 let request_id = uuid::Uuid::new_v4().to_string();
                 let (normalized, hash) = canonicalise(&tool_name, &arguments);
                 let arguments_view = truncate(&normalized, DECISION_ARGUMENT_CHARS);
@@ -611,42 +1250,84 @@ fn gate(world: &mut World) {
                     status: ApprovalStatus::Pending,
                     created_at: super::db::now(),
                     resolved_at: None,
-                    client_id: Some(client_id.clone()),
-                    capability: Some(capability.clone()),
+                    client_id: bound_client_id,
+                    capability: bound_capability,
                 };
-                if let Err(error) = store.insert_approval(&approval) {
-                    super::fail(world, error.to_string());
+                if let Err(error) = issue_hold(world, &store, approval, call) {
+                    if error.is_storage() {
+                        super::fail(world, error.to_string());
+                        return;
+                    }
+                    refuse(world, call, "approval persistence failed; failing closed");
                     return;
                 }
-                world
-                    .resource_mut::<Approvals>()
-                    .by_request
-                    .insert(request_id.clone(), Hold { call, hold });
-                // The mechanical rules did not decide, so the decision model
-                // judges first (docs/design/permissions.md §3). The card is
-                // pushed by `collect_decisions`, only when the model requires
-                // approval or the call fails.
-                let inputs = DecisionInputs {
-                    tool_name: tool_name.clone(),
-                    target: target.clone(),
-                    arguments: arguments_view,
-                    request: request_context(world, &store, agent, &run_id),
-                    policies: store.policy_texts().unwrap_or_default(),
-                    rules: rules.clone(),
-                };
                 let pending = Pending {
                     request: request_id,
                     companion: companion_id.clone(),
-                    target,
+                    target: target.clone(),
                 };
-                if capability == w::COMPUTER_USE {
-                    push_card(world, &pending);
-                    continue;
-                }
+                let policies = match store.policy_texts() {
+                    Ok(policies) => policies,
+                    Err(error) => {
+                        if error.is_storage() {
+                            super::fail(world, error.to_string());
+                            return;
+                        }
+                        push_card(world, &pending);
+                        continue;
+                    }
+                };
+                let inputs = DecisionInputs {
+                    tool_name: tool_name.clone(),
+                    target,
+                    arguments: arguments_view,
+                    request: request_context(world, &store, agent, &run_id),
+                    policies,
+                    rules: rules.clone(),
+                };
                 start_decision(world, &store, pending, inputs);
             }
         }
     }
+}
+
+pub(crate) fn issue_hold(
+    world: &mut World,
+    store: &Store,
+    approval: Approval,
+    call: Entity,
+) -> Result<Hold> {
+    let request_id = approval.request_id.clone();
+    store.insert_approval(&approval)?;
+    let hold = world.spawn(HoldOf(call)).id();
+    let entry = Hold { call, hold };
+    world
+        .resource_mut::<Approvals>()
+        .by_request
+        .insert(request_id, entry);
+    Ok(entry)
+}
+
+pub(crate) fn notify_approval_card(
+    world: &mut World,
+    companion: &str,
+    approval: &Approval,
+    target: &str,
+) {
+    let mut notifier = world.resource_mut::<Notifier>();
+    notifier.push(
+        Some(companion),
+        None,
+        w::notification::Event::ApprovalRequested(Box::new(w::ApprovalRequested {
+            request: Some(crate::host::wire::approval(approval)).into(),
+            ..Default::default()
+        })),
+    );
+    notifier.notice(
+        Some(companion),
+        "approval_required",
+        &format!("{target}: approval is required before this operation runs"),
+    );
 }
 
 /// The companion, work session and run an agent serves. A work agent carries
@@ -724,11 +1405,6 @@ fn resolve_capability(
         return Ok(None);
     };
     Ok(Some((spec.name.clone(), Some(spec))))
-}
-
-/// The client the call must be sent to.
-fn target_client(companion_id: &str, store: &Store, work_id: Option<&str>) -> Option<String> {
-    store.target(companion_id, work_id).ok().flatten()
 }
 
 // === Decision Engine =======================================================
@@ -1023,9 +1699,21 @@ fn collect_decisions(world: &mut World) {
     let outcome = background::take(flight.task)
         .unwrap_or_else(|| Err("the decision task ended without a result".to_owned()));
     let store = world.resource::<Store>().clone();
-    let Ok(Some(approval)) = store.approval(&request) else {
-        tracing::debug!(request = %request, "a late decision dropped: no such approval");
-        return;
+    let approval = match store.approval(&request) {
+        Ok(Some(approval)) => approval,
+        Ok(None) => {
+            tracing::debug!(request = %request, "a late decision dropped: no such approval");
+            return;
+        }
+        Err(error) => {
+            if error.is_storage() {
+                super::fail(world, error.to_string());
+                return;
+            }
+            tracing::warn!(%error, request = %request, "decision collection failed to read approval");
+            push_card(world, &flight.pending);
+            return;
+        }
     };
     if approval.status != ApprovalStatus::Pending {
         tracing::debug!(
@@ -1072,29 +1760,22 @@ fn collect_decisions(world: &mut World) {
 /// before the Decision API. Only a still-pending approval is carded.
 fn push_card(world: &mut World, pending: &Pending) {
     let store = world.resource::<Store>().clone();
-    let Ok(Some(approval)) = store.approval(&pending.request) else {
-        return;
+    let approval = match store.approval(&pending.request) {
+        Ok(Some(approval)) => approval,
+        Ok(None) => return,
+        Err(error) => {
+            if error.is_storage() {
+                super::fail(world, error.to_string());
+            } else {
+                tracing::warn!(%error, request = %pending.request, "failed to read approval for card");
+            }
+            return;
+        }
     };
     if approval.status != ApprovalStatus::Pending {
         return;
     }
-    let mut notifier = world.resource_mut::<Notifier>();
-    notifier.push(
-        Some(&pending.companion),
-        None,
-        w::notification::Event::ApprovalRequested(Box::new(w::ApprovalRequested {
-            request: Some(crate::host::wire::approval(&approval)).into(),
-            ..Default::default()
-        })),
-    );
-    notifier.notice(
-        Some(&pending.companion),
-        "approval_required",
-        &format!(
-            "{}: approval is required before this operation runs",
-            pending.target
-        ),
-    );
+    notify_approval_card(world, &pending.companion, &approval, &pending.target);
 }
 
 pub(super) fn decide(world: &mut World, call: Entity, outcome: Outcome) {
@@ -1159,13 +1840,21 @@ fn bound_client(store: &Store, approval: &Approval) -> Result<Option<String>> {
     Ok(session.client_id)
 }
 
-/// Approves or denies a pending request. The caller must still have a live
-/// tool call (an approval is never replayed onto another one).
+/// Approves or denies a pending request. Validates hash, client binding,
+/// grants, and DB state before mutating the ECS hold or granting execution.
 pub(crate) fn submit(
     world: &mut World,
     request_id: &str,
     decision: ApprovalDecision,
 ) -> crate::host::error::Result<Approval> {
+    submit_with_outcome(world, request_id, decision).map(|outcome| outcome.approval)
+}
+
+pub(crate) fn submit_with_outcome(
+    world: &mut World,
+    request_id: &str,
+    decision: ApprovalDecision,
+) -> crate::host::error::Result<SubmitOutcome> {
     let store = world.resource::<Store>().clone();
     let approval = store
         .approval(request_id)?
@@ -1175,24 +1864,30 @@ pub(crate) fn submit(
             ("approval is no longer pending").into(),
         ));
     }
-    let Some(hold) = release(world, request_id) else {
+    let Some(hold) = world
+        .resource::<Approvals>()
+        .by_request
+        .get(request_id)
+        .copied()
+    else {
         store.resolve_approval(request_id, ApprovalStatus::Expired)?;
         return Err(HostError::Conflict(
             ("approval is not attached to a live tool call").into(),
         ));
     };
-    let changed = world
-        .get::<ToolRequest>(hold.call)
-        .map(|request| {
-            canonicalise(
-                request.call.function.name.as_str(),
-                &Value::Object(request.call.function.arguments.clone()),
-            )
-            .1
-        })
+    let request_snapshot = world.get::<ToolRequest>(hold.call).map(|request| {
+        (
+            request.call.function.name.as_str().to_owned(),
+            Value::Object(request.call.function.arguments.clone()),
+        )
+    });
+    let changed = request_snapshot
+        .as_ref()
+        .map(|(name, args)| canonicalise(name, args).1)
         .is_none_or(|hash| hash != approval.action_payload_hash);
     if changed {
         store.resolve_approval(request_id, ApprovalStatus::Expired)?;
+        release(world, request_id);
         refuse(
             world,
             hold.call,
@@ -1204,23 +1899,74 @@ pub(crate) fn submit(
     }
     match decision {
         ApprovalDecision::Approve | ApprovalDecision::AlwaysApprove => {
-            // The approved operation runs on the client the approval is bound
-            // to: the hand's work-session client, else the companion's active
-            // client. A client that moved since the card was shown does not
-            // void the approval; the held call is re-pointed so that its
-            // operation goes to the bound client.
-            if let Some(client_id) = bound_client(&store, &approval)?
+            let call_binding = world.get::<CallBinding>(hold.call).cloned();
+            let mut rebound_client: Option<String> = None;
+            if let Some(binding) = &call_binding {
+                let target_id =
+                    bound_client(&store, &approval)?.unwrap_or_else(|| binding.client_id.clone());
+                let client = store.client(&target_id)?.ok_or_else(|| {
+                    HostError::Conflict(("the bound client is not registered").into())
+                })?;
+                if !client.is_granted(&binding.capability) {
+                    return Err(HostError::Conflict(format!(
+                        "capability `{}` is no longer granted on `{target_id}`",
+                        binding.capability
+                    )));
+                }
+                if let Some((tool_name, raw_args)) = &request_snapshot {
+                    let empty = serde_json::json!({});
+                    let input = if tool_name == "device_request" {
+                        raw_args.get("input").unwrap_or(&empty).clone()
+                    } else {
+                        raw_args.clone()
+                    };
+                    let action = CandidateAction::DeviceCapability {
+                        capability: binding.capability.clone(),
+                        spec: client.spec(&binding.capability).cloned().map(Box::new),
+                        tool_name: tool_name.clone(),
+                        input,
+                        raw_arguments: raw_args.clone(),
+                    };
+                    let typed_target = extract_target(&action);
+                    if let Some(reason) = hard_denied_action(&action, &typed_target) {
+                        store.resolve_approval(request_id, ApprovalStatus::Denied)?;
+                        release(world, request_id);
+                        refuse(world, hold.call, &reason);
+                        return Err(HostError::Permission(reason));
+                    }
+                    if approval.client_id.as_deref() != Some(target_id.as_str()) {
+                        let rules = store.policy_rules()?;
+                        if let Verdict::Deny { reason } = decide_action(&rules, &action) {
+                            store.resolve_approval(request_id, ApprovalStatus::Denied)?;
+                            release(world, request_id);
+                            refuse(world, hold.call, &reason);
+                            return Err(HostError::Permission(reason));
+                        }
+                    }
+                }
+                rebound_client = Some(target_id);
+            }
+            let approval = store.resolve_approval_with_client(
+                request_id,
+                ApprovalStatus::Approved,
+                rebound_client.as_deref(),
+            )?;
+            release(world, request_id);
+            if let Some(target_id) = rebound_client
                 && let Some(mut binding) = world.get_mut::<CallBinding>(hold.call)
             {
-                binding.client_id = client_id;
+                binding.client_id = target_id;
             }
             world.entity_mut(hold.call).insert(Approved);
-            let approval = store.resolve_approval(request_id, ApprovalStatus::Approved)?;
+            let mut rule_saved = false;
+            let mut rule_error = None;
             if matches!(decision, ApprovalDecision::AlwaysApprove) {
                 let pattern = if approval.normalized_arguments.trim().is_empty() {
                     "*".to_owned()
-                } else {
+                } else if approval.normalized_arguments.chars().count() <= 4_000 {
                     approval.normalized_arguments.clone()
+                } else {
+                    format!("exact_sha256:{}", hex_digest(&approval.action_payload_hash))
                 };
                 let rule = PolicyRule {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -1231,6 +1977,7 @@ pub(crate) fn submit(
                 };
                 match store.apply_policy_rules(&[rule], &[]) {
                     Ok(rules) => {
+                        rule_saved = true;
                         let wire_rules = rules.iter().map(crate::host::wire::policy_rule).collect();
                         let mut notifier = world.resource_mut::<Notifier>();
                         notifier.push(
@@ -1245,18 +1992,40 @@ pub(crate) fn submit(
                         );
                     }
                     Err(error) => {
+                        if error.is_storage() {
+                            super::fail(world, error.to_string());
+                        }
+                        let msg = error.to_string();
                         tracing::warn!(%error, "failed to persist AlwaysApprove policy rule");
+                        let mut notifier = world.resource_mut::<Notifier>();
+                        notifier.notice(
+                            Some(&approval.session_id),
+                            "policy_rule_save_failed",
+                            &format!(
+                                "承認は実行されましたが、常時許可ルールの保存に失敗しました: {msg}"
+                            ),
+                        );
+                        rule_error = Some(msg);
                     }
                 }
             }
             notify_resolved(world, &approval);
-            Ok(approval)
+            Ok(SubmitOutcome {
+                approval,
+                rule_saved,
+                rule_error,
+            })
         }
         ApprovalDecision::Deny | ApprovalDecision::Unspecified => {
-            refuse(world, hold.call, "the user denied this operation");
             let approval = store.resolve_approval(request_id, ApprovalStatus::Denied)?;
+            release(world, request_id);
+            refuse(world, hold.call, "the user denied this operation");
             notify_resolved(world, &approval);
-            Ok(approval)
+            Ok(SubmitOutcome {
+                approval,
+                rule_saved: false,
+                rule_error: None,
+            })
         }
     }
 }
@@ -1756,6 +2525,7 @@ mod decision_tests {
                 .init_resource::<Waiting>()
                 .insert_resource(DeviceTimeout(Duration::from_secs(30)))
                 .insert_resource(models())
+                .insert_resource(crate::host::HostState::default())
                 .insert_resource(HostRuntime(runtime.handle().clone()))
                 // The gate only sees a call the kernel has a handler for: a
                 // `device_request` with no registered tool is dropped before
@@ -2171,6 +2941,158 @@ mod decision_tests {
                 .len(),
             1
         );
+        provider.task.abort();
+    }
+
+    #[test]
+    fn b20_confirm_rule_is_never_bypassed_by_decision_allow() {
+        let runtime = paused_runtime();
+        let provider = runtime.block_on(serve(
+            r#"{"decision":"allow","reason":"safe"}"#,
+            Duration::ZERO,
+        ));
+        let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+        world
+            .store()
+            .apply_policy_rules(
+                &[PolicyRule {
+                    id: "confirm-x".into(),
+                    tool_name: "device.files".into(),
+                    pattern: "/tmp/x".into(),
+                    effect: PolicyEffect::Confirm,
+                    created_at: String::new(),
+                }],
+                &[],
+            )
+            .unwrap();
+        let call = world.gated_call("/tmp/x");
+        world.app.update();
+        assert!(
+            world.app.world().resource::<Decisions>().running.is_empty(),
+            "HumanRequired must skip Decision LLM"
+        );
+        let request = world.pending().request_id;
+        let events = world.events();
+        assert_eq!(cards(&events), vec![request.clone()]);
+        assert!(world.app.world().get::<Approved>(call).is_none());
+        assert_eq!(provider.bodies.lock().unwrap().len(), 0);
+        let resolved = submit(world.app.world_mut(), &request, ApprovalDecision::Approve).unwrap();
+        assert_eq!(resolved.status, ApprovalStatus::Approved);
+        assert!(world.app.world().get::<Approved>(call).is_some());
+        provider.task.abort();
+    }
+
+    #[test]
+    fn b06_submit_keeps_hold_when_bound_client_loses_grant() {
+        let runtime = paused_runtime();
+        let provider = runtime.block_on(serve(
+            r#"{"decision":"require_approval","reason":"ask"}"#,
+            Duration::ZERO,
+        ));
+        let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+        let call = world.gated_call("/tmp/a");
+        world.app.update();
+        let request = world.pending().request_id;
+        let mut client = world.store().client("c1").unwrap().unwrap();
+        client.granted_capabilities.clear();
+        world.store().restore_client(&client).unwrap();
+
+        let err = submit(world.app.world_mut(), &request, ApprovalDecision::Approve).unwrap_err();
+        assert!(matches!(err, HostError::Conflict(_)));
+        assert_eq!(
+            world.store().approval(&request).unwrap().unwrap().status,
+            ApprovalStatus::Pending
+        );
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<Approvals>()
+                .by_request
+                .contains_key(&request),
+            "hold remains intact after pre-commit failure"
+        );
+        assert!(world.app.world().get::<Approved>(call).is_none());
+        provider.task.abort();
+    }
+
+    #[test]
+    fn b18_large_always_approve_persists_exact_digest_rule_and_skips_second_prompt() {
+        let runtime = paused_runtime();
+        let provider = runtime.block_on(serve(
+            r#"{"decision":"require_approval","reason":"large payload"}"#,
+            Duration::ZERO,
+        ));
+        let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+        let big_path = format!("/tmp/{}", "a".repeat(4200));
+        let call1 = world.gated_call(&big_path);
+        world.app.update();
+        let request = world.pending().request_id;
+        let outcome = submit_with_outcome(
+            world.app.world_mut(),
+            &request,
+            ApprovalDecision::AlwaysApprove,
+        )
+        .unwrap();
+        assert!(outcome.rule_saved, "{:?}", outcome.rule_error);
+        assert!(world.app.world().get::<Approved>(call1).is_some());
+
+        let rules = world.store().policy_rules().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].pattern.starts_with("exact_sha256:"));
+
+        let call2 = world.gated_call(&big_path);
+        world.app.update();
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<Waiting>()
+                .by_operation
+                .values()
+                .any(|wait| wait.call == call2)
+        );
+        assert!(
+            world
+                .store()
+                .approvals(ApprovalStatus::Pending)
+                .unwrap()
+                .is_empty()
+        );
+        provider.task.abort();
+    }
+
+    #[test]
+    fn b05_policy_read_failure_fails_closed_instead_of_treating_as_empty() {
+        let runtime = paused_runtime();
+        let provider = runtime.block_on(serve(
+            r#"{"decision":"allow","reason":"safe"}"#,
+            Duration::ZERO,
+        ));
+        let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+        // Corrupt policy_rules row triggers HostError::Storage on policy_rules().
+        world
+            .store()
+            .conn()
+            .unwrap()
+            .execute(
+                "INSERT INTO policy_rules (id, tool_name, pattern, effect, created_at) \
+                 VALUES ('bad', '*', '*', 'bogus', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        let call = world.gated_call("/tmp/a");
+        world.app.update();
+        assert!(
+            world
+                .app
+                .world()
+                .resource::<crate::host::HostState>()
+                .failed
+                .is_some(),
+            "corrupted policy rules must fail the host instead of returning empty rules"
+        );
+        assert!(world.app.world().get::<Approved>(call).is_none());
         provider.task.abort();
     }
 }

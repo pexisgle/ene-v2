@@ -56,7 +56,8 @@ impl w::SettingsService for Services {
                 crate::host::settings::ConnectionKind::Tts => ene_plugin::Extension::Tts,
                 crate::host::settings::ConnectionKind::Stt => ene_plugin::Extension::Stt,
                 crate::host::settings::ConnectionKind::Acp => ene_plugin::Extension::Harness,
-                crate::host::settings::ConnectionKind::Mcp => continue,
+                crate::host::settings::ConnectionKind::Mcp
+                | crate::host::settings::ConnectionKind::Search => continue,
             };
             let _ = self.runtime.providers().start(&adapter, extension).await;
         }
@@ -176,10 +177,12 @@ impl w::SettingsService for Services {
         };
         let request_id = request.request_id.to_owned();
         self.call(move |app| {
-            let approval = permission::submit(app.world_mut(), &request_id, decision)?;
+            let outcome = permission::submit_with_outcome(app.world_mut(), &request_id, decision)?;
             Ok(w::SubmitApprovalResponse {
                 acknowledged: true,
-                status: wire::approval_status(approval.status).into(),
+                status: wire::approval_status(outcome.approval.status).into(),
+                rule_saved: outcome.rule_saved,
+                rule_error: outcome.rule_error,
                 ..Default::default()
             })
         })
@@ -396,54 +399,98 @@ impl w::SettingsService for Services {
         // The probe performs a network request, so it must not run on the ECS
         // thread; the connection was captured above.
         let check = if is_mcp {
-            let uses_npx = matches!(&connection.config,
-                settings::ConnectionConfig::Mcp(config)
-                    if config.command.eq_ignore_ascii_case("npx")
-                        || config.command.eq_ignore_ascii_case("npx.cmd"));
-            // npm may have to download a package before the server can list tools.
-            let timeout = std::time::Duration::from_secs(if uses_npx { 60 } else { 20 });
-            let tools = tokio::time::timeout(timeout, async {
-                loop {
-                    let id = connection.id.clone();
-                    let revision = connection.revision;
-                    let tools = self
-                        .runtime
-                        .read(move |app| {
-                            let world = app.world();
-                            if !world
-                                .resource::<Store>()
-                                .connection(&id)?
-                                .is_some_and(|current| current.revision == revision)
-                            {
-                                return Err(HostError::Conflict(
-                                    "MCP connection changed during the check".into(),
-                                ));
-                            }
-                            Ok(crate::host::mcp::server_tool_names(world, &id, revision))
-                        })
-                        .await?;
-                    if tools.is_some() || !connection.enabled {
-                        return Ok::<_, HostError>(tools);
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if !connection.enabled {
+                crate::host::settings::Check {
+                    healthy: false,
+                    checked_at: crate::host::db::now(),
+                    failure: Some(crate::host::error::Failure::new(
+                        "connection_check",
+                        "MCP 接続が無効化されています。",
+                    )),
+                    capabilities: Vec::new(),
+                    resources: Vec::new(),
                 }
-            })
-            .await
-            .unwrap_or(Ok(None))
-            .map_err(ConnectError::from)?;
-            let message = if uses_npx {
-                "MCP に接続できませんでした。ホストで Node.js と npm が使えること、起動コマンドと通信環境を確認してください。"
             } else {
-                "MCP に接続できませんでした。サーバー URL または起動コマンドを確認してください。"
-            };
-            crate::host::settings::Check {
-                healthy: tools.is_some(),
-                checked_at: crate::host::db::now(),
-                failure: tools
-                    .is_none()
-                    .then(|| crate::host::error::Failure::new("connection_check", message)),
-                capabilities: Vec::new(),
-                resources: tools.unwrap_or_default(),
+                let reconnect_id = connection.id.clone();
+                self.call(move |app| {
+                    crate::host::mcp::request_reconnect(app.world_mut(), &reconnect_id);
+                    Ok(())
+                })
+                .await?;
+                let uses_npx = matches!(&connection.config,
+                    settings::ConnectionConfig::Mcp(config)
+                        if config.command.eq_ignore_ascii_case("npx")
+                            || config.command.eq_ignore_ascii_case("npx.cmd"));
+                // npm may have to download a package before the server can list tools.
+                let timeout = std::time::Duration::from_secs(if uses_npx { 60 } else { 20 });
+                let outcome = tokio::time::timeout(timeout, async {
+                    loop {
+                        let id = connection.id.clone();
+                        let revision = connection.revision;
+                        let state = self
+                            .runtime
+                            .read(move |app| {
+                                let world = app.world();
+                                if !world
+                                    .resource::<Store>()
+                                    .connection(&id)?
+                                    .is_some_and(|current| current.revision == revision)
+                                {
+                                    return Err(HostError::Conflict(
+                                        "MCP connection changed during the check".into(),
+                                    ));
+                                }
+                                Ok(crate::host::mcp::check_state(world, &id, revision))
+                            })
+                            .await?;
+                        match state {
+                            crate::host::mcp::CheckState::Connected(tools) => {
+                                return Ok::<_, HostError>(Ok(tools));
+                            }
+                            crate::host::mcp::CheckState::Failed(reason) => {
+                                return Ok::<_, HostError>(Err(reason));
+                            }
+                            crate::host::mcp::CheckState::Connecting => {}
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                })
+                .await;
+                let default_message = if uses_npx {
+                    "MCP に接続できませんでした。ホストで Node.js と npm が使えること、起動コマンドと通信環境を確認してください。"
+                } else {
+                    "MCP に接続できませんでした。サーバー URL または起動コマンドを確認してください。"
+                };
+                match outcome {
+                    Ok(Ok(Ok(tools))) => crate::host::settings::Check {
+                        healthy: true,
+                        checked_at: crate::host::db::now(),
+                        failure: None,
+                        capabilities: Vec::new(),
+                        resources: tools,
+                    },
+                    Ok(Ok(Err(reason))) => crate::host::settings::Check {
+                        healthy: false,
+                        checked_at: crate::host::db::now(),
+                        failure: Some(crate::host::error::Failure::new(
+                            "connection_check",
+                            format!("{default_message} ({reason})"),
+                        )),
+                        capabilities: Vec::new(),
+                        resources: Vec::new(),
+                    },
+                    Ok(Err(error)) => return Err(error.into()),
+                    Err(_) => crate::host::settings::Check {
+                        healthy: false,
+                        checked_at: crate::host::db::now(),
+                        failure: Some(crate::host::error::Failure::new(
+                            "connection_check",
+                            default_message,
+                        )),
+                        capabilities: Vec::new(),
+                        resources: Vec::new(),
+                    },
+                }
             }
         } else if connection.kind == crate::host::settings::ConnectionKind::Tts
             && connection
@@ -462,6 +509,9 @@ impl w::SettingsService for Services {
             probe_openai_speech(&connection, &credentials, &self.runtime.providers()).await
         } else if connection.kind == crate::host::settings::ConnectionKind::Embedding {
             probe_embedding(&connection, &credentials, &self.runtime.providers()).await
+        } else if connection.kind == crate::host::settings::ConnectionKind::Search {
+            crate::host::web_search::probe(&connection, &credentials, &self.runtime.providers())
+                .await
         } else {
             model::probe(&store, &credentials, &connection, &self.runtime.providers()).await
         };
@@ -492,6 +542,152 @@ impl w::SettingsService for Services {
                 check: Some(wire::check(&check)).into(),
                 ..Default::default()
             })
+        })
+        .await
+    }
+
+    async fn list_plugins(
+        &self,
+        _: RequestContext,
+        _: ServiceRequest<'_, w::Empty>,
+    ) -> ServiceResult<w::PluginList> {
+        let providers = self.runtime.providers();
+        self.read(move |app| {
+            let store = app.world().resource::<Store>();
+            let entries = store.plugin_entries()?;
+            let mut by_id: std::collections::BTreeMap<String, w::PluginInfo> = entries
+                .into_iter()
+                .map(|entry| {
+                    let info = w::PluginInfo {
+                        id: entry.plugin_id.clone(),
+                        name: entry.name,
+                        version: entry.version,
+                        enabled: entry.enabled,
+                        path: entry.path,
+                        installed_at: entry.installed_at,
+                        ..Default::default()
+                    };
+                    (entry.plugin_id, info)
+                })
+                .collect();
+            for adapter in providers.adapters() {
+                let Some(loaded) = providers.get(adapter) else {
+                    continue;
+                };
+                let manifest = &loaded.package.manifest;
+                let extensions: Vec<String> = manifest
+                    .entrypoints
+                    .iter()
+                    .flat_map(|ep| ep.provides.iter())
+                    .map(|ext| format!("{ext:?}").to_ascii_lowercase())
+                    .collect();
+                by_id
+                    .entry(manifest.id.clone())
+                    .and_modify(|info| {
+                        info.description = manifest.description.clone();
+                        info.extensions = extensions.clone();
+                    })
+                    .or_insert_with(|| w::PluginInfo {
+                        id: manifest.id.clone(),
+                        name: manifest.name.clone(),
+                        version: manifest.version.clone(),
+                        description: manifest.description.clone(),
+                        enabled: true,
+                        extensions,
+                        path: loaded.package.root.to_string_lossy().into_owned(),
+                        ..Default::default()
+                    });
+            }
+            Ok(w::PluginList {
+                plugins: by_id.into_values().collect(),
+                ..Default::default()
+            })
+        })
+        .await
+    }
+
+    async fn install_plugin(
+        &self,
+        _: RequestContext,
+        request: ServiceRequest<'_, w::InstallPluginRequest>,
+    ) -> ServiceResult<w::PluginInfo> {
+        let source_path = request.to_owned_message().source_path;
+        let state_dir = self.runtime.state_dir().to_path_buf();
+        self.call(move |app| {
+            let store = app.world().resource::<Store>().clone();
+            let (entry, manifest) = crate::host::db::plugins::install_local_package(
+                &store,
+                &state_dir,
+                std::path::Path::new(&source_path),
+            )?;
+            let extensions = manifest
+                .entrypoints
+                .iter()
+                .flat_map(|ep| ep.provides.iter())
+                .map(|ext| format!("{ext:?}").to_ascii_lowercase())
+                .collect();
+            Ok(w::PluginInfo {
+                id: entry.plugin_id,
+                name: entry.name,
+                version: entry.version,
+                description: manifest.description,
+                enabled: entry.enabled,
+                extensions,
+                path: entry.path,
+                installed_at: entry.installed_at,
+                ..Default::default()
+            })
+        })
+        .await
+    }
+
+    async fn set_plugin_enabled(
+        &self,
+        _: RequestContext,
+        request: ServiceRequest<'_, w::SetPluginEnabledRequest>,
+    ) -> ServiceResult<w::PluginInfo> {
+        let req = request.to_owned_message();
+        self.call(move |app| {
+            let store = app.world().resource::<Store>();
+            if !store.set_plugin_enabled(&req.plugin_id, req.enabled)? {
+                return Err(HostError::NotFound(format!(
+                    "plugin `{}` not found",
+                    req.plugin_id
+                )));
+            }
+            let entry = store
+                .plugin_entries()?
+                .into_iter()
+                .find(|e| e.plugin_id == req.plugin_id)
+                .ok_or_else(|| HostError::NotFound("plugin not found".into()))?;
+            Ok(w::PluginInfo {
+                id: entry.plugin_id,
+                name: entry.name,
+                version: entry.version,
+                enabled: entry.enabled,
+                path: entry.path,
+                installed_at: entry.installed_at,
+                ..Default::default()
+            })
+        })
+        .await
+    }
+
+    async fn remove_plugin(
+        &self,
+        _: RequestContext,
+        request: ServiceRequest<'_, w::RemovePluginRequest>,
+    ) -> ServiceResult<w::Empty> {
+        let plugin_id = request.to_owned_message().plugin_id;
+        let state_dir = self.runtime.state_dir().to_path_buf();
+        self.call(move |app| {
+            let store = app.world().resource::<Store>();
+            if !crate::host::db::plugins::remove_local_package(store, &state_dir, &plugin_id)? {
+                return Err(HostError::NotFound(format!(
+                    "plugin `{plugin_id}` not found"
+                )));
+            }
+            Ok(w::Empty::default())
         })
         .await
     }

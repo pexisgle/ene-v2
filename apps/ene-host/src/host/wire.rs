@@ -8,8 +8,8 @@ use super::{
     permission::{Approval, ApprovalStatus, PolicyEffect, PolicyRule, PolicyText},
     settings::{
         AcpConnection, Check, Connection, ConnectionConfig, ConnectionKind, CredentialState,
-        EmbeddingConnection, Endpoint, LlmConnection, McpConnection, Settings, SttConnection,
-        TtsConnection,
+        EmbeddingConnection, Endpoint, LlmConnection, McpConnection, SearchConnection, Settings,
+        SttConnection, TtsConnection,
     },
     work::{Run, RunState, WorkSession, WorkStatus},
 };
@@ -31,7 +31,10 @@ macro_rules! wire_enum {
 /// the domain and proto config structs share their names and their kind-specific
 /// fields.
 macro_rules! connection_configs {
-    ($($variant:ident($config:ident) { $($field:ident),* $(,)? }),+ $(,)?) => {
+    ($($variant:ident($config:ident) {
+        fields: [$($field:ident),* $(,)?],
+        maps: [$($map:ident),* $(,)?] $(,)?
+    }),+ $(,)?) => {
         fn config_to_wire(
             value: &ConnectionConfig,
             endpoint: &w::ConnectionEndpoint,
@@ -41,6 +44,7 @@ macro_rules! connection_configs {
                     w::connection_config::Config::$variant(Box::new(w::$config {
                         endpoint: Some(endpoint.clone()).into(),
                         $($field: config.$field.clone(),)*
+                        $($map: config.$map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),)*
                         ..Default::default()
                     }))
                 }),+
@@ -53,6 +57,7 @@ macro_rules! connection_configs {
                     ConnectionConfig::$variant($config {
                         endpoint: endpoint_from(config.endpoint.as_option()),
                         $($field: config.$field,)*
+                        $($map: config.$map.into_iter().collect(),)*
                     })
                 }),+
             }
@@ -61,12 +66,16 @@ macro_rules! connection_configs {
 }
 
 connection_configs! {
-    Llm(LlmConnection) { model_ids },
-    Tts(TtsConnection) { voice_ids },
-    Stt(SttConnection) { language_hints },
-    Embedding(EmbeddingConnection) { model_id, dimensions },
-    Mcp(McpConnection) { allowed_tools, command, args },
-    Acp(AcpConnection) { command, args },
+    Llm(LlmConnection) { fields: [model_ids], maps: [] },
+    Tts(TtsConnection) { fields: [voice_ids], maps: [] },
+    Stt(SttConnection) { fields: [language_hints], maps: [] },
+    Embedding(EmbeddingConnection) { fields: [model_id, dimensions], maps: [] },
+    Mcp(McpConnection) {
+        fields: [allowed_tools, command, args, cwd, auth_header, secret_env_var],
+        maps: [env, headers],
+    },
+    Acp(AcpConnection) { fields: [command, args], maps: [] },
+    Search(SearchConnection) { fields: [max_results], maps: [] },
 }
 
 /// Rebuilds the common endpoint from the contract.
@@ -88,6 +97,7 @@ pub(crate) fn connection_from(input: w::ConnectionInput) -> Result<Connection, H
         Some(w::ConnectionKind::Embedding) => ConnectionKind::Embedding,
         Some(w::ConnectionKind::Mcp) => ConnectionKind::Mcp,
         Some(w::ConnectionKind::Acp) => ConnectionKind::Acp,
+        Some(w::ConnectionKind::Search) => ConnectionKind::Search,
         Some(w::ConnectionKind::Unspecified) | None => {
             return Err(HostError::Invalid(("connection kind is required").into()));
         }
@@ -240,7 +250,7 @@ pub(crate) fn memory(value: &Memory) -> w::MemoryItem {
 }
 
 wire_enum!(connection_kind: ConnectionKind => w::ConnectionKind {
-    Llm, Tts, Stt, Embedding, Mcp, Acp
+    Llm, Tts, Stt, Embedding, Mcp, Acp, Search
 });
 
 pub(crate) fn connection(value: &Connection) -> w::Connection {

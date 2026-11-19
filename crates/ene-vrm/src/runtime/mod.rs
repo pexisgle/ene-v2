@@ -2,6 +2,7 @@ pub(crate) mod constraint;
 pub(crate) mod look_at;
 pub(crate) mod spring;
 
+pub use look_at::GazeOverride;
 pub use spring::{SpringJointProps, SpringRig};
 
 use crate::{

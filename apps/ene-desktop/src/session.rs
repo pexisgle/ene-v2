@@ -30,9 +30,11 @@ use crate::{
     work_tools::{self, Workspace},
 };
 use buffa::view::MessageView;
+use ene_avatar_ipc::{AvatarEvent, AvatarStatus};
 use ene_rpc as w;
 use std::{
-    path::PathBuf,
+    collections::{BTreeMap, HashMap},
+    path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -48,6 +50,46 @@ const SCREEN_SAMPLE: Duration = Duration::from_secs(20);
 const CAPTURE: Duration = Duration::from_millis(100);
 /// How often the playback amplitude goes to the renderer (about 60 Hz).
 const LIP: Duration = Duration::from_millis(16);
+
+fn client_id_path() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Some(root) = std::env::var_os("LOCALAPPDATA") {
+            return Some(PathBuf::from(root).join("ene").join("desktop-client-id"));
+        }
+    }
+    directories::ProjectDirs::from("", "", "ene")
+        .map(|dirs| dirs.config_local_dir().join("desktop-client-id"))
+}
+
+/// Loads or atomically initializes a stable per-install client ID at `path`.
+pub fn load_or_create_client_id(path: &Path) -> String {
+    if let Ok(existing) = std::fs::read_to_string(path) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() && trimmed.len() <= 128 && !trimmed.contains(char::is_whitespace) {
+            return trimmed.to_owned();
+        }
+    }
+    let id = format!("desktop-{}", uuid::Uuid::new_v4());
+    if let Some(parent) = path.parent()
+        && std::fs::create_dir_all(parent).is_ok()
+        && let Ok(mut tmp) = tempfile::NamedTempFile::new_in(parent)
+    {
+        use std::io::Write as _;
+        if tmp.write_all(id.as_bytes()).is_ok() {
+            let _ = tmp.persist(path);
+        }
+    }
+    id
+}
+
+/// Returns the stable per-install client ID used when `ENE_DESKTOP_CLIENT_ID` is unset.
+pub fn persistent_client_id() -> String {
+    match client_id_path() {
+        Some(path) => load_or_create_client_id(&path),
+        None => format!("desktop-{}", uuid::Uuid::new_v4()),
+    }
+}
 
 /// What the client needs to identify itself and find its renderer.
 #[derive(Clone, Debug)]
@@ -107,11 +149,14 @@ pub struct Session {
     connection: Connection,
     updates: UnboundedSender<Update>,
     commands: UnboundedReceiver<Command>,
-    /// The companion this client serves, and the generation it holds. Exactly
-    /// one: the host attributes audio, perception and device results to a client
-    /// through `activation_for_client`, so serving two at once would make every
-    /// report ambiguous.
-    binding: Option<Binding>,
+    /// Companions currently resident (activated) on this client, keyed by companion ID.
+    bindings: BTreeMap<String, Binding>,
+    /// Companion currently focused by the pod / interactive controls.
+    focused: Option<String>,
+    /// Latest companion records from the host, used to resolve body/model per resident companion.
+    companions: BTreeMap<String, w::Companion>,
+    /// Companion currently owning active TTS playback for lip-sync attribution.
+    speaking_companion: Option<String>,
     /// Whether the next attempt may move the activation. It is set on the first
     /// connect and when the operator picks a companion, so a reconnect never
     /// steals the companion back from another device.
@@ -134,10 +179,19 @@ pub struct Session {
     /// Capabilities this machine can honour, declared at registration.
     specs: Vec<w::ClientCapabilitySpec>,
     workspace: Option<Arc<Workspace>>,
-    /// The last amplitude sent to the renderer, so silence sends nothing new.
-    last_lip: Option<f32>,
+    /// Verified client-side Wasm plugins (`F11`).
+    client_plugins: Arc<crate::plugins::ClientPlugins>,
+    /// Long-lived workspace operations so settings updates/resyncs never abort them.
+    work: tokio::task::JoinSet<w::DeviceOperationResult>,
+    /// Last amplitude sent per character, so silence sends nothing new.
+    last_lip: HashMap<String, f32>,
+    /// Per-character debounce timestamp for avatar click/interaction perception (`F21`).
+    last_avatar_interaction: HashMap<String, std::time::Instant>,
     /// Software mute for the microphone.
     mic_muted: bool,
+    /// Active capture mode (VAD or Push-to-Talk) (`F07`).
+    capture_mode: audio::CaptureMode,
+    ptt_active: bool,
     /// Software mute for speaker output.
     output_muted: bool,
     /// Current avatar display scale percentage.
@@ -203,13 +257,18 @@ impl Session {
         if let Some(workspace) = &workspace {
             specs.extend(workspace.specs());
         }
+        let client_plugins = Arc::new(crate::plugins::ClientPlugins::probe_default());
+        specs.extend(client_plugins.specs().iter().cloned());
         Self {
             path,
             options,
             connection,
             updates,
             commands,
-            binding: None,
+            bindings: BTreeMap::new(),
+            focused: None,
+            companions: BTreeMap::new(),
+            speaking_companion: None,
             may_activate: true,
             subscription: String::new(),
             cursor: None,
@@ -222,14 +281,64 @@ impl Session {
             computer_enabled: perception::preference_enabled(crate::computer::PREFERENCE),
             #[cfg(windows)]
             computer_frame: None,
-            last_lip: None,
+            last_lip: HashMap::new(),
+            last_avatar_interaction: HashMap::new(),
             mic_muted: false,
+            capture_mode: audio::CaptureMode::Vad,
+            ptt_active: false,
             output_muted: false,
             avatar_scale: 100.,
             last_ui_audio: (0., 0., false),
             pending: None,
             specs,
             workspace,
+            client_plugins,
+            work: tokio::task::JoinSet::new(),
+        }
+    }
+
+    fn focused_companion_id(&self) -> Option<&str> {
+        self.focused
+            .as_deref()
+            .filter(|id| self.bindings.contains_key(*id))
+            .or_else(|| self.bindings.keys().next().map(String::as_str))
+    }
+
+    fn focused_binding(&self) -> Option<&Binding> {
+        self.focused_companion_id()
+            .and_then(|id| self.bindings.get(id))
+    }
+
+    fn body_binding_for(&self, companion_id: &str) -> w::BodyBinding {
+        self.companions
+            .get(companion_id)
+            .and_then(|companion| companion.body.as_option())
+            .and_then(|doc| serde_json::from_str::<w::BodyBinding>(&doc.json).ok())
+            .unwrap_or_default()
+    }
+
+    fn model_for(&self, companion_id: &str) -> Option<PathBuf> {
+        let body = self.body_binding_for(companion_id);
+        avatar::resolve_model_path(body.model.as_deref(), self.options.model.as_deref())
+    }
+
+    fn rebuild_specs(&mut self) {
+        let mut specs = capabilities::Declaration::probe(
+            self.options.renderer.as_deref(),
+            self.options.model.as_deref(),
+        )
+        .specs();
+        if let Some(workspace) = &self.workspace {
+            specs.extend(workspace.specs());
+        }
+        specs.extend(self.client_plugins.specs().iter().cloned());
+        self.specs = specs;
+    }
+
+    async fn sync_capabilities(&mut self, host: &Host) {
+        self.rebuild_specs();
+        if let Err(error) = self.register(host).await {
+            tracing::warn!("failed to sync client capabilities in place: {error}");
         }
     }
 
@@ -329,11 +438,11 @@ impl Session {
             },
             Err(error) => return self.classify(error),
         };
-        let previous = self.binding.clone();
+        let previous = self.bindings.clone();
         if let Err(outcome) = self.bind(&host, &snapshot).await {
             return outcome;
         }
-        if previous != self.binding {
+        if previous != self.bindings {
             self.sensor = Sensor::default();
         }
         self.report(Link::Live {
@@ -397,8 +506,61 @@ impl Session {
             .map_err(|error| connectrpc::ConnectError::internal(error.to_string()))
     }
 
-    /// Binds this client to the companion it should serve.
+    /// Binds this client to its resident companions from `snapshot` without
+    /// stealing companions already held by other devices.
     async fn bind(&mut self, host: &Host, snapshot: &w::Snapshot) -> Result<(), Outcome> {
+        self.companions = snapshot
+            .companions
+            .iter()
+            .map(|companion| (companion.id.clone(), companion.clone()))
+            .collect();
+        self.bindings = snapshot
+            .activations
+            .iter()
+            .filter(|activation| activation.client_id.as_deref() == Some(self.options.id.as_str()))
+            .map(|activation| {
+                (
+                    activation.companion_id.clone(),
+                    Binding {
+                        companion_id: activation.companion_id.clone(),
+                    },
+                )
+            })
+            .collect();
+
+        if !self.bindings.is_empty() {
+            // Re-attaching to an existing host activation must consume initial
+            // activation intent so a future move away never auto-steals back (B16).
+            self.may_activate = false;
+            let requested = self.pending.take();
+            if let Some(target) = requested {
+                if !self.bindings.contains_key(&target) && self.companions.contains_key(&target) {
+                    match self.activate_one(host, &target).await {
+                        Ok(binding) => {
+                            self.bindings.insert(target.clone(), binding);
+                        }
+                        Err(error) => return Err(self.classify(error)),
+                    }
+                }
+                if self.bindings.contains_key(&target) {
+                    self.focused = Some(target);
+                }
+            }
+            if self
+                .focused
+                .as_deref()
+                .is_none_or(|id| !self.bindings.contains_key(id))
+            {
+                self.focused = snapshot
+                    .active_companion_id
+                    .as_deref()
+                    .filter(|id| self.bindings.contains_key(*id))
+                    .map(str::to_owned)
+                    .or_else(|| self.bindings.keys().next().cloned());
+            }
+            return Ok(());
+        }
+
         let wanted = self
             .pending
             .clone()
@@ -410,36 +572,23 @@ impl Session {
                     .map(|companion| companion.id.clone())
             });
         let Some(wanted) = wanted else {
-            self.binding = None;
+            self.bindings.clear();
+            self.focused = None;
             return Ok(());
         };
-        let current = snapshot
-            .activations
-            .iter()
-            .find(|activation| activation.companion_id == wanted)
-            .cloned();
-        let ours = current
-            .as_ref()
-            .and_then(|activation| activation.client_id.as_deref())
-            == Some(self.options.id.as_str());
-        if ours {
-            self.binding = current.map(|activation| Binding {
-                companion_id: activation.companion_id,
-            });
-            self.pending = None;
-            return Ok(());
-        }
         if !self.may_activate {
             // Another device holds this companion. Serving nothing is the
             // honest state: no audio, no perception, no device results.
-            self.binding = None;
+            self.bindings.clear();
+            self.focused = None;
             self.pending = None;
             tracing::info!("another client is the active device for {wanted}");
             return Ok(());
         }
-        match self.activate(host, &wanted).await {
+        match self.activate_one(host, &wanted).await {
             Ok(binding) => {
-                self.binding = Some(binding);
+                self.bindings.insert(wanted.clone(), binding);
+                self.focused = Some(wanted);
                 self.may_activate = false;
                 self.pending = None;
                 Ok(())
@@ -448,20 +597,13 @@ impl Session {
         }
     }
 
-    /// Moves the activation to this client, releasing a previous companion so
-    /// this client is never the active device for two at once.
-    async fn activate(
-        &mut self,
+    /// Activates `companion_id` onto this client without releasing other
+    /// companions already resident here.
+    async fn activate_one(
+        &self,
         host: &Host,
         companion_id: &str,
     ) -> Result<Binding, connectrpc::ConnectError> {
-        if let Some(previous) = self.binding.clone()
-            && previous.companion_id != companion_id
-        {
-            // Releasing first keeps the attribution unambiguous; the host then
-            // has no active device for the companion this client is leaving.
-            self.release(host, &previous).await?;
-        }
         let activation = host
             .client
             .activate(w::ActivationRequest {
@@ -476,22 +618,22 @@ impl Session {
             .map_err(|error| connectrpc::ConnectError::internal(error.to_string()))?;
         tracing::info!(
             companion = %activation.companion_id,
-            "the client is the active device"
+            "the client is an active device"
         );
         Ok(Binding {
             companion_id: activation.companion_id,
         })
     }
 
-    /// Gives up the activation this client holds.
-    async fn release(
-        &mut self,
+    /// Releases `companion_id` from this client.
+    async fn release_one(
+        &self,
         host: &Host,
-        binding: &Binding,
+        companion_id: &str,
     ) -> Result<(), connectrpc::ConnectError> {
         host.client
             .activate(w::ActivationRequest {
-                companion_id: binding.companion_id.clone(),
+                companion_id: companion_id.to_owned(),
                 client_id: String::new(),
                 release: true,
                 ..Default::default()
@@ -522,43 +664,45 @@ impl Session {
             Ok(stream) => stream,
             Err(error) => return self.classify(error),
         };
-        // The audio subscription is what gives this client the speech floor, so
-        // it is opened only while this client is the active device.
-        let mut output = match self.binding.clone() {
-            Some(_) => {
-                match host
-                    .voice
-                    .subscribe_audio_output(w::SubscribeAudioRequest {
-                        client_id: self.options.id.clone(),
-                        ..Default::default()
-                    })
-                    .await
-                {
-                    Ok(stream) => Some(stream),
-                    Err(error) => {
-                        tracing::info!("no audio output stream: {error}");
-                        self.set_out(Device::Unavailable(error.to_string())).await;
-                        None
+        // The audio subscription is opened while this client holds at least one companion.
+        let mut output = if !self.bindings.is_empty() {
+            match host
+                .voice
+                .subscribe_audio_output(w::SubscribeAudioRequest {
+                    client_id: self.options.id.clone(),
+                    ..Default::default()
+                })
+                .await
+            {
+                Ok(stream) => {
+                    if let Some(player) = self.player.as_mut() {
+                        player.reset_stream();
                     }
+                    Some(stream)
+                }
+                Err(error) => {
+                    tracing::info!("no audio output stream: {error}");
+                    self.set_out(Device::Unavailable(error.to_string())).await;
+                    None
                 }
             }
-            None => None,
+        } else {
+            None
         };
-        let (mut mic_send, mut mic_recv) = match self.binding.clone() {
-            Some(_) => {
-                self.open_microphone().await;
-                match host.voice.stream_audio_input().await {
-                    Ok(stream) => {
-                        let (send, recv) = stream.into_split();
-                        (Some(send), Some(recv))
-                    }
-                    Err(error) => {
-                        tracing::info!("no microphone stream: {error}");
-                        (None, None)
-                    }
+        let (mut mic_send, mut mic_recv) = if !self.bindings.is_empty() {
+            self.open_microphone().await;
+            match host.voice.stream_audio_input().await {
+                Ok(stream) => {
+                    let (send, recv) = stream.into_split();
+                    (Some(send), Some(recv))
+                }
+                Err(error) => {
+                    tracing::info!("no microphone stream: {error}");
+                    (None, None)
                 }
             }
-            None => (None, None),
+        } else {
+            (None, None)
         };
         let mut mic_retry_at: Option<tokio::time::Instant> = None;
         let mut mic_error_reported = false;
@@ -572,7 +716,6 @@ impl Session {
         let mut observations = tokio::task::JoinSet::new();
         let mut capture = interval(CAPTURE);
         let mut lip = interval(LIP);
-        let mut work = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 frame = device.message() => match frame {
@@ -580,7 +723,7 @@ impl Session {
                         let event = message.to_owned_message();
                         {
                             if let Some(event) = event.event {
-                                match self.device_event(&host, event, &mut work).await {
+                                match self.device_event(&host, event).await {
                                     Step::Continue => {}
                                     Step::Restart => return Outcome::Resync("the binding changed".into()),
                                     Step::Stop => return Outcome::Closed,
@@ -591,7 +734,7 @@ impl Session {
                     Ok(None) => return Outcome::Dropped("the host closed the device stream".into()),
                     Err(error) => return self.classify(error),
                 },
-                Some(result) = work.join_next(), if !work.is_empty() => {
+                Some(result) = self.work.join_next(), if !self.work.is_empty() => {
                     match result {
                         Ok(result) => Self::report_operation(&host, result).await,
                         Err(error) => tracing::warn!("workspace operation did not finish: {error}"),
@@ -640,7 +783,7 @@ impl Session {
                                     message: error.to_string(),
                                 });
                             }
-                            if self.binding.is_some() && self.microphone.is_some() {
+                            if !self.bindings.is_empty() && self.microphone.is_some() {
                                 mic_retry_at = Some(tokio::time::Instant::now() + Duration::from_secs(5));
                             }
                         }
@@ -653,7 +796,7 @@ impl Session {
                             is_final: true,
                             is_speaking: false,
                         });
-                        if self.binding.is_some() && self.microphone.is_some() {
+                        if !self.bindings.is_empty() && self.microphone.is_some() {
                             mic_retry_at = Some(tokio::time::Instant::now() + Duration::from_secs(5));
                         }
                         mic_recv = None;
@@ -662,7 +805,7 @@ impl Session {
                 },
                 () = retry_wait(mic_retry_at) => {
                     mic_retry_at = None;
-                    if self.binding.is_some() && mic_recv.is_none() {
+                    if !self.bindings.is_empty() && mic_recv.is_none() {
                         match host.voice.stream_audio_input().await {
                             Ok(stream) => {
                                 let (send, recv) = stream.into_split();
@@ -680,8 +823,18 @@ impl Session {
                 },
                 _ = capture.tick() => {
                     let speaking = self.player.as_ref().is_some_and(|player| player.playing() && !player.is_muted());
-                    let CaptureTick { chunks, state } =
-                        capture_tick(&mut self.microphone, &self.binding, &self.options.id, speaking);
+                    let far_end_level = self.player.as_ref().map_or(0., Player::level);
+                    let CaptureTick { chunks, state, barge_in } = capture_tick(
+                        &mut self.microphone,
+                        !self.bindings.is_empty(),
+                        &self.options.id,
+                        speaking,
+                        far_end_level,
+                    );
+                    if barge_in && let Some(player) = self.player.as_mut() {
+                        player.stop_current();
+                        self.speaking_companion = None;
+                    }
                     let mut sent = 0;
                     if let Some(stream) = mic_send.as_mut() {
                         for chunk in chunks {
@@ -701,7 +854,7 @@ impl Session {
                     });
                 }
                 _ = lip.tick() => {
-                    self.drain_renderer();
+                    self.drain_renderer().await;
                     self.pump_lip();
                 }
                 _ = sample.tick(), if observations.is_empty() => {
@@ -765,12 +918,7 @@ impl Session {
     }
 
     /// Handles one device event, executing only from the device stream.
-    async fn device_event(
-        &mut self,
-        host: &Host,
-        event: w::device_event::Event,
-        work: &mut tokio::task::JoinSet<w::DeviceOperationResult>,
-    ) -> Step {
+    async fn device_event(&mut self, host: &Host, event: w::device_event::Event) -> Step {
         match event {
             w::device_event::Event::Ready(ready) => {
                 self.subscription = ready.subscription_id;
@@ -790,6 +938,7 @@ impl Session {
                 }
                 if operation.capability.starts_with(work_tools::PREFIX) {
                     let workspace = self.workspace.clone();
+                    let active_work = self.work.len();
                     let request = (|| {
                         if let Some(reason) = refusal {
                             return Err(reason);
@@ -797,7 +946,7 @@ impl Session {
                         if operation.work_id.as_deref().is_none_or(str::is_empty) {
                             return Err("workspace operations require a work session".into());
                         }
-                        if work.len() >= 8 {
+                        if active_work >= 8 {
                             return Err("the workspace is busy".into());
                         }
                         Ok((
@@ -808,7 +957,7 @@ impl Session {
                     match request {
                         Ok((workspace, input)) => {
                             let client_id = self.options.id.clone();
-                            work.spawn(async move {
+                            self.work.spawn(async move {
                                 let output = workspace.execute(&operation.capability, input).await;
                                 Self::operation_result(&client_id, &operation, output)
                             });
@@ -822,7 +971,7 @@ impl Session {
                 } else {
                     let outcome = match refusal {
                         Some(reason) => Err(reason),
-                        None => self.execute(&operation),
+                        None => self.execute(&operation).await,
                     };
                     let result = Self::operation_result(&self.options.id, &operation, outcome);
                     Self::report_operation(host, result).await;
@@ -888,10 +1037,7 @@ impl Session {
             .as_option()
             .ok_or("the work session is unavailable")?;
         if session.client_id != self.options.id
-            || self
-                .binding
-                .as_ref()
-                .is_none_or(|binding| binding.companion_id != session.companion_id)
+            || !self.bindings.contains_key(session.companion_id)
             || !work
                 .runs
                 .iter()
@@ -967,14 +1113,14 @@ impl Session {
         let claim = Claim {
             client_id: &operation.client_id,
             subscription_id: &operation.subscription_id,
+            work_id: operation.work_id.as_deref(),
         };
-        admits(
-            &self.options.id,
-            &self.subscription,
-            self.binding.as_ref(),
-            &claim,
-        )
-        .err()
+        let binding = if !operation.companion_id.is_empty() {
+            self.bindings.get(&operation.companion_id)
+        } else {
+            self.focused_binding()
+        };
+        admits(&self.options.id, &self.subscription, binding, &claim).err()
     }
 
     fn operation_input(operation: &w::DeviceOperation) -> Result<serde_json::Value, String> {
@@ -986,41 +1132,162 @@ impl Session {
         }
     }
 
+    fn target_companion_id(&self, operation: &w::DeviceOperation) -> Result<String, String> {
+        if !operation.companion_id.is_empty() {
+            Ok(operation.companion_id.clone())
+        } else {
+            self.focused_companion_id()
+                .ok_or_else(|| "this client is not serving any companion".to_owned())
+                .map(str::to_owned)
+        }
+    }
+
     /// Runs an avatar or perception capability on the session thread.
-    fn execute(&mut self, operation: &w::DeviceOperation) -> Result<serde_json::Value, String> {
+    async fn execute(
+        &mut self,
+        operation: &w::DeviceOperation,
+    ) -> Result<serde_json::Value, String> {
         let input = Self::operation_input(operation)?;
         match operation.capability.as_str() {
-            "body.motion" => self.motion(&input),
+            "body.motion" => {
+                let target = self.target_companion_id(operation)?;
+                self.motion(&target, &input).await
+            }
+            "body.look_at" => {
+                let target = self.target_companion_id(operation)?;
+                self.look_at(&target, &input).await
+            }
+            "body.perch" => {
+                let target = self.target_companion_id(operation)?;
+                self.perch(&target, &input).await
+            }
             "eye.watch" => self.watch(&input),
+            other if other.starts_with("plugin.") => {
+                self.client_plugins.execute(other, input).await
+            }
             other => Err(format!("this client does not implement `{other}`")),
         }
     }
 
-    /// Shows a motion. Without a renderer the operation fails; it did not happen.
-    fn motion(&mut self, input: &serde_json::Value) -> Result<serde_json::Value, String> {
+    async fn look_at(
+        &mut self,
+        companion_id: &str,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let reset = input
+            .get("reset")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let (yaw_deg, pitch_deg) = if reset {
+            (None, None)
+        } else {
+            let yaw = input
+                .get("yaw_deg")
+                .and_then(serde_json::Value::as_f64)
+                .map(|v| v as f32)
+                .unwrap_or(0.);
+            let pitch = input
+                .get("pitch_deg")
+                .and_then(serde_json::Value::as_f64)
+                .map(|v| v as f32)
+                .unwrap_or(0.);
+            if !yaw.is_finite() || !pitch.is_finite() || yaw.abs() > 90. || pitch.abs() > 60. {
+                return Err(
+                    "body.look_at requires yaw_deg in [-90, 90] and pitch_deg in [-60, 60]".into(),
+                );
+            }
+            (Some(yaw), Some(pitch))
+        };
+        let avatar = self
+            .avatar
+            .as_mut()
+            .ok_or("no renderer is configured, so gaze was not updated")?;
+        avatar.look_at(companion_id, yaw_deg, pitch_deg).await?;
+        Ok(serde_json::json!({
+            "reset": reset,
+            "yaw_deg": yaw_deg,
+            "pitch_deg": pitch_deg,
+        }))
+    }
+
+    async fn perch(
+        &mut self,
+        companion_id: &str,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let x = input
+            .get("x")
+            .and_then(serde_json::Value::as_f64)
+            .map(|v| v as f32)
+            .ok_or("body.perch requires numeric `x`")?;
+        let y = input
+            .get("y")
+            .and_then(serde_json::Value::as_f64)
+            .map(|v| v as f32)
+            .ok_or("body.perch requires numeric `y`")?;
+        if !x.is_finite() || !y.is_finite() || x.abs() > 1_000_000. || y.abs() > 1_000_000. {
+            return Err("body.perch coordinates must be finite".into());
+        }
+        let monitor = input
+            .get("monitor")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let posture = input
+            .get("posture")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let model = self.model_for(companion_id);
+        let avatar = self
+            .avatar
+            .as_mut()
+            .ok_or("no renderer is configured, so the avatar could not perch")?;
+        avatar.place(companion_id, monitor.clone(), [x, y]).await?;
+        if let Some(posture_name) = posture.as_deref()
+            && matches!(posture_name, "sit_idle" | "sit_swing_legs" | "idle")
+            && let Some(model_path) = model
+        {
+            let clip = avatar::motion(posture_name);
+            if clip.is_some() || posture_name == "idle" {
+                let _ = avatar
+                    .show_preset(companion_id, &model_path, posture_name, clip.as_deref())
+                    .await;
+            }
+        }
+        Ok(serde_json::json!({
+            "x": x,
+            "y": y,
+            "monitor": monitor,
+            "posture": posture,
+        }))
+    }
+
+    /// Shows a motion on `companion_id`. Without a renderer the operation fails.
+    async fn motion(
+        &mut self,
+        companion_id: &str,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         let plan = MotionPlan::parse(input)?;
+        let model = self
+            .model_for(companion_id)
+            .ok_or("no model is configured for the renderer")?;
         let avatar = self
             .avatar
             .as_mut()
             .ok_or("no renderer is configured, so no motion was shown")?;
-        let model = self
-            .options
-            .model
-            .as_ref()
-            .ok_or("no model is configured for the renderer")?;
-        if avatar.show(
-            &self.options.id,
-            model,
-            plan.clip.as_deref(),
-            plan.motion == "idle",
-        )? {
-            avatar.await_state(&self.options.id, Duration::from_secs(2))?;
+        if avatar
+            .show_preset(companion_id, &model, &plan.motion, plan.clip.as_deref())
+            .await?
+        {
+            avatar
+                .await_state(companion_id, Duration::from_secs(2))
+                .await?;
         }
         // A face is separate from the motion: `neutral` clears it, and the
         // renderer keeps it across later motion changes.
         if let Some(name) = &plan.expression {
             let face = (name != "neutral").then_some(name.as_str());
-            avatar.expression(&self.options.id, face)?;
+            avatar.expression(companion_id, face).await?;
         }
         Ok(serde_json::json!({
             "applied": true,
@@ -1030,8 +1297,7 @@ impl Session {
     }
 
     /// Sends the amplitude the device last played, so the renderer can open the
-    /// mouth in step with the audio. A tick at the audio rate is worthless once
-    /// the level stops changing, so repeats of the last value are dropped.
+    /// mouth of the speaking companion in step with the audio.
     fn pump_lip(&mut self) {
         let level = self.player.as_ref().map_or(0., Player::level);
         let input = self.microphone.as_ref().map_or(0., Microphone::level);
@@ -1048,19 +1314,37 @@ impl Session {
                 speaking,
             });
         }
-        if self
-            .last_lip
-            .is_some_and(|last| (last - level).abs() < 0.005)
-        {
-            return;
-        }
-        let id = self.options.id.clone();
+        let target = self
+            .speaking_companion
+            .as_deref()
+            .filter(|id| self.bindings.contains_key(*id))
+            .or_else(|| self.focused_companion_id())
+            .map(str::to_owned);
         let Some(avatar) = self.avatar.as_mut() else {
             return;
         };
+        let active_chars: Vec<String> = self.last_lip.keys().cloned().collect();
+        for other in active_chars {
+            if target.as_deref() != Some(other.as_str())
+                && self.last_lip.get(&other).is_some_and(|v| *v > 0.005)
+                && avatar.lip_sync(&other, 0.0).is_ok()
+            {
+                self.last_lip.insert(other, 0.0);
+            }
+        }
+        let Some(id) = target else {
+            return;
+        };
+        if self
+            .last_lip
+            .get(&id)
+            .is_some_and(|last| (*last - level).abs() < 0.005)
+        {
+            return;
+        }
         if avatar.lip_sync(&id, level).is_ok() {
-            tracing::trace!("lip sync {level:.3}");
-            self.last_lip = Some(level);
+            tracing::trace!(companion = %id, "lip sync {level:.3}");
+            self.last_lip.insert(id, level);
         }
     }
 
@@ -1085,26 +1369,48 @@ impl Session {
                 return Step::Restart;
             }
             Some(w::notification::Event::ActivationUpdated(activation)) => {
-                if self
-                    .binding
-                    .as_ref()
-                    .is_some_and(|binding| binding.companion_id == activation.companion_id)
-                {
-                    let ours = activation.client_id.as_deref() == Some(self.options.id.as_str());
-                    if !ours {
-                        // Another device holds this companion now. Old audio and
-                        // old streams must not be reused for it.
-                        self.binding = None;
+                let ours = activation.client_id.as_deref() == Some(self.options.id.as_str());
+                if ours {
+                    if !self.bindings.contains_key(&activation.companion_id) {
+                        self.bindings.insert(
+                            activation.companion_id.clone(),
+                            Binding {
+                                companion_id: activation.companion_id.clone(),
+                            },
+                        );
+                        if self.focused.is_none() {
+                            self.focused = Some(activation.companion_id.clone());
+                        }
+                        self.sync_avatars().await;
+                        if self.bindings.len() == 1 {
+                            restart = true;
+                        }
+                    }
+                } else if self.bindings.remove(&activation.companion_id).is_some() {
+                    if self.speaking_companion.as_deref() == Some(activation.companion_id.as_str())
+                    {
                         self.stop_playback();
+                        self.speaking_companion = None;
+                    }
+                    if self.focused.as_deref() == Some(activation.companion_id.as_str()) {
+                        self.focused = self.bindings.keys().next().cloned();
+                    }
+                    self.sync_avatars().await;
+                    if self.bindings.is_empty() {
                         self.sensor = Sensor::default();
                         restart = true;
                     }
                 }
             }
-            Some(w::notification::Event::Companion(companion))
-                if self.pending.as_deref() == Some(companion.id.as_str()) =>
-            {
-                restart = true;
+            Some(w::notification::Event::Companion(companion)) => {
+                self.companions
+                    .insert(companion.id.clone(), (**companion).clone());
+                if self.bindings.contains_key(&companion.id) {
+                    self.sync_avatars().await;
+                }
+                if self.pending.as_deref() == Some(companion.id.as_str()) {
+                    restart = true;
+                }
             }
             Some(w::notification::Event::Generic(event)) if event.kind == "perception_status" => {
                 if self.eyes_enabled
@@ -1132,23 +1438,95 @@ impl Session {
     async fn command(&mut self, host: &Host, command: Command) -> Step {
         match command {
             Command::Serve(companion_id) => {
-                self.pending = Some(companion_id);
-                self.may_activate = true;
-                Step::Restart
+                let was_empty = self.bindings.is_empty();
+                self.focused = Some(companion_id.clone());
+                if !self.bindings.contains_key(&companion_id) {
+                    match self.activate_one(host, &companion_id).await {
+                        Ok(binding) => {
+                            self.bindings.insert(companion_id.clone(), binding);
+                            self.may_activate = false;
+                            self.sync_avatars().await;
+                            if was_empty {
+                                return Step::Restart;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = self.updates.send(Update::Failed {
+                                context: "コンパニオンの有効化",
+                                message: error.to_string(),
+                            });
+                        }
+                    }
+                }
+                Step::Continue
+            }
+            Command::ActivateCompanion(companion_id) => {
+                let was_empty = self.bindings.is_empty();
+                if !self.bindings.contains_key(&companion_id) {
+                    match self.activate_one(host, &companion_id).await {
+                        Ok(binding) => {
+                            self.bindings.insert(companion_id.clone(), binding);
+                            if self.focused.is_none() {
+                                self.focused = Some(companion_id);
+                            }
+                            self.may_activate = false;
+                            self.sync_avatars().await;
+                            if was_empty {
+                                return Step::Restart;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = self.updates.send(Update::Failed {
+                                context: "コンパニオンの常駐",
+                                message: error.to_string(),
+                            });
+                        }
+                    }
+                }
+                Step::Continue
+            }
+            Command::ReleaseCompanion(companion_id) => {
+                if let Err(error) = self.release_one(host, &companion_id).await {
+                    let _ = self.updates.send(Update::Failed {
+                        context: "コンパニオンの常駐解除",
+                        message: error.to_string(),
+                    });
+                    return Step::Continue;
+                }
+                self.bindings.remove(&companion_id);
+                if self.speaking_companion.as_deref() == Some(companion_id.as_str()) {
+                    self.stop_playback();
+                    self.speaking_companion = None;
+                }
+                if self.focused.as_deref() == Some(companion_id.as_str()) {
+                    self.focused = self.bindings.keys().next().cloned();
+                }
+                self.sync_avatars().await;
+                if self.bindings.is_empty() {
+                    self.sensor = Sensor::default();
+                    Step::Restart
+                } else {
+                    Step::Continue
+                }
             }
             Command::StopPlayback => {
                 self.stop_playback();
                 Step::Continue
             }
-            Command::Refresh => Step::Restart,
+            Command::Refresh => {
+                self.sync_capabilities(host).await;
+                Step::Continue
+            }
             Command::SetEyesEnabled(enabled) => {
                 self.set_eyes_enabled(enabled);
-                Step::Restart
+                self.sync_capabilities(host).await;
+                Step::Continue
             }
             #[cfg(windows)]
             Command::SetComputerUseEnabled(enabled) => {
                 self.set_computer_use_enabled(enabled);
-                Step::Restart
+                self.sync_capabilities(host).await;
+                Step::Continue
             }
             Command::SetMicMuted(muted) => {
                 self.mic_muted = muted;
@@ -1159,6 +1537,57 @@ impl Session {
                     mic_muted: self.mic_muted,
                     output_muted: self.output_muted,
                 });
+                Step::Continue
+            }
+            Command::SetCaptureMode(mode) => {
+                self.capture_mode = mode;
+                self.ptt_active = false;
+                if let Some(microphone) = self.microphone.as_mut() {
+                    microphone.set_capture_mode(mode);
+                }
+                let _ = self.updates.send(Update::CaptureModeChanged {
+                    mode: self.capture_mode,
+                    ptt_active: self.ptt_active,
+                });
+                Step::Continue
+            }
+            Command::PttStart => {
+                if self.capture_mode == audio::CaptureMode::Ptt {
+                    self.ptt_active = true;
+                    if let Some(microphone) = self.microphone.as_mut() {
+                        microphone.ptt_start();
+                    }
+                    let _ = self.updates.send(Update::CaptureModeChanged {
+                        mode: self.capture_mode,
+                        ptt_active: self.ptt_active,
+                    });
+                }
+                Step::Continue
+            }
+            Command::PttCommit => {
+                if self.ptt_active {
+                    self.ptt_active = false;
+                    if let Some(microphone) = self.microphone.as_mut() {
+                        microphone.ptt_commit();
+                    }
+                    let _ = self.updates.send(Update::CaptureModeChanged {
+                        mode: self.capture_mode,
+                        ptt_active: self.ptt_active,
+                    });
+                }
+                Step::Continue
+            }
+            Command::PttCancel => {
+                if self.ptt_active {
+                    self.ptt_active = false;
+                    if let Some(microphone) = self.microphone.as_mut() {
+                        microphone.ptt_cancel();
+                    }
+                    let _ = self.updates.send(Update::CaptureModeChanged {
+                        mode: self.capture_mode,
+                        ptt_active: self.ptt_active,
+                    });
+                }
                 Step::Continue
             }
             Command::SetOutputMuted(muted) => {
@@ -1175,27 +1604,51 @@ impl Session {
             Command::SetAvatarScale(scale) => {
                 let scale = scale.clamp(50., 200.);
                 self.avatar_scale = scale;
-                if let (Some(avatar), Some(model)) =
-                    (self.avatar.as_mut(), self.options.model.as_ref())
-                {
-                    if let Err(error) = avatar.set_scale(&self.options.id, model, scale) {
-                        let _ = self.updates.send(Update::Failed {
-                            context: "アバターのサイズ変更",
-                            message: error,
-                        });
-                    } else {
-                        let _ = self.updates.send(Update::AvatarScaleChanged(scale));
-                        self.devices().await;
-                    }
-                } else {
+                let target_ids: Vec<String> = self
+                    .focused_companion_id()
+                    .map(|id| vec![id.to_owned()])
+                    .unwrap_or_else(|| self.bindings.keys().cloned().collect());
+                if target_ids.is_empty() || self.avatar.is_none() {
                     let _ = self.updates.send(Update::Failed {
                         context: "アバターのサイズ変更",
-                        message: "アバター描画プロセスまたはモデルが設定されていません".into(),
+                        message: "アバター描画プロセスまたはコンパニオンが設定されていません"
+                            .into(),
                     });
+                    return Step::Continue;
+                }
+                let models: Vec<(String, Option<PathBuf>)> = target_ids
+                    .into_iter()
+                    .map(|id| {
+                        let model = self.model_for(&id);
+                        (id, model)
+                    })
+                    .collect();
+                let mut updated = false;
+                let mut last_err = None;
+                if let Some(avatar) = self.avatar.as_mut() {
+                    for (id, model) in models {
+                        if let Some(model) = model {
+                            match avatar.set_scale(&id, &model, scale).await {
+                                Ok(()) => updated = true,
+                                Err(error) => last_err = Some(error),
+                            }
+                        }
+                    }
+                }
+                if let Some(error) = last_err
+                    && !updated
+                {
+                    let _ = self.updates.send(Update::Failed {
+                        context: "アバターのサイズ変更",
+                        message: error,
+                    });
+                } else if updated {
+                    let _ = self.updates.send(Update::AvatarScaleChanged(scale));
+                    self.devices().await;
                 }
                 Step::Continue
             }
-            Command::Speak(text) => {
+            Command::Speak { companion_id, text } => {
                 let host = host.clone();
                 let updates = self.updates.clone();
                 let client_id = self.options.id.clone();
@@ -1207,6 +1660,7 @@ impl Session {
                         .speak(w::SpeakRequest {
                             client_id,
                             text,
+                            companion_id,
                             ..Default::default()
                         })
                         .await
@@ -1221,8 +1675,9 @@ impl Session {
                 Step::Continue
             }
             Command::CenterAvatar => {
-                if let Some(avatar) = self.avatar.as_mut() {
-                    if let Err(error) = avatar.center(&self.options.id) {
+                let target = self.focused_companion_id().map(str::to_owned);
+                if let (Some(avatar), Some(target)) = (self.avatar.as_mut(), target) {
+                    if let Err(error) = avatar.center(&target).await {
                         let _ = self.updates.send(Update::Failed {
                             context: "アバターの中央移動",
                             message: error,
@@ -1240,10 +1695,10 @@ impl Session {
         }
     }
 
-    /// Stops playback now.
+    /// Stops playback now without poisoning future generations.
     fn stop_playback(&mut self) {
         if let Some(player) = self.player.as_mut() {
-            player.flush(u64::MAX);
+            player.stop_current();
         }
     }
 
@@ -1253,28 +1708,57 @@ impl Session {
             return;
         };
         match Avatar::spawn(&program) {
-            Ok(mut avatar) => {
-                if let Some(model) = self.options.model.as_ref() {
-                    let initial_motion = avatar::motion("idle");
-                    if let Err(error) =
-                        avatar.show(&self.options.id, model, initial_motion.as_deref(), true)
-                    {
-                        tracing::warn!("the renderer did not show the model: {error}");
-                    } else if (self.avatar_scale - 100.).abs() > f32::EPSILON
-                        && let Err(error) =
-                            avatar.set_scale(&self.options.id, model, self.avatar_scale)
-                    {
-                        tracing::warn!("the renderer did not apply scale: {error}");
-                    }
-                }
+            Ok(avatar) => {
                 self.avatar = Some(avatar);
-                self.devices().await;
+                self.sync_avatars().await;
             }
             Err(error) => {
                 tracing::warn!("the renderer did not start: {error}");
                 self.set_avatar(Device::Unavailable(error)).await;
             }
         }
+    }
+
+    /// Reconciles all resident companions onto the running renderer with their
+    /// resolved `BodyBinding` models and placements.
+    async fn sync_avatars(&mut self) {
+        if self.avatar.is_none() {
+            return;
+        }
+        let resident: Vec<(String, w::BodyBinding, Option<PathBuf>)> = self
+            .bindings
+            .keys()
+            .map(|id| {
+                let body = self.body_binding_for(id);
+                let model = self.model_for(id);
+                (id.clone(), body, model)
+            })
+            .collect();
+        let idle = avatar::motion("idle");
+        let default_scale = self.avatar_scale;
+        let Some(avatar) = self.avatar.as_mut() else {
+            return;
+        };
+        let shown = avatar.shown_characters();
+        for stale in shown {
+            if !resident.iter().any(|(id, _, _)| id == &stale)
+                && let Err(error) = avatar.remove_character(&stale).await
+            {
+                tracing::warn!(character = %stale, %error, "failed to remove released avatar");
+            }
+        }
+        for (id, body, model) in resident {
+            let Some(model) = model else {
+                continue;
+            };
+            if let Err(error) = avatar
+                .show_with_body(&id, &model, idle.as_deref(), &body, default_scale)
+                .await
+            {
+                tracing::warn!(character = %id, %error, "the renderer did not show the model");
+            }
+        }
+        self.devices().await;
     }
 
     /// Opens the output device once.
@@ -1306,8 +1790,9 @@ impl Session {
             return;
         }
         match Microphone::open() {
-            Ok(microphone) => {
+            Ok(mut microphone) => {
                 microphone.set_muted(self.mic_muted);
+                microphone.set_capture_mode(self.capture_mode);
                 self.microphone = Some(microphone);
                 self.devices().await;
             }
@@ -1326,8 +1811,12 @@ impl Session {
                     utterance = %chunk.utterance_id,
                     generation = chunk.generation_id,
                     rate = chunk.sample_rate,
+                    companion = %chunk.companion_id,
                     "audio output chunk"
                 );
+                if !chunk.companion_id.is_empty() {
+                    self.speaking_companion = Some(chunk.companion_id.clone());
+                }
                 let Some(player) = self.player.as_mut() else {
                     return;
                 };
@@ -1341,9 +1830,25 @@ impl Session {
                 if let Some(player) = self.player.as_mut() {
                     player.flush(flush.flush_generation_id);
                 }
+                if !flush.companion_id.is_empty()
+                    && self.speaking_companion.as_deref() == Some(flush.companion_id.as_str())
+                {
+                    self.speaking_companion = None;
+                }
                 tracing::info!(reason = ?flush.reason, "the host flushed playback");
             }
             w::audio_output_event::Event::Finished(finished) => {
+                if let Some(player) = self.player.as_mut()
+                    && let Err(error) =
+                        player.finish_utterance(&finished.utterance_id, finished.generation_id)
+                {
+                    tracing::warn!("the audio resampler tail was not drained: {error}");
+                }
+                if !finished.companion_id.is_empty()
+                    && self.speaking_companion.as_deref() == Some(finished.companion_id.as_str())
+                {
+                    self.speaking_companion = None;
+                }
                 tracing::debug!(
                     utterance = %finished.utterance_id,
                     sentences = finished.total_sentences,
@@ -1353,20 +1858,70 @@ impl Session {
         }
     }
 
-    /// Returns to idle when the renderer finishes a gesture.
-    fn drain_renderer(&mut self) {
-        let Some(avatar) = self.avatar.as_mut() else {
+    /// Returns to idle when the renderer finishes a gesture and detects dead renderers.
+    async fn drain_renderer(&mut self) {
+        let Some(mut avatar) = self.avatar.take() else {
             return;
         };
         for event in avatar.notifications() {
             tracing::debug!(?event, "renderer");
-            if event["event"] == "finished"
-                && event["character"] == self.options.id.as_str()
-                && let Some(model) = self.options.model.as_deref()
-                && let Err(error) = avatar.return_to_idle(&self.options.id, model)
-            {
-                tracing::warn!(%error, "the renderer could not return to idle");
+            match event {
+                AvatarEvent::Finished { character } => {
+                    if self.bindings.contains_key(&character)
+                        && let Some(model) = self.model_for(&character)
+                        && let Err(error) = avatar.return_to_idle(&character, &model).await
+                    {
+                        tracing::warn!(%character, %error, "the renderer could not return to idle");
+                    }
+                }
+                AvatarEvent::State {
+                    character,
+                    status: AvatarStatus::Error,
+                    error,
+                } => {
+                    tracing::warn!(%character, ?error, "the renderer reported a model error");
+                }
+                AvatarEvent::Click { character } => {
+                    const DEBOUNCE: Duration = Duration::from_millis(500);
+                    let now = std::time::Instant::now();
+                    let allow = self
+                        .last_avatar_interaction
+                        .get(&character)
+                        .is_none_or(|prev| now.duration_since(*prev) >= DEBOUNCE);
+                    if allow && self.bindings.contains_key(&character) {
+                        self.last_avatar_interaction.insert(character.clone(), now);
+                        let host = self.connection.read().ok().and_then(|guard| guard.clone());
+                        if let Some(host) = host {
+                            let event = w::PerceptionEvent {
+                                client_id: self.options.id.clone(),
+                                companion_id: Some(character.clone()),
+                                event: Some(w::perception_event::Event::AvatarInteraction(
+                                    Box::new(w::AvatarInteraction {
+                                        kind: w::AvatarInteractionKind::Click.into(),
+                                        character_id: character,
+                                        region: "body".into(),
+                                        ..Default::default()
+                                    }),
+                                )),
+                                ..Default::default()
+                            };
+                            tokio::spawn(async move {
+                                let _ = host.client.report_perception(event).await;
+                            });
+                        }
+                    }
+                }
+                AvatarEvent::State { .. } => {}
             }
+        }
+        if avatar.is_healthy() {
+            self.avatar = Some(avatar);
+        } else {
+            avatar.shutdown();
+            self.set_avatar(Device::Unavailable(
+                "アバター描画プロセスが応答を停止しました".into(),
+            ))
+            .await;
         }
     }
 
@@ -1428,7 +1983,7 @@ impl Session {
     ) {
         use w::perception_event::Event;
         if !self.eyes_enabled
-            || self.binding.is_none()
+            || self.bindings.is_empty()
             || self.subscription.is_empty()
             || !perception::supported()
         {
@@ -1569,11 +2124,17 @@ impl Session {
 
     fn avatar_state(&self) -> Device {
         match self.avatar.as_ref() {
-            Some(avatar) => Device::Ready(
-                avatar
-                    .describe(&self.options.id)
-                    .unwrap_or_else(|| "描画中".into()),
-            ),
+            Some(avatar) => {
+                let mut labels: Vec<String> = self
+                    .bindings
+                    .keys()
+                    .filter_map(|id| avatar.describe(id))
+                    .collect();
+                if labels.is_empty() {
+                    labels.push("描画中".into());
+                }
+                Device::Ready(labels.join(", "))
+            }
             None if self.options.renderer.is_some() => Device::Off,
             None => Device::Unavailable("描画プロセスが設定されていません".into()),
         }
@@ -1693,6 +2254,7 @@ async fn retry_wait(deadline: Option<tokio::time::Instant>) {
 struct CaptureTick {
     chunks: Vec<w::AudioInputChunk>,
     state: CaptureState,
+    barge_in: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1704,58 +2266,77 @@ struct CaptureState {
 /// Takes ordered PCM chunks and end markers from the microphone.
 fn capture_tick(
     microphone: &mut Option<Microphone>,
-    binding: &Option<Binding>,
+    active: bool,
     client_id: &str,
     speaking: bool,
+    far_end_level: f32,
 ) -> CaptureTick {
     let Some(microphone) = microphone.as_mut() else {
         return CaptureTick {
             chunks: Vec::new(),
             state: CaptureState::default(),
+            barge_in: false,
         };
     };
     // The level is read before the gate so the probe shows the microphone even
     // while the gate is closed; that is the difference the test screen exists to
     // make visible.
     let level = microphone.level();
-    if binding.is_none() {
+    if !active {
         return CaptureTick {
             chunks: Vec::new(),
             state: CaptureState { level, open: false },
+            barge_in: false,
         };
     }
-    let output = microphone.take(speaking);
+    let output = microphone.take(speaking, far_end_level);
     let state = CaptureState {
         level,
         open: output.open,
     };
-    let chunks = output
+    let barge_in = output.barge_in;
+    let mut chunks: Vec<w::AudioInputChunk> = output
         .chunks
         .into_iter()
-        .map(|pcm_data| w::AudioInputChunk {
+        .enumerate()
+        .map(|(index, pcm_data)| w::AudioInputChunk {
             client_id: client_id.to_owned(),
             pcm_data,
             sample_rate: audio::WIRE_RATE,
+            is_companion_speaking: speaking && !barge_in,
+            barge_in: barge_in && index == 0,
             ..Default::default()
         })
         .collect();
-    CaptureTick { chunks, state }
+    if barge_in && chunks.is_empty() {
+        chunks.push(w::AudioInputChunk {
+            client_id: client_id.to_owned(),
+            sample_rate: audio::WIRE_RATE,
+            barge_in: true,
+            ..Default::default()
+        });
+    }
+    CaptureTick {
+        chunks,
+        state,
+        barge_in,
+    }
 }
 
 /// What one operation claims about the client it was sent to.
 struct Claim<'a> {
     client_id: &'a str,
     subscription_id: &'a str,
+    work_id: Option<&'a str>,
 }
 
 /// Whether this client may execute the operation, or why it must not.
 ///
-/// An operation is executable only when both parts of the claim still name this
-/// client's own identity and its current device stream, and this client is the
-/// active device for some companion. A client that executed a stale claim would
-/// move the wrong character, or report a result the host attributes to another
-/// device's stream. The tests below enumerate every combination of the fields,
-/// so this decision is checked in full rather than sampled.
+/// An operation executes when it names this client's own identity and its
+/// current device stream, and either belongs to a work session bound to this
+/// client or this client is the active device for a companion. The tests below
+/// enumerate every combination of the fields, so this decision is checked in
+/// full rather than sampled.
 fn admits(
     our_id: &str,
     our_subscription: &str,
@@ -1770,6 +2351,9 @@ fn admits(
     }
     if !our_subscription.is_empty() && claim.subscription_id != our_subscription {
         return Err("this operation belongs to an older device stream".into());
+    }
+    if claim.work_id.is_some_and(|work_id| !work_id.is_empty()) {
+        return Ok(());
     }
     match binding {
         Some(_) => Ok(()),
@@ -1788,8 +2372,8 @@ mod tests {
     }
 
     /// Every case the guard can distinguish: our own identity, our own
-    /// subscription, and whether we hold the companion, each against every
-    /// operation claim the host could send.
+    /// subscription, whether we hold the companion, and whether the operation
+    /// carries a work session id, each against every operation claim.
     #[test]
     fn only_the_claim_naming_the_current_binding_executes() {
         let our_ids = ["desktop", ""];
@@ -1797,6 +2381,7 @@ mod tests {
         let claim_ids = ["desktop", "other", ""];
         let claim_subscriptions = ["sub-1", "sub-2", ""];
         let held_bindings = [false, true];
+        let work_ids = [None, Some(""), Some("work-1")];
 
         let mut cases = 0usize;
         for our_id in our_ids {
@@ -1804,31 +2389,35 @@ mod tests {
                 for claim_id in claim_ids {
                     for claim_subscription in claim_subscriptions {
                         for holds in held_bindings {
-                            let binding = holds.then(held);
-                            let claim = Claim {
-                                client_id: claim_id,
-                                subscription_id: claim_subscription,
-                            };
-                            // Stated independently of `admits`.
-                            let expected = claim_id == our_id
-                                && (our_subscription.is_empty()
-                                    || claim_subscription == our_subscription)
-                                && holds;
-                            let allowed =
-                                admits(our_id, our_subscription, binding.as_ref(), &claim);
-                            assert_eq!(
-                                allowed.is_ok(),
-                                expected,
-                                "id {our_id:?}/{claim_id:?} subscription {our_subscription:?}/\
-{claim_subscription:?} holds {holds:?}: {allowed:?}"
-                            );
-                            cases += 1;
+                            for work_id in work_ids {
+                                let binding = holds.then(held);
+                                let claim = Claim {
+                                    client_id: claim_id,
+                                    subscription_id: claim_subscription,
+                                    work_id,
+                                };
+                                // Stated independently of `admits`.
+                                let has_work = work_id.is_some_and(|id| !id.is_empty());
+                                let expected = claim_id == our_id
+                                    && (our_subscription.is_empty()
+                                        || claim_subscription == our_subscription)
+                                    && (holds || has_work);
+                                let allowed =
+                                    admits(our_id, our_subscription, binding.as_ref(), &claim);
+                                assert_eq!(
+                                    allowed.is_ok(),
+                                    expected,
+                                    "id {our_id:?}/{claim_id:?} subscription {our_subscription:?}/\
+{claim_subscription:?} holds {holds:?} work_id {work_id:?}: {allowed:?}"
+                                );
+                                cases += 1;
+                            }
                         }
                     }
                 }
             }
         }
-        assert_eq!(cases, 2 * 2 * 3 * 3 * 2, "the domain changed size");
+        assert_eq!(cases, 2 * 2 * 3 * 3 * 2 * 3, "the domain changed size");
     }
 
     #[test]
@@ -1837,6 +2426,7 @@ mod tests {
         let stale = Claim {
             client_id: "desktop",
             subscription_id: "sub-1",
+            work_id: None,
         };
         let refused = admits("desktop", "sub-2", Some(&binding), &stale).unwrap_err();
         assert!(refused.contains("older device stream"), "{refused}");
@@ -1844,12 +2434,20 @@ mod tests {
         let elsewhere = Claim {
             client_id: "desk-1",
             subscription_id: "sub-1",
+            work_id: None,
         };
         let refused = admits("desktop", "sub-1", Some(&binding), &elsewhere).unwrap_err();
         assert!(refused.contains("desk-1"), "{refused}");
 
         let unbound = admits("desktop", "sub-1", None, &stale).unwrap_err();
         assert!(unbound.contains("not the active device"), "{unbound}");
+
+        let work_op = Claim {
+            client_id: "desktop",
+            subscription_id: "sub-1",
+            work_id: Some("w1"),
+        };
+        assert!(admits("desktop", "sub-1", None, &work_op).is_ok());
     }
     #[test]
     fn a_motion_plan_carries_the_face_with_the_motion() {
@@ -1883,5 +2481,20 @@ mod tests {
         assert!(error.contains("not a declared motion preset"), "{error}");
         let error = MotionPlan::parse(&serde_json::json!({})).unwrap_err();
         assert!(error.contains("requires a `motion`"), "{error}");
+    }
+
+    #[test]
+    fn b15_persistent_client_id_is_unique_and_stable_across_restarts() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let path_a = dir_a.path().join("desktop-client-id");
+        let path_b = dir_b.path().join("desktop-client-id");
+
+        let id_a1 = load_or_create_client_id(&path_a);
+        let id_a2 = load_or_create_client_id(&path_a);
+        let id_b = load_or_create_client_id(&path_b);
+        assert_eq!(id_a1, id_a2);
+        assert_ne!(id_a1, id_b);
+        assert!(id_a1.starts_with("desktop-"));
     }
 }

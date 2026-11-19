@@ -66,7 +66,7 @@ struct AwaitingTail;
 #[derive(Component)]
 struct PendingTail {
     turn: Entity,
-    task: Option<AbortOnDropHandle<String>>,
+    task: Option<AbortOnDropHandle<crate::host::db::Result<String>>>,
 }
 
 fn collect_tails(mut commands: Commands, mut pending: Query<(Entity, &HoldOf, &mut PendingTail)>) {
@@ -78,11 +78,22 @@ fn collect_tails(mut commands: Commands, mut pending: Query<(Entity, &HoldOf, &m
         {
             continue;
         }
-        let tail = pending
-            .task
-            .take()
-            .and_then(background::take)
-            .unwrap_or_else(opening);
+        let outcome = pending.task.take().and_then(background::take);
+        let tail = match outcome {
+            Some(Ok(tail)) => tail,
+            Some(Err(error)) => {
+                if error.is_storage() {
+                    let message = error.to_string();
+                    commands.queue(move |world: &mut World| {
+                        crate::host::fail(world, message);
+                    });
+                } else {
+                    tracing::warn!(%error, "dynamic tail could not be rendered");
+                }
+                opening()
+            }
+            None => opening(),
+        };
         commands.entity(pending.turn).try_insert(DynamicTail(tail));
         commands.entity(of.0).try_remove::<AwaitingTail>();
         commands.entity(hold).despawn();
@@ -129,16 +140,8 @@ fn inject_tail(
             let Some(view) = agent_view(&agents, &conversations, agent) else {
                 continue;
             };
-            let eye_only = eye_report.is_some()
-                && !conversation.is_some_and(|conversation| {
-                    conversation
-                        .asked(turn.start)
-                        .any(|entry| entry.is_users_own())
-                });
-            let query = view
-                .conversation
-                .filter(|_| !eye_only)
-                .and_then(|conversation| recall_query(conversation));
+            let cause = TurnCause::classify(view.conversation, turn.start, eye_report.is_some());
+            let query = cause.recall_query().map(str::to_owned);
             let empty_perception = Perception::default();
             let perception = if eye_report.is_some() {
                 &empty_perception
@@ -176,14 +179,27 @@ fn inject_tail(
                 ));
                 continue;
             }
-            let tail = render_tail(
+            let tail = match render_tail(
                 &store,
                 perception,
                 &view.companion,
                 query.as_deref(),
                 &[],
                 turn_id,
-            );
+            ) {
+                Ok(tail) => tail,
+                Err(error) => {
+                    if error.is_storage() {
+                        let message = error.to_string();
+                        commands.queue(move |world: &mut World| {
+                            crate::host::fail(world, message);
+                        });
+                    } else {
+                        tracing::warn!(%error, "dynamic tail could not be rendered");
+                    }
+                    opening()
+                }
+            };
             commands.entity(of.0).insert(DynamicTail(tail.clone()));
             tail
         };
@@ -245,6 +261,155 @@ fn opening() -> String {
 /// ordinary turn would get. `turn` is the companion turn the automatic recall is
 /// recorded under; a work run or a call that is not a turn passes `None` and
 /// records nothing.
+/// What triggered the current turn, derived exclusively from `conversation.asked(turn_start)`
+/// so non-user turns (schedules, work reports, eye reports) never recycle a stale user message
+/// from an earlier turn (`B13`, `R09`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TurnCause {
+    UserMessage(String),
+    EyeReportOnly,
+    WorkReport(String),
+    Scheduled(String),
+    Other(Option<String>),
+}
+
+impl TurnCause {
+    fn classify(
+        conversation: Option<&Conversation>,
+        turn_start: MessageId,
+        has_eye_report: bool,
+    ) -> Self {
+        let Some(conversation) = conversation else {
+            return if has_eye_report {
+                Self::EyeReportOnly
+            } else {
+                Self::Other(None)
+            };
+        };
+        let asked: Vec<_> = conversation.asked(turn_start).collect();
+        if let Some(text) = asked
+            .iter()
+            .rev()
+            .find(|entry| entry.is_users_own())
+            .and_then(agent::entry_text)
+        {
+            return Self::UserMessage(text);
+        }
+        if has_eye_report {
+            return Self::EyeReportOnly;
+        }
+        for entry in asked.iter().rev() {
+            let Some(text) = agent::entry_text(entry) else {
+                continue;
+            };
+            match entry.author.map(|author| &author.kind) {
+                Some(rig_core::conversation::AuthorKind::Agent) => {
+                    return Self::WorkReport(text);
+                }
+                Some(rig_core::conversation::AuthorKind::Plugin(_))
+                    if text.starts_with("[スケジュール実行:") =>
+                {
+                    return Self::Scheduled(text);
+                }
+                _ => return Self::Other(Some(text)),
+            }
+        }
+        Self::Other(None)
+    }
+
+    fn recall_query(&self) -> Option<&str> {
+        match self {
+            Self::UserMessage(text) | Self::WorkReport(text) | Self::Scheduled(text) => {
+                Some(text.as_str())
+            }
+            Self::EyeReportOnly => None,
+            Self::Other(text) => text.as_deref(),
+        }
+    }
+}
+
+const TAIL_BUDGET_CHARS: usize = 6_000;
+const TAIL_CLOSING: &str = "---";
+
+/// Assembles the dynamic context tail within a fixed character budget and tracks
+/// exactly which recalled memory IDs survived budget fitting (`B14`, `R09`).
+struct ContextBuilder {
+    budget_chars: usize,
+    used_chars: usize,
+    buf: String,
+    included_recalled_ids: Vec<String>,
+}
+
+impl ContextBuilder {
+    fn new(total_budget_chars: usize) -> Self {
+        let closing_chars = TAIL_CLOSING.chars().count();
+        Self {
+            budget_chars: total_budget_chars.saturating_sub(closing_chars),
+            used_chars: 0,
+            buf: String::new(),
+            included_recalled_ids: Vec::new(),
+        }
+    }
+
+    fn remaining_chars(&self) -> usize {
+        self.budget_chars.saturating_sub(self.used_chars)
+    }
+
+    /// Appends priority context (clock, profile, perception, state, pinned),
+    /// clipping cleanly to the remaining budget if needed.
+    fn push_priority(&mut self, text: &str) {
+        let rem = self.remaining_chars();
+        if rem == 0 {
+            return;
+        }
+        let count = text.chars().count();
+        if count <= rem {
+            self.buf.push_str(text);
+            self.used_chars += count;
+        } else {
+            let clipped: String = text.chars().take(rem).collect();
+            self.buf.push_str(&clipped);
+            self.used_chars = self.budget_chars;
+        }
+    }
+
+    /// Appends recalled memories one full line at a time, recording only IDs
+    /// whose entire bullet fit within the remaining budget.
+    fn push_recalled(&mut self, items: &[super::memory::Scored]) {
+        const HEADER: &str = "今の話に関係する記憶:\n";
+        if items.is_empty() {
+            return;
+        }
+        let header_chars = HEADER.chars().count();
+        let mut header_written = false;
+        for item in items {
+            let line = format!("- {}\n", item.memory.content);
+            let line_chars = line.chars().count();
+            let needed = if header_written {
+                line_chars
+            } else {
+                header_chars + line_chars
+            };
+            if needed > self.remaining_chars() {
+                break;
+            }
+            if !header_written {
+                self.buf.push_str(HEADER);
+                self.used_chars += header_chars;
+                header_written = true;
+            }
+            self.buf.push_str(&line);
+            self.used_chars += line_chars;
+            self.included_recalled_ids.push(item.memory.id.clone());
+        }
+    }
+
+    fn finish(mut self) -> (String, Vec<String>) {
+        self.buf.push_str(TAIL_CLOSING);
+        (self.buf, self.included_recalled_ids)
+    }
+}
+
 pub(crate) async fn dynamic_tail(
     store: &Store,
     perception: &Perception,
@@ -253,14 +418,41 @@ pub(crate) async fn dynamic_tail(
     embeddings: &Embeddings,
     credentials: Option<&Credentials>,
     turn: Option<u64>,
-) -> String {
+) -> crate::host::db::Result<String> {
     let semantic = match query {
         Some(query) => {
             embedding::semantic_ids(store, embeddings, credentials, companion, query).await
         }
         None => Vec::new(),
     };
-    render_tail(store, perception, companion, query, &semantic, turn)
+    let providers = embeddings.providers();
+    let hook_notes = if !providers
+        .with_extension(ene_plugin::Extension::Hook)
+        .is_empty()
+    {
+        let outcome = crate::host::providers::extensions::run_hooks(
+            &providers,
+            store,
+            ene_plugin::HookEvent::PreTurn {
+                companion_id: companion.to_owned(),
+                query: query.map(str::to_owned),
+            },
+        )
+        .await;
+        outcome.injected_context
+    } else {
+        Vec::new()
+    };
+    render_tail_full(
+        store,
+        perception,
+        companion,
+        query,
+        &semantic,
+        &hook_notes,
+        turn,
+        TAIL_BUDGET_CHARS,
+    )
 }
 
 fn render_tail(
@@ -270,72 +462,106 @@ fn render_tail(
     query: Option<&str>,
     semantic: &[String],
     turn: Option<u64>,
-) -> String {
-    let mut tail = opening();
-    let profile = crate::host::db::memories::profile_lines(store);
+) -> crate::host::db::Result<String> {
+    render_tail_with_budget(
+        store,
+        perception,
+        companion,
+        query,
+        semantic,
+        turn,
+        TAIL_BUDGET_CHARS,
+    )
+}
+
+fn render_tail_with_budget(
+    store: &Store,
+    perception: &Perception,
+    companion: &str,
+    query: Option<&str>,
+    semantic: &[String],
+    turn: Option<u64>,
+    budget_chars: usize,
+) -> crate::host::db::Result<String> {
+    render_tail_full(
+        store,
+        perception,
+        companion,
+        query,
+        semantic,
+        &[],
+        turn,
+        budget_chars,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_tail_full(
+    store: &Store,
+    perception: &Perception,
+    companion: &str,
+    query: Option<&str>,
+    semantic: &[String],
+    hook_notes: &[String],
+    turn: Option<u64>,
+    budget_chars: usize,
+) -> crate::host::db::Result<String> {
+    let mut builder = ContextBuilder::new(budget_chars);
+    builder.push_priority(&opening());
+    let profile = crate::host::db::memories::profile_lines(store)?;
     if !profile.is_empty() {
-        tail.push_str("ユーザー情報:\n");
+        builder.push_priority("ユーザー情報:\n");
         for line in profile {
-            tail.push_str("- ");
-            tail.push_str(&line);
-            tail.push('\n');
+            builder.push_priority(&format!("- {line}\n"));
         }
     }
     // Perception and the clock lead the tail so truncation cannot drop them:
     // the model must always know the current environment.
     if let Some(event) = perception.events.get(companion) {
-        tail.push_str(&format!("知覚: {}\n", event.summary));
+        builder.push_priority(&format!("知覚: {}\n", event.summary));
     }
-    if let Ok(Some(state)) = store.companion(companion) {
-        tail.push_str(&format!(
+    if !hook_notes.is_empty() {
+        builder.push_priority("プラグイン補足:\n");
+        for note in hook_notes {
+            builder.push_priority(&format!("- {note}\n"));
+        }
+    }
+    if let Some(state) = store.companion(companion)? {
+        builder.push_priority(&format!(
             "現在の心: 感情={} 関係={} 傾向={} 懸念={}\n",
             state.state.emotion.json,
             state.state.relationships.json,
             state.state.tendencies.json,
             state.state.concerns.json
         ));
-        if let Ok(pinned) = store.pinned(companion)
-            && !pinned.is_empty()
-        {
-            tail.push_str("常に覚えていること:\n");
+        let pinned = store.pinned(companion)?;
+        if !pinned.is_empty() {
+            builder.push_priority("常に覚えていること:\n");
             for memory in pinned {
-                tail.push_str("- ");
-                tail.push_str(&memory.content);
-                tail.push('\n');
+                builder.push_priority(&format!("- {}\n", memory.content));
             }
         }
-        if let Some(query) = query
-            && let Ok(recalled) = store.recall_hybrid(
+        if let Some(query) = query {
+            let recalled = store.recall_hybrid(
                 companion,
                 query,
                 super::memory::RecallMode::Auto,
                 semantic,
                 6,
-            )
-            && !recalled.items.is_empty()
-        {
-            if let Some(turn) = turn {
-                let ids: Vec<String> = recalled
-                    .items
-                    .iter()
-                    .map(|item| item.memory.id.clone())
-                    .collect();
-                // Persisted, so the citation guard still knows the verified
-                // injection set after a restart (docs/design/mind.md §4.2).
-                if let Err(error) = store.record_injections(companion, &turn.to_string(), &ids) {
-                    tracing::warn!(%error, companion = %companion, "injected memories were not recorded");
-                }
-            }
-            tail.push_str("今の話に関係する記憶:\n");
-            for memory in recalled.items {
-                tail.push_str("- ");
-                tail.push_str(&memory.memory.content);
-                tail.push('\n');
-            }
+            )?;
+            builder.push_recalled(&recalled.items);
         }
     }
-    tail.push_str("---");
-    crate::host::db::truncate(&tail, 6_000)
+    let (tail, included_ids) = builder.finish();
+    if let Some(turn) = turn
+        && !included_ids.is_empty()
+    {
+        // Persisted ONLY for recalled memories that actually survived budget
+        // fitting, so the citation guard never trusts a truncated memory
+        // (docs/design/mind.md §4.2, B14).
+        store.record_injections(companion, &turn.to_string(), &included_ids)?;
+    }
+    Ok(tail)
 }
 
 struct AgentView<'a> {
@@ -363,6 +589,8 @@ fn agent_view<'a>(
 }
 
 /// The text automatic recall searches with: the newest message the user typed.
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn recall_query(conversation: &rig_core::conversation::Conversation) -> Option<String> {
     conversation
         .entries()
@@ -692,5 +920,200 @@ mod tests {
                 "work agent turns must not pollute companion memory_injections"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn b13_turn_cause_uses_schedule_instruction_instead_of_stale_user_chat() {
+        use crate::host::db::memories::MemoryRecord;
+        use crate::host::tests::{Harness, bound, text_turn};
+
+        let model = MockCompletionModel::from_stream_turns([
+            text_turn("紅茶だね"),
+            text_turn("会議の時間だね"),
+        ]);
+        let probe = model.clone();
+        let mut harness = Harness::new([]);
+        harness
+            .app
+            .insert_resource(ModelFactory(Arc::new(move |_, _, _, _, _, _| {
+                Ok(bound(&model))
+            })));
+        let store = harness.store();
+        store
+            .insert_memory(MemoryRecord {
+                id: "m-tea".into(),
+                scope: harness.companion.clone(),
+                content: "ユーザーは アールグレイ紅茶 が大好き".into(),
+                importance: 8,
+                occurred_at: None,
+                source_context: serde_json::json!({}),
+            })
+            .unwrap();
+        store
+            .insert_memory(MemoryRecord {
+                id: "m-standup".into(),
+                scope: harness.companion.clone(),
+                content: "月曜の 定例朝会 は議事録係を毎回交代する".into(),
+                importance: 8,
+                occurred_at: None,
+                source_context: serde_json::json!({}),
+            })
+            .unwrap();
+
+        let head = harness.companion_agent();
+        harness
+            .accept("k-tea", "アールグレイ紅茶 の話しよう")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                harness.tick();
+                if probe.requests().len() == 1
+                    && harness
+                        .conversation(head)
+                        .entries()
+                        .any(|e| agent::entry_text(&e).is_some_and(|t| t.contains("紅茶だね")))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first user turn settles");
+
+        // Now deliver a scheduled turn (NOT a user message): recall must match
+        // the schedule instruction ("定例朝会"), NOT the stale user chat ("アールグレイ紅茶").
+        assert!(agent::deliver(
+            harness.app.world_mut(),
+            head,
+            &harness.companion,
+            "[スケジュール実行: 朝会] 定例朝会 の準備をして".into(),
+            DeliveryMode::Queue,
+            Author::plugin("ene-host"),
+        ));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                harness.tick();
+                if probe.requests().len() == 2
+                    && harness.conversation(head).entries().any(|e| {
+                        agent::entry_text(&e).is_some_and(|t| t.contains("会議の時間だね"))
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("scheduled turn settles");
+
+        let second_req = format!("{:?}", probe.requests()[1]);
+        assert!(
+            second_req.contains("月曜の 定例朝会 は議事録係を毎回交代する"),
+            "scheduled turn must recall memory for its own instruction: {second_req}"
+        );
+        assert!(
+            !second_req.contains("ユーザーは アールグレイ紅茶 が大好き"),
+            "scheduled turn must not recycle stale user query from earlier turn: {second_req}"
+        );
+    }
+
+    #[test]
+    fn b14_context_builder_records_only_recalled_memories_that_fit_budget() {
+        use crate::host::db::memories::MemoryRecord;
+        use crate::host::tests::Harness;
+
+        let harness = Harness::new([]);
+        let store = harness.store();
+        let first_content = format!("予算テスト記憶A {}", "あ".repeat(90));
+        let second_content = format!("予算テスト記憶B {}", "い".repeat(300));
+        store
+            .insert_memory(MemoryRecord {
+                id: "m-fit".into(),
+                scope: harness.companion.clone(),
+                content: first_content.clone(),
+                importance: 10,
+                occurred_at: None,
+                source_context: serde_json::json!({}),
+            })
+            .unwrap();
+        store
+            .insert_memory(MemoryRecord {
+                id: "m-dropped".into(),
+                scope: harness.companion.clone(),
+                content: second_content.clone(),
+                importance: 5,
+                occurred_at: None,
+                source_context: serde_json::json!({}),
+            })
+            .unwrap();
+
+        // Measure base priority tail without recall, then set a tight budget
+        // that fits the header + `m-fit` cleanly while dropping `m-dropped`.
+        let base = render_tail_with_budget(
+            &store,
+            &Perception::default(),
+            &harness.companion,
+            None,
+            &[],
+            None,
+            TAIL_BUDGET_CHARS,
+        )
+        .unwrap();
+        let budget = base.chars().count()
+            + "今の話に関係する記憶:\n".chars().count()
+            + first_content.chars().count()
+            + 20;
+
+        let tail = render_tail_with_budget(
+            &store,
+            &Perception::default(),
+            &harness.companion,
+            Some("予算テスト記憶"),
+            &[],
+            Some(42),
+            budget,
+        )
+        .unwrap();
+        assert!(tail.chars().count() <= budget);
+        assert!(tail.contains(&first_content), "first recalled memory fits");
+        assert!(
+            !tail.contains(&second_content),
+            "second recalled memory must be omitted when over budget"
+        );
+        let recorded = store
+            .injected_between(&harness.companion, None, u64::MAX)
+            .unwrap();
+        assert_eq!(
+            recorded,
+            vec!["m-fit".to_owned()],
+            "citation guard injection log must contain ONLY memories that survived budget fitting"
+        );
+    }
+
+    #[test]
+    fn q05_storage_fault_in_tail_marks_host_failed_instead_of_empty_state() {
+        use crate::host::tests::{Harness, text_turn};
+
+        let mut harness = Harness::new([text_turn("ok")]);
+        // Drop `user_profiles` to simulate a SQLite storage fault during recall.
+        harness
+            .store()
+            .conn()
+            .unwrap()
+            .execute("DROP TABLE user_profiles", [])
+            .unwrap();
+        let err = render_tail(
+            &harness.store(),
+            &Perception::default(),
+            &harness.companion,
+            Some("query"),
+            &[],
+            Some(1),
+        )
+        .unwrap_err();
+        assert!(err.is_storage(), "expected storage error, got {err:?}");
+        let _ = harness.accept("k-fault", "こんにちは");
+        harness.run_until(|world| world.resource::<crate::host::HostState>().failed.is_some());
     }
 }

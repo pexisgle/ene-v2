@@ -56,6 +56,7 @@ impl SettingsStudio {
             eyes_status,
             avatar_scale,
             rules,
+            policy_texts,
             client_caps,
             tray_resident,
             pod_visible,
@@ -73,6 +74,7 @@ impl SettingsStudio {
                 .snapshot()
                 .map(|s| s.policy_rules.clone())
                 .unwrap_or_default();
+            let policy_texts = hub.model.policy_texts().to_vec();
             (
                 hub.live(),
                 hub.model.link.clone(),
@@ -85,6 +87,7 @@ impl SettingsStudio {
                 hub.model.eyes_status.clone(),
                 hub.model.avatar_scale,
                 rules,
+                policy_texts,
                 caps,
                 hub.is_tray_resident(),
                 hub.is_pod_visible(),
@@ -857,6 +860,436 @@ impl SettingsStudio {
                 .into_any_element()
         });
 
+        let policy_text_heading = div()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(
+                div()
+                    .text_size(px(18.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme.ink)
+                    .child("自由文ポリシー（AI 補助判定の基準）"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.ink_muted)
+                    .child("構造化ルールで未決の操作を Decision モデルが評価する際の参考基準（各 500 文字以内）です。強制的な禁止や毎回確認には上の構造化ルールを使ってください。"),
+            );
+
+        let mut text_items: Vec<AnyElement> = Vec::new();
+        for (index, item) in policy_texts.iter().enumerate() {
+            let editing = self.editing_policy_text_id.as_deref() == Some(item.id.as_str());
+            let armed = self.delete_armed_policy_text.as_deref() == Some(item.id.as_str());
+            if editing {
+                let edit_d = self.description_draft(
+                    cx,
+                    format!("policy-text:edit:{}", item.id),
+                    "例: プロジェクト外への書き込みは必ず確認する",
+                    Some(&item.text),
+                    theme,
+                );
+                let edit_val = edit_d.read(cx).text().trim().to_owned();
+                let char_count = edit_val.chars().count();
+                let valid = (1..=500).contains(&char_count);
+                let studio_cancel = cx.entity();
+                let studio_save = cx.entity();
+                let hub_save = self.hub.clone();
+                let save_id = item.id.clone();
+                text_items.push(
+                    div()
+                        .when(index > 0, |this| {
+                            this.border_t_1().border_color(theme.border)
+                        })
+                        .px(px(16.))
+                        .py(px(12.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .child(edit_d)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(if char_count > 500 {
+                                            theme.danger_fg
+                                        } else {
+                                            theme.ink_muted
+                                        })
+                                        .child(format!("{char_count} / 500 文字")),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .gap(px(6.))
+                                        .child(pill_button(
+                                            SharedString::from(format!(
+                                                "poltxt-edit-cancel-{}",
+                                                item.id
+                                            )),
+                                            "キャンセル",
+                                            None,
+                                            Tone::Ghost,
+                                            true,
+                                            theme,
+                                            move |_, cx| {
+                                                studio_cancel.update(cx, |this, cx| {
+                                                    this.editing_policy_text_id = None;
+                                                    cx.notify();
+                                                });
+                                            },
+                                        ))
+                                        .child(pill_button(
+                                            SharedString::from(format!(
+                                                "poltxt-edit-save-{}",
+                                                item.id
+                                            )),
+                                            "保存",
+                                            Some(Icon::Check),
+                                            Tone::Primary,
+                                            live && valid,
+                                            theme,
+                                            move |_, cx| {
+                                                let val = edit_val.clone();
+                                                let id = save_id.clone();
+                                                hub_save.update(cx, |hub, cx| {
+                                                    hub.upsert_policy_text(Some(id), val, cx);
+                                                });
+                                                studio_save.update(cx, |this, cx| {
+                                                    this.editing_policy_text_id = None;
+                                                    cx.notify();
+                                                });
+                                            },
+                                        )),
+                                ),
+                        )
+                        .into_any_element(),
+                );
+                continue;
+            }
+            let studio_edit = cx.entity();
+            let studio_arm = cx.entity();
+            let studio_cancel = cx.entity();
+            let hub_remove = self.hub.clone();
+            let edit_id = item.id.clone();
+            let arm_id = item.id.clone();
+            let del_id = item.id.clone();
+            let trailing = if armed {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(pill_button(
+                        SharedString::from(format!("poltxt-cancel-{}", item.id)),
+                        "キャンセル",
+                        None,
+                        Tone::Ghost,
+                        true,
+                        theme,
+                        move |_, cx| {
+                            studio_cancel.update(cx, |this, cx| {
+                                this.delete_armed_policy_text = None;
+                                cx.notify();
+                            });
+                        },
+                    ))
+                    .child(pill_button(
+                        SharedString::from(format!("poltxt-exec-{}", item.id)),
+                        "確定",
+                        Some(Icon::Trash),
+                        Tone::Danger,
+                        live,
+                        theme,
+                        move |_, cx| {
+                            hub_remove
+                                .update(cx, |hub, cx| hub.remove_policy_text(del_id.clone(), cx));
+                        },
+                    ))
+                    .into_any_element()
+            } else {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(pill_button(
+                        SharedString::from(format!("poltxt-edit-{}", item.id)),
+                        "編集",
+                        None,
+                        Tone::Ghost,
+                        live,
+                        theme,
+                        move |_, cx| {
+                            studio_edit.update(cx, |this, cx| {
+                                this.editing_policy_text_id = Some(edit_id.clone());
+                                this.delete_armed_policy_text = None;
+                                cx.notify();
+                            });
+                        },
+                    ))
+                    .child(pill_button(
+                        SharedString::from(format!("poltxt-arm-{}", item.id)),
+                        "削除",
+                        Some(Icon::Trash),
+                        Tone::Danger,
+                        live,
+                        theme,
+                        move |_, cx| {
+                            studio_arm.update(cx, |this, cx| {
+                                this.delete_armed_policy_text = Some(arm_id.clone());
+                                cx.notify();
+                            });
+                        },
+                    ))
+                    .into_any_element()
+            };
+            text_items.push(
+                div()
+                    .when(index > 0, |this| {
+                        this.border_t_1().border_color(theme.border)
+                    })
+                    .px(px(16.))
+                    .py(px(11.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(theme.ink)
+                            .child(item.text.clone()),
+                    )
+                    .child(trailing)
+                    .into_any_element(),
+            );
+        }
+
+        let policy_text_card = div()
+            .w_full()
+            .bg(theme.bg_surface)
+            .border_1()
+            .border_color(theme.border)
+            .rounded(px(14.))
+            .when(text_items.is_empty(), |card| {
+                card.child(
+                    div()
+                        .px(px(16.))
+                        .py(px(12.))
+                        .text_xs()
+                        .text_color(theme.ink_muted)
+                        .child("自由文ポリシーはまだありません。"),
+                )
+            })
+            .children(text_items);
+
+        let studio_add_poltxt = cx.entity();
+        let add_txt_open = self.adding_policy_text_open;
+        let add_txt_toggle = disclosure_row(
+            "dev-policy-text-add-disclosure",
+            "自由文ポリシーを追加",
+            add_txt_open,
+            theme,
+            move |_, cx| {
+                studio_add_poltxt.update(cx, |this, cx| {
+                    this.adding_policy_text_open = !this.adding_policy_text_open;
+                    cx.notify();
+                });
+            },
+        );
+        let add_txt_panel = if add_txt_open {
+            let new_d = self.description_draft(
+                cx,
+                "policy-text:new",
+                "例: 外部 URL へのデータ送信前には必ず確認を求める",
+                None,
+                theme,
+            );
+            let new_val = new_d.read(cx).text().trim().to_owned();
+            let char_count = new_val.chars().count();
+            let valid = (1..=500).contains(&char_count);
+            let hub_add = self.hub.clone();
+            let studio_clear = cx.entity();
+            let draft_clear = new_d.clone();
+            Some(
+                div()
+                    .w_full()
+                    .bg(theme.bg_surface)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(px(14.))
+                    .p(px(16.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .child(labeled_field("ポリシー文（500 文字以内）", new_d, theme))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(if char_count > 500 {
+                                        theme.danger_fg
+                                    } else {
+                                        theme.ink_muted
+                                    })
+                                    .child(format!("{char_count} / 500 文字")),
+                            )
+                            .child(pill_button(
+                                "dev-poltxt-submit",
+                                "追加",
+                                Some(Icon::Plus),
+                                Tone::Primary,
+                                live && valid,
+                                theme,
+                                move |_, cx| {
+                                    let val = new_val.clone();
+                                    hub_add.update(cx, |hub, cx| {
+                                        hub.upsert_policy_text(None, val, cx);
+                                    });
+                                    draft_clear.update(cx, |draft, cx| draft.clear(cx));
+                                    studio_clear.update(cx, |this, cx| {
+                                        this.adding_policy_text_open = false;
+                                        cx.notify();
+                                    });
+                                },
+                            )),
+                    ),
+            )
+        } else {
+            None
+        };
+
+        let plugins = self.hub.read(cx).model.plugins.clone();
+        let plugins_heading = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme.ink)
+                    .child("プラグイン管理"),
+            )
+            .child(pill_button(
+                "dev-plugins-refresh",
+                "更新",
+                None,
+                Tone::Ghost,
+                live,
+                theme,
+                {
+                    let hub = self.hub.clone();
+                    move |_, cx| hub.update(cx, |h, cx| h.load_plugins(cx))
+                },
+            ));
+        let plugins_card = div()
+            .rounded(px(14.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_surface)
+            .px(px(16.))
+            .py(px(12.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .when(plugins.is_empty(), |card| {
+                card.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.ink_muted)
+                        .child("インストール済みプラグインはありません。"),
+                )
+            })
+            .children(plugins.into_iter().map(|plugin| {
+                let id_toggle = plugin.id.clone();
+                let id_remove = plugin.id.clone();
+                let next_enabled = !plugin.enabled;
+                let hub_toggle = self.hub.clone();
+                let hub_remove = self.hub.clone();
+                let subtitle = if plugin.extensions.is_empty() {
+                    format!("v{}", plugin.version)
+                } else {
+                    format!("v{} · {}", plugin.version, plugin.extensions.join(", "))
+                };
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(theme.ink)
+                                    .child(format!("{} ({})", plugin.name, plugin.id)),
+                            )
+                            .child(div().text_xs().text_color(theme.ink_muted).child(subtitle)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(6.))
+                            .child(pill_button(
+                                SharedString::from(format!("plugin-toggle-{}", plugin.id)),
+                                if plugin.enabled {
+                                    "無効化"
+                                } else {
+                                    "有効化"
+                                },
+                                None,
+                                if plugin.enabled {
+                                    Tone::Mint
+                                } else {
+                                    Tone::Ghost
+                                },
+                                live,
+                                theme,
+                                move |_, cx| {
+                                    hub_toggle.update(cx, |h, cx| {
+                                        h.set_plugin_enabled(id_toggle.clone(), next_enabled, cx);
+                                    });
+                                },
+                            ))
+                            .child(pill_button(
+                                SharedString::from(format!("plugin-remove-{}", plugin.id)),
+                                "削除",
+                                None,
+                                Tone::Danger,
+                                live,
+                                theme,
+                                move |_, cx| {
+                                    hub_remove.update(cx, |h, cx| {
+                                        h.remove_plugin(id_remove.clone(), cx);
+                                    });
+                                },
+                            )),
+                    )
+            }));
+
         div()
             .flex()
             .flex_col()
@@ -867,6 +1300,12 @@ impl SettingsStudio {
             .child(policy_card)
             .child(add_toggle)
             .when_some(add_panel, |this, panel| this.child(panel))
+            .child(policy_text_heading)
+            .child(policy_text_card)
+            .child(add_txt_toggle)
+            .when_some(add_txt_panel, |this, panel| this.child(panel))
+            .child(plugins_heading)
+            .child(plugins_card)
             .when_some(reset_history, |this, card| this.child(card))
             .into_any_element()
     }

@@ -54,6 +54,189 @@ impl BrokerServices {
     }
 }
 
+/// Callback invoked when a plugin calls `ServiceRequest::Tool` (always gated
+/// by the caller; fail-closed when absent).
+pub(crate) type PluginToolCallback =
+    Arc<dyn Fn(String, Value) -> BoxFuture<'static, Result<Value, Failure>> + Send + Sync>;
+
+/// Full host-service implementation for non-provider and extension plugins
+/// (`Log`, `Configuration`, isolated `State`, optional `HttpBroker`, and
+/// optional policy-gated `Tool` invocation) (`F19`).
+pub(crate) struct PluginServices {
+    plugin_id: String,
+    store: crate::host::db::Store,
+    broker: Option<(Arc<HttpBroker>, String)>,
+    tool_callback: Option<PluginToolCallback>,
+}
+
+impl PluginServices {
+    pub(crate) fn new(plugin_id: impl Into<String>, store: crate::host::db::Store) -> Arc<Self> {
+        Arc::new(Self {
+            plugin_id: plugin_id.into(),
+            store,
+            broker: None,
+            tool_callback: None,
+        })
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn with_tool_callback(
+        plugin_id: impl Into<String>,
+        store: crate::host::db::Store,
+        tool_callback: PluginToolCallback,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            plugin_id: plugin_id.into(),
+            store,
+            broker: None,
+            tool_callback: Some(tool_callback),
+        })
+    }
+}
+
+impl Services for PluginServices {
+    fn handle(&self, request: ServiceRequest) -> BoxFuture<'_, Result<Value, Failure>> {
+        let plugin_id = self.plugin_id.clone();
+        let store = self.store.clone();
+        let broker = self.broker.clone();
+        let tool_callback = self.tool_callback.clone();
+        Box::pin(async move {
+            match request {
+                ServiceRequest::Log { message } => {
+                    let clipped = crate::host::db::truncate(&message, 4_096);
+                    tracing::info!(plugin = %plugin_id, "{clipped}");
+                    Ok(Value::Null)
+                }
+                ServiceRequest::Configuration => store
+                    .plugin_config(&plugin_id)
+                    .map_err(|_| Failure::new("service_failed")),
+                ServiceRequest::StateRead { key } => {
+                    let val = store
+                        .plugin_state_read(&plugin_id, &key)
+                        .map_err(|_| Failure::new("service_failed"))?;
+                    Ok(val.unwrap_or(Value::Null))
+                }
+                ServiceRequest::StateWrite { key, value } => {
+                    store
+                        .plugin_state_write(&plugin_id, &key, &value)
+                        .map_err(|_| Failure::new("service_failed"))?;
+                    Ok(Value::Null)
+                }
+                ServiceRequest::HttpOpen { request } => {
+                    let Some((broker, provider)) = broker else {
+                        return Err(Failure::new("undeclared_service"));
+                    };
+                    serde_json::to_value(broker.open(&provider, request).await?)
+                        .map_err(|_| Failure::new("serialize"))
+                }
+                ServiceRequest::HttpRead { handle } => {
+                    let Some((broker, _)) = broker else {
+                        return Err(Failure::new("undeclared_service"));
+                    };
+                    serde_json::to_value(broker.read(&handle).await?)
+                        .map_err(|_| Failure::new("serialize"))
+                }
+                ServiceRequest::HttpClose { handle } => {
+                    let Some((broker, _)) = broker else {
+                        return Err(Failure::new("undeclared_service"));
+                    };
+                    broker.close(&handle)?;
+                    Ok(Value::Null)
+                }
+                ServiceRequest::Tool { name, arguments } => {
+                    let Some(cb) = tool_callback else {
+                        return Err(Failure::new("permission_required"));
+                    };
+                    cb(name, arguments).await
+                }
+                ServiceRequest::AudioRead { .. } => Err(Failure::new("undeclared_service")),
+            }
+        })
+    }
+
+    fn check(&self) -> BoxFuture<'_, Result<(), Failure>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Resolved per-connection invocation context shared across LLM, embedding,
+/// and speech provider plugins.
+#[derive(Clone)]
+pub(crate) struct ProviderInvocationContext {
+    pub(crate) provider_id: String,
+    pub(crate) endpoint: String,
+    pub(crate) options: Value,
+    pub(crate) broker: Arc<HttpBroker>,
+}
+
+impl ProviderInvocationContext {
+    /// Builds an invocation context for one provider plugin and connection,
+    /// constructing its HTTP broker from `Grant`.
+    pub(crate) fn from_connection(
+        running: &super::Running,
+        connection: &crate::host::settings::Connection,
+        credentials: Option<&crate::host::model::Credentials>,
+        providers: &super::Providers,
+        deadline: Option<std::time::Duration>,
+    ) -> crate::host::error::Result<Self> {
+        let grant = super::Grant::new(running.provider(), connection, credentials, providers)?;
+        let broker = match deadline {
+            Some(deadline) => http_broker_with_deadline(Arc::new(grant), deadline),
+            None => http_broker(Arc::new(grant)),
+        }
+        .map_err(|error| {
+            crate::host::error::HostError::Unavailable(format!("plugin HTTP transport: {error}"))
+        })?;
+        Ok(Self::with_broker(running, connection, providers, broker))
+    }
+
+    /// Builds an invocation context using a caller-provided broker.
+    pub(crate) fn with_broker(
+        running: &super::Running,
+        connection: &crate::host::settings::Connection,
+        providers: &super::Providers,
+        broker: Arc<HttpBroker>,
+    ) -> Self {
+        let endpoint = crate::host::settings::endpoint_of(connection, providers)
+            .unwrap_or_else(|| running.provider().endpoint.clone());
+        let options = merge_options(&running.provider().options, &connection.endpoint().options);
+        Self {
+            provider_id: running.provider().id.clone(),
+            endpoint,
+            options,
+            broker,
+        }
+    }
+
+    /// Services handle backed by this context's broker and provider identity.
+    pub(crate) fn services(&self) -> Arc<dyn Services> {
+        BrokerServices::new(Arc::clone(&self.broker), self.provider_id.clone())
+    }
+}
+
+/// Merges connection-level JSON options onto plugin manifest defaults.
+pub(crate) fn merge_options(defaults: &Value, raw_connection_options: &str) -> Value {
+    let trimmed = raw_connection_options.trim();
+    let conn_val: Option<Value> = if trimmed.is_empty() {
+        None
+    } else {
+        serde_json::from_str(trimmed).ok()
+    };
+    match (defaults, conn_val) {
+        (Value::Object(base), Some(Value::Object(override_map))) => {
+            let mut merged = base.clone();
+            for (key, value) in override_map {
+                merged.insert(key, value);
+            }
+            Value::Object(merged)
+        }
+        (_, Some(override_val @ Value::Object(_))) => override_val,
+        (Value::Object(base), _) => Value::Object(base.clone()),
+        (other, _) if !other.is_null() => other.clone(),
+        _ => Value::Object(Default::default()),
+    }
+}
+
 impl Services for BrokerServices {
     fn handle(&self, request: ServiceRequest) -> BoxFuture<'_, Result<Value, Failure>> {
         let broker = Arc::clone(&self.broker);

@@ -59,6 +59,7 @@ pub(super) fn describe_device_request(
     store: Res<Store>,
     hub: Res<DeviceHub>,
     computer_use: Res<ComputerUse>,
+    mut commands: Commands,
 ) {
     for (mut call, agent) in &mut calls {
         let Some(index) = call
@@ -84,10 +85,35 @@ pub(super) fn describe_device_request(
         if computer_model && let Some(work) = work {
             computer_use.attach_frame(&mut call, work, &store, &hub);
         }
-        let client = target
-            .ok()
-            .flatten()
-            .and_then(|id| store.client(&id).ok().flatten());
+        let target_id = match target {
+            Ok(id) => id,
+            Err(error) => {
+                if error.is_storage() {
+                    let message = error.to_string();
+                    commands.queue(move |world: &mut World| {
+                        crate::host::fail(world, message);
+                    });
+                    return;
+                }
+                None
+            }
+        };
+        let client = match target_id {
+            Some(id) => match store.client(&id) {
+                Ok(client) => client,
+                Err(error) => {
+                    if error.is_storage() {
+                        let message = error.to_string();
+                        commands.queue(move |world: &mut World| {
+                            crate::host::fail(world, message);
+                        });
+                        return;
+                    }
+                    None
+                }
+            },
+            None => None,
+        };
         let mut names = Vec::new();
         let mut inputs = String::from("JSON input for the selected capability.");
         if let Some(client) = client {
@@ -191,7 +217,7 @@ pub(crate) fn accept(
         .get::<CallBinding>(call)
         .cloned()
         .ok_or_else(|| HostError::Internal(("a device call without a binding").into()))?;
-    let work_id = agent_context(world, agent)
+    let (companion_id, work_id) = agent_context(world, agent)
         .ok_or_else(|| HostError::Internal(("a device call without an agent").into()))?;
     let client = store
         .client(&binding.client_id)?
@@ -217,6 +243,17 @@ pub(crate) fn accept(
             ));
         }
         super::validate_input(spec, &input)?;
+    }
+    let action = permission::CandidateAction::DeviceCapability {
+        capability: binding.capability.clone(),
+        spec: spec.cloned().map(Box::new),
+        tool_name: binding.capability.clone(),
+        input: input.clone(),
+        raw_arguments: input.clone(),
+    };
+    let typed_target = permission::extract_target(&action);
+    if let Some(reason) = permission::hard_denied_action(&action, &typed_target) {
+        return Err(HostError::Permission(reason));
     }
     let computer = if binding.capability == w::COMPUTER_USE {
         let work = world.get::<WorkAgent>(agent).ok_or_else(|| {
@@ -257,7 +294,7 @@ pub(crate) fn accept(
         updated_at: now(),
     };
     store.insert_operation(&operation)?;
-    let status = dispatch(world, &operation, computer.as_ref())?;
+    let status = dispatch(world, &operation, computer.as_ref(), Some(&companion_id))?;
     if let Some(computer) = computer {
         if status != DeviceStatus::Dispatched {
             store.set_operation_status(&operation.id, DeviceStatus::Failed)?;
@@ -273,16 +310,51 @@ pub(crate) fn accept(
     Ok((operation_id, answer))
 }
 
-/// The work session an agent serves: `Some(None)` for a companion agent,
-/// `Some(Some(work))` for a hand, and `None` for an entity that serves
-/// neither.
-fn agent_context(world: &World, agent: Entity) -> Option<Option<String>> {
-    if world.get::<CompanionAgent>(agent).is_some() {
-        return Some(None);
+/// Dispatches an authorized host-initiated capability operation (such as an
+/// `Extension::Character` expression/motion action) directly to `client_id`
+/// when the client has declared and been granted `capability`.
+pub(crate) fn dispatch_direct(
+    world: &mut World,
+    companion_id: &str,
+    client_id: &str,
+    capability: &str,
+    input: Value,
+) -> Result<String> {
+    let store = world.resource::<Store>().clone();
+    let client = store
+        .client(client_id)?
+        .ok_or_else(|| HostError::NotFound("client not found".into()))?;
+    if !client.is_granted(capability) {
+        return Err(HostError::Permission(format!(
+            "capability `{capability}` is not granted on `{client_id}`"
+        )));
+    }
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let operation = DeviceOperation {
+        id: operation_id.clone(),
+        client_id: client_id.to_owned(),
+        capability: capability.to_owned(),
+        input,
+        work_id: None,
+        status: DeviceStatus::Pending,
+        output: None,
+        failure: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    store.insert_operation(&operation)?;
+    let _ = dispatch(world, &operation, None, Some(companion_id))?;
+    Ok(operation_id)
+}
+
+/// `(companion_id, work_id)` for the agent entity that requested the call.
+fn agent_context(world: &World, agent: Entity) -> Option<(String, Option<String>)> {
+    if let Some(companion) = world.get::<CompanionAgent>(agent) {
+        return Some((companion.companion_id.clone(), None));
     }
     world
         .get::<WorkAgent>(agent)
-        .map(|work| Some(work.work_id.clone()))
+        .map(|work| (work.companion_id.clone(), Some(work.work_id.clone())))
 }
 
 /// Writes the operation to the client's live stream. A missing stream leaves
@@ -292,6 +364,7 @@ fn dispatch(
     world: &mut World,
     operation: &DeviceOperation,
     computer: Option<&computer::Pending>,
+    companion_id: Option<&str>,
 ) -> Result<DeviceStatus> {
     let hub = world.resource::<DeviceHub>().clone();
     let store = world.resource::<Store>().clone();
@@ -302,8 +375,13 @@ fn dispatch(
     if computer.is_some_and(|pending| pending.subscription != subscription) {
         return Ok(DeviceStatus::Pending);
     }
+    let resolved_companion = match companion_id {
+        Some(id) if !id.is_empty() => id.to_owned(),
+        _ => resolve_operation_companion(&store, operation)?,
+    };
     let mut wire_operation = wire::device_operation(operation, &subscription);
     wire_operation.run_id = computer.map(|pending| pending.run.clone());
+    wire_operation.companion_id = resolved_companion;
     let event = w::DeviceEvent {
         event: Some(w::device_event::Event::Operation(Box::new(
             wire_operation.clone(),
@@ -324,19 +402,49 @@ fn dispatch(
     Ok(DeviceStatus::Pending)
 }
 
+fn resolve_operation_companion(store: &Store, operation: &DeviceOperation) -> Result<String> {
+    if let Some(work_id) = operation.work_id.as_deref()
+        && let Some(session) = store.work_session(work_id)?
+    {
+        return Ok(session.companion_id);
+    }
+    Ok(store
+        .activation_for_client(&operation.client_id)?
+        .unwrap_or_default())
+}
+
 /// Replays operations that were never delivered after a client reconnects.
 pub(crate) fn resend(world: &mut World, client: &str) {
     let subscription = world.resource::<DeviceHub>().subscription(client);
     computer::invalidate_client(world, client, subscription.as_deref());
     let store = world.resource::<Store>().clone();
-    if !matches!(store.activation_for_client(client), Ok(Some(_))) {
-        return;
-    }
-    let Ok(operations) = store.outstanding_operations(client) else {
-        return;
+    let active_companion = match store.activation_for_client(client) {
+        Ok(companion) => companion,
+        Err(error) => {
+            if error.is_storage() {
+                crate::host::fail(world, error.to_string());
+            } else {
+                tracing::warn!(client, %error, "failed to check client activation on resend");
+            }
+            return;
+        }
+    };
+    let operations = match store.outstanding_operations(client) {
+        Ok(operations) => operations,
+        Err(error) => {
+            if error.is_storage() {
+                crate::host::fail(world, error.to_string());
+            } else {
+                tracing::warn!(client, %error, "failed to read outstanding operations on resend");
+            }
+            return;
+        }
     };
     for operation in operations {
         if operation.status != DeviceStatus::Pending {
+            continue;
+        }
+        if operation.work_id.is_none() && active_companion.is_none() {
             continue;
         }
         if operation.capability == w::COMPUTER_USE {
@@ -346,7 +454,7 @@ pub(crate) fn resend(world: &mut World, client: &str) {
                 "Computer Use operations are never replayed",
             );
         } else {
-            let _ = dispatch(world, &operation, None);
+            let _ = dispatch(world, &operation, None, active_companion.as_deref());
         }
     }
 }
@@ -356,12 +464,27 @@ pub(crate) fn resend(world: &mut World, client: &str) {
 pub(crate) fn disconnected(world: &mut World, client: &str) {
     computer::invalidate_client(world, client, None);
     let store = world.resource::<Store>().clone();
-    let operations = store.outstanding_operations(client).unwrap_or_default();
+    let operations = match store.outstanding_operations(client) {
+        Ok(operations) => operations,
+        Err(error) => {
+            if error.is_storage() {
+                crate::host::fail(world, error.to_string());
+            } else {
+                tracing::warn!(client, %error, "failed to read operations on disconnect");
+            }
+            return;
+        }
+    };
     for operation in operations {
         if operation.status != DeviceStatus::Dispatched {
             continue;
         }
-        let _ = store.set_operation_status(&operation.id, DeviceStatus::Uncertain);
+        if let Err(error) = store.set_operation_status(&operation.id, DeviceStatus::Uncertain)
+            && error.is_storage()
+        {
+            crate::host::fail(world, error.to_string());
+            return;
+        }
     }
 }
 
@@ -432,18 +555,14 @@ pub(crate) fn complete(
     let success = result.success && failure.is_none() && output.is_some();
     // A capability declared without a spec has no output contract; its
     // answer is accepted as the client sent it.
-    let mut validated = output.map(|output| {
-        match store
-            .client(&operation.client_id)
-            .ok()
-            .flatten()
-            .and_then(|client| client.spec(&operation.capability).cloned())
-        {
-            Some(spec) => super::validate_output(&spec, &output)
-                .map(|()| output)
-                .map_err(|error| error.to_string()),
-            None => Ok(output),
-        }
+    let spec = store
+        .client(&operation.client_id)?
+        .and_then(|client| client.spec(&operation.capability).cloned());
+    let mut validated = output.map(|output| match spec {
+        Some(spec) => super::validate_output(&spec, &output)
+            .map(|()| output)
+            .map_err(|error| error.to_string()),
+        None => Ok(output),
     });
     let mut frame = None;
     if let Some(pending) = computer {

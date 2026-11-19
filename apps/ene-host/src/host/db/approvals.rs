@@ -73,13 +73,23 @@ impl Store {
         request_id: &str,
         status: ApprovalStatus,
     ) -> Result<Approval> {
+        self.resolve_approval_with_client(request_id, status, None)
+    }
+
+    pub(crate) fn resolve_approval_with_client(
+        &self,
+        request_id: &str,
+        status: ApprovalStatus,
+        client_id: Option<&str>,
+    ) -> Result<Approval> {
         let resolved = now();
         self.fetch(
             &format!(
-                "UPDATE approval_requests SET status = ?2, resolved_at = ?3 \
+                "UPDATE approval_requests SET status = ?2, resolved_at = ?3, \
+                 client_id = COALESCE(?4, client_id) \
                  WHERE request_id = ?1 AND status = 'pending' RETURNING {COLUMNS}"
             ),
-            params![request_id, status.as_str(), resolved],
+            params![request_id, status.as_str(), resolved, client_id],
             row_to_approval,
         )?
         .ok_or_else(|| HostError::Conflict(("approval is missing or no longer pending").into()))

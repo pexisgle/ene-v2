@@ -267,3 +267,59 @@ CREATE INDEX IF NOT EXISTS idx_schedules_companion_enabled ON schedules(companio
 -- The firing loop reads only due rows: equality on `enabled` first, then the
 -- ordered range on `next_run_at`.
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_run_at);
+
+-- Materialized schedule occurrences keep delivery idempotent across restarts
+-- and transient model-binding failures: a due firing is recorded once with a
+-- deterministic `occurrence_key` and only transitions to `delivered` once the
+-- companion's conversation confirms receipt.
+CREATE TABLE IF NOT EXISTS schedule_occurrences (
+    occurrence_key TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL,
+    companion_id TEXT NOT NULL,
+    scheduled_for TEXT NOT NULL,
+    title TEXT NOT NULL,
+    instruction TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    delivered_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_occurrences_pending
+    ON schedule_occurrences(status, scheduled_for);
+
+-- Per-plugin configuration document and isolated key-value state (`F19`).
+CREATE TABLE IF NOT EXISTS plugin_config (
+    plugin_id TEXT PRIMARY KEY,
+    config TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS plugin_state (
+    plugin_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (plugin_id, key)
+);
+
+-- Companion procedural skills (`F06`).
+CREATE TABLE IF NOT EXISTS skills (
+    companion_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    instructions TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (companion_id, name)
+);
+
+-- Installed plugin registry entries (`F12`).
+CREATE TABLE IF NOT EXISTS plugin_entries (
+    plugin_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    path TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    installed_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);

@@ -3,6 +3,7 @@
 //! and bottom collapsed disclosure for model-role & voice slot overrides.
 
 use super::icons::Icon;
+use super::mcp_add::parse_process_args;
 use super::studio::labeled_field;
 use super::theme::Theme;
 use super::widgets::{
@@ -231,6 +232,7 @@ impl SettingsStudio {
         let hub_stt = self.hub.clone();
         let hub_sakura_emb = self.hub.clone();
         let hub_oai_emb = self.hub.clone();
+        let hub_search = self.hub.clone();
         let studio_vv = cx.entity();
         let studio_sakura_tts = cx.entity();
         let studio_oai = cx.entity();
@@ -239,6 +241,7 @@ impl SettingsStudio {
         let studio_stt = cx.entity();
         let studio_sakura_emb = cx.entity();
         let studio_oai_emb = cx.entity();
+        let studio_search = cx.entity();
 
         let voice_chips = div()
             .flex()
@@ -397,6 +400,31 @@ impl SettingsStudio {
                         cx.notify();
                     });
                 },
+            ))
+            .child(pill_button(
+                "add-preset-search-mwmbl",
+                "Mwmbl (Web検索)",
+                Some(Icon::Search),
+                Tone::Ghost,
+                live,
+                theme,
+                move |_, cx| {
+                    if let Some(input) = build_custom_connection_input(
+                        w::ConnectionKind::Search,
+                        "Web検索 (Mwmbl)",
+                        "mwmbl",
+                        "https://api.mwmbl.org/api/v2/search/",
+                    ) {
+                        hub_search.update(cx, |hub, cx| {
+                            hub.upsert_connection("Web検索接続の追加", input, cx);
+                        });
+                    }
+                    studio_search.update(cx, |this, cx| {
+                        this.adding_connection = false;
+                        this.open_dropdown = None;
+                        cx.notify();
+                    });
+                },
             ));
 
         let custom_kind = self.custom_kind;
@@ -408,6 +436,7 @@ impl SettingsStudio {
             w::ConnectionKind::Embedding,
             w::ConnectionKind::Mcp,
             w::ConnectionKind::Acp,
+            w::ConnectionKind::Search,
         ] {
             let selected = custom_kind == kind;
             let studio = cx.entity();
@@ -1034,6 +1063,7 @@ impl SettingsStudio {
             w::ConnectionKind::Embedding => "埋め込みモデルID",
             w::ConnectionKind::Mcp => "許可ツール（カンマ区切り・空欄で全件）",
             w::ConnectionKind::Acp => "起動引数（スペース区切り）",
+            w::ConnectionKind::Search => "最大検索結果数 (1–20)",
             w::ConnectionKind::Unspecified => "オプション",
         };
         let list_d = self.draft(
@@ -1059,6 +1089,61 @@ impl SettingsStudio {
                 "実行コマンド",
                 Some(cmd_init),
                 theme,
+            ))
+        } else {
+            None
+        };
+        let mcp_args_d = if let Some(w::connection_config::Config::Mcp(mcp)) = cfg {
+            let initial = serde_json::json!(mcp.args).to_string();
+            Some(self.description_draft(
+                cx,
+                format!("conn:{id}:r{rev}:mcp-args"),
+                r#"["-y", "@scope/mcp-server", "--stdio"]"#,
+                Some(&initial),
+                theme,
+            ))
+        } else {
+            None
+        };
+        let mcp_extra_d = if let Some(w::connection_config::Config::Mcp(mcp)) = cfg {
+            let env_init = format_kv_lines(&mcp.env, '=');
+            let headers_init = format_kv_lines(&mcp.headers, ':');
+            Some((
+                self.draft(
+                    cx,
+                    format!("conn:{id}:r{rev}:mcp-cwd"),
+                    "作業ディレクトリ (cwd)",
+                    Some(&mcp.cwd),
+                    theme,
+                ),
+                self.draft(
+                    cx,
+                    format!("conn:{id}:r{rev}:mcp-secret-env"),
+                    "例: GITHUB_TOKEN",
+                    Some(&mcp.secret_env_var),
+                    theme,
+                ),
+                self.draft(
+                    cx,
+                    format!("conn:{id}:r{rev}:mcp-auth-header"),
+                    "例: Authorization / X-Api-Key",
+                    Some(&mcp.auth_header),
+                    theme,
+                ),
+                self.description_draft(
+                    cx,
+                    format!("conn:{id}:r{rev}:mcp-env"),
+                    "KEY=VALUE（1行に1つ）",
+                    Some(&env_init),
+                    theme,
+                ),
+                self.description_draft(
+                    cx,
+                    format!("conn:{id}:r{rev}:mcp-headers"),
+                    "Header-Name: value（1行に1つ）",
+                    Some(&headers_init),
+                    theme,
+                ),
             ))
         } else {
             None
@@ -1846,6 +1931,31 @@ impl SettingsStudio {
         let next_ep = ep_d.read(cx).text().trim().to_owned();
         let next_list = list_d.read(cx).text().trim().to_owned();
         let next_cmd = cmd_d.as_ref().map(|d| d.read(cx).text().trim().to_owned());
+        let next_args = mcp_args_d.as_ref().map_or(Ok(Vec::new()), |draft| {
+            parse_process_args(draft.read(cx).text())
+        });
+        let args_error = next_args.as_ref().err().copied();
+        let next_mcp_extra =
+            mcp_extra_d
+                .as_ref()
+                .map(|(cwd_d, secret_env_d, auth_hdr_d, env_d, headers_d)| {
+                    let env_parsed = parse_kv_lines(env_d.read(cx).text(), '=');
+                    let headers_parsed = parse_kv_lines(headers_d.read(cx).text(), ':');
+                    (
+                        cwd_d.read(cx).text().trim().to_owned(),
+                        secret_env_d.read(cx).text().trim().to_owned(),
+                        auth_hdr_d.read(cx).text().trim().to_owned(),
+                        env_parsed,
+                        headers_parsed,
+                    )
+                });
+        let mcp_kv_error = next_mcp_extra.as_ref().and_then(|(_, _, _, env_r, hdr_r)| {
+            env_r
+                .as_ref()
+                .err()
+                .or_else(|| hdr_r.as_ref().err())
+                .copied()
+        });
 
         let conn_for_save = conn.clone();
         let hub_save = self.hub.clone();
@@ -1892,6 +2002,46 @@ impl SettingsStudio {
             .child(labeled_field("表示名", name_d, theme))
             .when_some(cmd_d, |this, cd| {
                 this.child(labeled_field("コマンド", cd, theme))
+            })
+            .when_some(mcp_args_d, |this, draft| {
+                this.child(labeled_field(
+                    "起動引数（JSON 配列または空白区切り）",
+                    div()
+                        .id(SharedString::from(format!("conn-mcp-args-{id}")))
+                        .max_h(px(124.))
+                        .overflow_y_scroll()
+                        .child(draft),
+                    theme,
+                ))
+                .when_some(args_error, |this, error| {
+                    this.child(div().text_xs().text_color(theme.danger_fg).child(error))
+                })
+            })
+            .when_some(mcp_extra_d, |this, (cwd_d, secret_env_d, auth_hdr_d, env_d, headers_d)| {
+                this.child(labeled_field("作業ディレクトリ (cwd)", cwd_d, theme))
+                    .child(labeled_field("認証シークレット環境変数名 (stdio)", secret_env_d, theme))
+                    .child(labeled_field("認証ヘッダー名 (HTTP・空欄時は Bearer)", auth_hdr_d, theme))
+                    .child(labeled_field(
+                        "環境変数（KEY=VALUE を1行ずつ）",
+                        div()
+                            .id(SharedString::from(format!("conn-mcp-env-{id}")))
+                            .max_h(px(110.))
+                            .overflow_y_scroll()
+                            .child(env_d),
+                        theme,
+                    ))
+                    .child(labeled_field(
+                        "HTTP ヘッダー（Name: Value を1行ずつ）",
+                        div()
+                            .id(SharedString::from(format!("conn-mcp-headers-{id}")))
+                            .max_h(px(110.))
+                            .overflow_y_scroll()
+                            .child(headers_d),
+                        theme,
+                    ))
+                    .when_some(mcp_kv_error, |this, error| {
+                        this.child(div().text_xs().text_color(theme.danger_fg).child(error))
+                    })
             })
             .when(!agent_platform, |this| {
                 this.child(labeled_field("エンドポイント URL", ep_d, theme))
@@ -1953,18 +2103,31 @@ impl SettingsStudio {
                 "保存",
                 Some(Icon::Check),
                 Tone::Primary,
-                live && !next_name.is_empty(),
+                live && !next_name.is_empty() && args_error.is_none() && mcp_kv_error.is_none(),
                 theme,
                 move |_, cx| {
-                    let input = apply_connection_edits(
+                    let Ok(args) = &next_args else { return };
+                    let mut input = apply_connection_edits(
                         &conn_for_save,
                         &next_name,
                         &next_ep,
-                        next_cmd.as_deref(),
+                        next_cmd.as_deref().map(|command| (command, args.as_slice())),
                         &next_list,
                         next_dim.as_deref(),
                         next_options_json.as_deref(),
                     );
+                    if let Some((cwd, secret_env, auth_hdr, Ok(env), Ok(headers))) =
+                        &next_mcp_extra
+                    {
+                        apply_mcp_extra_edits(
+                            &mut input,
+                            cwd,
+                            secret_env,
+                            auth_hdr,
+                            env,
+                            headers,
+                        );
+                    }
                     hub_save.update(cx, |hub, cx| {
                         hub.upsert_connection("接続設定の保存", input, cx);
                     });
@@ -2619,6 +2782,7 @@ fn kind_label(kind: w::ConnectionKind) -> &'static str {
         w::ConnectionKind::Embedding => "埋め込み",
         w::ConnectionKind::Mcp => "MCP",
         w::ConnectionKind::Acp => "ACP",
+        w::ConnectionKind::Search => "Web検索",
         w::ConnectionKind::Unspecified => "その他",
     }
 }
@@ -2637,6 +2801,7 @@ fn extract_endpoint(cfg: Option<&w::connection_config::Config>) -> Option<w::Con
         w::connection_config::Config::Embedding(c) => c.endpoint.as_option().cloned(),
         w::connection_config::Config::Mcp(c) => c.endpoint.as_option().cloned(),
         w::connection_config::Config::Acp(c) => c.endpoint.as_option().cloned(),
+        w::connection_config::Config::Search(c) => c.endpoint.as_option().cloned(),
     }
 }
 
@@ -2648,8 +2813,72 @@ fn extract_kind_list_init(cfg: Option<&w::connection_config::Config>) -> String 
         Some(w::connection_config::Config::Embedding(c)) => c.model_id.clone(),
         Some(w::connection_config::Config::Mcp(c)) => c.allowed_tools.join(", "),
         Some(w::connection_config::Config::Acp(c)) => c.args.join(" "),
+        Some(w::connection_config::Config::Search(c)) => {
+            if c.max_results == 0 {
+                "5".into()
+            } else {
+                c.max_results.to_string()
+            }
+        }
         None => String::new(),
     }
+}
+
+fn format_kv_lines<S: std::hash::BuildHasher>(
+    map: &std::collections::HashMap<String, String, S>,
+    sep: char,
+) -> String {
+    let mut pairs: Vec<_> = map.iter().collect();
+    pairs.sort_by_key(|(a, _)| *a);
+    pairs
+        .into_iter()
+        .map(|(k, v)| match sep {
+            ':' => format!("{k}: {v}"),
+            _ => format!("{k}{sep}{v}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_kv_lines(raw: &str, sep: char) -> Result<Vec<(String, String)>, &'static str> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some((k, v)) = trimmed.split_once(sep) else {
+            return Err(match sep {
+                ':' => "ヘッダーは `Name: Value` 形式で入力してください。",
+                _ => "環境変数は `KEY=VALUE` 形式で入力してください。",
+            });
+        };
+        let key = k.trim();
+        if key.is_empty() {
+            return Err("空のキーは指定できません。");
+        }
+        out.push((key.to_owned(), v.trim().to_owned()));
+    }
+    Ok(out)
+}
+
+fn apply_mcp_extra_edits(
+    input: &mut w::ConnectionInput,
+    cwd: &str,
+    secret_env_var: &str,
+    auth_header: &str,
+    env: &[(String, String)],
+    headers: &[(String, String)],
+) {
+    let mut cfg = input.config.as_option().cloned().unwrap_or_default();
+    if let Some(w::connection_config::Config::Mcp(mcp)) = cfg.config.as_mut() {
+        mcp.cwd = cwd.to_owned();
+        mcp.secret_env_var = secret_env_var.to_owned();
+        mcp.auth_header = auth_header.to_owned();
+        mcp.env = env.iter().cloned().collect();
+        mcp.headers = headers.iter().cloned().collect();
+    }
+    input.config = Some(cfg).into();
 }
 
 fn split_comma(raw: &str) -> Vec<String> {
@@ -2674,7 +2903,7 @@ fn apply_connection_edits(
     conn: &w::Connection,
     name: &str,
     endpoint_url: &str,
-    command: Option<&str>,
+    process: Option<(&str, &[String])>,
     list_raw: &str,
     dimensions_raw: Option<&str>,
     options_json: Option<&str>,
@@ -2784,7 +3013,7 @@ fn apply_connection_edits(
                 .into_option()
                 .unwrap_or_default();
             ep_val.adapter = "mcp".to_owned();
-            if let Some(cmd) = command {
+            if let Some((cmd, args)) = process {
                 let trimmed = cmd.trim();
                 if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
                     ep_val.endpoint = trimmed.to_owned();
@@ -2792,6 +3021,7 @@ fn apply_connection_edits(
                     mcp.args.clear();
                 } else {
                     mcp.command = trimmed.to_owned();
+                    mcp.args = args.to_vec();
                 }
             }
             mcp.endpoint = Some(ep_val).into();
@@ -2799,10 +3029,25 @@ fn apply_connection_edits(
         }
         Some(w::connection_config::Config::Acp(acp)) => {
             acp.endpoint = updated_ep(acp.endpoint.as_option());
-            if let Some(cmd) = command {
+            if let Some((cmd, _)) = process {
                 acp.command = cmd.to_owned();
             }
             acp.args = list_raw.split_whitespace().map(str::to_owned).collect();
+        }
+        Some(w::connection_config::Config::Search(search)) => {
+            let mut ep_val = updated_ep(search.endpoint.as_option())
+                .into_option()
+                .unwrap_or_default();
+            if ep_val.adapter.trim().is_empty() {
+                ep_val.adapter = "mwmbl".to_owned();
+            }
+            search.endpoint = Some(ep_val).into();
+            search.max_results = list_raw
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|&n| (1..=20).contains(&n))
+                .unwrap_or(5);
         }
         None => {}
     }
@@ -2866,6 +3111,17 @@ fn build_custom_connection_input(
             }))
         }
         w::ConnectionKind::Mcp => return None,
+        w::ConnectionKind::Search => {
+            let mut search_ep = ep;
+            if search_ep.adapter.trim().is_empty() {
+                search_ep.adapter = "mwmbl".to_owned();
+            }
+            w::connection_config::Config::Search(Box::new(w::SearchConnection {
+                endpoint: Some(search_ep).into(),
+                max_results: 5,
+                ..Default::default()
+            }))
+        }
         w::ConnectionKind::Acp => w::connection_config::Config::Acp(Box::new(w::AcpConnection {
             command: adapter_or_cmd.to_owned(),
             args: url_or_args.split_whitespace().map(str::to_owned).collect(),
@@ -2886,4 +3142,51 @@ fn build_custom_connection_input(
         .into(),
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editing_a_saved_mcp_connection_replaces_only_the_requested_arguments() {
+        let mcp = w::McpConnection {
+            command: "npx".into(),
+            args: ["-y", "old-package", r"C:\My Tools\日本語", ""]
+                .map(str::to_owned)
+                .to_vec(),
+            allowed_tools: vec!["echo".into()],
+            ..Default::default()
+        };
+        let conn = w::Connection {
+            id: "saved-mcp".into(),
+            kind: w::ConnectionKind::Mcp.into(),
+            revision: 3,
+            config: Some(w::ConnectionConfig {
+                config: Some(w::connection_config::Config::Mcp(Box::new(mcp.clone()))),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
+        let initial = serde_json::json!(mcp.args).to_string();
+        let draft = initial.replace("old-package", "new-package");
+        let args = parse_process_args(&draft).unwrap();
+        let input = apply_connection_edits(
+            &conn,
+            "Saved MCP",
+            "",
+            Some(("npx", &args)),
+            "echo",
+            None,
+            None,
+        );
+        assert_eq!(input.expected_revision, conn.revision);
+        let Some(w::connection_config::Config::Mcp(saved)) = input.config.config.as_ref() else {
+            panic!("expected MCP settings");
+        };
+        assert_eq!(saved.command, "npx");
+        assert_eq!(saved.args, ["-y", "new-package", r"C:\My Tools\日本語", ""]);
+        assert_eq!(saved.allowed_tools, mcp.allowed_tools);
+    }
 }

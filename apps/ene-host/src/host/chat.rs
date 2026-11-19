@@ -252,7 +252,7 @@ pub(crate) fn message(
 ) -> w::Message {
     let role = agent::role_of(entry);
     let text = if work.is_empty() && role == w::MessageRole::Assistant {
-        w::plain_reply(&text)
+        super::voice::speech::strip_motion_leak(&text)
     } else {
         text
     };

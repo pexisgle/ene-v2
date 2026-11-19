@@ -196,6 +196,74 @@ mod guest {
                 let event = harness(&input)?;
                 emit(Event::Harness { event })?;
             }
+            Operation::Hook { event } => {
+                let decision = match event {
+                    HookEvent::PreTurn { query, .. } => {
+                        let cfg = configuration().unwrap_or(Value::Null);
+                        let note = cfg
+                            .get("inject_note")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if !note.is_empty() {
+                            HookDecision::InjectContext {
+                                text: note.to_owned(),
+                            }
+                        } else if query
+                            .as_deref()
+                            .is_some_and(|q| q.contains("FORBIDDEN_TURN"))
+                        {
+                            HookDecision::Block {
+                                reason: "blocked by reference hook".into(),
+                            }
+                        } else {
+                            HookDecision::Continue
+                        }
+                    }
+                    HookEvent::PreTool {
+                        tool_name,
+                        arguments,
+                        ..
+                    } => {
+                        if arguments.get("block_me").and_then(Value::as_bool) == Some(true) {
+                            HookDecision::Block {
+                                reason: format!("hook blocked `{tool_name}`"),
+                            }
+                        } else {
+                            HookDecision::Continue
+                        }
+                    }
+                    _ => HookDecision::Continue,
+                };
+                return Ok(Json(serde_json::to_value(decision)?));
+            }
+            Operation::ListTools => {
+                let defs = vec![PluginToolDefinition {
+                    name: "reference_echo".into(),
+                    description: "Echo input text through the reference plugin tool.".into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "text": { "type": "string" }
+                        },
+                        "required": ["text"]
+                    }),
+                    read_only: true,
+                }];
+                return Ok(Json(serde_json::to_value(defs)?));
+            }
+            Operation::InvokeTool { request } => {
+                let text = request
+                    .arguments
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let _ = log(format!("reference_echo: {text}"));
+                let result = ToolInvokeResult {
+                    output: json!({ "echo": text }),
+                    is_error: false,
+                };
+                return Ok(Json(serde_json::to_value(result)?));
+            }
             _ => return Err(extism_pdk::Error::msg("unsupported operation").into()),
         }
         Ok(Json(json!({})))

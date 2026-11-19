@@ -984,3 +984,105 @@ async fn sakura_stt_uses_whisper_turbo_and_omits_response_format() {
     assert!(text_req.contains("name=\"language\"\r\n\r\nja"));
     assert!(!text_req.contains("name=\"response_format\""));
 }
+
+#[test]
+fn b11_companion_voice_binding_selects_bound_tts_connection_without_silent_fallback() {
+    use crate::host::settings::TtsConnection;
+    let mut world = World::new();
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("host.db")).unwrap();
+    let conn_a = Connection {
+        id: "tts-a".into(),
+        name: "Enabled TTS".into(),
+        enabled: true,
+        kind: ConnectionKind::Tts,
+        config: ConnectionConfig::Tts(TtsConnection {
+            endpoint: Endpoint {
+                adapter: "voicevox".into(),
+                endpoint: "http://127.0.0.1:50021".into(),
+                options_schema: String::new(),
+                options: "{}".into(),
+            },
+            voice_ids: vec!["3".into()],
+        }),
+        credential_state: crate::host::settings::CredentialState::Absent,
+        revision: 1,
+        last_check: None,
+    };
+    let conn_b = Connection {
+        id: "tts-b".into(),
+        name: "Disabled TTS".into(),
+        enabled: false,
+        kind: ConnectionKind::Tts,
+        config: ConnectionConfig::Tts(TtsConnection {
+            endpoint: Endpoint {
+                adapter: "voicevox".into(),
+                endpoint: "http://127.0.0.1:50022".into(),
+                options_schema: String::new(),
+                options: "{}".into(),
+            },
+            voice_ids: vec!["8".into()],
+        }),
+        credential_state: crate::host::settings::CredentialState::Absent,
+        revision: 1,
+        last_check: None,
+    };
+    store
+        .update_settings(1, &[(conn_a, 0), (conn_b, 0)])
+        .unwrap();
+    let mut comp = crate::host::mind::default_ene_companion("2026-01-01T00:00:00Z");
+    store.insert_companion(&comp).unwrap();
+    comp.voice = crate::host::json::JsonDoc::new(
+        "ene.voice.v1",
+        serde_json::json!({"connection_id": "tts-b", "voice_id": "8"}),
+    );
+    world.insert_resource(store);
+
+    let err = match companion_tts_source(&world, Some(&comp)) {
+        Err(err) => err,
+        Ok(_) => panic!("bound disabled TTS connection must not fall back to another connection"),
+    };
+    assert!(matches!(err, SetupError::Disabled(_)), "{err:?}");
+
+    comp.voice = crate::host::json::JsonDoc::new(
+        "ene.voice.v1",
+        serde_json::json!({"connection_id": "tts-a", "voice_id": "3", "speed": 1.15}),
+    );
+    assert!(companion_tts_source(&world, Some(&comp)).is_ok());
+}
+
+#[tokio::test]
+async fn f01_audio_events_carry_owning_companion_id() {
+    let voice = Voice::new(tokio::runtime::Handle::current());
+    let mut sub = voice.register("desk-1");
+    voice.publish("ene", "desk-1");
+    voice.publish("miku", "desk-1");
+
+    assert!(voice.begin("miku", Arc::new(FakeTts { fail: false }), "1".into()));
+    voice.speak("miku", "こんにちは。");
+    let ended = voice.end_turn("miku");
+    assert!(ended.is_some());
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut chunk_companion = None;
+    let mut finished_companion = None;
+    while tokio::time::Instant::now() < deadline
+        && (chunk_companion.is_none() || finished_companion.is_none())
+    {
+        if let Ok(event) = sub.receiver.try_recv() {
+            match event.event {
+                Some(w::audio_output_event::Event::Chunk(chunk)) => {
+                    chunk_companion = Some(chunk.companion_id);
+                }
+                Some(w::audio_output_event::Event::Finished(fin)) => {
+                    finished_companion = Some(fin.companion_id);
+                }
+                _ => {}
+            }
+        } else {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    assert_eq!(chunk_companion.as_deref(), Some("miku"));
+    assert_eq!(finished_companion.as_deref(), Some("miku"));
+}

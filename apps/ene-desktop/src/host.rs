@@ -1,19 +1,77 @@
-//! The desktop client's view of one host: discovery and the generated clients.
+//! The desktop client's view of one host: local loopback discovery or an
+//! explicit remote HTTPS ingress, and the generated Connect RPC clients.
 //!
-//! The host publishes `connection.json` into its runtime directory. That file is
-//! the only way in: an endpoint that must be loopback `/rpc` and an Owner
-//! Bearer, both validated by [`ene_rpc::connect`]. The host rewrites the file on
-//! every start, so it is read again on every attempt rather than once.
+//! For local hosts, the host publishes `connection.json` into its runtime
+//! directory (`http://<loopback>/rpc` + Owner Bearer, validated by
+//! [`ene_rpc::connect`]). For remote hosts, the user explicitly supplies an
+//! `https://<host>/rpc` ingress and Bearer token validated by
+//! [`ene_rpc::connect_remote`]; plaintext remote URLs are always rejected.
 
 use ene_rpc as w;
-use serde::Deserialize;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// What the host publishes for a client to connect with.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Discovery {
     pub endpoint: String,
     pub token: String,
+}
+
+/// Selected host target: local discovery file or explicit remote HTTPS host.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum HostTarget {
+    Local { path: PathBuf },
+    Remote { endpoint: String, token: String },
+}
+
+#[allow(dead_code)]
+impl HostTarget {
+    /// Reads a persisted remote target (`remote_host.json`), returning `Ok(None)`
+    /// when not configured.
+    pub fn read_remote(path: &Path) -> Result<Option<Self>, Connect> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(Connect::Unavailable(format!("{}: {error}", path.display()))),
+        };
+        let discovery: Discovery = serde_json::from_slice(&bytes)
+            .map_err(|error| Connect::Invalid(format!("{}: {error}", path.display())))?;
+        ene_rpc::validate_remote_endpoint(&discovery.endpoint)
+            .map_err(|error| Connect::Invalid(error.to_string()))?;
+        Ok(Some(Self::Remote {
+            endpoint: discovery.endpoint,
+            token: discovery.token,
+        }))
+    }
+
+    /// Validates and persists a remote HTTPS target (`remote_host.json`).
+    pub fn write_remote(path: &Path, endpoint: &str, token: &str) -> Result<(), Connect> {
+        ene_rpc::validate_remote_endpoint(endpoint)
+            .map_err(|error| Connect::Invalid(error.to_string()))?;
+        if token.is_empty() || token.bytes().any(|b| !(0x21..=0x7e).contains(&b)) {
+            return Err(Connect::Invalid("invalid Bearer token".into()));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| Connect::Unavailable(format!("{}: {error}", parent.display())))?;
+        }
+        let body = serde_json::to_vec_pretty(&Discovery {
+            endpoint: endpoint.to_owned(),
+            token: token.to_owned(),
+        })
+        .map_err(|error| Connect::Invalid(error.to_string()))?;
+        std::fs::write(path, body)
+            .map_err(|error| Connect::Unavailable(format!("{}: {error}", path.display())))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
 }
 
 impl Discovery {
@@ -60,19 +118,44 @@ pub struct Host {
 }
 
 impl Host {
-    /// Connects to a published endpoint. The endpoint and token are validated
-    /// by `ene_rpc::connect`; nothing here widens that.
-    pub fn connect(discovery: &Discovery) -> Result<Self, Connect> {
-        let (transport, config) = ene_rpc::connect(&discovery.endpoint, &discovery.token)
-            .map_err(|error| Connect::Invalid(error.to_string()))?;
-        Ok(Self {
+    fn from_parts(
+        transport: connectrpc::client::HttpClient,
+        config: connectrpc::client::ClientConfig,
+    ) -> Self {
+        Self {
             host: w::HostServiceClient::new(transport.clone(), config.clone()),
             chat: w::ChatServiceClient::new(transport.clone(), config.clone()),
             settings: w::SettingsServiceClient::new(transport.clone(), config.clone()),
             voice: w::VoiceServiceClient::new(transport.clone(), config.clone()),
             work: w::WorkServiceClient::new(transport.clone(), config.clone()),
             client: w::ClientServiceClient::new(transport, config),
-        })
+        }
+    }
+
+    /// Connects to a published loopback endpoint. The endpoint and token are
+    /// validated by `ene_rpc::connect`; nothing here widens that.
+    pub fn connect(discovery: &Discovery) -> Result<Self, Connect> {
+        let (transport, config) = ene_rpc::connect(&discovery.endpoint, &discovery.token)
+            .map_err(|error| Connect::Invalid(error.to_string()))?;
+        Ok(Self::from_parts(transport, config))
+    }
+
+    /// Connects to an explicitly configured remote HTTPS ingress using TLS +
+    /// Bearer authentication (`ene_rpc::connect_remote`).
+    #[allow(dead_code)]
+    pub fn connect_remote(endpoint: &str, token: &str) -> Result<Self, Connect> {
+        let (transport, config) = ene_rpc::connect_remote(endpoint, token)
+            .map_err(|error| Connect::Invalid(error.to_string()))?;
+        Ok(Self::from_parts(transport, config))
+    }
+
+    /// Connects according to a local or remote [`HostTarget`].
+    #[allow(dead_code)]
+    pub fn connect_target(target: &HostTarget) -> Result<Self, Connect> {
+        match target {
+            HostTarget::Local { path } => Self::connect(&Discovery::read(path)?),
+            HostTarget::Remote { endpoint, token } => Self::connect_remote(endpoint, token),
+        }
     }
 }
 
@@ -98,5 +181,33 @@ mod tests {
             Err(Connect::Invalid(_)) => {}
             other => panic!("a malformed file is Invalid, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn f10_remote_host_target_enforces_https_and_roundtrips_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote_host.json");
+        assert!(HostTarget::read_remote(&path).unwrap().is_none());
+
+        assert!(matches!(
+            HostTarget::write_remote(&path, "http://ene.example.com/rpc", "tok"),
+            Err(Connect::Invalid(_))
+        ));
+        assert!(matches!(
+            Host::connect_remote("http://ene.example.com/rpc", "tok"),
+            Err(Connect::Invalid(_))
+        ));
+
+        HostTarget::write_remote(&path, "https://ene.example.com/rpc", "remote-bearer-token")
+            .unwrap();
+        let loaded = HostTarget::read_remote(&path).unwrap().unwrap();
+        assert_eq!(
+            loaded,
+            HostTarget::Remote {
+                endpoint: "https://ene.example.com/rpc".into(),
+                token: "remote-bearer-token".into(),
+            }
+        );
+        assert!(Host::connect_target(&loaded).is_ok());
     }
 }

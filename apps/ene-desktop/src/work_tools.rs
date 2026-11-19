@@ -40,6 +40,11 @@ const SHELL: &str = "powershell";
 #[cfg(not(windows))]
 const SHELL: &str = "bash";
 
+#[cfg(windows)]
+pub(crate) const WORKSPACE_SHELL_CAPABILITY: &str = "work.powershell";
+#[cfg(not(windows))]
+pub(crate) const WORKSPACE_SHELL_CAPABILITY: &str = "work.bash";
+
 pub(crate) struct Workspace {
     root: PathBuf,
     dir: Dir,

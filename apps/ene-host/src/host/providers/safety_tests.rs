@@ -6,8 +6,8 @@ use crate::host::{
     mind::{Assignment, Assignments, Companion, Profile, Role, State},
     model::{self, Credentials},
     settings::{
-        self, Connection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint,
-        LlmConnection, SttConnection, TtsConnection,
+        self, Connection, ConnectionConfig, ConnectionKind, CredentialState, EmbeddingConnection,
+        Endpoint, LlmConnection, SttConnection, TtsConnection,
     },
     voice::{self, SetupError},
 };
@@ -1135,5 +1135,121 @@ fn p10_listed_providers_cover_installed_plugins_and_their_defaults() {
     assert_eq!(
         settings::endpoint_of(&configured, &providers).as_deref(),
         Some("https://operator.example")
+    );
+}
+
+#[tokio::test]
+async fn b07_embedding_plugin_uses_provider_context_and_broker() {
+    let manifest_unused = NativeEndpoint::start().await;
+    let upstream_a = NativeEndpoint::start().await;
+    let upstream_b = NativeEndpoint::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let call_one = [
+        assert_guest_bytes(&format!("\"endpoint\":\"{}\"", upstream_a.base), true, true),
+        assert_guest_bytes(r#""fixture_option":"preserved""#, true, true),
+        assert_guest_bytes(r#""tier":"a""#, true, true),
+        assert_guest_bytes("secret-a", true, false),
+        service(json!({"type":"http_open", "request":{
+            "method":"POST", "url":format!("{}/embeddings", upstream_a.base), "headers":{}
+        }})),
+        assert_guest_bytes(r#""Ok":{"#, false, true),
+        service(json!({"type":"http_close", "handle":"http-1"})),
+        assert_guest_bytes(r#"{"Ok":null}"#, false, true),
+        reply(r#"{"vectors":[[0.1,0.2,0.3]]}"#),
+    ]
+    .join(" ");
+    let call_two = [
+        assert_guest_bytes(&format!("\"endpoint\":\"{}\"", upstream_b.base), true, true),
+        assert_guest_bytes(r#""fixture_option":"overridden""#, true, true),
+        assert_guest_bytes(r#""tier":"b""#, true, true),
+        assert_guest_bytes("secret-b", true, false),
+        service(json!({"type":"http_open", "request":{
+            "method":"POST", "url":format!("{}/embeddings", upstream_b.base), "headers":{}
+        }})),
+        assert_guest_bytes(r#""Ok":{"#, false, true),
+        service(json!({"type":"http_close", "handle":"http-1"})),
+        assert_guest_bytes(r#"{"Ok":null}"#, false, true),
+        reply(r#"{"vectors":[[0.4,0.5,0.6]]}"#),
+    ]
+    .join(" ");
+    let body = format!("global.get $calls i32.const 1 i32.eq if {call_one} else {call_two} end");
+    let _ = installed_providers(
+        root.path(),
+        Extension::Embedding,
+        &body,
+        &manifest_unused.base,
+        json!({"type":"bearer"}),
+    );
+    let manifest_path = root
+        .path()
+        .join(PLUGINS_DIR)
+        .join("openrouter/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["entrypoints"][0]["provider"]["destinations"] =
+        json!([upstream_a.base, upstream_b.base]);
+    super::tests::write(manifest_path, manifest.to_string());
+    let providers = Providers::load(root.path());
+
+    let conn_a = Connection {
+        id: "emb-a".into(),
+        name: "Embed A".into(),
+        enabled: true,
+        kind: ConnectionKind::Embedding,
+        config: ConnectionConfig::Embedding(EmbeddingConnection {
+            endpoint: Endpoint {
+                adapter: "openrouter".into(),
+                endpoint: upstream_a.base.clone(),
+                options: r#"{"tier":"a"}"#.into(),
+                ..Default::default()
+            },
+            model_id: "embed-a".into(),
+            dimensions: 3,
+        }),
+        credential_state: CredentialState::Registered,
+        revision: 1,
+        last_check: None,
+    };
+    let conn_b = Connection {
+        id: "emb-b".into(),
+        name: "Embed B".into(),
+        enabled: true,
+        kind: ConnectionKind::Embedding,
+        config: ConnectionConfig::Embedding(EmbeddingConnection {
+            endpoint: Endpoint {
+                adapter: "openrouter".into(),
+                endpoint: upstream_b.base.clone(),
+                options: r#"{"tier":"b","fixture_option":"overridden"}"#.into(),
+                ..Default::default()
+            },
+            model_id: "embed-b".into(),
+            dimensions: 3,
+        }),
+        credential_state: CredentialState::Registered,
+        revision: 1,
+        last_check: None,
+    };
+    let credentials = Credentials::new(true);
+    credentials.remember(&conn_a.id, "secret-a".into());
+    credentials.remember(&conn_b.id, "secret-b".into());
+
+    let dims_a = crate::host::mind::embedding::probe_dimensions(&conn_a, &credentials, &providers)
+        .await
+        .unwrap();
+    let dims_b = crate::host::mind::embedding::probe_dimensions(&conn_b, &credentials, &providers)
+        .await
+        .unwrap();
+    assert_eq!(dims_a, 3);
+    assert_eq!(dims_b, 3);
+    manifest_unused.assert_requests(0);
+    upstream_a.assert_requests(1);
+    upstream_b.assert_requests(1);
+    assert_eq!(
+        upstream_a.headers.lock().unwrap()[0]["authorization"],
+        "Bearer secret-a"
+    );
+    assert_eq!(
+        upstream_b.headers.lock().unwrap()[0]["authorization"],
+        "Bearer secret-b"
     );
 }

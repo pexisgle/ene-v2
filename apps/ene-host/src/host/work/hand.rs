@@ -24,8 +24,7 @@ use crate::host::{
     background::{self, AbortOnDropHandle},
     db::{Result, Store, now},
     error::HostError,
-    permission,
-    permission::{ApprovalStatus, Hold},
+    permission::{self, ApprovalStatus},
     providers::{Providers, Running},
     resources::HostRuntime,
 };
@@ -36,7 +35,6 @@ use ene_plugin::{
     SessionUpdate, StopReason, ToolCallStatus, ToolCallUpdate, text_block,
 };
 use ene_plugin_runtime::instance::{DenyServices, Services};
-use ene_rpc as w;
 use rig_core::message::{CallId, ToolCall as RequestedCall, ToolFunction, ToolName};
 use rig_ecs::prelude::*;
 use serde_json::{Value, json};
@@ -599,13 +597,21 @@ fn request_permission(
         (tool_name, arguments_of(&tool_call))
     };
     let store = world.resource::<Store>().clone();
+    let Ok(name) = ToolName::new(&tool_name) else {
+        tracing::warn!(work = %run.work_id, "the harness named an empty tool");
+        return;
+    };
     let (normalized, hash) = permission::canonicalise(&tool_name, &arguments);
     let approval_id = uuid::Uuid::new_v4().to_string();
-    let client_id = store
-        .work_session(&run.work_id)
-        .ok()
-        .flatten()
-        .and_then(|session| session.client_id);
+    let client_id = match store.work_session(&run.work_id) {
+        Ok(session) => session.and_then(|session| session.client_id),
+        Err(error) => {
+            if error.is_storage() {
+                crate::host::fail(world, error.to_string());
+            }
+            return;
+        }
+    };
     let approval = permission::Approval {
         request_id: approval_id.clone(),
         session_id: companion.to_owned(),
@@ -620,17 +626,6 @@ fn request_permission(
         client_id,
         capability: Some(tool_name.clone()),
     };
-    if let Err(error) = store.insert_approval(&approval) {
-        crate::host::fail(world, error.to_string());
-        return;
-    }
-    // The hold marker carries the request as a `ToolRequest` whose arguments
-    // hash to the row, because that is what `permission::submit` compares
-    // when it answers. It is never admitted, so no kernel system runs it.
-    let Ok(name) = ToolName::new(&tool_name) else {
-        tracing::warn!(work = %run.work_id, "the harness named an empty tool");
-        return;
-    };
     let call = world
         .spawn(rig_ecs::tools::ToolRequest {
             call: RequestedCall::new(
@@ -639,11 +634,11 @@ fn request_permission(
             ),
         })
         .id();
-    let hold = world.spawn(HoldOf(call)).id();
-    world
-        .resource_mut::<permission::Approvals>()
-        .by_request
-        .insert(approval_id.clone(), Hold { call, hold });
+    if let Err(error) = permission::issue_hold(world, &store, approval.clone(), call) {
+        world.entity_mut(call).despawn();
+        crate::host::fail(world, error.to_string());
+        return;
+    }
     if let Some(hand) = world.resource_mut::<Hands>().by_adapter.get_mut(adapter) {
         hand.pending = Some(Pending {
             approval: approval_id,
@@ -652,20 +647,11 @@ fn request_permission(
             options,
         });
     }
-    let mut notifier = world.resource_mut::<crate::host::notify::Notifier>();
-    notifier.push(
-        Some(companion),
-        None,
-        w::notification::Event::ApprovalRequested(Box::new(w::ApprovalRequested {
-            request: Some(crate::host::wire::approval(&approval)).into(),
-            ..Default::default()
-        })),
-    );
     let target = format!(
-        "{tool_name} {}: approval is required before this operation runs",
+        "{tool_name} {}",
         crate::host::db::truncate(&approval.normalized_arguments, 200)
     );
-    notifier.notice(Some(companion), "approval_required", &target);
+    permission::notify_approval_card(world, companion, &approval, &target);
 }
 
 /// The canonical document a permission card shows and the approval hash is

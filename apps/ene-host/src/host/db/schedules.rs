@@ -261,6 +261,7 @@ impl Store {
     /// The enabled schedules due at `now`, for the firing loop. The indexed
     /// comparison is over the canonical whole-second timestamps, so string
     /// order is time order.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn due_schedules(&self, now: Timestamp) -> Result<Vec<Schedule>> {
         self.fetch_all(
             "SELECT id, companion_id, title, instruction, run_at, cron_expr, enabled, \
@@ -274,6 +275,7 @@ impl Store {
     /// Records that `id` fired at `at` and moves it to `next_run_at`. A
     /// missing next time disables the row, which is how a one-shot ends.
     /// `false` when the row no longer exists.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn mark_schedule_fired(
         &self,
         id: &str,
@@ -295,13 +297,186 @@ impl Store {
         Ok(changed > 0)
     }
 
-    pub(crate) fn cancel_schedule(&self, companion: &str, id: &str) -> Result<bool> {
+    /// Atomically materializes all schedules due at `now` whose companion is
+    /// present in `ready_companions` into idempotent `schedule_occurrences`
+    /// rows (advancing each materialized schedule row in the same transaction)
+    /// and returns all currently pending occurrences.
+    pub(crate) fn materialize_due_occurrences(
+        &self,
+        now: Timestamp,
+        clock: &ScheduleClock,
+        ready_companions: &std::collections::HashSet<String>,
+    ) -> Result<Vec<ScheduleOccurrence>> {
+        let now_stamp = stamp(now);
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let due = {
+            let mut stmt = tx.prepare_cached(
+                "SELECT id, companion_id, title, instruction, run_at, cron_expr, enabled, \
+                 next_run_at, created_at, last_triggered_at FROM schedules \
+                 WHERE enabled = 1 AND next_run_at <= ?1 ORDER BY next_run_at, id",
+            )?;
+            stmt.query_map([&now_stamp], row_to_schedule)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for schedule in due {
+            if !ready_companions.contains(&schedule.companion_id) {
+                continue;
+            }
+            let scheduled_for = schedule
+                .next_run_at
+                .clone()
+                .unwrap_or_else(|| now_stamp.clone());
+            let occurrence_key = format!("schedule:{}:{scheduled_for}", schedule.id);
+            let next_run_at = if schedule.one_shot() {
+                None
+            } else {
+                match schedule
+                    .cron_expr
+                    .as_deref()
+                    .map(|expression| next_occurrence(expression, now, clock.zone()))
+                {
+                    Some(Ok(at)) => Some(at),
+                    Some(Err(error)) => {
+                        tracing::warn!(%error, schedule = %schedule.id, "a repeating schedule exhausted its expression");
+                        None
+                    }
+                    None => None,
+                }
+            };
+            tx.prepare_cached(
+                "INSERT OR IGNORE INTO schedule_occurrences \
+                 (occurrence_key, schedule_id, companion_id, scheduled_for, title, instruction, \
+                  status, attempts, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', 0, ?7)",
+            )?
+            .execute(params![
+                occurrence_key,
+                schedule.id,
+                schedule.companion_id,
+                scheduled_for,
+                schedule.title,
+                schedule.instruction,
+                now_stamp,
+            ])?;
+            tx.prepare_cached(
+                "UPDATE schedules SET last_triggered_at = ?2, next_run_at = ?3, enabled = ?4 \
+                 WHERE id = ?1",
+            )?
+            .execute(params![
+                schedule.id,
+                now_stamp,
+                next_run_at.map(stamp),
+                if next_run_at.is_some() { 1 } else { 0 }
+            ])?;
+        }
+        let pending = {
+            let mut stmt = tx.prepare_cached(
+                "SELECT occurrence_key, schedule_id, companion_id, scheduled_for, title, \
+                 instruction, status, attempts, last_error, created_at, delivered_at \
+                 FROM schedule_occurrences WHERE status = 'pending' \
+                 ORDER BY scheduled_for, occurrence_key",
+            )?;
+            stmt.query_map([], row_to_occurrence)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok(pending)
+    }
+
+    /// Pending schedule occurrences awaiting confirmed delivery.
+    pub(crate) fn pending_schedule_occurrences(&self) -> Result<Vec<ScheduleOccurrence>> {
+        self.fetch_all(
+            "SELECT occurrence_key, schedule_id, companion_id, scheduled_for, title, \
+             instruction, status, attempts, last_error, created_at, delivered_at \
+             FROM schedule_occurrences WHERE status = 'pending' \
+             ORDER BY scheduled_for, occurrence_key",
+            [],
+            row_to_occurrence,
+        )
+    }
+
+    /// Marks `occurrence_key` delivered once confirmed in the companion's
+    /// conversation log.
+    pub(crate) fn mark_occurrence_delivered(
+        &self,
+        occurrence_key: &str,
+        at: Timestamp,
+    ) -> Result<bool> {
         let changed = self
             .conn()?
-            .prepare_cached("DELETE FROM schedules WHERE id = ?1 AND companion_id = ?2")?
-            .execute(params![id, companion])?;
+            .prepare_cached(
+                "UPDATE schedule_occurrences SET status = 'delivered', delivered_at = ?2, \
+                 last_error = NULL WHERE occurrence_key = ?1 AND status != 'delivered'",
+            )?
+            .execute(params![occurrence_key, stamp(at)])?;
         Ok(changed > 0)
     }
+
+    /// Records a failed delivery attempt on a pending occurrence so the next
+    /// poll retries cleanly once the failure clears (for example when a model
+    /// connection is bound).
+    pub(crate) fn record_occurrence_attempt(
+        &self,
+        occurrence_key: &str,
+        error: &str,
+    ) -> Result<()> {
+        self.conn()?
+            .prepare_cached(
+                "UPDATE schedule_occurrences SET attempts = attempts + 1, last_error = ?2 \
+                 WHERE occurrence_key = ?1 AND status = 'pending'",
+            )?
+            .execute(params![occurrence_key, error])?;
+        Ok(())
+    }
+
+    pub(crate) fn cancel_schedule(&self, companion: &str, id: &str) -> Result<bool> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let changed = tx
+            .prepare_cached("DELETE FROM schedules WHERE id = ?1 AND companion_id = ?2")?
+            .execute(params![id, companion])?;
+        if changed > 0 {
+            tx.prepare_cached(
+                "DELETE FROM schedule_occurrences WHERE schedule_id = ?1 AND status = 'pending'",
+            )?
+            .execute([id])?;
+        }
+        tx.commit()?;
+        Ok(changed > 0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct ScheduleOccurrence {
+    pub(crate) occurrence_key: String,
+    pub(crate) schedule_id: String,
+    pub(crate) companion_id: String,
+    pub(crate) scheduled_for: String,
+    pub(crate) title: String,
+    pub(crate) instruction: String,
+    pub(crate) status: String,
+    pub(crate) attempts: u64,
+    pub(crate) last_error: Option<String>,
+    pub(crate) created_at: String,
+    pub(crate) delivered_at: Option<String>,
+}
+
+fn row_to_occurrence(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduleOccurrence> {
+    Ok(ScheduleOccurrence {
+        occurrence_key: row.get("occurrence_key")?,
+        schedule_id: row.get("schedule_id")?,
+        companion_id: row.get("companion_id")?,
+        scheduled_for: row.get("scheduled_for")?,
+        title: row.get("title")?,
+        instruction: row.get("instruction")?,
+        status: row.get("status")?,
+        attempts: row.get("attempts")?,
+        last_error: row.get("last_error")?,
+        created_at: row.get("created_at")?,
+        delivered_at: row.get("delivered_at")?,
+    })
 }
 
 fn row_to_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {

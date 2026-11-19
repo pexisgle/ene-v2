@@ -37,6 +37,8 @@ const CHUNK: usize = 480;
 
 /// A streaming sample-rate converter that keeps its state across chunks.
 struct Filter {
+    from: u32,
+    to: u32,
     inner: rubato::Fft<f32>,
     pending: Vec<f32>,
     output: Vec<f32>,
@@ -57,6 +59,8 @@ impl Filter {
         )
         .map_err(|error| format!("the sample rate cannot be converted: {error}"))?;
         Ok(Self {
+            from,
+            to,
             inner,
             pending: Vec::with_capacity(CHUNK * 2),
             output: vec![0.; CHUNK * 4],
@@ -67,6 +71,33 @@ impl Filter {
         use rubato::Resampler;
         self.inner.reset();
         self.pending.clear();
+    }
+
+    fn finish(&mut self) -> Result<Vec<f32>, String> {
+        if self.pending.is_empty() {
+            self.reset();
+            return Ok(Vec::new());
+        }
+        use rubato::Resampler;
+        let remainder = self.pending.len();
+        let want = self.inner.input_frames_next();
+        let pad_zeroes = want.saturating_sub(remainder % want);
+        if pad_zeroes > 0 && !remainder.is_multiple_of(want) {
+            self.pending.resize(remainder + pad_zeroes, 0.0);
+        }
+        let mut out = self.push(&[])?;
+        let delay = self.inner.output_delay();
+        let expected_tail =
+            ((remainder as f64) * (self.to as f64) / (self.from as f64)).ceil() as usize;
+        if delay > 0 && out.len() < expected_tail {
+            let flush_pad = vec![0.0; want];
+            out.extend(self.push(&flush_pad)?);
+        }
+        if out.len() > expected_tail {
+            out.truncate(expected_tail);
+        }
+        self.reset();
+        Ok(out)
     }
 
     /// Converts everything that completes a chunk, keeping the remainder.
@@ -116,18 +147,141 @@ struct Deck {
     pending: VecDeque<f32>,
 }
 
+struct PlayerQueue {
+    deck: Arc<Mutex<Deck>>,
+    filter: Option<Filter>,
+    flushed: Arc<AtomicU64>,
+}
+
+impl PlayerQueue {
+    fn new(device_rate: u32) -> Result<Self, String> {
+        Ok(Self {
+            deck: Arc::new(Mutex::new(Deck::default())),
+            filter: (device_rate != WIRE_RATE)
+                .then(|| Filter::new(WIRE_RATE, device_rate))
+                .transpose()?,
+            flushed: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    fn push(&mut self, utterance: &str, generation: u64, pcm: &[u8]) -> Result<(), String> {
+        if generation == 0 || generation <= self.flushed.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let decoded = decode(pcm)?;
+        let switched = {
+            let deck = self
+                .deck
+                .lock()
+                .map_err(|_| "the audio deck was poisoned")?;
+            if generation < deck.generation {
+                return Ok(());
+            }
+            deck.generation != generation || deck.utterance != utterance
+        };
+        if switched && let Some(filter) = self.filter.as_mut() {
+            filter.reset();
+        }
+        let samples = match self.filter.as_mut() {
+            Some(filter) => filter.push(&decoded)?,
+            None => decoded,
+        };
+        let mut deck = self
+            .deck
+            .lock()
+            .map_err(|_| "the audio deck was poisoned")?;
+        if generation <= self.flushed.load(Ordering::Relaxed) || generation < deck.generation {
+            return Ok(());
+        }
+        if deck.generation != generation || deck.utterance != utterance {
+            deck.pending.clear();
+            deck.generation = generation;
+            deck.utterance = utterance.to_owned();
+        }
+        deck.pending.extend(samples);
+        Ok(())
+    }
+
+    fn finish_utterance(&mut self, utterance: &str, generation: u64) -> Result<(), String> {
+        if generation == 0 || generation <= self.flushed.load(Ordering::Relaxed) {
+            if let Some(filter) = self.filter.as_mut() {
+                filter.reset();
+            }
+            return Ok(());
+        }
+        let active = {
+            let deck = self
+                .deck
+                .lock()
+                .map_err(|_| "the audio deck was poisoned")?;
+            deck.generation == generation && deck.utterance == utterance
+        };
+        if !active {
+            return Ok(());
+        }
+        let tail = match self.filter.as_mut() {
+            Some(filter) => filter.finish()?,
+            None => Vec::new(),
+        };
+        if tail.is_empty() {
+            return Ok(());
+        }
+        let mut deck = self
+            .deck
+            .lock()
+            .map_err(|_| "the audio deck was poisoned")?;
+        if generation > self.flushed.load(Ordering::Relaxed)
+            && deck.generation == generation
+            && deck.utterance == utterance
+        {
+            deck.pending.extend(tail);
+        }
+        Ok(())
+    }
+
+    fn stop_current(&mut self) {
+        if let Some(filter) = self.filter.as_mut() {
+            filter.reset();
+        }
+        if let Ok(mut deck) = self.deck.lock() {
+            deck.pending.clear();
+            deck.utterance.clear();
+        }
+    }
+
+    fn flush(&mut self, generation: u64) {
+        self.flushed.fetch_max(generation, Ordering::Relaxed);
+        if let Ok(mut deck) = self.deck.lock()
+            && deck.generation <= generation
+        {
+            deck.pending.clear();
+            deck.utterance.clear();
+            if let Some(filter) = self.filter.as_mut() {
+                filter.reset();
+            }
+        }
+    }
+
+    fn reset_stream(&mut self) {
+        self.flushed.store(0, Ordering::Relaxed);
+        if let Some(filter) = self.filter.as_mut() {
+            filter.reset();
+        }
+        if let Ok(mut deck) = self.deck.lock() {
+            deck.generation = 0;
+            deck.pending.clear();
+            deck.utterance.clear();
+        }
+    }
+}
+
 /// The device-side player. One client owns one deck.
 pub struct Player {
-    deck: Arc<Mutex<Deck>>,
+    queue: PlayerQueue,
     rate: u32,
     channels: usize,
-    /// Device rate minus wire rate, when the device does not offer the wire
-    /// rate. The session thread owns this, never the callback.
-    filter: Option<Filter>,
     /// The stream must stay alive for audio to continue; dropping it stops it.
     _stream: cpal::Stream,
-    /// The generation the host last invalidated.
-    flushed: Arc<AtomicU64>,
     /// RMS of the buffer the device last played, for lip sync.
     level: Arc<AtomicU32>,
     /// Software mute: drains the deck without audible output.
@@ -145,11 +299,10 @@ impl Player {
         let supported = pick_output(&device)?;
         let rate = supported.sample_rate();
         let channels = supported.channels() as usize;
-        let deck = Arc::new(Mutex::new(Deck::default()));
-        let flushed = Arc::new(AtomicU64::new(0));
+        let queue = PlayerQueue::new(rate)?;
         let level = Arc::new(AtomicU32::new(0));
         let muted = Arc::new(AtomicBool::new(false));
-        let sink = deck.clone();
+        let sink = queue.deck.clone();
         let rms = level.clone();
         let out_muted = muted.clone();
         let stream = match supported.sample_format() {
@@ -196,14 +349,10 @@ impl Player {
             .play()
             .map_err(|error| format!("the output stream could not start: {error}"))?;
         Ok(Self {
-            deck,
+            queue,
             rate,
             channels,
-            filter: (rate != WIRE_RATE)
-                .then(|| Filter::new(WIRE_RATE, rate))
-                .transpose()?,
             _stream: stream,
-            flushed,
             level,
             muted,
         })
@@ -229,42 +378,33 @@ impl Player {
     /// Queues one wire chunk. A chunk for a flushed or superseded generation is
     /// dropped, which is what makes a late arrival harmless.
     pub fn push(&mut self, utterance: &str, generation: u64, pcm: &[u8]) -> Result<(), String> {
-        if generation <= self.flushed.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-        let samples = decode(pcm)?;
-        let samples = match self.filter.as_mut() {
-            Some(filter) => filter.push(&samples)?,
-            None => samples,
-        };
-        let mut deck = self
-            .deck
-            .lock()
-            .map_err(|_| "the audio deck was poisoned")?;
-        if deck.generation != generation || deck.utterance != utterance {
-            // A new utterance always wins: the old audio is dropped, never mixed.
-            deck.pending.clear();
-            deck.generation = generation;
-            deck.utterance = utterance.to_owned();
-        }
-        deck.pending.extend(samples);
-        Ok(())
+        self.queue.push(utterance, generation, pcm)
+    }
+
+    /// Drains any buffered resampler tail at utterance completion.
+    pub fn finish_utterance(&mut self, utterance: &str, generation: u64) -> Result<(), String> {
+        self.queue.finish_utterance(utterance, generation)
+    }
+
+    /// Stops only what is currently buffered without poisoning future generations.
+    pub fn stop_current(&mut self) {
+        self.queue.stop_current();
     }
 
     /// Stops everything at or below `generation`.
-    pub fn flush(&self, generation: u64) {
-        self.flushed.fetch_max(generation, Ordering::Relaxed);
-        if let Ok(mut deck) = self.deck.lock()
-            && deck.generation <= generation
-        {
-            deck.pending.clear();
-            deck.utterance.clear();
-        }
+    pub fn flush(&mut self, generation: u64) {
+        self.queue.flush(generation);
+    }
+
+    /// Resets generation tracking when opening a fresh audio subscription stream.
+    pub fn reset_stream(&mut self) {
+        self.queue.reset_stream();
     }
 
     /// Whether audio is still queued for the current utterance.
     pub fn playing(&self) -> bool {
-        self.deck
+        self.queue
+            .deck
             .lock()
             .map(|deck| !deck.pending.is_empty())
             .unwrap_or(false)
@@ -515,11 +655,123 @@ const VAD_PRE_ROLL_SAMPLES: usize = VAD_FRAME_SAMPLES * 35; // 560 ms
 const VAD_START_SCORE: f32 = 0.55;
 const VAD_CONTINUE_SCORE: f32 = 0.35;
 
+/// Microphone capture mode (`F07`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CaptureMode {
+    /// Continuous voice-activity detection.
+    #[default]
+    Vad,
+    /// Push-to-Talk: captures only while held, commits on release, discards on cancel.
+    Ptt,
+}
+
+/// Far-end reference echo suppressor with barge-in detection (`F08`).
+///
+/// While the companion is speaking, speaker bleed into the microphone tracks the
+/// far-end playback RMS. Genuine user speech interrupting the companion stays
+/// meaningfully above `max(far_end_rms * ECHO_MARGIN, MIN_BARGE_IN_RMS)` for
+/// `BARGE_IN_FRAMES` consecutive ticks before triggering a barge-in.
+#[derive(Default)]
+struct EchoSuppressor {
+    over_threshold_frames: u8,
+    barge_in_latched: bool,
+}
+
+const ECHO_MARGIN: f32 = 1.8;
+const MIN_BARGE_IN_RMS: f32 = 0.06;
+const BARGE_IN_FRAMES: u8 = 3;
+
+impl EchoSuppressor {
+    fn reset(&mut self) {
+        self.over_threshold_frames = 0;
+        self.barge_in_latched = false;
+    }
+
+    /// Evaluates one capture frame against far-end playback state.
+    /// Returns `(allow_capture, barge_in_triggered)`.
+    fn evaluate(&mut self, companion_speaking: bool, near_rms: f32, far_rms: f32) -> (bool, bool) {
+        if !companion_speaking {
+            self.reset();
+            return (true, false);
+        }
+        if self.barge_in_latched {
+            return (true, false);
+        }
+        let threshold = (far_rms * ECHO_MARGIN).max(MIN_BARGE_IN_RMS);
+        if near_rms >= threshold {
+            self.over_threshold_frames = self.over_threshold_frames.saturating_add(1);
+            if self.over_threshold_frames >= BARGE_IN_FRAMES {
+                self.barge_in_latched = true;
+                return (true, true);
+            }
+        } else {
+            self.over_threshold_frames = 0;
+        }
+        (false, false)
+    }
+}
+
+/// Push-to-Talk capture state machine (`F07`).
+#[derive(Default)]
+struct PttController {
+    active: bool,
+    has_audio: bool,
+    pending_commit: bool,
+}
+
+impl PttController {
+    fn start(&mut self) {
+        self.active = true;
+        self.has_audio = false;
+        self.pending_commit = false;
+    }
+
+    fn commit(&mut self) {
+        if self.active {
+            self.active = false;
+            self.pending_commit = self.has_audio;
+            self.has_audio = false;
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.active = false;
+        self.has_audio = false;
+        self.pending_commit = false;
+    }
+
+    fn process(&mut self, samples: &[f32]) -> CaptureOutput {
+        let mut chunks = Vec::new();
+        if self.active {
+            if !samples.is_empty() {
+                chunks.push(encode(samples));
+                self.has_audio = true;
+            }
+            return CaptureOutput {
+                chunks,
+                open: true,
+                barge_in: false,
+            };
+        }
+        if self.pending_commit {
+            self.pending_commit = false;
+            chunks.push(Vec::new());
+        }
+        CaptureOutput {
+            chunks,
+            open: false,
+            barge_in: false,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct CaptureOutput {
     /// Wire PCM in order. An empty chunk ends the preceding utterance.
     pub chunks: Vec<Vec<u8>>,
     pub open: bool,
+    /// True on the tick user speech overrode companion playback (`F08`).
+    pub barge_in: bool,
 }
 
 fn is_single_tone(frame: &[f32]) -> bool {
@@ -677,6 +929,9 @@ pub struct Microphone {
     muted: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
     voice_gate: VoiceGate,
+    mode: CaptureMode,
+    ptt: PttController,
+    echo: EchoSuppressor,
 }
 
 fn build_microphone_stream(
@@ -796,7 +1051,43 @@ impl Microphone {
             muted,
             level,
             voice_gate: VoiceGate::new()?,
+            mode: CaptureMode::Vad,
+            ptt: PttController::default(),
+            echo: EchoSuppressor::default(),
         })
+    }
+
+    pub fn set_capture_mode(&mut self, mode: CaptureMode) {
+        if self.mode != mode {
+            self.mode = mode;
+            self.ptt.cancel();
+            let _ = self.voice_gate.reset();
+            self.echo.reset();
+        }
+    }
+
+    pub fn ptt_start(&mut self) {
+        if self.mode == CaptureMode::Ptt {
+            self.ptt.start();
+        }
+    }
+
+    pub fn ptt_commit(&mut self) {
+        if self.mode == CaptureMode::Ptt {
+            self.ptt.commit();
+        }
+    }
+
+    pub fn ptt_cancel(&mut self) {
+        if self.mode == CaptureMode::Ptt {
+            self.ptt.cancel();
+            if let Ok(mut frames) = self.frames.try_lock() {
+                frames.clear();
+            }
+            if let Some(filter) = &mut self.filter {
+                filter.reset();
+            }
+        }
     }
 
     /// Mutes or unmutes microphone capture. Muting clears buffered frames and
@@ -825,17 +1116,41 @@ impl Microphone {
     }
 
     /// Takes the frames captured since the last call as ordered wire chunks.
-    pub fn take(&mut self, companion_speaking: bool) -> CaptureOutput {
-        let suppress = self.is_muted() || companion_speaking;
-        let samples = match self.frames.lock() {
-            Ok(mut frames) if suppress => {
+    pub fn take(&mut self, companion_speaking: bool, far_end_level: f32) -> CaptureOutput {
+        if self.is_muted() {
+            if let Ok(mut frames) = self.frames.lock() {
                 frames.clear();
-                Vec::new()
             }
+            if let Some(filter) = &mut self.filter {
+                filter.reset();
+            }
+            self.echo.reset();
+            self.ptt.cancel();
+            return CaptureOutput {
+                chunks: self.voice_gate.reset().then(Vec::new).into_iter().collect(),
+                open: false,
+                barge_in: false,
+            };
+        }
+        let samples: Vec<f32> = match self.frames.lock() {
             Ok(mut frames) => frames.drain(..).collect(),
             Err(_) => return CaptureOutput::default(),
         };
-        if !suppress {
+        if self.mode == CaptureMode::Ptt {
+            let barge_in = self.ptt.active && companion_speaking;
+            let converted = match self.filter.as_mut() {
+                Some(filter) => filter.push(&samples).unwrap_or_default(),
+                None => samples,
+            };
+            let mut out = self.ptt.process(&converted);
+            out.barge_in = barge_in;
+            return out;
+        }
+        let near_rms = self.level();
+        let (allow_capture, barge_in) =
+            self.echo
+                .evaluate(companion_speaking, near_rms, far_end_level);
+        if allow_capture {
             let samples = match self.filter.as_mut() {
                 Some(filter) => filter.push(&samples),
                 None => Ok(samples),
@@ -845,6 +1160,7 @@ impl Microphone {
                     return CaptureOutput {
                         chunks,
                         open: self.voice_gate.active,
+                        barge_in,
                     };
                 }
                 Err(error) => tracing::warn!(%error, "microphone audio conversion failed"),
@@ -857,6 +1173,7 @@ impl Microphone {
         CaptureOutput {
             chunks: self.voice_gate.reset().then(Vec::new).into_iter().collect(),
             open: false,
+            barge_in: false,
         }
     }
 }
@@ -1246,5 +1563,108 @@ mod tests {
         assert!((captured[0] - 0.5).abs() < 1e-3);
         assert!((captured[1] + 0.5).abs() < 1e-3);
         assert!((f32::from_bits(cap_level.load(Ordering::Relaxed)) - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn b01_stop_current_and_reset_stream_do_not_silence_generation_one() {
+        let mut queue = PlayerQueue::new(WIRE_RATE).unwrap();
+        let pcm = encode(&[0.25; 64]);
+        queue.push("u1", 5, &pcm).unwrap();
+        assert!(!queue.deck.lock().unwrap().pending.is_empty());
+
+        // Local stop clears buffered samples without latching flushed=u64::MAX.
+        queue.stop_current();
+        assert!(queue.deck.lock().unwrap().pending.is_empty());
+        queue.push("u2", 6, &pcm).unwrap();
+        assert!(!queue.deck.lock().unwrap().pending.is_empty());
+
+        // After host restart or resync, reset_stream allows generation=1 again.
+        queue.flush(6);
+        queue.reset_stream();
+        queue.push("u3", 1, &pcm).unwrap();
+        assert_eq!(queue.deck.lock().unwrap().generation, 1);
+        assert!(!queue.deck.lock().unwrap().pending.is_empty());
+    }
+
+    #[test]
+    fn q01_older_generation_chunk_never_overwrites_newer_generation() {
+        let mut queue = PlayerQueue::new(WIRE_RATE).unwrap();
+        let newer = encode(&[0.5; 32]);
+        let older = encode(&[-0.5; 32]);
+        queue.push("u3", 3, &newer).unwrap();
+        queue.push("u2", 2, &older).unwrap();
+        let deck = queue.deck.lock().unwrap();
+        assert_eq!(deck.generation, 3);
+        assert_eq!(deck.utterance, "u3");
+        assert_eq!(deck.pending.len(), 32);
+    }
+
+    #[test]
+    fn q02_utterance_switch_resets_filter_and_finish_drains_tail() {
+        let mut queue = PlayerQueue::new(48_000).unwrap();
+        // Less than one CHUNK (480 samples) stays buffered inside Filter.
+        let partial = encode(&[0.25; 240]);
+        queue.push("u1", 1, &partial).unwrap();
+        assert!(queue.deck.lock().unwrap().pending.is_empty());
+
+        // Switching to a new utterance resets Filter so u1's partial audio
+        // never leaks into u2.
+        let full = encode(&[-0.25; 480]);
+        queue.push("u2", 2, &full).unwrap();
+        {
+            let deck = queue.deck.lock().unwrap();
+            assert_eq!(deck.generation, 2);
+            assert!(deck.pending.iter().all(|&s| s <= 0.05));
+        }
+
+        // Finishing an utterance drains the remaining resampler tail.
+        let mut queue2 = PlayerQueue::new(48_000).unwrap();
+        queue2.push("u3", 1, &partial).unwrap();
+        assert!(queue2.deck.lock().unwrap().pending.is_empty());
+        queue2.finish_utterance("u3", 1).unwrap();
+        assert!(!queue2.deck.lock().unwrap().pending.is_empty());
+    }
+
+    #[test]
+    fn f07_ptt_mode_gates_capture_until_active_and_cancel_discards() {
+        let mut ptt = PttController::default();
+        // Inactive PTT ignores audio and emits nothing.
+        let idle = ptt.process(&[0.2; 64]);
+        assert!(!idle.open && idle.chunks.is_empty());
+
+        // Start -> captures raw audio; commit -> emits end-of-utterance marker.
+        ptt.start();
+        let active = ptt.process(&[0.25; 64]);
+        assert!(active.open);
+        assert_eq!(active.chunks.len(), 1);
+        assert!(!active.chunks[0].is_empty());
+        ptt.commit();
+        let committed = ptt.process(&[]);
+        assert!(!committed.open);
+        assert_eq!(committed.chunks, vec![Vec::<u8>::new()]);
+
+        // Cancel -> discards buffered audio and emits NO end marker.
+        ptt.start();
+        let _ = ptt.process(&[0.3; 64]);
+        ptt.cancel();
+        let cancelled = ptt.process(&[0.3; 64]);
+        assert!(!cancelled.open && cancelled.chunks.is_empty());
+    }
+
+    #[test]
+    fn f08_echo_suppressor_blocks_echo_and_detects_barge_in() {
+        let mut echo = EchoSuppressor::default();
+        // Speaker echo closely tracking far-end level stays suppressed.
+        for _ in 0..5 {
+            assert_eq!(echo.evaluate(true, 0.12, 0.10), (false, false));
+        }
+        // Strong user voice exceeding far-end margin for 3 frames triggers barge-in once.
+        assert_eq!(echo.evaluate(true, 0.45, 0.10), (false, false));
+        assert_eq!(echo.evaluate(true, 0.45, 0.10), (false, false));
+        assert_eq!(echo.evaluate(true, 0.45, 0.10), (true, true));
+        // Subsequent frames stay open without re-triggering barge-in.
+        assert_eq!(echo.evaluate(true, 0.45, 0.10), (true, false));
+        // Once companion stops speaking, suppressor resets cleanly.
+        assert_eq!(echo.evaluate(false, 0.01, 0.0), (true, false));
     }
 }

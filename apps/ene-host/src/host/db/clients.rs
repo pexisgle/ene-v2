@@ -347,15 +347,22 @@ impl Store {
     /// The companion a client is currently the active client of, if any.
     pub(crate) fn activation_for_client(&self, client: &str) -> Result<Option<String>> {
         Ok(self
-            .fetch(
-                &format!(
-                    "SELECT {ACTIVATION_COLUMNS} FROM activations \
-                     WHERE client_id = ?1 ORDER BY companion_id"
-                ),
-                [client],
-                row_to_activation,
-            )?
-            .map(|activation| activation.companion_id))
+            .active_companions_for_client(client)?
+            .into_iter()
+            .next())
+    }
+
+    /// All companions currently resident (active) on `client`.
+    pub(crate) fn active_companions_for_client(&self, client: &str) -> Result<Vec<String>> {
+        self.fetch_all(
+            &format!(
+                "SELECT {ACTIVATION_COLUMNS} FROM activations \
+                 WHERE client_id = ?1 ORDER BY companion_id"
+            ),
+            [client],
+            row_to_activation,
+        )
+        .map(|items| items.into_iter().map(|a| a.companion_id).collect())
     }
 }
 

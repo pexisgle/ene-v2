@@ -8,13 +8,13 @@
 use super::{BoxFuture, HttpResult, SAMPLE_RATE, SetupError, SttEngine, TtsEngine};
 use crate::host::{
     model::Credentials,
-    providers::{BrokerServices, Grant, Providers},
+    providers::{ProviderInvocationContext, Providers},
     settings::{Connection, ConnectionKind},
 };
 use ene_plugin::{
     AudioFormat, Extension, Operation as PluginOperation, SynthesisRequest, TranscriptionRequest,
 };
-use ene_plugin_runtime::{instance::Services, service::HttpBroker};
+use ene_plugin_runtime::instance::Services;
 use std::sync::Arc;
 
 /// The most audio one utterance may produce. A minute of 24 kHz PCM is about
@@ -25,8 +25,7 @@ const MAX_AUDIO_BYTES: u64 = 16 * 1024 * 1024;
 /// A speech engine backed by a provider plugin.
 pub(crate) struct PluginSpeech {
     running: Arc<crate::host::providers::Running>,
-    broker: Arc<HttpBroker>,
-    connection: Connection,
+    context: ProviderInvocationContext,
 }
 
 impl PluginSpeech {
@@ -46,19 +45,20 @@ impl PluginSpeech {
         let Some(running) = providers.running(&adapter, extension) else {
             return Ok(None);
         };
-        let grant = Grant::new(running.provider(), connection, credentials, providers)
-            .map_err(|error| SetupError::Broken(error.to_string()))?;
-        Ok(Some(Self {
-            running,
-            broker: crate::host::providers::http_broker(Arc::new(grant))
-                .map_err(|error| SetupError::Broken(format!("plugin HTTP transport: {error}")))?,
-            connection: connection.clone(),
-        }))
+        let context = ProviderInvocationContext::from_connection(
+            &running,
+            connection,
+            credentials,
+            providers,
+            None,
+        )
+        .map_err(|error| SetupError::Broken(error.to_string()))?;
+        Ok(Some(Self { running, context }))
     }
 
     /// The services a speech call needs: the broker, and nothing else.
     fn services(&self) -> Arc<dyn Services> {
-        BrokerServices::new(Arc::clone(&self.broker), self.running.provider().id.clone())
+        self.context.services()
     }
 
     /// Reads a synthesis answer back, chunk by chunk, into one buffer.
@@ -70,6 +70,7 @@ impl PluginSpeech {
         let mut audio = Vec::with_capacity(bytes as usize);
         loop {
             let chunk = self
+                .context
                 .broker
                 .read(handle)
                 .await
@@ -93,21 +94,66 @@ impl TtsEngine for PluginSpeech {
         voice: String,
     ) -> BoxFuture<'a, HttpResult<(Vec<u8>, u32)>> {
         Box::pin(async move {
-            let options = options_of(&self.connection);
+            use base64::Engine;
             let request = SynthesisRequest {
-                endpoint: self.running.provider().endpoint.clone(),
-                options,
-                model: model_of(&self.connection),
+                endpoint: self.context.endpoint.clone(),
+                options: self.context.options.clone(),
+                model: model_of(&self.context.options),
                 text,
                 voice,
                 speed: 0.0,
                 format: AudioFormat::Pcm16,
             };
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+            let collector = tokio::spawn(async move {
+                let mut streamed = Vec::<u8>::new();
+                let mut sample_rate = 0u32;
+                let mut got_chunks = false;
+                while let Some(event) = rx.recv().await {
+                    if let ene_plugin::Event::Audio {
+                        data_base64,
+                        sample_rate: rate,
+                        ..
+                    } = event
+                    {
+                        got_chunks = true;
+                        if rate > 0 {
+                            sample_rate = rate;
+                        }
+                        if !data_base64.is_empty() {
+                            let decoded = base64::engine::general_purpose::STANDARD
+                                .decode(&data_base64)
+                                .map_err(|_| {
+                                    "the speech provider emitted undecodable audio chunk".to_owned()
+                                })?;
+                            if (streamed.len() + decoded.len()) as u64 > MAX_AUDIO_BYTES {
+                                return Err(
+                                    "the speech provider exceeded the maximum streamed audio size"
+                                        .to_owned(),
+                                );
+                            }
+                            streamed.extend_from_slice(&decoded);
+                        }
+                    }
+                }
+                Ok::<_, String>((got_chunks, streamed, sample_rate))
+            });
             let reply = self
                 .running
-                .invoke(PluginOperation::Synthesize { request }, self.services())
+                .invoke_streaming(PluginOperation::Synthesize { request }, self.services(), tx)
                 .await
                 .map_err(|error| format!("the speech provider: {error}"))?;
+            let (got_chunks, streamed, streamed_rate) = collector
+                .await
+                .map_err(|_| "the speech stream collector stopped".to_owned())??;
+            if got_chunks {
+                let rate = if streamed_rate > 0 {
+                    streamed_rate
+                } else {
+                    SAMPLE_RATE
+                };
+                return Ok((streamed, rate));
+            }
             let handle = reply
                 .get("handle")
                 .and_then(|value| value.as_str())
@@ -137,18 +183,37 @@ impl SttEngine for PluginSpeech {
         Box::pin(async move {
             use base64::Engine;
             let request = TranscriptionRequest {
-                endpoint: self.running.provider().endpoint.clone(),
-                options: options_of(&self.connection),
-                model: model_of(&self.connection),
+                endpoint: self.context.endpoint.clone(),
+                options: self.context.options.clone(),
+                model: model_of(&self.context.options),
                 pcm_base64: base64::engine::general_purpose::STANDARD.encode(pcm),
                 sample_rate,
                 language: None,
             };
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+            let collector = tokio::spawn(async move {
+                let mut final_text: Option<String> = None;
+                let mut partials = Vec::<String>::new();
+                while let Some(event) = rx.recv().await {
+                    if let ene_plugin::Event::Transcription { text, is_final } = event {
+                        let trimmed = text.trim();
+                        if is_final {
+                            final_text = Some(trimmed.to_owned());
+                        } else if !trimmed.is_empty() {
+                            partials.push(trimmed.to_owned());
+                        }
+                    }
+                }
+                final_text.or_else(|| (!partials.is_empty()).then(|| partials.join(" ")))
+            });
             let reply = self
                 .running
-                .invoke(PluginOperation::Transcribe { request }, self.services())
+                .invoke_streaming(PluginOperation::Transcribe { request }, self.services(), tx)
                 .await
                 .map_err(|error| format!("the speech provider: {error}"))?;
+            if let Some(streamed) = collector.await.ok().flatten() {
+                return Ok(streamed);
+            }
             Ok(reply
                 .get("text")
                 .and_then(|value| value.as_str())
@@ -159,12 +224,12 @@ impl SttEngine for PluginSpeech {
     }
 }
 
-/// The model a speech connection names, if any.
-fn model_of(connection: &Connection) -> String {
-    connection.endpoint().options.clone()
-}
-
-/// The connection's own options document, as the plugin declared it.
-fn options_of(connection: &Connection) -> serde_json::Value {
-    serde_json::from_str(&connection.endpoint().options).unwrap_or(serde_json::Value::Null)
+/// The model a speech connection names in its resolved options, if any.
+fn model_of(options: &serde_json::Value) -> String {
+    options
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_owned()
 }

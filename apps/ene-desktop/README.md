@@ -89,8 +89,8 @@ Windows の同梱ホストを起動している場合は **設定 → この端�
 - 設定の「この端末」から「目」をオンにできます（初期値はオフ）。Windowsでは操作中のモニターを20秒ごとに撮影し、画像入力対応モデルで評価できます。ウィンドウや活動の情報と画像は、担当コンパニオンの「目」のモデル（未指定時は会話モデル）の提供元で処理されます。
 
 - `ene-avatar` は別プロセスで、標準入出力のJSON Linesだけを使います。標準出力は常に読み続け、標準エラーはログとして扱い、応答とは混同しません。終了時は `quit` を送って待ちます。
-- 既定の ene は `assets/vrma` の `idle-breath` で待機します。`body_motion` で `nod`（相づち）、`tilt_head`（首をかしげて考える）、`stretch`（伸び）、`wave`（手振り）、`ask_question`（聞き返し）、`task_complete`（完了）、`apologize`（謝る）を指定すると、1回再生して待機に戻ります。
-- 待機中の仕草には `look_around`（見回す）、`adjust_posture`（姿勢を整える）、`sleepy_nod`（うとうとする）も使えます。「目」が有効なら、離席の始まりや長引いた離席をきっかけに、コンパニオンが無言で仕草を選ぶことがあります。
+- 既定の ene は `assets/vrma` の `idle-breath` で待機します。`assets/vrma` には全35種のモーションを同梱しています。ループ姿勢として立位待機（`idle` / `idle_sway` / `idle_hands_behind`）、着席待機（`sit_idle` / `sit_swing_legs`）、音楽ノリ（`music_groove`）、つまみ浮遊（`drag_held`）を切り替えられ、単発ジェスチャー（会話・作業の `nod` / `shake_head` / `listen` / `explain` / `tilt_head` / `ask_question` / `aha` / `shrug` / `task_complete` / `apologize`、挨拶・気配の `wave` / `bow` / `goodbye` / `peek` / `beckon` / `sit_wave`、リアクションの `head_pat` / `surprised` / `shy` / `happy_bounce` / `clap` / `cheer`）は1回再生して直前の待機姿勢に戻ります。
+- 待機中の仕草には `look_around`（見回す）、`adjust_posture`（姿勢を整える）、`sleepy_nod`（うとうとする）、`yawn`（あくび）、`deep_breath`（深呼吸）、`stretch`（伸び）も使えます。「目」が有効なら、離席の始まりや長引いた離席をきっかけに、コンパニオンが無言で仕草を選ぶことがあります。
 - 知覚は Windows に加え、Linux（Wayland の `wlr-foreign-toplevel-management`＋`ext-idle-notify-v1`、または X11 の `_NET_ACTIVE_WINDOW`＋ScreenSaver）でも有効です。対応しない環境（GNOME/KDE 等）では `eye.watch` を宣言せず、取得できないウィンドウ情報を推測で補いません。
 
 ## 宣言する能力

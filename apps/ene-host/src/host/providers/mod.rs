@@ -12,6 +12,7 @@
 //! what keeps that boundary synchronous, and it bounds the instance count to
 //! the plugins the operator installed rather than to the connections that
 //! happen to reference them.
+pub(crate) mod extensions;
 mod grant;
 #[cfg(test)]
 mod safety_tests;
@@ -20,7 +21,9 @@ mod services;
 pub(crate) use grant::Grant;
 #[cfg(test)]
 pub(crate) use services::construction_failure;
-pub(crate) use services::{BrokerServices, http_broker, http_broker_with_deadline};
+#[cfg(test)]
+pub(crate) use services::{BrokerServices, http_broker};
+pub(crate) use services::{PluginServices, ProviderInvocationContext};
 
 use ene_plugin::{Extension, ProviderConfiguration};
 use ene_plugin_runtime::{Package, instance::Instance};
@@ -56,6 +59,8 @@ pub(crate) struct Loaded {
     /// provider: it carries no endpoint or credential, so it lives apart from
     /// `entries` and `Running` holds no provider configuration for it.
     harness: Option<String>,
+    /// Non-provider extension entrypoints (`Character`, `Hook`, `Tool`).
+    extensions: HashMap<Extension, String>,
 }
 
 impl Loaded {
@@ -69,6 +74,14 @@ impl Loaded {
     /// The entrypoint that serves the harness extension, when one is declared.
     pub(crate) fn harness_entrypoint(&self) -> Option<&str> {
         self.harness.as_deref()
+    }
+
+    /// The entrypoint that serves a non-provider extension (`Character`, `Hook`, `Tool`).
+    pub(crate) fn extension_entrypoint(&self, extension: Extension) -> Option<&str> {
+        if extension == Extension::Harness {
+            return self.harness_entrypoint();
+        }
+        self.extensions.get(&extension).map(String::as_str)
     }
 }
 
@@ -124,6 +137,21 @@ impl Providers {
     /// The adapters this host loaded.
     pub(crate) fn adapters(&self) -> impl Iterator<Item = &str> {
         self.loaded.keys().map(String::as_str)
+    }
+
+    /// Deterministically sorted plugin IDs that provide `extension`.
+    pub(crate) fn with_extension(&self, extension: Extension) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .loaded
+            .iter()
+            .filter(|(_, loaded)| {
+                loaded.entry(extension).is_some()
+                    || loaded.extension_entrypoint(extension).is_some()
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort();
+        ids
     }
 
     /// Starts `adapter`'s entrypoint for `extension`, once per adapter and
@@ -190,7 +218,8 @@ impl Providers {
                 // endpoint adapter; the hand that drives it starts here with
                 // every other used plugin. MCP is a transport, not a plugin.
                 crate::host::settings::ConnectionKind::Acp => Extension::Harness,
-                crate::host::settings::ConnectionKind::Mcp => continue,
+                crate::host::settings::ConnectionKind::Mcp
+                | crate::host::settings::ConnectionKind::Search => continue,
             };
             if !connection.enabled {
                 continue;
@@ -219,9 +248,20 @@ fn load_one(path: &Path) -> Result<(String, Loaded), HostError> {
     let id = package.manifest.id.clone();
     let mut entries = HashMap::new();
     let mut harness = None;
+    let mut extensions = HashMap::new();
     for entrypoint in &package.manifest.entrypoints {
+        if entrypoint.target == ene_plugin::Target::Client {
+            continue;
+        }
         if entrypoint.provides.contains(&Extension::Harness) {
             harness.get_or_insert_with(|| entrypoint.id.clone());
+        }
+        for ext in [Extension::Character, Extension::Hook, Extension::Tool] {
+            if entrypoint.provides.contains(&ext) {
+                extensions
+                    .entry(ext)
+                    .or_insert_with(|| entrypoint.id.clone());
+            }
         }
         let Some(configuration) = &entrypoint.provider else {
             continue;
@@ -234,9 +274,9 @@ fn load_one(path: &Path) -> Result<(String, Loaded), HostError> {
             }
         }
     }
-    if entries.is_empty() && harness.is_none() {
+    if entries.is_empty() && harness.is_none() && extensions.is_empty() {
         return Err(HostError::Unavailable(format!(
-            "the plugin `{id}` serves no provider extension and no harness"
+            "the plugin `{id}` serves no supported host extension"
         )));
     }
     Ok((
@@ -245,6 +285,7 @@ fn load_one(path: &Path) -> Result<(String, Loaded), HostError> {
             package,
             entries,
             harness,
+            extensions,
         },
     ))
 }
@@ -279,10 +320,10 @@ impl Running {
         loaded: Arc<Loaded>,
         extension: Extension,
     ) -> Result<Self, HostError> {
-        let (entrypoint, provider, provider_id) = if extension == Extension::Harness {
-            let entrypoint = loaded.harness_entrypoint().ok_or_else(|| {
+        let (entrypoint, provider, provider_id) = if !extension.serves_provider() {
+            let entrypoint = loaded.extension_entrypoint(extension).ok_or_else(|| {
                 HostError::Unavailable(format!(
-                    "the plugin `{}` serves no harness entrypoint",
+                    "the plugin `{}` serves no {extension:?} entrypoint",
                     loaded.package.manifest.id
                 ))
             })?;

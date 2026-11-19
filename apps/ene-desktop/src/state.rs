@@ -151,6 +151,9 @@ pub struct Effects {
 /// Everything the window draws.
 pub struct Model {
     pub link: Link,
+    /// Monotonically incremented whenever the host connection leaves or enters
+    /// `Link::Live`, so stale async replies from earlier connections are dropped.
+    pub link_epoch: u64,
     /// The last snapshot: the single display copy of host state.
     pub snapshot: Option<w::Snapshot>,
     /// The companion the operator picked, or the host's active one.
@@ -170,6 +173,8 @@ pub struct Model {
     pub audio_input_rms: f32,
     pub companion_speaking: bool,
     pub mic_muted: bool,
+    pub capture_mode: crate::audio::CaptureMode,
+    pub ptt_active: bool,
     pub eyes_enabled: bool,
     #[cfg(windows)]
     pub computer_use_enabled: bool,
@@ -186,6 +191,14 @@ pub struct Model {
     pub recognized: Vec<String>,
     pub minds: BTreeMap<String, w::MindView>,
     pub work_active: bool,
+    /// Built-in companion starter templates loaded from the host.
+    pub templates: Vec<w::CompanionTemplate>,
+    /// Most recent sanitized template JSON exported for `(companion_id, json)`.
+    pub exported_template: Option<(String, String)>,
+    /// Latest ephemeral preview response before saving a new companion.
+    pub preview_reply: Option<Result<String, String>>,
+    /// Installed host plugins (`F12`).
+    pub plugins: Vec<w::PluginInfo>,
 }
 
 impl Model {
@@ -196,6 +209,7 @@ impl Model {
                 path,
                 reason: "ホストがまだ起動していません".into(),
             },
+            link_epoch: 0,
             snapshot: None,
             selected: None,
             chat: Chat::default(),
@@ -209,6 +223,8 @@ impl Model {
             audio_input_rms: 0.0,
             companion_speaking: false,
             mic_muted: false,
+            capture_mode: crate::audio::CaptureMode::Vad,
+            ptt_active: false,
             eyes_enabled: false,
             #[cfg(windows)]
             computer_use_enabled: false,
@@ -221,6 +237,10 @@ impl Model {
             recognized: Vec::new(),
             minds: BTreeMap::new(),
             work_active: false,
+            templates: Vec::new(),
+            exported_template: None,
+            preview_reply: None,
+            plugins: Vec::new(),
         }
     }
 
@@ -270,9 +290,36 @@ impl Model {
             == Some(client_id)
     }
 
+    /// All companion IDs currently resident on `client_id`.
+    pub fn resident_companions(&self, client_id: &str) -> Vec<String> {
+        self.snapshot.as_ref().map_or_else(Vec::new, |snapshot| {
+            snapshot
+                .activations
+                .iter()
+                .filter(|activation| activation.client_id.as_deref() == Some(client_id))
+                .map(|activation| activation.companion_id.clone())
+                .collect()
+        })
+    }
+
+    /// Whether `companion_id` is currently resident on `client_id`.
+    pub fn is_resident(&self, companion_id: &str, client_id: &str) -> bool {
+        self.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.activations.iter().any(|activation| {
+                activation.companion_id == companion_id
+                    && activation.client_id.as_deref() == Some(client_id)
+            })
+        })
+    }
+
     /// The settings the window shows.
     pub fn settings(&self) -> Option<&w::Settings> {
         self.snapshot.as_ref()?.settings.as_option()
+    }
+
+    pub fn policy_texts(&self) -> &[w::PolicyText] {
+        self.settings()
+            .map_or(&[], |settings| settings.policy_texts.as_slice())
     }
 
     /// The pending approvals, oldest first.
@@ -303,8 +350,23 @@ impl Model {
     pub fn apply(&mut self, update: Update) -> Effects {
         let mut effects = Effects::default();
         match update {
+            Update::Scoped {
+                epoch,
+                seq: _,
+                inner,
+            } => {
+                if epoch != self.link_epoch {
+                    return Effects::default();
+                }
+                return self.apply(*inner);
+            }
             Update::Link(link) => {
-                let appeared = link.is_live() && !self.link.is_live();
+                let was_live = self.link.is_live();
+                let is_live = link.is_live();
+                let appeared = is_live && !was_live;
+                if was_live != is_live {
+                    self.link_epoch = self.link_epoch.saturating_add(1);
+                }
                 self.link = *link;
                 if !self.link.is_live() {
                     // A preview belongs to the link that produced it. Keeping it
@@ -419,11 +481,17 @@ impl Model {
                     snapshot.pending_approvals = items;
                 }
             }
-            Update::Resolved { request_id } => {
+            Update::Resolved {
+                request_id,
+                rule_warning,
+            } => {
                 if let Some(snapshot) = self.snapshot.as_mut() {
                     snapshot
                         .pending_approvals
                         .retain(|approval| approval.request_id != request_id);
+                }
+                if let Some(warning) = rule_warning {
+                    self.notice(NoticeKind::Failed, "許可ルールの保存", warning);
                 }
             }
             Update::StopRequested { companion_id } => {
@@ -483,6 +551,13 @@ impl Model {
                     self.audio_output_rms = 0.0;
                 }
             }
+            Update::CaptureModeChanged { mode, ptt_active } => {
+                self.capture_mode = mode;
+                self.ptt_active = ptt_active;
+            }
+            Update::Plugins(plugins) => {
+                self.plugins = plugins;
+            }
             Update::Transcription {
                 text,
                 is_final,
@@ -533,8 +608,27 @@ impl Model {
                     snapshot.policy_rules = rules;
                 }
             }
+            Update::PolicyTexts(texts) => {
+                if let Some(snapshot) = self.snapshot.as_mut() {
+                    let mut settings = snapshot.settings.take().unwrap_or_default();
+                    settings.policy_texts = texts;
+                    snapshot.settings = Some(settings).into();
+                }
+            }
             Update::AvatarScaleChanged(scale) => {
                 self.avatar_scale = scale;
+            }
+            Update::CompanionTemplates(items) => {
+                self.templates = items;
+            }
+            Update::CompanionExported { companion_id, json } => {
+                self.exported_template = Some((companion_id, json));
+            }
+            Update::CompanionPreview { reply, error } => {
+                self.preview_reply = Some(match reply {
+                    Some(text) => Ok(text),
+                    None => Err(error.unwrap_or_else(|| "プレビューに失敗しました".into())),
+                });
             }
             // The window clears the field that held the secret; nothing about a
             // credential is kept in the model, and a resnapshot is the window's
@@ -688,9 +782,13 @@ fn merge_notification(model: &mut Model, notification: w::Notification, effects:
                 upsert_activation(&mut snapshot.activations, *activation);
             }
         }
-        // The settings surface reads the texts from `SettingsUpdated`, which the
-        // host rewrites on every change, so this carries no extra state.
-        Some(w::notification::Event::PolicyTextsUpdated(_)) => {}
+        Some(w::notification::Event::PolicyTextsUpdated(updated)) => {
+            if let Some(snapshot) = model.snapshot.as_mut() {
+                let mut settings = snapshot.settings.take().unwrap_or_default();
+                settings.policy_texts = updated.texts;
+                snapshot.settings = Some(settings).into();
+            }
+        }
         // Work stays behind the companion's dialogue; the window has no surface
         // a work event would refresh.
         Some(w::notification::Event::WorkEvent(work)) => {
@@ -978,11 +1076,42 @@ mod tests {
         assert_eq!(model.approvals().len(), 1);
         model.apply(Update::Resolved {
             request_id: "r1".into(),
+            rule_warning: None,
         });
         assert!(
             model.approvals().is_empty(),
             "a resolved approval is not pending"
         );
+        model.apply(Update::Resolved {
+            request_id: "r2".into(),
+            rule_warning: Some("rule save failed".into()),
+        });
+        assert!(
+            model
+                .notices
+                .iter()
+                .any(|notice| notice.message == "rule save failed"),
+            "AlwaysApprove save failures must be surfaced"
+        );
+    }
+
+    #[test]
+    fn f16_policy_texts_updated_notification_updates_settings() {
+        let mut model = model();
+        model.snapshot = Some(snapshot());
+        let entry = w::PolicyText {
+            id: "pt-1".into(),
+            text: "外部送信は毎回確認".into(),
+            ..Default::default()
+        };
+        model.apply(Update::Notification(Box::new(notification(
+            w::notification::Event::PolicyTextsUpdated(Box::new(w::PolicyTextsUpdated {
+                texts: vec![entry.clone()],
+                ..Default::default()
+            })),
+        ))));
+        assert_eq!(model.policy_texts().len(), 1);
+        assert_eq!(model.policy_texts()[0].text, "外部送信は毎回確認");
     }
 
     #[test]
@@ -1193,5 +1322,74 @@ mod tests {
             })),
         ))));
         assert!(!model.work_active);
+    }
+
+    #[test]
+    fn q04_stale_epoch_scoped_updates_are_discarded_after_reconnect() {
+        let mut model = model();
+        model.apply(Update::Link(Box::new(Link::Live {
+            version: "1".into(),
+        })));
+        let first_epoch = model.link_epoch;
+        model.apply(Update::Models {
+            connection_id: "c1".into(),
+            models: vec![w::Model {
+                id: "m-fresh".into(),
+                ..Default::default()
+            }],
+        });
+
+        model.apply(Update::Link(Box::new(Link::Lost {
+            reason: "drop".into(),
+            retry_in: Duration::from_secs(1),
+        })));
+        model.apply(Update::Link(Box::new(Link::Live {
+            version: "2".into(),
+        })));
+        assert!(model.link_epoch > first_epoch);
+
+        model.apply(Update::Scoped {
+            epoch: first_epoch,
+            seq: 1,
+            inner: Box::new(Update::Models {
+                connection_id: "c1".into(),
+                models: vec![w::Model {
+                    id: "m-stale".into(),
+                    ..Default::default()
+                }],
+            }),
+        });
+        assert_eq!(
+            model.models.get("c1").unwrap()[0].id,
+            "m-fresh",
+            "stale epoch response must not overwrite state after reconnect"
+        );
+    }
+
+    #[test]
+    fn f01_r03_resident_companions_queries_multiple_activations_on_one_client() {
+        let mut model = model();
+        let mut snap = snapshot();
+        snap.activations = vec![
+            w::Activation {
+                companion_id: "ene".into(),
+                client_id: Some("desk-a".into()),
+                ..Default::default()
+            },
+            w::Activation {
+                companion_id: "miku".into(),
+                client_id: Some("desk-a".into()),
+                ..Default::default()
+            },
+            w::Activation {
+                companion_id: "kai".into(),
+                client_id: Some("desk-b".into()),
+                ..Default::default()
+            },
+        ];
+        model.snapshot = Some(snap);
+        assert_eq!(model.resident_companions("desk-a"), vec!["ene", "miku"]);
+        assert!(model.is_resident("miku", "desk-a"));
+        assert!(!model.is_resident("kai", "desk-a"));
     }
 }

@@ -19,7 +19,19 @@ impl SettingsStudio {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (live, companions, active_id, has_models, tts_voices, tts_conn_ids, minds) = {
+        let (
+            live,
+            companions,
+            active_id,
+            resident_ids,
+            has_models,
+            tts_voices,
+            tts_conn_ids,
+            minds,
+            templates,
+            exported_template,
+            preview_reply,
+        ) = {
             let hub = self.hub.read(cx);
             let tts_ids: Vec<String> = hub
                 .model
@@ -39,15 +51,21 @@ impl SettingsStudio {
                     .map(|s| s.companions.clone())
                     .unwrap_or_default(),
                 hub.model.companion_id().map(str::to_owned),
+                hub.model.resident_companions(&hub.options.id),
                 !hub.model_choices().is_empty(),
                 hub.tts_voice_choices(),
                 tts_ids,
                 hub.model.minds.clone(),
+                hub.model.templates.clone(),
+                hub.model.exported_template.clone(),
+                hub.model.preview_reply.clone(),
             )
         };
 
         let studio_toggle_create = cx.entity();
+        let studio_toggle_import = cx.entity();
         let creating = self.creating_companion;
+        let importing = self.importing_template;
         let header = div()
             .flex()
             .flex_row()
@@ -61,27 +79,70 @@ impl SettingsStudio {
                     .text_color(theme.ink)
                     .child("コンパニオン"),
             )
-            .child(pill_button(
-                "comp-toggle-create",
-                if creating {
-                    "閉じる"
-                } else {
-                    "新規作成"
-                },
-                (!creating).then_some(Icon::Plus),
-                if creating { Tone::Ghost } else { Tone::Primary },
-                true,
-                theme,
-                move |_, cx| {
-                    studio_toggle_create.update(cx, |this, cx| {
-                        this.creating_companion = !this.creating_companion;
-                        cx.notify();
-                    });
-                },
-            ));
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(pill_button(
+                        "comp-toggle-import",
+                        if importing {
+                            "読込を閉じる"
+                        } else {
+                            "テンプレート読込"
+                        },
+                        None,
+                        Tone::Ghost,
+                        live,
+                        theme,
+                        move |_, cx| {
+                            studio_toggle_import.update(cx, |this, cx| {
+                                this.importing_template = !this.importing_template;
+                                if this.importing_template {
+                                    this.creating_companion = false;
+                                }
+                                cx.notify();
+                            });
+                        },
+                    ))
+                    .child(pill_button(
+                        "comp-toggle-create",
+                        if creating {
+                            "閉じる"
+                        } else {
+                            "新規作成"
+                        },
+                        (!creating).then_some(Icon::Plus),
+                        if creating { Tone::Ghost } else { Tone::Primary },
+                        true,
+                        theme,
+                        move |_, cx| {
+                            studio_toggle_create.update(cx, |this, cx| {
+                                this.creating_companion = !this.creating_companion;
+                                if this.creating_companion {
+                                    this.importing_template = false;
+                                }
+                                cx.notify();
+                            });
+                        },
+                    )),
+            );
 
+        let import_panel = if importing {
+            Some(self.render_import_panel(live, &templates, theme, cx))
+        } else {
+            None
+        };
         let create_panel = if creating {
-            Some(self.render_create_panel(live, has_models, theme, cx))
+            Some(self.render_create_panel(
+                live,
+                has_models,
+                &templates,
+                preview_reply.as_ref(),
+                theme,
+                cx,
+            ))
         } else {
             None
         };
@@ -91,6 +152,7 @@ impl SettingsStudio {
             let id = comp.id.clone();
             let rev = comp.revision;
             let active = active_id.as_deref() == Some(id.as_str());
+            let resident = resident_ids.iter().any(|rid| rid == &id);
             let expanded = self.expanded_companion_id.as_deref() == Some(id.as_str());
             let persona_line = comp
                 .persona
@@ -102,6 +164,8 @@ impl SettingsStudio {
 
             let hub_select = self.hub.clone();
             let select_id = id.clone();
+            let hub_res = self.hub.clone();
+            let res_id = id.clone();
             let studio_expand = cx.entity();
             let expand_id = id.clone();
             let hub_expand = self.hub.clone();
@@ -126,7 +190,7 @@ impl SettingsStudio {
                             &comp.name,
                             &id,
                             34.,
-                            active.then_some(theme.mint),
+                            (active || resident).then_some(theme.mint),
                             theme,
                         ))
                         .child(
@@ -159,9 +223,26 @@ impl SettingsStudio {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(8.))
+                        .gap(px(6.))
+                        .child(pill_button(
+                            SharedString::from(format!("comp-res-{id}")),
+                            if resident { "常駐中" } else { "常駐" },
+                            None,
+                            if resident { Tone::Mint } else { Tone::Ghost },
+                            live,
+                            theme,
+                            move |_, cx| {
+                                hub_res.update(cx, |hub, cx| {
+                                    if resident {
+                                        hub.release_companion(res_id.clone(), cx);
+                                    } else {
+                                        hub.activate_companion(res_id.clone(), cx);
+                                    }
+                                });
+                            },
+                        ))
                         .child(if active {
-                            status_pill("使用中", Some(theme.mint), theme.mint_soft, theme.mint_fg)
+                            status_pill("会話中", Some(theme.mint), theme.mint_soft, theme.mint_fg)
                         } else {
                             pill_button(
                                 SharedString::from(format!("comp-select-{id}")),
@@ -199,18 +280,18 @@ impl SettingsStudio {
                                     cx.notify();
                                 });
                                 if let Some(target_id) = next_open {
-                                    hub_expand.update(cx, |hub, cx| {
-                                        if hub.model.companion_id() != Some(target_id.as_str()) {
-                                            hub.select_companion(&target_id, cx);
-                                        } else {
-                                            hub.load_mind(cx);
-                                        }
+                                    hub_expand.update(cx, |hub, _| {
+                                        hub.load_mind_for(target_id);
                                     });
                                 }
                             },
                         )),
                 );
 
+            let exported_for_id = exported_template
+                .as_ref()
+                .filter(|(cid, _)| cid == &id)
+                .map(|(_, json)| json.as_str());
             let editor = if expanded {
                 Some(self.render_companion_editor(
                     &comp,
@@ -218,6 +299,7 @@ impl SettingsStudio {
                     minds.get(&id),
                     &tts_voices,
                     &tts_conn_ids,
+                    exported_for_id,
                     live,
                     theme,
                     cx,
@@ -287,8 +369,123 @@ impl SettingsStudio {
             .flex_col()
             .gap(px(16.))
             .child(header)
+            .when_some(import_panel, |this, p| this.child(p))
             .when_some(create_panel, |this, p| this.child(p))
             .child(div().flex().flex_col().gap(px(10.)).children(rows))
+            .into_any_element()
+    }
+
+    fn render_import_panel(
+        &mut self,
+        live: bool,
+        templates: &[w::CompanionTemplate],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let json_d = self.description_draft(
+            cx,
+            "import:json",
+            r#"{"format_version":1,"name":"...", "mind":"..."}"#,
+            None,
+            theme,
+        );
+        let json_text = json_d.read(cx).text().to_owned();
+        let hub_import_json = self.hub.clone();
+        let studio_close = cx.entity();
+
+        let mut starter_buttons: Vec<AnyElement> = Vec::new();
+        for template in templates {
+            let tpl = template.clone();
+            let hub_tpl = self.hub.clone();
+            let tid = tpl.id.clone();
+            let label = tpl.name.clone();
+            starter_buttons.push(pill_button(
+                SharedString::from(format!("comp-starter-{tid}")),
+                label,
+                Some(Icon::Plus),
+                Tone::Soft,
+                live,
+                theme,
+                move |_, cx| {
+                    hub_tpl.update(cx, |hub, cx| {
+                        hub.import_companion_template(tpl.clone(), cx);
+                    });
+                },
+            ));
+        }
+
+        div()
+            .w_full()
+            .bg(theme.bg_surface)
+            .border_1()
+            .border_color(theme.border)
+            .rounded(px(14.))
+            .p(px(16.))
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .when(!starter_buttons.is_empty(), |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(theme.ink_muted)
+                                .child("スターターテンプレートから追加"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap(px(6.))
+                                .children(starter_buttons),
+                        ),
+                )
+            })
+            .child(labeled_field(
+                "配布用テンプレート JSON を貼り付けて作成（記憶やキーは含まれません）",
+                json_d,
+                theme,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(pill_button(
+                        "comp-import-cancel",
+                        "閉じる",
+                        None,
+                        Tone::Ghost,
+                        true,
+                        theme,
+                        move |_, cx| {
+                            studio_close.update(cx, |this, cx| {
+                                this.importing_template = false;
+                                cx.notify();
+                            });
+                        },
+                    ))
+                    .child(pill_button(
+                        "comp-import-submit",
+                        "JSON から作成",
+                        Some(Icon::Check),
+                        Tone::Primary,
+                        live && !json_text.trim().is_empty(),
+                        theme,
+                        move |_, cx| {
+                            hub_import_json.update(cx, |hub, cx| {
+                                hub.import_companion_json(json_text.clone(), cx);
+                            });
+                        },
+                    )),
+            )
             .into_any_element()
     }
 
@@ -296,6 +493,8 @@ impl SettingsStudio {
         &mut self,
         live: bool,
         has_models: bool,
+        templates: &[w::CompanionTemplate],
+        preview_reply: Option<&Result<String, String>>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -321,7 +520,38 @@ impl SettingsStudio {
 
         let hub_to_conn = self.hub.clone();
         let hub_create = self.hub.clone();
+        let hub_preview = self.hub.clone();
         let studio_cancel = cx.entity();
+        let studio_preview = cx.entity();
+        let preview_pending = self.preview_pending;
+
+        let mut template_chips: Vec<AnyElement> = Vec::new();
+        for tpl in templates {
+            let tid = tpl.id.clone();
+            let tname = tpl.name.clone();
+            let tmind = tpl.mind.clone();
+            let tpersona = tpl.persona.clone().unwrap_or_default();
+            let n_d = name_d.clone();
+            let m_d = mind_d.clone();
+            let p_d = persona_d.clone();
+            template_chips.push(pill_button(
+                SharedString::from(format!("comp-new-tpl-{tid}")),
+                tname.clone(),
+                None,
+                Tone::Ghost,
+                true,
+                theme,
+                move |_, cx| {
+                    n_d.update(cx, |d, cx| d.set(tname.clone(), cx));
+                    m_d.update(cx, |d, cx| d.set(tmind.clone(), cx));
+                    p_d.update(cx, |d, cx| d.set(tpersona.clone(), cx));
+                },
+            ));
+        }
+
+        let name_for_preview = name.clone();
+        let mind_for_preview = mind.clone();
+        let persona_for_preview = persona.clone();
 
         div()
             .w_full()
@@ -333,9 +563,50 @@ impl SettingsStudio {
             .flex()
             .flex_col()
             .gap(px(12.))
+            .when(!template_chips.is_empty(), |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .flex_wrap()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.ink_muted)
+                                .child("雛形を反映:"),
+                        )
+                        .children(template_chips),
+                )
+            })
             .child(labeled_field("名前", name_d, theme))
             .child(labeled_field("人格の核", mind_d, theme))
             .child(labeled_field("話し方", persona_d, theme))
+            .when_some(preview_reply.cloned(), |this, outcome| {
+                let (bg, fg, text) = match outcome {
+                    Ok(reply) => (
+                        theme.bg_blush,
+                        theme.ink,
+                        format!("プレビュー応答: {reply}"),
+                    ),
+                    Err(err) => (
+                        theme.danger_soft,
+                        theme.danger_fg,
+                        format!("プレビュー失敗: {err}"),
+                    ),
+                };
+                this.child(
+                    div()
+                        .rounded(px(10.))
+                        .bg(bg)
+                        .px(px(12.))
+                        .py(px(8.))
+                        .text_xs()
+                        .text_color(fg)
+                        .child(text),
+                )
+            })
             .when(!has_models, |this| {
                 this.child(
                     div()
@@ -384,7 +655,37 @@ impl SettingsStudio {
                         move |_, cx| {
                             studio_cancel.update(cx, |this, cx| {
                                 this.creating_companion = false;
+                                this.preview_pending = false;
                                 cx.notify();
+                            });
+                        },
+                    ))
+                    .child(pill_button(
+                        "comp-create-preview",
+                        if preview_pending {
+                            "試用中…"
+                        } else {
+                            "プレビュー"
+                        },
+                        Some(Icon::Sparkles),
+                        Tone::Soft,
+                        live && has_models
+                            && !preview_pending
+                            && !name.is_empty()
+                            && !mind.is_empty(),
+                        theme,
+                        move |_, cx| {
+                            studio_preview.update(cx, |this, cx| {
+                                this.preview_pending = true;
+                                cx.notify();
+                            });
+                            hub_preview.update(cx, |hub, cx| {
+                                hub.preview_companion(
+                                    name_for_preview.clone(),
+                                    mind_for_preview.clone(),
+                                    persona_for_preview.clone(),
+                                    cx,
+                                );
                             });
                         },
                     ))
@@ -419,13 +720,45 @@ impl SettingsStudio {
         comp: &w::Companion,
         rev: u64,
         mind_view: Option<&w::MindView>,
-        tts_voices: &[(String, String, String)],
+        tts_voices: &[(String, String, String, String)],
         tts_conn_ids: &[String],
+        exported_json: Option<&str>,
         live: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = comp.id.clone();
+        let current_body = comp
+            .body
+            .as_option()
+            .and_then(|doc| serde_json::from_str::<w::BodyBinding>(&doc.json).ok())
+            .unwrap_or_default();
+        let mut current_voice = comp
+            .voice
+            .as_option()
+            .and_then(|doc| serde_json::from_str::<w::VoiceBinding>(&doc.json).ok())
+            .unwrap_or_default();
+        if current_voice
+            .voice_id
+            .as_deref()
+            .is_none_or(|v| v.trim().is_empty())
+        {
+            current_voice.voice_id = comp.voice_identifier.clone();
+        }
+        let initial_voice_key = match (
+            current_voice
+                .connection_id
+                .as_deref()
+                .filter(|s| !s.is_empty()),
+            current_voice.voice_id.as_deref().filter(|s| !s.is_empty()),
+        ) {
+            (Some(cid), Some(vid)) => format!("{cid}\0{vid}"),
+            (None, Some(vid)) => format!("\0{vid}"),
+            _ => String::new(),
+        };
+        let initial_speed = current_voice.speed.map(|v| format!("{v:.2}"));
+        let initial_pitch = current_voice.pitch.map(|v| format!("{v:.2}"));
+
         let name_d = self.draft(
             cx,
             format!("comp:{id}:r{rev}:name"),
@@ -447,18 +780,84 @@ impl SettingsStudio {
             comp.persona.as_deref(),
             theme,
         );
+        let body_model_d = self.draft(
+            cx,
+            format!("comp:{id}:r{rev}:body-model"),
+            "VRM モデル（例: ENE.vrm / Seed-san.vrm / .vrm パス）",
+            current_body.model.as_deref(),
+            theme,
+        );
+        let voice_key_d = self.draft(
+            cx,
+            format!("comp:{id}:r{rev}:voice-key"),
+            "",
+            Some(&initial_voice_key),
+            theme,
+        );
         let voice_d = self.draft(
             cx,
             format!("comp:{id}:r{rev}:voice"),
             "話者ID（任意）",
-            comp.voice_identifier.as_deref(),
+            current_voice.voice_id.as_deref(),
+            theme,
+        );
+        let voice_speed_d = self.draft(
+            cx,
+            format!("comp:{id}:r{rev}:voice-speed"),
+            "速度（例: 1.0）",
+            initial_speed.as_deref(),
+            theme,
+        );
+        let voice_pitch_d = self.draft(
+            cx,
+            format!("comp:{id}:r{rev}:voice-pitch"),
+            "音高（例: 0.0）",
+            initial_pitch.as_deref(),
+            theme,
+        );
+        let voice_style_d = self.draft(
+            cx,
+            format!("comp:{id}:r{rev}:voice-style"),
+            "読み上げ調（任意・OpenAI互換等）",
+            current_voice.style.as_deref(),
             theme,
         );
 
         let name_val = name_d.read(cx).text().trim().to_owned();
         let mind_val = mind_d.read(cx).text().trim().to_owned();
         let persona_val = persona_d.read(cx).text().trim().to_owned();
-        let voice_val = voice_d.read(cx).text().trim().to_owned();
+        let body_model_val = body_model_d.read(cx).text().trim().to_owned();
+        let voice_key_val = voice_key_d.read(cx).text().to_owned();
+        let voice_manual_val = voice_d.read(cx).text().trim().to_owned();
+        let (picked_conn_id, picked_voice_id) =
+            parse_voice_selection(&voice_key_val, &voice_manual_val);
+        let speed_val = voice_speed_d
+            .read(cx)
+            .text()
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|v| v.is_finite());
+        let pitch_val = voice_pitch_d
+            .read(cx)
+            .text()
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|v| v.is_finite());
+        let style_val = {
+            let s = voice_style_d.read(cx).text().trim().to_owned();
+            (!s.is_empty()).then_some(s)
+        };
+        let mut next_body = current_body.clone();
+        next_body.model = (!body_model_val.is_empty()).then_some(body_model_val);
+        let next_voice = w::VoiceBinding {
+            connection_id: picked_conn_id.clone(),
+            voice_id: picked_voice_id.clone(),
+            speed: speed_val,
+            pitch: pitch_val,
+            style: style_val,
+        };
 
         let voice_dd_key = format!("comp-voice:{id}");
         let voice_dd_open = self.open_dropdown.as_deref() == Some(voice_dd_key.as_str());
@@ -475,25 +874,36 @@ impl SettingsStudio {
             label: "接続の既定を使用".to_owned(),
             detail: None,
         }];
-        for (vid, label, conn_name) in tts_voices {
+        for (cid, vid, label, conn_name) in tts_voices {
             voice_options.push(DropdownOption {
-                value: vid.clone(),
+                value: format!("{cid}\0{vid}"),
                 label: label.clone(),
                 detail: Some(format!("{conn_name} / ID: {vid}")),
             });
         }
-        let selected_voice_label = if voice_val.is_empty() {
-            Some("接続の既定を使用".to_owned())
-        } else {
-            tts_voices
+        let selected_voice_label = match (picked_conn_id.as_deref(), picked_voice_id.as_deref()) {
+            (None, None) => Some("接続の既定を使用".to_owned()),
+            (Some(cid), Some(vid)) => tts_voices
                 .iter()
-                .find(|(vid, _, _)| vid == &voice_val)
-                .map(|(vid, label, _)| format!("{label} (ID: {vid})"))
-                .or_else(|| Some(voice_val.clone()))
+                .find(|(c, v, _, _)| c == cid && v == vid)
+                .map(|(_, v, label, cname)| format!("{label} ({cname} / ID: {v})"))
+                .or_else(|| Some(format!("{cid} / {vid}"))),
+            (None, Some(vid)) => tts_voices
+                .iter()
+                .find(|(_, v, _, _)| v == vid)
+                .map(|(_, v, label, cname)| format!("{label} ({cname} / ID: {v})"))
+                .or_else(|| Some(vid.to_owned())),
+            (Some(cid), None) => Some(cid.to_owned()),
+        };
+        let selected_dropdown_val = if !voice_key_val.is_empty() {
+            Some(voice_key_val.as_str())
+        } else {
+            Some("")
         };
         let studio_voice_toggle = cx.entity();
         let studio_voice_pick = cx.entity();
         let toggle_key = voice_dd_key.clone();
+        let voice_key_d_pick = voice_key_d.clone();
         let voice_d_pick = voice_d.clone();
         let hub_refresh_voice = self.hub.clone();
         let refresh_tts_ids = tts_conn_ids.to_vec();
@@ -508,7 +918,7 @@ impl SettingsStudio {
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(4.))
+            .gap(px(6.))
             .child(
                 div()
                     .flex()
@@ -521,7 +931,7 @@ impl SettingsStudio {
                             .text_xs()
                             .font_weight(FontWeight::BOLD)
                             .text_color(theme.ink_muted)
-                            .child("声（話者）"),
+                            .child("声（接続・話者）"),
                     )
                     .when(!refresh_tts_ids.is_empty(), |this| {
                         this.child(pill_button(
@@ -547,7 +957,7 @@ impl SettingsStudio {
             )
             .child(dropdown_select(
                 voice_dd_key,
-                Some(voice_val.as_str()),
+                selected_dropdown_val,
                 selected_voice_label.as_deref(),
                 "接続の既定を使用",
                 &voice_options,
@@ -570,14 +980,39 @@ impl SettingsStudio {
                     });
                 },
                 move |picked, _, cx| {
-                    voice_d_pick.update(cx, |d, cx| d.set(picked, cx));
+                    let raw_vid = picked
+                        .split_once('\0')
+                        .map_or_else(|| picked.clone(), |(_, v)| v.to_owned());
+                    voice_key_d_pick.update(cx, |d, cx| d.set(picked, cx));
+                    voice_d_pick.update(cx, |d, cx| d.set(raw_vid, cx));
                     studio_voice_pick.update(cx, |this, cx| {
                         this.open_dropdown = None;
                         cx.notify();
                     });
                 },
             ))
-            .when(tts_voices.is_empty(), |this| this.child(voice_d));
+            .when(tts_voices.is_empty(), |this| this.child(voice_d))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(labeled_field("話速", voice_speed_d, theme)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(labeled_field("音高", voice_pitch_d, theme)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(labeled_field("調子", voice_style_d, theme)),
+                    ),
+            );
 
         let studio_disc = cx.entity();
         let mind_open = self.mind_disclosure_open;
@@ -747,6 +1182,10 @@ impl SettingsStudio {
             ))
         };
 
+        let export_id = id.clone();
+        let hub_export = self.hub.clone();
+        let save_id = id.clone();
+
         div()
             .border_t_1()
             .border_color(theme.border)
@@ -758,9 +1197,37 @@ impl SettingsStudio {
             .child(labeled_field("名前", name_d, theme))
             .child(labeled_field("人格の核", mind_d, theme))
             .child(labeled_field("話し方", persona_d, theme))
+            .child(labeled_field("見た目（VRM モデル）", body_model_d, theme))
             .child(voice_selector)
             .child(disclosure)
             .when_some(mind_strip, |this, strip| this.child(strip))
+            .when_some(exported_json, |this, json| {
+                this.child(
+                    div()
+                        .rounded(px(10.))
+                        .bg(theme.bg_blush)
+                        .p(px(10.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(theme.ink_muted)
+                                .child("書き出したテンプレート JSON（秘密情報・記憶なし）"),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("comp-export-json-{id}")))
+                                .max_h(px(140.))
+                                .overflow_y_scroll()
+                                .text_xs()
+                                .text_color(theme.ink)
+                                .child(json.to_owned()),
+                        ),
+                )
+            })
             .child(
                 div()
                     .pt(px(4.))
@@ -770,27 +1237,64 @@ impl SettingsStudio {
                     .justify_between()
                     .gap(px(10.))
                     .child(delete_controls)
-                    .child(pill_button(
-                        SharedString::from(format!("comp-save-{id}")),
-                        "保存",
-                        Some(Icon::Check),
-                        Tone::Primary,
-                        live && !name_val.is_empty(),
-                        theme,
-                        move |_, cx| {
-                            hub_save.update(cx, |hub, cx| {
-                                hub.update_companion_profile(
-                                    name_val.clone(),
-                                    persona_val.clone(),
-                                    mind_val.clone(),
-                                    voice_val.clone(),
-                                    cx,
-                                );
-                            });
-                        },
-                    )),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(pill_button(
+                                SharedString::from(format!("comp-export-{id}")),
+                                "テンプレート出力",
+                                None,
+                                Tone::Ghost,
+                                live,
+                                theme,
+                                move |_, cx| {
+                                    hub_export.update(cx, |hub, cx| {
+                                        hub.export_companion(export_id.clone(), cx);
+                                    });
+                                },
+                            ))
+                            .child(pill_button(
+                                SharedString::from(format!("comp-save-{id}")),
+                                "保存",
+                                Some(Icon::Check),
+                                Tone::Primary,
+                                live && !name_val.is_empty(),
+                                theme,
+                                move |_, cx| {
+                                    hub_save.update(cx, |hub, cx| {
+                                        hub.update_companion_profile(
+                                            save_id.clone(),
+                                            name_val.clone(),
+                                            persona_val.clone(),
+                                            mind_val.clone(),
+                                            next_body.clone(),
+                                            next_voice.clone(),
+                                            cx,
+                                        );
+                                    });
+                                },
+                            )),
+                    ),
             )
             .into_any_element()
+    }
+}
+
+fn parse_voice_selection(raw_key: &str, manual_fallback: &str) -> (Option<String>, Option<String>) {
+    let trimmed = raw_key.trim();
+    if let Some((cid, vid)) = trimmed.split_once('\0') {
+        let conn = (!cid.trim().is_empty()).then(|| cid.trim().to_owned());
+        let voice = (!vid.trim().is_empty()).then(|| vid.trim().to_owned());
+        return (conn, voice);
+    }
+    let fallback = manual_fallback.trim();
+    if fallback.is_empty() {
+        (None, None)
+    } else {
+        (None, Some(fallback.to_owned()))
     }
 }
 
@@ -800,4 +1304,22 @@ fn split_pipe(raw: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn b11_parse_voice_selection_preserves_connection_and_duplicate_voice_id() {
+        assert_eq!(
+            parse_voice_selection("tts-b\0shared-id", ""),
+            (Some("tts-b".into()), Some("shared-id".into()))
+        );
+        assert_eq!(
+            parse_voice_selection("", "manual-3"),
+            (None, Some("manual-3".into()))
+        );
+        assert_eq!(parse_voice_selection("", ""), (None, None));
+    }
 }

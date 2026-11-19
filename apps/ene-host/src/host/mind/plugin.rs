@@ -6,9 +6,8 @@
 //! that runs the plugin's `ene_invoke` delivers the reply. Everything above
 //! the transport (the driver, the fold, telemetry, error enrichment) is rig's,
 //! so a plugin model behaves like a built-in one.
-use super::super::providers::Running;
+use super::super::providers::{ProviderInvocationContext, Running};
 use ene_plugin::{EmbeddingRequest, Operation as PluginOperation};
-use ene_plugin_runtime::instance::Services;
 use futures_util::stream;
 use rig_core::{
     DynModel,
@@ -37,6 +36,7 @@ pub(crate) struct PluginEmbedding {
 /// A plugin-backed embedding model, erased to rig's operation.
 pub(crate) fn embedding(
     provider: Arc<Running>,
+    context: ProviderInvocationContext,
     model: String,
     dimensions: usize,
 ) -> DynModel<EmbeddingOp> {
@@ -45,7 +45,11 @@ pub(crate) fn embedding(
         model: model.clone(),
         dimensions,
     };
-    let transport = PluginTransport { provider, model };
+    let transport = PluginTransport {
+        provider,
+        context,
+        model,
+    };
     rig_core::Model::new(wire, transport).erase()
 }
 
@@ -77,23 +81,25 @@ impl Wire for PluginEmbedding {
 #[derive(Clone)]
 pub(crate) struct PluginTransport {
     provider: Arc<Running>,
+    context: ProviderInvocationContext,
     model: String,
 }
 
 impl Transport<PluginEmbedding> for PluginTransport {
     fn send(&self, payload: EmbedPayload, _exchange: Exchange) -> Opening<WireFrame> {
         let provider = Arc::clone(&self.provider);
+        let context = self.context.clone();
         let model = self.model.clone();
         Opening::new(async move {
             let request = EmbeddingRequest {
-                endpoint: provider.provider().endpoint.clone(),
-                options: provider.provider().options.clone(),
+                endpoint: context.endpoint.clone(),
+                options: context.options.clone(),
                 model,
                 inputs: payload.inputs,
                 dimensions: payload.dimensions,
             };
             let reply = provider
-                .invoke(PluginOperation::Embed { request }, Arc::new(NoServices))
+                .invoke(PluginOperation::Embed { request }, context.services())
                 .await
                 .map_err(|error| ProviderError::Response(error.to_string()))?;
             let vectors: Vec<Vec<f32>> = reply
@@ -122,21 +128,5 @@ impl Transport<PluginEmbedding> for PluginTransport {
                 ))
             })))
         })
-    }
-}
-
-/// The services an embedding call needs: none. A provider's HTTP goes through
-/// the broker, which the host wires where the plugin is started.
-struct NoServices;
-
-impl Services for NoServices {
-    fn handle(
-        &self,
-        _: ene_plugin::ServiceRequest,
-    ) -> futures_util::future::BoxFuture<'_, Result<serde_json::Value, ene_plugin::Failure>> {
-        Box::pin(async { Err(ene_plugin::Failure::new("undeclared_service")) })
-    }
-    fn check(&self) -> futures_util::future::BoxFuture<'_, Result<(), ene_plugin::Failure>> {
-        Box::pin(async { Ok(()) })
     }
 }

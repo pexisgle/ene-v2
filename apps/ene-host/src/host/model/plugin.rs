@@ -6,7 +6,7 @@
 //! The client turns rig's encoded chat request into one Extism operation; the
 //! guest forwards it through the host's broker and returns the provider's
 //! bytes. SSE parsing, tool-call assembly and finish reasons stay in rig.
-use super::super::providers::{BrokerServices, Running};
+use super::super::providers::{ProviderInvocationContext, Running};
 use crate::host::error::HostError;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ene_plugin::{Event as PluginEvent, HttpChunk, HttpRequest, Operation as PluginOperation};
@@ -56,11 +56,11 @@ const HOST_OWNED: &[&str] = &[
 /// that wire, not the Responses API an OpenAI config defaults to.
 pub(crate) fn completion(
     provider: Arc<Running>,
+    context: ProviderInvocationContext,
     model: String,
-    broker: Arc<HttpBroker>,
     image_input: bool,
 ) -> DynModel<Completion> {
-    let endpoint = provider.provider().endpoint.clone();
+    let endpoint = context.endpoint.clone();
     // An unlisted model is assumed to call tools; the host cannot prove
     // otherwise without a probe. Its limits stay unknown rather than guessed.
     let mut spec = ModelSpec::new(provider.provider_id(), model.clone()).with_tools(true);
@@ -72,7 +72,7 @@ pub(crate) fn completion(
     );
     config.completion_model(
         &model,
-        DynHttpClient::new(GuestClient { provider, broker }),
+        DynHttpClient::new(GuestClient { provider, context }),
         ModelFacts::new(spec),
     )
 }
@@ -81,7 +81,7 @@ pub(crate) fn completion(
 #[derive(Clone)]
 struct GuestClient {
     provider: Arc<Running>,
-    broker: Arc<HttpBroker>,
+    context: ProviderInvocationContext,
 }
 
 type Invocation = Pin<Box<dyn Future<Output = Result<serde_json::Value, HostError>> + Send>>;
@@ -227,11 +227,10 @@ impl Drop for Exchange {
 
 impl GuestClient {
     fn exchange(&self, parts: &http::request::Parts, body: Bytes) -> Result<Exchange, HttpError> {
-        let endpoint = self.provider.provider().endpoint.clone();
         let url = if parts.uri.scheme().is_some() {
             parts.uri.to_string()
         } else {
-            let base = url::Url::parse(&endpoint)
+            let base = url::Url::parse(&self.context.endpoint)
                 .map_err(|_| protocol("the provider endpoint is not a URL"))?;
             base.join(parts.uri.path_and_query().map_or("/", |path| path.as_str()))
                 .map_err(|_| protocol("the provider endpoint and route do not join"))?
@@ -255,8 +254,7 @@ impl GuestClient {
         };
         let (sender, events) = mpsc::channel(64);
         let provider = Arc::clone(&self.provider);
-        let services =
-            BrokerServices::new(Arc::clone(&self.broker), provider.provider().id.clone());
+        let services = self.context.services();
         let invocation: Invocation = Box::pin(async move {
             provider
                 .invoke_streaming(PluginOperation::GenerateHttp { request }, services, sender)
@@ -266,7 +264,7 @@ impl GuestClient {
             invocation,
             events,
             provider: Arc::clone(&self.provider),
-            broker: Arc::clone(&self.broker),
+            broker: Arc::clone(&self.context.broker),
             handles: Vec::new(),
             status: None,
             headers: None,
