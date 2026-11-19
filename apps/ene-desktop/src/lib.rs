@@ -28,9 +28,9 @@ pub use session::{Connection, Options, Session};
 pub use state::{Link, Model};
 pub use tray::{Tray, TrayAction, TrayHandle, TrayState};
 pub use ui::{
-    CompanionPod, Desktop, EmbeddedAssets, Hub, PodMode, SettingsSection, SettingsStudio,
-    bind as bind_actions, focus_chat, initial_pod_bounds, initial_pod_bounds_for_mode,
-    open_pod_window,
+    CompanionPod, Desktop, EmbeddedAssets, HistoryReset, Hub, PodMode, SettingsSection,
+    SettingsStudio, bind as bind_actions, focus_chat, initial_pod_bounds,
+    initial_pod_bounds_for_mode, open_pod_window,
 };
 pub use update::{Command, Update};
 pub use work_tools::WORKSPACE_FILE_CAPABILITIES;

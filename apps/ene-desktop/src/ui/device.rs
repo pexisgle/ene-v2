@@ -140,7 +140,25 @@ impl SettingsStudio {
         let hub_eyes = self.hub.clone();
         let hub_center = self.hub.clone();
         #[cfg(windows)]
-        let computer_use = self.hub.read(cx).model.computer_use_enabled;
+        let (computer_use, computer_granted) = {
+            let hub = self.hub.read(cx);
+            let granted = hub
+                .model
+                .snapshot()
+                .and_then(|snapshot| {
+                    snapshot
+                        .clients
+                        .iter()
+                        .find(|client| client.id == hub.options.id)
+                })
+                .is_some_and(|client| {
+                    client
+                        .granted_capabilities
+                        .iter()
+                        .any(|name| name == w::COMPUTER_USE)
+                });
+            (hub.model.computer_use_enabled, granted)
+        };
         #[cfg(windows)]
         let hub_computer = self.hub.clone();
 
@@ -314,7 +332,12 @@ impl SettingsStudio {
                     .child(row_frame(
                         true,
                         "手に画面操作を許可",
-                        None,
+                        (live && computer_use && !computer_granted).then(|| status_pill(
+                            "ホストの許可が必要",
+                            None,
+                            theme.amber_soft,
+                            theme.amber_fg,
+                        )),
                         toggle_switch("dev-computer-use", computer_use, true, theme, move |_, cx| {
                             hub_computer.read(cx).set_computer_use_enabled(!computer_use);
                         }),
@@ -744,6 +767,56 @@ impl SettingsStudio {
             None
         };
 
+        let reset_history = cx.try_global::<super::HistoryReset>().cloned().map(|reset| {
+            div()
+                .w_full()
+                .bg(theme.bg_surface)
+                .border_1()
+                .border_color(theme.border)
+                .rounded(px(14.))
+                .child(row_frame(
+                    false,
+                    "会話・作業の履歴と記憶",
+                    None,
+                    pill_button(
+                        "dev-reset-history",
+                        "履歴をリセット",
+                        Some(Icon::Trash),
+                        Tone::Danger,
+                        live,
+                        theme,
+                        move |window, cx| {
+                            let requested = reset.requested.clone();
+                            let answer = window.prompt(
+                                gpui::PromptLevel::Warning,
+                                "履歴と記憶を消去しますか？",
+                                Some("全コンパニオンの会話・作業履歴と記憶を消去して ene を再起動します。接続設定、API キー、キャラクター設定は保持されます。"),
+                                &["キャンセル", "消去して再起動"],
+                                cx,
+                            );
+                            cx.spawn(async move |cx| {
+                                if answer.await == Ok(1) {
+                                    requested.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    let _ = cx.update(|cx| cx.quit());
+                                }
+                            }).detach();
+                        },
+                    ),
+                    theme,
+                ))
+                .when_some(reset.failure, |card, failure| {
+                    card.child(
+                        div()
+                            .px(px(16.))
+                            .pb(px(12.))
+                            .text_xs()
+                            .text_color(theme.danger_fg)
+                            .child(failure),
+                    )
+                })
+                .into_any_element()
+        });
+
         div()
             .flex()
             .flex_col()
@@ -754,6 +827,7 @@ impl SettingsStudio {
             .child(policy_card)
             .child(add_toggle)
             .when_some(add_panel, |this, panel| this.child(panel))
+            .when_some(reset_history, |this, card| this.child(card))
             .into_any_element()
     }
 }
