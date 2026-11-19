@@ -513,8 +513,13 @@ pub(crate) fn models(connection: &Connection, catalog: &Catalog) -> Vec<(String,
         for id in resources {
             push_unique_id(&mut ordered, id);
         }
-    } else if ordered.is_empty() {
-        for &id in preferred {
+    } else if ordered.is_empty() || adapter == agent_platform::ADAPTER {
+        let defaults = if adapter == agent_platform::ADAPTER {
+            agent_platform::fallback_models(connection.endpoint())
+        } else {
+            preferred
+        };
+        for &id in defaults {
             push_unique_id(&mut ordered, id);
         }
     }
@@ -566,26 +571,48 @@ pub(crate) async fn probe(
     if config.endpoint.adapter == agent_platform::ADAPTER
         && providers.get(agent_platform::ADAPTER).is_none()
     {
-        let models = models(connection, Catalog::builtin());
+        let secret = match connection_secret(connection, Some(credentials), providers) {
+            Ok(Some(secret)) => secret,
+            Ok(None) => return failure("Google Agent Platform の API キーが未登録です".into()),
+            Err(error) => return failure(error.to_string()),
+        };
+        let mut discovered = Check::default();
+        match agent_platform::list_models(&config.endpoint, Some(&secret)).await {
+            Ok(ids) if !ids.is_empty() => {
+                discovered.resources = ids;
+                discovered.capabilities.push("model_list".into());
+            }
+            Ok(_) => {}
+            Err(error) => tracing::debug!(%error, "could not list Google Agent Platform models"),
+        }
+        let mut connection = connection.clone();
+        connection.last_check = Some(discovered.clone());
+        let models = models(&connection, Catalog::builtin());
         let Some((_, spec)) = models.first() else {
             return failure("Google Agent Platform のモデルを指定してください".into());
         };
         let model =
-            connection_secret(connection, Some(credentials), providers).and_then(|secret| {
-                agent_platform::model(&config.endpoint, secret, Arc::new(spec.clone()))
-            });
-        let model = match model {
-            Ok(model) => model,
-            Err(error) => return failure(error.to_string()),
-        };
-        if let Err(error) = agent_platform::probe(model).await {
-            return failure(error);
+            match agent_platform::model(&config.endpoint, Some(secret), Arc::new(spec.clone())) {
+                Ok(model) => model,
+                Err(error) => return failure(error.to_string()),
+            };
+        let resources = models.into_iter().map(|(id, _)| id).collect();
+        if discovered.capabilities.is_empty() {
+            discovered.capabilities.push("model_catalog".into());
         }
+        if let Err(error) = agent_platform::probe(model).await {
+            return Check {
+                resources,
+                capabilities: discovered.capabilities,
+                ..failure(error)
+            };
+        }
+        discovered.capabilities.push("streaming_text".into());
         return Check {
             healthy: true,
             checked_at,
-            capabilities: vec!["streaming_text".into()],
-            resources: models.into_iter().map(|(id, _)| id).collect(),
+            capabilities: discovered.capabilities,
+            resources,
             ..Default::default()
         };
     }

@@ -654,6 +654,10 @@ message UpdateSettingsRequest {
   uint64 expected_revision = 1;
   repeated ConnectionInput connections = 2;
 }
+message DeleteConnectionRequest {
+  string id = 1;
+  uint64 expected_revision = 2; // Connection.revision
+}
 message SettingsUpdated { Settings settings = 1; }
 
 message CredentialRequest {
@@ -946,6 +950,8 @@ service ChatService {
 service SettingsService {
   rpc GetSettings(Empty) returns (Settings);
   rpc UpdateSettings(UpdateSettingsRequest) returns (Settings);
+  // 接続と登録キーを削除し、その接続へのモデル割り当てを解除する。
+  rpc DeleteConnection(DeleteConnectionRequest) returns (Settings);
   rpc ListPendingApprovals(Empty) returns (PendingApprovals);
   rpc SubmitApproval(SubmitApprovalRequest) returns (SubmitApprovalResponse);
   rpc ListPolicyRules(Empty) returns (PolicyRules);

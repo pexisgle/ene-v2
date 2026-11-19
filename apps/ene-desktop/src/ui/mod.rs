@@ -1543,18 +1543,27 @@ impl Hub {
                     .await?;
                 response.view().to_owned_message().map_err(decode)
             },
-            |settings| {
-                Update::Notification(Box::new(w::Notification {
-                    kind: "settings".into(),
-                    event: Some(w::notification::Event::SettingsUpdated(Box::new(
-                        w::SettingsUpdated {
-                            settings: Some(settings).into(),
-                            ..Default::default()
-                        },
-                    ))),
-                    ..Default::default()
-                }))
+            settings_update,
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn delete_connection(&mut self, id: String, revision: u64, cx: &mut Context<Self>) {
+        let Some(host) = self.host() else { return };
+        self.request(
+            "接続の削除",
+            async move {
+                let response = host
+                    .settings
+                    .delete_connection(w::DeleteConnectionRequest {
+                        id,
+                        expected_revision: revision,
+                        ..Default::default()
+                    })
+                    .await?;
+                response.view().to_owned_message().map_err(decode)
             },
+            settings_update,
         );
         cx.notify();
     }
@@ -2965,7 +2974,11 @@ impl Hub {
             .cloned()
             .unwrap_or_default();
         let checked = if adapter == GOOGLE_AGENT_PLATFORM {
-            Vec::new()
+            connection
+                .last_check
+                .as_option()
+                .map(|check| check.resources.clone())
+                .unwrap_or_default()
         } else {
             self.model
                 .checks
@@ -2999,12 +3012,7 @@ impl Hub {
             push_unique_model(&mut list, id, fetched_name);
         }
         for model in &fetched {
-            if adapter != GOOGLE_AGENT_PLATFORM
-                || (configured.is_empty()
-                    && default_models_for_adapter(adapter).contains(&model.id.as_str()))
-            {
-                push_unique_model(&mut list, &model.id, Some(&model.name));
-            }
+            push_unique_model(&mut list, &model.id, Some(&model.name));
         }
         for id in &checked {
             push_unique_model(&mut list, id, None);
@@ -3605,6 +3613,19 @@ pub(crate) fn failure(context: &'static str, error: connectrpc::ConnectError) ->
     }
 }
 
+fn settings_update(settings: w::Settings) -> Update {
+    Update::Notification(Box::new(w::Notification {
+        kind: "settings".into(),
+        event: Some(w::notification::Event::SettingsUpdated(Box::new(
+            w::SettingsUpdated {
+                settings: Some(settings).into(),
+                ..Default::default()
+            },
+        ))),
+        ..Default::default()
+    }))
+}
+
 /// Keeps a per-window draft entity map synced with the active field theme.
 pub(crate) fn window_draft(
     drafts: &mut BTreeMap<String, gpui::Entity<crate::input::Draft>>,
@@ -3613,12 +3634,13 @@ pub(crate) fn window_draft(
     placeholder: &'static str,
     initial: Option<&str>,
     look: crate::input::FieldLook,
+    context: &'static str,
 ) -> gpui::Entity<crate::input::Draft> {
     let entity = drafts
         .entry(key.into())
         .or_insert_with(|| {
             cx.new(|cx| {
-                let mut draft = crate::input::Draft::new(cx, placeholder, "TextField");
+                let mut draft = crate::input::Draft::new(cx, placeholder, context);
                 if let Some(value) = initial {
                     draft.set(value.to_owned(), cx);
                 }

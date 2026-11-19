@@ -37,7 +37,7 @@ cargo run --locked -p ene-host
 
 - **Express mode** は初回セットアップまたは接続設定で「Google Agent Platform（旧 Vertex AI）」を選び、[Google Cloud のキー管理画面](https://console.cloud.google.com/agent-platform/api-keys)で取得した Express mode の API キーを登録します。
 - **通常の Google Cloud プロジェクト** は接続設定で同じプロバイダーを追加し、プロジェクト ID と必要に応じてロケーションを保存します。ロケーションの既定値は `global` です。Agent Platform API を有効にし、必要な IAM 権限を持つサービスアカウントに紐づいた [Google Cloud API キー](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/api-keys?usertype=standard) を登録します。
-- 既定モデルは `gemini-3.8-flash` です。別の Gemini モデルを使う場合は接続設定のモデル ID 欄で指定します。「確認」は先頭のモデルに短い生成リクエストを送り、キーと接続先を確認します。
+- 「モデル一覧を取得」で Google の公開元モデル一覧を読み込み、会話向けの Gemini を表示します。Express mode などで一覧 API を利用できない場合は、接続方式に応じた候補を表示します。モデル ID は手入力でも指定でき、「確認」は先頭の候補に短い生成リクエストを送り、キーと接続先を確認します。
 
 RPC では LLM 接続の `adapter` に `google-agent-platform` を指定し、通常接続の場合は `options` に JSON オブジェクトの文字列（例 `{"project_id":"my-project","location":"asia-northeast1"}`）を設定します。キーは `RegisterCredentials` で登録します。
 

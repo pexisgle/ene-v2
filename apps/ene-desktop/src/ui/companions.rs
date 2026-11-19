@@ -95,9 +95,10 @@ impl SettingsStudio {
             let persona_line = comp
                 .persona
                 .as_deref()
-                .map(|s| s.trim().replace('\n', " "))
+                .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "話し方未設定".to_owned());
+                .unwrap_or("話し方未設定")
+                .to_owned();
 
             let hub_select = self.hub.clone();
             let select_id = id.clone();
@@ -147,7 +148,7 @@ impl SettingsStudio {
                                     div()
                                         .text_xs()
                                         .text_color(theme.ink_muted)
-                                        .truncate()
+                                        .line_clamp(2)
                                         .child(persona_line),
                                 ),
                         ),
@@ -299,14 +300,14 @@ impl SettingsStudio {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let name_d = self.draft(cx, "new:name", "例: ene", None, theme);
-        let mind_d = self.draft(
+        let mind_d = self.description_draft(
             cx,
             "new:mind",
             "例: 相手の気持ちに寄り添い、率直に対話する",
             None,
             theme,
         );
-        let persona_d = self.draft(
+        let persona_d = self.description_draft(
             cx,
             "new:persona",
             "例: 柔らかく丁寧で、親しみやすい口調",
@@ -432,14 +433,14 @@ impl SettingsStudio {
             Some(&comp.name),
             theme,
         );
-        let mind_d = self.draft(
+        let mind_d = self.description_draft(
             cx,
             format!("comp:{id}:r{rev}:mind"),
             "人格の核",
             Some(&comp.mind),
             theme,
         );
-        let persona_d = self.draft(
+        let persona_d = self.description_draft(
             cx,
             format!("comp:{id}:r{rev}:persona"),
             "話し方",
@@ -604,28 +605,28 @@ impl SettingsStudio {
             let bg_init = profile.background.join(" | ");
             let expr_init = profile.expression.join(" | ");
 
-            let facets_d = self.draft(
+            let facets_d = self.description_draft(
                 cx,
                 format!("mind:{id}:r{prev}:facets"),
                 "「|」区切り",
                 Some(&facets_init),
                 theme,
             );
-            let examples_d = self.draft(
+            let examples_d = self.description_draft(
                 cx,
                 format!("mind:{id}:r{prev}:examples"),
                 "「|」区切り",
                 Some(&examples_init),
                 theme,
             );
-            let bg_d = self.draft(
+            let bg_d = self.description_draft(
                 cx,
                 format!("mind:{id}:r{prev}:bg"),
                 "「|」区切り",
                 Some(&bg_init),
                 theme,
             );
-            let expr_d = self.draft(
+            let expr_d = self.description_draft(
                 cx,
                 format!("mind:{id}:r{prev}:expr"),
                 "「|」区切り",

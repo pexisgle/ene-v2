@@ -652,10 +652,19 @@ impl SettingsStudio {
         let check_id = id.clone();
         let studio_expand = cx.entity();
         let expand_id = id.clone();
+        let agent_platform =
+            super::llm_endpoint(conn).is_some_and(|ep| ep.adapter == super::GOOGLE_AGENT_PLATFORM);
         let should_auto_probe = conn.enabled
             && !needs_key_flag
             && (kind == w::ConnectionKind::Llm || is_voicevox)
-            && check.is_none_or(|c| c.resources.is_empty());
+            && check.is_none_or(|c| {
+                c.resources.is_empty()
+                    || (agent_platform
+                        && !c
+                            .capabilities
+                            .iter()
+                            .any(|cap| matches!(cap.as_str(), "model_list" | "model_catalog")))
+            });
 
         let header = div()
             .h(px(62.))
@@ -788,6 +797,9 @@ impl SettingsStudio {
         let rev = conn.revision;
         let conn_toggle = conn.clone();
         let hub_toggle = self.hub.clone();
+        let hub_delete = self.hub.clone();
+        let delete_id = id.clone();
+        let delete_title = format!("「{}」を削除しますか？", conn.name);
 
         let err_strip = check
             .filter(|c| !c.healthy)
@@ -1210,7 +1222,7 @@ impl SettingsStudio {
                                     )
                                     .when(!options.is_empty(), |this| {
                                         this.child(kind_pill(
-                                            format!("{}件取得済み", options.len()),
+                                            format!("{}件の候補", options.len()),
                                             theme,
                                         ))
                                     }),
@@ -1918,7 +1930,32 @@ impl SettingsStudio {
                         .children(schema_controls),
                 )
             })
-            .child(div().flex().flex_row().justify_end().child(pill_button(
+            .child(div().flex().flex_row().justify_between().gap(px(8.)).child(pill_button(
+                SharedString::from(format!("conn-delete-{id}")),
+                "接続を削除",
+                Some(Icon::Trash),
+                Tone::Danger,
+                live,
+                theme,
+                move |window, cx| {
+                    let hub = hub_delete.clone();
+                    let id = delete_id.clone();
+                    let answer = window.prompt(
+                        gpui::PromptLevel::Warning,
+                        &delete_title,
+                        Some("この接続の設定、保存したキー、コンパニオンへのモデル割り当てを削除します。"),
+                        &["キャンセル", "削除"],
+                        cx,
+                    );
+                    cx.spawn(async move |cx| {
+                        if answer.await == Ok(1) {
+                            let _ = cx.update(|cx| {
+                                hub.update(cx, |hub, cx| hub.delete_connection(id, rev, cx));
+                            });
+                        }
+                    }).detach();
+                },
+            )).child(pill_button(
                 SharedString::from(format!("conn-save-{id}")),
                 "保存",
                 Some(Icon::Check),
