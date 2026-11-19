@@ -4,8 +4,8 @@ mod cli;
 mod host;
 pub(crate) mod server;
 
-pub use cli::parse;
-pub use server::run;
+pub use cli::{Action, parse};
+pub use server::{reset_history, run};
 
 /// State and runtime directories, with explicit environment overrides.
 pub fn paths() -> std::io::Result<(std::path::PathBuf, std::path::PathBuf)> {

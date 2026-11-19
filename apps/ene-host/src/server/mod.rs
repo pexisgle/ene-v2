@@ -1,6 +1,7 @@
 //! Process startup, private discovery and graceful shutdown of the host API.
 mod access;
 mod auth;
+mod history;
 pub(crate) mod rpc;
 
 use self::rpc::router;
@@ -8,6 +9,12 @@ use crate::host::Runtime;
 use std::error::Error;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
+
+pub fn reset_history() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (state, runtime) = crate::paths()?;
+    let _access = access::Access::acquire(&state, &runtime)?;
+    history::reset(&state, true)
+}
 
 #[tokio::main(flavor = "multi_thread")]
 pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -31,6 +38,7 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
             runtime_path.display()
         ))
     })?;
+    history::reset(&state, false)?;
     let runtime = Runtime::start(&state).await?;
     // Access control is delegated to the OS or a fronting service
     // (docs/design/host-access.md): the bind address is explicit, and the

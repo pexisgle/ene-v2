@@ -66,13 +66,28 @@ fn main() {
     };
 
     #[cfg(windows)]
-    let _local_host = local_host.and_then(|host| match start_local_host(&host) {
-        Ok(child) => Some(child),
-        Err(error) => {
-            tracing::error!(%error, "could not start the local ene-host");
-            None
+    let local_host_child = local_host.as_deref().and_then(|host| {
+        match local_host_command(host)
+            .env("ENE_HOST_EXIT_ON_STDIN_EOF", "1")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => Some(child),
+            Err(error) => {
+                tracing::error!(%error, "could not start the local ene-host");
+                None
+            }
         }
     });
+    #[cfg(windows)]
+    let history_reset = local_host_child
+        .as_ref()
+        .map(|_| ene_desktop::HistoryReset {
+            requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            failure: std::env::var("ENE_DESKTOP_HISTORY_RESET_ERROR").ok(),
+        });
+    #[cfg(windows)]
+    let history_reset_ui = history_reset.clone();
     let (updates_tx, updates_rx) = unbounded_channel();
     let (commands_tx, commands_rx) = unbounded_channel();
     let connection: Connection = Arc::new(RwLock::new(None));
@@ -137,6 +152,10 @@ fn main() {
     Application::new()
         .with_assets(EmbeddedAssets)
         .run(move |cx: &mut App| {
+            #[cfg(windows)]
+            if let Some(history_reset) = history_reset_ui {
+                cx.set_global(history_reset);
+            }
             if let Some(rx) = shutdown_rx {
                 cx.spawn(async move |cx| {
                     if rx.await.is_ok() {
@@ -195,6 +214,15 @@ fn main() {
     drop(tray);
     let _ = quit.send(Command::Quit);
     let _ = worker.join();
+    #[cfg(windows)]
+    if history_reset.is_some_and(|reset| reset.requested.load(std::sync::atomic::Ordering::Relaxed))
+        && let (Some(host), Some(child)) = (local_host, local_host_child)
+    {
+        let reset_error = reset_local_history(&host, child).err();
+        if let Err(error) = restart_desktop(reset_error) {
+            tracing::error!(%error, "could not reopen ene after the history reset");
+        }
+    }
 }
 
 /// The discovery file: `ENE_HOST_CONNECTION`, or the host's default runtime
@@ -215,11 +243,8 @@ fn discovery_path(local_host: bool) -> Result<PathBuf, String> {
 }
 
 #[cfg(windows)]
-fn start_local_host(host: &std::path::Path) -> std::io::Result<std::process::Child> {
-    use std::{
-        os::windows::process::CommandExt as _,
-        process::{Command, Stdio},
-    };
+fn local_host_command(host: &std::path::Path) -> std::process::Command {
+    use std::{os::windows::process::CommandExt as _, process::Command};
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut command = Command::new(host);
@@ -227,14 +252,53 @@ fn start_local_host(host: &std::path::Path) -> std::io::Result<std::process::Chi
         let capabilities = ene_desktop::WORKSPACE_FILE_CAPABILITIES.join(",");
         command.env(
             "ENE_HOST_ALLOWED_CAPABILITIES",
-            format!("body.motion,{capabilities}"),
+            format!("body.motion,{capabilities},{}", ene_rpc::COMPUTER_USE),
         );
     }
+    command.creation_flags(CREATE_NO_WINDOW);
     command
-        .creation_flags(CREATE_NO_WINDOW)
-        .env("ENE_HOST_EXIT_ON_STDIN_EOF", "1")
-        .stdin(Stdio::piped())
-        .spawn()
+}
+
+#[cfg(windows)]
+fn reset_local_history(
+    host: &std::path::Path,
+    mut child: std::process::Child,
+) -> Result<(), String> {
+    use std::time::{Duration, Instant};
+
+    drop(child.stdin.take());
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while child
+        .try_wait()
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        if Instant::now() >= deadline {
+            return Err("ローカルホストの停止を待ってから、もう一度お試しください。".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let result = local_host_command(host)
+        .arg("--reset-history")
+        .output()
+        .map_err(|error| error.to_string())?;
+    if result.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&result.stderr).trim().to_owned())
+    }
+}
+
+#[cfg(windows)]
+fn restart_desktop(reset_error: Option<String>) -> std::io::Result<()> {
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command.env("ENE_DESKTOP_OPEN_SETTINGS", "device");
+    if let Some(error) = reset_error {
+        command.env("ENE_DESKTOP_HISTORY_RESET_ERROR", error);
+    } else {
+        command.env_remove("ENE_DESKTOP_HISTORY_RESET_ERROR");
+    }
+    command.spawn().map(|_| ())
 }
 
 /// The client's identity and renderer, from the environment.

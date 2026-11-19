@@ -35,6 +35,14 @@ use gpui::{
 use std::collections::{BTreeMap, HashSet};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+#[derive(Clone)]
+pub struct HistoryReset {
+    pub requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub failure: Option<String>,
+}
+
+impl gpui::Global for HistoryReset {}
+
 /// Inputs collected from the simplified companion creation form.
 pub(crate) struct NewCompanionSpec {
     pub name: String,

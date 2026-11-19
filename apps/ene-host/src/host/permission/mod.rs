@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn hard_denied_and_undeclared_operations_fail_safe() {
         let denied = decide_capability(
-            &[],
+            &[rule(PolicyEffect::Allow, "*", "*")],
             Some(&spec(CapabilityApproval::Auto)),
             "payment.transfer",
             "device_request",
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn rules_decide_by_precedence() {
-        let allow = rule(PolicyEffect::Allow, "device_request", "*");
+        let allow = rule(PolicyEffect::Allow, "*", "*");
         let confirm = rule(PolicyEffect::Confirm, "device_request", "/tmp/x");
         let verdict = decide_capability(
             &[allow.clone(), confirm],

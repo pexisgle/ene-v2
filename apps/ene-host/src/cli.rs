@@ -1,14 +1,17 @@
-//! The binary's command line: the host takes no arguments.
-//!
-//! It is configured by its environment and the files in its runtime directory,
-//! so an argument is a mistake the operator is told about rather than an option
-//! the host honours.
+//! The binary's command line for serving and offline maintenance.
 use std::ffi::OsString;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Action {
+    Serve,
+    ResetHistory,
+}
 
 /// What the host tells an operator who asks it for help or passes it something
 /// it does not take. The endpoint and Owner token are published in the runtime
 /// directory's connection.json.
-pub const USAGE: &str = "ene-host takes no arguments.\n\
+pub const USAGE: &str = "Usage: ene-host [--reset-history]\n\
+--reset-history clears conversations, work history and memory while the host is stopped.\n\
 The endpoint and Owner token are published in the runtime directory's connection.json.\n\
 ENE_HOST_STATE_DIR overrides the SQLite/rig directory.\n\
 ENE_HOST_RUNTIME_DIR overrides the discovery/lock directory.";
@@ -16,11 +19,14 @@ ENE_HOST_RUNTIME_DIR overrides the discovery/lock directory.";
 /// Parses the process's arguments. `Err` carries the exit status to leave with,
 /// after the usage text is already printed: help succeeds, anything else is a
 /// misuse.
-pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<(), i32> {
+pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Action, i32> {
     let mut arguments = arguments.into_iter();
     arguments.next();
     match arguments.next() {
-        None => Ok(()),
+        None => Ok(Action::Serve),
+        Some(argument) if argument == "--reset-history" && arguments.next().is_none() => {
+            Ok(Action::ResetHistory)
+        }
         Some(argument) if argument == "-h" || argument == "--help" => {
             println!("{USAGE}");
             Err(0)
@@ -45,7 +51,16 @@ mod tests {
 
     #[test]
     fn no_arguments_serves_the_host() {
-        assert_eq!(parse(arguments(&[])), Ok(()));
+        assert_eq!(parse(arguments(&[])), Ok(Action::Serve));
+    }
+
+    #[test]
+    fn the_reset_action_takes_no_other_arguments() {
+        assert_eq!(
+            parse(arguments(&["--reset-history"])),
+            Ok(Action::ResetHistory)
+        );
+        assert_eq!(parse(arguments(&["--reset-history", "extra"])), Err(1));
     }
 
     #[test]
