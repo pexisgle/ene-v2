@@ -45,17 +45,17 @@
 
 ### 2.2 知覚イベントの送信と`eye.watch`の適用
 
-デスクトップクライアントは`ClientService.ReportPerception`でホストへ知覚イベントを送る。
+デスクトップクライアントは「この端末」の「目」がオンで、当該コンパニオンの担当端末のときに `ClientService.ReportPerception` で知覚イベントを送る。既定はオフで、選択を端末に保存する。Windowsでは前面ウィンドウがあるモニター全体をオン直後と20秒ごとにキャプチャする。ロック画面では停止する。Linuxはウィンドウと活動イベントで動作する。
 
-- **アクティブウィンドウの変化**: OSフックで前面ウィンドウの変更を検出し、`PerceptionEvent { active_window: ActiveWindowChanged { title, app_id } }`を送信する。
-- **アイドル状態**: 無操作時は15〜30秒間隔でサンプリングし、`PerceptionEvent { user_activity: UserActivityState { is_active, idle_seconds } }`を送信する。
+- **アクティブウィンドウの変化**: 1秒ごとに前面ウィンドウを確認し、変化時と20秒ごとのサンプルで `ActiveWindowChanged { title, app_id }` を送信する。
+- **アイドル状態**: 操作・アイドルの切り替わりと、20秒ごとのサンプルを `PerceptionEvent { user_activity: UserActivityState { is_active, idle_seconds } }` として送信する。
 - **要約の生成**: クライアント側で要約を作れる場合は`PerceptionSummary`を送信してよい。ホスト側でも受信内容から簡潔な要約を生成する。
 - **`eye.watch`の受信**: ホストから`DeviceOperation { capability: "eye.watch", input: <ルールJSON> }`が届いたら、OSフックのフィルタ条件を動的に更新する。
   - `target_pattern`: 監視対象のウィンドウタイトルまたはアプリ識別子の部分一致・正規表現パターン（例: `"GitHub"`, `".*\\.rs"`）
   - `match_kind`: `"title"`（ウィンドウタイトル）または `"app_id"`（プロセス/アプリケーション名）
   - `notify_on`: 発火契機（`"focus"`: アクティブ化時、`"blur"`: 非アクティブ化時、`"title_change"`: タイトル変更時）
   - `enabled`: ルールの有効化（`true`）または解除（`false`）
-- **優先割り込み**: ルールに合致したら、定期サンプリングを待たずに`ReportPerception`で優先割り込みイベントを返す。ホストはこれを親エージェントのリアクション推論へ渡す。
+- **監視条件の一致**: ルールに合致したら `WatchMatch` を送る。ホストはモデルによる重要度判定を経ずに親ターンへの配送を予約する。
 - **非対応環境**: WaylandのGNOME/KDE等、フックAPIが利用できない環境では、ウィンドウ情報を取得できないことを明示して安全に縮退する。取得できない項目を推測で補わない。
 
 ### 2.3 専用連携プラグイン

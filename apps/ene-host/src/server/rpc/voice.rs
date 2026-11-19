@@ -6,6 +6,8 @@
 use super::Services;
 use crate::host::{
     Runtime,
+    db::Store,
+    error::HostError,
     voice::{self, InputBinding, SetupError, SttEngine},
 };
 use connectrpc::{
@@ -186,6 +188,70 @@ impl w::VoiceService for Services {
         .take_until(self.shutdown.clone().cancelled_owned());
         Response::stream_ok(stream)
     }
+
+    async fn speak(
+        &self,
+        _: RequestContext,
+        request: ServiceRequest<'_, w::SpeakRequest>,
+    ) -> ServiceResult<w::Empty> {
+        let client_id = request.client_id.to_owned();
+        let text = request.text.trim().to_owned();
+        // Validation at the trust boundary, so a malformed probe never reaches
+        // the network as a 503 from the engine.
+        if text.is_empty() {
+            return Err(ConnectError::invalid_argument("text is required"));
+        }
+        if text.chars().count() > voice::MAX_PROBE_CHARS {
+            return Err(ConnectError::invalid_argument(format!(
+                "text is limited to {} characters",
+                voice::MAX_PROBE_CHARS
+            )));
+        }
+        // Synthesis is a network call, so it happens here rather than on the
+        // ECS thread; only the store lookups and the dispatch run inside it.
+        let source = self
+            .runtime
+            .read(|app| {
+                voice::tts_source(app.world()).map_err(|error| match error {
+                    SetupError::Missing => {
+                        HostError::FailedPrecondition(voice::VOICE_UNAVAILABLE.into())
+                    }
+                    SetupError::Disabled(message)
+                    | SetupError::Broken(message)
+                    | SetupError::Unsupported(message) => HostError::FailedPrecondition(message),
+                })
+            })
+            .await
+            .map_err(ConnectError::from)?;
+        let (voice_name, companion) = self
+            .runtime
+            .read({
+                let client_id = client_id.clone();
+                move |app| {
+                    let store = app.world().resource::<Store>();
+                    let companion = store.activation_for_client(&client_id)?.ok_or_else(|| {
+                        HostError::FailedPrecondition(
+                            "the client is not the active client of any companion".into(),
+                        )
+                    })?;
+                    let voice = store
+                        .companion(&companion)?
+                        .and_then(|companion| companion.voice_identifier)
+                        .unwrap_or_default();
+                    Ok((voice, companion))
+                }
+            })
+            .await
+            .map_err(ConnectError::from)?;
+        let (pcm, rate) = voice::synthesize_for_probe(source, &text, voice_name)
+            .await
+            .map_err(ConnectError::unavailable)?;
+        self.runtime
+            .read(move |app| voice::play_once(app.world(), &companion, pcm, rate))
+            .await
+            .map_err(ConnectError::from)
+            .map(Response::ok)?
+    }
 }
 
 fn setup_error(error: SetupError) -> ConnectError {
@@ -213,15 +279,32 @@ impl Recognition {
         runtime: &Runtime,
         engine: &Arc<dyn SttEngine>,
     ) -> std::result::Result<Option<w::TranscriptionEvent>, ConnectError> {
+        let was_speaking = self.speaking;
         self.speaking = false;
+        fn clear_speaking(
+            was_speaking: bool,
+            transcription_id: &mut String,
+        ) -> Option<w::TranscriptionEvent> {
+            let id = std::mem::take(transcription_id);
+            was_speaking.then(|| w::TranscriptionEvent {
+                transcription_id: id,
+                text: String::new(),
+                is_final: false,
+                is_speaking: false,
+                ..Default::default()
+            })
+        }
         if self.pending.len() < voice::MIN_STT_BYTES {
             self.pending.clear();
-            return Ok(None);
+            return Ok(clear_speaking(was_speaking, &mut self.transcription_id));
         }
         let pcm = std::mem::take(&mut self.pending);
         let Some(binding) = self.binding.clone() else {
-            return Ok(None);
+            return Ok(clear_speaking(was_speaking, &mut self.transcription_id));
         };
+        if !voiced(&pcm, self.sample_rate) {
+            return Ok(clear_speaking(was_speaking, &mut self.transcription_id));
+        }
         let active = runtime
             .read({
                 let binding = binding.clone();
@@ -230,7 +313,7 @@ impl Recognition {
             .await
             .map_err(ConnectError::from)?;
         if !active {
-            return Ok(None);
+            return Ok(clear_speaking(was_speaking, &mut self.transcription_id));
         }
         let text =
             tokio::time::timeout(voice::STT_TIMEOUT, engine.transcribe(pcm, self.sample_rate))
@@ -241,8 +324,7 @@ impl Recognition {
                 })?;
         let text = text.trim().to_owned();
         if text.is_empty() {
-            self.transcription_id.clear();
-            return Ok(None);
+            return Ok(clear_speaking(was_speaking, &mut self.transcription_id));
         }
         let transcription_id = std::mem::take(&mut self.transcription_id);
         let accepted = runtime
@@ -254,7 +336,13 @@ impl Recognition {
             .await
             .map_err(ConnectError::from)?;
         if !accepted {
-            return Ok(None);
+            return Ok(was_speaking.then(|| w::TranscriptionEvent {
+                transcription_id,
+                text: String::new(),
+                is_final: false,
+                is_speaking: false,
+                ..Default::default()
+            }));
         }
         Ok(Some(w::TranscriptionEvent {
             transcription_id,
@@ -266,12 +354,27 @@ impl Recognition {
     }
 }
 
+/// Checks for signal above the floor in a 40 ms window so quiet words survive
+/// silence at either end of the capture. Removing the mean ignores DC offset.
+fn voiced(pcm: &[u8], sample_rate: u32) -> bool {
+    let samples = pcm.as_chunks::<2>().0;
+    let window = sample_rate as usize / 25;
+    let min_variance = f64::from(voice::MIN_STT_RMS).powi(2);
+    samples.chunks_exact(window).any(|frame| {
+        let (sum, squares) = frame.iter().fold((0.0, 0.0), |(sum, squares), pair| {
+            let sample = f64::from(i16::from_le_bytes(*pair)) / 32_768.0;
+            (sum + sample, squares + sample * sample)
+        });
+        let mean = sum / window as f64;
+        squares / window as f64 - mean * mean >= min_variance
+    })
+}
+
 struct StreamGuard {
     runtime: Runtime,
     client_id: String,
     subscription: String,
 }
-
 impl Drop for StreamGuard {
     fn drop(&mut self) {
         let client_id = self.client_id.clone();
@@ -344,24 +447,45 @@ mod tests {
             })
             .await
             .unwrap();
-        let chunk = |client: &str, rate, sample: i16, speaking| {
+        // Alternating ±amplitude: real energy, unlike a constant offset, so a
+        // fixture reaches `transcribe` only when it is voiced enough to. Each
+        // chunk is one whole `MIN_STT_BYTES` capture at 24 kHz.
+        const SAMPLES: usize = voice::MIN_STT_BYTES / 2;
+        let wave = |amplitude: i16| -> Vec<i16> {
+            (0..SAMPLES)
+                .map(|index| {
+                    if index % 2 == 0 {
+                        amplitude
+                    } else {
+                        -amplitude
+                    }
+                })
+                .collect()
+        };
+        let chunk = |client: &str, rate, samples: Vec<i16>, speaking| {
+            let pcm: Vec<u8> = samples
+                .iter()
+                .flat_map(|sample| sample.to_le_bytes())
+                .collect();
             StreamMessage::from_message(&w::AudioInputChunk {
                 client_id: client.into(),
                 sample_rate: rate,
-                pcm_data: sample.to_le_bytes().repeat(1_600),
+                pcm_data: pcm,
                 is_companion_speaking: speaking,
                 ..Default::default()
             })
         };
+        let mut quiet = wave(150);
+        quiet.resize(SAMPLES * 4, 0); // 600 ms of trailing silence
         let messages = vec![
-            chunk("c1", 24_000, 1, false),
+            chunk("c1", 24_000, wave(5_000), false),
             // A frame that names another client never joins this stream.
-            chunk("other", 24_000, 2, false),
-            chunk("c1", 24_000, 3, false),
+            chunk("other", 24_000, wave(5_500), false),
+            chunk("c1", 24_000, wave(5_200), false),
             // Playback echo discards the capture in progress.
-            chunk("", 0, 4, true),
-            chunk("", 16_000, 5, false),
-            chunk("", 24_000, 6, false),
+            chunk("", 0, wave(5_400), true),
+            chunk("", 16_000, wave(5_000), false),
+            chunk("", 24_000, quiet.clone(), false),
             StreamMessage::from_message(&w::AudioInputChunk::default()),
         ];
         let service = Services {
@@ -383,10 +507,25 @@ mod tests {
             .map(|event| event.text)
             .collect();
         assert_eq!(finals, ["capture 1", "capture 2"]);
-        assert_eq!(
-            *captured.lock().unwrap(),
-            [(16_000, vec![5; 1_600]), (24_000, vec![6; 1_600])]
-        );
+        {
+            let captured = captured.lock().unwrap();
+            assert_eq!(
+                captured
+                    .iter()
+                    .map(|(rate, samples)| (*rate, samples.len()))
+                    .collect::<Vec<_>>(),
+                [(16_000, SAMPLES), (24_000, quiet.len())]
+            );
+            // The alternation survives the trip, so the fixture is the signal the
+            // client would have sent, not a constant the gate now rejects.
+            assert!(
+                captured[0]
+                    .1
+                    .iter()
+                    .all(|sample| *sample == -5_000 || *sample == 5_000)
+            );
+            assert_eq!(captured[1].1, quiet);
+        }
         runtime.shutdown().await.unwrap();
     }
 
@@ -477,6 +616,115 @@ mod tests {
                 .unwrap()
                 > before
         );
+        runtime.shutdown().await.unwrap();
+    }
+
+    /// Whisper-family engines answer silence with a stock phrase (the classic
+    /// "ご視聴ありがとうございました"). A buffer at the noise floor, or too short
+    /// to be an utterance, must never reach the engine.
+    #[test]
+    fn only_a_voiced_buffer_reaches_the_recognizer() {
+        let samples = |amplitude: i16, count: usize| -> Vec<u8> {
+            (0..count)
+                .flat_map(|index| {
+                    let value = if index % 2 == 0 {
+                        amplitude
+                    } else {
+                        -amplitude
+                    };
+                    value.to_le_bytes()
+                })
+                .collect()
+        };
+        let voiced = |pcm: &[u8]| super::voiced(pcm, voice::SAMPLE_RATE);
+        assert!(!voiced(&[]), "an empty capture is not speech");
+        // Steady hum just above the client's VAD floor, well under MIN_STT_RMS.
+        assert!(!voiced(&samples(40, 4_800)));
+        assert!(!voiced(&samples(0, 4_800)), "digital silence is not speech");
+        assert!(!voiced(&[0, 4].repeat(4_800)), "DC offset is not speech");
+        // Real speech energy passes.
+        assert!(voiced(&samples(1_200, 4_800)));
+    }
+
+    #[tokio::test]
+    async fn short_or_empty_utterance_clears_speaking_indicator() {
+        use connectrpc::StreamMessage;
+        use w::VoiceService;
+
+        struct EmptyStt;
+        impl SttEngine for EmptyStt {
+            fn transcribe<'a>(
+                &'a self,
+                _: Vec<u8>,
+                _: u32,
+            ) -> voice::BoxFuture<'a, Result<String, String>> {
+                Box::pin(async { Ok(String::new()) })
+            }
+        }
+
+        let state = tempfile::tempdir().unwrap();
+        let runtime = Runtime::start(state.path()).await.unwrap();
+        runtime
+            .read(|app| {
+                let store = app.world().resource::<Store>();
+                store.register_client(&ClientDeclaration {
+                    id: "c1",
+                    name: "desk",
+                    platform: "linux",
+                    capabilities: &[],
+                    specs: &[],
+                    expected_revision: 0,
+                })?;
+                store.activate("ene", Some("c1"))?;
+                app.world_mut().insert_resource(voice::Engines {
+                    stt: Some(Arc::new(EmptyStt)),
+                    ..Default::default()
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let messages = vec![
+            StreamMessage::from_message(&w::AudioInputChunk {
+                client_id: "c1".into(),
+                sample_rate: 24_000,
+                pcm_data: vec![1; 400], // below MIN_STT_BYTES
+                is_companion_speaking: false,
+                ..Default::default()
+            }),
+            StreamMessage::from_message(&w::AudioInputChunk::default()),
+            StreamMessage::from_message(&w::AudioInputChunk {
+                client_id: "c1".into(),
+                sample_rate: 24_000,
+                pcm_data: vec![1; 4_000], // empty transcript from EmptyStt
+                is_companion_speaking: false,
+                ..Default::default()
+            }),
+            StreamMessage::from_message(&w::AudioInputChunk::default()),
+        ];
+        let service = Services {
+            runtime: runtime.clone(),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+        };
+        let response = service
+            .stream_audio_input(
+                RequestContext::new(http::HeaderMap::new()),
+                Box::pin(futures_util::stream::iter(messages.into_iter().map(Ok))),
+            )
+            .await
+            .unwrap();
+        let events: Vec<w::TranscriptionEvent> = response
+            .body
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(events.len(), 4);
+        assert!(events[0].is_speaking);
+        assert!(!events[1].is_speaking && !events[1].is_final);
+        assert!(events[2].is_speaking);
+        assert!(!events[3].is_speaking && !events[3].is_final);
         runtime.shutdown().await.unwrap();
     }
 }

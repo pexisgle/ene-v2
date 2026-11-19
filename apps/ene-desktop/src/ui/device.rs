@@ -20,6 +20,8 @@ impl SettingsStudio {
             devices,
             mic_muted,
             output_muted,
+            eyes_enabled,
+            eyes_status,
             avatar_scale,
             rules,
             client_caps,
@@ -47,6 +49,8 @@ impl SettingsStudio {
                 hub.model.devices.clone(),
                 hub.model.mic_muted,
                 hub.model.output_muted,
+                hub.model.eyes_enabled,
+                hub.model.eyes_status.clone(),
                 hub.model.avatar_scale,
                 rules,
                 caps,
@@ -105,7 +109,12 @@ impl SettingsStudio {
         let hub_pod = self.hub.clone();
         let hub_mic = self.hub.clone();
         let hub_out = self.hub.clone();
+        let hub_eyes = self.hub.clone();
         let hub_center = self.hub.clone();
+        #[cfg(windows)]
+        let computer_use = self.hub.read(cx).model.computer_use_enabled;
+        #[cfg(windows)]
+        let hub_computer = self.hub.clone();
 
         let mic_configured = self
             .hub
@@ -118,6 +127,20 @@ impl SettingsStudio {
         let mic_ready = mic_configured && matches!(devices.input, Device::Ready(_));
         let output_ready = output_configured && matches!(devices.output, Device::Ready(_));
         let avatar_ready = matches!(devices.avatar, Device::Ready(_));
+        let eyes_supported = crate::perception::supported();
+        let eyes_label = match (
+            eyes_enabled,
+            live && is_active_client,
+            eyes_status.as_deref(),
+        ) {
+            _ if !eyes_supported => "この環境では取得不可",
+            (false, _, _) => "オフ",
+            (_, false, _) => "担当端末になるまで待機",
+            (_, _, Some("unavailable")) => "目のモデルに接続できません",
+            (_, _, Some("image")) if cfg!(windows) => "画面と活動を評価",
+            (_, _, Some("events" | "image")) => "活動イベントを評価",
+            _ => "モデル確認中",
+        };
         let mut scale_chips = Vec::new();
         for pct in [75.0f32, 100.0, 125.0, 150.0] {
             let selected = (avatar_scale - pct).abs() < 1.0;
@@ -231,6 +254,56 @@ impl SettingsStudio {
                 ),
                 theme,
             ))
+            .child(row_frame(
+                true,
+                "目",
+                Some(status_pill(eyes_label, None, theme.bg_blush, theme.ink_muted)),
+                toggle_switch(
+                    "dev-eyes-toggle",
+                    eyes_enabled,
+                    eyes_supported || eyes_enabled,
+                    theme,
+                    move |_, cx| hub_eyes.read(cx).set_eyes_enabled(!eyes_enabled),
+                ),
+                theme,
+            ))
+            .child(
+                div()
+                    .px(px(16.))
+                    .pb(px(12.))
+                    .text_xs()
+                    .text_color(theme.ink_muted)
+                    .child(if cfg!(windows) {
+                        "オンの間、活動情報をモデルの提供元に送ります。画像対応モデルには操作中のモニターの画像も送ります。"
+                    } else {
+                        "オンの間、ウィンドウと活動情報を、設定されたモデルの提供元に送ります。"
+                    }),
+            )
+            .when(cfg!(windows), |this| {
+                #[cfg(windows)]
+                {
+                    this
+                    .child(row_frame(
+                        true,
+                        "手に画面操作を許可",
+                        None,
+                        toggle_switch("dev-computer-use", computer_use, true, theme, move |_, cx| {
+                            hub_computer.read(cx).set_computer_use_enabled(!computer_use);
+                        }),
+                        theme,
+                    ))
+                    .child(
+                        div()
+                            .px(px(16.))
+                            .pb(px(12.))
+                            .text_xs()
+                            .text_color(theme.ink_muted)
+                            .child("オンの間、手はこの端末のアプリを操作できます。作業で取得した画面は作業モデルの提供元へ送ります。"),
+                    )
+                }
+                #[cfg(not(windows))]
+                this
+            })
             .child(row_frame(
                 true,
                 "対話ウィンドウ",

@@ -10,6 +10,8 @@
 mod audio;
 mod avatar;
 mod capabilities;
+#[cfg(windows)]
+mod computer;
 mod host;
 mod input;
 mod perception;
@@ -18,6 +20,7 @@ mod state;
 mod tray;
 mod ui;
 mod update;
+mod work_tools;
 
 pub use avatar::{bundled_ene_model, default_model, default_renderer};
 pub use host::{Connect, Discovery, Host};

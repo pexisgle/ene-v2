@@ -480,8 +480,11 @@ pub(crate) fn tool_names(world: &mut World) -> HashSet<String> {
 }
 
 /// Raw tool names currently registered for a specific connected MCP server id.
-pub(crate) fn server_tool_names(world: &World, id: &str) -> Option<Vec<String>> {
+pub(crate) fn server_tool_names(world: &World, id: &str, revision: u64) -> Option<Vec<String>> {
     let server = world.resource::<McpServers>().0.get(id)?;
+    if server.launch.revision != revision || server.connection.is_closed() {
+        return None;
+    }
     let catalog = server.registry.snapshot();
     let mut names: Vec<String> = catalog
         .definitions()

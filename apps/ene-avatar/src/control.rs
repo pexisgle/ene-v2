@@ -1,4 +1,4 @@
-use crate::character::{AvatarState, Character, Config, Notification, Pending, reload};
+use crate::character::{AvatarState, Character, Config, Notification, queue_motion, reload};
 use crate::desktop::Output;
 use bevy::{
     app::{AppExit, MainScheduleOrder},
@@ -122,6 +122,11 @@ enum Command {
         character: String,
         config: Config,
     },
+    Motion {
+        character: String,
+        motion: Option<String>,
+        looping: bool,
+    },
     Get {},
     Remove {
         character: String,
@@ -171,6 +176,7 @@ fn requests(world: &mut World, avatars: &mut QueryState<(Entity, &mut Character)
             let target = match &request.command {
                 Command::Add { character, .. }
                 | Command::Set { character, .. }
+                | Command::Motion { character, .. }
                 | Command::Remove { character }
                 | Command::Center { character, .. }
                 | Command::Expression { character, .. }
@@ -197,10 +203,7 @@ fn requests(world: &mut World, avatars: &mut QueryState<(Entity, &mut Character)
                                 // The model is staying: fade to the new clip
                                 // instead of despawning and reloading it.
                                 if previous != old.config.motion {
-                                    old.pending = Some(match old.config.motion.clone() {
-                                        Some(path) => Pending::Fade(path),
-                                        None => Pending::Rest,
-                                    });
+                                    queue_motion(world, entity);
                                 }
                                 return Ok(Value::Null);
                             }
@@ -208,6 +211,23 @@ fn requests(world: &mut World, avatars: &mut QueryState<(Entity, &mut Character)
                         }
                     };
                     reload(world, entity);
+                }
+                Command::Motion {
+                    motion, looping, ..
+                } => {
+                    let (entity, mut old) = target.ok_or("unknown character")?;
+                    let config = Config {
+                        motion,
+                        looping,
+                        ..old.config.clone()
+                    };
+                    config.validate()?;
+                    old.config = config;
+                    if matches!(old.state, AvatarState::Error(_)) {
+                        reload(world, entity);
+                    } else {
+                        queue_motion(world, entity);
+                    }
                 }
                 Command::Get {} => {
                     return world

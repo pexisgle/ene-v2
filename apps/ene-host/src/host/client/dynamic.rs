@@ -49,7 +49,13 @@ use tokio::sync::{mpsc, oneshot};
 /// How many capability calls may queue before a handler waits.
 const QUEUE: usize = 64;
 
-const WORK_AGENT_TOOLS: &[&str] = &["device_request", "mind_read", "mind_recall", "report"];
+const WORK_AGENT_TOOLS: &[&str] = &[
+    "device_request",
+    "mind_read",
+    "mind_recall",
+    "report",
+    crate::host::web_search::NAME,
+];
 
 /// One active companion/client a shared tool dispatches for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -349,14 +355,13 @@ fn granted_names(
     granted
 }
 
-/// The tools a parent agent is offered: the host's minimal built-ins (without
-/// `report`, which belongs to the hand) and the capability tools its active
-/// client granted. External MCP tools belong exclusively to the hand.
-fn parent_names(granted: &[String]) -> Vec<String> {
+/// The tools a parent agent is offered: its built-ins and the capability
+/// tools its active client granted.
+pub(super) fn parent_names(granted: &[String]) -> Vec<String> {
     let mut names: Vec<String> = BUILTIN_TOOLS
         .iter()
         .copied()
-        .filter(|name| *name != "report")
+        .filter(|name| !matches!(*name, "report" | crate::host::web_search::NAME))
         .map(str::to_owned)
         .collect();
     names.extend(granted.iter().cloned());
@@ -365,9 +370,7 @@ fn parent_names(granted: &[String]) -> Vec<String> {
     names
 }
 
-/// The tools a work agent ("hand") is offered: its built-in execution/mind
-/// tools (`device_request`, `mind_read`, `mind_recall`, `report`) plus every
-/// tool the host serves itself, such as connected MCP server tools.
+/// The tools a work agent ("hand") is offered: its built-ins plus MCP tools.
 pub(crate) fn hand_names(host: &std::collections::HashSet<String>) -> Vec<String> {
     let mut names: Vec<String> = WORK_AGENT_TOOLS
         .iter()
@@ -386,9 +389,7 @@ pub(crate) fn hand_tool_access(world: &mut World) -> ToolAccess {
     ToolAccess::Only(hand_names(&host))
 }
 
-/// Limits what each parent agent is offered ("head": minimal built-ins + active
-/// client capability tools) and what each work agent is offered ("hand":
-/// `report`, `device_request`, `mind_read`, `mind_recall` + all MCP tools).
+/// Refreshes tool access for both the parent and work agents.
 /// This corrects the `ToolAccess::All` that a freshly spawned or restored
 /// agent starts with.
 fn sync_access(world: &mut World, entities: &HashMap<String, Entity>) {

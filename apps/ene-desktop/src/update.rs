@@ -50,6 +50,12 @@ pub enum Update {
     StopRequested {
         companion_id: String,
     },
+    /// The host synthesized and dispatched a probe utterance.
+    Spoke,
+    /// The probe could not be synthesized or dispatched.
+    SpokeFailed {
+        message: String,
+    },
     /// The conversation the window asked for.
     History {
         companion_id: String,
@@ -61,7 +67,12 @@ pub enum Update {
     },
     /// The provider catalog.
     Providers(Vec<w::LlmProvider>),
-    SetupFinished(bool),
+    SetupFinished {
+        ok: bool,
+        connection_id: Option<String>,
+        models: Vec<String>,
+        error: Option<String>,
+    },
     /// The declared models of one connection.
     Models {
         connection_id: String,
@@ -101,11 +112,25 @@ pub enum Update {
         input: f32,
         speaking: bool,
     },
+    /// Local capture state, so the settings probe can show where a spoken
+    /// phrase stops: microphone, VAD gate, bytes actually sent to the host.
+    Capture {
+        /// RMS of the frames the device delivered since the last report.
+        level: f32,
+        /// Whether the voice gate is passing audio right now.
+        open: bool,
+        /// Wire bytes handed to the host since the previous report.
+        sent: usize,
+    },
     /// Current local mute flags.
     AudioMute {
         mic_muted: bool,
         output_muted: bool,
     },
+    EyesEnabled(bool),
+    EyesStatus(Option<String>),
+    #[cfg(windows)]
+    ComputerUseEnabled(bool),
     /// Live STT recognition status from `StreamAudioInput`.
     Transcription {
         text: String,
@@ -142,10 +167,16 @@ pub enum Command {
     SetMicMuted(bool),
     /// Mute or unmute local speaker playback.
     SetOutputMuted(bool),
+    SetEyesEnabled(bool),
+    #[cfg(windows)]
+    SetComputerUseEnabled(bool),
     /// Adjust avatar size percentage (50..=200).
     SetAvatarScale(f32),
     /// Center the avatar on screen.
     CenterAvatar,
+    /// Speak `text` through the host's TTS connection. The host synthesizes it
+    /// outside any turn, so this is a probe and not a message to the companion.
+    Speak(String),
     /// Stop serving and exit. Sent when the window closes.
     Quit,
 }

@@ -48,6 +48,7 @@ pub enum Message {
 struct Shown {
     model: String,
     motion: Option<String>,
+    looping: bool,
     monitor: Option<String>,
     position: Option<[f32; 2]>,
     size_percent: f32,
@@ -58,6 +59,7 @@ impl Shown {
         Self {
             model: model.to_string_lossy().into_owned(),
             motion: None,
+            looping: true,
             monitor: None,
             position: None,
             size_percent: 100.,
@@ -69,7 +71,7 @@ impl Shown {
             "model": self.model,
             "motion": self.motion,
             "playing": true,
-            "looping": true,
+            "looping": self.looping,
             "monitor": self.monitor,
             "position": self.position,
             "size_percent": self.size_percent,
@@ -107,6 +109,7 @@ pub struct Avatar {
     child: Child,
     stdin: ChildStdin,
     replies: Receiver<Result<Message, String>>,
+    finished: Vec<Value>,
     next_id: u64,
     /// What each character was last configured to, so a repeated request is a
     /// no-op and a partial change stays partial.
@@ -114,6 +117,11 @@ pub struct Avatar {
 }
 
 impl Avatar {
+    #[cfg(windows)]
+    pub(crate) fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Spawns the renderer. `program` is the `ene-avatar` binary; the caller
     /// resolves it so a missing binary is an error before any model loads.
     pub fn spawn(program: &Path) -> Result<Self, String> {
@@ -141,6 +149,7 @@ impl Avatar {
             child,
             stdin,
             replies,
+            finished: Vec::new(),
             next_id: 1,
             shown: HashMap::new(),
         })
@@ -178,7 +187,7 @@ impl Avatar {
                     return Err(format!("the renderer answered id {got}, expected {id}"));
                 }
                 // A notification that arrived mid-call is not this call's answer.
-                Ok(Ok(Message::Event(_))) => continue,
+                Ok(Ok(Message::Event(event))) => self.keep_finished(event),
                 Ok(Err(error)) => return Err(error),
                 Err(_) => return Err("the renderer exited".into()),
             }
@@ -187,8 +196,8 @@ impl Avatar {
 
     /// Drains notifications that arrived since the last call, so the renderer's
     /// output queue never fills.
-    pub fn notifications(&self) -> Vec<Value> {
-        let mut events = Vec::new();
+    pub fn notifications(&mut self) -> Vec<Value> {
+        let mut events = std::mem::take(&mut self.finished);
         loop {
             match self.replies.try_recv() {
                 Ok(Ok(Message::Event(event))) => events.push(event),
@@ -200,38 +209,76 @@ impl Avatar {
         events
     }
 
+    fn keep_finished(&mut self, event: Value) {
+        if event["event"] == "finished" {
+            self.finished.push(event);
+        }
+    }
+
     /// Shows `motion` on `character`, adding it first if it is not there.
     ///
-    /// A repeated request for the motion already showing sends nothing, so a
-    /// model that asks for `nod` twice does not restart the clip.
+    /// Returns whether the renderer has to load the model.
+    /// A repeated gesture restarts with a fade. An already-looping idle stays in place.
     pub fn show(
         &mut self,
         character: &str,
         model: &Path,
         motion: Option<&Path>,
-    ) -> Result<(), String> {
+        looping: bool,
+    ) -> Result<bool, String> {
         let motion = motion.map(|path| path.to_string_lossy().into_owned());
-        let next = match self.shown.get(character) {
-            Some(current) => {
-                if current.motion == motion && current.model == model.to_string_lossy() {
-                    return Ok(());
-                }
-                let mut next = current.clone();
-                next.motion = motion;
-                next
-            }
-            None => {
-                let mut next = Shown::new(model);
-                next.motion = motion;
-                next
-            }
-        };
+        let existing = self.shown.get(character);
+        let mut next = existing.cloned().unwrap_or_else(|| Shown::new(model));
+        next.model = model.to_string_lossy().into_owned();
+        next.motion = motion;
+        next.looping = looping;
+        if looping && existing == Some(&next) {
+            return Ok(false);
+        }
+        let loads_model = existing.is_none_or(|shown| shown.model != next.model);
+        if loads_model {
+            self.configure(character, next)?;
+        } else {
+            self.call(
+                "motion",
+                json!({"character": character, "motion": next.motion, "looping": looping}),
+            )?;
+            self.shown.insert(character.to_owned(), next);
+        }
+        // Everything received before the new configuration's reply was for the old motion.
+        self.finished
+            .retain(|event| event["character"] != character);
+        Ok(loads_model)
+    }
+
+    pub fn return_to_idle(&mut self, character: &str, model: &Path) -> Result<(), String> {
+        if self
+            .shown
+            .get(character)
+            .is_some_and(|shown| !shown.looping)
+        {
+            self.show(character, model, motion("idle").as_deref(), true)?;
+        }
+        Ok(())
+    }
+
+    fn configure(&mut self, character: &str, next: Shown) -> Result<(), String> {
+        let mut config = next.config();
         let op = if self.shown.contains_key(character) {
+            // Dragging happens inside the renderer, which owns the live placement.
+            let state = self.call("get", json!({}))?;
+            if let Some(actor) = state["characters"]
+                .as_array()
+                .and_then(|actors| actors.iter().find(|actor| actor["character"] == character))
+            {
+                config["monitor"] = actor["config"]["monitor"].clone();
+                config["position"] = actor["config"]["position"].clone();
+            }
             "set"
         } else {
             "add"
         };
-        self.call(op, json!({"character": character, "config": next.config()}))?;
+        self.call(op, json!({"character": character, "config": config}))?;
         self.shown.insert(character.to_owned(), next);
         Ok(())
     }
@@ -253,13 +300,11 @@ impl Avatar {
         size_percent: f32,
     ) -> Result<(), String> {
         let clamped = size_percent.clamp(50., 200.);
-        let (op, next) = match self.shown.get(character) {
-            Some(current) => ("set", current.with_scale(clamped)),
-            None => ("add", Shown::new(model).with_scale(clamped)),
+        let next = match self.shown.get(character) {
+            Some(current) => current.with_scale(clamped),
+            None => Shown::new(model).with_scale(clamped),
         };
-        self.call(op, json!({"character": character, "config": next.config()}))?;
-        self.shown.insert(character.to_owned(), next);
-        Ok(())
+        self.configure(character, next)
     }
 
     /// Centers the character on the primary monitor.
@@ -322,6 +367,7 @@ impl Avatar {
                     if event.get("event").and_then(Value::as_str) != Some("state")
                         || event.get("character").and_then(Value::as_str) != Some(character)
                     {
+                        self.keep_finished(event);
                         continue;
                     }
                     match event.get("status").and_then(Value::as_str) {
@@ -513,18 +559,25 @@ pub fn default_renderer() -> Option<PathBuf> {
         .find_map(|path| normalize_path(&path))
 }
 
-/// The motion file for a preset name, when the fetch script installed one.
-///
-/// `idle` has no sample, so it resolves to no motion: the renderer then loads
-/// the model without a clip instead of failing.
+pub const MOTIONS: &[(&str, &str)] = &[
+    ("idle", "01-presence/idle-breath.vrma"),
+    ("look_around", "01-presence/idle-look-around.vrma"),
+    ("adjust_posture", "01-presence/guarded-idle.vrma"),
+    ("sleepy_nod", "01-presence/sleepy-nod.vrma"),
+    ("nod", "04-conversation/acknowledge.vrma"),
+    ("tilt_head", "05-task/task-think.vrma"),
+    ("stretch", "06-reminders/break-stretch.vrma"),
+    ("wave", "01-presence/welcome-back.vrma"),
+    ("ask_question", "04-conversation/ask-question.vrma"),
+    ("task_complete", "05-task/task-complete.vrma"),
+    ("apologize", "07-emotion/apologize.vrma"),
+];
+
+/// The selected VRMAs ship beside the bundled ENE model.
 pub fn motion(name: &str) -> Option<PathBuf> {
-    let file = match name {
-        "nod" => "motions/three-vrm-sample.vrma",
-        "tilt_head" => "motions/josie-walk.vrma",
-        "stretch" => "motions/quaternius-dance.vrma",
-        _ => return None,
-    };
-    let path = asset_cache()?.join(file);
+    let (_, file) = MOTIONS.iter().find(|(preset, _)| *preset == name)?;
+    let model = bundled_ene_model()?;
+    let path = model.parent()?.join("vrma").join(file);
     path.is_file().then_some(path)
 }
 
@@ -546,9 +599,11 @@ mod tests {
     }
 
     #[test]
-    fn a_preset_without_a_sample_resolves_to_no_motion() {
-        // `idle` is a state, not a clip; the renderer must still load the model.
-        assert!(motion("idle").is_none());
+    fn bundled_presets_resolve_to_vrma_files() {
+        for &(preset, _) in MOTIONS {
+            let path = motion(preset).expect(preset);
+            assert!(path.is_absolute() && path.is_file(), "{path:?}");
+        }
         assert!(motion("no-such-motion").is_none());
     }
 

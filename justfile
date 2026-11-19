@@ -9,6 +9,14 @@ cargo_wrapper := if os_family() == "windows" { "--config \"build.rustc-wrapper='
 default:
     @just --list
 
+[windows]
+observe:
+    if (Get-Command uv -ErrorAction SilentlyContinue) { uv run python scripts/observe.py } elseif (Get-Command py -ErrorAction SilentlyContinue) { py -3 scripts/observe.py } else { python scripts/observe.py }
+
+[unix]
+observe:
+    python3 scripts/observe.py
+
 fmt:
     cargo fmt --all
 

@@ -10,9 +10,6 @@
 use ene_rpc as w;
 use std::path::Path;
 
-/// The motions the renderer has a clip for.
-pub const MOTIONS: &[&str] = &["idle", "nod", "tilt_head", "stretch"];
-
 /// The faces the renderer can blend. `neutral` clears an expression.
 pub const EXPRESSIONS: &[&str] = &["neutral", "happy", "sad", "surprised", "relaxed"];
 
@@ -31,10 +28,10 @@ impl Declaration {
     pub fn probe(renderer: Option<&Path>, model: Option<&Path>) -> Self {
         let usable = renderer.is_some() && model.is_some();
         let motions = if usable {
-            MOTIONS
+            crate::avatar::MOTIONS
                 .iter()
-                .copied()
-                // `idle` is a state rather than a clip, so it needs no asset.
+                .map(|&(preset, _)| preset)
+                // `idle` can also return to the model's rest pose.
                 .filter(|motion| *motion == "idle" || crate::avatar::motion(motion).is_some())
                 .collect()
         } else {
@@ -78,8 +75,14 @@ impl Declaration {
             specs.push(w::ClientCapabilitySpec {
                 name: "body.motion".into(),
                 tool_name: "body_motion".into(),
-                description: "Move the character's body, and optionally set its face. Use it for \
-                              a nod, a head tilt, a stretch, or a smile while listening."
+                description: "Play a gesture once and return to idle, or choose idle to resume \
+                              resting now. For quiet waiting, vary between look_around, \
+                              adjust_posture, stretch, and sleepy_nod after a long absence, \
+                              choosing only motions listed in the schema. \
+                              Use nod to acknowledge, tilt_head while thinking, \
+                              stretch for a break, wave to greet, ask_question when asking back, \
+                              task_complete to celebrate a result, or apologize for a correction. \
+                              An optional expression sets the face separately."
                     .into(),
                 input_schema: format!(
                     r#"{{"type":"object","required":["motion"],"properties":{{"motion":{{"type":"string","enum":[{allowed}]}}{expression}}}}}"#
@@ -127,7 +130,7 @@ mod tests {
 
     #[test]
     fn every_declaration_is_a_valid_object_schema() {
-        for spec in declaration(MOTIONS).specs() {
+        for spec in declaration(&["idle", "nod"]).specs() {
             let schema: serde_json::Value =
                 serde_json::from_str(&spec.input_schema).expect("the schema is JSON");
             assert_eq!(
@@ -162,7 +165,7 @@ mod tests {
             "schedule_cancel",
             "report",
         ];
-        for spec in declaration(MOTIONS).specs() {
+        for spec in declaration(&["idle", "nod"]).specs() {
             assert!(
                 !HOST_TOOLS.contains(&spec.tool_name.as_str()),
                 "{} shadows a host tool",
@@ -205,10 +208,15 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_with_a_renderer_and_no_asset_declares_only_the_state() {
-        assert!(crate::avatar::motion("idle").is_none());
-        let declaration = Declaration::probe(None, None);
-        assert!(declaration.motions.is_empty());
+    fn the_bundled_ene_declares_the_selected_presets() {
+        let model = crate::avatar::bundled_ene_model().unwrap();
+        let declaration = Declaration::probe(Some(Path::new("ene-avatar")), Some(&model));
+        assert!(
+            declaration
+                .motions
+                .into_iter()
+                .eq(crate::avatar::MOTIONS.iter().map(|&(name, _)| name))
+        );
     }
     /// The schema is what the host enforces, so an expression it rejects is one
     /// the model cannot ask for.

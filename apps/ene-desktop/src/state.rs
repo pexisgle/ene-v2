@@ -121,6 +121,25 @@ pub struct LiveTranscription {
     pub is_speaking: bool,
 }
 
+/// What the settings probe shows about local capture, so the operator can tell
+/// a dead microphone from a closed voice gate from a host that received nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Capture {
+    /// RMS of the frames the microphone delivered.
+    pub level: f32,
+    /// Whether the voice gate is passing audio.
+    pub open: bool,
+    /// Wire bytes handed to the host since the last report.
+    pub sent: usize,
+}
+
+/// A readback line the speech tab keeps after its request finished.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpeechReport {
+    pub text: String,
+    pub failed: bool,
+}
+
 /// What the window should refetch because a notification invalidated it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Effects {
@@ -151,9 +170,20 @@ pub struct Model {
     pub audio_input_rms: f32,
     pub companion_speaking: bool,
     pub mic_muted: bool,
+    pub eyes_enabled: bool,
+    #[cfg(windows)]
+    pub computer_use_enabled: bool,
+    pub eyes_status: Option<String>,
     pub output_muted: bool,
     pub avatar_scale: f32,
     pub transcription: Option<LiveTranscription>,
+    /// Local capture state, for the speech settings probe.
+    pub capture: Capture,
+    /// The last line the speech probe showed.
+    pub speech_report: Option<SpeechReport>,
+    /// Text the recognition stream produced while the probe was open, oldest
+    /// first. Distinct from `transcription`, which the pod clears on `is_final`.
+    pub recognized: Vec<String>,
     pub minds: BTreeMap<String, w::MindView>,
     pub work_active: bool,
 }
@@ -179,9 +209,16 @@ impl Model {
             audio_input_rms: 0.0,
             companion_speaking: false,
             mic_muted: false,
+            eyes_enabled: false,
+            #[cfg(windows)]
+            computer_use_enabled: false,
+            eyes_status: None,
             output_muted: false,
             avatar_scale: 100.0,
             transcription: None,
+            capture: Capture::default(),
+            speech_report: None,
+            recognized: Vec::new(),
             minds: BTreeMap::new(),
             work_active: false,
         }
@@ -425,6 +462,13 @@ impl Model {
                 self.audio_input_rms = input;
                 self.companion_speaking = speaking;
             }
+            Update::EyesEnabled(enabled) => {
+                self.eyes_enabled = enabled;
+                self.eyes_status = None;
+            }
+            Update::EyesStatus(status) => self.eyes_status = status,
+            #[cfg(windows)]
+            Update::ComputerUseEnabled(enabled) => self.computer_use_enabled = enabled,
             Update::AudioMute {
                 mic_muted,
                 output_muted,
@@ -444,6 +488,18 @@ impl Model {
                 is_final,
                 is_speaking,
             } => {
+                if is_final {
+                    // The probe keeps what the recognizer produced; the pod's
+                    // subtitle is cleared either way.
+                    let text = text.trim();
+                    if !text.is_empty() {
+                        self.recognized.push(text.to_owned());
+                        drop(
+                            self.recognized
+                                .split_off(self.recognized.len().saturating_sub(20)),
+                        );
+                    }
+                }
                 if is_final || (text.trim().is_empty() && !is_speaking) {
                     self.transcription = None;
                 } else {
@@ -453,6 +509,21 @@ impl Model {
                         is_speaking,
                     });
                 }
+            }
+            Update::Capture { level, open, sent } => {
+                self.capture = Capture { level, open, sent };
+            }
+            Update::Spoke => {
+                self.speech_report = Some(SpeechReport {
+                    text: "読み上げを送りました。音が鳴らない場合は、この端末の出力と読み上げ接続を確認してください。".into(),
+                    failed: false,
+                });
+            }
+            Update::SpokeFailed { message } => {
+                self.speech_report = Some(SpeechReport {
+                    text: message.clone(),
+                    failed: true,
+                });
             }
             Update::MindLoaded { companion_id, view } => {
                 self.minds.insert(companion_id, *view);
@@ -468,7 +539,7 @@ impl Model {
             // The window clears the field that held the secret; nothing about a
             // credential is kept in the model, and a resnapshot is the window's
             // own request.
-            Update::SetupFinished(_)
+            Update::SetupFinished { .. }
             | Update::CredentialRegistered { connection_id: _ }
             | Update::Resnapshot => {}
         }

@@ -95,10 +95,12 @@ impl Draft {
         placeholder: impl Into<SharedString>,
         context: &'static str,
     ) -> Self {
+        let placeholder: SharedString = placeholder.into();
+        let placeholder = SharedString::from(single_line(&placeholder));
         Self {
             focus: cx.focus_handle(),
             content: SharedString::default(),
-            placeholder: placeholder.into(),
+            placeholder,
             context,
             selected: 0..0,
             reversed: false,
@@ -140,7 +142,8 @@ impl Draft {
         placeholder: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) {
-        self.placeholder = placeholder.into();
+        let placeholder: SharedString = placeholder.into();
+        self.placeholder = SharedString::from(single_line(&placeholder));
         cx.notify();
     }
 
@@ -162,8 +165,11 @@ impl Draft {
 
     /// Replaces the text and puts the caret at the end.
     pub fn set(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.content = text.into();
-        self.selected = self.content.len()..self.content.len();
+        let raw: SharedString = text.into();
+        self.content = SharedString::from(single_line(&raw));
+        let end = self.content.len();
+        self.selected = end..end;
+        self.reversed = false;
         self.marked = None;
         cx.notify();
     }
@@ -174,16 +180,7 @@ impl Draft {
     }
 
     fn offset_from_utf16(&self, offset: usize) -> usize {
-        let mut utf8 = 0;
-        let mut utf16 = 0;
-        for character in self.content.chars() {
-            if utf16 >= offset {
-                break;
-            }
-            utf16 += character.len_utf16();
-            utf8 += character.len_utf8();
-        }
-        utf8
+        offset_from_utf16_in(&self.content, offset)
     }
 
     fn offset_to_utf16(&self, offset: usize) -> usize {
@@ -408,9 +405,23 @@ fn unmasked_offset(content: &str, masked_byte_idx: usize) -> usize {
         .map_or(content.len(), |(byte_idx, _)| byte_idx)
 }
 
+/// Converts a UTF-16 code-unit offset inside `text` to a UTF-8 byte offset.
+fn offset_from_utf16_in(text: &str, offset: usize) -> usize {
+    let mut utf8 = 0;
+    let mut utf16 = 0;
+    for character in text.chars() {
+        if utf16 >= offset {
+            break;
+        }
+        utf16 += character.len_utf16();
+        utf8 += character.len_utf8();
+    }
+    utf8
+}
+
 /// Collapses a paste into one line, so a pasted block stays a message.
 fn single_line(text: &str) -> String {
-    text.replace(['\n', '\r'], " ")
+    text.replace(['\r', '\n'], " ")
 }
 
 /// A byte index inside `text`, on a character boundary.
@@ -519,20 +530,26 @@ impl EntityInputHandler for Draft {
             .or(self.marked.clone())
             .unwrap_or(self.selected.clone());
         let range = clamp_range(&self.content, range);
+        let new_text = single_line(new_text);
         self.content = SharedString::from(
-            self.content[0..range.start].to_owned() + new_text + &self.content[range.end..],
+            self.content[0..range.start].to_owned() + &new_text + &self.content[range.end..],
         );
         // The composition stays marked, so it is drawn underlined until the IME
         // commits it through `replace_text_in_range`.
         self.marked = (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
-        self.selected = new_selected_range_utf16
+        let selected = new_selected_range_utf16
             .as_ref()
-            .map(|selection| self.range_from_utf16(selection))
-            .map(|selection| selection.start + range.start..selection.end + range.start)
+            .map(|selection| {
+                let start = offset_from_utf16_in(&new_text, selection.start);
+                let end = offset_from_utf16_in(&new_text, selection.end);
+                range.start + start..range.start + end
+            })
             .unwrap_or_else(|| {
                 let caret = range.start + new_text.len();
                 caret..caret
             });
+        self.selected = clamp_range(&self.content, selected);
+        self.reversed = false;
         cx.notify();
     }
 
@@ -643,24 +660,6 @@ impl gpui::Element for FieldElement {
         let content = input.content.clone();
         let masked = input.masked && !content.is_empty();
         let look = input.look;
-        let selected = if masked {
-            masked_offset(&content, input.selected.start)
-                ..masked_offset(&content, input.selected.end)
-        } else {
-            input.selected.clone()
-        };
-        let cursor = if masked {
-            masked_offset(&content, input.cursor())
-        } else {
-            input.cursor()
-        };
-        let marked = input.marked.as_ref().map(|range| {
-            if masked {
-                masked_offset(&content, range.start)..masked_offset(&content, range.end)
-            } else {
-                range.clone()
-            }
-        });
         let style = window.text_style();
         let (text, color) = if content.is_empty() {
             (input.placeholder.clone(), look.placeholder)
@@ -668,7 +667,47 @@ impl gpui::Element for FieldElement {
             let bullets: String = std::iter::repeat_n(MASK_CHAR, content.chars().count()).collect();
             (SharedString::from(bullets), look.text)
         } else {
-            (content, look.text)
+            (content.clone(), look.text)
+        };
+        // GPUI's `shape_line` asserts that `text` contains no newlines; keep
+        // this single-line invariant directly before shaping as well.
+        let text = if text.contains(['\r', '\n']) {
+            SharedString::from(single_line(&text))
+        } else {
+            text
+        };
+        let selected = if content.is_empty() {
+            0..0
+        } else if masked {
+            clamp_range(
+                &text,
+                masked_offset(&content, input.selected.start)
+                    ..masked_offset(&content, input.selected.end),
+            )
+        } else {
+            clamp_range(&text, input.selected.clone())
+        };
+        let cursor = if content.is_empty() {
+            0
+        } else if masked {
+            clamp_index(&text, masked_offset(&content, input.cursor()))
+        } else {
+            clamp_index(&text, input.cursor())
+        };
+        let marked = if content.is_empty() {
+            None
+        } else {
+            input.marked.as_ref().and_then(|range| {
+                let clamped = if masked {
+                    clamp_range(
+                        &text,
+                        masked_offset(&content, range.start)..masked_offset(&content, range.end),
+                    )
+                } else {
+                    clamp_range(&text, range.clone())
+                };
+                (!clamped.is_empty()).then_some(clamped)
+            })
         };
         let run = TextRun {
             len: text.len(),
@@ -939,5 +978,19 @@ mod tests {
         assert_eq!(super::unmasked_offset(text, 3 * bullet_len), 5);
         assert_eq!(super::unmasked_offset(text, 4 * bullet_len), text.len());
         assert_eq!(super::unmasked_offset(text, 99), text.len());
+    }
+
+    #[test]
+    fn single_line_and_utf16_selection_clamp_multiline_japanese_text() {
+        let raw = "ユーザー：テスト\r\n本人：返答";
+        let clean = super::single_line(raw);
+        assert!(!clean.contains('\n') && !clean.contains('\r'), "{clean}");
+        assert_eq!(clean, "ユーザー：テスト  本人：返答");
+
+        let sample = "あいう";
+        assert_eq!(super::offset_from_utf16_in(sample, 0), 0);
+        assert_eq!(super::offset_from_utf16_in(sample, 2), 6);
+        assert_eq!(super::offset_from_utf16_in(sample, 99), sample.len());
+        assert_eq!(clamp_range(&clean, 0..999), 0..clean.len());
     }
 }

@@ -11,6 +11,7 @@ pub mod icons;
 pub mod pod;
 pub mod studio;
 pub mod theme;
+mod voice;
 mod widgets;
 
 pub use icons::EmbeddedAssets;
@@ -73,19 +74,21 @@ impl PodMode {
     }
 }
 
-/// Three chapters inside `SettingsStudio`.
+/// The chapters inside `SettingsStudio`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SettingsSection {
     #[default]
     Companions,
     Connections,
+    Voice,
     Device,
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 3] = [
+    pub const ALL: [SettingsSection; 4] = [
         SettingsSection::Companions,
         SettingsSection::Connections,
+        SettingsSection::Voice,
         SettingsSection::Device,
     ];
 
@@ -93,6 +96,7 @@ impl SettingsSection {
         match self {
             Self::Companions => "コンパニオン",
             Self::Connections => "接続",
+            Self::Voice => "音声テスト",
             Self::Device => "この端末",
         }
     }
@@ -101,6 +105,7 @@ impl SettingsSection {
         match self {
             Self::Companions => icons::Icon::Sparkles,
             Self::Connections => icons::Icon::Plug,
+            Self::Voice => icons::Icon::Mic,
             Self::Device => icons::Icon::Sliders,
         }
     }
@@ -109,6 +114,7 @@ impl SettingsSection {
         match self {
             Self::Companions => "studio-companions",
             Self::Connections => "studio-connections",
+            Self::Voice => "studio-voice",
             Self::Device => "studio-device",
         }
     }
@@ -141,7 +147,7 @@ impl ModelRoleSlot {
         match self {
             Self::Companion => "会話モデル（主要）",
             Self::Task => "作業モデル（主要）",
-            Self::Perception => "画面知覚の要約",
+            Self::Perception => "目（画面・活動の評価）",
             Self::Compaction => "会話履歴の圧縮",
             Self::Consolidation => "記憶の整理",
             Self::Decision => "権限判定",
@@ -192,6 +198,10 @@ pub struct Hub {
     pub created_ping: u64,
     setup_pending: bool,
     setup_error: Option<&'static str>,
+    pub setup_error_detail: Option<String>,
+    pub pending_setup_connection_id: Option<String>,
+    pub pending_setup_models: Vec<String>,
+    pub checking_connections: HashSet<String>,
     auto_assigned_revisions: BTreeMap<String, u64>,
     tray: Option<TrayHandle>,
     _tray_pump: Option<Task<()>>,
@@ -249,6 +259,10 @@ impl Hub {
             created_ping: 0,
             setup_pending: false,
             setup_error: None,
+            setup_error_detail: None,
+            pending_setup_connection_id: None,
+            pending_setup_models: Vec::new(),
+            checking_connections: HashSet::new(),
             auto_assigned_revisions: BTreeMap::new(),
             tray,
             _tray_pump: tray_pump,
@@ -404,7 +418,7 @@ impl Hub {
         self.connection.read().ok()?.clone()
     }
 
-    fn has_audio_connection(&self, kind: w::ConnectionKind) -> bool {
+    pub(crate) fn has_audio_connection(&self, kind: w::ConnectionKind) -> bool {
         self.model
             .settings()
             .is_some_and(|s| s.connections.iter().any(|c| c.enabled && c.kind == kind))
@@ -459,19 +473,41 @@ impl Hub {
             Update::Checked {
                 connection_id: id,
                 check,
-            } if check.healthy
-                && self.model.settings().is_some_and(|s| {
-                    s.connections
-                        .iter()
-                        .any(|c| &c.id == id && c.kind == w::ConnectionKind::Llm)
-                }) =>
-            {
-                self.setup_error = None;
+            } => {
+                self.checking_connections.remove(id);
+                if check.healthy
+                    && self.model.settings().is_some_and(|s| {
+                        s.connections
+                            .iter()
+                            .any(|c| &c.id == id && c.kind == w::ConnectionKind::Llm)
+                    })
+                {
+                    self.setup_error = None;
+                    self.setup_error_detail = None;
+                }
             }
-            Update::SetupFinished(ok) => {
+            Update::SetupFinished {
+                ok,
+                connection_id,
+                models,
+                error,
+            } => {
                 self.setup_pending = false;
-                self.setup_error = (!ok).then_some("接続を確認できませんでした。選んだサービスのキーとネットワークを確認して、もう一度登録してください。");
+                if *ok {
+                    self.setup_error = None;
+                    self.setup_error_detail = None;
+                    self.pending_setup_connection_id = connection_id.clone();
+                    self.pending_setup_models = models.clone();
+                } else {
+                    self.setup_error = Some(
+                        "接続を確認できませんでした。選んだサービスのキーとネットワークを確認して、もう一度登録してください。",
+                    );
+                    self.setup_error_detail = error.clone();
+                }
                 self.resnapshot();
+                if *ok {
+                    self.load_models(cx);
+                }
             }
             Update::Resnapshot => self.resnapshot(),
             Update::Created(id) => {
@@ -483,6 +519,21 @@ impl Hub {
             _ => {}
         }
         let conflicted = matches!(update, Update::Conflict { .. });
+        if let Update::Checked {
+            connection_id: _,
+            check,
+        } = &update
+            && check.healthy
+        {
+            self.load_models(cx);
+        }
+        if let Update::Failed { context, .. }
+        | Update::Conflict { context, .. }
+        | Update::Denied { context, .. } = &update
+            && *context == "接続確認"
+        {
+            self.checking_connections.clear();
+        }
         if let Update::SendFailed { reason, .. } = &update {
             tracing::warn!(reason = %reason, "the message was not accepted");
         }
@@ -568,6 +619,9 @@ impl Hub {
         let Some(companion) = self.model.companion().cloned() else {
             return;
         };
+        if self.pending_setup_connection_id.is_some() {
+            return;
+        }
         if self
             .auto_assigned_revisions
             .get(&companion.id)
@@ -884,6 +938,15 @@ impl Hub {
         cx.notify();
     }
 
+    pub(crate) fn set_eyes_enabled(&self, enabled: bool) {
+        let _ = self.commands.send(Command::SetEyesEnabled(enabled));
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn set_computer_use_enabled(&self, enabled: bool) {
+        let _ = self.commands.send(Command::SetComputerUseEnabled(enabled));
+    }
+
     pub(crate) fn toggle_output_mute(&mut self, cx: &mut Context<Self>) {
         let next = !self.model.output_muted;
         self.model.output_muted = next;
@@ -904,6 +967,24 @@ impl Hub {
 
     pub(crate) fn center_avatar(&self) {
         let _ = self.commands.send(Command::CenterAvatar);
+    }
+
+    /// Speaks typed text through the host's TTS connection, outside any turn.
+    pub(crate) fn speak_probe(&mut self, text: String, cx: &mut Context<Self>) {
+        let text = text.trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        self.model.speech_report = None;
+        let _ = self.commands.send(Command::Speak(text));
+        cx.notify();
+    }
+
+    /// Forgets the speech probe's readback and recognized lines.
+    pub(crate) fn clear_voice_probe(&mut self, cx: &mut Context<Self>) {
+        self.model.recognized.clear();
+        self.model.speech_report = None;
+        cx.notify();
     }
 
     pub(crate) fn activate_this_client(&mut self, cx: &mut Context<Self>) {
@@ -1476,19 +1557,82 @@ impl Hub {
         enabled: bool,
         cx: &mut Context<Self>,
     ) {
-        self.upsert_connection(
-            "接続状態の更新",
-            w::ConnectionInput {
-                id: connection.id,
-                name: connection.name,
-                enabled,
-                expected_revision: connection.revision,
-                kind: connection.kind,
-                config: connection.config,
-                ..Default::default()
-            },
-            cx,
-        );
+        let Some(settings) = self.model.settings().cloned() else {
+            return;
+        };
+        let Some(host) = self.host() else {
+            return;
+        };
+        let is_voicevox = is_local_voicevox_conn(&connection);
+        let conn_id = connection.id.clone();
+        let input = w::ConnectionInput {
+            id: connection.id,
+            name: connection.name,
+            enabled,
+            expected_revision: connection.revision,
+            kind: connection.kind,
+            config: connection.config,
+            ..Default::default()
+        };
+        if enabled && is_voicevox {
+            self.checking_connections.insert(conn_id.clone());
+            let updates = self.updates.clone();
+            let runtime_host = host.clone();
+            self.request(
+                "接続状態の更新",
+                async move {
+                    let response = host
+                        .settings
+                        .update_settings(w::UpdateSettingsRequest {
+                            expected_revision: settings.revision,
+                            connections: vec![input],
+                            ..Default::default()
+                        })
+                        .await?;
+                    let updated = response.view().to_owned_message().map_err(decode)?;
+                    let check_id = conn_id.clone();
+                    let check_host = runtime_host.clone();
+                    let check_updates = updates.clone();
+                    tokio::spawn(async move {
+                        let check_res = check_host
+                            .settings
+                            .check_connection(w::CheckRequest {
+                                id: check_id.clone(),
+                                request_key: uuid::Uuid::new_v4().to_string(),
+                                ..Default::default()
+                            })
+                            .await;
+                        let update = match check_res {
+                            Ok(resp) => match resp.view().to_owned_message() {
+                                Ok(res) => Update::Checked {
+                                    connection_id: check_id,
+                                    check: res.check.into_option().unwrap_or_default(),
+                                },
+                                Err(err) => failure("接続確認", decode(err)),
+                            },
+                            Err(err) => failure("接続確認", err),
+                        };
+                        let _ = check_updates.send(update);
+                    });
+                    Ok(updated)
+                },
+                |settings| {
+                    Update::Notification(Box::new(w::Notification {
+                        kind: "settings".into(),
+                        event: Some(w::notification::Event::SettingsUpdated(Box::new(
+                            w::SettingsUpdated {
+                                settings: Some(settings).into(),
+                                ..Default::default()
+                            },
+                        ))),
+                        ..Default::default()
+                    }))
+                },
+            );
+            cx.notify();
+        } else {
+            self.upsert_connection("接続状態の更新", input, cx);
+        }
     }
 
     pub(crate) fn add_llm_from_provider(
@@ -1521,7 +1665,17 @@ impl Hub {
         let existing = settings.connections.iter().find(|c| {
             c.enabled
                 && llm_endpoint(c).is_some_and(|ep| {
-                    ep.adapter == provider.adapter && ep.endpoint == provider.endpoint
+                    ep.adapter == provider.adapter
+                        && ep.endpoint == provider.endpoint
+                        && (ep.adapter != GOOGLE_AGENT_PLATFORM
+                            || serde_json::from_str::<serde_json::Value>(&ep.options)
+                                .ok()
+                                .and_then(|options| {
+                                    options["project_id"]
+                                        .as_str()
+                                        .map(|id| !id.trim().is_empty())
+                                })
+                                != Some(true))
                 })
         });
         let id = existing
@@ -1529,13 +1683,10 @@ impl Hub {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let revision = settings.revision;
         let create = existing.is_none();
-        let models = default_models_for_adapter(&provider.adapter)
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let input = llm_provider_input(id.clone(), provider, models);
+        let input = llm_provider_input(id.clone(), provider, Vec::new());
         self.setup_pending = true;
         self.setup_error = None;
+        self.setup_error_detail = None;
         self.request_with(
             "AI接続",
             async move {
@@ -1560,7 +1711,7 @@ impl Hub {
                 let probe = host
                     .settings
                     .check_connection(w::CheckRequest {
-                        id,
+                        id: id.clone(),
                         request_key: uuid::Uuid::new_v4().to_string(),
                         ..Default::default()
                     })
@@ -1568,10 +1719,156 @@ impl Hub {
                     .view()
                     .to_owned_message()
                     .map_err(decode)?;
-                Ok(probe.check.as_option().is_some_and(|check| check.healthy))
+                let check = probe.check.into_option();
+                let healthy = check.as_ref().is_some_and(|c| c.healthy);
+                let models = check
+                    .as_ref()
+                    .map(|c| c.resources.clone())
+                    .unwrap_or_default();
+                let error = check
+                    .as_ref()
+                    .and_then(|c| c.failure.as_option())
+                    .map(|f| f.message.clone())
+                    .filter(|msg| !msg.trim().is_empty());
+                Ok(Update::SetupFinished {
+                    ok: healthy,
+                    connection_id: Some(id),
+                    models,
+                    error,
+                })
             },
-            Update::SetupFinished,
-            |_, _| Update::SetupFinished(false),
+            |outcome| outcome,
+            |_, err| Update::SetupFinished {
+                ok: false,
+                connection_id: None,
+                models: Vec::new(),
+                error: Some(err.to_string()),
+            },
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn complete_setup_selection(
+        &mut self,
+        connection_id: String,
+        model_id: String,
+        companion_name: Option<String>,
+        voice_identifier: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(settings) = self.model.settings().cloned() else {
+            return;
+        };
+        let Some(host) = self.host() else {
+            return;
+        };
+        let model_id = model_id.trim().to_owned();
+        if model_id.is_empty() {
+            return;
+        }
+        let conn = settings
+            .connections
+            .iter()
+            .find(|c| c.id == connection_id)
+            .cloned();
+        let existing_comp = self.model.companion().cloned();
+        let voice_clean = voice_identifier
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty());
+        let name_clean = companion_name
+            .map(|n| n.trim().to_owned())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "ene".to_owned());
+
+        self.pending_setup_connection_id = None;
+        self.pending_setup_models.clear();
+
+        self.request(
+            "初期設定の完了",
+            async move {
+                if let Some(conn) = conn {
+                    let mut cfg = conn.config.as_option().cloned().unwrap_or_default();
+                    if let Some(w::connection_config::Config::Llm(llm)) = cfg.config.as_mut() {
+                        llm.model_ids = vec![model_id.clone()];
+                    }
+                    let input = w::ConnectionInput {
+                        id: conn.id.clone(),
+                        name: conn.name,
+                        enabled: true,
+                        expected_revision: conn.revision,
+                        kind: conn.kind,
+                        config: Some(cfg).into(),
+                        ..Default::default()
+                    };
+                    let _ = host
+                        .settings
+                        .update_settings(w::UpdateSettingsRequest {
+                            expected_revision: settings.revision,
+                            connections: vec![input],
+                            ..Default::default()
+                        })
+                        .await?;
+                }
+                let patch = w::AssignmentPatch {
+                    change: Some(w::assignment_patch::Change::Set(Box::new(
+                        w::ModelAssignment {
+                            connection_id: connection_id.clone(),
+                            model_id: model_id.clone(),
+                            ..Default::default()
+                        },
+                    ))),
+                    ..Default::default()
+                };
+                if let Some(comp) = existing_comp {
+                    let response = host
+                        .host
+                        .update_companion(w::UpdateCompanionRequest {
+                            id: comp.id,
+                            revision: comp.revision,
+                            companion_assignment: Some(patch.clone()).into(),
+                            task_assignment: Some(patch).into(),
+                            voice_identifier: voice_clean,
+                            ..Default::default()
+                        })
+                        .await?;
+                    let updated = response.view().to_owned_message().map_err(decode)?;
+                    Ok(Update::Notification(Box::new(w::Notification {
+                        kind: "companion".into(),
+                        event: Some(w::notification::Event::Companion(Box::new(updated))),
+                        ..Default::default()
+                    })))
+                } else {
+                    let assignments = w::ModelAssignments {
+                        companion: Some(w::ModelAssignment {
+                            connection_id: connection_id.clone(),
+                            model_id: model_id.clone(),
+                            ..Default::default()
+                        })
+                        .into(),
+                        task: Some(w::ModelAssignment {
+                            connection_id,
+                            model_id,
+                            ..Default::default()
+                        })
+                        .into(),
+                        ..Default::default()
+                    };
+                    let response = host
+                        .host
+                        .create_companion(w::CreateCompanionRequest {
+                            name: name_clean,
+                            mind: "相手を思いやりながら率直に対話する。".into(),
+                            persona: Some("柔らかく親しみやすい口調で会話します。".into()),
+                            voice_identifier: voice_clean,
+                            assignments: Some(assignments).into(),
+                            ..Default::default()
+                        })
+                        .await?;
+                    let created = response.view().to_owned_message().map_err(decode)?;
+                    Ok(Update::Created(created.id))
+                }
+            },
+            |update| update,
         );
         cx.notify();
     }
@@ -1582,40 +1879,100 @@ impl Hub {
         speed: Option<f32>,
         cx: &mut Context<Self>,
     ) {
+        let Some(settings) = self.model.settings().cloned() else {
+            return;
+        };
+        let Some(host) = self.host() else {
+            return;
+        };
+        let existing_rev = settings
+            .connections
+            .iter()
+            .find(|c| c.id == "voicevox")
+            .map(|c| c.revision)
+            .unwrap_or(0);
         let options = match speed {
             Some(speed) => format!("{{\"speaker\":{speaker},\"speed\":{speed:.2}}}"),
             None => format!("{{\"speaker\":{speaker}}}"),
         };
-        self.upsert_connection(
+        let input = w::ConnectionInput {
+            id: "voicevox".into(),
+            name: "VOICEVOX（ローカル）".into(),
+            enabled: true,
+            expected_revision: existing_rev,
+            kind: w::ConnectionKind::Tts.into(),
+            config: Some(w::ConnectionConfig {
+                config: Some(w::connection_config::Config::Tts(Box::new(
+                    w::TtsConnection {
+                        endpoint: Some(w::ConnectionEndpoint {
+                            adapter: "voicevox".into(),
+                            endpoint: "http://127.0.0.1:50021".into(),
+                            options_schema: String::new(),
+                            options,
+                            ..Default::default()
+                        })
+                        .into(),
+                        voice_ids: vec![speaker.to_string()],
+                        ..Default::default()
+                    },
+                ))),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
+        self.checking_connections.insert("voicevox".into());
+        let updates = self.updates.clone();
+        let probe_host = host.clone();
+        self.request(
             "VOICEVOX接続の追加",
-            w::ConnectionInput {
-                id: "voicevox".into(),
-                name: "VOICEVOX（ローカル）".into(),
-                enabled: true,
-                expected_revision: 0,
-                kind: w::ConnectionKind::Tts.into(),
-                config: Some(w::ConnectionConfig {
-                    config: Some(w::connection_config::Config::Tts(Box::new(
-                        w::TtsConnection {
-                            endpoint: Some(w::ConnectionEndpoint {
-                                adapter: "voicevox".into(),
-                                endpoint: "http://127.0.0.1:50021".into(),
-                                options_schema: String::new(),
-                                options,
-                                ..Default::default()
-                            })
-                            .into(),
-                            voice_ids: vec![speaker.to_string()],
+            async move {
+                let response = host
+                    .settings
+                    .update_settings(w::UpdateSettingsRequest {
+                        expected_revision: settings.revision,
+                        connections: vec![input],
+                        ..Default::default()
+                    })
+                    .await?;
+                let updated = response.view().to_owned_message().map_err(decode)?;
+                tokio::spawn(async move {
+                    let check_res = probe_host
+                        .settings
+                        .check_connection(w::CheckRequest {
+                            id: "voicevox".into(),
+                            request_key: uuid::Uuid::new_v4().to_string(),
+                            ..Default::default()
+                        })
+                        .await;
+                    let update = match check_res {
+                        Ok(resp) => match resp.view().to_owned_message() {
+                            Ok(res) => Update::Checked {
+                                connection_id: "voicevox".into(),
+                                check: res.check.into_option().unwrap_or_default(),
+                            },
+                            Err(err) => failure("接続確認", decode(err)),
+                        },
+                        Err(err) => failure("接続確認", err),
+                    };
+                    let _ = updates.send(update);
+                });
+                Ok(updated)
+            },
+            |settings| {
+                Update::Notification(Box::new(w::Notification {
+                    kind: "settings".into(),
+                    event: Some(w::notification::Event::SettingsUpdated(Box::new(
+                        w::SettingsUpdated {
+                            settings: Some(settings).into(),
                             ..Default::default()
                         },
                     ))),
                     ..Default::default()
-                })
-                .into(),
-                ..Default::default()
+                }))
             },
-            cx,
         );
+        cx.notify();
     }
 
     pub(crate) fn add_openai_tts_preset(
@@ -1679,31 +2036,64 @@ impl Hub {
         language: String,
         cx: &mut Context<Self>,
     ) {
+        self.add_stt_preset_with_spec(
+            SttPreset {
+                fixed_id: None,
+                adapter: "openai",
+                name,
+                endpoint,
+                model,
+                language,
+            },
+            cx,
+        );
+    }
+
+    fn add_stt_preset_with_spec(&mut self, spec: SttPreset<'_>, cx: &mut Context<Self>) {
+        let existing_rev = spec
+            .fixed_id
+            .and_then(|fid| {
+                self.model.settings().and_then(|s| {
+                    s.connections
+                        .iter()
+                        .find(|c| c.id == fid)
+                        .map(|c| c.revision)
+                })
+            })
+            .unwrap_or(0);
+        let protocol = if spec.adapter == "sakura" {
+            "sakura"
+        } else {
+            "openai"
+        };
         let options = serde_json::json!({
-            "protocol": "openai",
-            "model": if model.trim().is_empty() { "whisper-1" } else { model.trim() },
-            "language": if language.trim().is_empty() { "ja" } else { language.trim() },
+            "protocol": protocol,
+            "model": if spec.model.trim().is_empty() { "whisper-1" } else { spec.model.trim() },
+            "language": if spec.language.trim().is_empty() { "ja" } else { spec.language.trim() },
         })
         .to_string();
-        let lang = if language.trim().is_empty() {
+        let lang = if spec.language.trim().is_empty() {
             "ja".to_owned()
         } else {
-            language.trim().to_owned()
+            spec.language.trim().to_owned()
         };
         self.upsert_connection(
             "音声認識（STT）接続の追加",
             w::ConnectionInput {
-                id: uuid::Uuid::new_v4().to_string(),
-                name,
+                id: spec
+                    .fixed_id
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                name: spec.name,
                 enabled: true,
-                expected_revision: 0,
+                expected_revision: existing_rev,
                 kind: w::ConnectionKind::Stt.into(),
                 config: Some(w::ConnectionConfig {
                     config: Some(w::connection_config::Config::Stt(Box::new(
                         w::SttConnection {
                             endpoint: Some(w::ConnectionEndpoint {
-                                adapter: "openai".into(),
-                                endpoint,
+                                adapter: spec.adapter.to_owned(),
+                                endpoint: spec.endpoint,
                                 options_schema: String::new(),
                                 options,
                                 ..Default::default()
@@ -1722,10 +2112,169 @@ impl Hub {
         );
     }
 
+    pub(crate) fn add_sakura_tts_preset(&mut self, cx: &mut Context<Self>) {
+        let existing_rev = self
+            .model
+            .settings()
+            .and_then(|s| {
+                s.connections
+                    .iter()
+                    .find(|c| c.id == "sakura-tts")
+                    .map(|c| c.revision)
+            })
+            .unwrap_or(0);
+        let options = serde_json::json!({
+            "protocol": "sakura",
+            "model": "zundamon",
+            "voice": "normal",
+            "response_format": "wav",
+        })
+        .to_string();
+        self.upsert_connection(
+            "さくらのAI Engine TTS接続の追加",
+            w::ConnectionInput {
+                id: "sakura-tts".into(),
+                name: "さくらのAI Engine TTS".into(),
+                enabled: true,
+                expected_revision: existing_rev,
+                kind: w::ConnectionKind::Tts.into(),
+                config: Some(w::ConnectionConfig {
+                    config: Some(w::connection_config::Config::Tts(Box::new(
+                        w::TtsConnection {
+                            endpoint: Some(w::ConnectionEndpoint {
+                                adapter: "sakura".into(),
+                                endpoint: SAKURA_ENDPOINT.into(),
+                                options_schema: String::new(),
+                                options,
+                                ..Default::default()
+                            })
+                            .into(),
+                            voice_ids: vec!["zundamon/normal".into()],
+                            ..Default::default()
+                        },
+                    ))),
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            },
+            cx,
+        );
+    }
+
+    pub(crate) fn add_sakura_stt_preset(&mut self, cx: &mut Context<Self>) {
+        self.add_stt_preset_with_spec(
+            SttPreset {
+                fixed_id: Some("sakura-stt"),
+                adapter: "sakura",
+                name: "さくらのAI Engine STT".into(),
+                endpoint: SAKURA_ENDPOINT.into(),
+                model: "whisper-large-v3-turbo".into(),
+                language: "ja".into(),
+            },
+            cx,
+        );
+    }
+
+    pub(crate) fn add_sakura_embedding_preset(&mut self, cx: &mut Context<Self>) {
+        self.add_embedding_preset(
+            "sakura-embedding",
+            "さくらのAI Engine Embedding",
+            "sakura",
+            SAKURA_ENDPOINT,
+            "multilingual-e5-large",
+            1024,
+            cx,
+        );
+    }
+
+    pub(crate) fn add_openai_embedding_preset(&mut self, cx: &mut Context<Self>) {
+        self.add_embedding_preset(
+            "openai-embedding",
+            "OpenAI Embedding",
+            "openai",
+            "https://api.openai.com/v1",
+            "text-embedding-3-small",
+            1536,
+            cx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_embedding_preset(
+        &mut self,
+        id: &str,
+        name: &str,
+        adapter: &str,
+        endpoint: &str,
+        model_id: &str,
+        dimensions: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let existing_rev = self
+            .model
+            .settings()
+            .and_then(|s| {
+                s.connections
+                    .iter()
+                    .find(|c| c.id == id)
+                    .map(|c| c.revision)
+            })
+            .unwrap_or(0);
+        let should_assign = self.model.companion().is_some_and(|c| {
+            c.assignments
+                .as_option()
+                .and_then(|a| a.embedding.as_option())
+                .is_none_or(|e| e.connection_id.trim().is_empty())
+        });
+        self.upsert_connection(
+            "埋め込み（Embedding）接続の追加",
+            w::ConnectionInput {
+                id: id.into(),
+                name: name.into(),
+                enabled: true,
+                expected_revision: existing_rev,
+                kind: w::ConnectionKind::Embedding.into(),
+                config: Some(w::ConnectionConfig {
+                    config: Some(w::connection_config::Config::Embedding(Box::new(
+                        w::EmbeddingConnection {
+                            endpoint: Some(w::ConnectionEndpoint {
+                                adapter: adapter.into(),
+                                endpoint: endpoint.into(),
+                                options_schema: String::new(),
+                                options: "{}".into(),
+                                ..Default::default()
+                            })
+                            .into(),
+                            model_id: model_id.into(),
+                            dimensions,
+                            ..Default::default()
+                        },
+                    ))),
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            },
+            cx,
+        );
+        if should_assign {
+            self.assign_model(
+                ModelRoleSlot::Embedding,
+                Some((id.into(), model_id.into())),
+                cx,
+            );
+        }
+    }
+
     pub(crate) fn check_connection(&mut self, connection_id: String, cx: &mut Context<Self>) {
         let Some(host) = self.host() else {
             return;
         };
+        if self.checking_connections.contains(&connection_id) {
+            return;
+        }
+        self.checking_connections.insert(connection_id.clone());
         let id = connection_id.clone();
         let companion = self.model.companion_id().map(str::to_owned);
         self.request(
@@ -1748,6 +2297,377 @@ impl Hub {
             },
         );
         cx.notify();
+    }
+
+    pub(crate) fn select_connection_model(
+        &mut self,
+        connection_id: String,
+        model_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(settings) = self.model.settings().cloned() else {
+            return;
+        };
+        let Some(conn) = settings
+            .connections
+            .iter()
+            .find(|c| c.id == connection_id)
+            .cloned()
+        else {
+            return;
+        };
+        let model_id = model_id.trim().to_owned();
+        if model_id.is_empty() {
+            return;
+        }
+        let mut cfg = conn.config.as_option().cloned().unwrap_or_default();
+        if let Some(w::connection_config::Config::Llm(llm)) = cfg.config.as_mut() {
+            llm.model_ids = vec![model_id.clone()];
+        }
+        self.upsert_connection(
+            "使用モデルの変更",
+            w::ConnectionInput {
+                id: conn.id.clone(),
+                name: conn.name,
+                enabled: conn.enabled,
+                expected_revision: conn.revision,
+                kind: conn.kind,
+                config: Some(cfg).into(),
+                ..Default::default()
+            },
+            cx,
+        );
+        if let Some(comp) = self.model.companion().cloned() {
+            let assignments = comp.assignments.as_option();
+            let comp_uses_conn = assignments
+                .and_then(|a| a.companion.as_option())
+                .is_none_or(|a| a.connection_id.is_empty() || a.connection_id == connection_id);
+            let task_uses_conn = assignments
+                .and_then(|a| a.task.as_option())
+                .is_none_or(|a| a.connection_id.is_empty() || a.connection_id == connection_id);
+            if comp_uses_conn {
+                self.assign_model(
+                    ModelRoleSlot::Companion,
+                    Some((connection_id.clone(), model_id.clone())),
+                    cx,
+                );
+            }
+            if task_uses_conn {
+                self.assign_model(ModelRoleSlot::Task, Some((connection_id, model_id)), cx);
+            }
+        }
+    }
+
+    pub(crate) fn select_voicevox_speaker(
+        &mut self,
+        connection_id: String,
+        speaker_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_tts_voice(connection_id, speaker_id, cx);
+    }
+
+    pub(crate) fn select_tts_voice(
+        &mut self,
+        connection_id: String,
+        voice_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(settings) = self.model.settings().cloned() else {
+            return;
+        };
+        let Some(conn) = settings
+            .connections
+            .iter()
+            .find(|c| c.id == connection_id)
+            .cloned()
+        else {
+            return;
+        };
+        let voice_clean = voice_id.trim().to_owned();
+        if voice_clean.is_empty() {
+            return;
+        }
+        let is_sakura = is_sakura_conn(&conn);
+        let mut cfg = conn.config.as_option().cloned().unwrap_or_default();
+        apply_tts_voice_to_config(&mut cfg, is_sakura, &voice_clean);
+        self.upsert_connection(
+            "音声話者の変更",
+            w::ConnectionInput {
+                id: conn.id,
+                name: conn.name,
+                enabled: conn.enabled,
+                expected_revision: conn.revision,
+                kind: conn.kind,
+                config: Some(cfg).into(),
+                ..Default::default()
+            },
+            cx,
+        );
+    }
+
+    pub(crate) fn select_stt_model(
+        &mut self,
+        connection_id: String,
+        model_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(settings) = self.model.settings().cloned() else {
+            return;
+        };
+        let Some(conn) = settings
+            .connections
+            .iter()
+            .find(|c| c.id == connection_id)
+            .cloned()
+        else {
+            return;
+        };
+        let model_clean = model_id.trim().to_owned();
+        if model_clean.is_empty() {
+            return;
+        }
+        let mut cfg = conn.config.as_option().cloned().unwrap_or_default();
+        apply_stt_model_to_config(&mut cfg, &model_clean);
+        self.upsert_connection(
+            "音声認識モデルの変更",
+            w::ConnectionInput {
+                id: conn.id,
+                name: conn.name,
+                enabled: conn.enabled,
+                expected_revision: conn.revision,
+                kind: conn.kind,
+                config: Some(cfg).into(),
+                ..Default::default()
+            },
+            cx,
+        );
+    }
+
+    /// Assigns the active STT connection and model atomically across all STT connections.
+    pub(crate) fn assign_stt_model(
+        &mut self,
+        selection: Option<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(settings) = self.model.settings().cloned() else {
+            return;
+        };
+        let Some(host) = self.host() else {
+            return;
+        };
+        let inputs = build_stt_assignment_inputs(
+            &settings.connections,
+            selection
+                .as_ref()
+                .map(|(cid, mid)| (cid.as_str(), mid.as_str())),
+        );
+        if inputs.is_empty() {
+            return;
+        }
+        self.request(
+            "音声認識モデルの割当",
+            async move {
+                let response = host
+                    .settings
+                    .update_settings(w::UpdateSettingsRequest {
+                        expected_revision: settings.revision,
+                        connections: inputs,
+                        ..Default::default()
+                    })
+                    .await?;
+                response.view().to_owned_message().map_err(decode)
+            },
+            |settings| {
+                Update::Notification(Box::new(w::Notification {
+                    kind: "settings".into(),
+                    event: Some(w::notification::Event::SettingsUpdated(Box::new(
+                        w::SettingsUpdated {
+                            settings: Some(settings).into(),
+                            ..Default::default()
+                        },
+                    ))),
+                    ..Default::default()
+                }))
+            },
+        );
+        cx.notify();
+    }
+
+    /// Assigns the active TTS connection and voice atomically across all TTS connections,
+    /// probing local VOICEVOX when newly enabled and syncing companion `voice_identifier`.
+    pub(crate) fn assign_tts_voice(
+        &mut self,
+        selection: Option<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(settings) = self.model.settings().cloned() else {
+            return;
+        };
+        let Some(host) = self.host() else {
+            return;
+        };
+        let inputs = build_tts_assignment_inputs(
+            &settings.connections,
+            selection
+                .as_ref()
+                .map(|(cid, vid)| (cid.as_str(), vid.as_str())),
+        );
+        if inputs.is_empty() {
+            return;
+        }
+        let target_voice_clean = selection
+            .as_ref()
+            .map(|(_, vid)| vid.trim().to_owned())
+            .filter(|v| !v.is_empty());
+        let probe_voicevox_id = selection.as_ref().and_then(|(cid, _)| {
+            let conn = settings.connections.iter().find(|c| c.id == *cid)?;
+            if is_local_voicevox_conn(conn)
+                && (!conn.enabled || self.voice_choices_for_connection(&conn.id).len() <= 1)
+            {
+                Some(conn.id.clone())
+            } else {
+                None
+            }
+        });
+        if let Some(ref check_id) = probe_voicevox_id {
+            self.checking_connections.insert(check_id.clone());
+        }
+        let check_updates = self.updates.clone();
+        let probe_host = host.clone();
+        let settings_host = host.clone();
+        self.request(
+            "音声合成（TTS）の割当",
+            async move {
+                let response = settings_host
+                    .settings
+                    .update_settings(w::UpdateSettingsRequest {
+                        expected_revision: settings.revision,
+                        connections: inputs,
+                        ..Default::default()
+                    })
+                    .await?;
+                let updated = response.view().to_owned_message().map_err(decode)?;
+                if let Some(check_id) = probe_voicevox_id {
+                    tokio::spawn(async move {
+                        let check_res = probe_host
+                            .settings
+                            .check_connection(w::CheckRequest {
+                                id: check_id.clone(),
+                                request_key: uuid::Uuid::new_v4().to_string(),
+                                ..Default::default()
+                            })
+                            .await;
+                        let update = match check_res {
+                            Ok(resp) => match resp.view().to_owned_message() {
+                                Ok(res) => Update::Checked {
+                                    connection_id: check_id,
+                                    check: res.check.into_option().unwrap_or_default(),
+                                },
+                                Err(err) => failure("接続確認", decode(err)),
+                            },
+                            Err(err) => failure("接続確認", err),
+                        };
+                        let _ = check_updates.send(update);
+                    });
+                }
+                Ok(updated)
+            },
+            |settings| {
+                Update::Notification(Box::new(w::Notification {
+                    kind: "settings".into(),
+                    event: Some(w::notification::Event::SettingsUpdated(Box::new(
+                        w::SettingsUpdated {
+                            settings: Some(settings).into(),
+                            ..Default::default()
+                        },
+                    ))),
+                    ..Default::default()
+                }))
+            },
+        );
+        if let Some(voice_clean) = target_voice_clean
+            && let Some(comp) = self.model.companion().cloned()
+            && comp.voice_identifier.as_deref() != Some(voice_clean.as_str())
+        {
+            self.request(
+                "コンパニオン話者の同期",
+                async move {
+                    let response = host
+                        .host
+                        .update_companion(w::UpdateCompanionRequest {
+                            id: comp.id,
+                            revision: comp.revision,
+                            voice_identifier: Some(voice_clean),
+                            ..Default::default()
+                        })
+                        .await?;
+                    response.view().to_owned_message().map_err(decode)
+                },
+                |companion| {
+                    Update::Notification(Box::new(w::Notification {
+                        kind: "companion".into(),
+                        event: Some(w::notification::Event::Companion(Box::new(companion))),
+                        ..Default::default()
+                    }))
+                },
+            );
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn select_embedding_model(
+        &mut self,
+        connection_id: String,
+        model_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(settings) = self.model.settings().cloned() else {
+            return;
+        };
+        let Some(conn) = settings
+            .connections
+            .iter()
+            .find(|c| c.id == connection_id)
+            .cloned()
+        else {
+            return;
+        };
+        let model_clean = model_id.trim().to_owned();
+        if model_clean.is_empty() {
+            return;
+        }
+        let mut cfg = conn.config.as_option().cloned().unwrap_or_default();
+        if let Some(w::connection_config::Config::Embedding(emb)) = cfg.config.as_mut() {
+            emb.model_id = model_clean.clone();
+            emb.dimensions = default_embedding_dimensions(&model_clean);
+        }
+        self.upsert_connection(
+            "埋め込みモデルの変更",
+            w::ConnectionInput {
+                id: conn.id.clone(),
+                name: conn.name,
+                enabled: conn.enabled,
+                expected_revision: conn.revision,
+                kind: conn.kind,
+                config: Some(cfg).into(),
+                ..Default::default()
+            },
+            cx,
+        );
+        if let Some(comp) = self.model.companion()
+            && comp
+                .assignments
+                .as_option()
+                .and_then(|a| a.embedding.as_option())
+                .is_some_and(|a| a.connection_id == connection_id)
+        {
+            self.assign_model(
+                ModelRoleSlot::Embedding,
+                Some((connection_id, model_clean)),
+                cx,
+            );
+        }
     }
 
     pub(crate) fn register_secret(
@@ -1781,6 +2701,38 @@ impl Hub {
         cx.notify();
     }
 
+    pub(crate) fn register_secret_for_connections(
+        &mut self,
+        connection_ids: Vec<String>,
+        secret: String,
+        cx: &mut Context<Self>,
+    ) {
+        let secret = secret.trim().to_owned();
+        if secret.is_empty() || connection_ids.is_empty() {
+            return;
+        }
+        let Some(host) = self.host() else {
+            return;
+        };
+        self.request(
+            "複数接続への資格情報登録",
+            async move {
+                for id in connection_ids {
+                    host.settings
+                        .register_credentials(w::CredentialRequest {
+                            id,
+                            secret: Some(secret.clone()),
+                            ..Default::default()
+                        })
+                        .await?;
+                }
+                Ok::<_, connectrpc::ConnectError>(())
+            },
+            |_| Update::Resnapshot,
+        );
+        cx.notify();
+    }
+
     pub(crate) fn revoke_secret(&mut self, connection_id: String, cx: &mut Context<Self>) {
         let Some(host) = self.host() else {
             return;
@@ -1800,39 +2752,261 @@ impl Hub {
         cx.notify();
     }
 
-    /// Discovered TTS voice identifiers from enabled TTS connections.
-    pub(crate) fn tts_voice_choices(&self) -> Vec<(String, String)> {
+    /// Discovered TTS voice identifiers `(voice_id, display_name, connection_name)`
+    /// from enabled TTS connections.
+    pub(crate) fn tts_voice_choices(&self) -> Vec<(String, String, String)> {
         let Some(settings) = self.model.settings() else {
             return Vec::new();
         };
-        let mut voices = Vec::new();
+        let mut voices: Vec<(String, String, String)> = Vec::new();
         for conn in &settings.connections {
             if conn.kind != w::ConnectionKind::Tts || !conn.enabled {
                 continue;
             }
-            if let Some(check) = self
-                .model
-                .checks
-                .get(&conn.id)
-                .or_else(|| conn.last_check.as_option())
-            {
-                for res in &check.resources {
-                    if !voices.iter().any(|(existing, _)| existing == res) {
-                        voices.push((res.clone(), format!("{} / {res}", conn.name)));
-                    }
-                }
-            }
-            if let Some(w::connection_config::Config::Tts(tts)) =
-                conn.config.as_option().and_then(|c| c.config.as_ref())
-            {
-                for id in &tts.voice_ids {
-                    if !voices.iter().any(|(existing, _)| existing == id) {
-                        voices.push((id.clone(), format!("{} / {id}", conn.name)));
-                    }
+            for (vid, label) in self.voice_choices_for_connection(&conn.id) {
+                if !voices.iter().any(|(existing, _, _)| existing == &vid) {
+                    voices.push((vid, label, conn.name.clone()));
                 }
             }
         }
         voices
+    }
+
+    /// Discovered `(voice_id, display_name)` choices for a single TTS connection.
+    pub(crate) fn voice_choices_for_connection(&self, conn_id: &str) -> Vec<(String, String)> {
+        let Some(settings) = self.model.settings() else {
+            return Vec::new();
+        };
+        let Some(conn) = settings.connections.iter().find(|c| c.id == conn_id) else {
+            return Vec::new();
+        };
+        let mut voices: Vec<(String, String)> = Vec::new();
+        fn push_voice_unique(voices: &mut Vec<(String, String)>, raw: &str) {
+            let (vid, label) = parse_voice_resource(raw);
+            if vid.is_empty() {
+                return;
+            }
+            if let Some(existing) = voices.iter_mut().find(|(id, _)| id == &vid) {
+                if existing.1 == existing.0 && label != vid {
+                    existing.1 = label;
+                }
+            } else {
+                voices.push((vid, label));
+            }
+        }
+        if let Some(check) = self
+            .model
+            .checks
+            .get(&conn.id)
+            .or_else(|| conn.last_check.as_option())
+        {
+            for res in &check.resources {
+                push_voice_unique(&mut voices, res);
+            }
+        }
+        let sakura = is_sakura_conn(conn);
+        if let Some(w::connection_config::Config::Tts(tts)) =
+            conn.config.as_option().and_then(|c| c.config.as_ref())
+        {
+            for id in &tts.voice_ids {
+                push_voice_unique(&mut voices, id);
+            }
+            if !sakura
+                && tts
+                    .endpoint
+                    .as_option()
+                    .is_some_and(|ep| ep.adapter.trim().eq_ignore_ascii_case("openai"))
+            {
+                for voice in OPENAI_TTS_VOICES {
+                    push_voice_unique(&mut voices, voice);
+                }
+            }
+        }
+        if sakura {
+            for entry in SAKURA_TTS_VOICES {
+                push_voice_unique(&mut voices, entry);
+            }
+        } else if voices.is_empty()
+            && let Some(configured) = tts_voice_of_connection(conn)
+        {
+            push_voice_unique(&mut voices, &configured);
+        }
+        voices
+    }
+
+    pub(crate) fn stt_model_choices_for_connection(&self, conn_id: &str) -> Vec<(String, String)> {
+        let Some(settings) = self.model.settings() else {
+            return Vec::new();
+        };
+        let Some(conn) = settings.connections.iter().find(|c| c.id == conn_id) else {
+            return Vec::new();
+        };
+        let mut models: Vec<(String, String)> = Vec::new();
+        fn push_str_unique(list: &mut Vec<(String, String)>, id: &str) {
+            let trimmed = id.trim();
+            if !trimmed.is_empty() && !list.iter().any(|(existing, _)| existing == trimmed) {
+                list.push((trimmed.to_owned(), trimmed.to_owned()));
+            }
+        }
+        if let Some(w::connection_config::Config::Stt(stt)) =
+            conn.config.as_option().and_then(|c| c.config.as_ref())
+            && let Some(ep) = stt.endpoint.as_option()
+            && let Ok(serde_json::Value::Object(opts)) = serde_json::from_str(&ep.options)
+            && let Some(model) = opts.get("model").and_then(|v| v.as_str())
+        {
+            push_str_unique(&mut models, model);
+        }
+        let sakura = is_sakura_conn(conn);
+        if let Some(check) = self
+            .model
+            .checks
+            .get(&conn.id)
+            .or_else(|| conn.last_check.as_option())
+        {
+            for res in &check.resources {
+                let lower = res.to_ascii_lowercase();
+                if !sakura || lower.contains("whisper") || lower.contains("transcribe") {
+                    push_str_unique(&mut models, res);
+                }
+            }
+        }
+        let defaults: &[&str] = if sakura {
+            SAKURA_STT_MODELS
+        } else {
+            &["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "whisper-1"]
+        };
+        for id in defaults {
+            push_str_unique(&mut models, id);
+        }
+        models
+    }
+
+    pub(crate) fn embedding_model_choices_for_connection(
+        &self,
+        conn_id: &str,
+    ) -> Vec<(String, String)> {
+        let Some(settings) = self.model.settings() else {
+            return Vec::new();
+        };
+        let Some(conn) = settings.connections.iter().find(|c| c.id == conn_id) else {
+            return Vec::new();
+        };
+        let mut models: Vec<(String, String)> = Vec::new();
+        fn push_emb_unique(list: &mut Vec<(String, String)>, id: &str) {
+            let trimmed = id.trim();
+            if !trimmed.is_empty() && !list.iter().any(|(existing, _)| existing == trimmed) {
+                list.push((trimmed.to_owned(), trimmed.to_owned()));
+            }
+        }
+        if let Some(w::connection_config::Config::Embedding(emb)) =
+            conn.config.as_option().and_then(|c| c.config.as_ref())
+        {
+            push_emb_unique(&mut models, &emb.model_id);
+        }
+        if let Some(check) = self
+            .model
+            .checks
+            .get(&conn.id)
+            .or_else(|| conn.last_check.as_option())
+        {
+            for res in &check.resources {
+                let lower = res.to_ascii_lowercase();
+                if lower.contains("embed") || lower.contains("e5") {
+                    push_emb_unique(&mut models, res);
+                }
+            }
+        }
+        let defaults: &[&str] = if is_sakura_conn(conn) {
+            SAKURA_EMBEDDING_MODELS
+        } else {
+            &["text-embedding-3-small", "text-embedding-3-large"]
+        };
+        for id in defaults {
+            push_emb_unique(&mut models, id);
+        }
+        models
+    }
+
+    /// Available `(model_id, display_label)` choices for a single LLM connection,
+    /// merging configured `model_ids`, fetched `ListModels`, and `ConnectionCheck.resources`.
+    pub(crate) fn available_models_for_connection(&self, conn_id: &str) -> Vec<(String, String)> {
+        let Some(settings) = self.model.settings() else {
+            return Vec::new();
+        };
+        let Some(connection) = settings.connections.iter().find(|c| c.id == conn_id) else {
+            return Vec::new();
+        };
+        let (configured, adapter) = match connection
+            .config
+            .as_option()
+            .and_then(|config| config.config.as_ref())
+        {
+            Some(w::connection_config::Config::Llm(llm)) => (
+                llm.model_ids.clone(),
+                llm.endpoint
+                    .as_option()
+                    .map(|ep| ep.adapter.as_str())
+                    .unwrap_or_default(),
+            ),
+            _ => (Vec::new(), ""),
+        };
+        let fetched = self
+            .model
+            .models
+            .get(&connection.id)
+            .cloned()
+            .unwrap_or_default();
+        let checked = if adapter == GOOGLE_AGENT_PLATFORM {
+            Vec::new()
+        } else {
+            self.model
+                .checks
+                .get(&connection.id)
+                .or_else(|| connection.last_check.as_option())
+                .map(|check| check.resources.clone())
+                .unwrap_or_default()
+        };
+
+        let mut list: Vec<(String, String)> = Vec::new();
+        fn push_unique_model(list: &mut Vec<(String, String)>, id: &str, name: Option<&str>) {
+            let id = id.trim();
+            if id.is_empty() {
+                return;
+            }
+            let display = name.map(str::trim).filter(|n| !n.is_empty()).unwrap_or(id);
+            if let Some(existing) = list.iter_mut().find(|(eid, _)| eid == id) {
+                if existing.1 == existing.0 && display != id {
+                    existing.1 = display.to_owned();
+                }
+            } else {
+                list.push((id.to_owned(), display.to_owned()));
+            }
+        }
+
+        for id in &configured {
+            let fetched_name = fetched
+                .iter()
+                .find(|m| m.id == *id)
+                .map(|m| m.name.as_str());
+            push_unique_model(&mut list, id, fetched_name);
+        }
+        for model in &fetched {
+            if adapter != GOOGLE_AGENT_PLATFORM
+                || (configured.is_empty()
+                    && default_models_for_adapter(adapter).contains(&model.id.as_str()))
+            {
+                push_unique_model(&mut list, &model.id, Some(&model.name));
+            }
+        }
+        for id in &checked {
+            push_unique_model(&mut list, id, None);
+        }
+        if list.is_empty() {
+            for id in default_models_for_adapter(adapter) {
+                push_unique_model(&mut list, id, None);
+            }
+        }
+        list
     }
 
     /// Every `(connection_id, model_id, display_label)` available across enabled LLM connections.
@@ -1845,68 +3019,39 @@ impl Hub {
             if connection.kind != w::ConnectionKind::Llm || !connection.enabled {
                 continue;
             }
-            let (configured, adapter) = match connection
-                .config
-                .as_option()
-                .and_then(|config| config.config.as_ref())
-            {
-                Some(w::connection_config::Config::Llm(llm)) => (
-                    llm.model_ids.clone(),
-                    llm.endpoint
-                        .as_option()
-                        .map(|ep| ep.adapter.as_str())
-                        .unwrap_or_default(),
-                ),
-                _ => (Vec::new(), ""),
-            };
-            let fetched = self
-                .model
-                .models
-                .get(&connection.id)
-                .cloned()
-                .unwrap_or_default();
-            if !configured.is_empty() {
-                for id in configured {
-                    choices.push((
-                        connection.id.clone(),
-                        id.clone(),
-                        format!("{} / {id}", connection.name),
-                    ));
-                }
-            } else if !fetched.is_empty() {
-                for model in fetched {
-                    let label = if model.name.is_empty() {
-                        format!("{} / {}", connection.name, model.id)
-                    } else {
-                        format!("{} / {}", connection.name, model.name)
-                    };
-                    choices.push((connection.id.clone(), model.id, label));
-                }
-            } else {
-                let checked = self
-                    .model
-                    .checks
-                    .get(&connection.id)
-                    .or_else(|| connection.last_check.as_option())
-                    .map(|check| check.resources.clone())
-                    .unwrap_or_default();
-                if !checked.is_empty() {
-                    for id in checked {
-                        choices.push((
-                            connection.id.clone(),
-                            id.clone(),
-                            format!("{} / {id}", connection.name),
-                        ));
-                    }
-                } else {
-                    for id in default_models_for_adapter(adapter) {
-                        choices.push((
-                            connection.id.clone(),
-                            (*id).to_owned(),
-                            format!("{} / {id}", connection.name),
-                        ));
-                    }
-                }
+            for (model_id, label) in self.available_models_for_connection(&connection.id) {
+                choices.push((
+                    connection.id.clone(),
+                    model_id,
+                    format!("{} / {label}", connection.name),
+                ));
+            }
+        }
+        choices
+    }
+
+    fn collect_connection_choices<F>(
+        &self,
+        kind: w::ConnectionKind,
+        choices_for: F,
+    ) -> Vec<(String, String, String)>
+    where
+        F: Fn(&Self, &str) -> Vec<(String, String)>,
+    {
+        let Some(settings) = self.model.settings() else {
+            return Vec::new();
+        };
+        let mut choices = Vec::new();
+        for connection in &settings.connections {
+            if connection.kind != kind {
+                continue;
+            }
+            for (id, label) in choices_for(self, &connection.id) {
+                choices.push((
+                    connection.id.clone(),
+                    id,
+                    format!("{} / {label}", connection.name),
+                ));
             }
         }
         choices
@@ -1914,123 +3059,402 @@ impl Hub {
 
     /// Model choices across all LLM connections for progressive-disclosure slot overrides.
     pub(crate) fn all_llm_models(&self) -> Vec<(String, String, String)> {
-        let Some(settings) = self.model.settings() else {
-            return Vec::new();
-        };
-        let mut choices = Vec::new();
-        for connection in &settings.connections {
-            if connection.kind != w::ConnectionKind::Llm {
-                continue;
-            }
-            let (configured, adapter) = match connection
-                .config
-                .as_option()
-                .and_then(|config| config.config.as_ref())
-            {
-                Some(w::connection_config::Config::Llm(llm)) => (
-                    llm.model_ids.clone(),
-                    llm.endpoint
-                        .as_option()
-                        .map(|ep| ep.adapter.as_str())
-                        .unwrap_or_default(),
-                ),
-                _ => (Vec::new(), ""),
-            };
-            let fetched = self
-                .model
-                .models
-                .get(&connection.id)
-                .cloned()
-                .unwrap_or_default();
-            if !fetched.is_empty() {
-                for model in fetched {
-                    let name = if model.name.is_empty() {
-                        model.id.clone()
-                    } else {
-                        model.name
-                    };
-                    choices.push((
-                        connection.id.clone(),
-                        model.id,
-                        format!("{} / {name}", connection.name),
-                    ));
-                }
-            } else if !configured.is_empty() {
-                for id in configured {
-                    choices.push((
-                        connection.id.clone(),
-                        id.clone(),
-                        format!("{} / {id}", connection.name),
-                    ));
-                }
-            } else {
-                let checked = self
-                    .model
-                    .checks
-                    .get(&connection.id)
-                    .or_else(|| connection.last_check.as_option())
-                    .map(|check| check.resources.clone())
-                    .unwrap_or_default();
-                if !checked.is_empty() {
-                    for id in checked {
-                        choices.push((
-                            connection.id.clone(),
-                            id.clone(),
-                            format!("{} / {id}", connection.name),
-                        ));
-                    }
-                } else {
-                    for id in default_models_for_adapter(adapter) {
-                        choices.push((
-                            connection.id.clone(),
-                            (*id).to_owned(),
-                            format!("{} / {id}", connection.name),
-                        ));
-                    }
-                }
-            }
-        }
-        choices
+        self.collect_connection_choices(
+            w::ConnectionKind::Llm,
+            Self::available_models_for_connection,
+        )
     }
 
     /// Model choices across embedding connections for the embedding role slot.
     pub(crate) fn all_embedding_models(&self) -> Vec<(String, String, String)> {
-        let Some(settings) = self.model.settings() else {
-            return Vec::new();
-        };
-        let mut choices = Vec::new();
-        for connection in &settings.connections {
-            if connection.kind != w::ConnectionKind::Embedding {
-                continue;
-            }
-            let model_id = match connection
-                .config
-                .as_option()
-                .and_then(|config| config.config.as_ref())
-            {
-                Some(w::connection_config::Config::Embedding(emb))
-                    if !emb.model_id.trim().is_empty() =>
-                {
-                    emb.model_id.trim().to_owned()
-                }
-                _ => "text-embedding-3-small".to_owned(),
-            };
-            choices.push((
-                connection.id.clone(),
-                model_id.clone(),
-                format!("{} / {model_id}", connection.name),
-            ));
-        }
-        choices
+        self.collect_connection_choices(
+            w::ConnectionKind::Embedding,
+            Self::embedding_model_choices_for_connection,
+        )
+    }
+
+    /// Model choices across all STT connections (`enabled` or disabled).
+    pub(crate) fn all_stt_models(&self) -> Vec<(String, String, String)> {
+        self.collect_connection_choices(
+            w::ConnectionKind::Stt,
+            Self::stt_model_choices_for_connection,
+        )
+    }
+
+    /// Currently active `(connection_id, model_id)` for STT (`None` if all STT connections are off).
+    pub(crate) fn active_stt_selection(&self) -> Option<(String, String)> {
+        let settings = self.model.settings()?;
+        active_stt_in_connections(&settings.connections)
+    }
+
+    /// Voice choices across all TTS connections (`enabled` or disabled).
+    pub(crate) fn all_tts_voices(&self) -> Vec<(String, String, String)> {
+        self.collect_connection_choices(w::ConnectionKind::Tts, Self::voice_choices_for_connection)
+    }
+
+    /// Currently active `(connection_id, voice_id)` for TTS (`None` if all TTS connections are off).
+    pub(crate) fn active_tts_selection(&self) -> Option<(String, String)> {
+        let settings = self.model.settings()?;
+        active_tts_in_connections(&settings.connections)
     }
 }
+
+const OPENAI_TTS_VOICES: &[&str] = &[
+    "alloy", "ash", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer",
+];
+
+fn apply_tts_voice_to_config(cfg: &mut w::ConnectionConfig, is_sakura: bool, voice_clean: &str) {
+    if let Some(w::connection_config::Config::Tts(tts)) = cfg.config.as_mut() {
+        tts.voice_ids = vec![voice_clean.to_owned()];
+        let mut ep = tts.endpoint.as_option().cloned().unwrap_or_default();
+        let mut opts = match serde_json::from_str::<serde_json::Value>(&ep.options) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        };
+        if is_sakura {
+            if let Some((m, v)) = voice_clean.split_once('/') {
+                if !m.trim().is_empty() {
+                    opts.insert("model".into(), serde_json::json!(m.trim()));
+                }
+                if !v.trim().is_empty() {
+                    opts.insert("voice".into(), serde_json::json!(v.trim()));
+                }
+            } else {
+                opts.insert("model".into(), serde_json::json!(voice_clean));
+            }
+            opts.entry("protocol".to_owned())
+                .or_insert_with(|| serde_json::json!("sakura"));
+            opts.entry("response_format".to_owned())
+                .or_insert_with(|| serde_json::json!("wav"));
+            ep.options = serde_json::Value::Object(opts).to_string();
+        } else if let Ok(speaker_num) = voice_clean.parse::<u32>() {
+            opts.insert("speaker".into(), serde_json::json!(speaker_num));
+            ep.options = serde_json::Value::Object(opts).to_string();
+        } else {
+            opts.insert("voice".into(), serde_json::json!(voice_clean));
+            ep.options = serde_json::Value::Object(opts).to_string();
+        }
+        tts.endpoint = Some(ep).into();
+    }
+}
+
+fn apply_stt_model_to_config(cfg: &mut w::ConnectionConfig, model_clean: &str) {
+    if let Some(w::connection_config::Config::Stt(stt)) = cfg.config.as_mut() {
+        let mut ep = stt.endpoint.as_option().cloned().unwrap_or_default();
+        let mut opts = match serde_json::from_str::<serde_json::Value>(&ep.options) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        };
+        opts.insert("model".into(), serde_json::json!(model_clean));
+        ep.options = serde_json::Value::Object(opts).to_string();
+        stt.endpoint = Some(ep).into();
+    }
+}
+
+fn is_local_voicevox_conn(conn: &w::Connection) -> bool {
+    conn.kind == w::ConnectionKind::Tts
+        && !is_sakura_conn(conn)
+        && conn
+            .config
+            .as_option()
+            .and_then(|c| c.config.as_ref())
+            .is_some_and(|c| match c {
+                w::connection_config::Config::Tts(tts) => tts
+                    .endpoint
+                    .as_option()
+                    .is_some_and(|ep| ep.adapter.eq_ignore_ascii_case("voicevox")),
+                _ => false,
+            })
+}
+
+fn stt_model_of_connection(conn: &w::Connection) -> String {
+    if let Some(w::connection_config::Config::Stt(stt)) =
+        conn.config.as_option().and_then(|c| c.config.as_ref())
+        && let Some(ep) = stt.endpoint.as_option()
+        && let Ok(serde_json::Value::Object(opts)) = serde_json::from_str(&ep.options)
+        && let Some(model) = opts
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    {
+        return model.to_owned();
+    }
+    if is_sakura_conn(conn) {
+        "whisper-large-v3-turbo".to_owned()
+    } else {
+        "whisper-1".to_owned()
+    }
+}
+
+fn tts_voice_of_connection(conn: &w::Connection) -> Option<String> {
+    let Some(w::connection_config::Config::Tts(tts)) =
+        conn.config.as_option().and_then(|c| c.config.as_ref())
+    else {
+        return None;
+    };
+    if let Some(first) = tts
+        .voice_ids
+        .first()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let (vid, _) = parse_voice_resource(first);
+        if !vid.is_empty() {
+            return Some(vid);
+        }
+    }
+    let sakura = is_sakura_conn(conn);
+    if let Some(ep) = tts.endpoint.as_option() {
+        if let Ok(serde_json::Value::Object(opts)) = serde_json::from_str(&ep.options) {
+            if sakura {
+                let model = opts
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("zundamon");
+                let voice = opts
+                    .get("voice")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("normal");
+                return Some(format!("{model}/{voice}"));
+            }
+            if let Some(speaker) = opts.get("speaker") {
+                if let Some(num) = speaker.as_u64() {
+                    return Some(num.to_string());
+                }
+                if let Some(s) = speaker.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                    return Some(s.to_owned());
+                }
+            }
+            if let Some(voice) = opts
+                .get("voice")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return Some(voice.to_owned());
+            }
+        }
+        if sakura {
+            return Some("zundamon/normal".to_owned());
+        }
+        let adapter = ep.adapter.trim().to_ascii_lowercase();
+        if adapter == "voicevox" {
+            return Some("3".to_owned());
+        }
+        if adapter == "openai" {
+            return Some("alloy".to_owned());
+        }
+    }
+    None
+}
+
+fn active_stt_in_connections(connections: &[w::Connection]) -> Option<(String, String)> {
+    connections
+        .iter()
+        .find(|c| c.kind == w::ConnectionKind::Stt && c.enabled)
+        .map(|c| (c.id.clone(), stt_model_of_connection(c)))
+}
+
+fn active_tts_in_connections(connections: &[w::Connection]) -> Option<(String, String)> {
+    connections
+        .iter()
+        .find(|c| c.kind == w::ConnectionKind::Tts && c.enabled)
+        .and_then(|c| tts_voice_of_connection(c).map(|v| (c.id.clone(), v)))
+}
+
+fn disable_connection_input(conn: &w::Connection) -> w::ConnectionInput {
+    w::ConnectionInput {
+        id: conn.id.clone(),
+        name: conn.name.clone(),
+        enabled: false,
+        expected_revision: conn.revision,
+        kind: conn.kind,
+        config: conn.config.clone(),
+        ..Default::default()
+    }
+}
+
+fn build_voice_assignment_inputs<F>(
+    connections: &[w::Connection],
+    kind: w::ConnectionKind,
+    selection: Option<(&str, &str)>,
+    apply_cfg: F,
+) -> Vec<w::ConnectionInput>
+where
+    F: Fn(&w::Connection, &mut w::ConnectionConfig, &str),
+{
+    let mut inputs = Vec::new();
+    match selection {
+        Some((target_id, value)) => {
+            let clean = value.trim();
+            if clean.is_empty()
+                || !connections
+                    .iter()
+                    .any(|c| c.id == target_id && c.kind == kind)
+            {
+                return inputs;
+            }
+            for conn in connections.iter().filter(|c| c.kind == kind) {
+                if conn.id == target_id {
+                    let mut cfg = conn.config.as_option().cloned().unwrap_or_default();
+                    apply_cfg(conn, &mut cfg, clean);
+                    inputs.push(w::ConnectionInput {
+                        id: conn.id.clone(),
+                        name: conn.name.clone(),
+                        enabled: true,
+                        expected_revision: conn.revision,
+                        kind: conn.kind,
+                        config: Some(cfg).into(),
+                        ..Default::default()
+                    });
+                } else if conn.enabled {
+                    inputs.push(disable_connection_input(conn));
+                }
+            }
+        }
+        None => {
+            for conn in connections.iter().filter(|c| c.kind == kind && c.enabled) {
+                inputs.push(disable_connection_input(conn));
+            }
+        }
+    }
+    inputs
+}
+
+fn build_stt_assignment_inputs(
+    connections: &[w::Connection],
+    selection: Option<(&str, &str)>,
+) -> Vec<w::ConnectionInput> {
+    build_voice_assignment_inputs(
+        connections,
+        w::ConnectionKind::Stt,
+        selection,
+        |_, cfg, m| {
+            apply_stt_model_to_config(cfg, m);
+        },
+    )
+}
+
+fn build_tts_assignment_inputs(
+    connections: &[w::Connection],
+    selection: Option<(&str, &str)>,
+) -> Vec<w::ConnectionInput> {
+    build_voice_assignment_inputs(
+        connections,
+        w::ConnectionKind::Tts,
+        selection,
+        |conn, cfg, v| apply_tts_voice_to_config(cfg, is_sakura_conn(conn), v),
+    )
+}
+
+struct SttPreset<'a> {
+    fixed_id: Option<&'a str>,
+    adapter: &'a str,
+    name: String,
+    endpoint: String,
+    model: String,
+    language: String,
+}
+
+const SAKURA_ENDPOINT: &str = "https://api.ai.sakura.ad.jp/v1";
+
+const SAKURA_CHAT_MODELS: &[&str] = &[
+    "gpt-oss-120b",
+    "llm-jp-3.1-8x13b-instruct4",
+    "preview/Qwen3.6-35B-A3B",
+    "preview/gemma-4-31B-it",
+    "preview/Kimi-K2.6",
+    "preview/Kimi-K2.7-Code",
+    "preview/Qwen3-VL-30B-A3B-Instruct",
+    "preview/GLM-5.3-Flash",
+    "preview/DeepSeek-V4.1-Flash-1017",
+    "preview/Phi-4-mini-instruct-cpu",
+    "preview/Qwen3-0.6B-cpu",
+];
+
+const SAKURA_STT_MODELS: &[&str] = &["whisper-large-v3-turbo"];
+
+const SAKURA_EMBEDDING_MODELS: &[&str] =
+    &["multilingual-e5-large", "preview/Qwen3-Embedding-4B-FP16"];
+
+const SAKURA_TTS_VOICES: &[&str] = &[
+    "zundamon/normal:VOICEVOX:ずんだもん（ノーマル）",
+    "zundamon/amaama:VOICEVOX:ずんだもん（あまあま）",
+    "zundamon/tsuntsun:VOICEVOX:ずんだもん（ツンツン）",
+    "zundamon/sexy:VOICEVOX:ずんだもん（セクシー）",
+    "zundamon/sasayaki:VOICEVOX:ずんだもん（ささやき）",
+    "shikokumetan/normal:VOICEVOX:四国めたん（ノーマル）",
+    "shikokumetan/amaama:VOICEVOX:四国めたん（あまあま）",
+    "shikokumetan/tsuntsun:VOICEVOX:四国めたん（ツンツン）",
+    "shikokumetan/sexy:VOICEVOX:四国めたん（セクシー）",
+    "kasukabetsumugi/normal:VOICEVOX:春日部つむぎ（ノーマル）",
+    "meimeihimari/normal:VOICEVOX:冥鳴ひまり（ノーマル）",
+    "tohokuzunko/normal:VOICEVOX:東北ずん子（ノーマル）",
+    "tohokukiritan/normal:VOICEVOX:東北きりたん（ノーマル）",
+    "tohokuitako/normal:VOICEVOX:東北イタコ（ノーマル）",
+    "ankomon/normal:VOICEVOX:あんこもん（ノーマル）",
+];
+
+pub(crate) fn is_sakura_endpoint(endpoint: &str) -> bool {
+    endpoint
+        .to_ascii_lowercase()
+        .contains("api.ai.sakura.ad.jp")
+}
+
+pub(crate) fn is_sakura_conn(conn: &w::Connection) -> bool {
+    let ep = match conn.config.as_option().and_then(|c| c.config.as_ref()) {
+        Some(w::connection_config::Config::Llm(c)) => c.endpoint.as_option(),
+        Some(w::connection_config::Config::Tts(c)) => c.endpoint.as_option(),
+        Some(w::connection_config::Config::Stt(c)) => c.endpoint.as_option(),
+        Some(w::connection_config::Config::Embedding(c)) => c.endpoint.as_option(),
+        Some(w::connection_config::Config::Mcp(c)) => c.endpoint.as_option(),
+        Some(w::connection_config::Config::Acp(c)) => c.endpoint.as_option(),
+        None => None,
+    };
+    ep.is_some_and(|e| {
+        e.adapter.trim().eq_ignore_ascii_case("sakura") || is_sakura_endpoint(&e.endpoint)
+    })
+}
+
+pub(crate) fn default_embedding_dimensions(model_id: &str) -> u32 {
+    match model_id.trim() {
+        "multilingual-e5-large" => 1024,
+        "preview/Qwen3-Embedding-4B-FP16" | "Qwen3-Embedding-4B" | "Qwen3-Embedding-4B-FP16" => {
+            2560
+        }
+        "text-embedding-3-large" => 3072,
+        _ => 1536,
+    }
+}
+
+pub(crate) fn parse_voice_resource(raw: &str) -> (String, String) {
+    let trimmed = raw.trim();
+    if let Some((id, name)) = trimmed.split_once(':') {
+        let id = id.trim();
+        let name = name.trim();
+        if !id.is_empty() && !name.is_empty() {
+            return (id.to_owned(), name.to_owned());
+        }
+    }
+    (trimmed.to_owned(), trimmed.to_owned())
+}
+
+const GOOGLE_AGENT_PLATFORM: &str = "google-agent-platform";
 
 pub(crate) fn default_models_for_adapter(adapter: &str) -> &'static [&'static str] {
     match adapter.trim().to_ascii_lowercase().as_str() {
         "openai" | "openai-responses" => &["gpt-5.4-mini", "gpt-5.4"],
         "anthropic" => &["claude-sonnet-4-6"],
         "gemini" | "google" => &["gemini-2.5-flash"],
+        GOOGLE_AGENT_PLATFORM => &["gemini-3.8-flash"],
         "openrouter" | "openrouter-wasm" => &["openai/gpt-5.4-mini"],
+        "sakura" => SAKURA_CHAT_MODELS,
         "ollama" | "vllm" | "lmstudio" => &["qwen2.5:7b"],
         _ => &[],
     }
@@ -2230,5 +3654,247 @@ mod setup_tests {
         assert!(can_start_chat(&conn, catalog));
         conn.last_check = Some(w::ConnectionCheck::default()).into();
         assert!(!can_start_chat(&conn, catalog));
+    }
+
+    #[test]
+    fn parse_voice_resource_extracts_id_and_japanese_name() {
+        assert_eq!(
+            parse_voice_resource("3:ずんだもん（ノーマル）"),
+            ("3".into(), "ずんだもん（ノーマル）".into())
+        );
+        assert_eq!(
+            parse_voice_resource("zundamon/normal:VOICEVOX:ずんだもん（ノーマル）"),
+            (
+                "zundamon/normal".into(),
+                "VOICEVOX:ずんだもん（ノーマル）".into()
+            )
+        );
+        assert_eq!(
+            parse_voice_resource("alloy"),
+            ("alloy".into(), "alloy".into())
+        );
+    }
+
+    #[test]
+    fn sakura_embedding_dimensions_resolve_known_models() {
+        assert_eq!(default_embedding_dimensions("multilingual-e5-large"), 1024);
+        assert_eq!(
+            default_embedding_dimensions("preview/Qwen3-Embedding-4B-FP16"),
+            2560
+        );
+        assert_eq!(default_embedding_dimensions("text-embedding-3-small"), 1536);
+        assert_eq!(default_embedding_dimensions("text-embedding-3-large"), 3072);
+    }
+
+    fn make_stt_conn(
+        id: &str,
+        enabled: bool,
+        adapter: &str,
+        endpoint: &str,
+        model: &str,
+    ) -> w::Connection {
+        w::Connection {
+            id: id.into(),
+            name: id.into(),
+            enabled,
+            revision: 3,
+            kind: w::ConnectionKind::Stt.into(),
+            config: Some(w::ConnectionConfig {
+                config: Some(w::connection_config::Config::Stt(Box::new(
+                    w::SttConnection {
+                        endpoint: Some(w::ConnectionEndpoint {
+                            adapter: adapter.into(),
+                            endpoint: endpoint.into(),
+                            options: serde_json::json!({ "model": model }).to_string(),
+                            ..Default::default()
+                        })
+                        .into(),
+                        ..Default::default()
+                    },
+                ))),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        }
+    }
+
+    fn make_tts_conn(
+        id: &str,
+        enabled: bool,
+        adapter: &str,
+        endpoint: &str,
+        voices: Vec<&str>,
+        options: serde_json::Value,
+    ) -> w::Connection {
+        w::Connection {
+            id: id.into(),
+            name: id.into(),
+            enabled,
+            revision: 5,
+            kind: w::ConnectionKind::Tts.into(),
+            config: Some(w::ConnectionConfig {
+                config: Some(w::connection_config::Config::Tts(Box::new(
+                    w::TtsConnection {
+                        endpoint: Some(w::ConnectionEndpoint {
+                            adapter: adapter.into(),
+                            endpoint: endpoint.into(),
+                            options: options.to_string(),
+                            ..Default::default()
+                        })
+                        .into(),
+                        voice_ids: voices.into_iter().map(str::to_owned).collect(),
+                        ..Default::default()
+                    },
+                ))),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn active_stt_and_tts_selection_reads_first_enabled_connection() {
+        let connections = vec![
+            make_stt_conn(
+                "stt-disabled",
+                false,
+                "openai",
+                "https://api.openai.com/v1",
+                "whisper-1",
+            ),
+            make_stt_conn(
+                "stt-sakura",
+                true,
+                "sakura",
+                SAKURA_ENDPOINT,
+                "whisper-large-v3-turbo",
+            ),
+            make_tts_conn(
+                "tts-voicevox",
+                false,
+                "voicevox",
+                "http://127.0.0.1:50021",
+                vec![],
+                serde_json::json!({ "speaker": 3 }),
+            ),
+            make_tts_conn(
+                "tts-sakura",
+                true,
+                "sakura",
+                SAKURA_ENDPOINT,
+                vec!["zundamon/amaama"],
+                serde_json::json!({ "protocol": "sakura", "model": "zundamon", "voice": "amaama" }),
+            ),
+        ];
+        assert_eq!(
+            active_stt_in_connections(&connections),
+            Some(("stt-sakura".into(), "whisper-large-v3-turbo".into()))
+        );
+        assert_eq!(
+            active_tts_in_connections(&connections),
+            Some(("tts-sakura".into(), "zundamon/amaama".into()))
+        );
+    }
+
+    #[test]
+    fn stt_assignment_inputs_activates_target_and_disables_others() {
+        let connections = vec![
+            make_stt_conn(
+                "stt-openai",
+                true,
+                "openai",
+                "https://api.openai.com/v1",
+                "whisper-1",
+            ),
+            make_stt_conn(
+                "stt-sakura",
+                false,
+                "sakura",
+                SAKURA_ENDPOINT,
+                "whisper-large-v3-turbo",
+            ),
+        ];
+
+        let inputs =
+            build_stt_assignment_inputs(&connections, Some(("stt-sakura", "gpt-4o-transcribe")));
+        assert_eq!(inputs.len(), 2);
+        let disabled = inputs
+            .iter()
+            .find(|i| i.id == "stt-openai")
+            .expect("old disabled");
+        assert!(!disabled.enabled);
+        assert_eq!(disabled.expected_revision, 3);
+
+        let activated = inputs
+            .iter()
+            .find(|i| i.id == "stt-sakura")
+            .expect("target enabled");
+        assert!(activated.enabled);
+        let Some(w::connection_config::Config::Stt(stt)) =
+            activated.config.as_option().and_then(|c| c.config.as_ref())
+        else {
+            panic!("expected Stt config");
+        };
+        let opts: serde_json::Value =
+            serde_json::from_str(&stt.endpoint.as_option().expect("endpoint").options)
+                .expect("json options");
+        assert_eq!(opts["model"], "gpt-4o-transcribe");
+
+        let off_inputs = build_stt_assignment_inputs(&connections, None);
+        assert_eq!(off_inputs.len(), 1);
+        assert_eq!(off_inputs[0].id, "stt-openai");
+        assert!(!off_inputs[0].enabled);
+    }
+
+    #[test]
+    fn tts_assignment_inputs_activates_target_updates_voice_and_disables_others() {
+        let connections = vec![
+            make_tts_conn(
+                "tts-voicevox",
+                true,
+                "voicevox",
+                "http://127.0.0.1:50021",
+                vec!["3"],
+                serde_json::json!({ "speaker": 3 }),
+            ),
+            make_tts_conn(
+                "tts-sakura",
+                false,
+                "sakura",
+                SAKURA_ENDPOINT,
+                vec!["zundamon/normal"],
+                serde_json::json!({ "protocol": "sakura", "model": "zundamon", "voice": "normal" }),
+            ),
+        ];
+
+        let inputs =
+            build_tts_assignment_inputs(&connections, Some(("tts-sakura", "shikokumetan/amaama")));
+        assert_eq!(inputs.len(), 2);
+        let disabled = inputs
+            .iter()
+            .find(|i| i.id == "tts-voicevox")
+            .expect("old disabled");
+        assert!(!disabled.enabled);
+        assert_eq!(disabled.expected_revision, 5);
+
+        let activated = inputs
+            .iter()
+            .find(|i| i.id == "tts-sakura")
+            .expect("target enabled");
+        assert!(activated.enabled);
+        let Some(w::connection_config::Config::Tts(tts)) =
+            activated.config.as_option().and_then(|c| c.config.as_ref())
+        else {
+            panic!("expected Tts config");
+        };
+        assert_eq!(tts.voice_ids, vec!["shikokumetan/amaama"]);
+        let opts: serde_json::Value =
+            serde_json::from_str(&tts.endpoint.as_option().expect("endpoint").options)
+                .expect("json options");
+        assert_eq!(opts["model"], "shikokumetan");
+        assert_eq!(opts["voice"], "amaama");
+        assert_eq!(opts["protocol"], "sakura");
     }
 }

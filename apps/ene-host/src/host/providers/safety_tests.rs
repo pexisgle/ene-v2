@@ -1095,7 +1095,7 @@ fn p10_listed_providers_cover_installed_plugins_and_their_defaults() {
         json!({"type":"none"}),
     );
     let listed = settings::providers(&providers);
-    assert_eq!(listed.len(), 4);
+    assert_eq!(listed.len(), 5);
     let mut shadowing: Vec<_> = listed
         .iter()
         .filter(|provider| provider.adapter == "openrouter")
@@ -1109,7 +1109,7 @@ fn p10_listed_providers_cover_installed_plugins_and_their_defaults() {
     assert_eq!(plugin.id, "p08-plugin");
     assert_eq!(plugin.endpoint, "https://plugin.example");
     assert_eq!(plugin.environment_variable.as_deref(), Some("ENE_P08_KEY"));
-    for adapter in ["anthropic", "gemini", "openai"] {
+    for adapter in ["anthropic", "gemini", "openai", "sakura"] {
         assert!(
             listed.iter().any(|provider| provider.adapter == adapter),
             "{adapter}"

@@ -29,6 +29,24 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
 
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            *s
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.as_str()
+        } else {
+            "unknown panic payload"
+        };
+        let location = info
+            .location()
+            .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
+            .unwrap_or_else(|| "unknown location".to_owned());
+        tracing::error!(location = %location, payload = %payload, "ene-desktop panicked");
+        eprintln!("ene-desktop panic at {location}: {payload}");
+        default_hook(info);
+    }));
+
     let path = match discovery_path() {
         Ok(path) => path,
         Err(reason) => {
@@ -132,6 +150,7 @@ fn main() {
                 .and_then(|val| match val.trim().to_ascii_lowercase().as_str() {
                     "companions" => Some(ene_desktop::SettingsSection::Companions),
                     "connections" | "1" | "true" => Some(ene_desktop::SettingsSection::Connections),
+                    "voice" => Some(ene_desktop::SettingsSection::Voice),
                     "device" => Some(ene_desktop::SettingsSection::Device),
                     _ => None,
                 });

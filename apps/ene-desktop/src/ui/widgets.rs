@@ -3,10 +3,12 @@
 
 use super::icons::{Icon, icon};
 use super::theme::{Theme, companion_palette};
+use crate::input::Draft;
 use gpui::{
-    AnyElement, ElementId, Hsla, MouseButton, MouseDownEvent, SharedString, Window, div,
+    AnyElement, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, SharedString, Window, div,
     prelude::*, px,
 };
+use std::rc::Rc;
 
 /// Semantic tone for capsule buttons and tags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -387,4 +389,252 @@ pub fn window_drag_area(div: gpui::Div, double_click_zoom: bool) -> gpui::Div {
     #[cfg(windows)]
     let _ = double_click_zoom;
     div
+}
+
+/// Option item shown in [`dropdown_select`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DropdownOption {
+    pub value: String,
+    pub label: String,
+    pub detail: Option<String>,
+}
+
+/// Searchable inline dropdown selector built to `DESIGN.md` Strawberry Milk Capsule rules.
+#[allow(clippy::too_many_arguments)]
+pub fn dropdown_select<T, S>(
+    id: impl Into<String>,
+    selected_value: Option<&str>,
+    selected_label: Option<&str>,
+    placeholder: &str,
+    options: &[DropdownOption],
+    open: bool,
+    enabled: bool,
+    max_list_height: f32,
+    filter_draft: Option<Entity<Draft>>,
+    filter_text: &str,
+    empty_label: &str,
+    theme: &Theme,
+    on_toggle: T,
+    on_select: S,
+) -> AnyElement
+where
+    T: Fn(&mut Window, &mut gpui::App) + 'static,
+    S: Fn(String, &mut Window, &mut gpui::App) + 'static,
+{
+    let id_base: String = id.into();
+    let display_label = selected_label
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| placeholder.to_owned());
+    let has_selection = selected_label.is_some_and(|s| !s.is_empty());
+    let trigger_bg = if enabled {
+        theme.bg_input
+    } else {
+        theme.bg_blush
+    };
+    let trigger_border = if open && enabled {
+        theme.accent
+    } else {
+        theme.border
+    };
+    let trigger_fg = if !enabled {
+        theme.ink_placeholder
+    } else if has_selection {
+        theme.ink
+    } else {
+        theme.ink_placeholder
+    };
+    let hover_border = theme.border_float;
+
+    let mut trigger = div()
+        .id(SharedString::from(format!("{id_base}-trigger")))
+        .w_full()
+        .min_w_0()
+        .px(px(12.))
+        .py(px(7.))
+        .rounded(px(10.))
+        .bg(trigger_bg)
+        .border_2()
+        .border_color(trigger_border)
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(8.))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_sm()
+                .text_color(trigger_fg)
+                .truncate()
+                .child(display_label),
+        )
+        .child(icon(
+            if open && enabled {
+                Icon::ChevronUp
+            } else {
+                Icon::ChevronDown
+            },
+            14.,
+            if enabled {
+                theme.ink_muted
+            } else {
+                theme.ink_placeholder
+            },
+        ));
+    if enabled {
+        trigger = trigger
+            .cursor_pointer()
+            .hover(move |this| this.border_color(hover_border))
+            .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, window, cx| {
+                on_toggle(window, cx);
+            });
+    }
+
+    let mut root = div().w_full().min_w_0().flex().flex_col().child(trigger);
+
+    if open && enabled {
+        let on_select = Rc::new(on_select);
+        let query = filter_text.trim().to_lowercase();
+        let show_search = options.len() > 8 && filter_draft.is_some();
+        let filtered: Vec<&DropdownOption> = options
+            .iter()
+            .filter(|opt| {
+                query.is_empty()
+                    || opt.label.to_lowercase().contains(&query)
+                    || opt.value.to_lowercase().contains(&query)
+                    || opt
+                        .detail
+                        .as_deref()
+                        .is_some_and(|d| d.to_lowercase().contains(&query))
+            })
+            .collect();
+
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(filtered.len());
+        for (idx, opt) in filtered.iter().enumerate() {
+            let is_selected = selected_value == Some(opt.value.as_str());
+            let val = opt.value.clone();
+            let select_cb = Rc::clone(&on_select);
+            let hover_bg = theme.bg_blush;
+            let row_bg = if is_selected {
+                theme.accent_soft
+            } else {
+                theme.bg_surface
+            };
+            rows.push(
+                div()
+                    .id(SharedString::from(format!("{id_base}-opt-{idx}")))
+                    .w_full()
+                    .min_w_0()
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(px(8.))
+                    .bg(row_bg)
+                    .cursor_pointer()
+                    .hover(move |this| this.bg(hover_bg))
+                    .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, window, cx| {
+                        select_cb(val.clone(), window, cx);
+                    })
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(if is_selected {
+                                        gpui::FontWeight::BOLD
+                                    } else {
+                                        gpui::FontWeight::MEDIUM
+                                    })
+                                    .text_color(if is_selected {
+                                        theme.accent_soft_fg
+                                    } else {
+                                        theme.ink
+                                    })
+                                    .truncate()
+                                    .child(opt.label.clone()),
+                            )
+                            .when_some(opt.detail.clone(), |this, detail| {
+                                this.child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(theme.ink_muted)
+                                        .truncate()
+                                        .child(detail),
+                                )
+                            }),
+                    )
+                    .when(is_selected, |this| {
+                        this.child(icon(Icon::Check, 13., theme.accent))
+                    })
+                    .into_any_element(),
+            );
+        }
+
+        if rows.is_empty() {
+            let msg = if query.is_empty() {
+                empty_label
+            } else {
+                "該当する候補がありません"
+            };
+            rows.push(
+                div()
+                    .px(px(10.))
+                    .py(px(8.))
+                    .text_xs()
+                    .text_color(theme.ink_muted)
+                    .child(msg.to_owned())
+                    .into_any_element(),
+            );
+        }
+
+        let search_bar = show_search.then(|| {
+            let draft = filter_draft.expect("checked is_some above");
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.))
+                .child(icon(Icon::Search, 13., theme.ink_muted))
+                .child(div().flex_1().min_w_0().child(draft))
+        });
+
+        root = root.child(
+            div()
+                .mt(px(4.))
+                .w_full()
+                .rounded(px(10.))
+                .bg(theme.bg_surface)
+                .border_1()
+                .border_color(theme.border)
+                .p(px(6.))
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .when_some(search_bar, |this, bar| this.child(bar))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("{id_base}-scroll")))
+                        .w_full()
+                        .max_h(px(max_list_height))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .children(rows),
+                ),
+        );
+    }
+
+    root.into_any_element()
 }

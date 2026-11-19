@@ -56,9 +56,11 @@ WorkSessionの実行バックエンドは親のtask接続で選ぶ。接続が`C
 
 能力の許可は、操作ごとの承認を省略する包括許可ではない。`device_request`および`tool_name`経由の端末操作も、ホストの`Stage::Gate`でハード禁止、明示的毎回確認、保存ルール、入力スキーマを検証し、必要な場合は`ApprovalRequest`を発行する。`ClientCapabilitySpec.approval`が`CONFIRM`の能力は操作ごとに承認を要求し、`AUTO`でもハード禁止や「毎回確認」ポリシーを迂回できない。未指定はホストの既定ポリシーに従い、未知の能力は`CONFIRM`相当として扱う。`approval`はクライアントの申告であり、ホストのポリシーが常に優先する。`approval_target`は承認カードの対象説明テンプレートであり、ホストが検証済み入力で埋める。クライアントが自己申告する説明だけを承認の根拠にしない。
 
+`computer.use` は現在の Run と接続中の発注元端末に束縛する。未実行分も含めて再送の対象外とする。スクリーンショットに成功した場合、`CompleteOperation` の入力は画像を含み、保存済み結果と通知は寸法と識別子を返す。画像は実行中の「手」のモデルリクエストにだけ添付する。
+
 ## 知覚（目）と動的Watcher
 
-クライアント側知覚センサー（OSウィンドウフック、アプリ連携、定期サンプリング等）は`ClientService.ReportPerception` RPCを通じてホストへ知覚イベント（`PerceptionEvent`）を送信する。ホストはこれを受信して簡潔な要約（`PerceptionSummary`）を生成し、親エージェントの動的文脈（Dynamic Tail）へインメモリ注入する。
+有効なクライアントは `ClientService.ReportPerception` に現在の `DeviceReady.subscription_id` を付け、`enabled=true` で観測を開始する。`enabled=false`、ストリーム切断、端末移動で観測と未配送の通知が失効する。画面フレームは長辺1280ピクセル、512 KiB以内のJPEGとする。「目」のモデルが報告を選んだ観測と `WatchMatch` が親ターンを起こす。観測要約は対象ターンの動的文脈に入り、「頭」が返答に使うか判断する。購読 ID のない旧形式は従来の受動的な要約として扱う。
 
 ### 身体表現（体）
 
@@ -162,11 +164,13 @@ message Snapshot {
 message SubscribeRequest {
   string client_id = 1;
   optional Cursor cursor = 2;
+  bool include_diagnostics = 3; // 目・手・頭の運用イベントを追加する
 }
 
 message Notification {
   Cursor cursor = 1;
   string kind = 2;
+  string emitted_at = 23; // 時系列表示用のRFC 3339日時。対象イベントのみ。
   optional string client_id = 17;     // 特定クライアント宛て通知の場合（省略時は全端末同報）
   optional string companion_id = 18;  // コンパニオン関連通知の場合
   oneof event {
@@ -386,6 +390,18 @@ message TurnEvent {
   string turn_id = 2;
   TurnStatus status = 3;
   optional Failure failure = 4;
+  optional EyeReportResult eye_report = 5;
+}
+message EyeReportResult {
+  enum Disposition {
+    DISPOSITION_UNSPECIFIED = 0; // 中断・失敗時はターンの status を使用
+    DISPOSITION_REPLIED = 1;
+    DISPOSITION_WATCHED = 2;
+    DISPOSITION_NO_REPLY = 3;
+  }
+  string report_id = 1;
+  Disposition disposition = 2;
+  optional string reply = 3;
 }
 message HistoryRequest {
   string companion_id = 1;
@@ -724,6 +740,11 @@ message TranscriptionEvent {
 message SubscribeAudioRequest {
   string client_id = 1;
 }
+// 接続確認用の読み上げ。登録済みのTTSで合成し、購読中のクライアントへ流す。
+message SpeakRequest {
+  string client_id = 1;
+  string text = 2;
+}
 message AudioOutputEvent {
   oneof event {
     AudioChunkEnvelope chunk = 1;
@@ -826,6 +847,7 @@ message DeviceOperation {
   string subscription_id = 4;
   string client_id = 5;             // 受付時に束縛した対象クライアント
   optional string work_id = 7;      // 手からの操作の場合のWorkSession
+  optional string run_id = 8;       // Computer Use を発行した実行中の Run
 }
 message DeviceReady { string subscription_id = 1; }
 message DeviceEvent {
@@ -861,7 +883,24 @@ message PerceptionEvent {
     ActiveWindowChanged active_window = 3;
     UserActivityState user_activity = 4;
     PerceptionSummary perception_summary = 5;
+    ScreenFrame screen_frame = 6;
+    WatchMatch watch_match = 7;
+    bool enabled = 8;
   }
+  string subscription_id = 9; // DeviceReady の購読 ID。旧形式では空。
+}
+
+message ScreenFrame { bytes jpeg = 1; }
+
+enum WatchTransition {
+  WATCH_TRANSITION_UNSPECIFIED = 0;
+  WATCH_TRANSITION_FOCUS = 1;
+  WATCH_TRANSITION_BLUR = 2;
+  WATCH_TRANSITION_TITLE_CHANGE = 3;
+}
+message WatchMatch {
+  ActiveWindowChanged window = 1;
+  WatchTransition transition = 2;
 }
 
 message ActiveWindowChanged {
@@ -885,6 +924,7 @@ message PerceptionSummary {
 service HostService {
   rpc GetSnapshot(Empty) returns (Snapshot);
   rpc Subscribe(SubscribeRequest) returns (stream Notification);
+  rpc GetPerceptionFrame(Id) returns (ScreenFrame);
   rpc ListCompanions(Empty) returns (Companions);
   rpc GetCompanion(Id) returns (Companion);
   rpc CreateCompanion(CreateCompanionRequest) returns (Companion);
@@ -935,6 +975,8 @@ service WorkService {
 service VoiceService {
   rpc StreamAudioInput(stream AudioInputChunk) returns (stream TranscriptionEvent); // HTTP/2
   rpc SubscribeAudioOutput(SubscribeAudioRequest) returns (stream AudioOutputEvent);
+  // 音声合成の確認用。会話の文脈・発話権には触れず、合成できなければ失敗を返す。
+  rpc Speak(SpeakRequest) returns (Empty);
 }
 
 service ClientService {

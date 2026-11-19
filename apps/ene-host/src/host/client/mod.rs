@@ -5,6 +5,8 @@ use super::error::{Failure, HostError, Result};
 use super::json;
 use serde::{Deserialize, Serialize};
 
+pub(crate) const WORKSPACE_CAPABILITY_PREFIX: &str = "work.";
+
 /// Tools the host itself owns. A client capability may not shadow one.
 pub(crate) const BUILTIN_TOOLS: &[&str] = &[
     "mind_recall",
@@ -20,6 +22,7 @@ pub(crate) const BUILTIN_TOOLS: &[&str] = &[
     "schedule_list",
     "schedule_cancel",
     "report",
+    super::web_search::NAME,
 ];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +296,7 @@ fn summarise(input: &serde_json::Value) -> String {
 // for the parent while it is granted and the client is active; every
 // operation is still gated by `permission::gate` and dispatched to the client
 // as a `DeviceOperation`.
+pub(crate) mod computer;
 pub(crate) mod device;
 pub(crate) mod dynamic;
 
@@ -393,19 +397,26 @@ impl Plugin for ClientPlugin {
             .unwrap_or_default();
         app.add_open_tool::<DeviceRequestArgs, _>(
             "device_request",
-            "Run a capability the active client declared. The host binds the target client. \
-             The validated result arrives in a later model call.",
+            "Run a listed capability on the bound client. Use its declared JSON input schema. \
+             The tool waits for the client's validated result.",
             ToolOptions::default(),
             device::on_device_request,
+        )
+        .add_systems(
+            AgentPass,
+            device::describe_device_request.in_set(PrepareSystems::Edit),
         )
         .insert_resource(dynamic::CapabilityCalls::new(wake))
         .init_resource::<CapabilityPolicy>()
         .init_resource::<CapabilityTools>()
+        .init_resource::<computer::ComputerUse>()
+        .init_resource::<super::eyes::Eyes>()
         .add_systems(
             Update,
             (
                 dynamic::drain.after(AgentLoop),
                 dynamic::refresh.before(AgentLoop),
+                super::eyes::poll.after(AgentLoop),
             ),
         );
     }
@@ -435,6 +446,15 @@ fn declarations(
 ) -> Result<Vec<CapabilitySpec>> {
     let specs: Vec<CapabilitySpec> = specs.iter().map(wire::capability_spec_from).collect();
     super::client::validate_declarations(capabilities, &specs)?;
+    if capabilities.iter().any(|name| name == w::COMPUTER_USE)
+        && !specs
+            .iter()
+            .any(|spec| spec.name == w::COMPUTER_USE && spec.tool_name.is_empty())
+    {
+        return Err(HostError::Invalid(
+            ("computer.use requires a schema and is only available through device_request").into(),
+        ));
+    }
     Ok(specs)
 }
 
@@ -443,6 +463,9 @@ fn publish(world: &mut World, client: &Client) -> Result<w::Client> {
     let connected = world.resource::<DeviceHub>().connected(&client.id);
     let view = wire::client(client, connected, Vec::new());
     dynamic::sync_tools(world)?;
+    if !client.is_granted(w::COMPUTER_USE) {
+        computer::invalidate_client(world, &client.id, None);
+    }
     notify_client(world, &view);
     Ok(view)
 }
@@ -566,6 +589,7 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
             .resource_mut::<Perception>()
             .events
             .remove(&request.companion_id);
+        super::eyes::clear(world, &request.companion_id);
         // The old client keeps its stream but is no longer the active one.
         if let Some(old) = store.client(&old_client)? {
             let hub = world.resource::<DeviceHub>();
@@ -583,12 +607,11 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
     Ok(activation)
 }
 
-/// Projects a perception event into the companion's dynamic tail. An event
-/// from a client that is not the active one is discarded.
+/// Routes live observations to the eyes and supports legacy passive summaries.
 pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) -> Result<()> {
     let store = world.resource::<Store>().clone();
     super::db::validate_id(&event.client_id)?;
-    store
+    let client = store
         .client(&event.client_id)?
         .ok_or_else(|| HostError::NotFound(("client not found").into()))?;
     let Some(companion_id) = store.activation_for_client(&event.client_id)? else {
@@ -596,6 +619,16 @@ pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) ->
         // act on. Not an error: the event is simply discarded.
         return Ok(());
     };
+    if !event.subscription_id.is_empty() {
+        if matches!(
+            &event.event,
+            Some(w::perception_event::Event::WatchMatch(_))
+        ) && !client.is_granted("eye.watch")
+        {
+            return Ok(());
+        }
+        return super::eyes::report(world, companion_id, event);
+    }
     let Some(summary) = perception_summary(&event) else {
         return Ok(());
     };
@@ -627,6 +660,7 @@ fn perception_summary(event: &w::PerceptionEvent) -> Option<String> {
             }
             summary.summary.clone()
         }
+        _ => return None,
     };
     Some(super::db::truncate(&summary, 1_000))
 }
@@ -635,13 +669,7 @@ fn perception_summary(event: &w::PerceptionEvent) -> Option<String> {
 /// Capability tools are added by `dynamic::sync_tools`; a work agent uses its
 /// own `ToolAccess::Only`.
 pub(crate) fn parent_tool_access() -> rig_ecs::prelude::ToolAccess {
-    rig_ecs::prelude::ToolAccess::Only(
-        BUILTIN_TOOLS
-            .iter()
-            .filter(|name| **name != "report")
-            .map(|name| (*name).to_owned())
-            .collect(),
-    )
+    rig_ecs::prelude::ToolAccess::Only(dynamic::parent_names(&[]))
 }
 
 #[cfg(test)]

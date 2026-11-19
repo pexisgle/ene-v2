@@ -30,8 +30,9 @@ just run-desktop
 | `ENE_DESKTOP_CLIENT_ID` | ホストに登録するクライアントID（既定 `desktop`）。再起動しても同じIDを使う |
 | `ENE_DESKTOP_CLIENT_NAME` | ホストの一覧に出す表示名（既定 `Desktop`） |
 | `ENE_DESKTOP_RENDERER` | `ene-avatar` の実行ファイル。未設定なら描画なしで動く |
-| `ENE_DESKTOP_MODEL` | 表示するVRMモデル。未設定なら `just fetch-assets` が置く既定モデル |
-| `ENE_DESKTOP_OPEN_SETTINGS` | 起動時に `SettingsStudio` を同時に開く指定（`1` / `companions` / `connections` / `device`） |
+| `ENE_DESKTOP_MODEL` | 表示するVRMモデル。未設定なら同梱の `assets/ENE.vrm` を使い、見つからなければ `just fetch-assets` で取得したモデルを使う |
+| `ENE_DESKTOP_OPEN_SETTINGS` | 起動時に `SettingsStudio` を同時に開く指定（`1` / `companions` / `connections` / `voice` / `device`） |
+| `ENE_DESKTOP_WORKSPACE` | 「手」が操作する既存の作業フォルダー。未設定ならOSのデスクトップフォルダー |
 
 ## 画面
 
@@ -43,6 +44,7 @@ just run-desktop
 | 承認カード | 承認待ちはポッドのメイン吹き出しに最優先で表示。「「…」の実行を許可しますか？」の確認と、許可・常に許可・拒否の3操作 |
 | コンパニオン (`Companions`) | 3項目の簡易新規作成（名前・人格の核・話し方）、62px行リスト、ヘアライン区切りの基本編集＋声（話者ID）設定、`MindProfile`（側面・セリフ例・背景・表現のクセ）の折りたたみ開示 |
 | 接続 (`Connections`) | LLM / TTS / STT / 埋め込み / MCP / ACP の接続追加と62px単一行一覧、マスク済み資格情報・疎通確認・`options_schema` 編集・MCPツール検索フィルタ、および折りたたみ開示による7役割モデル割当の詳細設定 |
+| 音声テスト (`Voice`) | マイク・マイク入力レベル・VAD（声の検出）・ホストへの送信量・音声認識の接続を段ごとに表示し、確定した認識文を並べる。読み上げたい文を入力すると `VoiceService.Speak` で実際に合成して鳴らす |
 | この端末 (`Device`) | ホスト接続状態・対話の担当端末切替・マイク/スピーカー入力出力トグル・3Dアバターの表示サイズ（75〜150%）と中央戻し・公開機能タグ・許可ルールの一覧/手動追加・削除 |
 
 承認を独立したタブにしないのは、承認カードをコンパニオンの窓口に集約し、内部のエージェントをユーザーに見せない、という設計に合わせるためです。
@@ -52,7 +54,7 @@ just run-desktop
 - `main.rs`: 起動、ディスカバリのパス決定、Tokioランタイムとセッションスレッド、GPUIアプリ（埋め込みSVGアセット登録・透過 `CompanionPod` 起動・`ENE_DESKTOP_OPEN_SETTINGS` 対応）、終了時の順序。
 - `session.rs`: 接続、登録、有効化、DeviceStream、音声ストリーム、再生報告、知覚、再接続。ローカル資源（アバター子プロセス、音声デバイス、感知器）の所有者。
 - `state.rs`: ウィンドウが表示する状態と、通知を表示へ畳み込む規則。ホスト状態の表示用コピーはここに1つだけ置く。
-- `ui/`: ウィンドウ群。`mod.rs` が共有エンティティ `Hub` とRPC発行、`pod.rs` が `CompanionPod`、`studio.rs` が `SettingsStudio` シェル、`companions.rs`・`connections.rs`・`device.rs` が各設定章、`theme.rs`・`icons.rs`・`widgets.rs` がストロベリーミルク・カプセルのトークン・埋め込みSVGアイコン・共通UI部品。
+- `ui/`: ウィンドウ群。`mod.rs` が共有エンティティ `Hub` とRPC発行、`pod.rs` が `CompanionPod`、`studio.rs` が `SettingsStudio` シェル、`companions.rs`・`connections.rs`・`voice.rs`・`device.rs` が各設定章、`theme.rs`・`icons.rs`・`widgets.rs` がストロベリーミルク・カプセルのトークン・埋め込みSVGアイコン・共通UI部品。
 - `input.rs`: GPUIの `EntityInputHandler` による入力欄。日本語IMEの変換中は送信しません。
 - `capabilities.rs`: この環境で実行できる能力だけを宣言する表。
 - `avatar.rs`: `ene-avatar` の起動とJSON Lines。`set` は設定全体の置換なので、直前の設定を保持して変更分だけ差し替えます。
@@ -75,11 +77,16 @@ just run-desktop
 - 音声コールバックはRPC・ファイルI/O・待機構造を呼びません。再生側はサンプルを取り出して文の進捗を数えるだけ、録音側は事前に確保したリングへ `try_lock` で写すだけです。変換はセッションスレッドで行います。
 - 同時に再生する発話は1つです。新しい発話のチャンクは旧発話を捨て、`FlushControl` の世代以下を破棄します。同じ文の複数チャンクは `sequence_no` が同じでも重複ではないため捨てません。
 - クライアントは再生完了をホストへ報告しません。受信した音声の再生順序と再生完了はクライアントの再生キューに閉じ、`UtteranceFinished` は発話の最後の音声イベントとして受け取るだけです。
-- エコーキャンセルは使えないため、マイクの音量による自動バージョインは行いません。停止は `Esc` の明示操作だけです。再生中に収録した音声には `is_companion_speaking` を立て、ホストが承認の判定から除外できるようにします。
+- エコーキャンセルは使えないため、スピーカー再生中のマイク音声は破棄し、収録中の発話はその時点で区切ります。再生の停止にはボタンまたは `Esc` を使います。
+- Earshotが16kHzの入力で声を検出します。ホストへは検出直前の最大約560msと、発話終了を判断するまでの約600msを含めて24kHzのPCMを送ります。ホストは200ms以上（24kHz時）の収録に対して40ms区間ごとの音量を確認し、全区間が判定しきい値を下回ると認識を省略します。
 
 ## アバターと知覚
 
+- 設定の「この端末」から「目」をオンにできます（初期値はオフ）。Windowsでは操作中のモニターを20秒ごとに撮影し、画像入力対応モデルで評価できます。ウィンドウや活動の情報と画像は、担当コンパニオンの「目」のモデル（未指定時は会話モデル）の提供元で処理されます。
+
 - `ene-avatar` は別プロセスで、標準入出力のJSON Linesだけを使います。標準出力は常に読み続け、標準エラーはログとして扱い、応答とは混同しません。終了時は `quit` を送って待ちます。
+- 既定の ene は `assets/vrma` の `idle-breath` で待機します。`body_motion` で `nod`（相づち）、`tilt_head`（首をかしげて考える）、`stretch`（伸び）、`wave`（手振り）、`ask_question`（聞き返し）、`task_complete`（完了）、`apologize`（謝る）を指定すると、1回再生して待機に戻ります。
+- 待機中の仕草には `look_around`（見回す）、`adjust_posture`（姿勢を整える）、`sleepy_nod`（うとうとする）も使えます。「目」が有効なら、離席の始まりや長引いた離席をきっかけに、コンパニオンが無言で仕草を選ぶことがあります。
 - 知覚は Windows に加え、Linux（Wayland の `wlr-foreign-toplevel-management`＋`ext-idle-notify-v1`、または X11 の `_NET_ACTIVE_WINDOW`＋ScreenSaver）でも有効です。対応しない環境（GNOME/KDE 等）では `eye.watch` を宣言せず、取得できないウィンドウ情報を推測で補いません。
 
 ## 宣言する能力
@@ -87,6 +94,19 @@ just run-desktop
 実行できるものだけを宣言します。描画プロセスかモデルが無ければ `body.motion` は宣言せず、モーションのアセットが無いプリセットは入力スキーマのenumから外します。`body.motion` の入力は `{motion, expression?}` で、表情のenumには `neutral`（消す）を含みます。`granted_capabilities` は決して送らず、ホストの判断だけを表示します。
 
 検証スクリプトは `verification/avatar-integration`（描画プロセスの契約）と `verification/desktop-generation-binding`（世代束縛の全数検査）。
+
+### 「手」の作業ツール
+
+「手」はホストから渡される `device_request` で `work.read`、`work.write`、`work.edit`、`work.grep`、`work.find`、`work.ls` を呼び出せます。ファイルパスは作業フォルダーからの相対パスです。作業フォルダーを開けない端末はこれらの能力を宣言しません。読み取りはUTF-8テキストとPNG・JPEG・GIF・WebPに対応し、画像の利用には画像入力対応モデルが必要です。
+
+Windows では `work.powershell`、Linux では `PATH` に Bash がある場合に `work.bash` を宣言します。コマンドは作業フォルダーを開始位置とし、端末ユーザーのOS権限で実行されます。ファイル操作とコマンド実行はホストの承認ポリシーを経由します。`just run` 以外でホストを起動する場合は `ENE_HOST_ALLOWED_CAPABILITIES` の許可対象に `work.*` を含めます。
+
+Windows の「この端末」で「手に画面操作を許可」をオンにすると、画像入力とツール呼び出しに対応する内蔵の「手」が `computer.use` を使えます。前面ウィンドウのあるモニターを撮影し、クリック、縦スクロール、文字入力、基本キー操作を行います。各入力には同じ Run の最新の画像が必要です。画面や人の入力が変化した場合は再撮影します。ene の画面への入力は拒否します。
+
+端末の許可は再起動後も続きます。独自にホストを起動する場合は `ENE_HOST_ALLOWED_CAPABILITIES` に `computer.use` を追加してください。ホストの拒否・毎回確認ルールは優先されます。スクリーンショットは作業中にモデルの提供元へ送信され、ene の永続履歴には画像の寸法と識別子が残ります。画面上のクリックの意味はホストの許可ルールから判定できないため、通常アプリ全般の操作を任せられる端末で有効にしてください。
+
+MCPツールは、設定の「接続」で登録して有効にした MCP サーバーから取得します。「接続確認」で検出した名前を確認でき、許可したツールが「手」に公開されます。
+
 ## 音声合成（VOICEVOX）
 
 設定の「音声読み上げ」から「VOICEVOX を追加」を押すと、ローカルの VOICEVOX ENGINE（`127.0.0.1:50021`、話者3）が TTS 接続として登録されます。エンジンは別途起動してください。

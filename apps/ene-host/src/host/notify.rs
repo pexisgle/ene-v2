@@ -13,6 +13,7 @@ use uuid::Uuid;
 pub(crate) const CAPACITY: usize = 256;
 /// How many flushed notifications are kept for a resuming cursor.
 pub(crate) const REPLAY: usize = 512;
+pub(crate) const DIAGNOSTIC: &str = "diagnostic";
 
 #[derive(Resource)]
 pub(crate) struct Notifier {
@@ -53,11 +54,48 @@ impl Notifier {
         client: Option<&str>,
         event: w::notification::Event,
     ) {
+        let kind = kind_of(&event);
         self.outbox.push(w::Notification {
-            kind: kind_of(&event).into(),
+            kind: kind.into(),
+            emitted_at: if matches!(kind, "turn" | "work" | "approval") {
+                super::db::now()
+            } else {
+                String::new()
+            },
             companion_id: companion.map(ToOwned::to_owned),
             client_id: client.map(ToOwned::to_owned),
             event: Some(event),
+            ..Default::default()
+        });
+    }
+
+    /// Adds operational metadata to opt-in subscriptions.
+    pub(crate) fn diagnostic(
+        &mut self,
+        companion: &str,
+        role: &str,
+        action: &str,
+        detail: serde_json::Value,
+    ) {
+        self.outbox.push(w::Notification {
+            kind: DIAGNOSTIC.into(),
+            emitted_at: super::db::now(),
+            companion_id: Some(companion.to_owned()),
+            event: Some(w::notification::Event::Generic(Box::new(w::HostEvent {
+                kind: DIAGNOSTIC.into(),
+                payload: Some(w::JsonDocument {
+                    schema: "ene.diagnostic.v1".into(),
+                    json: json!({
+                        "role": role,
+                        "action": action,
+                        "detail": detail,
+                    })
+                    .to_string(),
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            }))),
             ..Default::default()
         });
     }

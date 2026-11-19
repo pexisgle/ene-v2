@@ -24,9 +24,10 @@ use crate::{
     avatar::{self, Avatar},
     capabilities,
     host::{Connect, Discovery, Host},
-    perception::{self, Report, Sensor, Watch},
+    perception::{self, NotifyOn, Report, Sensor, Watch},
     state::{Device, Devices, Link},
     update::{Command, Update},
+    work_tools::{self, Workspace},
 };
 use buffa::view::MessageView;
 use ene_rpc as w;
@@ -41,7 +42,8 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 const FIRST_RETRY: Duration = Duration::from_secs(1);
 const MAX_RETRY: Duration = Duration::from_secs(30);
 /// How often the client samples the OS for perception.
-const SAMPLE: Duration = Duration::from_secs(20);
+const SAMPLE: Duration = Duration::from_secs(1);
+const SCREEN_SAMPLE: Duration = Duration::from_secs(20);
 /// How often captured audio goes to the host.
 const CAPTURE: Duration = Duration::from_millis(100);
 /// How often the playback amplitude goes to the renderer (about 60 Hz).
@@ -122,10 +124,16 @@ pub struct Session {
     player: Option<Player>,
     microphone: Option<Microphone>,
     sensor: Sensor,
+    eyes_enabled: bool,
+    #[cfg(windows)]
+    computer_enabled: bool,
+    #[cfg(windows)]
+    computer_frame: Option<crate::computer::Frame>,
     /// The companion the operator asked to serve while a request was in flight.
     pending: Option<String>,
     /// Capabilities this machine can honour, declared at registration.
     specs: Vec<w::ClientCapabilitySpec>,
+    workspace: Option<Arc<Workspace>>,
     /// The last amplitude sent to the renderer, so silence sends nothing new.
     last_lip: Option<f32>,
     /// Software mute for the microphone.
@@ -142,7 +150,7 @@ pub struct Session {
 #[derive(Debug, PartialEq)]
 struct MotionPlan {
     motion: String,
-    /// The clip to show. `idle` is a state, so it has none.
+    /// The clip to show. `idle` can fall back to the rest pose.
     clip: Option<std::path::PathBuf>,
     /// The face to hold, `neutral` to clear it, or nothing to leave it alone.
     expression: Option<String>,
@@ -154,7 +162,7 @@ impl MotionPlan {
             .get("motion")
             .and_then(serde_json::Value::as_str)
             .ok_or("body.motion requires a `motion` name")?;
-        if !capabilities::MOTIONS.contains(&motion) {
+        if !avatar::MOTIONS.iter().any(|(preset, _)| *preset == motion) {
             return Err(format!("`{motion}` is not a declared motion preset"));
         }
         let expression = input
@@ -166,8 +174,6 @@ impl MotionPlan {
         {
             return Err(format!("`{name}` is not a declared expression"));
         }
-        // `idle` is a state with no clip. Any other preset without an asset is
-        // one this machine cannot show, so it must not report success.
         let clip = avatar::motion(motion);
         if clip.is_none() && motion != "idle" {
             return Err(format!(
@@ -190,9 +196,13 @@ impl Session {
         updates: UnboundedSender<Update>,
         commands: UnboundedReceiver<Command>,
     ) -> Self {
-        let specs =
+        let mut specs =
             capabilities::Declaration::probe(options.renderer.as_deref(), options.model.as_deref())
                 .specs();
+        let workspace = Workspace::probe().map(Arc::new);
+        if let Some(workspace) = &workspace {
+            specs.extend(workspace.specs());
+        }
         Self {
             path,
             options,
@@ -207,6 +217,11 @@ impl Session {
             player: None,
             microphone: None,
             sensor: Sensor::default(),
+            eyes_enabled: perception::enabled(),
+            #[cfg(windows)]
+            computer_enabled: perception::preference_enabled(crate::computer::PREFERENCE),
+            #[cfg(windows)]
+            computer_frame: None,
             last_lip: None,
             mic_muted: false,
             output_muted: false,
@@ -214,11 +229,17 @@ impl Session {
             last_ui_audio: (0., 0., false),
             pending: None,
             specs,
+            workspace,
         }
     }
 
     /// Serves until the window closes or the session is asked to quit.
     pub async fn run(mut self) {
+        let _ = self.updates.send(Update::EyesEnabled(self.eyes_enabled));
+        #[cfg(windows)]
+        let _ = self
+            .updates
+            .send(Update::ComputerUseEnabled(self.computer_enabled));
         let mut retry = FIRST_RETRY;
         loop {
             match self.attempt().await {
@@ -241,8 +262,12 @@ impl Session {
                     tokio::select! {
                         () = tokio::time::sleep(retry_in) => {}
                         command = self.commands.recv() => {
-                            if matches!(command, Some(Command::Quit) | None) {
-                                break;
+                            match command {
+                                Some(Command::SetEyesEnabled(enabled)) => self.set_eyes_enabled(enabled),
+                                #[cfg(windows)]
+                                Some(Command::SetComputerUseEnabled(enabled)) => self.set_computer_use_enabled(enabled),
+                                Some(Command::Quit) | None => break,
+                                _ => {}
                             }
                         }
                     }
@@ -304,8 +329,12 @@ impl Session {
             },
             Err(error) => return self.classify(error),
         };
+        let previous = self.binding.clone();
         if let Err(outcome) = self.bind(&host, &snapshot).await {
             return outcome;
+        }
+        if previous != self.binding {
+            self.sensor = Sensor::default();
         }
         self.report(Link::Live {
             version: snapshot.server_version.clone(),
@@ -335,13 +364,30 @@ impl Session {
                     .map(|client| client.revision)
             })
             .unwrap_or(0);
+        let computer_spec = {
+            #[cfg(windows)]
+            {
+                self.computer_enabled.then(crate::computer::spec)
+            }
+            #[cfg(not(windows))]
+            {
+                None
+            }
+        };
+        let specs: Vec<_> = self
+            .specs
+            .iter()
+            .filter(|spec| self.eyes_enabled || spec.name != "eye.watch")
+            .cloned()
+            .chain(computer_spec)
+            .collect();
         host.client
             .register_client(w::RegisterClientRequest {
                 id: self.options.id.clone(),
                 name: self.options.name.clone(),
                 platform: self.options.platform.clone(),
-                capabilities: capabilities::names(&self.specs),
-                capability_specs: self.specs.clone(),
+                capabilities: capabilities::names(&specs),
+                capability_specs: specs,
                 expected_revision,
                 ..Default::default()
             })
@@ -456,6 +502,12 @@ impl Session {
 
     /// Serves the device stream, audio, the microphone and the subscription.
     async fn serve(&mut self, host: Host) -> Outcome {
+        self.subscription.clear();
+        #[cfg(windows)]
+        {
+            self.computer_frame = None;
+        }
+        let _ = self.updates.send(Update::EyesStatus(None));
         if self.options.renderer.is_some() && self.avatar.is_none() {
             self.open_avatar().await;
         }
@@ -493,26 +545,34 @@ impl Session {
             None => None,
         };
         let (mut mic_send, mut mic_recv) = match self.binding.clone() {
-            Some(_) => match host.voice.stream_audio_input().await {
-                Ok(stream) => {
-                    self.open_microphone();
-                    let (send, recv) = stream.into_split();
-                    (Some(send), Some(recv))
+            Some(_) => {
+                self.open_microphone().await;
+                match host.voice.stream_audio_input().await {
+                    Ok(stream) => {
+                        let (send, recv) = stream.into_split();
+                        (Some(send), Some(recv))
+                    }
+                    Err(error) => {
+                        tracing::info!("no microphone stream: {error}");
+                        (None, None)
+                    }
                 }
-                Err(error) => {
-                    tracing::info!("no microphone stream: {error}");
-                    (None, None)
-                }
-            },
+            }
             None => (None, None),
         };
+        let mut mic_retry_at: Option<tokio::time::Instant> = None;
+        let mut mic_error_reported = false;
         let mut subscription = match self.subscribe(&host).await {
             Ok(stream) => stream,
             Err(outcome) => return outcome,
         };
         let mut sample = interval(SAMPLE);
+        let mut screen_at = tokio::time::Instant::now();
+        let mut eyes_open = false;
+        let mut observations = tokio::task::JoinSet::new();
         let mut capture = interval(CAPTURE);
         let mut lip = interval(LIP);
+        let mut work = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 frame = device.message() => match frame {
@@ -520,7 +580,7 @@ impl Session {
                         let event = message.to_owned_message();
                         {
                             if let Some(event) = event.event {
-                                match self.device_event(&host, event).await {
+                                match self.device_event(&host, event, &mut work).await {
                                     Step::Continue => {}
                                     Step::Restart => return Outcome::Resync("the binding changed".into()),
                                     Step::Stop => return Outcome::Closed,
@@ -530,6 +590,12 @@ impl Session {
                     }
                     Ok(None) => return Outcome::Dropped("the host closed the device stream".into()),
                     Err(error) => return self.classify(error),
+                },
+                Some(result) = work.join_next(), if !work.is_empty() => {
+                    match result {
+                        Ok(result) => Self::report_operation(&host, result).await,
+                        Err(error) => tracing::warn!("workspace operation did not finish: {error}"),
+                    }
                 },
                 frame = audio_message(&mut output) => match frame {
                     Some(Ok(event)) => self.play(event).await,
@@ -549,6 +615,7 @@ impl Session {
                 },
                 frame = transcription_message(&mut mic_recv) => match frame {
                     Some(Ok(event)) => {
+                        mic_error_reported = false;
                         let _ = self.updates.send(Update::Transcription {
                             text: event.text,
                             is_final: event.is_final,
@@ -556,32 +623,91 @@ impl Session {
                         });
                     }
                     Some(Err(error)) => {
+                        let _ = self.updates.send(Update::Transcription {
+                            text: String::new(),
+                            is_final: true,
+                            is_speaking: false,
+                        });
                         if persistent(&error) {
                             tracing::info!("the host has no speech recognition: {error}");
+                            mic_retry_at = None;
                         } else {
                             tracing::warn!("the transcription stream ended: {error}");
+                            if !mic_error_reported {
+                                mic_error_reported = true;
+                                let _ = self.updates.send(Update::Failed {
+                                    context: "音声認識",
+                                    message: error.to_string(),
+                                });
+                            }
+                            if self.binding.is_some() && self.microphone.is_some() {
+                                mic_retry_at = Some(tokio::time::Instant::now() + Duration::from_secs(5));
+                            }
                         }
                         mic_recv = None;
                         mic_send = None;
                     }
                     None => {
+                        let _ = self.updates.send(Update::Transcription {
+                            text: String::new(),
+                            is_final: true,
+                            is_speaking: false,
+                        });
+                        if self.binding.is_some() && self.microphone.is_some() {
+                            mic_retry_at = Some(tokio::time::Instant::now() + Duration::from_secs(5));
+                        }
                         mic_recv = None;
                         mic_send = None;
                     }
                 },
-                Some(chunk) = capture_tick(&mut capture, &mut self.microphone, &self.binding, &self.options.id, self.player.as_ref().is_some_and(|player| player.playing() && !player.is_muted())) => {
-                    if let Some(stream) = mic_send.as_mut()
-                        && let Err(error) = stream.send(chunk).await
-                    {
-                        tracing::info!("the microphone stream closed: {error}");
-                        mic_send = None;
+                () = retry_wait(mic_retry_at) => {
+                    mic_retry_at = None;
+                    if self.binding.is_some() && mic_recv.is_none() {
+                        match host.voice.stream_audio_input().await {
+                            Ok(stream) => {
+                                let (send, recv) = stream.into_split();
+                                mic_send = Some(send);
+                                mic_recv = Some(recv);
+                                mic_error_reported = false;
+                            }
+                            Err(error) => {
+                                if !persistent(&error) {
+                                    mic_retry_at = Some(tokio::time::Instant::now() + Duration::from_secs(10));
+                                }
+                            }
+                        }
                     }
+                },
+                _ = capture.tick() => {
+                    let speaking = self.player.as_ref().is_some_and(|player| player.playing() && !player.is_muted());
+                    let CaptureTick { chunks, state } =
+                        capture_tick(&mut self.microphone, &self.binding, &self.options.id, speaking);
+                    let mut sent = 0;
+                    if let Some(stream) = mic_send.as_mut() {
+                        for chunk in chunks {
+                            let bytes = chunk.pcm_data.len();
+                            if let Err(error) = stream.send(chunk).await {
+                                tracing::info!("the microphone stream closed: {error}");
+                                mic_send = None;
+                                break;
+                            }
+                            sent += bytes;
+                        }
+                    }
+                    let _ = self.updates.send(Update::Capture {
+                        level: state.level,
+                        open: state.open,
+                        sent,
+                    });
                 }
                 _ = lip.tick() => {
                     self.drain_renderer();
                     self.pump_lip();
                 }
-                _ = sample.tick() => self.sample(&host).await,
+                _ = sample.tick(), if observations.is_empty() => {
+                    self.sample(&host, &mut screen_at, &mut eyes_open, &mut observations);
+                }
+                _ = observations.join_next(), if !observations.is_empty() => {}
                 frame = subscription.message() => match frame {
                     Ok(Some(message)) => {
                         let notification = message.to_owned_message();
@@ -594,10 +720,19 @@ impl Session {
                     Ok(None) => return Outcome::Resync("the host closed the subscription".into()),
                     Err(error) => return self.classify(error),
                 },
-                Some(command) = self.commands.recv() => match self.command(&host, command).await {
-                    Step::Continue => {}
-                    Step::Restart => return Outcome::Resync("the served companion changed".into()),
-                    Step::Stop => return Outcome::Closed,
+                Some(command) = self.commands.recv() => {
+                    if matches!(command, Command::SetEyesEnabled(false)) {
+                        observations.abort_all();
+                        if eyes_open {
+                            let event = self.perception_event(w::perception_event::Event::Enabled(false));
+                            let _ = tokio::time::timeout(Duration::from_secs(1), host.client.report_perception(event)).await;
+                        }
+                    }
+                    match self.command(&host, command).await {
+                        Step::Continue => {}
+                        Step::Restart => return Outcome::Resync("the session settings changed".into()),
+                        Step::Stop => return Outcome::Closed,
+                    }
                 },
                 else => return Outcome::Closed,
             }
@@ -630,51 +765,160 @@ impl Session {
     }
 
     /// Handles one device event, executing only from the device stream.
-    async fn device_event(&mut self, host: &Host, event: w::device_event::Event) -> Step {
+    async fn device_event(
+        &mut self,
+        host: &Host,
+        event: w::device_event::Event,
+        work: &mut tokio::task::JoinSet<w::DeviceOperationResult>,
+    ) -> Step {
         match event {
             w::device_event::Event::Ready(ready) => {
                 self.subscription = ready.subscription_id;
                 Step::Continue
             }
             w::device_event::Event::Operation(operation) => {
-                let result = self.apply(&operation);
-                match host.client.complete_operation(result).await {
-                    Ok(response) => {
-                        // The host silently drops a stale result and returns the
-                        // stored state, so the returned status is the evidence of
-                        // whether the result landed.
-                        if let Ok(state) = response.view().to_owned_message()
-                            && state.status == w::DeviceOperationStatus::Uncertain
-                        {
-                            tracing::warn!(
-                                operation = %operation.operation_id,
-                                "the host could not confirm the operation result"
-                            );
+                let refusal = self.refusal(&operation);
+                #[cfg(windows)]
+                if operation.capability == w::COMPUTER_USE {
+                    let outcome = match refusal {
+                        Some(reason) => Err(reason),
+                        None => self.computer_operation(host, &operation).await,
+                    };
+                    let result = Self::operation_result(&self.options.id, &operation, outcome);
+                    Self::report_operation(host, result).await;
+                    return Step::Continue;
+                }
+                if operation.capability.starts_with(work_tools::PREFIX) {
+                    let workspace = self.workspace.clone();
+                    let request = (|| {
+                        if let Some(reason) = refusal {
+                            return Err(reason);
+                        }
+                        if operation.work_id.as_deref().is_none_or(str::is_empty) {
+                            return Err("workspace operations require a work session".into());
+                        }
+                        if work.len() >= 8 {
+                            return Err("the workspace is busy".into());
+                        }
+                        Ok((
+                            workspace.ok_or("no workspace is configured")?,
+                            Self::operation_input(&operation)?,
+                        ))
+                    })();
+                    match request {
+                        Ok((workspace, input)) => {
+                            let client_id = self.options.id.clone();
+                            work.spawn(async move {
+                                let output = workspace.execute(&operation.capability, input).await;
+                                Self::operation_result(&client_id, &operation, output)
+                            });
+                        }
+                        Err(reason) => {
+                            let result =
+                                Self::operation_result(&self.options.id, &operation, Err(reason));
+                            Self::report_operation(host, result).await;
                         }
                     }
-                    Err(error) => {
-                        // An unreported result stays pending and is resent. The
-                        // operation itself was applied, so the honest state is
-                        // "unknown to the host", not "not done".
-                        tracing::warn!("the operation result was not reported: {error}");
-                    }
+                } else {
+                    let outcome = match refusal {
+                        Some(reason) => Err(reason),
+                        None => self.execute(&operation),
+                    };
+                    let result = Self::operation_result(&self.options.id, &operation, outcome);
+                    Self::report_operation(host, result).await;
                 }
                 Step::Continue
             }
         }
     }
 
-    /// Applies one dispatched operation, after checking the binding it names.
-    fn apply(&mut self, operation: &w::DeviceOperation) -> w::DeviceOperationResult {
-        let outcome = match self.refusal(operation) {
-            Some(reason) => Err(reason),
-            None => self.execute(operation),
-        };
+    async fn report_operation(host: &Host, result: w::DeviceOperationResult) {
+        let operation_id = result.operation_id.clone();
+        match host.client.complete_operation(result).await {
+            Ok(response) => {
+                if let Ok(state) = response.view().to_owned_message()
+                    && state.status == w::DeviceOperationStatus::Uncertain
+                {
+                    tracing::warn!(operation = %operation_id, "the host could not confirm the operation result");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(operation = %operation_id, "the operation result was not reported: {error}")
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    async fn computer_operation(
+        &mut self,
+        host: &Host,
+        operation: &w::DeviceOperation,
+    ) -> Result<serde_json::Value, String> {
+        if !self.computer_enabled || self.subscription.is_empty() {
+            return Err("Computer Use is disabled or the device stream is not ready".into());
+        }
+        let work_id = operation
+            .work_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .ok_or("Computer Use requires a work session")?;
+        let run_id = operation
+            .run_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .ok_or("Computer Use requires a bound run")?;
+        let (work, state) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::try_join!(
+                host.work.get_work(w::WorkRequest {
+                    work_id: work_id.to_owned(),
+                    ..Default::default()
+                }),
+                host.client.get_operation(w::Id {
+                    id: operation.operation_id.clone(),
+                    ..Default::default()
+                }),
+            )
+        })
+        .await
+        .map_err(|_| "could not verify the active run in time")?
+        .map_err(|_| "could not verify the active run")?;
+        let work = work.view();
+        let session = work
+            .session
+            .as_option()
+            .ok_or("the work session is unavailable")?;
+        if session.client_id != self.options.id
+            || self
+                .binding
+                .as_ref()
+                .is_none_or(|binding| binding.companion_id != session.companion_id)
+            || !work
+                .runs
+                .iter()
+                .any(|run| run.run_id == run_id && run.state == w::RunStatus::Running)
+            || state.view().status != w::DeviceOperationStatus::Dispatched
+        {
+            return Err("the Computer Use operation is no longer active on this device".into());
+        }
+        let input = Self::operation_input(operation)?;
+        crate::computer::execute(
+            &mut self.computer_frame,
+            run_id,
+            input,
+            self.avatar.as_ref().map(Avatar::pid),
+        )
+        .await
+    }
+
+    fn operation_result(
+        client_id: &str,
+        operation: &w::DeviceOperation,
+        outcome: Result<serde_json::Value, String>,
+    ) -> w::DeviceOperationResult {
         match &outcome {
-            Ok(output) => tracing::info!(
+            Ok(_) => tracing::info!(
                 operation = %operation.operation_id,
                 capability = %operation.capability,
-                output = %output,
                 "device operation applied"
             ),
             Err(reason) => tracing::warn!(
@@ -690,14 +934,26 @@ impl Session {
                 false,
                 String::new(),
                 Some(w::Failure {
-                    code: "operation_failed".into(),
+                    code: {
+                        #[cfg(windows)]
+                        if operation.capability == w::COMPUTER_USE
+                            && reason == crate::computer::PARTIAL_INPUT
+                        {
+                            "operation_uncertain"
+                        } else {
+                            "operation_failed"
+                        }
+                        #[cfg(not(windows))]
+                        "operation_failed"
+                    }
+                    .into(),
                     message: reason,
                     ..Default::default()
                 }),
             ),
         };
         w::DeviceOperationResult {
-            client_id: self.options.id.clone(),
+            client_id: client_id.to_owned(),
             operation_id: operation.operation_id.clone(),
             success,
             output,
@@ -721,14 +977,18 @@ impl Session {
         .err()
     }
 
-    /// Runs one capability. An unknown name is refused rather than ignored.
-    fn execute(&mut self, operation: &w::DeviceOperation) -> Result<serde_json::Value, String> {
-        let input: serde_json::Value = if operation.input.trim().is_empty() {
-            serde_json::json!({})
+    fn operation_input(operation: &w::DeviceOperation) -> Result<serde_json::Value, String> {
+        if operation.input.trim().is_empty() {
+            Ok(serde_json::json!({}))
         } else {
             serde_json::from_str(&operation.input)
-                .map_err(|error| format!("the operation input is not JSON: {error}"))?
-        };
+                .map_err(|error| format!("the operation input is not JSON: {error}"))
+        }
+    }
+
+    /// Runs an avatar or perception capability on the session thread.
+    fn execute(&mut self, operation: &w::DeviceOperation) -> Result<serde_json::Value, String> {
+        let input = Self::operation_input(operation)?;
         match operation.capability.as_str() {
             "body.motion" => self.motion(&input),
             "eye.watch" => self.watch(&input),
@@ -748,18 +1008,20 @@ impl Session {
             .model
             .as_ref()
             .ok_or("no model is configured for the renderer")?;
-        let clip = plan.clip.or_else(|| avatar::motion("nod"));
-        avatar.show(&self.options.id, model, clip.as_deref())?;
+        if avatar.show(
+            &self.options.id,
+            model,
+            plan.clip.as_deref(),
+            plan.motion == "idle",
+        )? {
+            avatar.await_state(&self.options.id, Duration::from_secs(2))?;
+        }
         // A face is separate from the motion: `neutral` clears it, and the
         // renderer keeps it across later motion changes.
         if let Some(name) = &plan.expression {
             let face = (name != "neutral").then_some(name.as_str());
             avatar.expression(&self.options.id, face)?;
         }
-        // The reply only says the request was accepted; the state event says
-        // whether the model and clip loaded. A failure there is a failed
-        // operation, not a shown motion.
-        avatar.await_state(&self.options.id, Duration::from_secs(2))?;
         Ok(serde_json::json!({
             "applied": true,
             "motion": plan.motion,
@@ -804,6 +1066,9 @@ impl Session {
 
     /// Applies or clears a watch rule.
     fn watch(&mut self, input: &serde_json::Value) -> Result<serde_json::Value, String> {
+        if !self.eyes_enabled {
+            return Err("「目」はオフです".into());
+        }
         let watch = Watch::parse(input)?;
         let enabled = watch.enabled;
         self.sensor.apply(if enabled { Some(watch) } else { None });
@@ -831,7 +1096,7 @@ impl Session {
                         // old streams must not be reused for it.
                         self.binding = None;
                         self.stop_playback();
-                        self.sensor.apply(None);
+                        self.sensor = Sensor::default();
                         restart = true;
                     }
                 }
@@ -840,6 +1105,16 @@ impl Session {
                 if self.pending.as_deref() == Some(companion.id.as_str()) =>
             {
                 restart = true;
+            }
+            Some(w::notification::Event::Generic(event)) if event.kind == "perception_status" => {
+                if self.eyes_enabled
+                    && let Some(payload) = event.payload.as_option()
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload.json)
+                    && value["subscription_id"].as_str() == Some(self.subscription.as_str())
+                {
+                    let status = value["status"].as_str().map(str::to_owned);
+                    let _ = self.updates.send(Update::EyesStatus(status));
+                }
             }
             _ => {}
         }
@@ -854,7 +1129,7 @@ impl Session {
     }
 
     /// Handles one window command.
-    async fn command(&mut self, _host: &Host, command: Command) -> Step {
+    async fn command(&mut self, host: &Host, command: Command) -> Step {
         match command {
             Command::Serve(companion_id) => {
                 self.pending = Some(companion_id);
@@ -866,6 +1141,15 @@ impl Session {
                 Step::Continue
             }
             Command::Refresh => Step::Restart,
+            Command::SetEyesEnabled(enabled) => {
+                self.set_eyes_enabled(enabled);
+                Step::Restart
+            }
+            #[cfg(windows)]
+            Command::SetComputerUseEnabled(enabled) => {
+                self.set_computer_use_enabled(enabled);
+                Step::Restart
+            }
             Command::SetMicMuted(muted) => {
                 self.mic_muted = muted;
                 if let Some(microphone) = self.microphone.as_ref() {
@@ -911,6 +1195,31 @@ impl Session {
                 }
                 Step::Continue
             }
+            Command::Speak(text) => {
+                let host = host.clone();
+                let updates = self.updates.clone();
+                let client_id = self.options.id.clone();
+                // Synthesis is a network call; awaiting it here would stall the
+                // microphone and the playback this loop owns.
+                tokio::spawn(async move {
+                    let update = match host
+                        .voice
+                        .speak(w::SpeakRequest {
+                            client_id,
+                            text,
+                            ..Default::default()
+                        })
+                        .await
+                    {
+                        Ok(_) => Update::Spoke,
+                        Err(error) => Update::SpokeFailed {
+                            message: error.to_string(),
+                        },
+                    };
+                    let _ = updates.send(update);
+                });
+                Step::Continue
+            }
             Command::CenterAvatar => {
                 if let Some(avatar) = self.avatar.as_mut() {
                     if let Err(error) = avatar.center(&self.options.id) {
@@ -946,9 +1255,9 @@ impl Session {
         match Avatar::spawn(&program) {
             Ok(mut avatar) => {
                 if let Some(model) = self.options.model.as_ref() {
-                    let initial_motion = avatar::motion("nod");
+                    let initial_motion = avatar::motion("idle");
                     if let Err(error) =
-                        avatar.show(&self.options.id, model, initial_motion.as_deref())
+                        avatar.show(&self.options.id, model, initial_motion.as_deref(), true)
                     {
                         tracing::warn!("the renderer did not show the model: {error}");
                     } else if (self.avatar_scale - 100.).abs() > f32::EPSILON
@@ -991,16 +1300,21 @@ impl Session {
         self.devices().await;
     }
 
-    fn open_microphone(&mut self) {
+    async fn open_microphone(&mut self) {
         if self.microphone.is_some() {
+            self.devices().await;
             return;
         }
         match Microphone::open() {
             Ok(microphone) => {
                 microphone.set_muted(self.mic_muted);
                 self.microphone = Some(microphone);
+                self.devices().await;
             }
-            Err(error) => tracing::warn!("no microphone: {error}"),
+            Err(error) => {
+                tracing::warn!("no microphone: {error}");
+                self.set_in(Device::Unavailable(error)).await;
+            }
         }
     }
 
@@ -1039,71 +1353,178 @@ impl Session {
         }
     }
 
-    /// Logs what the renderer reported. A finished motion arrives here, and
-    /// leaving it unread would fill the child's output queue.
+    /// Returns to idle when the renderer finishes a gesture.
     fn drain_renderer(&mut self) {
-        let Some(avatar) = self.avatar.as_ref() else {
+        let Some(avatar) = self.avatar.as_mut() else {
             return;
         };
         for event in avatar.notifications() {
             tracing::debug!(?event, "renderer");
+            if event["event"] == "finished"
+                && event["character"] == self.options.id.as_str()
+                && let Some(model) = self.options.model.as_deref()
+                && let Err(error) = avatar.return_to_idle(&self.options.id, model)
+            {
+                tracing::warn!(%error, "the renderer could not return to idle");
+            }
         }
     }
 
-    /// Samples the OS and reports what it observed.
-    async fn sample(&mut self, host: &Host) {
-        if self.binding.is_none() {
+    fn set_eyes_enabled(&mut self, enabled: bool) {
+        match perception::save_enabled(enabled) {
+            Ok(()) => self.eyes_enabled = enabled,
+            Err(error) => {
+                if !enabled {
+                    self.eyes_enabled = false;
+                }
+                let _ = self.updates.send(Update::Failed {
+                    context: "「目」の設定を保存",
+                    message: error.to_string(),
+                });
+            }
+        }
+        if !self.eyes_enabled {
+            self.sensor = Sensor::default();
+        }
+        let _ = self.updates.send(Update::EyesEnabled(self.eyes_enabled));
+    }
+
+    #[cfg(windows)]
+    fn set_computer_use_enabled(&mut self, enabled: bool) {
+        self.computer_frame = None;
+        if !enabled {
+            self.computer_enabled = false;
+        }
+        match perception::save_preference(crate::computer::PREFERENCE, enabled) {
+            Ok(()) => self.computer_enabled = enabled,
+            Err(error) => {
+                let _ = self.updates.send(Update::Failed {
+                    context: "画面操作の設定を保存",
+                    message: error.to_string(),
+                });
+            }
+        }
+        let _ = self
+            .updates
+            .send(Update::ComputerUseEnabled(self.computer_enabled));
+    }
+
+    fn perception_event(&self, event: w::perception_event::Event) -> w::PerceptionEvent {
+        w::PerceptionEvent {
+            client_id: self.options.id.clone(),
+            subscription_id: self.subscription.clone(),
+            event: Some(event),
+            ..Default::default()
+        }
+    }
+
+    /// Keeps socket waits and screenshot encoding off the audio/device loop.
+    fn sample(
+        &mut self,
+        host: &Host,
+        screen_at: &mut tokio::time::Instant,
+        eyes_open: &mut bool,
+        observations: &mut tokio::task::JoinSet<()>,
+    ) {
+        use w::perception_event::Event;
+        if !self.eyes_enabled
+            || self.binding.is_none()
+            || self.subscription.is_empty()
+            || !perception::supported()
+        {
             return;
         }
-        let reports = self.sensor.observe(perception::observe());
-        for report in reports {
-            let event = match report {
-                Report::Window(window) => w::PerceptionEvent {
-                    event: Some(w::perception_event::Event::ActiveWindow(Box::new(
-                        w::ActiveWindowChanged {
-                            title: window.title,
-                            app_id: window.app_id,
-                            ..Default::default()
-                        },
-                    ))),
-                    ..Default::default()
-                },
-                Report::Interrupt(window) => w::PerceptionEvent {
-                    event: Some(w::perception_event::Event::PerceptionSummary(Box::new(
-                        w::PerceptionSummary {
-                            summary: format!(
-                                "監視対象のウィンドウが前面にあります: {} ({})",
-                                window.title, window.app_id
-                            ),
-                            ..Default::default()
-                        },
-                    ))),
-                    ..Default::default()
-                },
+        #[cfg(windows)]
+        if !perception::unlocked() {
+            if std::mem::take(eyes_open) {
+                let watch = self.sensor.watch.take();
+                self.sensor = Sensor::default();
+                self.sensor.apply(watch);
+                let event = self.perception_event(Event::Enabled(false));
+                let host = host.clone();
+                observations.spawn(async move {
+                    let _ =
+                        tokio::time::timeout(SAMPLE, host.client.report_perception(event)).await;
+                });
+            }
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        let periodic = !*eyes_open || now >= *screen_at;
+        let observed = perception::observe();
+        let idle_seconds = observed.idle_seconds;
+        let window = periodic.then(|| observed.window.clone()).flatten();
+        let mut reports = self.sensor.observe(observed);
+        let mut events = Vec::new();
+        if periodic {
+            *screen_at = now + SCREEN_SAMPLE;
+            *eyes_open = true;
+            events.push(Event::Enabled(true));
+            if let Some(window) = window {
+                reports.retain(|report| !matches!(report, Report::Window(_)));
+                events.push(Event::ActiveWindow(Box::new(window_report(window))));
+            }
+            reports.retain(|report| !matches!(report, Report::Activity { .. }));
+            reports.push(Report::Activity {
+                is_active: idle_seconds < perception::IDLE_THRESHOLD,
+                idle_seconds,
+            });
+        }
+        events.extend(reports.into_iter().map(|report| {
+            match report {
+                Report::Window(window) => Event::ActiveWindow(Box::new(window_report(window))),
+                Report::Interrupt(window, transition) => {
+                    Event::WatchMatch(Box::new(w::WatchMatch {
+                        window: Some(window_report(window)).into(),
+                        transition: match transition {
+                            NotifyOn::Focus => w::WatchTransition::Focus,
+                            NotifyOn::Blur => w::WatchTransition::Blur,
+                            NotifyOn::TitleChange => w::WatchTransition::TitleChange,
+                        }
+                        .into(),
+                        ..Default::default()
+                    }))
+                }
                 Report::Activity {
                     is_active,
                     idle_seconds,
-                } => w::PerceptionEvent {
-                    event: Some(w::perception_event::Event::UserActivity(Box::new(
-                        w::UserActivityState {
-                            is_active,
-                            idle_seconds,
-                            ..Default::default()
-                        },
-                    ))),
+                } => Event::UserActivity(Box::new(w::UserActivityState {
+                    is_active,
+                    idle_seconds,
                     ..Default::default()
-                },
-            };
-            let event = w::PerceptionEvent {
-                client_id: self.options.id.clone(),
-                timestamp: String::new(),
-                ..event
-            };
-            if let Err(error) = host.client.report_perception(event).await {
-                tracing::warn!("perception was not reported: {error}");
-                return;
+                })),
             }
+        }));
+        if events.is_empty() {
+            return;
         }
+        let events = events
+            .into_iter()
+            .map(|event| self.perception_event(event))
+            .collect::<Vec<_>>();
+        let host = host.clone();
+        #[cfg(windows)]
+        let screen = periodic.then(|| self.perception_event(Event::ScreenFrame(Box::default())));
+        observations.spawn(async move {
+            for event in events {
+                let result =
+                    tokio::time::timeout(SAMPLE, host.client.report_perception(event)).await;
+                if !matches!(result, Ok(Ok(_))) {
+                    tracing::debug!("perception was not reported");
+                    return;
+                }
+            }
+            #[cfg(windows)]
+            if let Some(mut event) = screen
+                && let Ok(Some(jpeg)) = tokio::task::spawn_blocking(perception::capture).await
+            {
+                event.event = Some(Event::ScreenFrame(Box::new(w::ScreenFrame {
+                    jpeg,
+                    ..Default::default()
+                })));
+                let _ = tokio::time::timeout(SAMPLE, host.client.report_perception(event)).await;
+            }
+        });
     }
 
     /// Reports the link state.
@@ -1117,6 +1538,14 @@ impl Session {
             avatar: self.avatar_state(),
             output: state,
             input: self.input_state(),
+        })));
+    }
+
+    async fn set_in(&mut self, state: Device) {
+        let _ = self.updates.send(Update::Devices(Box::new(Devices {
+            avatar: self.avatar_state(),
+            output: self.output_state(),
+            input: state,
         })));
     }
 
@@ -1187,6 +1616,14 @@ impl Session {
 }
 
 /// A periodic timer that does not try to catch up after a stall.
+fn window_report(window: perception::Window) -> w::ActiveWindowChanged {
+    w::ActiveWindowChanged {
+        title: window.title,
+        app_id: window.app_id,
+        ..Default::default()
+    }
+}
+
 fn interval(period: Duration) -> tokio::time::Interval {
     let mut interval = tokio::time::interval(period);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1245,29 +1682,64 @@ async fn transcription_message(
     }
 }
 
-/// One captured block, when the microphone is due and has audio.
-///
-/// The chunk carries the software flag the host uses to drop audio captured
-/// while the companion speaks. Without echo cancellation that flag is the only
-/// protection, so it is reported honestly.
-async fn capture_tick(
-    capture: &mut tokio::time::Interval,
+async fn retry_wait(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// What one capture tick produced, and what the settings probe displays.
+struct CaptureTick {
+    chunks: Vec<w::AudioInputChunk>,
+    state: CaptureState,
+}
+
+#[derive(Clone, Copy, Default)]
+struct CaptureState {
+    level: f32,
+    open: bool,
+}
+
+/// Takes ordered PCM chunks and end markers from the microphone.
+fn capture_tick(
     microphone: &mut Option<Microphone>,
     binding: &Option<Binding>,
     client_id: &str,
     speaking: bool,
-) -> Option<w::AudioInputChunk> {
-    capture.tick().await;
-    binding.as_ref()?;
-    let microphone = microphone.as_mut()?;
-    let pcm = microphone.take();
-    (!pcm.is_empty()).then(|| w::AudioInputChunk {
-        client_id: client_id.to_owned(),
-        pcm_data: pcm,
-        sample_rate: audio::WIRE_RATE,
-        is_companion_speaking: speaking,
-        ..Default::default()
-    })
+) -> CaptureTick {
+    let Some(microphone) = microphone.as_mut() else {
+        return CaptureTick {
+            chunks: Vec::new(),
+            state: CaptureState::default(),
+        };
+    };
+    // The level is read before the gate so the probe shows the microphone even
+    // while the gate is closed; that is the difference the test screen exists to
+    // make visible.
+    let level = microphone.level();
+    if binding.is_none() {
+        return CaptureTick {
+            chunks: Vec::new(),
+            state: CaptureState { level, open: false },
+        };
+    }
+    let output = microphone.take(speaking);
+    let state = CaptureState {
+        level,
+        open: output.open,
+    };
+    let chunks = output
+        .chunks
+        .into_iter()
+        .map(|pcm_data| w::AudioInputChunk {
+            client_id: client_id.to_owned(),
+            pcm_data,
+            sample_rate: audio::WIRE_RATE,
+            ..Default::default()
+        })
+        .collect();
+    CaptureTick { chunks, state }
 }
 
 /// What one operation claims about the client it was sent to.
@@ -1384,7 +1856,7 @@ mod tests {
         let plan = MotionPlan::parse(&serde_json::json!({"motion": "idle"})).unwrap();
         assert_eq!(plan.motion, "idle");
         assert_eq!(plan.expression, None);
-        assert_eq!(plan.clip, None);
+        assert_eq!(plan.clip, avatar::motion("idle"));
 
         let plan = MotionPlan::parse(&serde_json::json!({"motion": "idle", "expression": "happy"}))
             .unwrap();

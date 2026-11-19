@@ -438,6 +438,7 @@ pub(crate) struct Approved;
 pub(crate) struct CallBinding {
     pub(crate) client_id: String,
     pub(crate) capability: String,
+    pub(crate) computer_run: Option<String>,
 }
 
 /// A held tool call and the marker that keeps it from running.
@@ -577,10 +578,19 @@ fn gate(world: &mut World) {
             );
             continue;
         }
+        if (capability.starts_with(super::client::WORKSPACE_CAPABILITY_PREFIX)
+            || capability == w::COMPUTER_USE)
+            && let Some(spec) = &spec
+            && let Err(error) = super::client::validate_input(spec, &arguments["input"])
+        {
+            refuse(world, call, error.message());
+            continue;
+        }
         let verdict = decide_capability(&rules, spec.as_ref(), &capability, &tool_name, &arguments);
         world.entity_mut(call).insert(CallBinding {
             client_id: client_id.clone(),
             capability: capability.clone(),
+            computer_run: (capability == w::COMPUTER_USE).then(|| run_id.clone()),
         });
         match verdict {
             Verdict::Allow => {}
@@ -624,16 +634,16 @@ fn gate(world: &mut World) {
                     policies: store.policy_texts().unwrap_or_default(),
                     rules: rules.clone(),
                 };
-                start_decision(
-                    world,
-                    &store,
-                    Pending {
-                        request: request_id,
-                        companion: companion_id.clone(),
-                        target,
-                    },
-                    inputs,
-                );
+                let pending = Pending {
+                    request: request_id,
+                    companion: companion_id.clone(),
+                    target,
+                };
+                if capability == w::COMPUTER_USE {
+                    push_card(world, &pending);
+                    continue;
+                }
+                start_decision(world, &store, pending, inputs);
             }
         }
     }
@@ -672,10 +682,31 @@ fn resolve_capability(
 ) -> Result<Option<(String, Option<CapabilitySpec>)>> {
     if tool_name == "device_request" {
         let Some(capability) = arguments.get("capability").and_then(Value::as_str) else {
-            return Ok(None);
+            return Err(HostError::Invalid(
+                ("device_request requires a capability name as a string").into(),
+            ));
         };
         if !client.capabilities.iter().any(|name| name == capability) {
-            return Ok(None);
+            return Err(HostError::Invalid(format!(
+                "capability `{capability}` is not declared by the bound client"
+            )));
+        }
+        if capability.starts_with(super::client::WORKSPACE_CAPABILITY_PREFIX)
+            && world.get::<super::agent::WorkAgent>(agent).is_none()
+        {
+            return Err(HostError::Permission(
+                ("workspace capabilities require a work session").into(),
+            ));
+        }
+        if capability == w::COMPUTER_USE
+            && (world.get::<super::agent::WorkAgent>(agent).is_none()
+                || !super::client::computer::model_supported(
+                    world.get::<rig_ecs::model::Connection>(agent),
+                ))
+        {
+            return Err(HostError::Permission(
+                ("Computer Use requires an internal work agent with an image and tool capable task model").into(),
+            ));
         }
         return Ok(Some((
             capability.to_owned(),
@@ -1066,7 +1097,7 @@ fn push_card(world: &mut World, pending: &Pending) {
     );
 }
 
-fn decide(world: &mut World, call: Entity, outcome: Outcome) {
+pub(super) fn decide(world: &mut World, call: Entity, outcome: Outcome) {
     if let Some(mut decision) = world.get_mut::<Decision>(call) {
         decision.decide(Decider::plugin("ene-host"), outcome);
     }

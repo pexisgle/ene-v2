@@ -23,7 +23,7 @@ No mocked renderer is involved.
 | silence closes the mouth | the release half of `character::expressions` |
 | a motion change is applied | `control::Command::Set`, `character::motion_change` |
 | a motion change does not reload the model | `Pending::Fade` path, no `reload` |
-| a motion change fades / settles on one clip | `start_main`, `motion_change`, `AnimationTransitions` |
+| a motion change fades / settles on one clip | `play_motion`, `motion_change`, `advance_fades` |
 | no motion returns to rest | `Pending::Rest`, the `running` rule in `update` |
 | the client wire format tests pass | `avatar::expression_request`, `avatar::lip_sync_line` |
 | the client motion plan tests pass | `MotionPlan::parse` in `session.rs` |
@@ -51,8 +51,8 @@ it.
 ## Requirements
 
 - Windows, a display, and a GPU that can open the renderer's window.
-- A VRM and two VRMA files. The defaults are the ones the desktop client's
-  asset cache uses (`%LOCALAPPDATA%\ene\cache`). Override with
+- A VRM and two VRMA files. The defaults are the bundled `ENE.vrm`, `idle-breath`,
+  and `acknowledge`. Override with
   `ENE_VERIFY_MODEL`, `ENE_VERIFY_MOTION`, `ENE_VERIFY_MOTION2`.
 - A built workspace; the script runs `cargo build -p ene-avatar` itself.
 

@@ -293,6 +293,7 @@ pub(crate) struct WorkPlugin;
 impl Plugin for WorkPlugin {
     fn build(&self, app: &mut App) {
         tools::register(app);
+        super::web_search::register(app);
         app.init_resource::<Runs>()
             .init_resource::<Receipts>()
             .init_resource::<hand::Hands>()
@@ -698,6 +699,7 @@ fn finish_run(world: &mut World, mut run: Run, state: RunState, text: Option<Str
         super::fail(world, error.to_string());
         return;
     }
+    super::client::computer::invalidate_run(world, &run_id);
     let session = store.work_session(&run.work_id).ok().flatten();
     if was_active && let Some(session) = &session {
         if session.status != WorkStatus::Closed {

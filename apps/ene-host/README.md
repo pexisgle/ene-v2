@@ -29,6 +29,16 @@ cargo run --locked -p ene-host
 
 `connection.json` のendpointとtokenを `ene_rpc::connect` に渡し、生成された `HostServiceClient` / `ChatServiceClient` / `SettingsServiceClient` / `WorkServiceClient` / `ClientServiceClient` を使います。
 
+ホストは起動時と稼働中に Models.dev の公開カタログを取得し、Rig の同梱カタログにないモデルの入出力形式とツール対応を補います。設定画面と「手」のモデル接続は同じカタログを参照します。取得できない場合は、稼働中に取得済みの情報または同梱カタログを使います。
+
+### Google Agent Platform（旧 Vertex AI）
+
+- **Express mode** は初回セットアップまたは接続設定で「Google Agent Platform（旧 Vertex AI）」を選び、[Google Cloud のキー管理画面](https://console.cloud.google.com/agent-platform/api-keys)で取得した Express mode の API キーを登録します。
+- **通常の Google Cloud プロジェクト** は接続設定で同じプロバイダーを追加し、プロジェクト ID と必要に応じてロケーションを保存します。ロケーションの既定値は `global` です。Agent Platform API を有効にし、必要な IAM 権限を持つサービスアカウントに紐づいた [Google Cloud API キー](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/api-keys?usertype=standard) を登録します。
+- 既定モデルは `gemini-3.8-flash` です。別の Gemini モデルを使う場合は接続設定のモデル ID 欄で指定します。「確認」は先頭のモデルに短い生成リクエストを送り、キーと接続先を確認します。
+
+RPC では LLM 接続の `adapter` に `google-agent-platform` を指定し、通常接続の場合は `options` に JSON オブジェクトの文字列（例 `{"project_id":"my-project","location":"asia-northeast1"}`）を設定します。キーは `RegisterCredentials` で登録します。
+
 ## 設計との対応
 
 - **1つのヘッドレスRig App** を専用スレッドで動かします。APIからの操作は `Runtime::call`（変更。1フレーム進めて通知を配信）と `Runtime::read`（読み取りのみ。時間を進めない）でこのスレッドへ直列化します。
@@ -42,7 +52,8 @@ cargo run --locked -p ene-host
 - **作業（手）**: `WorkSession`（文脈）と `Run`（1実行）を分け、`RunInfo` は `RunStatus` と `pending_request_id` を返します。入口は `start_work` / `send_work` / `stop_work` で、モデルから見る限りバックエンドの差はありません。親のtask接続が `CONNECTION_KIND_ACP` で、`endpoint.adapter` が名指すハーネスプラグイン（ABI 8。`Start` が `cwd` を運び、`Prompt` が生存中のセッションへ追加ターンを届ける）を導入済みなら、そのセッションはプラグインの「手」で走ります。進捗・計画・ツール呼び出しの更新は既存の報告経路で親へ届き、プラグインの `RequestPermission` は通常の承認カード（`SubmitApproval` / `resolve_approval`）になります。アダプターごとに同時に1セッションまで（2つ目の `start_work` は `unavailable` で拒否）、`stop_work` は実行中の呼び出しを中断するか保留中の承認へ `Cancel` を届け、その場でRunを `Cancelled` にします。再起動で開いていたプラグイン側Runは失敗として確定します。それ以外の割り当てはWorkSessionごとに1つのプロセス内Rigエージェントを維持し、複数Runで会話文脈を共有します。`send_work` は実行中のセッションへも同じくキューとして届けます（プラグイン側は次の `Prompt` ターンとして）。`report` ツール（activity / message / completed / failed）の完了・失敗は一人称の報告として親へ配送し、90秒の進捗途絶を1回だけ親へ通知します。ACPプロセスの起動はプラグインの内側の責務で、ホストはACPプロセスを持ちません。
 - **心と記憶**: SQLite（WAL、`busy_timeout=5000`、`synchronous=NORMAL`）に保存します。FTS5 trigram（3文字未満はLIKE）とEmbedding接続によるベクトル検索をRRF（k=60）で融合し、`CompactVectorIndex` でBLOBの再読込を避けます。並び順は `Score = min(1, Importance/0.3) * (0.5*Relevance + 0.3*Importance + 0.2*Recency)` です。忘却は `importance` の引き下げであり、削除や除外フラグではありません。`mind_read` などの明示利用だけが `last_accessed_at` を更新します（引用ガード）。ConsolidationはCompactionと同じジョブ・同じ会話区間で1回だけ走り、位置は最新の `ene.summary` Aside が持つので別のカーソルを持ちません。`mind_update` は追加・訂正・忘却・`supersedes` を単一トランザクションで適用します。ユーザープロファイルは動的文脈へ注入します。埋め込み・整理のエンドポイントは、loopback以外の平文HTTPやプライベート/リンクローカルIPを拒否します。
 - **設定と接続**: `Connection` は共通ヘッダー（name / enabled / kind / revision / last_check）と種別ごとの config（LLM / TTS / STT / Embedding / MCP / ACP）を持ちます。LLMはrig-coreのカタログからモデル仕様を引き、`ConnectOptions` で資格情報・base URL・HTTPクライアントを渡してエージェントの `Connection` を組み立てます。資格情報はOSキーリング（`ENE_HOST_SESSION_CREDENTIALS` でメモリのみ）に保存し、読み出しAPIは状態だけを返します。
-- **知覚（目）**: `ClientService.ReportPerception` を受信し、アクティブウィンドウ・活動状態・クライアント要約を短い要約にして動的文脈へ渡します。どの変化を価値あるものとして残すかはクライアントのセンサーと「頭」の判断に委ね、ホストはルールの解釈も監視条件の配信もしません。
+- **知覚（目）**: `ClientService.ReportPerception` で担当端末の観測を受信します。「目」用モデル（未指定時は会話モデル）がウィンドウ、活動情報、対応モデルでは画面画像も評価します。日常の小さな変化も短く要約して「頭」へ報告できます。`eye.watch` の一致も「頭」に配送し、返答に取り入れるか、無言の仕草にするか、静観するかは「頭」が判断します。
+- **知覚の診断画像**: `screen_received` と `evaluated` の `frame_id` で、受信した画像とモデルリクエストに含まれた画像を照合できます。`HostService.GetPerceptionFrame` で有効な知覚セッションの直近8枚の受信画像と最後の評価画像を、取得から最大3分間取得できます。画像は通知履歴や永続ストレージに書き込みません。
 - **通知**: 1つのアウトボックスに溜め、フレームごとに起動epochと連番カーソルを付けて配信します。直近512件はカーソル再開用に保持し、`SubscribeRequest.cursor` が同epochで途切れなく続く場合は差分を再送、それ以外は `initial_state` に戻します。`client_id` 宛ての通知は他の購読者へ流しません。取りこぼしでは `resync_required` を送り、保存済み状態が正本です。
 - **音声**: インストール済みのWasmプロバイダーがTTS/STT接続のadapterを提供していれば `VoiceService` を提供します。`Stage::Review` の文字片を文単位（`。！？\n`）で切り出して先行合成し、`generation_id`・`sequence_no`・`UtteranceFinished` を流します。発話権はターン終了（またはFlush・所有者の失敗）で解放し、合成中の音声は`is_final_chunk`まで続けて送ります。`generation_id`と`FlushControl`で割り込み時の旧世代を破棄し、端末移動時は旧世代を失効させます。音声のサンプルレート変換は `rubato` に委譲します。音声からの承認確定はホストのキーワード判定ではなく「頭」が会話文脈から`resolve_approval`で行います。音声認識の`transcription_id`単位で`start_work`を原子的に調停し、ターン終了時は他のコンパニオンへ`speech_completed`を同報してユーザー入力なしの掛け合いを促します（往復回数の上限は設けません）。接続がなければ各RPCは明示的な `unimplemented` を返し、接続はあるがadapterを提供するプラグインがない場合は `failed_precondition` を返します。
 
@@ -84,8 +95,9 @@ cargo run --locked -p ene-host
 - スキルファイル（`SKILL.md`）は未実装です。Wasmプロバイダーはホストへ組み込み済みで、`ene-plugin-runtime` のExtism実行基盤を使用します。MCPサーバーのツール登録は `rig-rmcp` と `ToolServerHandle` を使用します。
 - スケジュール発火は`Queue`で親へ直接注入し、`cron_expr`/`run_at`はホストのローカル時刻で評価して`next_run_at`を保持します。
 
-- 知覚の優先割り込みによる親ターンの自動起床と、AEC参照信号を用いる自動Barge-inは未実装です（Barge-inは明示操作のみ）。
-- クライアント能力ツールは `world.spawn_tool` で動的登録し、能力変更・有効化変更・切断に追随して入れ替えます。同名ツールは宣言（説明・入力スキーマ）が一致する限り1つの定義を複数コンパニオンで共有し、一致しない宣言は暗黙に切り捨てず明示的な競合エラーにします。親エージェントには組み込みツールと自分のアクティブクライアントが許可した能力ツールだけを公開し、作業エージェント（手）は `report` と `device_request` だけを使えます。
+- Barge-inは明示操作で行います。
+- クライアント能力ツールは `world.spawn_tool` で動的登録し、能力変更・有効化変更・切断に追随して入れ替えます。同名ツールは宣言（説明・入力スキーマ）が一致する限り1つの定義を複数コンパニオンで共有し、一致しない宣言は暗黙に切り捨てず明示的な競合エラーにします。親エージェントには会話用の組み込みツールと、アクティブクライアントが許可した能力ツールを公開します。組み込みの「手」は `report`、`device_request`、`mind_read`、`mind_recall`、`web_search` と、接続済みの MCP ツールを使えます。
+- `web_search` は [Mwmbl の公開検索 API](https://developer.mwmbl.org/) に検索語を送り、タイトル・出典 URL・抜粋を返します。API キーは不要です。既定は5件、最大10件で、匿名利用枠のレート・件数上限が適用されます。
 
 ## 検証
 

@@ -5,7 +5,10 @@ use super::SettingsStudio;
 use super::icons::Icon;
 use super::studio::labeled_field;
 use super::theme::Theme;
-use super::widgets::{Tone, companion_badge, disclosure_row, pill_button, status_pill};
+use super::widgets::{
+    DropdownOption, Tone, companion_badge, disclosure_row, dropdown_select, pill_button,
+    status_pill,
+};
 use super::{NewCompanionSpec, SettingsSection};
 use ene_rpc as w;
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
@@ -16,8 +19,19 @@ impl SettingsStudio {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (live, companions, active_id, has_models, tts_voices, minds) = {
+        let (live, companions, active_id, has_models, tts_voices, tts_conn_ids, minds) = {
             let hub = self.hub.read(cx);
+            let tts_ids: Vec<String> = hub
+                .model
+                .settings()
+                .map(|s| {
+                    s.connections
+                        .iter()
+                        .filter(|c| c.kind == w::ConnectionKind::Tts && c.enabled)
+                        .map(|c| c.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
             (
                 hub.live(),
                 hub.model
@@ -27,6 +41,7 @@ impl SettingsStudio {
                 hub.model.companion_id().map(str::to_owned),
                 !hub.model_choices().is_empty(),
                 hub.tts_voice_choices(),
+                tts_ids,
                 hub.model.minds.clone(),
             )
         };
@@ -201,6 +216,7 @@ impl SettingsStudio {
                     rev,
                     minds.get(&id),
                     &tts_voices,
+                    &tts_conn_ids,
                     live,
                     theme,
                     cx,
@@ -402,7 +418,8 @@ impl SettingsStudio {
         comp: &w::Companion,
         rev: u64,
         mind_view: Option<&w::MindView>,
-        tts_voices: &[(String, String)],
+        tts_voices: &[(String, String, String)],
+        tts_conn_ids: &[String],
         live: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -442,23 +459,124 @@ impl SettingsStudio {
         let persona_val = persona_d.read(cx).text().trim().to_owned();
         let voice_val = voice_d.read(cx).text().trim().to_owned();
 
-        let mut voice_chips = Vec::new();
-        for (vid, label) in tts_voices {
-            let selected = voice_val == *vid;
-            let vd = voice_d.clone();
-            let set_id = vid.clone();
-            voice_chips.push(pill_button(
-                SharedString::from(format!("comp-voice-{id}-{vid}")),
-                label.clone(),
-                selected.then_some(Icon::Check),
-                if selected { Tone::Primary } else { Tone::Ghost },
+        let voice_dd_key = format!("comp-voice:{id}");
+        let voice_dd_open = self.open_dropdown.as_deref() == Some(voice_dd_key.as_str());
+        let voice_filter_d = self.draft(
+            cx,
+            format!("comp:{id}:voice-filter"),
+            "話者名・IDで絞り込み…",
+            None,
+            theme,
+        );
+        let voice_filter_txt = voice_filter_d.read(cx).text().to_owned();
+        let mut voice_options = vec![DropdownOption {
+            value: String::new(),
+            label: "接続の既定を使用".to_owned(),
+            detail: None,
+        }];
+        for (vid, label, conn_name) in tts_voices {
+            voice_options.push(DropdownOption {
+                value: vid.clone(),
+                label: label.clone(),
+                detail: Some(format!("{conn_name} / ID: {vid}")),
+            });
+        }
+        let selected_voice_label = if voice_val.is_empty() {
+            Some("接続の既定を使用".to_owned())
+        } else {
+            tts_voices
+                .iter()
+                .find(|(vid, _, _)| vid == &voice_val)
+                .map(|(vid, label, _)| format!("{label} (ID: {vid})"))
+                .or_else(|| Some(voice_val.clone()))
+        };
+        let studio_voice_toggle = cx.entity();
+        let studio_voice_pick = cx.entity();
+        let toggle_key = voice_dd_key.clone();
+        let voice_d_pick = voice_d.clone();
+        let hub_refresh_voice = self.hub.clone();
+        let refresh_tts_ids = tts_conn_ids.to_vec();
+        let voice_checking = {
+            let hub = self.hub.read(cx);
+            tts_conn_ids
+                .iter()
+                .any(|cid| hub.checking_connections.contains(cid))
+        };
+        let voice_selector = div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(theme.ink_muted)
+                            .child("声（話者）"),
+                    )
+                    .when(!refresh_tts_ids.is_empty(), |this| {
+                        this.child(pill_button(
+                            SharedString::from(format!("comp-voice-refresh-{id}")),
+                            if voice_checking {
+                                "話者を取得中…"
+                            } else {
+                                "話者一覧を取得"
+                            },
+                            Some(Icon::Refresh),
+                            Tone::Ghost,
+                            live && !voice_checking,
+                            theme,
+                            move |_, cx| {
+                                hub_refresh_voice.update(cx, |hub, cx| {
+                                    for cid in &refresh_tts_ids {
+                                        hub.check_connection(cid.clone(), cx);
+                                    }
+                                });
+                            },
+                        ))
+                    }),
+            )
+            .child(dropdown_select(
+                voice_dd_key,
+                Some(voice_val.as_str()),
+                selected_voice_label.as_deref(),
+                "接続の既定を使用",
+                &voice_options,
+                voice_dd_open,
                 true,
+                210.,
+                Some(voice_filter_d),
+                &voice_filter_txt,
+                "有効なTTS接続から話者を取得できませんでした",
                 theme,
                 move |_, cx| {
-                    vd.update(cx, |d, cx| d.set(set_id.clone(), cx));
+                    studio_voice_toggle.update(cx, |this, cx| {
+                        this.open_dropdown =
+                            if this.open_dropdown.as_deref() == Some(toggle_key.as_str()) {
+                                None
+                            } else {
+                                Some(toggle_key.clone())
+                            };
+                        cx.notify();
+                    });
                 },
-            ));
-        }
+                move |picked, _, cx| {
+                    voice_d_pick.update(cx, |d, cx| d.set(picked, cx));
+                    studio_voice_pick.update(cx, |this, cx| {
+                        this.open_dropdown = None;
+                        cx.notify();
+                    });
+                },
+            ))
+            .when(tts_voices.is_empty(), |this| this.child(voice_d));
 
         let studio_disc = cx.entity();
         let mind_open = self.mind_disclosure_open;
@@ -639,17 +757,7 @@ impl SettingsStudio {
             .child(labeled_field("名前", name_d, theme))
             .child(labeled_field("人格の核", mind_d, theme))
             .child(labeled_field("話し方", persona_d, theme))
-            .child(labeled_field("声（話者ID）", voice_d, theme))
-            .when(!voice_chips.is_empty(), |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap(px(6.))
-                        .children(voice_chips),
-                )
-            })
+            .child(voice_selector)
             .child(disclosure)
             .when_some(mind_strip, |this, strip| this.child(strip))
             .child(

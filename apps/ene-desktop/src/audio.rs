@@ -44,10 +44,14 @@ struct Filter {
 
 impl Filter {
     fn new(from: u32, to: u32) -> Result<Self, String> {
+        Self::with_chunk(from, to, CHUNK)
+    }
+
+    fn with_chunk(from: u32, to: u32, chunk: usize) -> Result<Self, String> {
         let inner = rubato::Fft::<f32>::new(
             from as usize,
             to as usize,
-            CHUNK,
+            chunk,
             1,
             rubato::FixedSync::Input,
         )
@@ -57,6 +61,12 @@ impl Filter {
             pending: Vec::with_capacity(CHUNK * 2),
             output: vec![0.; CHUNK * 4],
         })
+    }
+
+    fn reset(&mut self) {
+        use rubato::Resampler;
+        self.inner.reset();
+        self.pending.clear();
     }
 
     /// Converts everything that completes a chunk, keeping the remainder.
@@ -496,70 +506,167 @@ fn pick_input(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, Stri
 ///
 /// The callback only copies device samples into a bounded ring. Conversion to
 /// the wire format happens in [`Microphone::take`], on the session thread.
-const VAD_START_RMS: f32 = 0.018;
-const VAD_CONTINUE_RMS: f32 = 0.010;
-const VAD_HANGOVER_TICKS: u8 = 5;
-const VAD_PRE_ROLL_SAMPLES: usize = 2_400;
+const VAD_RATE: u32 = 16_000;
+const VAD_FRAME_SAMPLES: usize = WIRE_RATE as usize * 16 / 1_000;
+const VAD_START_FRAMES: u16 = 2; // 32 ms
+const VAD_HANGOVER_FRAMES: u16 = 38; // 608 ms
+const VAD_MAX_ACTIVE_FRAMES: u16 = 937; // about 15 s
+const VAD_PRE_ROLL_SAMPLES: usize = VAD_FRAME_SAMPLES * 35; // 560 ms
+const VAD_START_SCORE: f32 = 0.55;
+const VAD_CONTINUE_SCORE: f32 = 0.35;
+
+#[derive(Default)]
+pub struct CaptureOutput {
+    /// Wire PCM in order. An empty chunk ends the preceding utterance.
+    pub chunks: Vec<Vec<u8>>,
+    pub open: bool,
+}
+
+fn is_single_tone(frame: &[f32]) -> bool {
+    // For a sinusoid, the mean of two equally spaced neighbors is a fixed
+    // multiple of the center. Differencing the samples also removes DC.
+    let (mut center_power, mut neighbor_power, mut product) = (0., 0., 0.);
+    for samples in frame.windows(13) {
+        let before = f64::from(samples[4] - samples[0]);
+        let center = f64::from(samples[8] - samples[4]);
+        let after = f64::from(samples[12] - samples[8]);
+        let neighbors = (before + after) * 0.5;
+        center_power += center * center;
+        neighbor_power += neighbors * neighbors;
+        product += center * neighbors;
+    }
+    center_power * neighbor_power - product * product <= 0.0001 * center_power * center_power
+}
 
 struct VoiceGate {
+    detector: earshot::Detector,
+    vad_filter: Filter,
     active: bool,
-    hangover: u8,
+    speech_frames: u16,
+    hangover: u16,
+    active_frames: u16,
+    pending: Vec<f32>,
     pre_roll: VecDeque<f32>,
 }
 
 impl VoiceGate {
-    fn new() -> Self {
-        Self {
+    fn new() -> Result<Self, String> {
+        Ok(Self {
+            detector: earshot::Detector::default(),
+            vad_filter: Filter::with_chunk(WIRE_RATE, VAD_RATE, VAD_FRAME_SAMPLES)?,
             active: false,
+            speech_frames: 0,
             hangover: 0,
+            active_frames: 0,
+            pending: Vec::new(),
             pre_roll: VecDeque::with_capacity(VAD_PRE_ROLL_SAMPLES),
-        }
+        })
     }
 
-    fn reset(&mut self) {
+    fn reset(&mut self) -> bool {
         self.active = false;
+        self.speech_frames = 0;
         self.hangover = 0;
+        self.detector.reset();
+        self.vad_filter.reset();
+        self.pending.clear();
         self.pre_roll.clear();
+        std::mem::take(&mut self.active_frames) > 0
     }
 
-    fn push_pre_roll(&mut self, samples: &[f32]) {
-        for &sample in samples {
-            if self.pre_roll.len() >= VAD_PRE_ROLL_SAMPLES {
-                self.pre_roll.pop_front();
-            }
-            self.pre_roll.push_back(sample);
-        }
+    fn push_pre_roll(&mut self, frame: &[f32]) {
+        let excess = (self.pre_roll.len() + frame.len()).saturating_sub(VAD_PRE_ROLL_SAMPLES);
+        self.pre_roll.drain(..excess);
+        self.pre_roll.extend(frame);
     }
 
-    fn process(&mut self, samples: &[f32]) -> Vec<f32> {
-        if samples.is_empty() {
-            return Vec::new();
+    fn process(&mut self, samples: &[f32]) -> Result<Vec<Vec<u8>>, String> {
+        self.pending.extend_from_slice(samples);
+        let mut chunks = Vec::new();
+        let mut audio = Vec::new();
+        let mut offset = 0;
+        while let Some(frame) = self.pending[offset..]
+            .first_chunk::<VAD_FRAME_SAMPLES>()
+            .copied()
+        {
+            offset += VAD_FRAME_SAMPLES;
+            // Only the detector needs 16 kHz. Pre-roll and sent audio use the
+            // original wire-rate samples so STT keeps their timing and spectrum.
+            let mut vad_frame = self.vad_filter.push(&frame)?;
+            for sample in &mut vad_frame {
+                *sample = if sample.is_finite() {
+                    sample.clamp(-1., 1.)
+                } else {
+                    0.
+                };
+            }
+            let score = self.detector.predict_f32(&vad_frame);
+            // Isolated hums and tones can still get high scores from the model.
+            let score = if is_single_tone(&vad_frame) {
+                0.
+            } else {
+                score
+            };
+            self.push_frame(&frame, score, &mut audio, &mut chunks);
         }
-        let rms = (samples.iter().map(|sample| sample * sample).sum::<f32>()
-            / samples.len() as f32)
-            .sqrt();
-        if self.active {
-            if rms >= VAD_CONTINUE_RMS {
-                self.hangover = VAD_HANGOVER_TICKS;
-                return samples.to_vec();
+        self.pending.drain(..offset);
+        if !audio.is_empty() {
+            chunks.push(encode(&audio));
+        }
+        Ok(chunks)
+    }
+
+    fn push_frame(
+        &mut self,
+        frame: &[f32],
+        score: f32,
+        audio: &mut Vec<f32>,
+        chunks: &mut Vec<Vec<u8>>,
+    ) {
+        if !self.active {
+            self.push_pre_roll(frame);
+            if score >= VAD_START_SCORE {
+                self.speech_frames += 1;
+            } else {
+                self.speech_frames = 0;
             }
-            if self.hangover > 0 {
-                self.hangover -= 1;
-                return samples.to_vec();
+            if self.speech_frames == VAD_START_FRAMES {
+                self.active = true;
+                self.hangover = VAD_HANGOVER_FRAMES;
+                self.active_frames = 1;
+                audio.extend(self.pre_roll.drain(..));
             }
+            return;
+        }
+
+        if score >= VAD_CONTINUE_SCORE {
+            self.hangover = VAD_HANGOVER_FRAMES;
+        } else if self.hangover == 0 {
             self.active = false;
-            self.push_pre_roll(samples);
-            Vec::new()
-        } else if rms >= VAD_START_RMS {
-            self.active = true;
-            self.hangover = VAD_HANGOVER_TICKS;
-            let mut out: Vec<f32> = self.pre_roll.drain(..).collect();
-            out.extend_from_slice(samples);
-            out
+            self.speech_frames = 0;
+            self.push_pre_roll(frame);
+            if std::mem::take(&mut self.active_frames) > 0 {
+                Self::end_segment(audio, chunks);
+            }
+            return;
         } else {
-            self.push_pre_roll(samples);
-            Vec::new()
+            self.hangover -= 1;
         }
+
+        audio.extend_from_slice(frame);
+        self.active_frames += 1;
+        if self.active_frames == VAD_MAX_ACTIVE_FRAMES {
+            self.active_frames = 0;
+            Self::end_segment(audio, chunks);
+        }
+    }
+
+    fn end_segment(audio: &mut Vec<f32>, chunks: &mut Vec<Vec<u8>>) {
+        if !audio.is_empty() {
+            chunks.push(encode(audio));
+            audio.clear();
+        }
+        chunks.push(Vec::new());
     }
 }
 
@@ -572,6 +679,68 @@ pub struct Microphone {
     voice_gate: VoiceGate,
 }
 
+fn build_microphone_stream(
+    device: &cpal::Device,
+    supported: &cpal::SupportedStreamConfig,
+    capacity: usize,
+    frames: &Arc<Mutex<VecDeque<f32>>>,
+    muted: &Arc<AtomicBool>,
+    level: &Arc<AtomicU32>,
+) -> Result<cpal::Stream, String> {
+    let channels = supported.channels() as usize;
+    let sink = frames.clone();
+    let cap_muted = muted.clone();
+    let cap_level = level.clone();
+    let stream = match supported.sample_format() {
+        cpal::SampleFormat::F32 => device.build_input_stream(
+            supported.config(),
+            move |input: &[f32], _| {
+                push_captured_with(
+                    input,
+                    channels,
+                    capacity,
+                    &sink,
+                    &cap_muted,
+                    &cap_level,
+                    |s| s,
+                );
+            },
+            |error| tracing::error!("audio input failed: {error}"),
+            None,
+        ),
+        cpal::SampleFormat::I16 => device.build_input_stream(
+            supported.config(),
+            move |input: &[i16], _| {
+                push_captured_with(
+                    input, channels, capacity, &sink, &cap_muted, &cap_level, i16_to_f32,
+                );
+            },
+            |error| tracing::error!("audio input failed: {error}"),
+            None,
+        ),
+        cpal::SampleFormat::U16 => device.build_input_stream(
+            supported.config(),
+            move |input: &[u16], _| {
+                push_captured_with(
+                    input, channels, capacity, &sink, &cap_muted, &cap_level, u16_to_f32,
+                );
+            },
+            |error| tracing::error!("audio input failed: {error}"),
+            None,
+        ),
+        other => {
+            return Err(format!(
+                "the input device uses {other} samples, which this client does not convert"
+            ));
+        }
+    }
+    .map_err(|error| format!("the input stream could not start: {error}"))?;
+    stream
+        .play()
+        .map_err(|error| format!("the input stream could not start: {error}"))?;
+    Ok(stream)
+}
+
 impl Microphone {
     /// Opens the default input device.
     pub fn open() -> Result<Self, String> {
@@ -579,65 +748,45 @@ impl Microphone {
         let device = host
             .default_input_device()
             .ok_or("the machine has no default input device")?;
-        let supported = pick_input(&device)?;
-        let rate = supported.sample_rate();
-        let channels = supported.channels() as usize;
-        // Two seconds of headroom: past that, a stalled reader loses old audio
-        // instead of growing without bound.
-        let capacity = rate as usize * 2;
+        let picked = pick_input(&device)?;
+        let mut chosen = picked;
+        let mut rate = chosen.sample_rate();
+        let mut capacity = rate as usize * 2;
         let frames = Arc::new(Mutex::new(VecDeque::with_capacity(capacity)));
         let muted = Arc::new(AtomicBool::new(false));
         let level = Arc::new(AtomicU32::new(0));
-        let sink = frames.clone();
-        let cap_muted = muted.clone();
-        let cap_level = level.clone();
-        let stream = match supported.sample_format() {
-            cpal::SampleFormat::F32 => device.build_input_stream(
-                supported.config(),
-                move |input: &[f32], _| {
-                    push_captured_with(
-                        input,
-                        channels,
-                        capacity,
-                        &sink,
-                        &cap_muted,
-                        &cap_level,
-                        |s| s,
-                    );
-                },
-                |error| tracing::error!("audio input failed: {error}"),
-                None,
-            ),
-            cpal::SampleFormat::I16 => device.build_input_stream(
-                supported.config(),
-                move |input: &[i16], _| {
-                    push_captured_with(
-                        input, channels, capacity, &sink, &cap_muted, &cap_level, i16_to_f32,
-                    );
-                },
-                |error| tracing::error!("audio input failed: {error}"),
-                None,
-            ),
-            cpal::SampleFormat::U16 => device.build_input_stream(
-                supported.config(),
-                move |input: &[u16], _| {
-                    push_captured_with(
-                        input, channels, capacity, &sink, &cap_muted, &cap_level, u16_to_f32,
-                    );
-                },
-                |error| tracing::error!("audio input failed: {error}"),
-                None,
-            ),
-            other => {
-                return Err(format!(
-                    "the input device uses {other} samples, which this client does not convert"
-                ));
-            }
-        }
-        .map_err(|error| format!("the input stream could not start: {error}"))?;
-        stream
-            .play()
-            .map_err(|error| format!("the input stream could not start: {error}"))?;
+        let stream =
+            match build_microphone_stream(&device, &chosen, capacity, &frames, &muted, &level) {
+                Ok(stream) => stream,
+                Err(first_error) => {
+                    let fallback = device
+                        .default_input_config()
+                        .ok()
+                        .and_then(|cfg| validate_default_config(cfg, "input").ok())
+                        .filter(|cfg| {
+                            cfg.sample_rate() != picked.sample_rate()
+                                || cfg.channels() != picked.channels()
+                                || cfg.sample_format() != picked.sample_format()
+                        });
+                    if let Some(default_cfg) = fallback {
+                        tracing::warn!(
+                            error = %first_error,
+                            "preferred input stream failed; falling back to device default config"
+                        );
+                        chosen = default_cfg;
+                        rate = chosen.sample_rate();
+                        capacity = rate as usize * 2;
+                        if let Ok(mut guard) = frames.lock() {
+                            guard.reserve(capacity);
+                        }
+                        build_microphone_stream(
+                            &device, &chosen, capacity, &frames, &muted, &level,
+                        )?
+                    } else {
+                        return Err(first_error);
+                    }
+                }
+            };
         Ok(Self {
             _stream: stream,
             frames,
@@ -646,7 +795,7 @@ impl Microphone {
                 .transpose()?,
             muted,
             level,
-            voice_gate: VoiceGate::new(),
+            voice_gate: VoiceGate::new()?,
         })
     }
 
@@ -675,28 +824,40 @@ impl Microphone {
         }
     }
 
-    /// Takes the frames captured since the last call, as wire PCM.
-    pub fn take(&mut self) -> Vec<u8> {
-        if self.is_muted() {
-            self.voice_gate.reset();
-            if let Ok(mut frames) = self.frames.lock() {
+    /// Takes the frames captured since the last call as ordered wire chunks.
+    pub fn take(&mut self, companion_speaking: bool) -> CaptureOutput {
+        let suppress = self.is_muted() || companion_speaking;
+        let samples = match self.frames.lock() {
+            Ok(mut frames) if suppress => {
                 frames.clear();
+                Vec::new()
             }
-            return Vec::new();
-        }
-        let samples: Vec<f32> = match self.frames.lock() {
             Ok(mut frames) => frames.drain(..).collect(),
-            Err(_) => return Vec::new(),
+            Err(_) => return CaptureOutput::default(),
         };
-        let samples = match self.filter.as_mut() {
-            Some(filter) => filter.push(&samples).unwrap_or_default(),
-            None => samples,
-        };
-        let gated = self.voice_gate.process(&samples);
-        if gated.is_empty() {
-            return Vec::new();
+        if !suppress {
+            let samples = match self.filter.as_mut() {
+                Some(filter) => filter.push(&samples),
+                None => Ok(samples),
+            };
+            match samples.and_then(|samples| self.voice_gate.process(&samples)) {
+                Ok(chunks) => {
+                    return CaptureOutput {
+                        chunks,
+                        open: self.voice_gate.active,
+                    };
+                }
+                Err(error) => tracing::warn!(%error, "microphone audio conversion failed"),
+            }
         }
-        encode(&gated)
+        // Keep pre-mute and pre-playback filter history out of the next utterance.
+        if let Some(filter) = &mut self.filter {
+            filter.reset();
+        }
+        CaptureOutput {
+            chunks: self.voice_gate.reset().then(Vec::new).into_iter().collect(),
+            open: false,
+        }
     }
 }
 
@@ -716,13 +877,57 @@ fn push_captured_with<T: Copy>(
     let Ok(mut sink) = sink.try_lock() else {
         return;
     };
+    const MAX_STACK_CH: usize = 16;
+    let tracked = channels.min(MAX_STACK_CH);
+    let mut ch_energy = [0f64; MAX_STACK_CH];
+    let mut frames_count = 0usize;
+    if channels > 1 {
+        for frame in input.chunks_exact(channels) {
+            for (idx, slot) in ch_energy.iter_mut().take(tracked).enumerate() {
+                let s = f64::from(to_f32(frame[idx]));
+                *slot += s * s;
+            }
+            frames_count += 1;
+        }
+    }
+    let mut active_mask = [true; MAX_STACK_CH];
+    let mut active_channels = channels;
+    if channels > 1 && channels <= MAX_STACK_CH && frames_count > 0 {
+        let max_energy = ch_energy[..tracked].iter().copied().fold(0.0f64, f64::max);
+        if max_energy > 0.0 {
+            let cutoff = max_energy * 0.05;
+            let mut active = 0usize;
+            for idx in 0..tracked {
+                let keep = ch_energy[idx] >= cutoff;
+                active_mask[idx] = keep;
+                if keep {
+                    active += 1;
+                }
+            }
+            if active > 0 {
+                active_channels = active;
+            } else {
+                active_mask.fill(true);
+            }
+        }
+    }
+
     let mut energy = 0f64;
     let mut count = 0u64;
     for frame in input.chunks(channels) {
-        // Average the channels: the wire is mono and the device
-        // may route the microphone to any one of them.
-        let sum: f32 = frame.iter().copied().map(&to_f32).sum();
-        let mono = sum / channels as f32;
+        let mono = if channels == 1 || frame.len() < channels || channels > MAX_STACK_CH {
+            let sum: f32 = frame.iter().copied().map(&to_f32).sum();
+            sum / frame.len().max(1) as f32
+        } else {
+            let mut sum = 0f32;
+            for (idx, &sample) in frame.iter().enumerate() {
+                if active_mask[idx] {
+                    sum += to_f32(sample);
+                }
+            }
+            sum / active_channels as f32
+        };
+        let mono = if mono.is_finite() { mono } else { 0. };
         energy += f64::from(mono) * f64::from(mono);
         count += 1;
         if sink.len() < capacity {
@@ -754,22 +959,104 @@ mod tests {
     use super::*;
 
     #[test]
-    fn voice_gate_drops_silence_and_passes_speech_with_preroll_and_hangover() {
-        let mut gate = VoiceGate::new();
-        let silence = vec![0.002f32; 480];
-        assert!(gate.process(&silence).is_empty());
-        assert!(gate.process(&silence).is_empty());
-
-        let speech = vec![0.05f32; 480];
-        let started = gate.process(&speech);
-        // Includes buffered pre-roll from the preceding silence ticks plus speech.
-        assert_eq!(started.len(), 480 * 3);
-
-        // Hangover keeps transmitting for VAD_HANGOVER_TICKS quiet chunks before closing.
-        for _ in 0..VAD_HANGOVER_TICKS {
-            assert_eq!(gate.process(&silence).len(), 480);
+    fn voice_gate_stays_closed_on_fluctuating_room_noise() {
+        let noise: Vec<f32> = (0..VAD_FRAME_SAMPLES * 150)
+            .map(|i| {
+                let phase = i as f32;
+                let amplitude = 0.008 + 0.020 * (phase * 0.004).sin().abs();
+                0.02 + amplitude * (phase * 0.09).sin()
+            })
+            .collect();
+        let white = (0..noise.len())
+            .scan(11u32, |state, _| {
+                *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                Some(0.06 * (*state as f32 / u32::MAX as f32 - 0.5))
+            })
+            .collect();
+        for input in [
+            noise.clone(),
+            [vec![0.; WIRE_RATE as usize], noise].concat(),
+            white,
+        ] {
+            let mut gate = VoiceGate::new().unwrap();
+            // Callbacks do not necessarily end at a VAD frame boundary.
+            for block in input.chunks(729) {
+                assert!(gate.process(block).unwrap().is_empty());
+            }
+            assert!(!gate.active);
         }
-        assert!(gate.process(&silence).is_empty());
+    }
+
+    #[test]
+    fn voice_gate_keeps_preroll_and_separates_utterances_in_one_batch() {
+        let mut gate = VoiceGate::new().unwrap();
+        let mut audio = Vec::new();
+        let mut chunks = Vec::new();
+        let pre_roll = [0.01; VAD_FRAME_SAMPLES];
+        let speech = [0.04; VAD_FRAME_SAMPLES];
+        let silence = [0.0; VAD_FRAME_SAMPLES];
+        gate.push_frame(&pre_roll, 1.0, &mut audio, &mut chunks);
+        gate.push_frame(&silence, 0.0, &mut audio, &mut chunks);
+        assert!(!gate.active, "one high score must not open the gate");
+
+        for _ in 0..2 {
+            for _ in 0..VAD_START_FRAMES {
+                gate.push_frame(&speech, 0.8, &mut audio, &mut chunks);
+            }
+            assert!(gate.active);
+            for _ in 0..=VAD_HANGOVER_FRAMES {
+                gate.push_frame(&silence, 0.0, &mut audio, &mut chunks);
+            }
+            assert!(!gate.active);
+        }
+
+        let expected = [
+            pre_roll.to_vec(),
+            silence.to_vec(),
+            speech.repeat(VAD_START_FRAMES as usize),
+            silence.repeat(VAD_HANGOVER_FRAMES as usize),
+        ]
+        .concat();
+        assert_eq!(chunks.len(), 4);
+        assert_eq!(chunks[0], encode(&expected));
+        assert!(chunks[1].is_empty());
+        assert_eq!(chunks[2], encode(&expected[VAD_FRAME_SAMPLES..]));
+        assert!(chunks[3].is_empty());
+    }
+
+    #[test]
+    fn voice_gate_keeps_the_frame_after_a_duration_split() {
+        let mut gate = VoiceGate::new().unwrap();
+        let mut audio = Vec::new();
+        let mut chunks = Vec::new();
+        let speech = [0.04; VAD_FRAME_SAMPLES];
+        for _ in 0..VAD_START_FRAMES {
+            gate.push_frame(&speech, 0.8, &mut audio, &mut chunks);
+        }
+        gate.active_frames = VAD_MAX_ACTIVE_FRAMES - 1;
+        gate.push_frame(&speech, 0.8, &mut audio, &mut chunks);
+        gate.push_frame(&speech, 0.8, &mut audio, &mut chunks);
+        assert_eq!(
+            chunks,
+            [
+                encode(&speech.repeat(VAD_START_FRAMES as usize + 1)),
+                Vec::new()
+            ]
+        );
+        assert_eq!(audio, speech);
+    }
+
+    #[test]
+    fn stereo_capture_with_dead_channel_preserves_active_channel_amplitude() {
+        let sink = Mutex::new(VecDeque::new());
+        let muted = AtomicBool::new(false);
+        let level = AtomicU32::new(0);
+        let stereo_one_channel = [0.02f32, 0.0, -0.02, 0.0, 0.02, 0.0, -0.02, 0.0];
+        push_captured(&stereo_one_channel, 2, 64, &sink, &muted, &level);
+        let captured: Vec<f32> = sink.lock().unwrap().iter().copied().collect();
+        assert_eq!(captured, [0.02, -0.02, 0.02, -0.02]);
+        let rms = f32::from_bits(level.load(Ordering::Relaxed));
+        assert!((rms - 0.02).abs() < 1e-6, "{rms}");
     }
 
     #[test]

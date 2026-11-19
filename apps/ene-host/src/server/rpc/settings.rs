@@ -79,6 +79,29 @@ impl w::SettingsService for Services {
             .await
             .map_err(ConnectError::from)?;
         self.runtime.providers().start_used(&store).await;
+        if let Ok(current) = store.settings() {
+            let active_vv = current.connections.iter().find(|conn| {
+                conn.enabled
+                    && conn.kind == crate::host::settings::ConnectionKind::Tts
+                    && conn.endpoint().adapter.eq_ignore_ascii_case("voicevox")
+                    && !model::is_sakura_endpoint(&conn.endpoint().endpoint)
+                    && self.runtime.providers().get("voicevox").is_none()
+            });
+            if let Some(vv) = active_vv {
+                if !cfg!(test) {
+                    let mgr = self.runtime.voicevox();
+                    let base = vv.endpoint().endpoint.clone();
+                    let options = vv.endpoint().options.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = mgr.ensure_running(&base, &options).await {
+                            tracing::warn!(%error, "could not auto-start VOICEVOX engine after settings update");
+                        }
+                    });
+                }
+            } else {
+                self.runtime.voicevox().stop().await;
+            }
+        }
         Ok(view)
     }
 
@@ -242,14 +265,23 @@ impl w::SettingsService for Services {
         _: RequestContext,
         request: ServiceRequest<'_, w::ModelsRequest>,
     ) -> ServiceResult<w::Models> {
-        let connection = connection(&self.runtime, request.id).await?;
-        Response::ok(w::Models {
-            items: model::models(&connection)
-                .into_iter()
-                .map(|(id, spec)| model_item(id, &spec))
-                .collect(),
-            ..Default::default()
+        let id = request.id.to_owned();
+        self.read(move |app| {
+            let world = app.world();
+            let connection = world
+                .resource::<Store>()
+                .connection(&id)?
+                .ok_or_else(|| HostError::NotFound(("connection not found").into()))?;
+            let catalog = world.resource::<rig_ecs::model::Models>().0.catalog();
+            Ok(w::Models {
+                items: model::models(&connection, catalog)
+                    .into_iter()
+                    .map(|(id, spec)| model_item(id, &spec))
+                    .collect(),
+                ..Default::default()
+            })
         })
+        .await
     }
 
     async fn register_credentials(
@@ -337,14 +369,26 @@ impl w::SettingsService for Services {
                 .runtime
                 .read({
                     let id = connection.id.clone();
-                    move |app| Ok(crate::host::mcp::server_tool_names(app.world(), &id))
+                    let revision = connection.revision;
+                    move |app| {
+                        Ok(crate::host::mcp::server_tool_names(
+                            app.world(),
+                            &id,
+                            revision,
+                        ))
+                    }
                 })
                 .await
-                .unwrap_or_default();
+                .map_err(ConnectError::from)?;
             crate::host::settings::Check {
-                healthy: true,
+                healthy: tools.is_some(),
                 checked_at: crate::host::db::now(),
-                failure: None,
+                failure: tools.is_none().then(|| {
+                    crate::host::error::Failure::new(
+                        "connection_check",
+                        "The MCP server is not connected.",
+                    )
+                }),
                 capabilities: Vec::new(),
                 resources: tools.unwrap_or_default(),
             }
@@ -353,18 +397,41 @@ impl w::SettingsService for Services {
                 .endpoint()
                 .adapter
                 .eq_ignore_ascii_case("voicevox")
+            && !model::is_sakura_endpoint(&connection.endpoint().endpoint)
             && self.runtime.providers().get("voicevox").is_none()
         {
-            probe_voicevox_tts(&connection).await
+            let voicevox = self.runtime.voicevox();
+            probe_voicevox_tts(&connection, &voicevox).await
+        } else if matches!(
+            connection.kind,
+            crate::host::settings::ConnectionKind::Stt | crate::host::settings::ConnectionKind::Tts
+        ) {
+            probe_openai_speech(&connection, &credentials, &self.runtime.providers()).await
+        } else if connection.kind == crate::host::settings::ConnectionKind::Embedding {
+            probe_embedding(&connection, &credentials, &self.runtime.providers()).await
         } else {
             model::probe(&store, &credentials, &connection, &self.runtime.providers()).await
         };
         let request_id = request.request_key.to_owned();
         let resource_id = request.resource_id.map(str::to_owned);
+        let checked_revision = (connection.endpoint().adapter == model::agent_platform::ADAPTER)
+            .then_some(connection.revision);
         let id = connection.id;
         self.call(move |app| {
             let store = app.world().resource::<Store>().clone();
+            if let Some(revision) = checked_revision
+                && store
+                    .connection(&id)?
+                    .is_some_and(|current| current.revision != revision)
+            {
+                return Err(HostError::Conflict(
+                    "connection changed during the check".into(),
+                ));
+            }
             store.set_check(&id, &check)?;
+            if checked_revision.is_some() {
+                notify_settings(app, wire::settings(&store.settings()?));
+            }
             Ok(w::CheckResult {
                 request_id,
                 success: check.healthy,
@@ -421,6 +488,7 @@ fn rule_from(rule: w::PolicyRule) -> Result<permission::PolicyRule, HostError> {
 
 async fn probe_voicevox_tts(
     connection: &crate::host::settings::Connection,
+    voicevox: &crate::host::voice::voicevox::VoicevoxManager,
 ) -> crate::host::settings::Check {
     let checked_at = crate::host::db::now();
     let base = connection.endpoint().endpoint.trim().trim_end_matches('/');
@@ -448,22 +516,63 @@ async fn probe_voicevox_tts(
             };
         }
     };
-    match client.get(&url).send().await {
+
+    let mut response = client.get(&url).send().await;
+    if response.is_err()
+        && let Err(start_error) = voicevox
+            .ensure_running(base, &connection.endpoint().options)
+            .await
+    {
+        return crate::host::settings::Check {
+            healthy: false,
+            checked_at,
+            failure: Some(crate::host::error::Failure::new(
+                "connection_check",
+                start_error,
+            )),
+            capabilities: Vec::new(),
+            resources: Vec::new(),
+        };
+    } else if response.is_err() {
+        response = client.get(&url).send().await;
+    }
+
+    match response {
         Ok(response) if response.status().is_success() => {
             let mut resources = Vec::new();
             if let Ok(speakers) = response.json::<Vec<serde_json::Value>>().await {
                 for speaker in speakers {
+                    let speaker_name = speaker
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .unwrap_or("");
                     if let Some(styles) = speaker.get("styles").and_then(|s| s.as_array()) {
                         for style in styles {
                             if let Some(id) = style.get("id").and_then(|v| v.as_u64()) {
-                                resources.push(id.to_string());
+                                let style_name = style
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::trim)
+                                    .unwrap_or("");
+                                let entry = match (speaker_name.is_empty(), style_name.is_empty()) {
+                                    (false, false) => {
+                                        format!("{id}:{speaker_name}（{style_name}）")
+                                    }
+                                    (false, true) => format!("{id}:{speaker_name}"),
+                                    _ => id.to_string(),
+                                };
+                                resources.push(entry);
                             }
                         }
                     }
                 }
             }
             if resources.is_empty() {
-                resources.extend(["1".to_owned(), "3".to_owned()]);
+                resources.extend([
+                    "1:ずんだもん（あまあま）".to_owned(),
+                    "3:ずんだもん（ノーマル）".to_owned(),
+                ]);
             }
             crate::host::settings::Check {
                 healthy: true,
@@ -493,6 +602,254 @@ async fn probe_voicevox_tts(
             capabilities: Vec::new(),
             resources: Vec::new(),
         },
+    }
+}
+
+async fn probe_openai_speech(
+    connection: &crate::host::settings::Connection,
+    credentials: &model::Credentials,
+    providers: &crate::host::providers::Providers,
+) -> crate::host::settings::Check {
+    let checked_at = crate::host::db::now();
+    let fail = |message: String| crate::host::settings::Check {
+        healthy: false,
+        checked_at: checked_at.clone(),
+        failure: Some(crate::host::error::Failure::new(
+            "connection_check",
+            message,
+        )),
+        capabilities: Vec::new(),
+        resources: Vec::new(),
+    };
+    let base = settings::endpoint_of(connection, providers).unwrap_or_else(|| {
+        connection
+            .endpoint()
+            .endpoint
+            .trim()
+            .trim_end_matches('/')
+            .to_owned()
+    });
+    let Ok(parsed) = url::Url::parse(&base) else {
+        return fail("接続先URLが正しくありません".into());
+    };
+    let sakura = model::is_sakura_connection(&connection.endpoint().adapter, &base);
+    let secret = match model::connection_secret(connection, Some(credentials), providers) {
+        Ok(secret) => secret,
+        Err(error) => return fail(error.to_string()),
+    };
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => return fail(error.to_string()),
+    };
+
+    let models_url = if sakura && base.ends_with("/tts/v1") {
+        let trimmed = base.trim_end_matches("/tts/v1");
+        format!("{trimmed}/v1/models")
+    } else {
+        format!("{base}/models")
+    };
+    let mut req = client.get(&models_url);
+    if let Some(key) = secret.as_deref() {
+        req = req.bearer_auth(key);
+    }
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let mut listed = Vec::new();
+            if let Ok(json) = resp.json::<serde_json::Value>().await
+                && let Some(items) = json.get("data").and_then(|v| v.as_array())
+            {
+                for item in items {
+                    if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                        listed.push(id.to_owned());
+                    }
+                }
+            }
+            let resources = if sakura && connection.kind == settings::ConnectionKind::Tts {
+                let mut out: Vec<String> = model::SAKURA_TTS_VOICES
+                    .iter()
+                    .map(|entry| (*entry).to_owned())
+                    .collect();
+                for id in listed {
+                    if model::is_sakura_tts_model_id(&id)
+                        && !out.iter().any(|entry| {
+                            entry
+                                .split('/')
+                                .next()
+                                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&id))
+                        })
+                    {
+                        out.push(format!("{id}/normal:VOICEVOX:{id}"));
+                    }
+                }
+                out
+            } else if sakura && connection.kind == settings::ConnectionKind::Stt {
+                let mut out: Vec<String> = listed
+                    .into_iter()
+                    .filter(|id| {
+                        let lower = id.to_ascii_lowercase();
+                        lower.contains("whisper") || lower.contains("transcribe")
+                    })
+                    .collect();
+                for id in model::SAKURA_STT_MODELS {
+                    if !out.iter().any(|existing| existing == id) {
+                        out.push((*id).to_owned());
+                    }
+                }
+                out
+            } else {
+                listed
+            };
+            crate::host::settings::Check {
+                healthy: true,
+                checked_at,
+                failure: None,
+                capabilities: Vec::new(),
+                resources,
+            }
+        }
+        Ok(resp) if matches!(resp.status().as_u16(), 401 | 403) => fail(format!(
+            "認証エラー (HTTP {})。APIキー（アカウントトークン）を確認してください。",
+            resp.status().as_u16()
+        )),
+        Ok(resp) => {
+            let is_loopback = parsed.host().is_some_and(|h| match h {
+                url::Host::Ipv4(ip) => ip.is_loopback(),
+                url::Host::Ipv6(ip) => ip.is_loopback(),
+                url::Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
+            });
+            if is_loopback {
+                let origin = format!(
+                    "{}://{}{}",
+                    parsed.scheme(),
+                    parsed.host_str().unwrap_or("127.0.0.1"),
+                    parsed.port().map(|p| format!(":{p}")).unwrap_or_default()
+                );
+                for path in ["/health", "/"] {
+                    let mut fallback = client.get(format!("{origin}{path}"));
+                    if let Some(key) = secret.as_deref() {
+                        fallback = fallback.bearer_auth(key);
+                    }
+                    if let Ok(r) = fallback.send().await
+                        && r.status().is_success()
+                    {
+                        return crate::host::settings::Check {
+                            healthy: true,
+                            checked_at,
+                            failure: None,
+                            capabilities: Vec::new(),
+                            resources: Vec::new(),
+                        };
+                    }
+                }
+            }
+            fail(format!("HTTP {}", resp.status().as_u16()))
+        }
+        Err(error) => fail(error.to_string()),
+    }
+}
+
+async fn probe_embedding(
+    connection: &crate::host::settings::Connection,
+    credentials: &model::Credentials,
+    providers: &crate::host::providers::Providers,
+) -> crate::host::settings::Check {
+    let checked_at = crate::host::db::now();
+    let fail = |message: String, resources: Vec<String>| crate::host::settings::Check {
+        healthy: false,
+        checked_at: checked_at.clone(),
+        failure: Some(crate::host::error::Failure::new(
+            "connection_check",
+            message,
+        )),
+        capabilities: Vec::new(),
+        resources,
+    };
+    let Some(base) = settings::endpoint_of(connection, providers) else {
+        return fail("接続先URLが正しくありません".into(), Vec::new());
+    };
+    if url::Url::parse(&base).is_err() {
+        return fail("接続先URLが正しくありません".into(), Vec::new());
+    }
+    let sakura = model::is_sakura_connection(&connection.endpoint().adapter, &base);
+    let secret = match model::connection_secret(connection, Some(credentials), providers) {
+        Ok(secret) => secret,
+        Err(error) => return fail(error.to_string(), Vec::new()),
+    };
+
+    let mut resources = Vec::new();
+    if let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        let mut req = client.get(format!("{base}/models"));
+        if let Some(key) = secret.as_deref() {
+            req = req.bearer_auth(key);
+        }
+        if let Ok(resp) = req.send().await {
+            if matches!(resp.status().as_u16(), 401 | 403) {
+                return fail(
+                    format!(
+                        "認証エラー (HTTP {})。APIキー（アカウントトークン）を確認してください。",
+                        resp.status().as_u16()
+                    ),
+                    resources,
+                );
+            }
+            if resp.status().is_success()
+                && let Ok(json) = resp.json::<serde_json::Value>().await
+                && let Some(items) = json.get("data").and_then(|v| v.as_array())
+            {
+                for item in items {
+                    if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                        let lower = id.to_ascii_lowercase();
+                        if lower.contains("embed") || lower.contains("e5") {
+                            resources.push(id.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if sakura {
+        for id in model::SAKURA_EMBEDDING_MODELS {
+            if !resources.iter().any(|existing| existing == id) {
+                resources.push((*id).to_owned());
+            }
+        }
+    }
+
+    match crate::host::mind::embedding::probe_dimensions(connection, credentials, providers).await {
+        Ok(actual_dim) => {
+            let configured_dim = match &connection.config {
+                settings::ConnectionConfig::Embedding(cfg) => cfg.dimensions as usize,
+                _ => 0,
+            };
+            if configured_dim > 0 && configured_dim != actual_dim {
+                return crate::host::settings::Check {
+                    healthy: false,
+                    checked_at,
+                    failure: Some(crate::host::error::Failure::new(
+                        "connection_check",
+                        format!(
+                            "埋め込み次元数が一致しません（設定: {configured_dim} / モデルの出力: {actual_dim}）。次元数を {actual_dim} に設定してください。"
+                        ),
+                    )),
+                    capabilities: vec![format!("dimensions:{actual_dim}")],
+                    resources,
+                };
+            }
+            crate::host::settings::Check {
+                healthy: true,
+                checked_at,
+                failure: None,
+                capabilities: vec![format!("dimensions:{actual_dim}")],
+                resources,
+            }
+        }
+        Err(error) => fail(error, resources),
     }
 }
 

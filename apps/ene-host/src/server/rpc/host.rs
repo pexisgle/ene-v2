@@ -23,6 +23,7 @@ impl w::HostService for Services {
         request: ServiceRequest<'_, w::SubscribeRequest>,
     ) -> ServiceResult<ServiceStream<w::Notification>> {
         let subscriber = (!request.client_id.is_empty()).then(|| request.client_id.to_owned());
+        let diagnostics = request.include_diagnostics;
         let subscriber_view = subscriber.clone();
         let cursor = request.cursor.as_option().map(|cursor| w::Cursor {
             epoch: cursor.epoch.to_owned(),
@@ -52,7 +53,7 @@ impl w::HostService for Services {
             match start {
                 Start::Replay(events) => {
                     for event in events {
-                        if visible(&event, subscriber_view.as_deref()) {
+                        if visible(&event, subscriber_view.as_deref(), diagnostics) {
                             yield Ok(event);
                         }
                     }
@@ -62,7 +63,7 @@ impl w::HostService for Services {
             loop {
                 match events.recv().await {
                     Ok(event) => {
-                        if visible(&event, subscriber_view.as_deref()) {
+                        if visible(&event, subscriber_view.as_deref(), diagnostics) {
                             yield Ok(event);
                         }
                     }
@@ -86,6 +87,16 @@ impl w::HostService for Services {
         }
         .take_until(self.shutdown.clone().cancelled_owned());
         Response::stream_ok(stream)
+    }
+
+    async fn get_perception_frame(
+        &self,
+        _: RequestContext,
+        request: ServiceRequest<'_, w::Id>,
+    ) -> ServiceResult<w::ScreenFrame> {
+        let id = request.id.to_owned();
+        self.read(move |app| host::eyes::preview(app.world(), &id))
+            .await
     }
 
     async fn list_companions(
@@ -140,7 +151,10 @@ enum Start {
 }
 
 /// A notification addressed to one client is not sent to another.
-fn visible(event: &w::Notification, subscriber: Option<&str>) -> bool {
+fn visible(event: &w::Notification, subscriber: Option<&str>, diagnostics: bool) -> bool {
+    if event.kind == host::notify::DIAGNOSTIC {
+        return diagnostics;
+    }
     match (event.client_id.as_deref(), subscriber) {
         (Some(target), Some(subscriber)) => target == subscriber,
         _ => true,
@@ -189,6 +203,12 @@ mod tests {
             .call(|app| {
                 let mut notifier = app.world_mut().resource_mut::<Notifier>();
                 notifier.push(None, Some("other"), event("hidden"));
+                notifier.diagnostic(
+                    "ene",
+                    "eyes",
+                    "screen_received",
+                    serde_json::json!({"bytes": 10}),
+                );
                 notifier.push(None, Some("c1"), event("replayed"));
                 Ok(())
             })
@@ -202,7 +222,7 @@ mod tests {
         let mut stream = {
             let message = StreamMessage::from_message(&w::SubscribeRequest {
                 client_id: "c1".into(),
-                cursor: Some(cursor).into(),
+                cursor: Some(cursor.clone()).into(),
                 ..Default::default()
             });
             service
@@ -219,6 +239,24 @@ mod tests {
         assert!(
             matches!(replayed.event, Some(w::notification::Event::Generic(ref item)) if item.kind == "replayed")
         );
+        {
+            let message = StreamMessage::from_message(&w::SubscribeRequest {
+                client_id: "c1".into(),
+                cursor: Some(cursor).into(),
+                include_diagnostics: true,
+                ..Default::default()
+            });
+            let mut diagnostics = service
+                .subscribe(
+                    RequestContext::new(http::HeaderMap::new()),
+                    ServiceRequest::from_parts(message.view(), message.bytes()),
+                )
+                .await
+                .unwrap()
+                .body;
+            let diagnostic = diagnostics.next().await.unwrap().unwrap();
+            assert_eq!(diagnostic.kind, host::notify::DIAGNOSTIC);
+        }
         runtime
             .call(|app| {
                 let mut notifier = app.world_mut().resource_mut::<Notifier>();

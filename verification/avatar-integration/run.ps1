@@ -31,9 +31,9 @@ function Resolve-Asset([string]$envName, [string]$fallback) {
     return $fallback
 }
 
-$model = Resolve-Asset 'ENE_VERIFY_MODEL' "$env:LOCALAPPDATA\ene\cache\models\Seed-san.vrm"
-$motion = Resolve-Asset 'ENE_VERIFY_MOTION' "$env:LOCALAPPDATA\ene\cache\motions\three-vrm-sample.vrma"
-$motion2 = Resolve-Asset 'ENE_VERIFY_MOTION2' "$env:LOCALAPPDATA\ene\cache\motions\quaternius-dance.vrma"
+$model = Resolve-Asset 'ENE_VERIFY_MODEL' (Join-Path $root 'assets/ENE.vrm')
+$motion = Resolve-Asset 'ENE_VERIFY_MOTION' (Join-Path $root 'assets/vrma/01-presence/idle-breath.vrma')
+$motion2 = Resolve-Asset 'ENE_VERIFY_MOTION2' (Join-Path $root 'assets/vrma/04-conversation/acknowledge.vrma')
 foreach ($path in @($model, $motion, $motion2)) {
     if (-not (Test-Path -LiteralPath $path)) {
         Write-Host "SKIP the renderer asset is missing: $path"

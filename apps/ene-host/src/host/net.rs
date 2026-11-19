@@ -37,3 +37,22 @@ pub(crate) fn model_client() -> Result<reqwest::Client, String> {
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
     CLIENT.get_or_init(|| build(Some(MODEL_TIMEOUT))).clone()
 }
+
+pub(crate) async fn read_response_body(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("the {label} response failed: {}", error.without_url()))?
+    {
+        if out.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(format!("the {label} response exceeded the host limit"));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}

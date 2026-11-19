@@ -45,9 +45,16 @@ const SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) const STT_TIMEOUT: Duration = Duration::from_secs(30);
 const AUDIO_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_SENTENCE_CHARS: usize = 240;
+/// The longest text a settings probe may ask the engine to speak.
+pub(crate) const MAX_PROBE_CHARS: usize = MAX_SENTENCE_CHARS;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const STT_SILENCE_WINDOW: Duration = Duration::from_millis(700);
-pub(crate) const MIN_STT_BYTES: usize = 3_200;
+/// Below this the recognizer is answering noise. Whisper-family models emit a
+/// stock phrase ("ご視聴ありがとうございました" and its English equivalents) on
+/// silence, so a buffer that is short or nearly flat never reaches the engine.
+pub(crate) const MIN_STT_BYTES: usize = 4_800 * 2;
+/// The normalized RMS floor of a short window worth sending to STT.
+pub(crate) const MIN_STT_RMS: f32 = 0.004;
 pub(crate) const MAX_STT_BYTES: usize = 48_000 * 20;
 const TRANSCRIPTION_MEMORY: usize = 128;
 const MAX_SENTENCES: u32 = 64;
@@ -95,6 +102,7 @@ struct SpeechOptions {
     model: Option<String>,
     voice: Option<String>,
     language: Option<String>,
+    response_format: Option<String>,
     path: Option<String>,
     audio_query_path: Option<String>,
     synthesis_path: Option<String>,
@@ -113,10 +121,12 @@ enum Protocol {
 
 struct HttpEngine {
     base: String,
+    sakura: bool,
     protocol: Protocol,
     model: String,
     voice: String,
     language: Option<String>,
+    response_format: String,
     path: String,
     query_path: String,
     synthesis_path: String,
@@ -136,7 +146,7 @@ impl HttpEngine {
         let tts = kind == ConnectionKind::Tts;
         let label = if tts { "TTS" } else { "STT" };
         let endpoint = connection.endpoint().clone();
-        let base = base_url(&endpoint, label)?;
+        let resolved_base = resolve_base(&connection, providers, label)?;
         let options: SpeechOptions = parse_options(&endpoint, label)?;
         let secret = match credentials {
             Some(creds) => model::connection_secret(
@@ -149,15 +159,25 @@ impl HttpEngine {
         };
         let protocol = match (tts, nonempty(options.protocol).as_deref()) {
             (true, None) if endpoint.adapter == "voicevox" => Protocol::Voicevox,
-            (true, None | Some("openai")) => Protocol::OpenAiTts,
+            (true, None | Some("openai" | "sakura")) => Protocol::OpenAiTts,
             (true, Some("voicevox")) => Protocol::Voicevox,
-            (false, None | Some("openai")) => Protocol::OpenAiStt,
+            (false, None | Some("openai" | "sakura")) => Protocol::OpenAiStt,
             (false, Some("raw")) => Protocol::Raw,
             (_, Some(other)) => {
                 return Err(SetupError::Unsupported(format!(
                     "the {label} adapter protocol `{other}` is not supported"
                 )));
             }
+        };
+        let sakura = model::is_sakura_connection(&endpoint.adapter, &resolved_base);
+        let use_sakura_tts_v1 = protocol == Protocol::Voicevox
+            && sakura
+            && options.audio_query_path.is_none()
+            && options.synthesis_path.is_none();
+        let base = if use_sakura_tts_v1 {
+            resolved_base.trim_end_matches("/v1").to_owned()
+        } else {
+            resolved_base
         };
         let default_voice = match &connection.config {
             ConnectionConfig::Tts(config) if tts => config.voice_ids.first().cloned(),
@@ -167,8 +187,27 @@ impl HttpEngine {
             ConnectionConfig::Stt(config) if !tts => &config.language_hints,
             _ => &[],
         };
+        let (default_sakura_model, default_sakura_voice) = match default_voice.as_deref() {
+            Some(raw) if sakura => {
+                let trimmed = raw.trim();
+                if let Some((m, v)) = trimmed.split_once('/') {
+                    let m = m.trim();
+                    let v = v.trim();
+                    (
+                        (!m.is_empty()).then(|| m.to_owned()),
+                        (!v.is_empty()).then(|| v.to_owned()),
+                    )
+                } else if !trimmed.is_empty() && model::is_sakura_tts_model_id(trimmed) {
+                    (Some(trimmed.to_owned()), None)
+                } else {
+                    (None, (!trimmed.is_empty()).then(|| trimmed.to_owned()))
+                }
+            }
+            _ => (None, default_voice.clone()),
+        };
         let default_speaker = default_voice
             .as_deref()
+            .and_then(|v| v.trim().split(':').next())
             .and_then(|v| v.trim().parse::<u32>().ok())
             .unwrap_or(3);
         let timeout = Duration::from_millis(
@@ -179,13 +218,32 @@ impl HttpEngine {
         );
         Ok(Self {
             base,
+            sakura,
             protocol,
             model: nonempty(options.model)
-                .unwrap_or_else(|| if tts { "tts-1" } else { "whisper-1" }.into()),
+                .or(default_sakura_model)
+                .unwrap_or_else(|| {
+                    if !tts {
+                        if sakura {
+                            "whisper-large-v3-turbo"
+                        } else {
+                            "whisper-1"
+                        }
+                    } else if sakura {
+                        "zundamon"
+                    } else {
+                        "tts-1"
+                    }
+                    .into()
+                }),
             voice: nonempty(options.voice)
-                .or(default_voice)
-                .unwrap_or_else(|| "alloy".into()),
-            language: nonempty(options.language).or_else(|| hints.first().cloned()),
+                .or(default_sakura_voice)
+                .unwrap_or_else(|| if sakura { "normal" } else { "alloy" }.into()),
+            language: nonempty(options.language)
+                .or_else(|| hints.first().cloned())
+                .or_else(|| (sakura && !tts).then(|| "ja".into())),
+            response_format: nonempty(options.response_format)
+                .unwrap_or_else(|| if sakura { "wav" } else { "pcm" }.into()),
             path: endpoint_path(
                 options.path,
                 if tts {
@@ -194,8 +252,22 @@ impl HttpEngine {
                     "/audio/transcriptions"
                 },
             ),
-            query_path: endpoint_path(options.audio_query_path, "/audio_query"),
-            synthesis_path: endpoint_path(options.synthesis_path, "/synthesis"),
+            query_path: endpoint_path(
+                options.audio_query_path,
+                if use_sakura_tts_v1 {
+                    "/tts/v1/audio_query"
+                } else {
+                    "/audio_query"
+                },
+            ),
+            synthesis_path: endpoint_path(
+                options.synthesis_path,
+                if use_sakura_tts_v1 {
+                    "/tts/v1/synthesis"
+                } else {
+                    "/synthesis"
+                },
+            ),
             speaker: options
                 .speaker
                 .map(|s| s.min(u64::from(u32::MAX)) as u32)
@@ -208,28 +280,72 @@ impl HttpEngine {
 
     async fn exchange(&self, call: reqwest::RequestBuilder, what: &str) -> HttpResult<Vec<u8>> {
         let response = post(call.timeout(self.timeout), self.secret.as_deref(), what).await?;
-        read_response_body(response, MAX_BODY_BYTES, what).await
+        net::read_response_body(response, MAX_BODY_BYTES, what).await
     }
 
     async fn openai_tts(&self, text: String, voice: String) -> HttpResult<(Vec<u8>, u32)> {
+        let trimmed = voice.trim();
+        let (req_model, req_voice) = if self.sakura {
+            if trimmed.is_empty() {
+                (self.model.as_str(), self.voice.as_str())
+            } else if let Some((m, v)) = trimmed.split_once('/') {
+                let m = m.trim();
+                let v = v.trim();
+                (
+                    if m.is_empty() { self.model.as_str() } else { m },
+                    if v.is_empty() { "normal" } else { v },
+                )
+            } else if model::is_sakura_tts_model_id(trimmed) {
+                (trimmed, self.voice.as_str())
+            } else {
+                (self.model.as_str(), trimmed)
+            }
+        } else {
+            (
+                self.model.as_str(),
+                if trimmed.is_empty() {
+                    self.voice.as_str()
+                } else {
+                    trimmed
+                },
+            )
+        };
         let mut body = serde_json::json!({
-            "model": self.model,
-            "voice": if voice.trim().is_empty() { &self.voice } else { voice.trim() },
+            "model": req_model,
+            "voice": req_voice,
             "input": text,
-            "response_format": "pcm",
+            "response_format": self.response_format,
         });
-        if let Some(speed) = self.speed {
+        if !self.sakura
+            && let Some(speed) = self.speed
+        {
             body["speed"] = serde_json::json!(speed);
         }
-        let call = net::client()?
+        let mut call = net::client()?
             .post(format!("{}{}", self.base, self.path))
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.to_string());
-        Ok((self.exchange(call, "TTS").await?, SAMPLE_RATE))
+            .header(reqwest::header::CONTENT_TYPE, "application/json");
+        if self.response_format.eq_ignore_ascii_case("wav") {
+            call = call.header(reqwest::header::ACCEPT, "audio/wav");
+        }
+        let bytes = self.exchange(call.body(body.to_string()), "TTS").await?;
+        if (bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE")
+            || self.response_format.eq_ignore_ascii_case("wav")
+        {
+            return parse_wav(&bytes);
+        }
+        Ok((bytes, SAMPLE_RATE))
     }
 
     async fn voicevox(&self, text: String, voice: String) -> HttpResult<(Vec<u8>, u32)> {
-        let speaker = voice.trim().parse::<u32>().ok().unwrap_or(self.speaker);
+        let speaker = voice
+            .trim()
+            .split(':')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .unwrap_or(self.speaker);
         let encoded: String = url::form_urlencoded::byte_serialize(text.as_bytes()).collect();
         let client = net::client()?;
         let call = client.post(format!(
@@ -253,7 +369,12 @@ impl HttpEngine {
     }
 
     async fn openai_stt(&self, pcm: Vec<u8>, sample_rate: u32) -> HttpResult<String> {
-        let file = reqwest::multipart::Part::bytes(wav_wrap(&pcm, sample_rate)?)
+        let (pcm_16k, stt_rate) = if sample_rate != 16_000 {
+            (resample_mono(&pcm, sample_rate, 16_000, &mut None)?, 16_000)
+        } else {
+            (pcm, sample_rate)
+        };
+        let file = reqwest::multipart::Part::bytes(wav_wrap(&pcm_16k, stt_rate)?)
             .file_name("audio.wav")
             .mime_str("audio/wav")
             .map_err(|error| format!("the STT multipart body: {error}"))?;
@@ -263,9 +384,12 @@ impl HttpEngine {
         if let Some(language) = &self.language {
             form = form.text("language", language.clone());
         }
+        if !self.sakura {
+            form = form.text("response_format", "json");
+        }
         let call = net::client()?
             .post(format!("{}{}", self.base, self.path))
-            .multipart(form.text("response_format", "json"));
+            .multipart(form);
         let body = self.exchange(call, "STT").await?;
         let value: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|_| "the STT endpoint answered a non-JSON transcript".to_owned())?;
@@ -273,10 +397,15 @@ impl HttpEngine {
     }
 
     async fn raw_stt(&self, pcm: Vec<u8>, sample_rate: u32) -> HttpResult<String> {
+        let (pcm_16k, stt_rate) = if sample_rate != 16_000 {
+            (resample_mono(&pcm, sample_rate, 16_000, &mut None)?, 16_000)
+        } else {
+            (pcm, sample_rate)
+        };
         let call = net::client()?
             .post(format!("{}{}", self.base, self.path))
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .body(wav_wrap(&pcm, sample_rate)?);
+            .body(wav_wrap(&pcm_16k, stt_rate)?);
         String::from_utf8(self.exchange(call, "STT").await?)
             .map(|text| text.trim().to_owned())
             .map_err(|_| "the STT endpoint answered a non-UTF-8 transcript".to_owned())
@@ -342,27 +471,22 @@ async fn post(
     }
 }
 
-async fn read_response_body(
-    mut response: reqwest::Response,
-    max_bytes: usize,
+fn resolve_base(
+    connection: &Connection,
+    providers: Option<&Providers>,
     label: &str,
-) -> HttpResult<Vec<u8>> {
-    let mut out = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| format!("the {label} response failed: {error}"))?
-    {
-        if out.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(format!("the {label} response exceeded the host limit"));
-        }
-        out.extend_from_slice(&chunk);
-    }
-    Ok(out)
-}
-
-fn base_url(endpoint: &Endpoint, label: &str) -> std::result::Result<String, SetupError> {
-    let base = endpoint.endpoint.trim().trim_end_matches('/');
+) -> std::result::Result<String, SetupError> {
+    let fallback = Providers::none();
+    let providers = providers.unwrap_or(&fallback);
+    let raw = super::settings::endpoint_of(connection, providers).unwrap_or_else(|| {
+        connection
+            .endpoint()
+            .endpoint
+            .trim()
+            .trim_end_matches('/')
+            .to_owned()
+    });
+    let base = raw.trim().trim_end_matches('/');
     url::Url::parse(base)
         .map_err(|_| SetupError::Broken(format!("the {label} connection endpoint is not a URL")))?;
     Ok(base.to_owned())
@@ -500,7 +624,7 @@ pub(crate) fn tts_source(world: &World) -> std::result::Result<Arc<dyn TtsEngine
     }
     if matches!(
         connection.endpoint().adapter.as_str(),
-        "voicevox" | "openai"
+        "voicevox" | "openai" | "sakura"
     ) {
         let engine = HttpEngine::new(
             connection,
@@ -527,7 +651,7 @@ pub(crate) fn stt_source(world: &World) -> std::result::Result<Arc<dyn SttEngine
     if let Some(engine) = plugin_engine(world, &connection, ConnectionKind::Stt)? {
         return Ok(Arc::new(engine));
     }
-    if connection.endpoint().adapter == "openai" {
+    if matches!(connection.endpoint().adapter.as_str(), "openai" | "sakura") {
         let engine = HttpEngine::new(
             connection,
             world.get_resource::<Credentials>(),
@@ -569,21 +693,26 @@ fn voice_connection(
     let settings = store
         .settings()
         .map_err(|error| SetupError::Broken(error.to_string()))?;
-    let Some(connection) = settings
-        .connections
-        .into_iter()
-        .find(|connection| connection.kind == kind)
-    else {
-        return Err(SetupError::Missing);
-    };
-    if !connection.enabled {
+    let mut first_disabled = None;
+    for connection in settings.connections {
+        if connection.kind != kind {
+            continue;
+        }
+        if connection.enabled {
+            return Ok(connection);
+        }
+        if first_disabled.is_none() {
+            first_disabled = Some(connection);
+        }
+    }
+    if let Some(connection) = first_disabled {
         return Err(SetupError::Disabled(format!(
             "the {} connection `{}` is disabled",
             kind.as_str(),
             connection.id
         )));
     }
-    Ok(connection)
+    Err(SetupError::Missing)
 }
 
 type ResamplerCache = Option<(u32, u32, rubato::Fft<f32>)>;
@@ -836,6 +965,40 @@ impl Voice {
             state.floor = Some(companion.to_owned());
         }
         true
+    }
+
+    /// Plays one already-synthesized utterance without taking the speech floor.
+    /// A probe must not stop the turn in flight, so nothing is flushed and the
+    /// owner's utterance is left exactly as it was: the events go straight to
+    /// the client's stream with a generation the turn does not own.
+    fn play(&self, companion: &str, pcm: &[u8]) -> Result<()> {
+        let mut state = self.lock();
+        let Some(owner) = state.owners.get(companion) else {
+            return Err(HostError::FailedPrecondition(
+                ("no client is subscribed to this companion's audio").into(),
+            ));
+        };
+        let client_id = owner.client_id.clone();
+        state.next_generation += 1;
+        let generation_id = state.next_generation;
+        let utterance_id = uuid::Uuid::new_v4().to_string();
+        let events = audio_events(&utterance_id, generation_id, 0, pcm);
+        let Some(stream) = state.streams.get(&client_id) else {
+            return Err(HostError::FailedPrecondition(
+                ("the audio subscription is closed").into(),
+            ));
+        };
+        for event in events {
+            stream.audio.try_send(event).map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => {
+                    HostError::Unavailable(("the audio queue is full").into())
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    HostError::Unavailable(("the audio subscription is closed").into())
+                }
+            })?;
+        }
+        Ok(())
     }
 
     fn speak(&self, companion: &str, text: &str) {
@@ -1426,6 +1589,48 @@ pub(crate) fn unsubscribe_audio(world: &World, client: &str, subscription: &str)
     }
 }
 
+/// Speaks `text` through `companion`'s audio client, outside any turn. The
+/// speech floor is not taken and no conversation is touched: this is the probe a
+/// settings screen uses to hear the TTS connection, so it must not disturb the
+/// turn the person is in the middle of.
+pub(crate) async fn synthesize_for_probe(
+    source: Arc<dyn TtsEngine>,
+    text: &str,
+    voice: String,
+) -> HttpResult<(Vec<u8>, u32)> {
+    let text = text.trim().to_owned();
+    if text.is_empty() {
+        return Err("text is required".into());
+    }
+    if text.chars().count() > MAX_PROBE_CHARS {
+        return Err(format!("text is limited to {MAX_PROBE_CHARS} characters"));
+    }
+    synthesize(&*source, text, voice).await
+}
+
+/// Hands already-synthesized audio to the subscribed client as one utterance.
+/// The speech floor is not taken, so a turn in flight keeps it.
+pub(crate) fn play_once(
+    world: &World,
+    companion: &str,
+    pcm: Vec<u8>,
+    rate: u32,
+) -> std::result::Result<w::Empty, HostError> {
+    let pcm = wire_pcm(pcm, rate, &mut None).map_err(HostError::Unavailable)?;
+    if pcm.is_empty() {
+        return Err(HostError::Unavailable(
+            ("the TTS engine returned no audio").into(),
+        ));
+    }
+    let Some(voice) = world.get_resource::<Voice>() else {
+        return Err(HostError::Unavailable(
+            ("the voice plugin is not installed").into(),
+        ));
+    };
+    voice.play(companion, &pcm)?;
+    Ok(w::Empty::default())
+}
+
 pub(crate) fn accept_transcription(
     world: &mut World,
     transcription_id: &str,
@@ -1589,3 +1794,4 @@ impl Plugin for VoicePlugin {
 mod plugin;
 #[cfg(test)]
 mod tests;
+pub(crate) mod voicevox;

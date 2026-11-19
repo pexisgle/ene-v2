@@ -11,7 +11,7 @@ use gpui::{
     AnyElement, Context, Entity, MouseButton, MouseDownEvent, SharedString, Subscription, Window,
     div, prelude::*, px,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 /// Settings window managing companions, connections and local device permissions.
 pub struct SettingsStudio {
@@ -32,6 +32,8 @@ pub struct SettingsStudio {
     pub(crate) revealed_secret_for: Option<String>,
     pub(crate) revoke_armed_for: Option<String>,
     pub(crate) advanced_roles_open: bool,
+    pub(crate) open_dropdown: Option<String>,
+    pub(crate) auto_probed_connections: HashSet<String>,
     last_cleared_secret_seq: u64,
     // Device & Policy state
     pub(crate) delete_armed_policy: Option<String>,
@@ -59,6 +61,8 @@ impl SettingsStudio {
             revealed_secret_for: None,
             revoke_armed_for: None,
             advanced_roles_open: false,
+            open_dropdown: None,
+            auto_probed_connections: HashSet::new(),
             last_cleared_secret_seq: 0,
             delete_armed_policy: None,
             adding_policy_open: false,
@@ -214,6 +218,7 @@ impl SettingsStudio {
         for section in SettingsSection::ALL {
             let is_active = section == active;
             let hub = self.hub.clone();
+            let studio = cx.entity();
             items.push(
                 div()
                     .id(SharedString::from(section.key()))
@@ -235,11 +240,16 @@ impl SettingsStudio {
                         this.hover(|this| this.bg(theme.bg_surface.alpha(0.65)))
                     })
                     .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _, cx| {
+                        studio.update(cx, |this, _| {
+                            this.open_dropdown = None;
+                        });
                         hub.update(cx, |hub, cx| {
                             hub.settings_section = section;
                             if section == SettingsSection::Connections {
                                 hub.load_providers(cx);
                                 hub.load_models(cx);
+                            } else if section == SettingsSection::Voice {
+                                hub.load_providers(cx);
                             } else if section == SettingsSection::Device {
                                 hub.load_policy_rules(cx);
                             }
@@ -388,6 +398,7 @@ impl Render for SettingsStudio {
         let section_body = match section {
             SettingsSection::Companions => self.render_companions(&theme, cx),
             SettingsSection::Connections => self.render_connections(&theme, cx),
+            SettingsSection::Voice => self.render_voice(&theme, cx),
             SettingsSection::Device => self.render_device(&theme, cx),
         };
 

@@ -1,14 +1,46 @@
-//! The "eyes": the active window and the user's idle state.
-//!
-//! The client samples the OS and reports what it observed. It never guesses:
-//! on a platform where the window cannot be read, the sensor reports nothing
-//! and the host keeps its previous summary (`docs/design/desktop-client.md` §2.2).
-//!
-//! `eye.watch` rules are applied here, not in the host: the host forwards the
-//! rule as a `DeviceOperation` and does not interpret it.
+//! Desktop observation and local `eye.watch` rules.
 
 use serde::Deserialize;
 use serde_json::Value;
+use std::{
+    io::{self, Write},
+    path::PathBuf,
+};
+
+#[cfg(windows)]
+pub(crate) mod screen;
+#[cfg(windows)]
+pub(crate) use screen::{capture, unlocked};
+
+fn preference_path(name: &str) -> io::Result<PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "ene")
+        .ok_or_else(|| io::Error::other("設定ディレクトリを取得できません"))?;
+    Ok(dirs.config_local_dir().join(name))
+}
+
+pub(crate) fn enabled() -> bool {
+    preference_enabled("desktop-eyes")
+}
+
+pub(crate) fn preference_enabled(name: &str) -> bool {
+    preference_path(name)
+        .and_then(std::fs::read)
+        .is_ok_and(|value| value == b"on")
+}
+
+pub(crate) fn save_enabled(enabled: bool) -> io::Result<()> {
+    save_preference("desktop-eyes", enabled)
+}
+
+pub(crate) fn save_preference(name: &str, enabled: bool) -> io::Result<()> {
+    let path = preference_path(name)?;
+    let directory = path.parent().expect("a preference path has a directory");
+    std::fs::create_dir_all(directory)?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    file.write_all(if enabled { b"on" } else { b"off" })?;
+    file.persist(path)?;
+    Ok(())
+}
 
 /// What the sensor can observe right now.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,6 +122,7 @@ pub struct Sensor {
     last: Option<Window>,
     /// Whether the last sample matched, so `focus` fires once per entry.
     matched: bool,
+    idle: bool,
 }
 
 /// What a sample produced for the host.
@@ -99,7 +132,7 @@ pub enum Report {
     /// The user's activity state changed.
     Activity { is_active: bool, idle_seconds: u64 },
     /// A watch rule matched on this transition.
-    Interrupt(Window),
+    Interrupt(Window, NotifyOn),
 }
 
 impl Sensor {
@@ -116,31 +149,42 @@ impl Sensor {
     /// woken without waiting for the next periodic sample.
     pub fn observe(&mut self, observation: Observation) -> Vec<Report> {
         let mut reports = Vec::new();
-        if let Some(window) = observation.window.clone() {
+        if let Some(window) = observation.window {
             let changed = self.last.as_ref() != Some(&window);
             if changed {
                 reports.push(Report::Window(window.clone()));
-                self.last = Some(window.clone());
             }
             if let Some(watch) = self.watch.as_ref().filter(|watch| watch.enabled) {
                 let matched = watch.matches(&window);
                 let fires = match watch.notify_on {
                     NotifyOn::Focus => matched && !self.matched,
                     NotifyOn::Blur => !matched && self.matched,
-                    NotifyOn::TitleChange => matched && changed,
+                    NotifyOn::TitleChange => {
+                        matched
+                            && self.last.as_ref().is_some_and(|last| {
+                                last.app_id == window.app_id && last.title != window.title
+                            })
+                    }
                 };
                 if fires {
-                    reports.push(Report::Interrupt(window));
+                    let target = match watch.notify_on {
+                        NotifyOn::Blur => self.last.as_ref().unwrap_or(&window),
+                        _ => &window,
+                    };
+                    reports.push(Report::Interrupt(target.clone(), watch.notify_on));
                 }
                 self.matched = matched;
             }
+            self.last = Some(window);
         }
-        if observation.idle_seconds >= IDLE_THRESHOLD {
+        let idle = observation.idle_seconds >= IDLE_THRESHOLD;
+        if idle != self.idle {
             reports.push(Report::Activity {
-                is_active: false,
+                is_active: !idle,
                 idle_seconds: observation.idle_seconds,
             });
         }
+        self.idle = idle;
         reports
     }
 }
@@ -880,14 +924,14 @@ mod tests {
         assert!(
             first
                 .iter()
-                .any(|report| matches!(report, Report::Interrupt(_))),
+                .any(|report| matches!(report, Report::Interrupt(_, _))),
             "entering the match interrupts"
         );
         let second = sensor.observe(github);
         assert!(
             !second
                 .iter()
-                .any(|report| matches!(report, Report::Interrupt(_))),
+                .any(|report| matches!(report, Report::Interrupt(_, _))),
             "staying in the match does not interrupt again"
         );
     }
@@ -908,7 +952,7 @@ mod tests {
         let left = sensor.observe(other);
         assert!(
             left.iter()
-                .any(|report| matches!(report, Report::Interrupt(_))),
+                .any(|report| matches!(report, Report::Interrupt(window, NotifyOn::Blur) if window.title == "GitHub")),
             "leaving the match interrupts"
         );
     }
@@ -926,7 +970,7 @@ mod tests {
         assert!(
             !reports
                 .iter()
-                .any(|report| matches!(report, Report::Interrupt(_)))
+                .any(|report| matches!(report, Report::Interrupt(_, _)))
         );
     }
 
@@ -941,6 +985,18 @@ mod tests {
             reports.as_slice(),
             [Report::Activity {
                 is_active: false,
+                ..
+            }]
+        ));
+        assert!(matches!(
+            sensor
+                .observe(Observation {
+                    window: None,
+                    idle_seconds: 0
+                })
+                .as_slice(),
+            [Report::Activity {
+                is_active: true,
                 ..
             }]
         ));
