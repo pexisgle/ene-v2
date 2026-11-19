@@ -414,7 +414,7 @@ impl SettingsStudio {
             cx,
             format!("{draft_prefix}:adapter"),
             if adding_mcp {
-                "https://example.com/mcp または npx"
+                "例: URL または npx"
             } else {
                 "アダプタ名またはコマンド（例: openai / npx）"
             },
