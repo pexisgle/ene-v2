@@ -332,12 +332,19 @@ async fn open(want: &Desired, registry: ToolServerHandle) -> Result<McpConnectio
     let connection = if !want.command.is_empty() {
         // A stdio server is a child process the host owns.
         let args = want.args.clone();
-        let mut wrap =
-            process_wrap::tokio::CommandWrap::with_new(Path::new(&want.command), |cmd| {
-                cmd.args(&args)
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped());
-            });
+        #[cfg(windows)]
+        let program = if want.command.eq_ignore_ascii_case("npx") {
+            "npx.cmd"
+        } else {
+            want.command.as_str()
+        };
+        #[cfg(not(windows))]
+        let program = want.command.as_str();
+        let mut wrap = process_wrap::tokio::CommandWrap::with_new(Path::new(program), |cmd| {
+            cmd.args(&args)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped());
+        });
         // One process group, killed on drop, so a host that exits does not
         // orphan the server.
         #[cfg(unix)]
