@@ -12,6 +12,7 @@ use ene_rpc as w;
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
 const SKIP_FILE_CONFIRMATION_PREFIX: &str = "desktop.skip-file-confirmation:";
+const SKIP_TOOL_CONFIRMATION_ID: &str = "desktop.skip-tool-confirmation";
 
 fn is_file_confirmation_rule(rule: &w::PolicyRule) -> bool {
     rule.id
@@ -19,21 +20,24 @@ fn is_file_confirmation_rule(rule: &w::PolicyRule) -> bool {
         .is_some_and(|capability| WORKSPACE_FILE_CAPABILITIES.contains(&capability))
 }
 
-fn file_confirmation_request(skip: bool) -> w::UpdatePolicyRulesRequest {
-    let mut request = w::UpdatePolicyRulesRequest::default();
-    for &capability in WORKSPACE_FILE_CAPABILITIES {
-        let id = format!("{SKIP_FILE_CONFIRMATION_PREFIX}{capability}");
-        if skip {
-            request.add_or_update.push(w::PolicyRule {
-                id,
-                tool_name: capability.into(),
-                pattern: "*".into(),
-                effect: w::PolicyEffect::Allow.into(),
-                ..Default::default()
-            });
-        } else {
-            request.remove_ids.push(id);
-        }
+fn tool_confirmation_request(skip: bool) -> w::UpdatePolicyRulesRequest {
+    let mut request = w::UpdatePolicyRulesRequest {
+        remove_ids: WORKSPACE_FILE_CAPABILITIES
+            .iter()
+            .map(|capability| format!("{SKIP_FILE_CONFIRMATION_PREFIX}{capability}"))
+            .collect(),
+        ..Default::default()
+    };
+    if skip {
+        request.add_or_update.push(w::PolicyRule {
+            id: SKIP_TOOL_CONFIRMATION_ID.into(),
+            tool_name: "*".into(),
+            pattern: "*".into(),
+            effect: w::PolicyEffect::Allow.into(),
+            ..Default::default()
+        });
+    } else {
+        request.remove_ids.push(SKIP_TOOL_CONFIRMATION_ID.into());
     }
     request
 }
@@ -489,12 +493,17 @@ impl SettingsStudio {
             .text_color(theme.ink)
             .child("許可ルール");
 
-        let skip_file_confirmation = rules.iter().any(is_file_confirmation_rule);
+        let skip_tool_confirmation = rules
+            .iter()
+            .any(|rule| rule.id == SKIP_TOOL_CONFIRMATION_ID);
+        let skip_files_only =
+            !skip_tool_confirmation && rules.iter().any(is_file_confirmation_rule);
         let hub_confirmation = self.hub.clone();
+        let hub_revoke_legacy = self.hub.clone();
         let mut rule_items: Vec<AnyElement> = Vec::new();
         for rule in rules
             .into_iter()
-            .filter(|rule| !is_file_confirmation_rule(rule))
+            .filter(|rule| rule.id != SKIP_TOOL_CONFIRMATION_ID && !is_file_confirmation_rule(rule))
         {
             let (eff_text, dot, bg, fg) = match rule.effect.as_known() {
                 Some(w::PolicyEffect::Allow) => {
@@ -628,33 +637,64 @@ impl SettingsStudio {
             .flex_col()
             .child(row_frame(
                 false,
-                "作業フォルダーのファイル操作",
-                None,
-                pill_button(
-                    "dev-file-confirmation",
-                    if skip_file_confirmation {
-                        "省略を解除"
-                    } else {
-                        "確認を省略"
-                    },
-                    None,
-                    if skip_file_confirmation {
-                        Tone::Soft
-                    } else {
-                        Tone::Ghost
-                    },
-                    live,
-                    theme,
-                    move |_, cx| {
-                        hub_confirmation.update(cx, |hub, cx| {
-                            hub.update_policy_rules(
-                                "ファイル操作の確認設定",
-                                file_confirmation_request(!skip_file_confirmation),
-                                cx,
-                            );
-                        });
-                    },
-                ),
+                "ツール操作の確認",
+                skip_files_only.then(|| {
+                    status_pill(
+                        "ファイル操作のみ省略中",
+                        None,
+                        theme.amber_soft,
+                        theme.amber_fg,
+                    )
+                }),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .when(skip_files_only, |buttons| {
+                        buttons.child(pill_button(
+                            "dev-file-confirmation-restore",
+                            "省略を解除",
+                            None,
+                            Tone::Ghost,
+                            live,
+                            theme,
+                            move |_, cx| {
+                                hub_revoke_legacy.update(cx, |hub, cx| {
+                                    hub.update_policy_rules(
+                                        "ツール操作の確認設定",
+                                        tool_confirmation_request(false),
+                                        cx,
+                                    );
+                                });
+                            },
+                        ))
+                    })
+                    .child(pill_button(
+                        "dev-tool-confirmation",
+                        if skip_tool_confirmation {
+                            "省略を解除"
+                        } else {
+                            "すべて省略"
+                        },
+                        None,
+                        if skip_tool_confirmation {
+                            Tone::Soft
+                        } else {
+                            Tone::Ghost
+                        },
+                        live,
+                        theme,
+                        move |_, cx| {
+                            hub_confirmation.update(cx, |hub, cx| {
+                                hub.update_policy_rules(
+                                    "ツール操作の確認設定",
+                                    tool_confirmation_request(!skip_tool_confirmation),
+                                    cx,
+                                );
+                            });
+                        },
+                    ))
+                    .into_any_element(),
                 theme,
             ))
             .children(rule_items);
@@ -900,38 +940,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_confirmation_removes_only_its_own_rules() {
-        let enabled = file_confirmation_request(true);
-        let disabled = file_confirmation_request(false);
-        assert!(enabled.remove_ids.is_empty() && disabled.add_or_update.is_empty());
-        assert_eq!(
+    fn tool_confirmation_updates_only_managed_rules() {
+        let enabled = tool_confirmation_request(true);
+        let disabled = tool_confirmation_request(false);
+        assert!(disabled.add_or_update.is_empty());
+        let [rule] = enabled.add_or_update.as_slice() else {
+            panic!("expected one global rule")
+        };
+        assert_eq!(rule.id, SKIP_TOOL_CONFIRMATION_ID);
+        assert_eq!(rule.tool_name, "*");
+        assert_eq!(rule.pattern, "*");
+        assert_eq!(rule.effect.as_known(), Some(w::PolicyEffect::Allow));
+        assert_eq!(enabled.remove_ids.len(), WORKSPACE_FILE_CAPABILITIES.len());
+        assert!(
             enabled
-                .add_or_update
+                .remove_ids
                 .iter()
-                .map(|rule| rule.tool_name.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "work.read",
-                "work.write",
-                "work.edit",
-                "work.grep",
-                "work.find",
-                "work.ls"
-            ],
+                .all(|id| is_file_confirmation_rule(&w::PolicyRule {
+                    id: id.clone(),
+                    ..Default::default()
+                }))
         );
         assert_eq!(
-            disabled.remove_ids,
-            enabled
-                .add_or_update
-                .iter()
-                .map(|rule| rule.id.clone())
-                .collect::<Vec<_>>(),
+            &disabled.remove_ids[..enabled.remove_ids.len()],
+            &enabled.remove_ids
         );
-        assert!(enabled.add_or_update.iter().all(|rule| {
-            is_file_confirmation_rule(rule)
-                && rule.pattern == "*"
-                && rule.effect.as_known() == Some(w::PolicyEffect::Allow)
-        }));
+        assert_eq!(
+            disabled.remove_ids.last().unwrap(),
+            SKIP_TOOL_CONFIRMATION_ID
+        );
         assert!(!is_file_confirmation_rule(&w::PolicyRule {
             id: "manual-write-rule".into(),
             tool_name: "work.write".into(),
