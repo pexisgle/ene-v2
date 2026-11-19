@@ -96,7 +96,6 @@ pub fn floating_orb_button<F>(
     id: impl Into<ElementId>,
     kind: Icon,
     active: bool,
-    danger: bool,
     theme: &Theme,
     on_press: F,
 ) -> AnyElement
@@ -109,13 +108,6 @@ where
             theme.accent_fg,
             theme.accent,
             theme.accent_hover,
-        )
-    } else if danger {
-        (
-            theme.bg_surface,
-            theme.ink_muted,
-            theme.border_float,
-            theme.danger_soft,
         )
     } else {
         (

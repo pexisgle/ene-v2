@@ -4,34 +4,38 @@ use super::super::{
     settings::Endpoint,
 };
 use bytes::Bytes;
-use http::{HeaderValue, Method, Request, Response, Uri};
+use futures_util::{StreamExt, stream};
+use http::{HeaderValue, Method, Request, Response, StatusCode, Uri};
 use rig_core::{
     catalog::{ModelFacts, ModelSpec},
-    completion::CompletionRequest,
     driver::{DynModel, Model},
-    error::ProviderError,
     http_client::{self, HttpClientExt, LazyBody, MultipartForm, StreamingResponse},
     operation::Completion,
     providers::gemini::{GeminiConfig, completion::GenerateContent},
 };
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 pub(crate) const ADAPTER: &str = "google-agent-platform";
 pub(crate) const ENDPOINT: &str = "https://aiplatform.googleapis.com";
 pub(super) const DEFAULT_MODEL: &str = "gemini-3.8-flash";
-const PROJECT_MODELS: &[&str] = &[
+pub(crate) const VERIFIED_MODEL_LIST: &str = "verified_model_list";
+
+// Google Cloud's Gemini chat model IDs. Use the same candidates for both
+// connection modes and let Google decide what each key and location can use.
+const CHAT_MODELS: &[&str] = &[
     DEFAULT_MODEL,
+    "gemini-4-neon",
+    "gemini-4-hydrogen",
+    "gemini-4-carbon",
     "gemini-4-argon",
     "gemini-3.7-flash",
+    "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
     "gemini-3.1-pro-preview",
-];
-const EXPRESS_MODELS: &[&str] = &[
-    DEFAULT_MODEL,
+    "gemini-3.1-pro-preview-customtools",
     "gemini-3-flash-preview",
-    "gemini-3.1-pro-preview",
 ];
 
 fn valid_resource(value: &str) -> bool {
@@ -97,25 +101,6 @@ fn publisher_endpoint(endpoint: &Endpoint) -> Result<String> {
     ))
 }
 
-fn express(publisher: &str) -> bool {
-    publisher == format!("{ENDPOINT}/v1/publishers/google/models")
-}
-
-pub(super) fn fallback_models(endpoint: &Endpoint) -> &'static [&'static str] {
-    if publisher_endpoint(endpoint).is_ok_and(|publisher| express(&publisher)) {
-        EXPRESS_MODELS
-    } else {
-        PROJECT_MODELS
-    }
-}
-
-fn model_list_url(publisher: &str) -> String {
-    let (host, _) = publisher
-        .split_once("/v1/")
-        .expect("validated publisher URL");
-    format!("{host}/v1beta1/publishers/google/models")
-}
-
 fn api_key(secret: Option<&str>) -> Result<HeaderValue> {
     let secret = secret
         .map(str::trim)
@@ -130,90 +115,116 @@ fn api_key(secret: Option<&str>) -> Result<HeaderValue> {
     Ok(key)
 }
 
-pub(super) async fn list_models(
+pub(super) async fn verify_models(
     endpoint: &Endpoint,
-    secret: Option<&str>,
-) -> std::result::Result<Vec<String>, String> {
+    secret: &str,
+    configured: &[String],
+) -> std::result::Result<VerifiedModels, String> {
     let publisher = publisher_endpoint(endpoint).map_err(|error| error.to_string())?;
-    let key = api_key(secret).map_err(|error| error.to_string())?;
-    tokio::time::timeout(
-        super::PROBE_TIMEOUT,
-        list_publisher_models(&net::client()?, &model_list_url(&publisher), key),
-    )
-    .await
-    .map_err(|_| "Google Agent Platform のモデル一覧の取得がタイムアウトしました".to_owned())?
+    let key = api_key(Some(secret)).map_err(|error| error.to_string())?;
+    verify_candidates(&net::client()?, &publisher, &key, configured).await
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ModelPage {
-    #[serde(default)]
-    publisher_models: Vec<PublisherModel>,
-    #[serde(default)]
-    next_page_token: String,
+pub(super) struct VerifiedModels {
+    pub(super) ids: Vec<String>,
+    pub(super) failure: Option<String>,
 }
 
-#[derive(serde::Deserialize)]
-struct PublisherModel {
-    name: String,
-}
-
-fn chat_model_id(name: &str) -> Option<&str> {
-    let id = name.strip_prefix("publishers/google/models/")?;
-    (valid_model(id)
-        && !id.split('-').any(|part| {
-            matches!(
-                part,
-                "embedding" | "image" | "live" | "tts" | "omni" | "cyber" | "banana"
-            )
-        }))
-    .then_some(id)
-}
-
-async fn list_publisher_models(
+async fn verify_candidates(
     client: &reqwest::Client,
-    url: &str,
-    key: HeaderValue,
-) -> std::result::Result<Vec<String>, String> {
-    let mut models = Vec::new();
-    let mut token = String::new();
-    let base = reqwest::Url::parse(url).map_err(|error| error.to_string())?;
-    for _ in 0..32 {
-        let mut page_url = base.clone();
-        page_url.query_pairs_mut().append_pair("pageSize", "100");
-        if !token.is_empty() {
-            page_url.query_pairs_mut().append_pair("pageToken", &token);
-        }
-        let response = client
-            .get(page_url)
-            .header("x-goog-api-key", key.clone())
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)
-            .map_err(|error| error.without_url().to_string())?;
-        let body = net::read_response_body(
-            response,
-            2 * 1024 * 1024,
-            "Google Agent Platform model list",
-        )
-        .await?;
-        let page: ModelPage = serde_json::from_slice(&body).map_err(|error| error.to_string())?;
-        for model in page.publisher_models {
-            if let Some(id) = chat_model_id(&model.name)
-                && !models.iter().any(|known| known == id)
-            {
-                models.push(id.to_owned());
+    publisher: &str,
+    key: &HeaderValue,
+    configured: &[String],
+) -> std::result::Result<VerifiedModels, String> {
+    let selected = configured.first().map(|id| id.trim());
+    let mut seen = HashSet::new();
+    // Check the selected model first, then every known chat candidate, then
+    // any other manually configured IDs. Each ID goes to Google only once.
+    let candidates: Vec<String> = selected
+        .into_iter()
+        .chain(CHAT_MODELS.iter().copied())
+        .chain(configured.iter().map(|id| id.trim()))
+        .filter(|&id| valid_model(id) && seen.insert(id))
+        .map(str::to_owned)
+        .collect();
+    let requests = stream::iter(candidates)
+        .map(move |id| async move {
+            let result = count_tokens(client, publisher, key, &id).await;
+            (id, result)
+        })
+        .buffered(5);
+    futures_util::pin_mut!(requests);
+    let deadline = tokio::time::Instant::now() + super::PROBE_TIMEOUT;
+    let mut ids = Vec::new();
+    let mut failure = None;
+    loop {
+        match tokio::time::timeout_at(deadline, requests.next()).await {
+            Ok(Some((id, Ok(true)))) => ids.push(id),
+            Ok(Some((id, Ok(false)))) => {
+                if selected == Some(id.as_str()) {
+                    failure = Some(format!(
+                        "Google Agent Platform で {id} をこのロケーションでは利用できません"
+                    ));
+                }
+            }
+            Ok(Some((id, Err(error)))) => {
+                if selected == Some(id.as_str()) {
+                    failure = Some(error);
+                } else {
+                    failure.get_or_insert(error);
+                }
+            }
+            Ok(None) => break,
+            Err(_) => {
+                failure.get_or_insert_with(|| "Google Agent Platform のモデル確認がタイムアウトしました。一覧を再取得してください".into());
+                break;
             }
         }
-        if page.next_page_token.is_empty() {
-            return Ok(models);
-        }
-        if page.next_page_token == token {
-            break;
-        }
-        token = page.next_page_token;
     }
-    Err("Google Agent Platform model list did not finish".into())
+    if ids.is_empty() {
+        return Err(failure.unwrap_or_else(|| {
+            "Google Agent Platform で利用できるモデルを確認できませんでした".into()
+        }));
+    }
+    Ok(VerifiedModels { ids, failure })
+}
+
+async fn count_tokens(
+    client: &reqwest::Client,
+    publisher: &str,
+    key: &HeaderValue,
+    model: &str,
+) -> std::result::Result<bool, String> {
+    // ListPublisherModels requires OAuth. CountTokens accepts the connection's
+    // API key and checks the exact model and location without generating text.
+    let response = client
+        .post(format!("{publisher}/{model}:countTokens"))
+        .header("x-goog-api-key", key.clone())
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(r#"{"contents":[{"role":"user","parts":[{"text":"Hi"}]}]}"#)
+        .timeout(Duration::from_secs(4))
+        .send()
+        .await
+        .map_err(|_| "Google Agent Platform のモデルを確認できませんでした".to_owned())?;
+    let status = response.status();
+    if status == StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
+    if !status.is_success() {
+        return Err(match status {
+            StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN =>
+                "Google Agent Platform がリクエストを拒否しました。API キー、プロジェクトと権限を確認してください".into(),
+            _ => format!("Google Agent Platform のモデル確認に失敗しました（HTTP {status}）"),
+        });
+    }
+    let body =
+        net::read_response_body(response, 16 * 1024, "Google Agent Platform token count").await?;
+    let result: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|_| "Google Agent Platform のトークン数を取得できませんでした".to_owned())?;
+    if result["totalTokens"].as_u64().is_none() {
+        return Err("Google Agent Platform のトークン数を取得できませんでした".into());
+    }
+    Ok(true)
 }
 
 pub(crate) fn validate(endpoint: &Endpoint, model_ids: &[String]) -> Result<()> {
@@ -334,40 +345,14 @@ impl<C: HttpClientExt> HttpClientExt for AgentPlatformHttp<C> {
     }
 }
 
-pub(super) async fn probe(model: DynModel<Completion>) -> std::result::Result<(), String> {
-    let request = CompletionRequest::new("Reply with OK.").max_tokens(64);
-    tokio::time::timeout(super::PROBE_TIMEOUT, model.call(request))
-        .await
-        .map_err(|_| "Google Agent Platform の接続確認がタイムアウトしました".to_owned())?
-        .map(|_| ())
-        .map_err(probe_error)
-}
-
-fn probe_error(error: ProviderError) -> String {
-    let status = match &error {
-        ProviderError::InvalidAuthentication(response)
-        | ProviderError::ProviderResponse(response) => response.status,
-        ProviderError::Http(error) => error.non_success_status(),
-        _ => None,
-    };
-    match status.map(|status| status.as_u16()) {
-        Some(400 | 401 | 403) => {
-            "Google Agent Platform がリクエストを拒否しました。API キー、プロジェクトと権限を確認してください".into()
-        }
-        Some(404) => "Google Agent Platform で指定したモデルまたはロケーションを利用できません".into(),
-        Some(status) => format!("Google Agent Platform の接続確認に失敗しました（HTTP {status}）"),
-        None => "Google Agent Platform から生成結果を取得できませんでした".into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use rig_core::{
         catalog::Catalog,
-        completion::ToolDefinition,
+        completion::{CompletionRequest, ToolDefinition},
         message::{Message, ToolName, ToolResultContent, UserContent},
-        test_utils::{MockHttpResponse, RecordingHttpClient, SequencedHttpClient},
+        test_utils::{MockHttpResponse, SequencedHttpClient},
     };
     use serde_json::{Value, json};
 
@@ -397,8 +382,6 @@ mod tests {
         ] {
             let endpoint = Endpoint { options: options.into(), ..Default::default() };
             assert_eq!(publisher_endpoint(&endpoint).unwrap(), expected);
-            let host = expected.split_once("/v1/").unwrap().0;
-            assert_eq!(model_list_url(&expected), format!("{host}/v1beta1/publishers/google/models"));
         }
         for options in [
             r#"{"location":"global"}"#,
@@ -421,41 +404,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lists_all_pages_and_keeps_only_gemini_chat_models() {
+    async fn checks_each_candidate_with_the_registered_key_and_excludes_missing_models() {
         let app = axum::Router::new().route(
-            "/v1beta1/publishers/google/models",
-            axum::routing::get(|uri: Uri, headers: http::HeaderMap| async move {
-                assert_eq!(headers["x-goog-api-key"], "test-key");
-                let model = |id: &str| json!({"name": format!("publishers/google/models/{id}")});
-                axum::Json(match uri.query() {
-                    Some("pageSize=100") => json!({
-                        "publisherModels": [model("gemini-3.8-flash"), model("gemini-3.8-live"),
-                            model("gemini-3-pro-image"), model("gemini-embedding-2")],
-                        "nextPageToken": "next+/="
-                    }),
-                    Some("pageSize=100&pageToken=next%2B%2F%3D") => json!({
-                        "publisherModels": [model("gemini-3.8-flash"), model("gemini-4-argon"),
-                            model("gemma-4"), model("gemini-3.8-flash-tts")]
-                    }),
-                    _ => panic!("unexpected model list query: {uri}"),
-                })
-            }),
+            "/v1/projects/my-project/locations/global/publishers/google/models/{call}",
+            axum::routing::post(
+                |axum::extract::Path(call): axum::extract::Path<String>,
+                 headers: http::HeaderMap,
+                 body: String| async move {
+                    assert!(body.contains("\"parts\""));
+                    if headers["x-goog-api-key"] != "test-key" {
+                        return (StatusCode::UNAUTHORIZED, r#"{"error":"secret-rejected"}"#);
+                    }
+                    match call.as_str() {
+                        "gemini-3.8-flash:countTokens"
+                        | "gemini-4-neon:countTokens"
+                        | "gemini-custom-model:countTokens" => {
+                            (StatusCode::OK, r#"{"totalTokens":1}"#)
+                        }
+                        _ => (StatusCode::NOT_FOUND, "{}"),
+                    }
+                },
+            ),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!(
-            "http://{}/v1beta1/publishers/google/models",
+            "http://{}/v1/projects/my-project/locations/global/publishers/google/models",
             listener.local_addr().unwrap()
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let models = list_publisher_models(
-            &net::client().unwrap(),
+        let http = net::client().unwrap();
+        let models = verify_candidates(
+            &http,
             &url,
-            api_key(Some("test-key")).unwrap(),
+            &api_key(Some("test-key")).unwrap(),
+            &[
+                "gemini-missing".into(),
+                "gemini-custom-model".into(),
+                "gemini-4-neon".into(),
+            ],
         )
         .await
         .unwrap();
+        assert_eq!(
+            models.ids,
+            ["gemini-3.8-flash", "gemini-4-neon", "gemini-custom-model"]
+        );
+        assert!(models.failure.unwrap().contains("gemini-missing"));
+        let rejected =
+            verify_candidates(&http, &url, &api_key(Some("wrong-key")).unwrap(), &[]).await;
+        let Err(message) = rejected else {
+            panic!("credentials should be rejected");
+        };
+        assert!(message.contains("API キー"));
+        assert!(!message.contains("secret-rejected"));
         server.abort();
-        assert_eq!(models, ["gemini-3.8-flash", "gemini-4-argon"]);
     }
 
     #[tokio::test]
@@ -529,28 +531,6 @@ mod tests {
         assert_eq!(
             body["contents"][2]["parts"][0]["functionResponse"]["id"],
             "call-a"
-        );
-    }
-
-    #[tokio::test]
-    async fn checks_the_configured_project_and_reports_rejected_credentials() {
-        let endpoint = Endpoint {
-            options: r#"{"project_id":"my-project","location":"global"}"#.into(),
-            ..Default::default()
-        };
-        let http = RecordingHttpClient::with_error(http::StatusCode::FORBIDDEN, "test-key");
-        assert!(model_with_http(&endpoint, None, spec(), http.clone()).is_err());
-        assert!(http.requests().is_empty());
-        let model =
-            model_with_http(&endpoint, Some("test-key".into()), spec(), http.clone()).unwrap();
-        let error = probe(model).await.unwrap_err();
-        assert!(error.contains("API キー"));
-        assert!(!error.contains("test-key"));
-        assert_eq!(
-            http.requests()[0].uri,
-            format!(
-                "{ENDPOINT}/v1/projects/my-project/locations/global/publishers/google/models/{DEFAULT_MODEL}:generateContent"
-            )
         );
     }
 }

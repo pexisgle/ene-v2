@@ -8,6 +8,7 @@ mod companions;
 mod connections;
 mod device;
 pub mod icons;
+mod mcp_add;
 pub mod pod;
 pub mod studio;
 pub mod theme;
@@ -2967,12 +2968,36 @@ impl Hub {
             ),
             _ => (Vec::new(), ""),
         };
-        let fetched = self
-            .model
-            .models
-            .get(&connection.id)
-            .cloned()
-            .unwrap_or_default();
+        let fetched =
+            if adapter == GOOGLE_AGENT_PLATFORM && connection.last_check.as_option().is_none() {
+                Vec::new()
+            } else {
+                self.model
+                    .models
+                    .get(&connection.id)
+                    .cloned()
+                    .unwrap_or_default()
+            };
+        if adapter == GOOGLE_AGENT_PLATFORM
+            && let Some(check) = connection.last_check.as_option()
+            && check
+                .capabilities
+                .iter()
+                .any(|cap| cap == "verified_model_list")
+        {
+            return check
+                .resources
+                .iter()
+                .map(|id| {
+                    let label = fetched
+                        .iter()
+                        .find(|item| &item.id == id)
+                        .filter(|item| !item.name.trim().is_empty())
+                        .map_or(id, |item| &item.name);
+                    (id.clone(), label.clone())
+                })
+                .collect();
+        }
         let checked = if adapter == GOOGLE_AGENT_PLATFORM {
             connection
                 .last_check

@@ -32,6 +32,7 @@ earshot = "1.2.2"
 rubato.workspace = true
 regex = "1"
 unicode-segmentation = "1"
+url = "2.5"
 uuid.workspace = true
 
 # gpui's Linux backends are features, and the workspace pins the crate with

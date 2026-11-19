@@ -1,5 +1,5 @@
 //! Minimal frameless floating companion window: speech bubble, inline approval,
-//! first-run onboarding, collapsible history, capsule composer and 3 orb controls.
+//! first-run onboarding, collapsible history, capsule composer and controls menu.
 
 use super::icons::{Icon, icon};
 use super::theme::{Theme, resolve_ui_font_family, ui_font_fallbacks};
@@ -21,6 +21,16 @@ use gpui::{
 const MAX_INPUT: usize = 4000;
 
 actions!(ene_desktop, [Submit, CancelOrStop]);
+
+#[derive(Clone, Copy)]
+enum ChatControl {
+    Companions,
+    Microphone { ready: bool },
+    Speaker { ready: bool },
+    History,
+    Settings,
+    Close,
+}
 
 /// Compatibility alias expected by `lib.rs`.
 pub type Desktop = CompanionPod;
@@ -59,6 +69,7 @@ pub struct CompanionPod {
     choosing_provider: bool,
     key_focused: bool,
     roster_open: bool,
+    controls_open: bool,
     last_size: Size<Pixels>,
     title_initialized: bool,
     scroll: ScrollHandle,
@@ -97,6 +108,7 @@ impl CompanionPod {
             choosing_provider: false,
             key_focused: false,
             roster_open: false,
+            controls_open: false,
             last_size: PodMode::MiniVoice.size(),
             title_initialized: false,
             scroll: ScrollHandle::new(),
@@ -267,6 +279,7 @@ impl CompanionPod {
         }
         let sent = self.hub.update(cx, |hub, cx| hub.send(text, cx));
         if sent {
+            self.controls_open = false;
             self.chat_input.update(cx, |draft, cx| draft.clear(cx));
         }
     }
@@ -1643,36 +1656,15 @@ impl CompanionPod {
     }
 
     fn render_capsule_dock(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let (theme, live, companion, mic_muted, mic_ready, expanded, unsent, link_dot) = {
+        let (theme, live, has_companion, unsent) = {
             let hub = self.hub.read(cx);
-            let theme = hub.theme();
-            let link_dot = match &hub.model.link {
-                Link::Live { .. } => theme.mint,
-                Link::Connecting { .. } => theme.amber,
-                _ => theme.danger,
-            };
             (
-                theme,
+                hub.theme(),
                 hub.live(),
-                hub.model.companion().cloned(),
-                hub.model.mic_muted,
-                matches!(hub.model.devices.input, Device::Ready(_)),
-                hub.pod_mode == PodMode::ExpandedChat,
+                hub.model.companion().is_some(),
                 hub.model.chat.unsent.clone(),
-                link_dot,
             )
         };
-
-        let mic_ready = mic_ready
-            && self
-                .hub
-                .read(cx)
-                .has_audio_connection(w::ConnectionKind::Stt);
-        let hub = self.hub.read(cx);
-        let output_ready = matches!(hub.model.devices.output, Device::Ready(_))
-            && hub.has_audio_connection(w::ConnectionKind::Tts);
-        let output_on = live && output_ready && !hub.model.output_muted;
-        let hub_output = self.hub.clone();
 
         let look = theme.field_look(true, true);
         self.chat_input
@@ -1680,10 +1672,7 @@ impl CompanionPod {
 
         let draft_text = self.chat_input.read(cx).text().to_owned();
         let too_long = draft_text.chars().count() > MAX_INPUT;
-        let can_send = live && companion.is_some() && !draft_text.trim().is_empty() && !too_long;
-
-        let comp_name = companion.as_ref().map(|c| c.name.as_str()).unwrap_or("ene");
-        let comp_id = companion.as_ref().map(|c| c.id.as_str()).unwrap_or("");
+        let can_send = live && has_companion && !draft_text.trim().is_empty() && !too_long;
 
         let mut unsent_rows: Vec<AnyElement> = Vec::new();
         for (idx, item) in unsent.into_iter().enumerate() {
@@ -1759,11 +1748,6 @@ impl CompanionPod {
             );
         }
 
-        let hub_mic = self.hub.clone();
-        let hub_settings = self.hub.clone();
-        let hub_close = self.hub.clone();
-        let pod_toggle = cx.entity();
-
         let capsule = div()
             .flex_1()
             .min_w_0()
@@ -1778,29 +1762,6 @@ impl CompanionPod {
             .flex_row()
             .items_center()
             .gap(px(4.))
-            .child(
-                div()
-                    .id("pod-switcher-btn")
-                    .flex_none()
-                    .p(px(2.))
-                    .rounded_full()
-                    .cursor_pointer()
-                    .hover(|this| this.bg(theme.bg_blush))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                            this.roster_open = !this.roster_open;
-                            cx.notify();
-                        }),
-                    )
-                    .child(companion_badge(
-                        comp_name,
-                        comp_id,
-                        28.,
-                        Some(link_dot),
-                        &theme,
-                    )),
-            )
             .child(
                 div()
                     .flex_1()
@@ -1842,125 +1803,24 @@ impl CompanionPod {
                             theme.ink_placeholder
                         },
                     )),
-            )
-            .child(
-                div()
-                    .id("pod-mic-btn")
-                    .flex_none()
-                    .w(px(30.))
-                    .h(px(30.))
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(if !mic_ready || mic_muted {
-                        theme.bg_blush
-                    } else {
-                        theme.mint_soft
-                    })
-                    .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                        hub_mic.update(cx, |hub, cx| {
-                            if mic_ready {
-                                hub.toggle_mic_mute(cx)
-                            } else {
-                                hub.open_settings(SettingsSection::Device, cx)
-                            }
-                        });
-                    })
-                    .child(icon(
-                        if mic_ready && !mic_muted {
-                            Icon::Mic
-                        } else {
-                            Icon::MicOff
-                        },
-                        14.,
-                        theme.ink_muted,
-                    )),
-            )
-            .child(
-                div()
-                    .id("pod-speaker-btn")
-                    .flex_none()
-                    .size(px(30.))
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(if output_on {
-                        theme.mint_soft
-                    } else {
-                        theme.bg_blush
-                    })
-                    .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                        hub_output.update(cx, |hub, cx| {
-                            if output_ready {
-                                hub.toggle_output_mute(cx)
-                            } else {
-                                hub.open_settings(SettingsSection::Device, cx)
-                            }
-                        })
-                    })
-                    .child(icon(
-                        if output_on {
-                            Icon::Volume
-                        } else {
-                            Icon::VolumeOff
-                        },
-                        14.,
-                        theme.ink_muted,
-                    )),
             );
 
-        let orbs = div()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.))
-            .child(floating_orb_button(
-                "pod-orb-history",
-                if expanded {
-                    Icon::ChatCollapse
-                } else {
-                    Icon::ChatBubble
-                },
-                expanded,
-                false,
-                &theme,
-                move |window, cx| {
-                    pod_toggle.update(cx, |this, cx| this.toggle_mode(window, cx));
-                },
-            ))
-            .child(floating_orb_button(
-                "pod-orb-settings",
-                Icon::Settings,
-                false,
-                false,
-                &theme,
-                move |_, cx| {
-                    hub_settings.update(cx, |hub, cx| {
-                        hub.open_settings(SettingsSection::Companions, cx);
-                    });
-                },
-            ))
-            .child(floating_orb_button(
-                "pod-orb-close",
-                Icon::Close,
-                false,
-                true,
-                &theme,
-                move |_, cx| {
-                    let should_hide = hub_close.read(cx).is_tray_resident()
-                        || hub_close.read(cx).settings_window.is_some();
-                    if should_hide {
-                        hub_close.update(cx, |hub, cx| hub.hide_pod(cx));
-                    } else {
-                        cx.quit();
-                    }
-                },
-            ));
+        let controls_open = self.controls_open;
+        let pod = cx.entity();
+        let trigger = floating_orb_button(
+            "pod-controls-toggle",
+            Icon::More,
+            controls_open,
+            &theme,
+            move |_, cx| {
+                pod.update(cx, |this, cx| {
+                    // Outside-click dismissal runs earlier in the same event.
+                    this.controls_open = !controls_open;
+                    this.roster_open = false;
+                    cx.notify();
+                });
+            },
+        );
 
         div()
             .w_full()
@@ -1980,15 +1840,176 @@ impl CompanionPod {
             })
             .child(
                 div()
+                    .relative()
                     .w_full()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap(px(8.))
                     .child(capsule)
-                    .child(orbs),
+                    .child(trigger)
+                    .when(controls_open, |this| {
+                        this.child(self.render_controls(&theme, cx))
+                    }),
             )
             .into_any_element()
+    }
+
+    fn render_controls(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let hub = self.hub.read(cx);
+        let mic_ready = matches!(hub.model.devices.input, Device::Ready(_))
+            && hub.has_audio_connection(w::ConnectionKind::Stt);
+        let speaker_ready = matches!(hub.model.devices.output, Device::Ready(_))
+            && hub.has_audio_connection(w::ConnectionKind::Tts);
+        let mic_on = mic_ready && !hub.model.mic_muted;
+        let speaker_on = hub.live() && speaker_ready && !hub.model.output_muted;
+        let expanded = hub.pod_mode == PodMode::ExpandedChat;
+        let button = |id, label, icon, tone, action| {
+            let pod = cx.entity();
+            pill_button(
+                id,
+                label,
+                Some(icon),
+                tone,
+                true,
+                theme,
+                move |window, cx| {
+                    pod.update(cx, |this, cx| this.use_control(action, window, cx));
+                },
+            )
+        };
+        div()
+            .id("pod-controls")
+            .absolute()
+            .bottom(px(52.))
+            .right(px(0.))
+            .occlude()
+            .rounded(px(18.))
+            .border_2()
+            .border_color(theme.border_float)
+            .bg(theme.bg_surface)
+            .shadow(theme.float_shadow())
+            .p(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(5.))
+            .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                this.controls_open = false;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(5.))
+                    .child(button(
+                        "pod-control-companions",
+                        "コンパニオン",
+                        Icon::UserBook,
+                        Tone::Ghost,
+                        ChatControl::Companions,
+                    ))
+                    .child(button(
+                        "pod-control-mic",
+                        if !mic_ready {
+                            "マイク設定"
+                        } else if mic_on {
+                            "マイクをオフ"
+                        } else {
+                            "マイクをオン"
+                        },
+                        if mic_on { Icon::Mic } else { Icon::MicOff },
+                        if mic_on { Tone::Mint } else { Tone::Ghost },
+                        ChatControl::Microphone { ready: mic_ready },
+                    ))
+                    .child(button(
+                        "pod-control-speaker",
+                        if !speaker_ready {
+                            "音声設定"
+                        } else if speaker_on {
+                            "音声をオフ"
+                        } else {
+                            "音声をオン"
+                        },
+                        if speaker_on {
+                            Icon::Volume
+                        } else {
+                            Icon::VolumeOff
+                        },
+                        if speaker_on { Tone::Mint } else { Tone::Ghost },
+                        ChatControl::Speaker {
+                            ready: speaker_ready,
+                        },
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(5.))
+                    .child(button(
+                        "pod-control-history",
+                        if expanded {
+                            "履歴を閉じる"
+                        } else {
+                            "履歴を表示"
+                        },
+                        if expanded {
+                            Icon::ChatCollapse
+                        } else {
+                            Icon::ChatBubble
+                        },
+                        Tone::Ghost,
+                        ChatControl::History,
+                    ))
+                    .child(button(
+                        "pod-control-settings",
+                        "設定",
+                        Icon::Settings,
+                        Tone::Ghost,
+                        ChatControl::Settings,
+                    ))
+                    .child(button(
+                        "pod-control-close",
+                        "チャットを閉じる",
+                        Icon::Close,
+                        Tone::Danger,
+                        ChatControl::Close,
+                    )),
+            )
+            .into_any_element()
+    }
+
+    fn use_control(&mut self, action: ChatControl, window: &mut Window, cx: &mut Context<Self>) {
+        self.controls_open = false;
+        cx.notify();
+        match action {
+            ChatControl::Companions => self.roster_open = true,
+            ChatControl::History => self.toggle_mode(window, cx),
+            ChatControl::Settings => self.hub.update(cx, |hub, cx| {
+                hub.open_settings(SettingsSection::Companions, cx)
+            }),
+            ChatControl::Microphone { ready } => self.hub.update(cx, |hub, cx| {
+                if ready {
+                    hub.toggle_mic_mute(cx)
+                } else {
+                    hub.open_settings(SettingsSection::Device, cx)
+                }
+            }),
+            ChatControl::Speaker { ready } => self.hub.update(cx, |hub, cx| {
+                if ready {
+                    hub.toggle_output_mute(cx)
+                } else {
+                    hub.open_settings(SettingsSection::Device, cx)
+                }
+            }),
+            ChatControl::Close => {
+                let hub = self.hub.read(cx);
+                if hub.is_tray_resident() || hub.settings_window.is_some() {
+                    self.hub.update(cx, |hub, cx| hub.hide_pod(cx));
+                } else {
+                    cx.quit();
+                }
+            }
+        }
     }
 
     fn render_roster_popover(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -2093,7 +2114,7 @@ impl CompanionPod {
             .id("pod-roster-popover")
             .absolute()
             .bottom(px(68.))
-            .left(px(14.))
+            .right(px(14.))
             .w(px(264.))
             .bg(theme.bg_surface)
             .border_2()
@@ -2159,6 +2180,7 @@ impl Render for CompanionPod {
         let in_onboarding = needs_key || self.in_model_setup(cx);
         if in_onboarding != self.key_focused {
             self.key_focused = in_onboarding;
+            self.controls_open = false;
             self.focus_input(window, cx);
         }
         let desired = self.desired_size(cx);
@@ -2223,6 +2245,11 @@ pub fn bind(cx: &mut App, hub: Entity<Hub>) {
             return;
         };
         let _ = view.update(cx, |this, cx| {
+            if this.controls_open {
+                this.controls_open = false;
+                cx.notify();
+                return;
+            }
             if this.setup_model_dropdown_open || this.setup_voice_dropdown_open {
                 this.setup_model_dropdown_open = false;
                 this.setup_voice_dropdown_open = false;

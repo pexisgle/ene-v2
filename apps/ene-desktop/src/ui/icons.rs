@@ -20,6 +20,7 @@ pub enum Icon {
     ChatExpand,
     ChatCollapse,
     Settings,
+    More,
     ChevronDown,
     ChevronUp,
     ChevronRight,
@@ -42,7 +43,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    pub const ALL: [Icon; 30] = [
+    pub const ALL: [Icon; 31] = [
         Icon::Mic,
         Icon::MicOff,
         Icon::Volume,
@@ -54,6 +55,7 @@ impl Icon {
         Icon::ChatExpand,
         Icon::ChatCollapse,
         Icon::Settings,
+        Icon::More,
         Icon::ChevronDown,
         Icon::ChevronUp,
         Icon::ChevronRight,
@@ -88,6 +90,7 @@ impl Icon {
             Icon::ChatExpand => "icons/chat_expand.svg",
             Icon::ChatCollapse => "icons/chat_collapse.svg",
             Icon::Settings => "icons/settings.svg",
+            Icon::More => "icons/more.svg",
             Icon::ChevronDown => "icons/chevron_down.svg",
             Icon::ChevronUp => "icons/chevron_up.svg",
             Icon::ChevronRight => "icons/chevron_right.svg",
@@ -112,6 +115,7 @@ impl Icon {
 
     const fn svg_bytes(self) -> &'static [u8] {
         match self {
+            Icon::More => br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000000"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>"##,
             Icon::Mic => br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>"##,
             Icon::MicOff => br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="22" y2="22"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><path d="M17 16.95A7 7 0 0 1 5 12v-2"/><path d="M19 10v2a7 7 0 0 1-.11 1.23"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>"##,
             Icon::Volume => br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>"##,
