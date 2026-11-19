@@ -39,10 +39,7 @@ use rig_rmcp::{
         },
     },
 };
-use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
-};
+use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -342,20 +339,15 @@ async fn open(want: &Desired, registry: ToolServerHandle) -> Result<McpConnectio
     let handler = McpClientHandler::new(ClientConfig::default(), registry);
     let connection = if !want.command.is_empty() {
         // A stdio server is a child process the host owns.
-        let args = want.args.clone();
+        let mut command = tokio::process::Command::new(&want.command);
         #[cfg(windows)]
-        let program = if want.command.eq_ignore_ascii_case("npx") {
-            "npx.cmd"
-        } else {
-            want.command.as_str()
-        };
-        #[cfg(not(windows))]
-        let program = want.command.as_str();
-        let mut wrap = process_wrap::tokio::CommandWrap::with_new(Path::new(program), |cmd| {
-            cmd.args(&args)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped());
-        });
+        if want.command.eq_ignore_ascii_case("npx") || want.command.eq_ignore_ascii_case("npx.cmd")
+        {
+            command = rig_rmcp::rmcp::transport::which_command("npx.cmd")
+                .map_err(|error| format!("npx.cmd was not found on PATH: {error}"))?;
+        }
+        command.args(&want.args);
+        let mut wrap = process_wrap::tokio::CommandWrap::from(command);
         // One process group, killed on drop, so a host that exits does not
         // orphan the server.
         #[cfg(unix)]
