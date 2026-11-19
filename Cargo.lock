@@ -4017,7 +4017,6 @@ dependencies = [
  "cpal",
  "directories",
  "earshot",
- "embed-resource",
  "ene-rpc",
  "futures-util",
  "globset",

@@ -129,16 +129,26 @@ impl Drop for Tray {
     }
 }
 
+#[cfg(any(windows, test))]
 const CMD_OPEN_CHAT: u32 = 1;
+#[cfg(any(windows, test))]
 const CMD_OPEN_MINI: u32 = 2;
+#[cfg(any(windows, test))]
 const CMD_HIDE_POD: u32 = 3;
+#[cfg(any(windows, test))]
 const CMD_SETTINGS_COMPANIONS: u32 = 4;
+#[cfg(any(windows, test))]
 const CMD_SETTINGS_CONNECTIONS: u32 = 5;
+#[cfg(any(windows, test))]
 const CMD_SETTINGS_DEVICE: u32 = 6;
+#[cfg(any(windows, test))]
 const CMD_CENTER_AVATAR: u32 = 7;
+#[cfg(any(windows, test))]
 const CMD_TOGGLE_MIC: u32 = 8;
+#[cfg(any(windows, test))]
 const CMD_QUIT: u32 = 9;
 
+#[cfg(any(windows, test))]
 fn action_for_command(id: u32) -> Option<TrayAction> {
     match id {
         CMD_OPEN_CHAT => Some(TrayAction::OpenChat),
@@ -156,6 +166,7 @@ fn action_for_command(id: u32) -> Option<TrayAction> {
 
 /// Encodes `text` as a NUL-terminated UTF-16 buffer fitting `NOTIFYICONDATAW::szTip`
 /// (`[u16; 128]`), stopping cleanly before splitting a surrogate pair.
+#[cfg(any(windows, test))]
 fn encode_tooltip(text: &str) -> [u16; 128] {
     let mut buf = [0u16; 128];
     let limit = buf.len() - 1;
