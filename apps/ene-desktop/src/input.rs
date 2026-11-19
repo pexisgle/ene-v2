@@ -680,7 +680,7 @@ struct FieldElement {
 }
 
 enum FieldLayout {
-    Single(ShapedLine),
+    Single(Box<ShapedLine>),
     Multiline(Vec<WrappedLine>, Pixels),
 }
 
@@ -976,7 +976,7 @@ impl gpui::Element for FieldElement {
             )
         };
         Prepaint {
-            layout: Some(FieldLayout::Single(line)),
+            layout: Some(FieldLayout::Single(Box::new(line))),
             cursor,
             selection,
             offset,
