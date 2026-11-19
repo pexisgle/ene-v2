@@ -167,7 +167,7 @@ fn absolute(path: &str) -> Result<String, String> {
 fn default_motion() -> Result<String, String> {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../assets/vrma/01-presence/idle-breath.vrma"
+        "/../../assets/vrma/idle-breath.vrma"
     );
     if !Path::new(path).is_file() {
         return Err(format!("bundled motion not found: {path}"));

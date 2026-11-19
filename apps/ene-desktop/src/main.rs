@@ -47,7 +47,15 @@ fn main() {
         default_hook(info);
     }));
 
-    let path = match discovery_path() {
+    let local_host = if cfg!(windows) && std::env::var_os("ENE_HOST_CONNECTION").is_none() {
+        std::env::current_exe()
+            .ok()
+            .map(|exe| exe.with_file_name("ene-host.exe"))
+            .filter(|host| host.is_file())
+    } else {
+        None
+    };
+    let path = match discovery_path(local_host.is_some()) {
         Ok(path) => path,
         Err(reason) => {
             // Without a runtime directory there is no host to find, so the
@@ -56,6 +64,15 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    #[cfg(windows)]
+    let _local_host = local_host.and_then(|host| match start_local_host(&host) {
+        Ok(child) => Some(child),
+        Err(error) => {
+            tracing::error!(%error, "could not start the local ene-host");
+            None
+        }
+    });
     let (updates_tx, updates_rx) = unbounded_channel();
     let (commands_tx, commands_rx) = unbounded_channel();
     let connection: Connection = Arc::new(RwLock::new(None));
@@ -182,9 +199,12 @@ fn main() {
 
 /// The discovery file: `ENE_HOST_CONNECTION`, or the host's default runtime
 /// directory.
-fn discovery_path() -> Result<PathBuf, String> {
+fn discovery_path(local_host: bool) -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("ENE_HOST_CONNECTION") {
         return Ok(PathBuf::from(path));
+    }
+    if local_host && let Some(runtime) = std::env::var_os("ENE_HOST_RUNTIME_DIR") {
+        return Ok(PathBuf::from(runtime).join("connection.json"));
     }
     let dirs = directories::ProjectDirs::from("", "", "ene")
         .ok_or("no runtime directory is configured; set ENE_HOST_CONNECTION")?;
@@ -192,6 +212,25 @@ fn discovery_path() -> Result<PathBuf, String> {
         .runtime_dir()
         .map_or_else(|| dirs.cache_dir().join("runtime"), PathBuf::from);
     Ok(runtime.join("connection.json"))
+}
+
+#[cfg(windows)]
+fn start_local_host(host: &std::path::Path) -> std::io::Result<std::process::Child> {
+    use std::{
+        os::windows::process::CommandExt as _,
+        process::{Command, Stdio},
+    };
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut command = Command::new(host);
+    if std::env::var_os("ENE_HOST_ALLOWED_CAPABILITIES").is_none() {
+        command.env("ENE_HOST_ALLOWED_CAPABILITIES", "body.motion");
+    }
+    command
+        .creation_flags(CREATE_NO_WINDOW)
+        .env("ENE_HOST_EXIT_ON_STDIN_EOF", "1")
+        .stdin(Stdio::piped())
+        .spawn()
 }
 
 /// The client's identity and renderer, from the environment.

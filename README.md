@@ -51,6 +51,20 @@ cargo run --locked -p ene-host
 
 `just verify`は整形とClippy（テストを含む型検査）を実行します。テストは対象の挙動を変更したときに`just test`で実行し、変更していない合格済みのテストを繰り返す必要はありません。成果物が必要なときは`just build`を実行します。
 
+## Windows インストーラーを作る
+
+Windows 10/11 x64 向けのセットアップ EXE を生成します。上記の Windows 開発環境に加え、x64 MSVC の再頒布用ランタイムファイルと [Inno Setup 6.3 以降](https://jrsoftware.org/inno-setup/downloads)を用意し、リポジトリのルートで実行します。
+
+```powershell
+just installer-windows
+```
+
+`target/installer/ene-<バージョン>-windows-x64-setup.exe` が生成されます。インストーラーは管理者権限なしで実行でき、デスクトップ・ローカルホスト・アバター描画の実行ファイル、MSVC ランタイム、`assets/ENE.vrm`、`assets/vrma/` 直下の採用済み VRMA を収録します。
+
+スタートメニューの **ene** またはインストール先の `ene-desktop.exe` を開くと、隣にある `ene-host.exe` も起動します。タスクトレイの **終了** でデスクトップを終了すると、ホストも終了します。`ENE_HOST_CONNECTION` で接続先を指定した場合は、そのホストに接続します。ローカルホストが既定で許可する端末能力はアバターのモーション（`body.motion`）です。
+
+会話や設定はユーザーのデータフォルダーに保存されます。公開配布前には、`ENE.vrm` に記録されている作者（pexisgle）と配布条件（`allowRedistribution: false`）を確認してください。
+
 ## ビルド高速化
 
 [Bevyのセットアップガイド](https://bevy.org/learn/quick-start/getting-started/setup/)に沿って、次の設定を使います。
@@ -83,6 +97,7 @@ Wasmプラグイン用の `wasm32-unknown-unknown` ターゲットも共通設�
 | `just clippy` | 全クレート・ターゲット・機能を検査し、警告をエラーにする |
 | `just test` | テスト用Wasmをビルドし、ワークスペースのテストを実行 |
 | `just build` | 全クレート・ターゲット・機能をビルド |
+| `just installer-windows` | キャラクターとモーションを同梱した Windows x64 インストーラーを生成 |
 | `just fetch-assets` | 開発用の Seed-san VRM モデルを取得。モーションは `assets/vrma` に同梱 |
 | `just verify` | 整形確認とClippy（テストを含む型検査）を実行 |
 | `just build-test-plugins` | 結合テスト用の参照Wasmをビルド |

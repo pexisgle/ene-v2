@@ -36,6 +36,10 @@ build:
     cargo build {{cargo_wrapper}} --workspace --all-targets --all-features --locked
 
 [windows]
+installer-windows:
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-installer.ps1
+
+[windows]
 fetch-assets asset="all":
     if (Get-Command uv -ErrorAction SilentlyContinue) { uv run python scripts/fetch-assets.py "{{asset}}" } elseif (Get-Command py -ErrorAction SilentlyContinue) { py -3 scripts/fetch-assets.py "{{asset}}" } else { python scripts/fetch-assets.py "{{asset}}" }
 

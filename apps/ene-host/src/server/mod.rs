@@ -68,7 +68,7 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     // listener to HTTP/1.1.
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            wait_for_signal().await;
+            wait_for_shutdown().await;
             shutdown.cancel();
             running.begin_shutdown().await;
         })
@@ -76,6 +76,21 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let result = runtime.shutdown().await;
     drop(access);
     result.map_err(Into::into)
+}
+
+async fn wait_for_shutdown() {
+    if std::env::var_os("ENE_HOST_EXIT_ON_STDIN_EOF").is_none() {
+        wait_for_signal().await;
+        return;
+    }
+
+    // The desktop holds the write end until it exits, including on a crash.
+    let (closed, wait) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+        let _ = closed.send(());
+    });
+    let _ = wait.await;
 }
 
 async fn wait_for_signal() {

@@ -560,17 +560,17 @@ pub fn default_renderer() -> Option<PathBuf> {
 }
 
 pub const MOTIONS: &[(&str, &str)] = &[
-    ("idle", "01-presence/idle-breath.vrma"),
-    ("look_around", "01-presence/idle-look-around.vrma"),
-    ("adjust_posture", "01-presence/guarded-idle.vrma"),
-    ("sleepy_nod", "01-presence/sleepy-nod.vrma"),
-    ("nod", "04-conversation/acknowledge.vrma"),
-    ("tilt_head", "05-task/task-think.vrma"),
-    ("stretch", "06-reminders/break-stretch.vrma"),
-    ("wave", "01-presence/welcome-back.vrma"),
-    ("ask_question", "04-conversation/ask-question.vrma"),
-    ("task_complete", "05-task/task-complete.vrma"),
-    ("apologize", "07-emotion/apologize.vrma"),
+    ("idle", "idle-breath.vrma"),
+    ("look_around", "idle-look-around.vrma"),
+    ("adjust_posture", "guarded-idle.vrma"),
+    ("sleepy_nod", "sleepy-nod.vrma"),
+    ("nod", "acknowledge.vrma"),
+    ("tilt_head", "task-think.vrma"),
+    ("stretch", "break-stretch.vrma"),
+    ("wave", "welcome-back.vrma"),
+    ("ask_question", "ask-question.vrma"),
+    ("task_complete", "task-complete.vrma"),
+    ("apologize", "apologize.vrma"),
 ];
 
 /// The selected VRMAs ship beside the bundled ENE model.
@@ -600,6 +600,18 @@ mod tests {
 
     #[test]
     fn bundled_presets_resolve_to_vrma_files() {
+        use std::collections::BTreeSet;
+
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/vrma");
+        let shipped: BTreeSet<_> = assets
+            .read_dir()
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        let selected: BTreeSet<std::ffi::OsString> =
+            MOTIONS.iter().map(|&(_, file)| file.into()).collect();
+        assert_eq!(shipped, selected);
+
         for &(preset, _) in MOTIONS {
             let path = motion(preset).expect(preset);
             assert!(path.is_absolute() && path.is_file(), "{path:?}");
