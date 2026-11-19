@@ -408,7 +408,7 @@ impl CompanionPod {
         let drag_strip = window_drag_area(
             div()
                 .w_full()
-                .h(if expanded { px(14.) } else { px(6.) })
+                .h(if expanded { px(18.) } else { px(10.) })
                 .flex()
                 .flex_row()
                 .items_center()
@@ -424,25 +424,28 @@ impl CompanionPod {
             )
         });
 
-        let badge = div()
-            .absolute()
-            .top(px(0.))
-            .left(px(16.))
-            .px(px(12.))
-            .py(px(4.))
-            .rounded_full()
-            .bg(theme.accent)
-            .border_2()
-            .border_color(theme.bg_surface)
-            .text_color(theme.accent_fg)
-            .text_xs()
-            .font_weight(gpui::FontWeight::BOLD)
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(5.))
-            .child(icon(Icon::Sparkles, 12., theme.accent_fg))
-            .child(badge_label);
+        let badge = window_drag_area(
+            div()
+                .absolute()
+                .top(px(0.))
+                .left(px(16.))
+                .px(px(12.))
+                .py(px(4.))
+                .rounded_full()
+                .bg(theme.accent)
+                .border_2()
+                .border_color(theme.bg_surface)
+                .text_color(theme.accent_fg)
+                .text_xs()
+                .font_weight(gpui::FontWeight::BOLD)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(5.))
+                .child(icon(Icon::Sparkles, 12., theme.accent_fg))
+                .child(badge_label),
+            false,
+        );
 
         let bubble = div()
             .w_full()

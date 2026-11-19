@@ -1,7 +1,6 @@
 //! Settings, connections, credentials, policy and approval services.
 use super::Services;
 use crate::host::{
-    Runtime,
     db::Store,
     error::HostError,
     model,
@@ -80,13 +79,11 @@ impl w::SettingsService for Services {
             .map_err(ConnectError::from)?;
         self.runtime.providers().start_used(&store).await;
         if let Ok(current) = store.settings() {
-            let active_vv = current.connections.iter().find(|conn| {
-                conn.enabled
-                    && conn.kind == crate::host::settings::ConnectionKind::Tts
-                    && conn.endpoint().adapter.eq_ignore_ascii_case("voicevox")
-                    && !model::is_sakura_endpoint(&conn.endpoint().endpoint)
-                    && self.runtime.providers().get("voicevox").is_none()
-            });
+            let providers = self.runtime.providers();
+            let active_vv = current
+                .connections
+                .iter()
+                .find(|conn| is_builtin_voicevox(conn, &providers));
             if let Some(vv) = active_vv {
                 if !cfg!(test) {
                     let mgr = self.runtime.voicevox();
@@ -122,6 +119,46 @@ impl w::SettingsService for Services {
             })
         })
         .await
+    }
+
+    async fn delete_connection(
+        &self,
+        _: RequestContext,
+        request: ServiceRequest<'_, w::DeleteConnectionRequest>,
+    ) -> ServiceResult<w::Settings> {
+        let id = request.id.to_owned();
+        let revision = request.expected_revision;
+        let credentials = self.runtime.credentials();
+        let response = self.call(move |app| {
+            let store = app.world().resource::<Store>().clone();
+            let (settings, companions) = store.delete_connection(&id, revision, &credentials)?;
+            let view = wire::settings(&settings);
+            notify_settings(app, view.clone());
+            for companion in companions {
+                if let Err(error) = crate::host::agent::sync_companion(app.world_mut(), &companion.id) {
+                    tracing::warn!(%error, "could not rebind companion after connection removal");
+                }
+                crate::host::mind::notify(app.world_mut(), &companion);
+            }
+            Ok(view)
+        }).await?;
+        let providers = self.runtime.providers();
+        let has_voicevox = self
+            .runtime
+            .read(move |app| {
+                Ok(app
+                    .world()
+                    .resource::<Store>()
+                    .settings()?
+                    .connections
+                    .iter()
+                    .any(|connection| is_builtin_voicevox(connection, &providers)))
+            })
+            .await;
+        if matches!(has_voicevox, Ok(false)) {
+            self.runtime.voicevox().stop().await;
+        }
+        Ok(response)
     }
 
     async fn submit_approval(
@@ -295,18 +332,13 @@ impl w::SettingsService for Services {
             .filter(|secret| !secret.is_empty())
             .ok_or_else(|| ConnectError::invalid_argument("secret is required"))?
             .to_owned();
-        connection(&self.runtime, &id).await?;
         let credentials = self.runtime.credentials();
-        {
-            let credentials = credentials.clone();
-            let id = id.clone();
-            tokio::task::spawn_blocking(move || model::save_secret(&credentials, &id, &secret))
-                .await
-                .map_err(|_| ConnectError::internal("credential store task failed"))?
-                .map_err(ConnectError::from)?;
-        }
         self.call(move |app| {
             let store = app.world().resource::<Store>().clone();
+            if store.connection(&id)?.is_none() {
+                return Err(HostError::NotFound("connection not found".into()));
+            }
+            model::save_secret(&credentials, &id, &secret)?;
             store.set_credential_state(&id, CredentialState::Registered)?;
             notify_settings(app, wire::settings(&store.settings()?));
             Ok(w::CredentialResult {
@@ -323,20 +355,15 @@ impl w::SettingsService for Services {
         request: ServiceRequest<'_, w::Id>,
     ) -> ServiceResult<w::Empty> {
         let id = request.id.to_owned();
-        let connection = connection(&self.runtime, &id).await?;
         let credentials = self.runtime.credentials();
-        {
-            let credentials = credentials.clone();
-            let id = id.clone();
-            tokio::task::spawn_blocking(move || model::delete_secret(&credentials, &id))
-                .await
-                .map_err(|_| ConnectError::internal("credential store task failed"))?
-                .map_err(ConnectError::from)?;
-        }
-        let state = model::credential_state(&connection, &credentials, &self.runtime.providers())
-            .map_err(ConnectError::from)?;
+        let providers = self.runtime.providers();
         self.call(move |app| {
             let store = app.world().resource::<Store>().clone();
+            let connection = store
+                .connection(&id)?
+                .ok_or_else(|| HostError::NotFound("connection not found".into()))?;
+            model::delete_secret(&credentials, &id)?;
+            let state = model::credential_state(&connection, &credentials, &providers)?;
             store.set_credential_state(&id, state)?;
             notify_settings(app, wire::settings(&store.settings()?));
             Ok(w::Empty::default())
@@ -455,17 +482,18 @@ fn notify_settings(app: &mut App, settings: w::Settings) {
     );
 }
 
-async fn connection(runtime: &Runtime, id: &str) -> Result<Connection, ConnectError> {
-    let id = id.to_owned();
-    runtime
-        .read(move |app| {
-            let store = app.world().resource::<Store>();
-            store
-                .connection(&id)?
-                .ok_or_else(|| HostError::NotFound(("connection not found").into()))
-        })
-        .await
-        .map_err(ConnectError::from)
+fn is_builtin_voicevox(
+    connection: &Connection,
+    providers: &crate::host::providers::Providers,
+) -> bool {
+    connection.enabled
+        && connection.kind == settings::ConnectionKind::Tts
+        && connection
+            .endpoint()
+            .adapter
+            .eq_ignore_ascii_case("voicevox")
+        && !model::is_sakura_endpoint(&connection.endpoint().endpoint)
+        && providers.get("voicevox").is_none()
 }
 
 fn rule_from(rule: w::PolicyRule) -> Result<permission::PolicyRule, HostError> {

@@ -86,6 +86,26 @@ impl SettingsStudio {
             placeholder,
             initial,
             theme.field_look(false, false),
+            "TextField",
+        )
+    }
+
+    pub(crate) fn description_draft(
+        &mut self,
+        cx: &mut Context<Self>,
+        key: impl Into<String>,
+        placeholder: &'static str,
+        initial: Option<&str>,
+        theme: &Theme,
+    ) -> Entity<Draft> {
+        window_draft(
+            &mut self.drafts,
+            cx,
+            key,
+            placeholder,
+            initial,
+            theme.field_look(false, false),
+            "TextField Multiline",
         )
     }
 

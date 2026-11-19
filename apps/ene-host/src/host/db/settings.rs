@@ -4,7 +4,8 @@ use super::{
     require_found, to_json,
 };
 use crate::host::error::HostError;
-use crate::host::model::agent_platform;
+use crate::host::mind::Companion;
+use crate::host::model::{Credentials, agent_platform, delete_secret};
 use crate::host::settings::{Check, Connection, ConnectionConfig, Settings};
 use rusqlite::{Row, params};
 use std::collections::HashSet;
@@ -191,6 +192,45 @@ impl Store {
         require_found(changed, "connection not found")
     }
 
+    pub(crate) fn delete_connection(
+        &self,
+        id: &str,
+        revision: u64,
+        credentials: &Credentials,
+    ) -> Result<(Settings, Vec<Companion>)> {
+        let mut companions = self.companions()?;
+        let mut db = self.conn()?;
+        let tx = db.transaction()?;
+        let deleted = tx.execute(
+            "DELETE FROM connections WHERE id = ?1 AND revision = ?2",
+            params![id, revision],
+        )?;
+        if deleted == 0 {
+            return Err(HostError::Conflict(
+                "connection changed or was already deleted".into(),
+            ));
+        }
+        let stamp = now();
+        companions.retain_mut(|companion| companion.assignments.remove_connection(id));
+        for companion in &mut companions {
+            companion.revision += 1;
+            companion.updated_at.clone_from(&stamp);
+            tx.execute(
+                "UPDATE companions SET assignments = ?1, revision = ?2, updated_at = ?3 WHERE id = ?4",
+                params![to_json(&companion.assignments)?, companion.revision, stamp, companion.id],
+            )?;
+        }
+        tx.execute(
+            "UPDATE settings_state SET revision = revision + 1, updated_at = ?1 WHERE id = 1",
+            [&stamp],
+        )?;
+        // Do not commit the removal if the registered key could not be erased.
+        delete_secret(credentials, id)?;
+        tx.commit()?;
+        drop(db);
+        Ok((self.settings()?, companions))
+    }
+
     pub(crate) fn set_check(&self, id: &str, check: &Check) -> Result<()> {
         let changed = self
             .conn()?
@@ -319,6 +359,60 @@ mod tests {
             assert_eq!(stored.name, changed.name);
             assert_eq!(stored.revision, expected + 1);
         }
+    }
+
+    #[test]
+    fn removing_a_connection_checks_revision_and_clears_only_its_bindings_and_secret() {
+        use crate::host::mind::{Assignment, default_ene_companion};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.sqlite3")).unwrap();
+        let settings = store
+            .update_settings(1, &[(connection("drop"), 0), (connection("keep"), 0)])
+            .unwrap();
+        let credentials = Credentials::new(true);
+        credentials.remember("drop", "discarded".into());
+        credentials.remember("keep", "preserved".into());
+        let mut companion = default_ene_companion(&now());
+        let assignment = |id: &str| Assignment {
+            connection_id: id.into(),
+            model_id: "gpt-5".into(),
+        };
+        companion.assignments.companion = assignment("drop");
+        companion.assignments.task = assignment("keep");
+        companion.assignments.perception = Some(assignment("drop"));
+        store.insert_companion(&companion).unwrap();
+
+        assert!(matches!(
+            store.delete_connection("drop", 2, &credentials),
+            Err(HostError::Conflict(_))
+        ));
+        assert_eq!(
+            credentials.secret("drop").unwrap().as_deref(),
+            Some("discarded")
+        );
+        assert_eq!(store.companion(&companion.id).unwrap().unwrap(), companion);
+        let (next, changed) = store.delete_connection("drop", 1, &credentials).unwrap();
+        assert_eq!(next.revision, settings.revision + 1);
+        assert_eq!(
+            next.connections
+                .iter()
+                .map(|conn| conn.id.as_str())
+                .collect::<Vec<_>>(),
+            ["keep"]
+        );
+        assert_eq!(changed.len(), 1);
+        let saved = store.companion(&companion.id).unwrap().unwrap();
+        assert_eq!(saved, changed[0]);
+        assert!(!saved.assignments.companion.is_set());
+        assert_eq!(saved.assignments.task, assignment("keep"));
+        assert!(saved.assignments.perception.is_none());
+        assert_eq!(saved.revision, companion.revision + 1);
+        assert!(credentials.secret("drop").unwrap().is_none());
+        assert_eq!(
+            credentials.secret("keep").unwrap().as_deref(),
+            Some("preserved")
+        );
     }
 
     #[test]

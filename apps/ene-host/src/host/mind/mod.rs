@@ -24,6 +24,34 @@ pub(crate) struct Assignments {
     pub(crate) embedding: Option<Assignment>,
 }
 
+impl Assignments {
+    pub(crate) fn remove_connection(&mut self, id: &str) -> bool {
+        let mut changed = false;
+        for assignment in [&mut self.companion, &mut self.task] {
+            if assignment.connection_id == id {
+                *assignment = Assignment::default();
+                changed = true;
+            }
+        }
+        for assignment in [
+            &mut self.perception,
+            &mut self.compaction,
+            &mut self.consolidation,
+            &mut self.decision,
+            &mut self.embedding,
+        ] {
+            if assignment
+                .as_ref()
+                .is_some_and(|value| value.connection_id == id)
+            {
+                *assignment = None;
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Assignment {
     pub(crate) connection_id: String,
@@ -405,7 +433,7 @@ pub(crate) fn delete(world: &mut World, id: &str) -> Result<()> {
     Ok(())
 }
 
-fn notify(world: &mut World, companion: &Companion) {
+pub(crate) fn notify(world: &mut World, companion: &Companion) {
     let view = wire::companion(companion);
     let mut notifier = world.resource_mut::<Notifier>();
     notifier.push(

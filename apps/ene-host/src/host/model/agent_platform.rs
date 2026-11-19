@@ -19,6 +19,20 @@ use std::sync::Arc;
 pub(crate) const ADAPTER: &str = "google-agent-platform";
 pub(crate) const ENDPOINT: &str = "https://aiplatform.googleapis.com";
 pub(super) const DEFAULT_MODEL: &str = "gemini-3.8-flash";
+const PROJECT_MODELS: &[&str] = &[
+    DEFAULT_MODEL,
+    "gemini-4-argon",
+    "gemini-3.7-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.1-pro-preview",
+];
+const EXPRESS_MODELS: &[&str] = &[
+    DEFAULT_MODEL,
+    "gemini-3-flash-preview",
+    "gemini-3.1-pro-preview",
+];
 
 fn valid_resource(value: &str) -> bool {
     !value.is_empty()
@@ -83,6 +97,125 @@ fn publisher_endpoint(endpoint: &Endpoint) -> Result<String> {
     ))
 }
 
+fn express(publisher: &str) -> bool {
+    publisher == format!("{ENDPOINT}/v1/publishers/google/models")
+}
+
+pub(super) fn fallback_models(endpoint: &Endpoint) -> &'static [&'static str] {
+    if publisher_endpoint(endpoint).is_ok_and(|publisher| express(&publisher)) {
+        EXPRESS_MODELS
+    } else {
+        PROJECT_MODELS
+    }
+}
+
+fn model_list_url(publisher: &str) -> String {
+    let (host, _) = publisher
+        .split_once("/v1/")
+        .expect("validated publisher URL");
+    format!("{host}/v1beta1/publishers/google/models")
+}
+
+fn api_key(secret: Option<&str>) -> Result<HeaderValue> {
+    let secret = secret
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| {
+            HostError::FailedPrecondition("Google Agent Platform の API キーが未登録です".into())
+        })?;
+    let mut key = HeaderValue::from_str(secret).map_err(|_| {
+        HostError::Invalid("Google Agent Platform の API キーの形式が無効です".into())
+    })?;
+    key.set_sensitive(true);
+    Ok(key)
+}
+
+pub(super) async fn list_models(
+    endpoint: &Endpoint,
+    secret: Option<&str>,
+) -> std::result::Result<Vec<String>, String> {
+    let publisher = publisher_endpoint(endpoint).map_err(|error| error.to_string())?;
+    let key = api_key(secret).map_err(|error| error.to_string())?;
+    tokio::time::timeout(
+        super::PROBE_TIMEOUT,
+        list_publisher_models(&net::client()?, &model_list_url(&publisher), key),
+    )
+    .await
+    .map_err(|_| "Google Agent Platform のモデル一覧の取得がタイムアウトしました".to_owned())?
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelPage {
+    #[serde(default)]
+    publisher_models: Vec<PublisherModel>,
+    #[serde(default)]
+    next_page_token: String,
+}
+
+#[derive(serde::Deserialize)]
+struct PublisherModel {
+    name: String,
+}
+
+fn chat_model_id(name: &str) -> Option<&str> {
+    let id = name.strip_prefix("publishers/google/models/")?;
+    (valid_model(id)
+        && !id.split('-').any(|part| {
+            matches!(
+                part,
+                "embedding" | "image" | "live" | "tts" | "omni" | "cyber" | "banana"
+            )
+        }))
+    .then_some(id)
+}
+
+async fn list_publisher_models(
+    client: &reqwest::Client,
+    url: &str,
+    key: HeaderValue,
+) -> std::result::Result<Vec<String>, String> {
+    let mut models = Vec::new();
+    let mut token = String::new();
+    let base = reqwest::Url::parse(url).map_err(|error| error.to_string())?;
+    for _ in 0..32 {
+        let mut page_url = base.clone();
+        page_url.query_pairs_mut().append_pair("pageSize", "100");
+        if !token.is_empty() {
+            page_url.query_pairs_mut().append_pair("pageToken", &token);
+        }
+        let response = client
+            .get(page_url)
+            .header("x-goog-api-key", key.clone())
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|error| error.without_url().to_string())?;
+        let body = net::read_response_body(
+            response,
+            2 * 1024 * 1024,
+            "Google Agent Platform model list",
+        )
+        .await?;
+        let page: ModelPage = serde_json::from_slice(&body).map_err(|error| error.to_string())?;
+        for model in page.publisher_models {
+            if let Some(id) = chat_model_id(&model.name)
+                && !models.iter().any(|known| known == id)
+            {
+                models.push(id.to_owned());
+            }
+        }
+        if page.next_page_token.is_empty() {
+            return Ok(models);
+        }
+        if page.next_page_token == token {
+            break;
+        }
+        token = page.next_page_token;
+    }
+    Err("Google Agent Platform model list did not finish".into())
+}
+
 pub(crate) fn validate(endpoint: &Endpoint, model_ids: &[String]) -> Result<()> {
     publisher_endpoint(endpoint)?;
     if model_ids.iter().any(|id| !valid_model(id.trim())) {
@@ -119,17 +252,7 @@ fn model_with_http(
             "Invalid Agent Platform Gemini model ID".into(),
         ));
     }
-    let secret = secret
-        .as_deref()
-        .map(str::trim)
-        .filter(|key| !key.is_empty());
-    let key = secret.ok_or_else(|| {
-        HostError::FailedPrecondition("Google Agent Platform の API キーが未登録です".into())
-    })?;
-    let mut key = HeaderValue::from_str(key).map_err(|_| {
-        HostError::Invalid("Google Agent Platform の API キーの形式が無効です".into())
-    })?;
-    key.set_sensitive(true);
+    let key = api_key(secret.as_deref())?;
     let wire = GenerateContent::new(GeminiConfig::new("").with_base_url(ENDPOINT), &spec.id)
         .with_facts(ModelFacts::new(spec.clone()));
     Ok(Model::new(
@@ -274,6 +397,8 @@ mod tests {
         ] {
             let endpoint = Endpoint { options: options.into(), ..Default::default() };
             assert_eq!(publisher_endpoint(&endpoint).unwrap(), expected);
+            let host = expected.split_once("/v1/").unwrap().0;
+            assert_eq!(model_list_url(&expected), format!("{host}/v1beta1/publishers/google/models"));
         }
         for options in [
             r#"{"location":"global"}"#,
@@ -293,6 +418,44 @@ mod tests {
         };
         assert!(publisher_endpoint(&endpoint).is_err());
         assert!(!valid_model("gemini-foo/../../bar"));
+    }
+
+    #[tokio::test]
+    async fn lists_all_pages_and_keeps_only_gemini_chat_models() {
+        let app = axum::Router::new().route(
+            "/v1beta1/publishers/google/models",
+            axum::routing::get(|uri: Uri, headers: http::HeaderMap| async move {
+                assert_eq!(headers["x-goog-api-key"], "test-key");
+                let model = |id: &str| json!({"name": format!("publishers/google/models/{id}")});
+                axum::Json(match uri.query() {
+                    Some("pageSize=100") => json!({
+                        "publisherModels": [model("gemini-3.8-flash"), model("gemini-3.8-live"),
+                            model("gemini-3-pro-image"), model("gemini-embedding-2")],
+                        "nextPageToken": "next+/="
+                    }),
+                    Some("pageSize=100&pageToken=next%2B%2F%3D") => json!({
+                        "publisherModels": [model("gemini-3.8-flash"), model("gemini-4-argon"),
+                            model("gemma-4"), model("gemini-3.8-flash-tts")]
+                    }),
+                    _ => panic!("unexpected model list query: {uri}"),
+                })
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/v1beta1/publishers/google/models",
+            listener.local_addr().unwrap()
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let models = list_publisher_models(
+            &net::client().unwrap(),
+            &url,
+            api_key(Some("test-key")).unwrap(),
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(models, ["gemini-3.8-flash", "gemini-4-argon"]);
     }
 
     #[tokio::test]

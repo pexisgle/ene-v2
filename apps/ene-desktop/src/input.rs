@@ -7,16 +7,16 @@
 //! works: the platform delivers composition through
 //! `replace_and_mark_text_in_range`, and the marked range is drawn underlined.
 //!
-//! It is single-line on purpose. Newlines are pasted as spaces, `Enter` submits
-//! through a key binding in `ChatInput` context, and a send is refused while a
-//! composition is open so conversion is never cut short.
+//! The chat composer and short fields are single-line. Description fields use
+//! the same input handler and preserve newlines, with soft wrapping in GPUI.
 
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla, InspectorElementId,
     IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
     Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
-    UnderlineStyle, Window, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
+    UnderlineStyle, Window, WrappedLine, div, fill, point, prelude::*, px, relative, rgb, rgba,
+    size,
 };
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
@@ -36,6 +36,11 @@ gpui::actions!(
         Paste,
         Cut,
         Copy,
+        Newline,
+        Up,
+        Down,
+        SelectUp,
+        SelectDown,
     ]
 );
 
@@ -79,7 +84,7 @@ pub struct Draft {
     selected: Range<usize>,
     reversed: bool,
     marked: Option<Range<usize>>,
-    last_layout: Option<ShapedLine>,
+    last_layout: Option<FieldLayout>,
     last_bounds: Option<Bounds<Pixels>>,
     /// Horizontal scroll in pixels, so the caret stays inside the field when the
     /// text is wider than it.
@@ -90,6 +95,10 @@ pub struct Draft {
 }
 
 impl Draft {
+    fn multiline(&self) -> bool {
+        self.context == "TextField Multiline"
+    }
+
     pub fn new(
         cx: &mut Context<Self>,
         placeholder: impl Into<SharedString>,
@@ -166,7 +175,7 @@ impl Draft {
     /// Replaces the text and puts the caret at the end.
     pub fn set(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         let raw: SharedString = text.into();
-        self.content = SharedString::from(single_line(&raw));
+        self.content = self.normalize(&raw).into();
         let end = self.content.len();
         self.selected = end..end;
         self.reversed = false;
@@ -285,12 +294,61 @@ impl Draft {
     }
 
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(0, cx);
+        let offset = self.index_in_visual_row(0., Some(px(0.))).unwrap_or(0);
+        self.move_to(offset, cx);
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
-        let end = self.content.len();
+        let end = self
+            .index_in_visual_row(0., Some(px(f32::MAX)))
+            .unwrap_or(self.content.len());
         self.move_to(end, cx);
+    }
+
+    fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.composing() {
+            self.replace_text_in_range(None, "\n", window, cx);
+        }
+    }
+
+    fn index_in_visual_row(&self, dy: f32, x: Option<Pixels>) -> Option<usize> {
+        let FieldLayout::Multiline(lines, height) = self.last_layout.as_ref()? else {
+            return None;
+        };
+        if self.content.is_empty() {
+            return Some(0);
+        }
+        let mut position = wrapped_position(lines, *height, self.cursor())?;
+        position.x = x.unwrap_or(position.x);
+        position.y += dy * *height + *height / 2.;
+        Some(clamp_index(
+            &self.content,
+            wrapped_index(lines, *height, position),
+        ))
+    }
+
+    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(index) = self.index_in_visual_row(-1., None) {
+            self.move_to(index, cx);
+        }
+    }
+
+    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(index) = self.index_in_visual_row(1., None) {
+            self.move_to(index, cx);
+        }
+    }
+
+    fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(index) = self.index_in_visual_row(-1., None) {
+            self.select_to(index, cx);
+        }
+    }
+
+    fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(index) = self.index_in_visual_row(1., None) {
+            self.select_to(index, cx);
+        }
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -311,7 +369,7 @@ impl Draft {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &single_line(&text), window, cx);
+            self.replace_text_in_range(None, &text, window, cx);
         }
     }
 
@@ -377,11 +435,23 @@ impl Draft {
         if self.content.is_empty() {
             return 0;
         }
-        let shaped_index = line.closest_index_for_x(position.x - bounds.left() + self.scroll);
+        let local = position - bounds.origin + point(self.scroll, px(0.));
+        let shaped_index = match line {
+            FieldLayout::Single(line) => line.closest_index_for_x(local.x),
+            FieldLayout::Multiline(lines, height) => wrapped_index(lines, *height, local),
+        };
         if self.masked {
             unmasked_offset(&self.content, shaped_index)
         } else {
             clamp_index(&self.content, shaped_index)
+        }
+    }
+
+    fn normalize(&self, text: &str) -> String {
+        if self.multiline() {
+            text.replace("\r\n", "\n").replace('\r', "\n")
+        } else {
+            single_line(text)
         }
     }
 }
@@ -504,7 +574,7 @@ impl EntityInputHandler for Draft {
             .or(self.marked.clone())
             .unwrap_or(self.selected.clone());
         let range = clamp_range(&self.content, range);
-        let new_text = single_line(new_text);
+        let new_text = self.normalize(new_text);
         self.content = SharedString::from(
             self.content[0..range.start].to_owned() + &new_text + &self.content[range.end..],
         );
@@ -530,7 +600,7 @@ impl EntityInputHandler for Draft {
             .or(self.marked.clone())
             .unwrap_or(self.selected.clone());
         let range = clamp_range(&self.content, range);
-        let new_text = single_line(new_text);
+        let new_text = self.normalize(new_text);
         self.content = SharedString::from(
             self.content[0..range.start].to_owned() + &new_text + &self.content[range.end..],
         );
@@ -572,16 +642,25 @@ impl EntityInputHandler for Draft {
         };
         // The candidate window opens here, so the geometry has to be real, and it
         // moves with the text when the field is scrolled.
-        Some(Bounds::from_corners(
-            point(
-                bounds.left() + line.x_for_index(start) - self.scroll,
-                bounds.top(),
+        let (start, end, height) = match line {
+            FieldLayout::Single(line) => (
+                point(line.x_for_index(start), px(0.)),
+                point(line.x_for_index(end), px(0.)),
+                bounds.size.height,
             ),
-            point(
-                bounds.left() + line.x_for_index(end) - self.scroll,
-                bounds.bottom(),
+            FieldLayout::Multiline(lines, height) => (
+                wrapped_position(lines, *height, start)?,
+                wrapped_position(lines, *height, end)?,
+                *height,
             ),
-        ))
+        };
+        let origin = bounds.origin - point(self.scroll, px(0.));
+        let width = if start.y == end.y {
+            (end.x - start.x).max(px(2.))
+        } else {
+            px(2.)
+        };
+        Some(Bounds::new(origin + start, size(width, height)))
     }
 
     fn character_index_for_point(
@@ -590,15 +669,8 @@ impl EntityInputHandler for Draft {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        let local = self.last_bounds?.localize(&point)?;
-        let line = self.last_layout.as_ref()?;
-        let index = line.index_for_x(point.x - local.x + self.scroll)?;
-        let content_index = if self.masked {
-            unmasked_offset(&self.content, index)
-        } else {
-            index
-        };
-        Some(self.offset_to_utf16(content_index))
+        self.last_bounds?.localize(&point)?;
+        Some(self.offset_to_utf16(self.index_for_mouse_position(point)))
     }
 }
 
@@ -607,8 +679,71 @@ struct FieldElement {
     input: Entity<Draft>,
 }
 
+enum FieldLayout {
+    Single(ShapedLine),
+    Multiline(Vec<WrappedLine>, Pixels),
+}
+
+fn wrapped_index(lines: &[WrappedLine], height: Pixels, mut position: Point<Pixels>) -> usize {
+    if position.y < px(0.) {
+        return 0;
+    }
+    let mut start = 0;
+    for line in lines {
+        let line_height = line.size(height).height;
+        if position.y < line_height {
+            let index = line.closest_index_for_position(position, height);
+            return start + index.unwrap_or_else(|boundary| boundary);
+        }
+        position.y -= line_height;
+        start += line.len() + 1;
+    }
+    start.saturating_sub(1)
+}
+
+fn wrapped_position(
+    lines: &[WrappedLine],
+    height: Pixels,
+    mut index: usize,
+) -> Option<Point<Pixels>> {
+    let mut top = px(0.);
+    for line in lines {
+        if index <= line.len() {
+            // GPUI reports a wrap boundary at the end of the prior row.
+            // Start of the next row is the useful caret position for editing.
+            if let Some(row) = line
+                .wrap_boundaries()
+                .iter()
+                .position(|wrap| line.runs()[wrap.run_ix].glyphs[wrap.glyph_ix].index == index)
+            {
+                return Some(point(px(0.), top + height * (row + 1)));
+            }
+            return line
+                .position_for_index(index, height)
+                .map(|point| point + gpui::point(px(0.), top));
+        }
+        index -= line.len() + 1;
+        top += line.size(height).height;
+    }
+    None
+}
+
+fn shape_wrapped(
+    window: &Window,
+    text: SharedString,
+    font_size: Pixels,
+    runs: &[TextRun],
+    width: Option<Pixels>,
+) -> Vec<WrappedLine> {
+    window
+        .text_system()
+        .shape_text(text, font_size, runs, width, None)
+        .expect("description text shapes")
+        .into_vec()
+}
+
 struct Prepaint {
-    line: Option<ShapedLine>,
+    layout: Option<FieldLayout>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
     offset: Pixels,
@@ -643,6 +778,38 @@ impl gpui::Element for FieldElement {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut style = Style::default();
         style.size.width = relative(1.).into();
+        if self.input.read(cx).multiline() {
+            let input = self.input.clone();
+            let text_style = window.text_style();
+            let font_size = text_style.font_size.to_pixels(window.rem_size());
+            let line_height = window.line_height();
+            return (
+                window.request_measured_layout(style, move |known, space, window, cx| {
+                    let input = input.read(cx);
+                    let text = if input.content.is_empty() {
+                        input.placeholder.clone()
+                    } else {
+                        input.content.clone()
+                    };
+                    let width = known.width.or(match space.width {
+                        gpui::AvailableSpace::Definite(width) => Some(width),
+                        _ => None,
+                    });
+                    let run = text_style.to_run(text.len());
+                    let lines = shape_wrapped(window, text, font_size, &[run], width);
+                    let height = lines.iter().fold(px(0.), |height, line| {
+                        height + line.size(line_height).height
+                    });
+                    let content_width = lines
+                        .iter()
+                        .map(|line| line.width())
+                        .max()
+                        .unwrap_or_default();
+                    size(width.unwrap_or(content_width), height.max(line_height * 3.))
+                }),
+                (),
+            );
+        }
         style.size.height = window.line_height().into();
         (window.request_layout(style, [], cx), ())
     }
@@ -671,7 +838,7 @@ impl gpui::Element for FieldElement {
         };
         // GPUI's `shape_line` asserts that `text` contains no newlines; keep
         // this single-line invariant directly before shaping as well.
-        let text = if text.contains(['\r', '\n']) {
+        let text = if !input.multiline() && text.contains(['\r', '\n']) {
             SharedString::from(single_line(&text))
         } else {
             text
@@ -717,35 +884,62 @@ impl gpui::Element for FieldElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = match marked.as_ref() {
-            Some(marked) => vec![
-                TextRun {
-                    len: marked.start,
-                    ..run.clone()
-                },
-                TextRun {
-                    len: marked.end - marked.start,
-                    underline: Some(UnderlineStyle {
+        let mut boundaries = vec![0, text.len()];
+        if let Some(marked) = &marked {
+            boundaries.extend([marked.start, marked.end]);
+        }
+        if input.multiline() && !selected.is_empty() {
+            boundaries.extend([selected.start, selected.end]);
+        }
+        boundaries.sort_unstable();
+        boundaries.dedup();
+        let runs: Vec<_> = boundaries
+            .windows(2)
+            .map(|span| TextRun {
+                len: span[1] - span[0],
+                background_color: (input.multiline() && selected.contains(&span[0]))
+                    .then_some(look.selection),
+                underline: marked
+                    .as_ref()
+                    .is_some_and(|range| range.contains(&span[0]))
+                    .then_some(UnderlineStyle {
                         color: Some(run.color),
                         thickness: px(1.),
                         wavy: false,
                     }),
-                    ..run.clone()
-                },
-                TextRun {
-                    len: text.len() - marked.end,
-                    ..run
-                },
-            ]
-            .into_iter()
-            .filter(|run| run.len > 0)
-            .collect(),
-            None => vec![run],
-        };
+                ..run.clone()
+            })
+            .collect();
         let font_size = style.font_size.to_pixels(window.rem_size());
-        let line = window
-            .text_system()
-            .shape_line(text, font_size, &runs, None);
+        if input.multiline() {
+            let height = window.line_height();
+            let lines = shape_wrapped(window, text, font_size, &runs, Some(bounds.size.width));
+            let caret = wrapped_position(&lines, height, cursor).unwrap_or_default();
+            return Prepaint {
+                layout: Some(FieldLayout::Multiline(lines, height)),
+                cursor: selected.is_empty().then(|| {
+                    fill(
+                        Bounds::new(
+                            bounds.origin + caret - point(px(1.), px(0.)),
+                            size(px(2.), height),
+                        ),
+                        look.caret,
+                    )
+                }),
+                selection: None,
+                offset: px(0.),
+            };
+        }
+        let line = window.text_system().shape_line(
+            text,
+            font_size,
+            if runs.is_empty() {
+                std::slice::from_ref(&run)
+            } else {
+                &runs
+            },
+            None,
+        );
         // Keep the caret inside the field. The shape is one line and the field
         // clips it, so without this a long value (a pasted key, a URL) would run
         // past the border and over whatever sits next to it.
@@ -782,7 +976,7 @@ impl gpui::Element for FieldElement {
             )
         };
         Prepaint {
-            line: Some(line),
+            layout: Some(FieldLayout::Single(line)),
             cursor,
             selection,
             offset,
@@ -809,17 +1003,28 @@ impl gpui::Element for FieldElement {
             window.paint_quad(selection);
         }
         let offset = prepaint.offset;
-        let line = prepaint.line.take().expect("the line was shaped");
+        let layout = prepaint.layout.take().expect("the field was shaped");
         // The mask is what keeps a long value inside the border; the offset is
         // what keeps its end (and the caret) inside the same box.
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            line.paint(
-                bounds.origin - point(offset, px(0.)),
-                window.line_height(),
-                window,
-                cx,
-            )
-            .expect("the line paints");
+        window.with_content_mask(Some(ContentMask { bounds }), |window| match &layout {
+            FieldLayout::Single(line) => line
+                .paint(
+                    bounds.origin - point(offset, px(0.)),
+                    window.line_height(),
+                    window,
+                    cx,
+                )
+                .expect("the line paints"),
+            FieldLayout::Multiline(lines, height) => {
+                let mut origin = bounds.origin;
+                for line in lines {
+                    line.paint_background(origin, *height, gpui::TextAlign::Left, None, window, cx)
+                        .expect("line background paints");
+                    line.paint(origin, *height, gpui::TextAlign::Left, None, window, cx)
+                        .expect("the line paints");
+                    origin.y += line.size(*height).height;
+                }
+            }
         });
         if focus.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()
@@ -827,7 +1032,7 @@ impl gpui::Element for FieldElement {
             window.paint_quad(cursor);
         }
         self.input.update(cx, |input, _cx| {
-            input.last_layout = Some(line);
+            input.last_layout = Some(layout);
             input.last_bounds = Some(bounds);
             input.scroll = offset;
         });
@@ -873,6 +1078,11 @@ impl Render for Draft {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::newline))
+            .on_action(cx.listener(Self::up))
+            .on_action(cx.listener(Self::down))
+            .on_action(cx.listener(Self::select_up))
+            .on_action(cx.listener(Self::select_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -914,6 +1124,11 @@ pub fn bind(cx: &mut App) {
         gpui::KeyBinding::new("secondary-x", Cut, Some("TextField")),
         gpui::KeyBinding::new("home", Home, None),
         gpui::KeyBinding::new("end", End, None),
+        gpui::KeyBinding::new("enter", Newline, Some("Multiline")),
+        gpui::KeyBinding::new("up", Up, Some("Multiline")),
+        gpui::KeyBinding::new("down", Down, Some("Multiline")),
+        gpui::KeyBinding::new("shift-up", SelectUp, Some("Multiline")),
+        gpui::KeyBinding::new("shift-down", SelectDown, Some("Multiline")),
     ]);
 }
 
