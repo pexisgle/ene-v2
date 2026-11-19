@@ -46,12 +46,12 @@ cargo run --release --locked -p ene-avatar --example control
 `help` で全コマンドを確認できます。`list` はキャラクター・モニター・FPSを表示し、
 読み込み完了やクリックなどの通知は操作中も表示します。
 `motion ene none` でモーションを解除できます。
-`add ene` は取得済みの Seed-san モデルと three-vrm サンプルモーションを使います。
+`add ene` は取得済みの Seed-san モデルと同梱の `idle-breath` モーションを使います。
 `model ene` / `motion ene` でもそれぞれの既定アセットへ戻せます。
 `add ene ./model.vrm ./wave.vrma` で両方を指定でき、
 `add ene ./model.vrm none` ならモーションなしで追加します。
 モデルだけ指定した場合も既定モーションを使います。
-既定アセットは取得スクリプトと同じキャッシュから探します
+Seed-san モデルは取得スクリプトと同じキャッシュから探します
 （Linux: `$XDG_CACHE_HOME/ene` または `~/.cache/ene`、Windows: `%LOCALAPPDATA%/ene/cache`）。
 未取得の場合は取得コマンドを案内します。
 部分変更は毎回 `get` した設定を引き継いで `set` します。
@@ -76,10 +76,13 @@ cargo run --release --locked -p ene-avatar --example control
 {"id":1,"op":"add","character":"ene","config":{"model":"/absolute/path/model.vrm"}}
 {"id":2,"op":"get"}
 {"id":3,"op":"set","character":"ene","config":{"model":"/absolute/path/model.vrm","motion":"/absolute/path/motion.vrma","playing":false}}
+{"id":9,"op":"motion","character":"ene","motion":"/absolute/path/other.vrma","looping":false}
 {"id":4,"op":"center","character":"ene","monitor":null}
 {"id":5,"op":"fps","value":60}
 {"id":6,"op":"remove","character":"ene"}
-{"id":7,"op":"quit"}
+{"id":7,"op":"expression","character":"ene","name":"happy"}
+{"op":"lip_sync","character":"ene","rms":0.42}
+{"id":8,"op":"quit"}
 ```
 
 Windowsのパスは`C:/models/model.vrm`のように書けます。
@@ -88,10 +91,13 @@ Windowsのパスは`C:/models/model.vrm`のように書けます。
 | 操作 | 内容 |
 | --- | --- |
 | `add` | IDを登録し、`config`のモデルとモーションを非同期で読み込む |
-| `set` | 設定全体を置き換える。省略した項目は既定値に戻る |
+| `set` | 設定全体を置き換える。省略した項目は既定値に戻る。モデルが同じならシーンを再構築せず、新しいモーションへ300msでフェードする |
+| `motion` | モーションとループ設定を切り替える。再生中は現在のポーズから新しいクリップへ約300msで移り、フェード中にも次の指示を受け付ける。同じクリップも先頭から再生できる |
 | `get` | キャラクターの状態・設定・再生時刻、モニター一覧、FPS設定を返す |
 | `center` | 指定モニターの既定位置へ戻す。`null`は最初の出力を使う |
 | `fps` | 全体の更新頻度を0～1000で指定する。既定値は60、0は制限なし |
+| `expression` | 表情を指定する。VRMプリセット名（`happy`、`aa`など）かカスタム名。`null`は表情を消す。150〜200msでフェードする |
+| `lip_sync` | 口の開きを0〜1で送る。`id`の無いワンウェイ通知で、応答は返らない。`aa`へ平滑化して反映する |
 | `remove` | 指定キャラクターとその子エンティティを削除する |
 | `quit` | 描画を終了し、受理済みの出力を送信してプロセスを終了する |
 

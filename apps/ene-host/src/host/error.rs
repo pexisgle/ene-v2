@@ -25,6 +25,9 @@ pub(crate) enum HostError {
     /// The capability exists but is not available right now.
     #[error("{0}")]
     Unavailable(String),
+    /// The host is correctly configured, but this operation needs setup first.
+    #[error("{0}")]
+    FailedPrecondition(String),
     /// The state database or the session log failed. The host stops.
     #[error("{0}")]
     Storage(String),
@@ -49,6 +52,7 @@ impl HostError {
             | Self::Permission(message)
             | Self::Exhausted(message)
             | Self::Unavailable(message)
+            | Self::FailedPrecondition(message)
             | Self::Storage(message)
             | Self::Internal(message) => message,
         }
@@ -63,6 +67,7 @@ impl HostError {
             Self::Permission(_) => "permission_denied",
             Self::Exhausted(_) => "resource_exhausted",
             Self::Unavailable(_) => "unavailable",
+            Self::FailedPrecondition(_) => "failed_precondition",
             Self::Storage(_) => "storage_error",
             Self::Internal(_) => "internal",
         }

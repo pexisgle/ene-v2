@@ -5,7 +5,7 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.99.1"
+rust-version = "1.100.0"
 publish = false
 
 [workspace.lints.rust]
@@ -15,16 +15,12 @@ unsafe_op_in_unsafe_fn = "deny"
 ene-rpc = { path = "crates/ene-rpc" }
 ene-plugin = { path = "crates/ene-plugin" }
 ene-plugin-runtime = { path = "crates/ene-plugin-runtime" }
-agent-client-protocol = { version = "5.2.0", default-features = false }
-# The guest SDK and the host must agree on one ACP type set. The host reaches it
-# through `agent_client_protocol::v1::schema` (tech-stack §G); a Wasm guest
-# cannot, because the SDK pulls `uuid` without a randomness source for
-# `wasm32-unknown-unknown`. `crates/ene-plugin` therefore depends on the
-# types-only crate directly, with a caret requirement so an SDK bump that moves
-# the schema to a new 1.x does not fail to resolve.
+# A Wasm guest cannot depend on the full ACP SDK, because the SDK pulls `uuid`
+# without a randomness source for `wasm32-unknown-unknown`. `crates/ene-plugin`
+# therefore depends on the types-only crate directly, with a caret requirement
+# so the pinned ACP version can move within 1.x without breaking resolution.
 agent-client-protocol-schema = { version = "1.15.1", default-features = false }
 process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
-which = "8.0.6"
 cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"
 tempfile = "3"
@@ -35,6 +31,9 @@ bytes = "1"
 buffa = { version = "0.9", features = ["json"] }
 connectrpc = { version = "0.9", default-features = false, features = ["json"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+# Pre-1.0 and explicitly unstable (docs/references.md), so the desktop client
+# pins the exact version its observed API was written against.
+gpui = { version = "=0.2.2", default-features = false }
 http = "1"
 croner = { version = "4", default-features = false, features = ["jiff"] }
 rubato = "5.1"

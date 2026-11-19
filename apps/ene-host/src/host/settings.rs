@@ -1,6 +1,7 @@
 //! Connections and settings: LLM, TTS, STT, embedding, MCP and ACP share one
 //! header and differ only in their config oneof (docs/api.md §7).
 use super::error::{Failure, HostError, Result};
+use super::model::agent_platform;
 use super::providers::Providers;
 use ene_plugin::{Extension, provider::AuthProfile};
 use ene_rpc as w;
@@ -128,6 +129,9 @@ impl ConnectionConfig {
                     return Err(HostError::Invalid(
                         ("connection model list is too large").into(),
                     ));
+                }
+                if config.endpoint.adapter == agent_platform::ADAPTER {
+                    agent_platform::validate(&config.endpoint, &config.model_ids)?;
                 }
             }
             Self::Embedding(config) => {
@@ -278,6 +282,9 @@ fn catalog_entry(id: &str, name: &str, settings: &[(&str, &str)]) -> w::LlmProvi
     }
 }
 
+pub(crate) const SAKURA_AI_ENDPOINT: &str = "https://api.ai.sakura.ad.jp/v1";
+pub(crate) const SAKURA_AI_API_KEY_ENV: &str = "SAKURA_AI_API_KEY";
+
 /// The provider catalogue the host can speak to through rig-core. It is a
 /// fixed alpha list; extensions add adapters, not host code paths.
 fn builtin_providers() -> Vec<w::LlmProvider> {
@@ -298,6 +305,41 @@ fn builtin_providers() -> Vec<w::LlmProvider> {
         ),
         catalog_entry("anthropic", "Anthropic", &[("base_url", "Base URL")]),
         catalog_entry("gemini", "Google Gemini", &[("base_url", "Base URL")]),
+        w::LlmProvider {
+            id: agent_platform::ADAPTER.into(),
+            name: "Google Agent Platform（旧 Vertex AI）".into(),
+            adapter: agent_platform::ADAPTER.into(),
+            endpoint: agent_platform::ENDPOINT.into(),
+            settings: [
+                ("project_id", "プロジェクト ID"),
+                ("location", "ロケーション"),
+            ]
+            .into_iter()
+            .map(|(key, label)| w::SettingField {
+                key: key.into(),
+                label: label.into(),
+                kind: "string".into(),
+                ..Default::default()
+            })
+            .collect(),
+            requires_credentials: true,
+            ..Default::default()
+        },
+        w::LlmProvider {
+            id: "sakura".into(),
+            name: "さくらのAI Engine".into(),
+            adapter: "sakura".into(),
+            endpoint: SAKURA_AI_ENDPOINT.into(),
+            settings: vec![w::SettingField {
+                key: "base_url".into(),
+                label: "Base URL".into(),
+                kind: "string".into(),
+                ..Default::default()
+            }],
+            requires_credentials: true,
+            environment_variable: Some(SAKURA_AI_API_KEY_ENV.into()),
+            ..Default::default()
+        },
     ]
 }
 

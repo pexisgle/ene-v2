@@ -1,5 +1,7 @@
 //! LLM connections: secrets, the model catalog and the rig connection an
 //! agent runs on.
+pub(crate) mod agent_platform;
+pub(crate) mod catalog;
 mod plugin;
 #[cfg(test)]
 pub(crate) mod plugin_tests;
@@ -10,11 +12,14 @@ use super::mind::{Companion, Role};
 use super::net;
 use super::settings::{Check, Connection, ConnectionConfig, ConnectionKind, CredentialState};
 pub(crate) use plugin::completion as plugin_completion;
-use rig_core::catalog::{Catalog, ModelSpec};
-use rig_core::driver::DynModel;
+use rig_core::catalog::{Catalog, ModelFacts, ModelSpec};
+use rig_core::driver::{DynModel, Model};
 use rig_core::operation::Completion;
 use rig_core::providers::{
-    openai::OpenAIConfig,
+    openai::{
+        OpenAIConfig,
+        wire::{Dialect, DimensionsField, Quirks, Route},
+    },
     registry::{ConnectOptions, ProviderConfig, ProviderId},
 };
 use std::{
@@ -178,13 +183,118 @@ pub(crate) fn connection_secret(
         .filter(|secret| !secret.is_empty()))
 }
 
+pub(crate) const SAKURA_CHAT_MODELS: &[&str] = &[
+    "gpt-oss-120b",
+    "llm-jp-3.1-8x13b-instruct4",
+    "preview/Qwen3.6-35B-A3B",
+    "preview/gemma-4-31B-it",
+    "preview/Kimi-K2.6",
+    "preview/Kimi-K2.7-Code",
+    "preview/Qwen3-VL-30B-A3B-Instruct",
+    "preview/GLM-5.3-Flash",
+    "preview/DeepSeek-V4.1-Flash-1017",
+    "preview/Phi-4-mini-instruct-cpu",
+    "preview/Qwen3-0.6B-cpu",
+];
+
+// https://manual.sakura.ad.jp/cloud/ai-engine/chat-models.html
+const SAKURA_VISION_MODELS: &[&str] = &[
+    "preview/gemma-4-31B-it",
+    "preview/Qwen3-VL-30B-A3B-Instruct",
+    "preview/Qwen3.6-35B-A3B",
+    "preview/Kimi-K2.7-Code",
+    "preview/GLM-5.3-Flash",
+    "preview/DeepSeek-V4.1-Flash-1017",
+];
+
+pub(crate) const SAKURA_STT_MODELS: &[&str] = &["whisper-large-v3-turbo"];
+
+pub(crate) const SAKURA_EMBEDDING_MODELS: &[&str] =
+    &["multilingual-e5-large", "preview/Qwen3-Embedding-4B-FP16"];
+
+pub(crate) const SAKURA_TTS_VOICES: &[&str] = &[
+    "zundamon/normal:VOICEVOX:ずんだもん（ノーマル）",
+    "zundamon/amaama:VOICEVOX:ずんだもん（あまあま）",
+    "zundamon/tsuntsun:VOICEVOX:ずんだもん（ツンツン）",
+    "zundamon/sexy:VOICEVOX:ずんだもん（セクシー）",
+    "zundamon/sasayaki:VOICEVOX:ずんだもん（ささやき）",
+    "shikokumetan/normal:VOICEVOX:四国めたん（ノーマル）",
+    "shikokumetan/amaama:VOICEVOX:四国めたん（あまあま）",
+    "shikokumetan/tsuntsun:VOICEVOX:四国めたん（ツンツン）",
+    "shikokumetan/sexy:VOICEVOX:四国めたん（セクシー）",
+    "kasukabetsumugi/normal:VOICEVOX:春日部つむぎ（ノーマル）",
+    "meimeihimari/normal:VOICEVOX:冥鳴ひまり（ノーマル）",
+    "tohokuzunko/normal:VOICEVOX:東北ずん子（ノーマル）",
+    "tohokukiritan/normal:VOICEVOX:東北きりたん（ノーマル）",
+    "tohokuitako/normal:VOICEVOX:東北イタコ（ノーマル）",
+    "ankomon/normal:VOICEVOX:あんこもん（ノーマル）",
+];
+
+pub(crate) fn is_sakura_endpoint(url: &str) -> bool {
+    url::Url::parse(url.trim())
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .host_str()
+                .map(|host| host.eq_ignore_ascii_case("api.ai.sakura.ad.jp"))
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn is_sakura_connection(adapter: &str, endpoint: &str) -> bool {
+    adapter.eq_ignore_ascii_case("sakura") || is_sakura_endpoint(endpoint)
+}
+
+pub(crate) fn sakura_dialect() -> Dialect {
+    let mut quirks = Quirks::openai();
+    // Sakura's Responses API lacks multi-turn conversation state; Chat Completions is full-featured.
+    quirks.completion_route = Route::Chat;
+    // Sakura's OpenAPI spec returns embeddings without a mandatory `usage` block and documents
+    // fixed native dimensions per model without an OpenAI `dimensions` parameter.
+    quirks.embedding.requires_usage = false;
+    quirks.embedding.dimensions = DimensionsField::Ignored;
+    Dialect::gateway(
+        "sakura",
+        super::settings::SAKURA_AI_ENDPOINT,
+        super::settings::SAKURA_AI_API_KEY_ENV,
+    )
+    .with_quirks(quirks)
+}
+
+pub(crate) fn is_sakura_tts_model_id(id: &str) -> bool {
+    let lower = id.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "zundamon"
+            | "shikokumetan"
+            | "kasukabetsumugi"
+            | "meimeihimari"
+            | "tohokuzunko"
+            | "tohokukiritan"
+            | "tohokuitako"
+            | "ankomon"
+            | "zunko"
+            | "kiritan"
+            | "itako"
+            | "himari"
+    )
+}
+
+pub(crate) fn is_non_chat_sakura_model(id: &str) -> bool {
+    let lower = id.trim().to_ascii_lowercase();
+    lower.contains("whisper")
+        || lower.contains("transcribe")
+        || lower.contains("embedding")
+        || lower.contains("multilingual-e5")
+        || is_sakura_tts_model_id(&lower)
+}
+
 /// The rig provider a host adapter names.
 ///
-/// The host keeps its own adapter names: its `gemini` connection is rig's
-/// `gcp.gemini` provider. Every other adapter is spelled the same in both.
 pub(crate) fn provider_of(adapter: &str) -> Option<ProviderId> {
     ProviderId::catalog(match adapter {
         "gemini" => "gcp.gemini",
+        agent_platform::ADAPTER => "vertexai",
         adapter => adapter,
     })
 }
@@ -198,6 +308,13 @@ pub(crate) fn provider_config(
     loaded: &super::providers::Providers,
 ) -> ProviderConfig {
     let secret = secret.unwrap_or_default();
+    if is_sakura_connection(adapter, base) {
+        return ProviderConfig::OpenAi(
+            OpenAIConfig::with_key(&sakura_dialect(), secret)
+                .with_base_url(base)
+                .with_route(Route::Chat),
+        );
+    }
     let default =
         super::settings::provider(adapter, loaded).map_or_else(String::new, |p| p.endpoint);
     match provider_of(adapter).and_then(|provider| provider.config(secret.clone())) {
@@ -273,7 +390,29 @@ pub(crate) fn connect(
             running,
             assignment.model_id.clone(),
             broker,
+            catalog
+                .resolve(&assignment.model_id)
+                .is_ok_and(|entry| entry.spec.input.image),
         ));
+    }
+    let base = super::settings::endpoint_of(&connection, providers)
+        .ok_or_else(|| HostError::Unavailable(("the connection has no endpoint to call").into()))?;
+    if is_sakura_connection(&endpoint.adapter, &base) {
+        let secret = connection_secret(&connection, Some(credentials), providers)?;
+        let client = net::model_client().map_err(HostError::Unavailable)?;
+        let http = rig_reqwest::ReqwestClient::from(client);
+        let config = OpenAIConfig::with_key(&sakura_dialect(), secret.unwrap_or_default())
+            .with_base_url(base)
+            .with_route(Route::Chat);
+        let mut chat = config.chat(assignment.model_id.clone());
+        if role == Role::Perception && SAKURA_VISION_MODELS.contains(&assignment.model_id.as_str())
+        {
+            let provider = ProviderId::declare("sakura").expect("valid provider name");
+            let mut spec = ModelSpec::new(provider, assignment.model_id.clone());
+            spec.input.image = true;
+            chat = chat.with_facts(ModelFacts::new(Arc::new(spec)));
+        }
+        return Ok(Model::new(chat, http).erase());
     }
     let provider = provider_of(&endpoint.adapter).ok_or_else(|| {
         HostError::Unavailable(format!("unsupported adapter `{}`", endpoint.adapter))
@@ -284,18 +423,21 @@ pub(crate) fn connect(
     let spec = match catalog.resolve(&catalog_reference) {
         Ok(resolved) => resolved.shared(),
         Err(_) => {
-            let mut spec = ModelSpec::new(provider, assignment.model_id.clone());
-            // An unlisted model is assumed to call tools; the host cannot
-            // prove otherwise without a probe.
-            spec.tools = true;
+            let mut spec = ModelSpec::new(provider, &assignment.model_id).with_tools(true);
+            if endpoint.adapter == "openrouter" {
+                spec.input.image = catalog
+                    .resolve(&assignment.model_id)
+                    .is_ok_and(|entry| entry.spec.input.image);
+            }
             Arc::new(spec)
         }
     };
     let secret = connection_secret(&connection, Some(credentials), providers)?;
+    if endpoint.adapter == agent_platform::ADAPTER {
+        return agent_platform::model(endpoint, secret, spec);
+    }
     let default = super::settings::provider(&endpoint.adapter, providers)
         .map_or_else(String::new, |p| p.endpoint);
-    let base = super::settings::endpoint_of(&connection, providers)
-        .ok_or_else(|| HostError::Unavailable(("the connection has no endpoint to call").into()))?;
     // Rig builds the model requests, so their deadline sits on the model
     // client; every other host request shares the unbounded one.
     let client = net::model_client().map_err(HostError::Unavailable)?;
@@ -314,25 +456,81 @@ pub(crate) fn connect(
     Ok(model)
 }
 
-/// Lists the models a connection declares, with whatever the catalog knows.
-pub(crate) fn models(connection: &Connection) -> Vec<(String, ModelSpec)> {
+/// Adapter-default model candidates when neither `model_ids` nor `last_check`
+/// has populated a concrete list, ordered with reliable tool-capable defaults first.
+fn default_models_for(adapter: &str) -> &'static [&'static str] {
+    match adapter {
+        "openrouter" | "openrouter-wasm" => &[
+            "openai/gpt-4o-mini",
+            "openai/gpt-4o",
+            "anthropic/claude-3.5-haiku",
+            "google/gemini-2.5-flash",
+        ],
+        "openai" => &["gpt-4o-mini", "gpt-4o"],
+        "anthropic" => &["claude-3-5-haiku-latest", "claude-sonnet-4-20250514"],
+        "gemini" => &["gemini-2.5-flash", "gemini-2.5-pro"],
+        agent_platform::ADAPTER => &[agent_platform::DEFAULT_MODEL],
+        "sakura" => SAKURA_CHAT_MODELS,
+        _ => &[],
+    }
+}
+
+/// Lists the models a connection serves, putting explicit `model_ids` first,
+/// then probed `last_check.resources` (promoting known tool-capable defaults
+/// first among probed results), and falling back to adapter defaults only when
+/// both are empty.
+pub(crate) fn models(connection: &Connection, catalog: &Catalog) -> Vec<(String, ModelSpec)> {
     let ConnectionConfig::Llm(config) = &connection.config else {
         return Vec::new();
     };
-    let catalog = Catalog::builtin();
-    config
-        .model_ids
-        .iter()
+    let adapter = connection.endpoint().adapter.as_str();
+    let preferred = default_models_for(adapter);
+    let resources = connection
+        .last_check
+        .as_ref()
+        .map(|check| check.resources.as_slice())
+        .unwrap_or(&[]);
+
+    let mut ordered = Vec::new();
+    fn push_unique_id(ordered: &mut Vec<String>, id: &str) {
+        if ordered.len() < MAX_MODELS && !ordered.iter().any(|existing| existing == id) {
+            ordered.push(id.to_owned());
+        }
+    }
+
+    for id in &config.model_ids {
+        let trimmed = id.trim();
+        if !trimmed.is_empty() {
+            push_unique_id(&mut ordered, trimmed);
+        }
+    }
+    if !resources.is_empty() {
+        for &pref in preferred {
+            if let Some(found) = resources.iter().find(|id| id.as_str() == pref) {
+                push_unique_id(&mut ordered, found);
+            }
+        }
+        for id in resources {
+            push_unique_id(&mut ordered, id);
+        }
+    } else if ordered.is_empty() {
+        for &id in preferred {
+            push_unique_id(&mut ordered, id);
+        }
+    }
+
+    ordered
+        .into_iter()
         .take(MAX_MODELS)
         .map(|model| {
-            let provider = provider_of(&connection.endpoint().adapter)
+            let provider = provider_of(adapter)
                 .unwrap_or_else(|| ProviderId::catalog("openai").expect("openai is registered"));
             let reference = format!("{}/{}", provider.vendor(), model);
             let spec = catalog
                 .resolve(&reference)
                 .map(|resolved| resolved.spec.clone())
-                .unwrap_or_else(|_| ModelSpec::new(provider, model.clone()));
-            (model.clone(), spec)
+                .unwrap_or_else(|_| ModelSpec::new(provider, &model).with_tools(true));
+            (model, spec)
         })
         .collect()
 }
@@ -365,6 +563,32 @@ pub(crate) async fn probe(
             ..Default::default()
         };
     };
+    if config.endpoint.adapter == agent_platform::ADAPTER
+        && providers.get(agent_platform::ADAPTER).is_none()
+    {
+        let models = models(connection, Catalog::builtin());
+        let Some((_, spec)) = models.first() else {
+            return failure("Google Agent Platform のモデルを指定してください".into());
+        };
+        let model =
+            connection_secret(connection, Some(credentials), providers).and_then(|secret| {
+                agent_platform::model(&config.endpoint, secret, Arc::new(spec.clone()))
+            });
+        let model = match model {
+            Ok(model) => model,
+            Err(error) => return failure(error.to_string()),
+        };
+        if let Err(error) = agent_platform::probe(model).await {
+            return failure(error);
+        }
+        return Check {
+            healthy: true,
+            checked_at,
+            capabilities: vec!["streaming_text".into()],
+            resources: models.into_iter().map(|(id, _)| id).collect(),
+            ..Default::default()
+        };
+    }
     // A connection that leaves its endpoint empty calls the provider's own
     // default, which is exactly what the probe has to ask.
     let Some(base) = super::settings::endpoint_of(connection, providers) else {
@@ -373,6 +597,25 @@ pub(crate) async fn probe(
     let listed = match list_models(connection, &base, credentials, providers).await {
         Ok(models) => models,
         Err(error) => return failure(error),
+    };
+    let listed = if is_sakura_connection(&connection.endpoint().adapter, &base) {
+        let chat_only: Vec<String> = listed
+            .iter()
+            .filter(|id| !is_non_chat_sakura_model(id))
+            .cloned()
+            .collect();
+        if !chat_only.is_empty() {
+            chat_only
+        } else if listed.is_empty() {
+            SAKURA_CHAT_MODELS
+                .iter()
+                .map(|id| (*id).to_owned())
+                .collect()
+        } else {
+            listed
+        }
+    } else {
+        listed
     };
     let mut resources: Vec<String> = config.model_ids.clone();
     for model in listed {
@@ -433,6 +676,23 @@ async fn list_models(
     }
     let secret = connection_secret(connection, Some(credentials), providers)
         .map_err(|error| error.to_string())?;
+    // OpenRouter's model list is public even when the supplied key is invalid.
+    if adapter == "openrouter" && base.trim_end_matches('/') == "https://openrouter.ai/api/v1" {
+        let key = secret.as_deref().ok_or("OpenRouterのAPIキーが未登録です")?;
+        let response = net::client()?
+            .get("https://openrouter.ai/api/v1/key")
+            .bearer_auth(key)
+            .timeout(PROBE_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "OpenRouterのキーを確認できませんでした（{}）",
+                response.status()
+            ));
+        }
+    }
     let config = provider_config(adapter, base, secret, providers);
     let http = rig_reqwest::ReqwestClient::from(net::client()?);
     let list = tokio::time::timeout(PROBE_TIMEOUT, async move {
@@ -627,6 +887,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sakura_perception_exposes_vision_only_for_supported_models() {
+        use crate::host::{mind::Assignment, tests::Harness};
+
+        let harness = Harness::new([]);
+        let store = harness.store();
+        let mut companion = store.companion(&harness.companion).unwrap().unwrap();
+        let connection = connection_for("sakura", "http://127.0.0.1:1234");
+        let connection_id = connection.id.clone();
+        store
+            .update_settings(store.settings_revision().unwrap(), &[(connection, 0)])
+            .unwrap();
+        for (id, supports_image) in [
+            ("preview/DeepSeek-V4.1-Flash-1017", true),
+            ("gpt-oss-120b", false),
+        ] {
+            companion.assignments.perception = Some(Assignment {
+                connection_id: connection_id.clone(),
+                model_id: id.into(),
+            });
+            let model = connect(
+                &store,
+                &Credentials::new(true),
+                Catalog::builtin(),
+                &companion,
+                Role::Perception,
+                &super::super::providers::Providers::none(),
+            )
+            .unwrap();
+            assert_eq!(
+                model.spec().is_some_and(|spec| spec.input.image),
+                supports_image
+            );
+        }
+    }
+
     /// Serves the model listing the request path asks for: Gemini's native
     /// reply under `/v1beta/models`, the OpenAI-shaped one elsewhere.
     async fn models_endpoint() -> (
@@ -776,5 +1072,94 @@ mod tests {
                 check.resources
             );
         }
+    }
+
+    #[test]
+    fn models_merges_configured_and_probed_resources_without_duplicates() {
+        let mut conn = llm_connection("openai", "https://api.openai.com/v1", &["gpt-5.4-mini"]);
+        conn.last_check = Some(Check {
+            healthy: true,
+            checked_at: "2026-11-19T00:00:00Z".into(),
+            failure: None,
+            capabilities: Vec::new(),
+            resources: vec!["gpt-4o".into(), "gpt-5.4-mini".into(), "gpt-5".into()],
+        });
+        let ids: Vec<String> = models(&conn, Catalog::builtin())
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ids, vec!["gpt-5.4-mini", "gpt-4o", "gpt-5"]);
+    }
+
+    #[test]
+    fn sakura_dialect_uses_chat_route_and_permissive_embedding_quirks() {
+        let providers = super::super::providers::Providers::none();
+        assert!(is_sakura_connection("sakura", "https://custom.invalid/v1"));
+        assert!(is_sakura_connection(
+            "openai",
+            "https://api.ai.sakura.ad.jp/v1/"
+        ));
+        assert!(!is_sakura_connection("openai", "https://api.openai.com/v1"));
+
+        let ProviderConfig::OpenAi(cfg) = provider_config(
+            "sakura",
+            super::super::settings::SAKURA_AI_ENDPOINT,
+            Some("tok".into()),
+            &providers,
+        ) else {
+            panic!("expected OpenAi provider config for sakura");
+        };
+        assert_eq!(cfg.completion_route(), Route::Chat);
+        assert!(!cfg.dialect.quirks.embedding.requires_usage);
+        assert_eq!(
+            cfg.dialect.quirks.embedding.dimensions,
+            DimensionsField::Ignored
+        );
+    }
+
+    #[tokio::test]
+    async fn sakura_probe_filters_non_chat_models_from_llm_list() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let body = serde_json::json!({
+                "object": "list",
+                "data": [
+                    {"id": "gpt-oss-120b"},
+                    {"id": "whisper-large-v3-turbo"},
+                    {"id": "multilingual-e5-large"},
+                    {"id": "zundamon"},
+                    {"id": "preview/Qwen3.6-35B-A3B"},
+                ]
+            })
+            .to_string();
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(reply.as_bytes()).await;
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
+        let credentials = Credentials::new(true);
+        credentials.remember("c1", "uuid:secret".into());
+        let conn = llm_connection("sakura", &format!("http://{addr}/v1"), &[]);
+        let check = probe(
+            &store,
+            &credentials,
+            &conn,
+            &super::super::providers::Providers::none(),
+        )
+        .await;
+        assert!(check.healthy, "{:?}", check.failure);
+        assert_eq!(
+            check.resources,
+            vec!["gpt-oss-120b", "preview/Qwen3.6-35B-A3B"]
+        );
     }
 }

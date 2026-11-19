@@ -293,6 +293,7 @@ pub(crate) struct WorkPlugin;
 impl Plugin for WorkPlugin {
     fn build(&self, app: &mut App) {
         tools::register(app);
+        super::web_search::register(app);
         app.init_resource::<Runs>()
             .init_resource::<Receipts>()
             .init_resource::<hand::Hands>()
@@ -661,21 +662,19 @@ pub(crate) fn settle_run(world: &mut World, run_id: String, outcome: TurnOutcome
         return;
     }
     let reported_failure = world.resource::<WorkReports>().failed.get(&run_id).cloned();
-    let (state, text) = match (&reported_failure, &outcome) {
-        (Some(reason), _) => (RunState::Failed, Some(reason.clone())),
-        (None, TurnOutcome::Answered(message)) => {
-            let report = world
-                .resource::<WorkReports>()
-                .completed
-                .get(&run_id)
-                .cloned();
-            (
-                RunState::Completed,
-                report.or_else(|| message_text(message)),
-            )
+    let reported_completed = world
+        .resource::<WorkReports>()
+        .completed
+        .get(&run_id)
+        .cloned();
+    let (state, text) = match (&reported_failure, &reported_completed, &outcome) {
+        (Some(reason), _, _) => (RunState::Failed, Some(reason.clone())),
+        (None, Some(report), _) => (RunState::Completed, Some(report.clone())),
+        (None, None, TurnOutcome::Answered(message)) => {
+            (RunState::Completed, message_text(message))
         }
-        (None, TurnOutcome::Stopped(_)) => (RunState::Cancelled, None),
-        (None, TurnOutcome::Failed(why)) => (
+        (None, None, TurnOutcome::Stopped(_)) => (RunState::Cancelled, None),
+        (None, None, TurnOutcome::Failed(why)) => (
             RunState::Failed,
             Some(format!("作業を続けられませんでした: {why}")),
         ),
@@ -700,6 +699,7 @@ fn finish_run(world: &mut World, mut run: Run, state: RunState, text: Option<Str
         super::fail(world, error.to_string());
         return;
     }
+    super::client::computer::invalidate_run(world, &run_id);
     let session = store.work_session(&run.work_id).ok().flatten();
     if was_active && let Some(session) = &session {
         if session.status != WorkStatus::Closed {
@@ -709,13 +709,18 @@ fn finish_run(world: &mut World, mut run: Run, state: RunState, text: Option<Str
             notify_status(world, &session);
             notify_finished(world, &session, &run);
             if let Some(parent) = agent::agent_of(world, &session.companion_id) {
-                let report = text.unwrap_or_else(|| {
+                let raw_report = text.unwrap_or_else(|| {
                     match state {
                         RunState::Cancelled => "作業を中断しました",
                         _ => "作業が終わりました",
                     }
                     .to_owned()
                 });
+                let report = if raw_report.starts_with('[') {
+                    raw_report
+                } else {
+                    format!("[作業結果 (work_id: {})] {raw_report}", session.id)
+                };
                 let author = Author::agent(
                     agent::work_agent_id(&run_id),
                     Some(RequestId(run_id.clone())),

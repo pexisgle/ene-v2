@@ -58,7 +58,25 @@ pub(crate) fn register(app: &mut App) {
         "noop",
         "Do nothing this turn: stay silent and keep watching.",
         ToolOptions::default(),
-        run_tool(|_: &mut World, _: Entity, _: &str, _: NoopArgs| {
+        run_tool(|world: &mut World, entity: Entity, _: &str, _: NoopArgs| {
+            if let Some(active) = world.get::<ActiveTurn>(entity)
+                && let Some(turn) = world.get::<Turn>(active.turn())
+                && let Some(conversation) = world.get::<Conversation>(entity)
+                && !conversation
+                    .entries()
+                    .skip(conversation.start_of(turn.start))
+                    .any(|entry| entry.is_users_own())
+                && conversation
+                    .asked(turn.start)
+                    .filter(|entry| entry.is_request())
+                    .last()
+                    .is_some_and(|entry| entry.author.is_some_and(super::eyes::is_eyes))
+            {
+                world.trigger(StopTurn {
+                    entity,
+                    reason: Some(super::eyes::WATCHED.into()),
+                });
+            }
             Ok(json!({"ok": true}).to_string())
         }),
     )

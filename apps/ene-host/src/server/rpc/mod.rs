@@ -157,6 +157,7 @@ impl From<HostError> for ConnectError {
             HostError::Permission(message) => ConnectError::permission_denied(message),
             HostError::Exhausted(message) => ConnectError::resource_exhausted(message),
             HostError::Unavailable(message) => ConnectError::unavailable(message),
+            HostError::FailedPrecondition(message) => ConnectError::failed_precondition(message),
             HostError::Storage(_) => {
                 ConnectError::unavailable("state storage failed; restart after repairing storage")
             }

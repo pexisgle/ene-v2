@@ -1,5 +1,4 @@
-//! A real host process: private discovery, owner auth and graceful SIGTERM.
-#![cfg(unix)]
+//! A real host process: private discovery, owner auth and graceful shutdown.
 
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use std::{path::Path, time::Duration};
@@ -13,6 +12,7 @@ fn connection_file(runtime: &Path) -> Option<(String, String)> {
     ))
 }
 
+#[cfg(unix)]
 fn spawn(state: &Path, runtime: &Path) -> Box<dyn ChildWrapper> {
     CommandWrap::with_new(env!("CARGO_BIN_EXE_ene-host"), |command| {
         command
@@ -40,8 +40,13 @@ async fn discovery(runtime: &Path) -> (String, String) {
     .expect("host did not publish discovery")
 }
 
+#[cfg(unix)]
 async fn stop(child: &mut Box<dyn ChildWrapper>) {
     child.signal(15).expect("send SIGTERM");
+    wait_for_exit(child).await;
+}
+
+async fn wait_for_exit(child: &mut Box<dyn ChildWrapper>) {
     let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
         .await
         .expect("host did not stop")
@@ -53,6 +58,7 @@ async fn stop(child: &mut Box<dyn ChildWrapper>) {
 /// The host refuses a state directory, and the loader a package, that anyone
 /// else may write, so the fixture makes both private, as the host does for a
 /// state directory it creates itself.
+#[cfg(unix)]
 fn install_voice_stt(state: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -94,6 +100,28 @@ fn install_voice_stt(state: &Path) {
 }
 
 #[tokio::test]
+async fn process_stops_when_the_desktop_closes_its_pipe() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = temp.path().join("runtime");
+    let mut child = CommandWrap::with_new(env!("CARGO_BIN_EXE_ene-host"), |command| {
+        command
+            .env("ENE_HOST_STATE_DIR", temp.path().join("state"))
+            .env("ENE_HOST_RUNTIME_DIR", &runtime)
+            .env("ENE_HOST_EXIT_ON_STDIN_EOF", "1")
+            .stdin(std::process::Stdio::piped());
+    })
+    .wrap(KillOnDrop)
+    .spawn()
+    .expect("start the desktop's ene-host");
+
+    discovery(&runtime).await;
+    drop(child.stdin().take().expect("host stdin"));
+    wait_for_exit(&mut child).await;
+    assert!(!runtime.join("connection.json").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn process_publishes_private_discovery_authenticates_and_stops() {
     let temp = tempfile::tempdir().unwrap();
     let state = temp.path().join("state");
@@ -118,6 +146,7 @@ async fn process_publishes_private_discovery_authenticates_and_stops() {
 /// A conversation and its acceptance receipt survive a restart: the restored
 /// agent keeps its role, and a retry with the same request key is not run
 /// again.
+#[cfg(unix)]
 #[tokio::test]
 async fn process_restores_a_conversation_and_its_acceptance() {
     let temp = tempfile::tempdir().unwrap();
@@ -273,6 +302,7 @@ async fn process_restores_a_conversation_and_its_acceptance() {
 
 /// A companion is stored before its model is bound. A failed binding must not
 /// leave a row the host cannot start over.
+#[cfg(unix)]
 #[tokio::test]
 async fn process_starts_over_a_companion_whose_model_was_never_bound() {
     let temp = tempfile::tempdir().unwrap();
@@ -331,6 +361,7 @@ async fn process_starts_over_a_companion_whose_model_was_never_bound() {
 /// The client helper opens a full-duplex stream: the host answers while the
 /// caller's input stream is still open. The voice input contract names
 /// HTTP/2, and the host's plain listener accepts h2c prior knowledge.
+#[cfg(unix)]
 #[tokio::test]
 async fn process_client_opens_the_bidirectional_voice_stream() {
     let temp = tempfile::tempdir().unwrap();

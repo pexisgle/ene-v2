@@ -9,6 +9,14 @@ pub mod rpc {
 }
 
 pub use rpc::*;
+/// Desktop GUI capability executed by a work agent on its bound client.
+pub const COMPUTER_USE: &str = "computer.use";
+/// Maximum width or height of a reported JPEG frame.
+pub const MAX_PERCEPTION_FRAME_EDGE: u32 = 1280;
+/// Maximum encoded JPEG size before Connect serialization.
+pub const MAX_PERCEPTION_JPEG_BYTES: usize = 512 * 1024;
+mod speech;
+pub use speech::plain_reply;
 
 #[cfg(all(feature = "client", not(target_family = "wasm")))]
 mod client;

@@ -13,6 +13,7 @@
 | パッケージ | 役割 |
 | --- | --- |
 | [`ene-host`](apps/ene-host/) | AI接続、会話、タスク、権限、永続化を管理するホスト |
+| [`ene-desktop`](apps/ene-desktop/) | ホストへ接続し、アバター描画・音声デバイス・知覚を担うデスクトップクライアント |
 | [`ene-avatar`](apps/ene-avatar/) | 単一Bevy AppでのVRM描画、透過ウィンドウ、JSON Linesによる表示制御 |
 | [`ene-plugin`](crates/ene-plugin/) | プラグイン作者向けの型定義とRust SDK |
 | [`ene-plugin-runtime`](crates/ene-plugin-runtime/) | ホストに組み込まれたExtism実行、検証、実行制限 |
@@ -26,7 +27,7 @@
 ```sh
 nix develop
 just verify
-just run-host
+just run
 ```
 
 direnvを使う場合は、リポジトリのルートで一度`direnv allow`を実行すると、ディレクトリへ入るたびに開発環境が有効になります。
@@ -38,7 +39,7 @@ rustupと`buf`、そのOSでRustプログラムをリンクするための開発
 リポジトリのルートで固定バージョンのツールチェーンをインストールし、通常のCargoで検査できます。
 
 ```sh
-rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy --component rust-analyzer --component rust-src --target wasm32-unknown-unknown
+rustup toolchain install 1.100.0 --profile minimal --component rustfmt --component clippy --component rust-analyzer --component rust-src --target wasm32-unknown-unknown
 cargo fmt --all -- --check
 cargo check --workspace --all-targets --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -50,6 +51,20 @@ cargo run --locked -p ene-host
 
 `just verify`は整形とClippy（テストを含む型検査）を実行します。テストは対象の挙動を変更したときに`just test`で実行し、変更していない合格済みのテストを繰り返す必要はありません。成果物が必要なときは`just build`を実行します。
 
+## Windows インストーラーを作る
+
+Windows 10/11 x64 向けのセットアップ EXE を生成します。上記の Windows 開発環境に加え、x64 MSVC の再頒布用ランタイムファイルと [Inno Setup 6.3 以降](https://jrsoftware.org/inno-setup/downloads)を用意し、リポジトリのルートで実行します。
+
+```powershell
+just installer-windows
+```
+
+`target/installer/ene-<バージョン>-windows-x64-setup.exe` が生成されます。インストーラーは管理者権限なしで実行でき、デスクトップ・ローカルホスト・アバター描画の実行ファイル、MSVC ランタイム、`assets/ENE.vrm`、`assets/vrma/` 直下の採用済み VRMA を収録します。
+
+スタートメニューの **ene** またはインストール先の `ene-desktop.exe` を開くと、隣にある `ene-host.exe` も起動します。タスクトレイの **終了** でデスクトップを終了すると、ホストも終了します。`ENE_HOST_CONNECTION` で接続先を指定した場合は、そのホストに接続します。ローカルホストが既定で許可する端末能力はアバターのモーション（`body.motion`）です。
+
+会話や設定はユーザーのデータフォルダーに保存されます。公開配布前には、`ENE.vrm` に記録されている作者（pexisgle）と配布条件（`allowRedistribution: false`）を確認してください。
+
 ## ビルド高速化
 
 [Bevyのセットアップガイド](https://bevy.org/learn/quick-start/getting-started/setup/)に沿って、次の設定を使います。
@@ -57,7 +72,7 @@ cargo run --locked -p ene-host
 - Linux（x86_64）ではClang＋LLDでリンクします。
 - 開発時の最適化はワークスペース内クレートを`opt-level = 1`、依存ライブラリを`opt-level = 3`に設定しています。CIでは依存ライブラリも`opt-level = 0`で検査し、コンパイル時間を優先します。
 
-Nixではrust-overlayが`rust-toolchain.toml`を読み、必要なコンポーネントをまとめて提供します。Nixとrustupで同じツールチェーンを使うため、バージョンを`1.99.1`に固定しています。更新時は`nix flake update rust-overlay`を実行し、`rust-toolchain.toml`と上記インストールコマンドのバージョンを揃えて変更します。
+Nixではrust-overlayが`rust-toolchain.toml`を読み、必要なコンポーネントをまとめて提供します。Nixとrustupで同じツールチェーンを使うため、バージョンを`1.100.0`に固定しています。更新時は`nix flake update rust-overlay`を実行し、`rust-toolchain.toml`と上記インストールコマンドのバージョンを揃えて変更します。
 
 Wasmプラグイン用の `wasm32-unknown-unknown` ターゲットも共通設定に含めます。プラグイン実行にbubblewrapは不要です。
 
@@ -82,9 +97,15 @@ Wasmプラグイン用の `wasm32-unknown-unknown` ターゲットも共通設�
 | `just clippy` | 全クレート・ターゲット・機能を検査し、警告をエラーにする |
 | `just test` | テスト用Wasmをビルドし、ワークスペースのテストを実行 |
 | `just build` | 全クレート・ターゲット・機能をビルド |
-| `just fetch-assets [asset]` | 開発用VRM・VRMAを取得（省略時は全件、`vrma`でモーションのみ、個別名も指定可能） |
+| `just installer-windows` | キャラクターとモーションを同梱した Windows x64 インストーラーを生成 |
+| `just fetch-assets` | 開発用の Seed-san VRM モデルを取得。モーションは `assets/vrma` に同梱 |
 | `just verify` | 整形確認とClippy（テストを含む型検査）を実行 |
 | `just build-test-plugins` | 結合テスト用の参照Wasmをビルド |
+| `just run` | ホストとデスクトップクライアント（アバター描画付き）を同時に起動 |
 | `just run-host` | 認証付きホストAPIを起動 |
+| `just observe` | 目・手・頭のアクティビティをブラウザーで開く |
+| `just run-desktop` | [ホストへ接続するデスクトップクライアント](apps/ene-desktop/README.md)を起動 |
 | `just run-avatar` | [JSON Linesで操作する透過描画プロセス](apps/ene-avatar/README.md)を起動 |
 | `just run-avatar-cli` | 本体をビルドし、対話式 CLI からアバターを操作 |
+
+`just observe` はローカルのホストに接続する読み取り専用ビューアです。「頭に報告」の行では目の報告本文と、頭が静観したか返答したかを確認できます。頭の行にはその返答本文も表示されます。画面の受信とモデルでの評価はそれぞれ表示され、対応する行を開くと最近の画像を確認できます。ホストは直近8枚の受信画像と最後に評価した画像を、取得から最大3分間メモリに保持します。ホスト直近の通知を読み込み、その後は最新300件を表示します。新しい診断イベントを見るには、変更後の `ene-host` とビューアーを起動してください。接続情報ファイルを指定する場合は `python scripts/observe.py --connection <connection.json>` を使います。

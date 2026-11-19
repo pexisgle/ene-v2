@@ -2,7 +2,7 @@
 use serde_json::{Value, json};
 use std::{
     io::{self, BufRead, BufReader, IsTerminal, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, ExitCode, Stdio},
     sync::mpsc::{self, Receiver, RecvTimeoutError},
     thread,
@@ -10,9 +10,9 @@ use std::{
 };
 
 const HELP: &str = "Commands (quote arguments containing spaces; backslashes are literal):
-  add ID [MODEL.vrm] [MOTION.vrma|none]  add with cached defaults
+  add ID [MODEL.vrm] [MOTION.vrma|none]  add with defaults
   model ID [MODEL.vrm]   replace model (default: cached Seed-san)
-  motion ID [MOTION.vrma] select motion (default: cached three-vrm sample)
+  motion ID [MOTION.vrma] select motion (default: bundled idle-breath)
   motion ID none         clear the motion
   play ID | pause ID     resume or pause
   loop ID on|off         change looping
@@ -70,15 +70,12 @@ impl Client {
             ["add", id, paths @ ..] if paths.len() <= 2 => {
                 let model = match paths.first() {
                     Some(path) => absolute(path)?,
-                    None => cached_asset("models/Seed-san.vrm", "vrm")?,
+                    None => cached_model()?,
                 };
                 let motion = match paths.get(1) {
                     Some(&"none") => None,
                     Some(path) => Some(absolute(path)?),
-                    None => Some(cached_asset(
-                        "motions/three-vrm-sample.vrma",
-                        "vrma-sample",
-                    )?),
+                    None => Some(default_motion()?),
                 };
                 json!({"op":"add", "character":id, "config":{"model":model, "motion":motion}})
             }
@@ -90,15 +87,9 @@ impl Client {
             }
             _ => {
                 let (id, patch) = match args.as_slice() {
-                    ["model", id] => (
-                        *id,
-                        json!({"model":cached_asset("models/Seed-san.vrm", "vrm")?}),
-                    ),
+                    ["model", id] => (*id, json!({"model":cached_model()?})),
                     ["model", id, path] => (*id, json!({"model":absolute(path)?})),
-                    ["motion", id] => (
-                        *id,
-                        json!({"motion":cached_asset("motions/three-vrm-sample.vrma", "vrma-sample")?}),
-                    ),
+                    ["motion", id] => (*id, json!({"motion":default_motion()?})),
                     ["motion", id, "none"] => (*id, json!({"motion":null})),
                     ["motion", id, path] => (*id, json!({"motion":absolute(path)?})),
                     ["play", id] => (*id, json!({"playing":true})),
@@ -173,8 +164,19 @@ fn absolute(path: &str) -> Result<String, String> {
         .map_err(|_| "path must be UTF-8".into())
 }
 
+fn default_motion() -> Result<String, String> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/vrma/idle-breath.vrma"
+    );
+    if !Path::new(path).is_file() {
+        return Err(format!("bundled motion not found: {path}"));
+    }
+    absolute(path)
+}
+
 // Keep the cache layout in sync with scripts/fetch-assets.py.
-fn cached_asset(relative: &str, asset: &str) -> Result<String, String> {
+fn cached_model() -> Result<String, String> {
     #[cfg(windows)]
     let cache = PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?)
         .join("ene/cache");
@@ -184,10 +186,10 @@ fn cached_asset(relative: &str, asset: &str) -> Result<String, String> {
         None => PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set")?).join(".cache"),
     }
     .join("ene");
-    let path = cache.join(relative);
+    let path = cache.join("models/Seed-san.vrm");
     if !path.is_file() {
         return Err(format!(
-            "default asset not found: {}; run `just fetch-assets {asset}` (or `just fetch-assets` for all samples)",
+            "default model not found: {}; run `just fetch-assets`",
             path.display()
         ));
     }

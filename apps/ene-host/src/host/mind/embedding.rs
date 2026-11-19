@@ -130,12 +130,25 @@ async fn request(target: &Target, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     Ok(vectors)
 }
 
-fn connect(
+pub(crate) fn default_dimensions(model_id: &str) -> Option<u32> {
+    match model_id.trim() {
+        "multilingual-e5-large" => Some(1024),
+        "preview/Qwen3-Embedding-4B-FP16" | "Qwen3-Embedding-4B" | "Qwen3-Embedding-4B-FP16" => {
+            Some(2560)
+        }
+        "text-embedding-3-small" | "text-embedding-ada-002" => Some(1536),
+        "text-embedding-3-large" => Some(3072),
+        _ => None,
+    }
+}
+
+fn connect_with_ndims(
     adapter: &str,
     endpoint: &str,
     secret: Option<String>,
     model_id: &str,
-    dimensions: usize,
+    ndims: Option<usize>,
+    plugin_ndims: usize,
     providers: &crate::host::providers::Providers,
 ) -> Result<DynModel<Embedding>> {
     // A plugin provider answers through the host's broker, not through rig's
@@ -144,7 +157,7 @@ fn connect(
         return Ok(super::plugin::embedding(
             running,
             model_id.to_owned(),
-            dimensions,
+            plugin_ndims,
         ));
     }
     let config = crate::host::model::provider_config(adapter, endpoint, secret, providers);
@@ -154,11 +167,11 @@ fn connect(
     let model: DynModel<Embedding> = match config {
         ProviderConfig::OpenAi(config) => config
             .connect(http)
-            .embedding(model_id.to_owned(), Some(dimensions))
+            .embedding(model_id.to_owned(), ndims)
             .erase(),
         ProviderConfig::Gemini(config) => config
             .connect(http)
-            .embedding(model_id.to_owned(), Some(dimensions))
+            .embedding(model_id.to_owned(), ndims)
             .erase(),
         ProviderConfig::Anthropic(_) => {
             return Err(HostError::Unavailable(
@@ -167,6 +180,72 @@ fn connect(
         }
     };
     Ok(model)
+}
+
+fn connect(
+    adapter: &str,
+    endpoint: &str,
+    secret: Option<String>,
+    model_id: &str,
+    dimensions: usize,
+    providers: &crate::host::providers::Providers,
+) -> Result<DynModel<Embedding>> {
+    connect_with_ndims(
+        adapter,
+        endpoint,
+        secret,
+        model_id,
+        Some(dimensions),
+        dimensions,
+        providers,
+    )
+}
+
+/// Probes an embedding connection by generating one sample vector without forcing
+/// `dimensions` on the wire so the host observes the server's actual output width.
+pub(crate) async fn probe_dimensions(
+    connection: &crate::host::settings::Connection,
+    credentials: &Credentials,
+    providers: &crate::host::providers::Providers,
+) -> std::result::Result<usize, String> {
+    let ConnectionConfig::Embedding(config) = &connection.config else {
+        return Err("埋め込み接続ではありません".into());
+    };
+    let base = crate::host::settings::endpoint_of(connection, providers)
+        .ok_or_else(|| "接続先URLが設定されていません".to_owned())?;
+    let adapter = connection.endpoint().adapter.as_str();
+    let sakura = crate::host::model::is_sakura_connection(adapter, &base);
+    let model_id = if config.model_id.trim().is_empty() {
+        if sakura {
+            "multilingual-e5-large"
+        } else {
+            "text-embedding-3-small"
+        }
+    } else {
+        config.model_id.trim()
+    };
+    let secret = crate::host::model::connection_secret(connection, Some(credentials), providers)
+        .map_err(|error| error.to_string())?;
+    let model = connect_with_ndims(
+        adapter,
+        &base,
+        secret,
+        model_id,
+        None,
+        config.dimensions as usize,
+        providers,
+    )
+    .map_err(|error| error.to_string())?;
+    let response = tokio::time::timeout(EMBED_TIMEOUT, model.call(vec!["ping".to_owned()]))
+        .await
+        .map_err(|_| "埋め込みエンドポイントがタイムアウトしました".to_owned())?
+        .map_err(|error| error.to_string())?;
+    let first = response
+        .embeddings
+        .into_iter()
+        .next()
+        .ok_or_else(|| "埋め込みエンドポイントがベクトルを返しませんでした".to_owned())?;
+    Ok(first.vec.len())
 }
 
 /// Resolves the companion's `Embedding` assignment to a callable target.
@@ -195,7 +274,11 @@ fn target(
     } else {
         config.model_id.trim()
     };
-    let dimensions = config.dimensions as usize;
+    let dimensions = if config.dimensions > 0 {
+        config.dimensions as usize
+    } else {
+        default_dimensions(model_id).unwrap_or(0) as usize
+    };
     // The space id is only stable when the dimensions are known up front.
     if model_id.is_empty() || dimensions == 0 || dimensions > MAX_DIMENSIONS {
         return Ok(None);
@@ -1049,6 +1132,125 @@ mod tests {
             assert_eq!(
                 index.ranked("ene", &space, &query, 2),
                 [(ids[0].clone(), 0.0), (ids[1].clone(), 0.0)]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sakura_embedding_omits_dimensions_and_decodes_without_usage() {
+        use crate::host::settings::{
+            Connection, ConnectionConfig, ConnectionKind, CredentialState, EmbeddingConnection,
+            Endpoint,
+        };
+        use crate::host::tests::Harness;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                loop {
+                    let n = socket.read(&mut tmp).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&buf[..pos]);
+                        let cl = header
+                            .lines()
+                            .find_map(|l| {
+                                let (k, v) = l.split_once(':')?;
+                                k.eq_ignore_ascii_case("content-length")
+                                    .then(|| v.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if buf.len() >= pos + 4 + cl {
+                            let body_start = pos + 4;
+                            let _ = tx.send(
+                                String::from_utf8_lossy(&buf[body_start..body_start + cl])
+                                    .into_owned(),
+                            );
+                            break;
+                        }
+                    }
+                }
+                let vec1024 = vec![0.25f64; 1024];
+                let body = serde_json::json!({
+                    "model": "multilingual-e5-large",
+                    "data": [{
+                        "index": 0,
+                        "object": "embedding",
+                        "embedding": vec1024,
+                    }]
+                })
+                .to_string();
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+
+        let credentials = Credentials::new(true);
+        credentials.remember("sakura-emb", "uuid:secret".into());
+        let connection = Connection {
+            id: "sakura-emb".into(),
+            name: "Sakura Embedding".into(),
+            enabled: true,
+            kind: ConnectionKind::Embedding,
+            credential_state: CredentialState::Registered,
+            revision: 1,
+            last_check: None,
+            config: ConnectionConfig::Embedding(EmbeddingConnection {
+                endpoint: Endpoint {
+                    adapter: "sakura".into(),
+                    endpoint: format!("http://{addr}/v1"),
+                    options_schema: String::new(),
+                    options: "{}".into(),
+                },
+                model_id: "multilingual-e5-large".into(),
+                dimensions: 0,
+            }),
+        };
+        let providers = crate::host::providers::Providers::none();
+        let actual_dim = probe_dimensions(&connection, &credentials, &providers)
+            .await
+            .unwrap();
+        assert_eq!(actual_dim, 1024);
+
+        let harness = Harness::new([]);
+        let store = harness.store();
+        let rev = store.settings_revision().unwrap();
+        store.update_settings(rev, &[(connection, 0)]).unwrap();
+        let mut comp = store.companion(&harness.companion).unwrap().unwrap();
+        comp.assignments.embedding = Some(super::super::Assignment {
+            connection_id: "sakura-emb".into(),
+            model_id: "multilingual-e5-large".into(),
+        });
+        let embeddings = Embeddings::default();
+        let resolved = target(&store, Some(&credentials), &comp, &embeddings)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.dimensions, 1024);
+        let vectors = request(&resolved, &["こんにちは".into()]).await.unwrap();
+        assert_eq!(vectors.len(), 1);
+        assert_eq!(vectors[0].len(), 1024);
+
+        for _ in 0..2 {
+            let body_str = rx.recv().unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&body_str).unwrap();
+            assert_eq!(parsed["model"], "multilingual-e5-large");
+            assert!(
+                parsed.get("dimensions").is_none(),
+                "sakura dialect must omit OpenAI dimensions field: {parsed}"
             );
         }
     }

@@ -13,6 +13,7 @@ pub(crate) mod compaction;
 pub(crate) mod db;
 pub(crate) mod delegation;
 pub(crate) mod error;
+pub(crate) mod eyes;
 pub(crate) mod json;
 pub(crate) mod mcp;
 pub(crate) mod mind;
@@ -25,6 +26,7 @@ pub(crate) mod resources;
 pub(crate) mod settings;
 pub(crate) mod tools;
 pub(crate) mod voice;
+pub(crate) mod web_search;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -79,6 +81,7 @@ pub(crate) struct Runtime {
     credentials: Credentials,
     hub: DeviceHub,
     providers: providers::Providers,
+    voicevox: voice::voicevox::VoicevoxManager,
 }
 
 struct Handle {
@@ -108,6 +111,7 @@ impl Runtime {
         options: Options,
     ) -> std::result::Result<Self, StartError> {
         let store = Store::open(&state.join("host.sqlite3")).map_err(boxed)?;
+        store.seed_initial_companion().map_err(boxed)?;
         // A unit test has no operator to ask for a keyring, and the machine it
         // runs on may have none. Keeping the store in memory there makes the
         // tests independent of the platform backend; the binary still reads
@@ -137,7 +141,10 @@ impl Runtime {
         if !installed.is_empty() {
             tracing::info!(plugins = %installed.join(","), "provider plugins loaded");
         }
-        providers.start_used(&store).await;
+        let ((), (models, catalog_refresh)) = tokio::join!(
+            providers.start_used(&store),
+            model::catalog::Refresh::initial()
+        );
         let thread_credentials = credentials.clone();
         let thread = std::thread::Builder::new()
             .name("ene-host-rig".into())
@@ -153,6 +160,8 @@ impl Runtime {
                     .insert_resource(thread_store)
                     .insert_resource(providers)
                     .insert_resource(thread_credentials)
+                    .insert_resource(models)
+                    .insert_resource(catalog_refresh)
                     .insert_resource(HostRuntime(host_runtime.clone()))
                     .insert_resource(thread_hub.clone())
                     .insert_resource(HostState::default())
@@ -177,7 +186,8 @@ impl Runtime {
                         autonomy::AutonomyPlugin,
                         compaction::CompactionPlugin,
                         voice::VoicePlugin,
-                    ));
+                    ))
+                    .add_systems(Update, model::catalog::refresh.before(AgentLoop));
                 app.finish();
                 if let Some(mut time) = app.world_mut().get_resource_mut::<Time<Virtual>>() {
                     time.set_max_delta(Duration::from_secs(60));
@@ -214,6 +224,26 @@ impl Runtime {
             .recv()
             .map_err(|_| boxed("Rig kernel did not start"))?
             .map_err(boxed)?;
+        let voicevox = voice::voicevox::VoicevoxManager::default();
+        if !cfg!(test)
+            && let Ok(settings) = store.settings()
+            && let Some(vv) = settings.connections.iter().find(|conn| {
+                conn.enabled
+                    && conn.kind == settings::ConnectionKind::Tts
+                    && conn.endpoint().adapter.eq_ignore_ascii_case("voicevox")
+                    && !model::is_sakura_endpoint(&conn.endpoint().endpoint)
+                    && runtime_providers.get("voicevox").is_none()
+            })
+        {
+            let mgr = voicevox.clone();
+            let base = vv.endpoint().endpoint.clone();
+            let options = vv.endpoint().options.clone();
+            tokio::spawn(async move {
+                if let Err(error) = mgr.ensure_running(&base, &options).await {
+                    tracing::warn!(%error, "could not auto-start VOICEVOX engine at startup");
+                }
+            });
+        }
         Ok(Self {
             handle: Arc::new(Handle {
                 commands,
@@ -223,6 +253,7 @@ impl Runtime {
             credentials,
             hub,
             providers: runtime_providers,
+            voicevox,
         })
     }
 
@@ -236,6 +267,10 @@ impl Runtime {
 
     pub(crate) fn hub(&self) -> DeviceHub {
         self.hub.clone()
+    }
+
+    pub(crate) fn voicevox(&self) -> voice::voicevox::VoicevoxManager {
+        self.voicevox.clone()
     }
 
     /// Tries to enqueue `operation` immediately. Accepted jobs advance one
@@ -323,6 +358,7 @@ impl Runtime {
     }
 
     pub(crate) async fn shutdown(&self) -> Result<()> {
+        self.voicevox.stop().await;
         let shutdown = self.handle.shutdown.clone();
         let thread = self
             .handle
@@ -480,6 +516,7 @@ pub(crate) fn snapshot(app: &mut App) -> Result<w::Snapshot> {
                 "clients",
                 "device-stream",
                 "perception",
+                "diagnostics",
             ]
             .into_iter()
             .map(Into::into)
@@ -629,5 +666,34 @@ mod runtime_tests {
                 Err(HostError::Unavailable(_))
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn fresh_runtime_seeds_ene_once_and_does_not_resurrect_after_delete() {
+        let state = tempfile::tempdir().unwrap();
+        let runtime = Runtime::start(state.path()).await.unwrap();
+        let snap = runtime.read(snapshot).await.unwrap();
+        assert!(
+            snap.companions
+                .iter()
+                .any(|c| c.id == "ene" && c.name == "ene"),
+            "fresh host must include seeded ene companion"
+        );
+        runtime
+            .call(|app| {
+                super::mind::delete(app.world_mut(), "ene")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        runtime.shutdown().await.unwrap();
+
+        let restarted = Runtime::start(state.path()).await.unwrap();
+        let snap = restarted.read(snapshot).await.unwrap();
+        assert!(
+            snap.companions.is_empty(),
+            "deleted initial companion must stay deleted after restart"
+        );
+        restarted.shutdown().await.unwrap();
     }
 }

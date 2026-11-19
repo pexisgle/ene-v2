@@ -58,11 +58,13 @@ pub(crate) fn completion(
     provider: Arc<Running>,
     model: String,
     broker: Arc<HttpBroker>,
+    image_input: bool,
 ) -> DynModel<Completion> {
     let endpoint = provider.provider().endpoint.clone();
     // An unlisted model is assumed to call tools; the host cannot prove
     // otherwise without a probe. Its limits stay unknown rather than guessed.
-    let spec = ModelSpec::new(provider.provider_id(), model.clone()).with_tools(true);
+    let mut spec = ModelSpec::new(provider.provider_id(), model.clone()).with_tools(true);
+    spec.input.image = image_input;
     let config = ProviderConfig::OpenAi(
         OpenAIConfig::new(BROKER_KEY)
             .with_base_url(endpoint)

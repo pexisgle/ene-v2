@@ -87,7 +87,7 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
     {
         return Err(HostError::Unavailable(reason));
     }
-    if !has_input(app.world_mut(), agent, &request_id) {
+    if !has_input(app.world(), agent, &request_id) {
         return Err(HostError::Unavailable(("the input was not saved").into()));
     }
     Ok(w::Acceptance {
@@ -135,14 +135,32 @@ fn receipts(world: &World, agent: Entity) -> Vec<(String, String, Vec<u8>)> {
 }
 
 fn has_input(world: &World, agent: Entity, request_id: &str) -> bool {
-    let Some(conversation) = world.get::<Conversation>(agent) else {
-        return false;
-    };
-    conversation.entries().any(|entry| {
-        entry
-            .author
-            .and_then(|author| author.request.as_ref())
-            .is_some_and(|request| request.0 == request_id && entry.is_request())
+    let in_conversation = world
+        .get::<Conversation>(agent)
+        .is_some_and(|conversation| {
+            conversation.entries().any(|entry| {
+                entry
+                    .author
+                    .and_then(|author| author.request.as_ref())
+                    .is_some_and(|request| request.0 == request_id && entry.is_request())
+            })
+        });
+    if in_conversation {
+        return true;
+    }
+    world.iter_entities().any(|entity| {
+        let Some(target) = entity.get::<ForAgent>() else {
+            return false;
+        };
+        let Some(message) = entity.get::<Incoming>() else {
+            return false;
+        };
+        target.0 == agent
+            && message
+                .author
+                .request
+                .as_ref()
+                .is_some_and(|request| request.0 == request_id)
     })
 }
 
@@ -232,11 +250,17 @@ pub(crate) fn message(
     entry: &rig_core::conversation::EntryRef<'_>,
     text: String,
 ) -> w::Message {
+    let role = agent::role_of(entry);
+    let text = if work.is_empty() && role == w::MessageRole::Assistant {
+        w::plain_reply(&text)
+    } else {
+        text
+    };
     w::Message {
         id: entry.id.get().to_string(),
         companion_id: companion.to_owned(),
         work_id: work.to_owned(),
-        role: agent::role_of(entry).into(),
+        role: role.into(),
         text,
         created_at: entry.made.to_string(),
         sequence: entry.id.get(),

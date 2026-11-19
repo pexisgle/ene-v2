@@ -35,6 +35,7 @@ http-body-util = "0.1"
 hyper = { version = "=1.12.0", features = ["client", "server", "http1"] }
 hyper-util = { version = "=0.1.21", features = ["tokio"] }
 io-lifetimes = "3"
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 itertools = "0.15"
 jiff.workspace = true
 keyring = { version = "4", default-features = false, features = ["v1"] }
@@ -61,7 +62,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url.workspace = true
 uuid.workspace = true
-which.workspace = true
 
 [dev-dependencies]
 bevy_time = "=0.20.0"

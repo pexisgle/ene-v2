@@ -1,0 +1,274 @@
+{
+  "schemaVersion": 2,
+  "seededFrom": "seed:f586ad297087ed26",
+  "generatedAt": "2026-11-18T07:03:30+09:00",
+  "title": "Design System: ene-desktop",
+  "extensions": {
+    "colorMeta": {
+      "milk-surface": {
+        "role": "neutral",
+        "displayName": "Milk Surface",
+        "canonical": "oklch(99.5% 0.004 350)",
+        "tonalRamp": ["#2d1b21", "#4e333c", "#74525d", "#9c7883", "#c4a3ad", "#e5cfd6", "#f7ecf0", "#fffdfd"]
+      },
+      "strawberry-milk": {
+        "role": "neutral",
+        "displayName": "Strawberry Milk",
+        "canonical": "oklch(90.8% 0.044 352)",
+        "tonalRamp": ["#3c1925", "#602c3d", "#87445a", "#ae627b", "#d0889f", "#e8b3c4", "#f5cedb", "#fadce6"]
+      },
+      "blush-wash": {
+        "role": "neutral",
+        "displayName": "Blush Wash",
+        "canonical": "oklch(97.5% 0.014 352)",
+        "tonalRamp": ["#3a1d27", "#5d3240", "#824e5e", "#a96e80", "#cd92a4", "#e7b9c7", "#f8dce5", "#fff4f8"]
+      },
+      "user-petal": {
+        "role": "neutral",
+        "displayName": "User Petal",
+        "canonical": "oklch(92.4% 0.038 352)",
+        "tonalRamp": ["#3c1925", "#612c3e", "#88455c", "#af647e", "#d18ba3", "#e9b5c7", "#f6d0dd", "#fce2ec"]
+      },
+      "berry-accent": {
+        "role": "primary",
+        "displayName": "Berry Accent",
+        "canonical": "oklch(55% 0.21 356)",
+        "tonalRamp": ["#3d091c", "#661231", "#931c47", "#be275e", "#cf2e68", "#e56190", "#f49ebb", "#fce4ee"]
+      },
+      "berry-hover": {
+        "role": "primary",
+        "displayName": "Berry Hover",
+        "canonical": "oklch(48% 0.20 356)",
+        "tonalRamp": ["#340717", "#590e29", "#83163d", "#a61e4f", "#b52358", "#d65180", "#ec8ead", "#fadbe6"]
+      },
+      "berry-soft": {
+        "role": "primary",
+        "displayName": "Berry Soft",
+        "canonical": "oklch(93% 0.036 352)",
+        "tonalRamp": ["#3d1524", "#64263d", "#8d3e5b", "#b55d7d", "#d485a1", "#eab1c5", "#f6d2df", "#fce4ee"]
+      },
+      "berry-soft-ink": {
+        "role": "primary",
+        "displayName": "Berry Soft Ink",
+        "canonical": "oklch(34% 0.125 356)",
+        "tonalRamp": ["#290613", "#4c0f25", "#691635", "#7a1c40", "#a1355d", "#c76186", "#e49ab5", "#f8dce7"]
+      },
+      "mint-live": {
+        "role": "secondary",
+        "displayName": "Mint Live",
+        "canonical": "oklch(62% 0.125 164)",
+        "tonalRamp": ["#092a1f", "#104835", "#186b50", "#1f8865", "#229a73", "#4fb894", "#8fd7bd", "#ddf5ec"]
+      },
+      "mint-soft": {
+        "role": "secondary",
+        "displayName": "Mint Soft",
+        "canonical": "oklch(94.5% 0.034 166)",
+        "tonalRamp": ["#0b2b20", "#154937", "#236c53", "#369172", "#58b494", "#8cd1b9", "#bee8da", "#ddf5ec"]
+      },
+      "mint-ink": {
+        "role": "secondary",
+        "displayName": "Mint Ink",
+        "canonical": "oklch(46% 0.098 164)",
+        "tonalRamp": ["#07241a", "#0d3d2d", "#135640", "#16694f", "#278869", "#55ac8f", "#92d0bb", "#d9f2e9"]
+      },
+      "amber-warn": {
+        "role": "tertiary",
+        "displayName": "Amber Warn",
+        "canonical": "oklch(64% 0.145 70)",
+        "tonalRamp": ["#321d04", "#553308", "#7c4b0c", "#a36311", "#c97a16", "#de9940", "#eec07f", "#fff3df"]
+      },
+      "amber-soft": {
+        "role": "tertiary",
+        "displayName": "Amber Soft",
+        "canonical": "oklch(96% 0.032 82)",
+        "tonalRamp": ["#332206", "#583d0d", "#805a17", "#aa7c29", "#cfa14b", "#e6c37f", "#f6e0b3", "#fff3df"]
+      },
+      "amber-ink": {
+        "role": "tertiary",
+        "displayName": "Amber Ink",
+        "canonical": "oklch(42% 0.105 68)",
+        "tonalRamp": ["#2b1702", "#4a2904", "#653806", "#7c4508", "#a46016", "#ca863d", "#e5b47c", "#fae6cd"]
+      },
+      "rose-danger": {
+        "role": "tertiary",
+        "displayName": "Rose Danger",
+        "canonical": "oklch(54% 0.205 12)",
+        "tonalRamp": ["#3b0816", "#641026", "#901a39", "#b7244b", "#c92a52", "#e25d7e", "#f29ab0", "#ffe9ee"]
+      },
+      "rose-danger-soft": {
+        "role": "tertiary",
+        "displayName": "Rose Danger Soft",
+        "canonical": "oklch(94.8% 0.028 4)",
+        "tonalRamp": ["#3d131c", "#652332", "#8e394d", "#b5566c", "#d57e92", "#ebaab9", "#f8d0d9", "#ffe9ee"]
+      },
+      "rose-danger-ink": {
+        "role": "tertiary",
+        "displayName": "Rose Danger Ink",
+        "canonical": "oklch(43% 0.165 10)",
+        "tonalRamp": ["#300611", "#540c1f", "#7a1430", "#9e1c3e", "#c2395d", "#dc6a88", "#ee9fb4", "#fce0e7"]
+      },
+      "cocoa-ink": {
+        "role": "neutral",
+        "displayName": "Cocoa Ink",
+        "canonical": "oklch(28% 0.036 355)",
+        "tonalRamp": ["#1f1116", "#2e1a21", "#3b232c", "#543541", "#74505e", "#987482", "#c3a7b2", "#eee1e6"]
+      },
+      "plum-muted": {
+        "role": "neutral",
+        "displayName": "Plum Muted",
+        "canonical": "oklch(40% 0.068 354)",
+        "tonalRamp": ["#2b151e", "#44222f", "#582e3e", "#6b3b4e", "#895469", "#aa768b", "#cfa4b5", "#f0dbe3"]
+      },
+      "plum-placeholder": {
+        "role": "neutral",
+        "displayName": "Plum Placeholder",
+        "canonical": "oklch(45% 0.068 354)",
+        "tonalRamp": ["#2d1820", "#492835", "#633949", "#7d4b5e", "#9b677b", "#ba8b9d", "#d8b4c2", "#f3e2e8"]
+      },
+      "petal-border": {
+        "role": "neutral",
+        "displayName": "Petal Border",
+        "canonical": "oklch(85% 0.065 352)",
+        "tonalRamp": ["#3a1a26", "#5e2c3e", "#85445b", "#ab627c", "#ce86a0", "#e4a9be", "#f3c4d5", "#fbe8ef"]
+      },
+      "milk-divider": {
+        "role": "neutral",
+        "displayName": "Milk Divider",
+        "canonical": "oklch(83.5% 0.072 352)",
+        "tonalRamp": ["#381723", "#5c293c", "#834159", "#a95f7a", "#cc839e", "#e2a3ba", "#f2bdd0", "#fae6ee"]
+      },
+      "float-outline": {
+        "role": "neutral",
+        "displayName": "Float Outline",
+        "canonical": "oklch(77.5% 0.105 352)",
+        "tonalRamp": ["#3a1120", "#612038", "#8a3353", "#b24c71", "#d46f94", "#ea8eb0", "#f09bb8", "#fbe4ed"]
+      }
+    },
+    "typographyMeta": {
+      "section-heading": { "displayName": "Section Heading", "purpose": "Top-level chapter titles inside SettingsStudio." },
+      "subsection-heading": { "displayName": "Subsection Heading", "purpose": "Secondary group headers such as 許可ルール." },
+      "body": { "displayName": "Body", "purpose": "Dialogue messages, timeline items, and single-line inputs." },
+      "row-title": { "displayName": "Row Title", "purpose": "List row primary titles and setting item labels." },
+      "pill-label": { "displayName": "Pill Label", "purpose": "Capsule buttons, status pills, kind tags, and form labels." },
+      "caption": { "displayName": "Caption", "purpose": "Secondary hints inside roster popovers and history headers." }
+    },
+    "shadows": [
+      {
+        "name": "float-cutout",
+        "value": "0 4px 10px hsla(340, 45%, 14%, 0.16)",
+        "purpose": "Single soft cutout drop shadow exclusively on frameless transparent CompanionPod islands."
+      }
+    ],
+    "motion": [
+      {
+        "name": "hover-tint",
+        "value": "background 120ms cubic-bezier(0.2, 0.8, 0.2, 1)",
+        "purpose": "Crisp immediate background wash on pill buttons, orbs, and sidebar items."
+      },
+      {
+        "name": "panel-disclose",
+        "value": "opacity 160ms cubic-bezier(0.2, 0.8, 0.2, 1)",
+        "purpose": "Single-level hairline expansion for one companion/connection row or collapsed disclosure strip."
+      }
+    ],
+    "breakpoints": [
+      { "name": "pod-mini", "value": "444px" },
+      { "name": "studio-min", "value": "680px" },
+      { "name": "studio-default", "value": "780px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Pill Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Primary action pill with Berry Accent fill and optional 13px leading SVG icon.",
+      "html": "<button class=\"ds-btn-primary\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M20 6 9 17l-5-5\"/></svg><span>保存</span></button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 6px 14px; border-radius: 9999px; border: none; background: #cf2e68; color: #fffdfd; font-family: 'Yu Gothic UI', sans-serif; font-size: 12px; font-weight: 700; cursor: pointer; transition: background 120ms ease; } .ds-btn-primary:hover { background: #b52358; } .ds-btn-primary:focus-visible { outline: 2px solid #3b232c; outline-offset: 2px; }"
+    },
+    {
+      "name": "Soft Pill Button",
+      "kind": "button",
+      "refersTo": "button-soft",
+      "description": "Secondary action pill for non-primary choices such as 選択 or 常に許可.",
+      "html": "<button class=\"ds-btn-soft\">常に許可</button>",
+      "css": ".ds-btn-soft { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 6px 14px; border-radius: 9999px; border: 1px solid #f3c4d5; background: #fce4ee; color: #7a1c40; font-family: 'Yu Gothic UI', sans-serif; font-size: 12px; font-weight: 700; cursor: pointer; transition: background 120ms ease; } .ds-btn-soft:hover { background: #f8d6e4; } .ds-btn-soft:focus-visible { outline: 2px solid #cf2e68; outline-offset: 2px; }"
+    },
+    {
+      "name": "Detached Floating Orb",
+      "kind": "button",
+      "refersTo": "orb-button",
+      "description": "40px circular button detached beside the CompanionPod input capsule.",
+      "html": "<button class=\"ds-orb-btn\" aria-label=\"設定\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"3\"/><path d=\"M12 2v3M12 19v3M4.93 4.93l2.12 2.12M16.95 16.95l2.12 2.12M2 12h3M19 12h3M4.93 19.07l2.12-2.12M16.95 7.05l2.12-2.12\"/></svg></button>",
+      "css": ".ds-orb-btn { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 9999px; border: 2px solid #f09bb8; background: #fffdfd; color: #6b3b4e; box-shadow: 0 8px 20px hsla(340, 45%, 14%, 0.16); cursor: pointer; transition: background 120ms ease; } .ds-orb-btn:hover { background: #fff4f8; } .ds-orb-btn:focus-visible { outline: 2px solid #cf2e68; outline-offset: 2px; }"
+    },
+    {
+      "name": "Status Pill",
+      "kind": "chip",
+      "refersTo": "settings-card",
+      "description": "Explicit Japanese state indicator pairing mint, amber, or rose color with clear label.",
+      "html": "<span class=\"ds-status-pill\"><span class=\"ds-status-dot\"></span><span>接続中</span></span>",
+      "css": ".ds-status-pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 9999px; background: #ddf5ec; color: #16694f; font-family: 'Yu Gothic UI', sans-serif; font-size: 12px; font-weight: 700; } .ds-status-dot { width: 6px; height: 6px; border-radius: 9999px; background: #229a73; }"
+    },
+    {
+      "name": "Capsule Composer Input",
+      "kind": "input",
+      "refersTo": "input-field",
+      "description": "Single-line borderless Draft composer wrapped inside a 44px floating capsule shell.",
+      "html": "<div class=\"ds-capsule-bar\"><span class=\"ds-badge\">エ</span><input class=\"ds-capsule-input\" type=\"text\" placeholder=\"メッセージを入力…\" /><button class=\"ds-send-circle\" aria-label=\"送信\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m22 2-7 20-4-9-9-4Z\"/><path d=\"M22 2 11 13\"/></svg></button></div>",
+      "css": ".ds-capsule-bar { display: inline-flex; align-items: center; gap: 6px; height: 44px; padding: 0 6px; border-radius: 9999px; border: 2px solid #f09bb8; background: #fffdfd; box-shadow: 0 8px 20px hsla(340, 45%, 14%, 0.16); } .ds-badge { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 9999px; background: #fadce6; border: 1px solid #cf2e68; color: #8d2048; font-size: 12px; font-weight: 700; } .ds-capsule-input { border: none; outline: none; background: transparent; color: #3b232c; font-family: 'Yu Gothic UI', sans-serif; font-size: 14px; min-width: 140px; } .ds-capsule-input::placeholder { color: #7d4b5e; } .ds-send-circle { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 9999px; border: none; background: #cf2e68; color: #fffdfd; cursor: pointer; } .ds-send-circle:hover { background: #b52358; } .ds-send-circle:focus-visible { outline: 2px solid #3b232c; outline-offset: 2px; }"
+    },
+    {
+      "name": "Asymmetric Speech Bubble",
+      "kind": "custom",
+      "refersTo": "settings-card",
+      "description": "Floating companion dialogue bubble with overlapping top-left berry pill and 8px pointer corner.",
+      "html": "<div class=\"ds-pod-bubble\"><span class=\"ds-pod-tag\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z\"/></svg><span>エネ ・ 待機中</span></span><p class=\"ds-pod-copy\">下の入力欄からメッセージを送るか、マイクから話しかけてみてください。</p></div>",
+      "css": ".ds-pod-bubble { position: relative; max-width: 360px; padding: 24px 16px 14px; border-radius: 24px 24px 8px 24px; border: 2px solid #f09bb8; background: #fffdfd; box-shadow: 0 8px 20px hsla(340, 45%, 14%, 0.16); color: #3b232c; font-family: 'Yu Gothic UI', sans-serif; } .ds-pod-tag { position: absolute; top: -13px; left: 16px; display: inline-flex; align-items: center; gap: 5px; padding: 4px 12px; border-radius: 9999px; background: #cf2e68; color: #fffdfd; font-size: 12px; font-weight: 700; } .ds-pod-copy { margin: 0; font-size: 14px; line-height: 1.5; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Strawberry Milk Capsule",
+    "overview": "`ene-desktop` treats the desktop companion interface as a warm strawberry-milk cutout floating gently above arbitrary desktop wallpapers, paired with a calm, uncluttered three-chapter settings studio. Everyday voice and text turns, first-run onboarding, and safety approvals resolve inside an asymmetric transparent-window speech pod (`CompanionPod`) anchored at bottom-right with a single-line capsule composer and three detached circular orb buttons.\n\nComplexity is strictly hidden behind progressive disclosure and clear standard Japanese labels: nested bordered cards, uppercase eyebrow kickers, Unicode glyph icons, raw diagnostic dumps, memory tables, and childish copy are explicitly rejected in favor of crisp vector SVG icons (`apps/ene-desktop/src/ui/icons.rs`), `>= 4.5:1` cocoa-and-plum contrast on pure milk surfaces, and single-line hairline rows in `SettingsStudio`.",
+    "keyCharacteristics": [
+      "Dual-window separation: frameless transparent `CompanionPod` (`444x218` mini / `444x540` expanded) for live dialogue and `SettingsStudio` (`780x580`) for infrequent configuration.",
+      "Zero nested bordered cards: structured containers use a single `1px` petal border (`#f3c4d5`) with hairline dividers or flat blush strips (`#fff4f8`) inside.",
+      "Progressive disclosure by default: 3-step inline onboarding disappears once configured, at most one row expands at a time, and 7-role model slot overrides stay collapsed under `詳細設定`.",
+      "Tactile capsule silhouette paired with crisp stroke SVG iconography (`Icon::ALL`) across every control and window chrome button."
+    ],
+    "rules": [
+      {
+        "name": "The Explicit State Word Rule",
+        "body": "Every connection row, approval state, and device toggle pairs its status dot or pill color with an explicit Japanese state word (`接続中`, `未確認`, `接続エラー`, `無効`, `使用中`, `登録済み`, `未登録`).",
+        "section": "colors"
+      },
+      {
+        "name": "The Cocoa Ink Contrast Rule",
+        "body": "Body copy, muted metadata, and placeholders stay anchored in Cocoa/Plum tones (`#3b232c`, `#6b3b4e`, `#7d4b5e`) over `#fffdfd` and `#fadce6` so contrast stays at or above 4.5:1 without muddy gray text.",
+        "section": "colors"
+      },
+      {
+        "name": "The Zero Kicker Rule",
+        "body": "Section headings stand alone with optional right-aligned primary pill actions; decorative eyebrow kickers and subtitle paragraphs above headings are forbidden.",
+        "section": "typography"
+      },
+      {
+        "name": "The Single-Boundary Elevation Rule",
+        "body": "Elements inside `SettingsStudio` never carry shadows or nested bordered boxes; sections expand via a `1px` `#f3c4d5` hairline divider (`border_t_1`) and flat `#fff4f8` inset strips.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do use only embedded vector SVG icons from `apps/ene-desktop/src/ui/icons.rs` (`Icon`) for every icon slot.",
+      "Do pair every color-coded badge or state indicator with an explicit standard Japanese state word (`接続中`, `未確認`, `接続エラー`, `許可`, `常に許可`, `拒否`).",
+      "Do isolate at most one expanded list row (`expanded_companion_id` / `expanded_connection_id`) at a time and separate details via a single `1px` `#f3c4d5` top hairline.",
+      "Do keep `float-cutout` shadow strictly on `CompanionPod` floating islands over the transparent `PopUp` window."
+    ],
+    "donts": [
+      "Don't render Unicode emojis or text symbols (`✓`, `✕`, `●`, `▸`, `✨`) as UI icons.",
+      "Don't place kickers, eyebrows, or explanatory prose paragraphs above headings in `SettingsStudio`.",
+      "Don't nest bordered cards inside other bordered cards or apply drop shadows inside `SettingsStudio`.",
+      "Don't expose internal host tables (memory lists, work sessions, raw RMS telemetry floats, or avatar test buttons) in user-facing desktop UI."
+    ]
+  }
+}

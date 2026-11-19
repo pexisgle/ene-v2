@@ -73,6 +73,66 @@ impl Binds {
     }
 }
 
+/// Expression weights a client sets directly, one entry per expression name.
+///
+/// The value is applied after the animation reset and before the morphs are
+/// written, so it needs no animation clip and no clip can wipe it. Names are VRM
+/// 1.0 preset names in lower case (`happy`, `aa`, ...), with `_` and `-` ignored,
+/// or a custom expression name. A name the model does not declare is ignored.
+#[derive(Component, Clone, Debug, Default, PartialEq, Reflect)]
+#[reflect(Component, Clone)]
+pub struct ExpressionWeights(pub Vec<(String, f32)>);
+
+/// Maps a client-facing expression name into the model's namespace.
+fn expression_name(name: &str) -> ExpressionName {
+    let normalized: String = name
+        .chars()
+        .filter(|c| *c != '_' && *c != '-')
+        .flat_map(char::to_lowercase)
+        .collect();
+    let preset = match normalized.as_str() {
+        "aa" => Some(schema::ExpressionPresetName::Aa),
+        "angry" => Some(schema::ExpressionPresetName::Angry),
+        "blink" => Some(schema::ExpressionPresetName::Blink),
+        "blinkleft" => Some(schema::ExpressionPresetName::BlinkLeft),
+        "blinkright" => Some(schema::ExpressionPresetName::BlinkRight),
+        "ee" => Some(schema::ExpressionPresetName::Ee),
+        "happy" => Some(schema::ExpressionPresetName::Happy),
+        "ih" => Some(schema::ExpressionPresetName::Ih),
+        "lookdown" => Some(schema::ExpressionPresetName::LookDown),
+        "lookleft" => Some(schema::ExpressionPresetName::LookLeft),
+        "lookright" => Some(schema::ExpressionPresetName::LookRight),
+        "lookup" => Some(schema::ExpressionPresetName::LookUp),
+        "neutral" => Some(schema::ExpressionPresetName::Neutral),
+        "oh" => Some(schema::ExpressionPresetName::Oh),
+        "ou" => Some(schema::ExpressionPresetName::Ou),
+        "relaxed" => Some(schema::ExpressionPresetName::Relaxed),
+        "sad" => Some(schema::ExpressionPresetName::Sad),
+        "surprised" => Some(schema::ExpressionPresetName::Surprised),
+        _ => None,
+    };
+    match preset {
+        Some(preset) => ExpressionName::Preset(preset),
+        None => ExpressionName::Custom(name.to_owned()),
+    }
+}
+
+fn apply_weights(
+    roots: Query<(&Binds, &ExpressionWeights)>,
+    mut inputs: Query<&mut animation::ExpressionInput>,
+) {
+    for (binds, weights) in &roots {
+        for (name, weight) in &weights.0 {
+            let Some(target) = binds.target(&expression_name(name)) else {
+                continue;
+            };
+            if let Ok(mut input) = inputs.get_mut(target) {
+                input.value = Some(weight.clamp(0., 1.));
+            }
+        }
+    }
+}
+
 pub(crate) fn weight<'a>(
     inputs: impl Fn(Entity) -> Option<f32> + 'a,
 ) -> impl Fn(&ExpressionBinding) -> f32 + 'a {
@@ -207,11 +267,15 @@ pub(crate) fn setup(app: &mut App) {
         .register_type::<Binds>()
         .register_type::<MaterialBinds<StandardMaterial>>()
         .register_type::<MaterialBinds<MToonMaterial>>()
+        .register_type::<ExpressionWeights>()
         .add_systems(
             PostUpdate,
             (
                 initialize_materials::<StandardMaterial>,
                 initialize_materials::<MToonMaterial>,
+                // A client-set weight has to land after the animation reset and
+                // before `apply` reads the inputs.
+                apply_weights.before(apply),
                 apply,
             )
                 .chain()
@@ -488,5 +552,83 @@ mod tests {
                 .abs_diff_eq(expected.translation, 1e-5)
         );
         assert_eq!(result.extension.params.uv_transforms, [expected.into(); 6]);
+    }
+    #[test]
+    fn client_expression_names_map_to_presets_and_custom_names() {
+        assert_eq!(
+            expression_name("happy"),
+            ExpressionName::Preset(schema::ExpressionPresetName::Happy)
+        );
+        // Clients spell these with underscores or different case.
+        assert_eq!(
+            expression_name("Blink_Left"),
+            ExpressionName::Preset(schema::ExpressionPresetName::BlinkLeft)
+        );
+        assert_eq!(
+            expression_name("AA"),
+            ExpressionName::Preset(schema::ExpressionPresetName::Aa)
+        );
+        assert_eq!(
+            expression_name("tint"),
+            ExpressionName::Custom("tint".into())
+        );
+    }
+
+    #[test]
+    fn expression_weights_reach_the_bound_targets() {
+        let mut app = App::new();
+        app.init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<MToonMaterial>>()
+            .add_systems(Update, apply_weights);
+        let mesh = app
+            .world_mut()
+            .spawn(MorphWeights::new(vec![0.0, 0.0], None).unwrap())
+            .id();
+        let root = app
+            .world_mut()
+            .spawn(ExpressionWeights(vec![
+                ("happy".into(), 0.7),
+                ("tint".into(), 0.2),
+                ("not-a-declared-expression".into(), 1.0),
+            ]))
+            .id();
+        let definitions = serde_json::from_value(serde_json::json!({
+            "preset": {
+                "happy": {"morphTargetBinds":[{"node":0,"index":0,"weight":1.0}]}
+            },
+            "custom": {
+                "tint": {"morphTargetBinds":[{"node":0,"index":1,"weight":1.0}]}
+            }
+        }))
+        .unwrap();
+        attach(
+            app.world_mut(),
+            root,
+            Some(&definitions),
+            &HashMap::from([(0, mesh)]),
+        )
+        .unwrap();
+        app.update();
+        let binds = app.world().get::<Binds>(root).unwrap();
+        let happy = binds
+            .target(&ExpressionName::Preset(schema::ExpressionPresetName::Happy))
+            .unwrap();
+        let tint = binds
+            .target(&ExpressionName::Custom("tint".into()))
+            .unwrap();
+        assert_eq!(
+            app.world()
+                .get::<animation::ExpressionInput>(happy)
+                .unwrap()
+                .value,
+            Some(0.7)
+        );
+        assert_eq!(
+            app.world()
+                .get::<animation::ExpressionInput>(tint)
+                .unwrap()
+                .value,
+            Some(0.2)
+        );
     }
 }

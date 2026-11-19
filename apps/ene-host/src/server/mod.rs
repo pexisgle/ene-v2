@@ -21,7 +21,16 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         )
         .with_writer(std::io::stderr)
         .init();
-    let access = access::Access::acquire(&state, &runtime_path)?;
+    // The directories are the first thing the host touches, and a profile that
+    // refuses them otherwise fails with a bare `PermissionDenied`.
+    let access = access::Access::acquire(&state, &runtime_path).map_err(|error| {
+        std::io::Error::other(format!(
+            "cannot use the state directory {} or the runtime directory {} ({error}); \
+             set ENE_HOST_STATE_DIR and ENE_HOST_RUNTIME_DIR to writable directories",
+            state.display(),
+            runtime_path.display()
+        ))
+    })?;
     let runtime = Runtime::start(&state).await?;
     // Access control is delegated to the OS or a fronting service
     // (docs/design/host-access.md): the bind address is explicit, and the
@@ -59,7 +68,7 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     // listener to HTTP/1.1.
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            wait_for_signal().await;
+            wait_for_shutdown().await;
             shutdown.cancel();
             running.begin_shutdown().await;
         })
@@ -67,6 +76,21 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let result = runtime.shutdown().await;
     drop(access);
     result.map_err(Into::into)
+}
+
+async fn wait_for_shutdown() {
+    if std::env::var_os("ENE_HOST_EXIT_ON_STDIN_EOF").is_none() {
+        wait_for_signal().await;
+        return;
+    }
+
+    // The desktop holds the write end until it exits, including on a crash.
+    let (closed, wait) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+        let _ = closed.send(());
+    });
+    let _ = wait.await;
 }
 
 async fn wait_for_signal() {

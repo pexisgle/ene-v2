@@ -12,7 +12,7 @@
 | **会話ログ・要約正本** | **`rig_memory::DirStore` (`rig-memory` feature `fs`)** | 公式の `rig-ecs` がネイティブに要求する同期ファイルストア。プロセス間ファイルロック、破損末尾行の自動退避、画像Blob管理を公式実装に委譲し、アダプタ実装ゼロ行で完結。受理レシート（`request_key`）も `Conversation::add_aside` でセッションログ内に記録するため、SQLiteとの2相不整合は原理的に発生しない |
 | **エージェント実行・推論** | **`rig-ecs`（エージェントステートマシン）＋ `rig-rmcp` ＋ Tokio（ホスト非同期I/Oランタイム）** | 親・内蔵の子の推論・ツール反復を `rig-ecs` のECSステージ・Observerに一本化。CLIハーネス用プラグイン（`rig-basics`）を排し、純粋なECSプリミティブ（`Stage::Gate` ＋ `HoldOf` ＋ ホスト定義の `Approved` マーカー）と `rig-rmcp` による公式MCPブリッジ動的登録を採用。TokioはConnect-RPCサーバーや外部非同期I/Oに徹する |
 | **プロセス管理** | **`process-wrap`** | 全OSで子プロセスのプロセスツリー管理と `kill-on-drop` を統一（OSネイティブSandboxは持たない） |
-| **デスクトップクライアント** | **`Slint` (GUI) ＋ `cpal` + `rubato` (音声I/O・リサンプリング) ＋ OSウィンドウ監視フック** | 軽量ネイティブGUIツールキットSlint（Royalty-free規約遵守）による軽快な設定・承認UI、cpal＋rubatoによる低遅延・高精度リサンプリング音声キャプチャ・再生、OSフックによる知覚センシング（目） |
+| **デスクトップクライアント** | **`GPUI` (GUI) ＋ `cpal` + `rubato` (音声I/O・リサンプリング) ＋ OSウィンドウ監視フック** | GPU描画のネイティブGUIフレームワークGPUI（Apache-2.0）による設定・承認UI、cpal＋rubatoによる低遅延・高精度リサンプリング音声キャプチャ・再生、OSフックによる知覚センシング（目） |
 | **アバター描画** | **`apps/ene-avatar` (`bevy` + `ene-vrm`)** | 既存資産をそのまま活用。透過デスクトップウィンドウ（Wayland layer-shell / Windows Win32 layered）、VRM 1.0モデルロード・アニメーション（`ene-vrm`）、RMS音量によるローカル即時口パク、標準入出力JSON Lines IPC制御 |
 | **音声（STT/TTS）** | **プラガブル抽象インターフェース (`SttEngine` / `TtsEngine`)** | VOICEVOXやStyle-Bert-VITS2等の文単位HTTP APIから、sherpa-onnx等のストリーミングエンジン、双方向Live APIまで、各エンジンの通信仕様・機能特性に柔軟に適応 |
 | **通信・RPC** | **`Connect-RPC` (`connectrpc` + `buffa` + `axum`)** | gRPC/Connect/HTTP/Web互換、高速Protobuf、双方向ストリーミング（HTTP/2）対応 |
@@ -305,7 +305,7 @@ pub trait TtsEngine: Send + Sync {
 
 | コンポーネント | 採用技術 | 選定理由と責務 |
 | :--- | :--- | :--- |
-| **ネイティブGUI** | **`Slint`** | ElectronやQtのような巨大なランタイム・Webブラウザエンジンを排し、Pure Rustで軽量・高速に描画されるネイティブGUIツールキットを採用。承認カード、設定画面、コンパニオン切替UIを数MBのフットプリントで瞬時に表示。<br>※ライセンスは `GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0`。OSS公開時はGPLv3、プロプライエタリ配布時はSlint Royalty-free Desktop License（帰属表示義務を満たす）を採用 |
+| **ネイティブGUI** | **`GPUI`** | ElectronやQtのような巨大なランタイム・Webブラウザエンジンを排し、Pure RustでGPU描画するネイティブGUIフレームワークを採用。承認カード、設定画面、コンパニオン切替UIをRustコードで構築する。<br>※ライセンスは `Apache-2.0`。UIをRustの型付きコードとして書き、`.slint`のような別言語のマークアップを挟まない |
 | **オーディオ入出力・リサンプリング** | **`cpal` ＋ `rubato`** | クロスプラットフォーム（ALSA/PulseAudio/WASAPI/CoreAudio）対応の低レイテンシオーディオI/O。オーディオハードウェアネイティブのサンプリングレート（48kHz/44.1kHz stereo等）と内部ワイヤー標準（24kHz mono PCM）間の相互変換を公式高品質リサンプラー `rubato` で行い、デバイス互換性と正確なRMS振幅計測を両立 |
 | **知覚センサー（目）** | **OSネイティブウィンドウフック** | Linux（X11/Wayland）、Windows（`SetWinEventHook`）、macOS（Accessibility API）を通じてアクティブウィンドウのタイトルやフォーカス変化をリアルタイム検知 |
 | **アバター子プロセス管理** | **標準入出力 JSON Lines IPC** | `apps/ene-avatar` を子プロセスとして起動・監視し、標準入出力経由でモーション指定、表情、リップシンク振幅をミリ秒単位で制御 |

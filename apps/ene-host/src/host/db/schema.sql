@@ -36,6 +36,11 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS bootstrap_state (
+    key TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+
 -- Episodic memory. The explicit INTEGER PRIMARY KEY is SQLite's rowid alias,
 -- so the FTS5 external-content table below keeps a stable integer key.
 CREATE TABLE IF NOT EXISTS memories (

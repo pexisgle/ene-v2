@@ -1608,6 +1608,245 @@ fn start_work(harness: &mut Harness) -> w::WorkSession {
     .unwrap()
 }
 
+fn computer_model(
+    harness: &mut Harness,
+    turns: impl IntoIterator<Item = Vec<MockStreamEvent>>,
+    image: bool,
+) -> MockCompletionModel {
+    let model = MockCompletionModel::from_stream_turns(turns);
+    let mut facts = (*Catalog::builtin()
+        .resolve("deepseek/deepseek-flash")
+        .unwrap()
+        .shared())
+    .clone();
+    facts.input.image = image;
+    let bound = model.clone().priced_as(Arc::new(facts));
+    harness
+        .app
+        .world_mut()
+        .insert_resource(super::model::ModelFactory(Arc::new(
+            move |_, _, _, _, _, _| Ok(bound.clone().into()),
+        )));
+    harness
+        .app
+        .world_mut()
+        .resource_mut::<super::resources::DeviceTimeout>()
+        .0 = Duration::from_secs(5);
+    model
+}
+
+#[test]
+fn computer_use_sends_a_request_only_image_and_never_replays_input() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use rig_core::message::UserContent;
+    use serde_json::json;
+
+    let mut harness = Harness::new([]);
+    let frame_id = uuid::Uuid::new_v4().to_string();
+    let model = computer_model(
+        &mut harness,
+        [
+            tool_turn(
+                "shot",
+                "device_request",
+                json!({
+                    "capability": w::COMPUTER_USE, "input": {"action":"screenshot"}
+                }),
+            ),
+            tool_turn(
+                "click",
+                "device_request",
+                json!({
+                    "capability": w::COMPUTER_USE,
+                    "input": {"action":"click","frame_id":frame_id,"x":0,"y":0,"button":"left"}
+                }),
+            ),
+        ],
+        true,
+    );
+    register(
+        harness.app.world_mut(),
+        "desk",
+        w::ClientCapabilitySpec {
+            approval: w::CapabilityApproval::Auto.into(),
+            ..spec(w::COMPUTER_USE)
+        },
+    );
+    activate(harness.app.world_mut(), &harness.companion, "desk");
+    let world = harness.app.world();
+    let hub = world.resource::<DeviceHub>().clone();
+    let (_, mut stream) = hub.register("desk");
+    let mut events = world.resource::<super::notify::Notifier>().subscribe();
+    let session = start_work(&mut harness);
+    let run = harness
+        .store()
+        .active_run(&session.id)
+        .unwrap()
+        .unwrap()
+        .run_id;
+    let outstanding = |world: &mut World| {
+        world
+            .resource::<Store>()
+            .outstanding_operations("desk")
+            .unwrap()
+            .len()
+            == 1
+    };
+    harness.run_until(outstanding);
+    let Some(w::device_event::Event::Operation(shot)) = stream.try_recv().unwrap().event else {
+        panic!("the screen request was not dispatched");
+    };
+    assert_eq!(shot.run_id.as_deref(), Some(run.as_str()));
+    assert_eq!(shot.work_id.as_deref(), Some(session.id.as_str()));
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+        .encode(&[200, 0, 80], 1, 1, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let encoded = STANDARD.encode(jpeg);
+    let result = w::DeviceOperationResult {
+        client_id: "desk".into(),
+        operation_id: shot.operation_id,
+        success: true,
+        output: json!({"frame_id":frame_id,"width":1,"height":1,"image_base64":encoded})
+            .to_string(),
+        ..Default::default()
+    };
+    let state = device::complete(harness.app.world_mut(), result.clone()).unwrap();
+    assert_eq!(state.status, w::DeviceOperationStatus::Completed);
+    assert_eq!(
+        state.result.unwrap().output,
+        json!({"frame_id":frame_id,"width":1,"height":1}).to_string()
+    );
+    let saved = harness
+        .store()
+        .operation(&result.operation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        saved.output.unwrap(),
+        json!({"frame_id":frame_id,"width":1,"height":1})
+    );
+    harness.run_until(outstanding);
+    let Some(w::device_event::Event::Operation(click)) = stream.try_recv().unwrap().event else {
+        panic!("the click was not dispatched");
+    };
+    assert_eq!(click.run_id.as_deref(), Some(run.as_str()));
+    assert!(model.requests().iter().any(|request| request.chat_history.iter().any(|message| {
+        matches!(message.as_ref(), Message::User { content } if content.iter().any(|part| matches!(part, UserContent::Image(_))))
+    })));
+    let mut result_event = false;
+    while let Ok(notification) = events.try_recv() {
+        if let Some(w::notification::Event::DeviceOperationResult(result)) = notification.event
+            && result.operation_id == saved.id
+        {
+            assert!(!result.output.contains(&encoded));
+            result_event = true;
+        }
+    }
+    assert!(
+        result_event,
+        "observers received only the screenshot metadata"
+    );
+    let logs = harness.root.path().join("rig").join("logs");
+    let work_log =
+        std::fs::read_to_string(logs.join(format!("{}.jsonl", agent::work_agent_id(&run))))
+            .unwrap();
+    assert!(work_log.contains(&frame_id));
+    assert!(!work_log.contains(&encoded));
+
+    work::stop(harness.app.world_mut(), &session.id).unwrap();
+    let (_, mut replacement) = hub.register("desk");
+    device::resend(harness.app.world_mut(), "desk");
+    assert!(replacement.try_recv().is_err());
+    let late = device::complete(
+        harness.app.world_mut(),
+        w::DeviceOperationResult {
+            operation_id: click.operation_id,
+            output: json!({"applied":true}).to_string(),
+            ..result
+        },
+    )
+    .unwrap();
+    assert_eq!(late.status, w::DeviceOperationStatus::Uncertain);
+}
+
+#[test]
+fn computer_use_respects_the_client_declaration_model_and_host_denial() {
+    use serde_json::json;
+
+    for (declared, image, denied) in [
+        (false, true, false),
+        (true, false, false),
+        (true, true, true),
+    ] {
+        let mut harness = Harness::new([]);
+        let model = computer_model(
+            &mut harness,
+            [
+                tool_turn(
+                    "shot",
+                    "device_request",
+                    json!({
+                        "capability": w::COMPUTER_USE, "input":{"action":"screenshot"}
+                    }),
+                ),
+                text_turn("cannot act"),
+            ],
+            image,
+        );
+        let spec = if declared {
+            w::ClientCapabilitySpec {
+                approval: w::CapabilityApproval::Auto.into(),
+                ..spec(w::COMPUTER_USE)
+            }
+        } else {
+            spec("body.motion")
+        };
+        register(harness.app.world_mut(), "desk", spec);
+        activate(harness.app.world_mut(), &harness.companion, "desk");
+        let hub = harness.app.world().resource::<DeviceHub>().clone();
+        let (_, mut stream) = hub.register("desk");
+        if denied {
+            harness
+                .store()
+                .apply_policy_rules(
+                    &[permission::PolicyRule {
+                        id: "deny-computer".into(),
+                        tool_name: w::COMPUTER_USE.into(),
+                        pattern: "*".into(),
+                        effect: permission::PolicyEffect::Deny,
+                        created_at: String::new(),
+                    }],
+                    &[],
+                )
+                .unwrap();
+        }
+        let session = start_work(&mut harness);
+        harness.run_until(|world| {
+            world
+                .resource::<Store>()
+                .active_run(&session.id)
+                .unwrap()
+                .is_none()
+        });
+        assert!(!model.requests().is_empty());
+        let tools = &model.requests()[0].tools;
+        let presented = tools.iter().any(|tool| {
+            tool.name.as_str() == "device_request"
+                && tool.parameters.to_string().contains(w::COMPUTER_USE)
+        });
+        assert_eq!(presented, declared && image);
+        assert!(stream.try_recv().is_err());
+        assert!(
+            harness
+                .store()
+                .outstanding_operations("desk")
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
 #[test]
 fn a_work_run_reports_back_to_the_parent() {
     let mut harness = Harness::new([text_turn("終わったよ")]);

@@ -41,8 +41,9 @@ pub(crate) struct StopArgs {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReportArgs {
-    /// activity | message | completed | failed
+    /// activity | message | question | completed | failed
     pub(crate) kind: String,
+    #[serde(alias = "summary", alias = "text", alias = "message")]
     pub(crate) content: String,
 }
 
@@ -55,7 +56,7 @@ pub(crate) fn register(app: &mut App) {
     )
     .add_open_tool::<SendArgs, _>(
         "send_work",
-        "Send more input to a running task.",
+        "Send more input or the user's answer to a work session (running or paused on a question).",
         ToolOptions::default(),
         run_tool(|world, agent, _, args| send(world, agent, args)),
     )
@@ -67,8 +68,7 @@ pub(crate) fn register(app: &mut App) {
     )
     .add_open_tool::<ReportArgs, _>(
         "report",
-        "Report progress, or report completion or failure. \
-         The host binds the session and run.",
+        "Report progress (`activity`), important update (`message`), a clarifying question for the user (`question`), completion (`completed`), or failure (`failed`). The host binds the session and run.",
         ToolOptions::default(),
         run_tool(|world, agent, _, args| report(world, agent, args)),
     );
@@ -82,7 +82,19 @@ fn companion(world: &World, agent: Entity) -> Result<String> {
 }
 
 fn own_session(world: &World, work_id: &str, companion: &str) -> Result<WorkSession> {
-    let session = super::require_session(world.resource::<Store>(), work_id)?;
+    let store = world.resource::<Store>();
+    let candidate = work_id.strip_prefix("work-").unwrap_or(work_id);
+    let session = match store.work_session(work_id)? {
+        Some(session) => Some(session),
+        None => match store.work_session(candidate)? {
+            Some(session) => Some(session),
+            None => match store.run(candidate)? {
+                Some(run) => store.work_session(&run.work_id)?,
+                None => None,
+            },
+        },
+    }
+    .ok_or_else(|| HostError::NotFound(("work session not found").into()))?;
     if session.companion_id != companion {
         return Err(HostError::Permission(
             ("this work session belongs to another companion").into(),
@@ -114,17 +126,18 @@ fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
     }
     if let Some(work_id) = args.work_id.as_deref().filter(|id| !id.is_empty()) {
         let session = own_session(world, work_id, &companion)?;
+        let resolved_id = session.id.clone();
         if session.status == WorkStatus::Closed {
             return Err(HostError::Conflict(("work session is closed").into()));
         }
         let store = world.resource::<Store>().clone();
-        if store.active_run(work_id)?.is_some() {
+        if store.active_run(&resolved_id)?.is_some() {
             return Err(HostError::Conflict(
                 ("the work session is already running").into(),
             ));
         }
         let run = super::start_run(world, &session, &args.instruction)?;
-        return Ok(json!({"work_id": work_id, "run_id": run.run_id}).to_string());
+        return Ok(json!({"work_id": resolved_id, "run_id": run.run_id}).to_string());
     }
     let session = super::start(
         world,
@@ -156,11 +169,11 @@ fn transcription_id(world: &World, agent: Entity) -> Option<String> {
 
 fn send(world: &mut World, agent: Entity, args: SendArgs) -> Result<String> {
     let companion = companion(world, agent)?;
-    own_session(world, &args.work_id, &companion)?;
+    let session = own_session(world, &args.work_id, &companion)?;
     let acceptance = super::send(
         world,
         w::SendWorkRequest {
-            work_id: args.work_id,
+            work_id: session.id,
             request_key: uuid::Uuid::new_v4().to_string(),
             text: args.text,
             ..Default::default()
@@ -175,7 +188,7 @@ fn stop(world: &mut World, agent: Entity, args: StopArgs) -> Result<String> {
     if session.status == WorkStatus::Closed {
         return Ok(json!({"work_id": session.id, "status": "closed"}).to_string());
     }
-    super::stop_with(world, &args.work_id, args.reason.as_deref())?;
+    super::stop_with(world, &session.id, args.reason.as_deref())?;
     Ok(json!({"work_id": session.id, "stopping": true}).to_string())
 }
 
@@ -202,32 +215,56 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
         return Err(HostError::Invalid(("report content is required").into()));
     }
     let run_id = run.run_id.clone();
+    let work_id = &work.work_id;
     match args.kind.as_str() {
-        "activity" | "message" => {
+        "activity" => {
             super::note_activity(world, &run_id);
             super::inform(
                 world,
                 &work.companion_id,
                 &run_id,
-                format!("[作業報告] {}", args.content),
+                format!("[作業報告 (work_id: {work_id})] {}", args.content),
                 DeliveryMode::Inform,
             );
             Ok(json!({"accepted": true}).to_string())
         }
+        "message" => {
+            super::note_activity(world, &run_id);
+            super::inform(
+                world,
+                &work.companion_id,
+                &run_id,
+                format!("[作業連絡 (work_id: {work_id})] {}", args.content),
+                DeliveryMode::Queue,
+            );
+            Ok(json!({"accepted": true}).to_string())
+        }
+        "question" => {
+            super::note_activity(world, &run_id);
+            world.resource_mut::<WorkReports>().completed.insert(
+                run_id,
+                format!("[作業質問 (work_id: {work_id})] {}", args.content),
+            );
+            world.trigger(StopTurn {
+                entity: agent,
+                reason: Some("the hand asked a question".into()),
+            });
+            Ok(json!({"accepted": true, "status": "waiting_for_answer"}).to_string())
+        }
         "completed" => {
             super::note_activity(world, &run_id);
-            world
-                .resource_mut::<WorkReports>()
-                .completed
-                .insert(run_id, args.content);
+            world.resource_mut::<WorkReports>().completed.insert(
+                run_id,
+                format!("[作業完了 (work_id: {work_id})] {}", args.content),
+            );
             Ok(json!({"accepted": true}).to_string())
         }
         "failed" => {
             // The settle path owns the run's terminal state and cleanup.
-            world
-                .resource_mut::<WorkReports>()
-                .failed
-                .insert(run_id.clone(), args.content.clone());
+            world.resource_mut::<WorkReports>().failed.insert(
+                run_id.clone(),
+                format!("[作業失敗 (work_id: {work_id})] {}", args.content),
+            );
             world.trigger(StopTurn {
                 entity: agent,
                 reason: Some("the hand reported a failure".into()),
@@ -236,7 +273,7 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
                 world,
                 &work.companion_id,
                 &run_id,
-                format!("[作業失敗] {}", args.content),
+                format!("[作業失敗 (work_id: {work_id})] {}", args.content),
                 DeliveryMode::Queue,
             );
             Ok(json!({"accepted": true}).to_string())

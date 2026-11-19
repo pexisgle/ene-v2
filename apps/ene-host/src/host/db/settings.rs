@@ -4,6 +4,7 @@ use super::{
     require_found, to_json,
 };
 use crate::host::error::HostError;
+use crate::host::model::agent_platform;
 use crate::host::settings::{Check, Connection, ConnectionConfig, Settings};
 use rusqlite::{Row, params};
 use std::collections::HashSet;
@@ -128,22 +129,31 @@ impl Store {
                     )));
                 }
             };
-            let changed = transaction.prepare_cached(
-                "INSERT INTO connections (id, name, enabled, kind, config, credential_state, \
+            let reset_check = existing.is_some_and(|previous| {
+                input.endpoint().adapter == agent_platform::ADAPTER
+                    && input.config != previous.config
+            });
+            let changed = transaction
+                .prepare_cached(
+                    "INSERT INTO connections (id, name, enabled, kind, config, credential_state, \
                  last_check, revision, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8) \
                  ON CONFLICT(id) DO UPDATE SET name = excluded.name, enabled = excluded.enabled, \
                  kind = excluded.kind, config = excluded.config, revision = excluded.revision, \
-                 updated_at = excluded.updated_at WHERE connections.revision = excluded.revision - 1",
-            )?.execute(params![
-                input.id,
-                input.name,
-                input.enabled,
-                input.kind.as_str(),
-                to_json(&input.config)?,
-                input.credential_state.as_str(),
-                revision,
-                stamp,
-            ])?;
+                 updated_at = excluded.updated_at, \
+                 last_check = CASE WHEN ?9 THEN NULL ELSE connections.last_check END \
+                 WHERE connections.revision = excluded.revision - 1",
+                )?
+                .execute(params![
+                    input.id,
+                    input.name,
+                    input.enabled,
+                    input.kind.as_str(),
+                    to_json(&input.config)?,
+                    input.credential_state.as_str(),
+                    revision,
+                    stamp,
+                    reset_check,
+                ])?;
             if changed == 0 {
                 return Err(HostError::Conflict(format!(
                     "connection `{}` changed since it was read",
