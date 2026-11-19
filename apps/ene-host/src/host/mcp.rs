@@ -747,7 +747,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     impl PendingPeer {
-        fn new(root: &Path, name: &str) -> Self {
+        fn new(root: &std::path::Path, name: &str) -> Self {
             Self {
                 marker: root.join(name),
                 process: None,
