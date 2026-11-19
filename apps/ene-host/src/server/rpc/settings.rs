@@ -396,8 +396,13 @@ impl w::SettingsService for Services {
         // The probe performs a network request, so it must not run on the ECS
         // thread; the connection was captured above.
         let check = if is_mcp {
+            let uses_npx = matches!(&connection.config,
+                settings::ConnectionConfig::Mcp(config)
+                    if config.command.eq_ignore_ascii_case("npx")
+                        || config.command.eq_ignore_ascii_case("npx.cmd"));
             // npm may have to download a package before the server can list tools.
-            let tools = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let timeout = std::time::Duration::from_secs(if uses_npx { 60 } else { 20 });
+            let tools = tokio::time::timeout(timeout, async {
                 loop {
                     let id = connection.id.clone();
                     let revision = connection.revision;
@@ -426,15 +431,10 @@ impl w::SettingsService for Services {
             .await
             .unwrap_or(Ok(None))
             .map_err(ConnectError::from)?;
-            let message = match &connection.config {
-                settings::ConnectionConfig::Mcp(config)
-                    if config.command.eq_ignore_ascii_case("npx") =>
-                {
-                    "MCP に接続できませんでした。ホストで Node.js と npm が使えること、起動コマンドと通信環境を確認してください。"
-                }
-                _ => {
-                    "MCP に接続できませんでした。サーバー URL または起動コマンドを確認してください。"
-                }
+            let message = if uses_npx {
+                "MCP に接続できませんでした。ホストで Node.js と npm が使えること、起動コマンドと通信環境を確認してください。"
+            } else {
+                "MCP に接続できませんでした。サーバー URL または起動コマンドを確認してください。"
             };
             crate::host::settings::Check {
                 healthy: tools.is_some(),

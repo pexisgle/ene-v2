@@ -71,7 +71,9 @@ impl SettingsStudio {
                             .child(draft),
                         theme,
                     ),
-                    Some("ホストを動かしている端末に Node.js と npm が必要です。"),
+                    Some(
+                        "ホストに Node.js と npm が必要です。初回はパッケージの取得に時間がかかる場合があります。",
+                    ),
                     target,
                 )
             }
@@ -290,10 +292,13 @@ fn npx_target(input: &str) -> Target {
     let (name, mut args) = if input.starts_with('{') {
         npx_from_json(input)?
     } else {
-        let mut args = split_args(input)?;
-        if args.first().is_some_and(|arg| is_npx(arg)) {
-            args.remove(0);
-        }
+        let args = split_args(input)?;
+        let args = match args.as_slice() {
+            [command, tail @ ..] if is_npx(command) || is_cmd(command) => {
+                npx_args(command, tail)?.to_vec()
+            }
+            _ => args,
+        };
         (None, args)
     };
     let package = args
@@ -328,6 +333,30 @@ fn is_npx(command: &str) -> bool {
         .any(|program| command.eq_ignore_ascii_case(program))
 }
 
+fn is_cmd(command: &str) -> bool {
+    command.eq_ignore_ascii_case("cmd") || command.eq_ignore_ascii_case("cmd.exe")
+}
+
+fn npx_args<'a>(command: &str, args: &'a [String]) -> Result<&'a [String], &'static str> {
+    if is_npx(command) {
+        return Ok(args);
+    }
+    // Accept the documented Windows wrapper, then launch npx directly on the host.
+    if is_cmd(command) {
+        let flags = args
+            .iter()
+            .take_while(|arg| arg.eq_ignore_ascii_case("/d") || arg.eq_ignore_ascii_case("/s"))
+            .count();
+        if let [run, launcher, tail @ ..] = &args[flags..]
+            && run.eq_ignore_ascii_case("/c")
+            && is_npx(launcher)
+        {
+            return Ok(tail);
+        }
+    }
+    Err("npx、または Windows 向けの cmd /c npx を指定してください。")
+}
+
 fn npx_from_json(input: &str) -> Result<(Option<String>, Vec<String>), &'static str> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -343,32 +372,32 @@ fn npx_from_json(input: &str) -> Result<(Option<String>, Vec<String>), &'static 
     }
     let value: serde_json::Value =
         serde_json::from_str(input).map_err(|_| "MCP の JSON 設定を確認してください。")?;
-    let (name, config) = if let Some(servers) = value.get("mcpServers") {
-        let servers = servers
-            .as_object()
-            .filter(|servers| servers.len() == 1)
-            .ok_or("JSON にはサーバーを1つだけ指定してください。")?;
-        let (name, config) = servers.iter().next().expect("one MCP server");
-        (Some(name.clone()), config.clone())
-    } else {
-        (None, value)
-    };
+    let (name, config) =
+        if let Some(servers) = value.get("mcpServers").or_else(|| value.get("servers")) {
+            let servers = servers
+                .as_object()
+                .filter(|servers| servers.len() == 1)
+                .ok_or("JSON にはサーバーを1つだけ指定してください。")?;
+            let (name, config) = servers.iter().next().expect("one MCP server");
+            (Some(name.clone()), config.clone())
+        } else {
+            (None, value)
+        };
     let config: Config = serde_json::from_value(config)
         .map_err(|_| "JSON の command と args を確認してください。")?;
-    if !is_npx(&config.command)
-        || config
-            .transport
-            .as_deref()
-            .is_some_and(|transport| transport != "stdio")
+    if config
+        .transport
+        .as_deref()
+        .is_some_and(|transport| transport != "stdio")
     {
-        return Err("この欄では command に npx を指定した JSON を使えます。");
+        return Err("この欄では stdio 接続の JSON を使えます。");
     }
     if !config.env.is_empty() || config.cwd.is_some() {
         return Err(
             "env や cwd を指定するサーバーは、ホストの実行環境を設定してからコマンドを登録してください。",
         );
     }
-    Ok((name, config.args))
+    Ok((name, npx_args(&config.command, &config.args)?.to_vec()))
 }
 
 /// Splits arguments without a shell. Backslashes stay literal for Windows paths.
@@ -451,5 +480,38 @@ mod tests {
         assert_eq!(local.command, "node");
         assert_eq!(local.args, ["C:/My Tools/mcp.js", "--stdio"]);
         assert!(local_target("node", "[").is_err());
+    }
+
+    #[test]
+    fn npx_normalizes_windows_command_wrappers_without_using_a_shell() {
+        let (config, name) = npx_target(
+            r#"{"mcpServers":{"filesystem":{"command":"cmd","args":["/c","npx","-y","@modelcontextprotocol/server-filesystem","C:\\My Tools\\日本語 & space"]}}}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(name, "filesystem");
+        assert_eq!(config.command, "npx");
+        assert_eq!(
+            config.args,
+            [
+                "-y",
+                "@modelcontextprotocol/server-filesystem",
+                r"C:\My Tools\日本語 & space"
+            ]
+        );
+
+        let (config, _) = npx_target(r#"cmd.exe /D /S /C npx.cmd pkg "a b""#)
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.args, ["-y", "pkg", "a b"]);
+        let (config, name) = npx_target(
+            r#"{"servers":{"fixture":{"type":"stdio","command":"cmd.exe","args":["/c","npx","pkg"]}}}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(name, "fixture");
+        assert_eq!(config.args, ["-y", "pkg"]);
+        assert!(npx_target("cmd /c echo hello").is_err());
+        assert!(npx_target("cmd /k npx pkg").is_err());
     }
 }
