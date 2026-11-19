@@ -234,6 +234,7 @@ fn sync(world: &mut World) {
     project_servers(world);
 
     let sender = world.resource::<McpEvents>().sender.clone();
+    let wake = world.get_resource::<Wake>().cloned();
     for (id, want) in wanted {
         if world.resource::<McpServers>().0.contains_key(&id)
             || world.resource::<Connecting>().0.contains_key(&id)
@@ -248,6 +249,7 @@ fn sync(world: &mut World) {
         let event_id = id.clone();
         let event_launch = launch.clone();
         let sender = sender.clone();
+        let wake = wake.clone();
         let task = runtime.spawn(async move {
             let event = match open(&want, registry.clone()).await {
                 Ok(connection) => Event::Connected {
@@ -262,10 +264,19 @@ fn sync(world: &mut World) {
                     reason,
                 },
             };
-            if let Err(error) = sender.send(event).await
-                && let Event::Connected { connection, .. } = error.0
-            {
-                connection.close().await;
+            let connected = matches!(event, Event::Connected { .. });
+            match sender.send(event).await {
+                Ok(()) if connected => {
+                    if let Some(wake) = wake {
+                        wake.wake();
+                    }
+                }
+                Err(error) => {
+                    if let Event::Connected { connection, .. } = error.0 {
+                        connection.close().await;
+                    }
+                }
+                Ok(()) => {}
             }
         });
         world.resource_mut::<Connecting>().0.insert(

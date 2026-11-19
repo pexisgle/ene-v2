@@ -389,33 +389,59 @@ impl w::SettingsService for Services {
             .await
             .map_err(ConnectError::from)?;
         let credentials = self.runtime.credentials();
+        let agent_platform = connection.endpoint().adapter == model::agent_platform::ADAPTER;
+        let is_mcp = connection.kind == settings::ConnectionKind::Mcp;
+        let checked_revision = (agent_platform || is_mcp).then_some(connection.revision);
+        let checked_credentials = agent_platform.then(|| credentials.generation());
         // The probe performs a network request, so it must not run on the ECS
         // thread; the connection was captured above.
-        let check = if connection.kind == crate::host::settings::ConnectionKind::Mcp {
-            let tools = self
-                .runtime
-                .read({
+        let check = if is_mcp {
+            // npm may have to download a package before the server can list tools.
+            let tools = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+                loop {
                     let id = connection.id.clone();
                     let revision = connection.revision;
-                    move |app| {
-                        Ok(crate::host::mcp::server_tool_names(
-                            app.world(),
-                            &id,
-                            revision,
-                        ))
+                    let tools = self
+                        .runtime
+                        .read(move |app| {
+                            let world = app.world();
+                            if !world
+                                .resource::<Store>()
+                                .connection(&id)?
+                                .is_some_and(|current| current.revision == revision)
+                            {
+                                return Err(HostError::Conflict(
+                                    "MCP connection changed during the check".into(),
+                                ));
+                            }
+                            Ok(crate::host::mcp::server_tool_names(world, &id, revision))
+                        })
+                        .await?;
+                    if tools.is_some() || !connection.enabled {
+                        return Ok::<_, HostError>(tools);
                     }
-                })
-                .await
-                .map_err(ConnectError::from)?;
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+            })
+            .await
+            .unwrap_or(Ok(None))
+            .map_err(ConnectError::from)?;
+            let message = match &connection.config {
+                settings::ConnectionConfig::Mcp(config)
+                    if config.command.eq_ignore_ascii_case("npx") =>
+                {
+                    "MCP に接続できませんでした。ホストで Node.js と npm が使えること、起動コマンドと通信環境を確認してください。"
+                }
+                _ => {
+                    "MCP に接続できませんでした。サーバー URL または起動コマンドを確認してください。"
+                }
+            };
             crate::host::settings::Check {
                 healthy: tools.is_some(),
                 checked_at: crate::host::db::now(),
-                failure: tools.is_none().then(|| {
-                    crate::host::error::Failure::new(
-                        "connection_check",
-                        "The MCP server is not connected.",
-                    )
-                }),
+                failure: tools
+                    .is_none()
+                    .then(|| crate::host::error::Failure::new("connection_check", message)),
                 capabilities: Vec::new(),
                 resources: tools.unwrap_or_default(),
             }
@@ -441,15 +467,15 @@ impl w::SettingsService for Services {
         };
         let request_id = request.request_key.to_owned();
         let resource_id = request.resource_id.map(str::to_owned);
-        let checked_revision = (connection.endpoint().adapter == model::agent_platform::ADAPTER)
-            .then_some(connection.revision);
         let id = connection.id;
         self.call(move |app| {
             let store = app.world().resource::<Store>().clone();
             if let Some(revision) = checked_revision
-                && store
-                    .connection(&id)?
-                    .is_some_and(|current| current.revision != revision)
+                && (checked_credentials
+                    .is_some_and(|generation| credentials.generation() != generation)
+                    || store
+                        .connection(&id)?
+                        .is_some_and(|current| current.revision != revision))
             {
                 return Err(HostError::Conflict(
                     "connection changed during the check".into(),

@@ -35,6 +35,17 @@ impl SettingsStudio {
             )
         };
 
+        if let Some(id) = self.pending_mcp.as_ref()
+            && connections.iter().any(|connection| &connection.id == id)
+        {
+            let id = self
+                .pending_mcp
+                .take()
+                .expect("the new MCP connection is saved");
+            self.clear_mcp_drafts();
+            let hub = self.hub.clone();
+            cx.defer(move |cx| hub.update(cx, |hub, cx| hub.check_connection(id, cx)));
+        }
         let studio_add = cx.entity();
         let studio_mcp = cx.entity();
         let adding = self.adding_connection;
@@ -68,6 +79,7 @@ impl SettingsStudio {
                                 this.adding_connection = true;
                                 this.custom_connection_open = true;
                                 this.custom_kind = w::ConnectionKind::Mcp;
+                                this.mcp_add_mode = super::mcp_add::Mode::Npx;
                                 cx.notify();
                             });
                         },
@@ -86,6 +98,11 @@ impl SettingsStudio {
                         move |_, cx| {
                             studio_add.update(cx, |this, cx| {
                                 this.adding_connection = !this.adding_connection;
+                                if this.adding_connection
+                                    && this.custom_kind == w::ConnectionKind::Mcp
+                                {
+                                    this.custom_kind = w::ConnectionKind::Llm;
+                                }
                                 cx.notify();
                             });
                         },
@@ -179,6 +196,9 @@ impl SettingsStudio {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if self.custom_connection_open && self.custom_kind == w::ConnectionKind::Mcp {
+            return self.render_mcp_add(live, theme, cx);
+        }
         let mut llm_chips: Vec<AnyElement> = Vec::new();
         for prov in providers {
             let p = prov.clone();
@@ -380,7 +400,6 @@ impl SettingsStudio {
             ));
 
         let custom_kind = self.custom_kind;
-        let adding_mcp = self.custom_connection_open && custom_kind == w::ConnectionKind::Mcp;
         let mut kind_chips = Vec::new();
         for kind in [
             w::ConnectionKind::Llm,
@@ -408,36 +427,24 @@ impl SettingsStudio {
             ));
         }
 
-        let draft_prefix = if adding_mcp { "add:mcp" } else { "add:custom" };
-        let name_d = self.draft(cx, format!("{draft_prefix}:name"), "表示名", None, theme);
+        let name_d = self.draft(cx, "add:custom:name", "表示名", None, theme);
         let adapter_d = self.draft(
             cx,
-            format!("{draft_prefix}:adapter"),
-            if adding_mcp {
-                "例: URL または npx"
-            } else {
-                "アダプタ名またはコマンド（例: openai / npx）"
-            },
+            "add:custom:adapter",
+            "アダプタ名またはコマンド",
             None,
             theme,
         );
         let target_d = self.draft(
             cx,
-            format!("{draft_prefix}:target"),
-            if adding_mcp {
-                r#"例: ["-y", "server-package"]"#
-            } else {
-                "エンドポイントURLまたは引数（スペース区切り）"
-            },
+            "add:custom:target",
+            "エンドポイントURLまたは引数（スペース区切り）",
             None,
             theme,
         );
         let c_name = name_d.read(cx).text().trim().to_owned();
         let c_adapter = adapter_d.read(cx).text().trim().to_owned();
         let c_target = target_d.read(cx).text().trim().to_owned();
-        let mcp_ready = !adding_mcp
-            || (is_mcp_url(&c_adapter) || is_mcp_url(&c_target))
-            || (!c_adapter.is_empty() && mcp_args(&c_target).is_some());
         let hub_custom = self.hub.clone();
         let studio_done = cx.entity();
 
@@ -451,7 +458,7 @@ impl SettingsStudio {
             .flex()
             .flex_col()
             .gap(px(12.))
-            .when(!adding_mcp && !llm_chips.is_empty(), |this| {
+            .when(!llm_chips.is_empty(), |this| {
                 this.child(
                     div()
                         .flex()
@@ -474,29 +481,23 @@ impl SettingsStudio {
                         ),
                 )
             })
-            .when(!adding_mcp, |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.))
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(theme.ink_muted)
-                                .child("音声・埋め込み機能を追加"),
-                        )
-                        .child(voice_chips),
-                )
-            })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(theme.ink_muted)
+                            .child("音声・埋め込み機能を追加"),
+                    )
+                    .child(voice_chips),
+            )
             .child(disclosure_row(
                 "custom-connection",
-                if adding_mcp {
-                    "MCP サーバー"
-                } else {
-                    "カスタム接続"
-                },
+                "カスタム接続",
                 self.custom_connection_open,
                 theme,
                 {
@@ -530,20 +531,12 @@ impl SettingsStudio {
                                 .flex_row()
                                 .gap(px(10.))
                                 .child(div().flex_1().min_w_0().child(labeled_field(
-                                    if adding_mcp {
-                                        "サーバー URL / 起動コマンド"
-                                    } else {
-                                        "アダプタ / コマンド"
-                                    },
+                                    "アダプタ / コマンド",
                                     adapter_d,
                                     theme,
                                 )))
                                 .child(div().flex_1().min_w_0().child(labeled_field(
-                                    if adding_mcp {
-                                        "起動引数（任意）"
-                                    } else {
-                                        "URL / 引数"
-                                    },
+                                    "URL / 引数",
                                     target_d,
                                     theme,
                                 ))),
@@ -553,7 +546,7 @@ impl SettingsStudio {
                             "追加",
                             Some(Icon::Plus),
                             Tone::Primary,
-                            live && !c_name.is_empty() && mcp_ready,
+                            live && !c_name.is_empty(),
                             theme,
                             move |_, cx| {
                                 let Some(input) = build_custom_connection_input(
@@ -663,7 +656,7 @@ impl SettingsStudio {
                         && !c
                             .capabilities
                             .iter()
-                            .any(|cap| matches!(cap.as_str(), "model_list" | "model_catalog")))
+                            .any(|cap| cap == "verified_model_list"))
             });
 
         let header = div()
@@ -2872,35 +2865,7 @@ fn build_custom_connection_input(
                 ..Default::default()
             }))
         }
-        w::ConnectionKind::Mcp => {
-            let first = adapter_or_cmd.trim();
-            let second = url_or_args.trim();
-            let http_url = if is_mcp_url(second) {
-                Some(second)
-            } else if is_mcp_url(first) {
-                Some(first)
-            } else {
-                None
-            };
-            let (command, args, endpoint_url) = if let Some(url) = http_url {
-                (String::new(), Vec::new(), url.to_owned())
-            } else {
-                (first.to_owned(), mcp_args(second)?, String::new())
-            };
-            w::connection_config::Config::Mcp(Box::new(w::McpConnection {
-                command,
-                args,
-                endpoint: Some(w::ConnectionEndpoint {
-                    adapter: "mcp".to_owned(),
-                    endpoint: endpoint_url,
-                    options_schema: String::new(),
-                    options: "{}".into(),
-                    ..Default::default()
-                })
-                .into(),
-                ..Default::default()
-            }))
-        }
+        w::ConnectionKind::Mcp => return None,
         w::ConnectionKind::Acp => w::connection_config::Config::Acp(Box::new(w::AcpConnection {
             command: adapter_or_cmd.to_owned(),
             args: url_or_args.split_whitespace().map(str::to_owned).collect(),
@@ -2921,53 +2886,4 @@ fn build_custom_connection_input(
         .into(),
         ..Default::default()
     })
-}
-
-fn is_mcp_url(value: &str) -> bool {
-    value.starts_with("http://") || value.starts_with("https://")
-}
-
-fn mcp_args(value: &str) -> Option<Vec<String>> {
-    if value.starts_with('[') {
-        serde_json::from_str(value).ok()
-    } else {
-        Some(value.split_whitespace().map(str::to_owned).collect())
-    }
-}
-
-#[cfg(test)]
-mod mcp_add_tests {
-    use super::*;
-
-    #[test]
-    fn the_mcp_form_supports_http_and_preserves_local_arguments() {
-        let input = build_custom_connection_input(
-            w::ConnectionKind::Mcp,
-            "Remote",
-            "https://example.com/mcp",
-            "",
-        )
-        .unwrap();
-        let Some(w::connection_config::Config::Mcp(mcp)) = input.config.config.as_ref() else {
-            panic!("expected MCP settings");
-        };
-        assert_eq!(mcp.endpoint.endpoint, "https://example.com/mcp");
-        assert!(mcp.command.is_empty() && mcp.args.is_empty());
-
-        let input = build_custom_connection_input(
-            w::ConnectionKind::Mcp,
-            "Local",
-            "node",
-            r#"["C:/My Tools/mcp.js", "--stdio"]"#,
-        )
-        .unwrap();
-        let Some(w::connection_config::Config::Mcp(mcp)) = input.config.config.as_ref() else {
-            panic!("expected MCP settings");
-        };
-        assert_eq!(mcp.command, "node");
-        assert_eq!(mcp.args, ["C:/My Tools/mcp.js", "--stdio"]);
-        assert!(
-            build_custom_connection_input(w::ConnectionKind::Mcp, "Invalid", "node", "[").is_none()
-        );
-    }
 }

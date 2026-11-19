@@ -28,6 +28,8 @@ pub struct SettingsStudio {
     pub(crate) adding_connection: bool,
     pub(crate) custom_connection_open: bool,
     pub(crate) custom_kind: w::ConnectionKind,
+    pub(crate) mcp_add_mode: super::mcp_add::Mode,
+    pub(crate) pending_mcp: Option<String>,
     pub(crate) expanded_connection_id: Option<String>,
     pub(crate) revealed_secret_for: Option<String>,
     pub(crate) revoke_armed_for: Option<String>,
@@ -57,6 +59,8 @@ impl SettingsStudio {
             adding_connection: false,
             custom_connection_open: false,
             custom_kind: w::ConnectionKind::Llm,
+            mcp_add_mode: super::mcp_add::Mode::Npx,
+            pending_mcp: None,
             expanded_connection_id: None,
             revealed_secret_for: None,
             revoke_armed_for: None,
@@ -107,6 +111,10 @@ impl SettingsStudio {
             theme.field_look(false, false),
             "TextField Multiline",
         )
+    }
+
+    pub(crate) fn clear_mcp_drafts(&mut self) {
+        self.drafts.retain(|key, _| !key.starts_with("add:mcp:"));
     }
 
     pub(crate) fn masked_draft(
@@ -468,7 +476,7 @@ impl Render for SettingsStudio {
 /// Shared clean field block with label and zero decorative kickers.
 pub(crate) fn labeled_field(
     label: &'static str,
-    field: Entity<Draft>,
+    field: impl gpui::IntoElement,
     theme: &Theme,
 ) -> AnyElement {
     div()

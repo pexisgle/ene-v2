@@ -133,6 +133,7 @@ impl Store {
             let reset_check = existing.is_some_and(|previous| {
                 input.endpoint().adapter == agent_platform::ADAPTER
                     && input.config != previous.config
+                    && !keeps_verified_model_list(previous, input)
             });
             let changed = transaction
                 .prepare_cached(
@@ -183,12 +184,16 @@ impl Store {
         id: &str,
         state: crate::host::settings::CredentialState,
     ) -> Result<()> {
+        let reset_check = self
+            .connection(id)?
+            .is_some_and(|connection| connection.endpoint().adapter == agent_platform::ADAPTER);
         let changed = self
             .conn()?
             .prepare_cached(
-                "UPDATE connections SET credential_state = ?2, updated_at = ?3 WHERE id = ?1",
+                "UPDATE connections SET credential_state = ?2, updated_at = ?3,
+                 last_check = CASE WHEN ?4 THEN NULL ELSE last_check END WHERE id = ?1",
             )?
-            .execute(params![id, state.as_str(), now()])?;
+            .execute(params![id, state.as_str(), now(), reset_check])?;
         require_found(changed, "connection not found")
     }
 
@@ -240,6 +245,24 @@ impl Store {
             .execute(params![id, to_json(check)?, now()])?;
         require_found(changed, "connection not found")
     }
+}
+
+fn keeps_verified_model_list(previous: &Connection, next: &Connection) -> bool {
+    let ConnectionConfig::Llm(config) = &next.config else {
+        return false;
+    };
+    previous.endpoint() == next.endpoint()
+        && previous.last_check.as_ref().is_some_and(|check| {
+            check.healthy
+                && check
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap == agent_platform::VERIFIED_MODEL_LIST)
+                && config
+                    .model_ids
+                    .iter()
+                    .all(|id| check.resources.iter().any(|known| known == id.trim()))
+        })
 }
 
 #[cfg(test)]

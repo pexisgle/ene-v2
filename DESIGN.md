@@ -122,7 +122,7 @@ components:
 
 **Creative North Star: "Strawberry Milk Capsule"**
 
-`ene-desktop` treats the desktop companion interface as a warm strawberry-milk cutout floating gently above arbitrary desktop wallpapers, paired with a calm, uncluttered three-chapter settings studio. Everyday voice and text turns, first-run onboarding, and safety approvals resolve inside an asymmetric transparent-window speech pod (`CompanionPod`) anchored at bottom-right with a single-line capsule composer and three detached circular orb buttons.
+`ene-desktop` treats the desktop companion interface as a warm strawberry-milk cutout floating gently above arbitrary desktop wallpapers, paired with a calm, uncluttered three-chapter settings studio. Everyday voice and text turns, first-run onboarding, and safety approvals resolve inside an asymmetric transparent-window speech pod (`CompanionPod`) anchored at bottom-right with a single-line capsule composer and a detached controls menu button.
 
 Complexity is strictly hidden behind progressive disclosure and clear standard Japanese labels: nested bordered cards, uppercase eyebrow kickers, Unicode glyph icons, raw diagnostic dumps, memory tables, and childish copy are explicitly rejected in favor of crisp vector SVG icons (`apps/ene-desktop/src/ui/icons.rs`), `>= 4.5:1` cocoa-and-plum contrast on pure milk surfaces, and single-line hairline rows in `SettingsStudio`.
 
@@ -183,7 +183,7 @@ The palette pairs pure warm milk whites (`#fffdfd`) and strawberry-milk washes (
 ## Layout
 
 Two purpose-built GPUI windows separate high-frequency companionship from low-frequency configuration:
-- **`CompanionPod`** (`444x218` `MiniVoice`, expanding to `444x540` `ExpandedChat`): Floating bottom-right transparent `PopUp` window with `14px` outer shadow/badge margin, an asymmetric upper speech/approval/onboarding bubble + `12px` circular tail dot, and a bottom row combining a `44px` capsule composer (`Draft` + companion switcher + send + mic toggle) with three detached `40px` circular orbs (`履歴`, `設定`, `×`).
+- **`CompanionPod`** (`444x218` `MiniVoice`, expanding to `444x540` `ExpandedChat`) uses a transparent bottom-right window, an asymmetric speech bubble with a `12px` tail dot, and a bottom row with a `44px` composer for typing and sending. A detached `40px` menu button opens companion switching, microphone, speaker, history, settings, and close controls above the row.
 - **`SettingsStudio`** (`780x580`, minimum `680x480`): Bounded window with a `38px` Strawberry-Milk custom titlebar (`設定 — ene` + SVG minimize/maximize/close), a `196px` left chapter sidebar (`コンパニオン`, `接続`, `この端末`), and a scrollable `#fffdfd` content pane (`28px` horizontal / `22px` vertical padding, `16px` vertical section stack, `62px` list rows with `10px` vertical gaps and at most one expanded row per section).
 
 ## Elevation & Depth
@@ -232,7 +232,7 @@ Every surface balances soft circularity against anchored structure:
 - **Style:** `196px` fixed `#fadce6` sidebar with three full-width pill items (`コンパニオン`, `接続`, `この端末`), active item filled `#cf2e68` with `#ffffff` bold text and SVG icon; inactive items transparent with `#3b232c` ink and hover tint.
 
 ### Floating Speech Pod
-- **Composition:** Top overlapping `#cf2e68` status pill (`Icon::Sparkles` + companion name + state word), draggable `16px` top-right grip (`WindowControlArea::Drag`), asymmetric `24/24/8/24px` `#fffdfd` speech/onboarding/approval bubble, `12px` circular tail dot, `44px` capsule composer (`companion_badge` switcher + borderless `Draft` + send + mic toggle), and three `40px` circular detached orbs (`履歴`, `設定`, `×`).
+- The speech bubble pairs the draggable `#cf2e68` name badge with asymmetric `24/24/8/24px` corners and a `12px` circular tail. The bottom composer pairs a borderless `Draft` with send, and the menu button sits immediately to its right.
 
 ## Do's and Don'ts
 

@@ -485,6 +485,13 @@ pub(crate) fn models(connection: &Connection, catalog: &Catalog) -> Vec<(String,
     };
     let adapter = connection.endpoint().adapter.as_str();
     let preferred = default_models_for(adapter);
+    let verified = adapter == agent_platform::ADAPTER
+        && connection.last_check.as_ref().is_some_and(|check| {
+            check
+                .capabilities
+                .iter()
+                .any(|cap| cap == agent_platform::VERIFIED_MODEL_LIST)
+        });
     let resources = connection
         .last_check
         .as_ref()
@@ -500,7 +507,7 @@ pub(crate) fn models(connection: &Connection, catalog: &Catalog) -> Vec<(String,
 
     for id in &config.model_ids {
         let trimmed = id.trim();
-        if !trimmed.is_empty() {
+        if !trimmed.is_empty() && (!verified || resources.iter().any(|id| id == trimmed)) {
             push_unique_id(&mut ordered, trimmed);
         }
     }
@@ -513,13 +520,8 @@ pub(crate) fn models(connection: &Connection, catalog: &Catalog) -> Vec<(String,
         for id in resources {
             push_unique_id(&mut ordered, id);
         }
-    } else if ordered.is_empty() || adapter == agent_platform::ADAPTER {
-        let defaults = if adapter == agent_platform::ADAPTER {
-            agent_platform::fallback_models(connection.endpoint())
-        } else {
-            preferred
-        };
-        for &id in defaults {
+    } else if ordered.is_empty() && !verified {
+        for &id in preferred {
             push_unique_id(&mut ordered, id);
         }
     }
@@ -571,50 +573,40 @@ pub(crate) async fn probe(
     if config.endpoint.adapter == agent_platform::ADAPTER
         && providers.get(agent_platform::ADAPTER).is_none()
     {
+        let verified = |mut check: Check| {
+            check
+                .capabilities
+                .push(agent_platform::VERIFIED_MODEL_LIST.into());
+            check
+        };
         let secret = match connection_secret(connection, Some(credentials), providers) {
             Ok(Some(secret)) => secret,
-            Ok(None) => return failure("Google Agent Platform の API キーが未登録です".into()),
-            Err(error) => return failure(error.to_string()),
-        };
-        let mut discovered = Check::default();
-        match agent_platform::list_models(&config.endpoint, Some(&secret)).await {
-            Ok(ids) if !ids.is_empty() => {
-                discovered.resources = ids;
-                discovered.capabilities.push("model_list".into());
+            Ok(None) => {
+                return verified(failure(
+                    "Google Agent Platform の API キーが未登録です".into(),
+                ));
             }
-            Ok(_) => {}
-            Err(error) => tracing::debug!(%error, "could not list Google Agent Platform models"),
-        }
-        let mut connection = connection.clone();
-        connection.last_check = Some(discovered.clone());
-        let models = models(&connection, Catalog::builtin());
-        let Some((_, spec)) = models.first() else {
-            return failure("Google Agent Platform のモデルを指定してください".into());
+            Err(error) => return verified(failure(error.to_string())),
         };
-        let model =
-            match agent_platform::model(&config.endpoint, Some(secret), Arc::new(spec.clone())) {
-                Ok(model) => model,
-                Err(error) => return failure(error.to_string()),
+        let result =
+            match agent_platform::verify_models(&config.endpoint, &secret, &config.model_ids).await
+            {
+                Ok(result) => result,
+                Err(error) => return verified(failure(error)),
             };
-        let resources = models.into_iter().map(|(id, _)| id).collect();
-        if discovered.capabilities.is_empty() {
-            discovered.capabilities.push("model_catalog".into());
-        }
-        if let Err(error) = agent_platform::probe(model).await {
-            return Check {
-                resources,
-                capabilities: discovered.capabilities,
-                ..failure(error)
-            };
-        }
-        discovered.capabilities.push("streaming_text".into());
-        return Check {
-            healthy: true,
-            checked_at,
-            capabilities: discovered.capabilities,
-            resources,
-            ..Default::default()
-        };
+        let mut check = result.failure.map_or(
+            Check {
+                healthy: true,
+                checked_at: checked_at.clone(),
+                ..Default::default()
+            },
+            failure,
+        );
+        check
+            .capabilities
+            .extend(["model_list".into(), "streaming_text".into()]);
+        check.resources = result.ids;
+        return verified(check);
     }
     // A connection that leaves its endpoint empty calls the provider's own
     // default, which is exactly what the probe has to ask.
