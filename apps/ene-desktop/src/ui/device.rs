@@ -515,6 +515,12 @@ impl SettingsStudio {
                 Some(w::PolicyEffect::Deny) => {
                     ("拒否", theme.danger, theme.danger_soft, theme.danger_fg)
                 }
+                Some(w::PolicyEffect::AskLlm) => (
+                    "AI判定",
+                    theme.accent,
+                    theme.accent_soft,
+                    theme.accent_soft_fg,
+                ),
                 _ => ("確認", theme.amber, theme.amber_soft, theme.amber_fg),
             };
             let armed = self.delete_armed_policy.as_deref() == Some(rule.id.as_str());
@@ -630,6 +636,32 @@ impl SettingsStudio {
             );
         }
 
+        let skip_armed = self.skip_confirm_armed;
+        let studio_arm_skip = cx.entity();
+        let studio_cancel_skip = cx.entity();
+        let studio_exec_skip = cx.entity();
+        let confirm_status = if skip_tool_confirmation {
+            status_pill(
+                "すべて省略中",
+                Some(theme.amber),
+                theme.amber_soft,
+                theme.amber_fg,
+            )
+        } else if skip_files_only {
+            status_pill(
+                "ファイル操作のみ省略中",
+                None,
+                theme.amber_soft,
+                theme.amber_fg,
+            )
+        } else {
+            status_pill(
+                "操作ごとに確認中",
+                Some(theme.mint),
+                theme.mint_soft,
+                theme.mint_fg,
+            )
+        };
         let policy_card = div()
             .w_full()
             .bg(theme.bg_surface)
@@ -641,14 +673,7 @@ impl SettingsStudio {
             .child(row_frame(
                 false,
                 "ツール操作の確認",
-                skip_files_only.then(|| {
-                    status_pill(
-                        "ファイル操作のみ省略中",
-                        None,
-                        theme.amber_soft,
-                        theme.amber_fg,
-                    )
-                }),
+                Some(confirm_status),
                 div()
                     .flex()
                     .items_center()
@@ -672,31 +697,81 @@ impl SettingsStudio {
                             },
                         ))
                     })
-                    .child(pill_button(
-                        "dev-tool-confirmation",
-                        if skip_tool_confirmation {
-                            "省略を解除"
-                        } else {
-                            "すべて省略"
-                        },
-                        None,
-                        if skip_tool_confirmation {
-                            Tone::Soft
-                        } else {
-                            Tone::Ghost
-                        },
-                        live,
-                        theme,
-                        move |_, cx| {
-                            hub_confirmation.update(cx, |hub, cx| {
-                                hub.update_policy_rules(
-                                    "ツール操作の確認設定",
-                                    tool_confirmation_request(!skip_tool_confirmation),
-                                    cx,
-                                );
-                            });
-                        },
-                    ))
+                    .when(skip_tool_confirmation, |buttons| {
+                        let hub_restore = hub_confirmation.clone();
+                        buttons.child(pill_button(
+                            "dev-tool-confirmation-restore",
+                            "確認を再開する",
+                            None,
+                            Tone::Soft,
+                            live,
+                            theme,
+                            move |_, cx| {
+                                hub_restore.update(cx, |hub, cx| {
+                                    hub.update_policy_rules(
+                                        "ツール操作の確認設定",
+                                        tool_confirmation_request(false),
+                                        cx,
+                                    );
+                                });
+                            },
+                        ))
+                    })
+                    .when(!skip_tool_confirmation && !skip_armed, |buttons| {
+                        buttons.child(pill_button(
+                            "dev-tool-confirmation",
+                            "確認をすべて省略…",
+                            None,
+                            Tone::Ghost,
+                            live,
+                            theme,
+                            move |_, cx| {
+                                studio_arm_skip.update(cx, |this, cx| {
+                                    this.skip_confirm_armed = true;
+                                    cx.notify();
+                                });
+                            },
+                        ))
+                    })
+                    .when(!skip_tool_confirmation && skip_armed, |buttons| {
+                        let hub_skip = hub_confirmation.clone();
+                        buttons
+                            .child(pill_button(
+                                "dev-tool-confirmation-cancel",
+                                "キャンセル",
+                                None,
+                                Tone::Ghost,
+                                true,
+                                theme,
+                                move |_, cx| {
+                                    studio_cancel_skip.update(cx, |this, cx| {
+                                        this.skip_confirm_armed = false;
+                                        cx.notify();
+                                    });
+                                },
+                            ))
+                            .child(pill_button(
+                                "dev-tool-confirmation-confirm",
+                                "本当にすべて省略",
+                                None,
+                                Tone::Danger,
+                                live,
+                                theme,
+                                move |_, cx| {
+                                    studio_exec_skip.update(cx, |this, cx| {
+                                        this.skip_confirm_armed = false;
+                                        cx.notify();
+                                    });
+                                    hub_skip.update(cx, |hub, cx| {
+                                        hub.update_policy_rules(
+                                            "ツール操作の確認設定",
+                                            tool_confirmation_request(true),
+                                            cx,
+                                        );
+                                    });
+                                },
+                            ))
+                    })
                     .into_any_element(),
                 theme,
             ))
@@ -717,7 +792,13 @@ impl SettingsStudio {
             },
         );
         let add_panel = if add_open {
-            let tool_d = self.draft(cx, "policy:tool", "例: device.files / bash", None, theme);
+            let tool_d = self.draft(
+                cx,
+                "policy:tool",
+                "例: work.write / web_search",
+                None,
+                theme,
+            );
             let pattern_d = self.draft(cx, "policy:pattern", "例: * / C:/work/*", None, theme);
             let tool_val = tool_d.read(cx).text().trim().to_owned();
             let pattern_val = pattern_d.read(cx).text().trim().to_owned();
@@ -756,6 +837,7 @@ impl SettingsStudio {
                     .gap(px(10.))
                     .child(
                         div()
+                            .w_full()
                             .flex()
                             .flex_row()
                             .gap(px(10.))
@@ -772,17 +854,21 @@ impl SettingsStudio {
                     )
                     .child(
                         div()
+                            .w_full()
                             .flex()
                             .flex_row()
                             .items_center()
                             .justify_between()
+                            .flex_wrap()
                             .gap(px(8.))
                             .child(
                                 div()
                                     .flex()
                                     .flex_row()
+                                    .flex_wrap()
                                     .gap(px(6.))
                                     .child(eff_chip(w::PolicyEffect::Allow, "許可"))
+                                    .child(eff_chip(w::PolicyEffect::AskLlm, "AI判定"))
                                     .child(eff_chip(w::PolicyEffect::Confirm, "確認"))
                                     .child(eff_chip(w::PolicyEffect::Deny, "拒否")),
                             )
@@ -1176,31 +1262,159 @@ impl SettingsStudio {
         };
 
         let plugins = self.hub.read(cx).model.plugins.clone();
+        let adding_plugin = self.adding_plugin_open;
+        let studio_add_plugin = cx.entity();
         let plugins_heading = div()
+            .w_full()
             .flex()
             .flex_row()
             .items_center()
             .justify_between()
+            .gap(px(10.))
             .child(
                 div()
-                    .text_sm()
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(theme.ink)
-                    .child("プラグイン管理"),
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .text_size(px(18.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(theme.ink)
+                            .child("プラグイン管理"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.ink_muted)
+                            .child("ローカルの Wasm プラグインパッケージ（ene-plugin.json）を導入・有効化・削除します。"),
+                    ),
             )
-            .child(pill_button(
-                "dev-plugins-refresh",
-                "更新",
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(pill_button(
+                        "dev-plugins-refresh",
+                        "更新",
+                        Some(Icon::Refresh),
+                        Tone::Ghost,
+                        live,
+                        theme,
+                        {
+                            let hub = self.hub.clone();
+                            move |_, cx| hub.update(cx, |h, cx| h.load_plugins(cx))
+                        },
+                    ))
+                    .child(pill_button(
+                        "dev-plugins-toggle-add",
+                        if adding_plugin { "閉じる" } else { "追加" },
+                        (!adding_plugin).then_some(Icon::Plus),
+                        if adding_plugin {
+                            Tone::Ghost
+                        } else {
+                            Tone::Primary
+                        },
+                        live,
+                        theme,
+                        move |_, cx| {
+                            studio_add_plugin.update(cx, |this, cx| {
+                                this.adding_plugin_open = !this.adding_plugin_open;
+                                cx.notify();
+                            });
+                        },
+                    )),
+            );
+
+        let add_plugin_panel = if adding_plugin {
+            let plugin_path_d = self.draft(
+                cx,
+                "plugin:install-path",
+                "プラグインフォルダのパス（ene-plugin.json を含むディレクトリ）",
                 None,
-                Tone::Ghost,
-                live,
                 theme,
-                {
-                    let hub = self.hub.clone();
-                    move |_, cx| hub.update(cx, |h, cx| h.load_plugins(cx))
-                },
-            ));
+            );
+            let path_val = plugin_path_d.read(cx).text().trim().to_owned();
+            let draft_browse = plugin_path_d.clone();
+            let draft_clear = plugin_path_d.clone();
+            let hub_install = self.hub.clone();
+            let studio_close = cx.entity();
+            Some(
+                div()
+                    .w_full()
+                    .bg(theme.bg_surface)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(px(14.))
+                    .p(px(16.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .child(labeled_field("パッケージフォルダ", plugin_path_d, theme))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.))
+                            .child(pill_button(
+                                "dev-plugin-browse",
+                                "フォルダを選択",
+                                None,
+                                Tone::Soft,
+                                true,
+                                theme,
+                                move |_, cx| {
+                                    let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+                                        files: false,
+                                        directories: true,
+                                        multiple: false,
+                                        prompt: Some("プラグインパッケージのフォルダを選択".into()),
+                                    });
+                                    let draft = draft_browse.clone();
+                                    cx.spawn(async move |cx| {
+                                        if let Ok(Ok(Some(paths))) = rx.await
+                                            && let Some(path) = paths.into_iter().next()
+                                        {
+                                            let path_str = path.to_string_lossy().into_owned();
+                                            let _ = cx.update(|cx| {
+                                                draft.update(cx, |d, cx| d.set(path_str, cx));
+                                            });
+                                        }
+                                    })
+                                    .detach();
+                                },
+                            ))
+                            .child(pill_button(
+                                "dev-plugin-install-submit",
+                                "導入する",
+                                Some(Icon::Plus),
+                                Tone::Primary,
+                                live && !path_val.is_empty(),
+                                theme,
+                                move |_, cx| {
+                                    let path = path_val.clone();
+                                    hub_install.update(cx, |h, cx| h.install_plugin(path, cx));
+                                    draft_clear.update(cx, |d, cx| d.clear(cx));
+                                    studio_close.update(cx, |this, cx| {
+                                        this.adding_plugin_open = false;
+                                        cx.notify();
+                                    });
+                                },
+                            )),
+                    ),
+            )
+        } else {
+            None
+        };
+
         let plugins_card = div()
+            .w_full()
             .rounded(px(14.))
             .border_1()
             .border_color(theme.border)
@@ -1215,7 +1429,7 @@ impl SettingsStudio {
                     div()
                         .text_xs()
                         .text_color(theme.ink_muted)
-                        .child("インストール済みプラグインはありません。"),
+                        .child("インストール済みプラグインはありません。右上の「追加」からローカルパッケージを導入できます。"),
                 )
             })
             .children(plugins.into_iter().map(|plugin| {
@@ -1230,6 +1444,7 @@ impl SettingsStudio {
                     format!("v{} · {}", plugin.version, plugin.extensions.join(", "))
                 };
                 div()
+                    .w_full()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -1237,6 +1452,8 @@ impl SettingsStudio {
                     .gap(px(8.))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .flex()
                             .flex_col()
                             .child(
@@ -1244,12 +1461,14 @@ impl SettingsStudio {
                                     .text_sm()
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(theme.ink)
+                                    .truncate()
                                     .child(format!("{} ({})", plugin.name, plugin.id)),
                             )
                             .child(div().text_xs().text_color(theme.ink_muted).child(subtitle)),
                     )
                     .child(
                         div()
+                            .flex_none()
                             .flex()
                             .flex_row()
                             .gap(px(6.))
@@ -1290,7 +1509,161 @@ impl SettingsStudio {
                     )
             }));
 
+        // --- Remote HTTPS host target (F10) -----------------------------------
+        let current_remote = super::Hub::current_remote_host();
+        let remote_open = self.remote_host_open;
+        let studio_remote_toggle = cx.entity();
+        let remote_heading = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(
+                div()
+                    .text_size(px(18.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme.ink)
+                    .child("ホスト接続先"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.ink_muted)
+                    .child("既定はローカルホスト（自動検出）です。Tailscale Serve や HTTPS リバースプロキシ経由で遠隔ホストへ接続することもできます。"),
+            );
+        let remote_card = {
+            let remote_ep_d = self.draft(
+                cx,
+                "remote:endpoint",
+                "https://ene.example.com/rpc",
+                current_remote.as_deref(),
+                theme,
+            );
+            let remote_tok_d =
+                self.masked_draft(cx, "remote:token", "Owner Bearer トークン", true, theme);
+            let ep_val = remote_ep_d.read(cx).text().trim().to_owned();
+            let tok_val = remote_tok_d.read(cx).text().trim().to_owned();
+            let ep_validation = if ep_val.is_empty() {
+                None
+            } else {
+                ene_rpc::validate_remote_endpoint(&ep_val)
+                    .err()
+                    .map(|e| e.to_string())
+            };
+            let can_save_remote =
+                !ep_val.is_empty() && !tok_val.is_empty() && ep_validation.is_none();
+            let hub_save_remote = self.hub.clone();
+            let hub_clear_remote = self.hub.clone();
+            let tok_clear = remote_tok_d.clone();
+            let ep_clear = remote_ep_d.clone();
+            div()
+                .w_full()
+                .bg(theme.bg_surface)
+                .border_1()
+                .border_color(theme.border)
+                .rounded(px(14.))
+                .flex()
+                .flex_col()
+                .child(row_frame(
+                    false,
+                    "接続モード",
+                    Some(match &current_remote {
+                        Some(ep) => status_pill(
+                            format!("遠隔 HTTPS ({ep})"),
+                            Some(theme.mint),
+                            theme.mint_soft,
+                            theme.mint_fg,
+                        ),
+                        None => status_pill(
+                            "ローカル（自動検出）",
+                            Some(theme.mint),
+                            theme.mint_soft,
+                            theme.mint_fg,
+                        ),
+                    }),
+                    pill_button(
+                        "dev-remote-toggle",
+                        if remote_open {
+                            "閉じる"
+                        } else {
+                            "遠隔設定"
+                        },
+                        None,
+                        if remote_open { Tone::Soft } else { Tone::Ghost },
+                        true,
+                        theme,
+                        move |_, cx| {
+                            studio_remote_toggle.update(cx, |this, cx| {
+                                this.remote_host_open = !this.remote_host_open;
+                                cx.notify();
+                            });
+                        },
+                    ),
+                    theme,
+                ))
+                .when(remote_open, |card| {
+                    card.child(
+                        div()
+                            .w_full()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .p(px(16.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(10.))
+                            .child(labeled_field(
+                                "遠隔エンドポイント（HTTPS /rpc 必須）",
+                                remote_ep_d,
+                                theme,
+                            ))
+                            .child(labeled_field("認証トークン（Bearer）", remote_tok_d, theme))
+                            .when_some(ep_validation.clone(), |this, err| {
+                                this.child(div().text_xs().text_color(theme.danger_fg).child(err))
+                            })
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(8.))
+                                    .child(pill_button(
+                                        "dev-remote-clear",
+                                        "ローカルに戻す",
+                                        None,
+                                        Tone::Ghost,
+                                        current_remote.is_some(),
+                                        theme,
+                                        move |_, cx| {
+                                            hub_clear_remote
+                                                .update(cx, |h, cx| h.clear_remote_host(cx));
+                                            ep_clear.update(cx, |d, cx| d.clear(cx));
+                                            tok_clear.update(cx, |d, cx| d.clear(cx));
+                                        },
+                                    ))
+                                    .child(pill_button(
+                                        "dev-remote-save",
+                                        "遠隔接続先を保存",
+                                        Some(Icon::Check),
+                                        Tone::Primary,
+                                        can_save_remote,
+                                        theme,
+                                        move |_, cx| {
+                                            let ep = ep_val.clone();
+                                            let tok = tok_val.clone();
+                                            hub_save_remote.update(cx, |h, cx| {
+                                                let _ = h.save_remote_host(ep, tok, cx);
+                                            });
+                                        },
+                                    )),
+                            ),
+                    )
+                })
+        };
+
         div()
+            .w_full()
             .flex()
             .flex_col()
             .gap(px(16.))
@@ -1305,7 +1678,10 @@ impl SettingsStudio {
             .child(add_txt_toggle)
             .when_some(add_txt_panel, |this, panel| this.child(panel))
             .child(plugins_heading)
+            .when_some(add_plugin_panel, |this, panel| this.child(panel))
             .child(plugins_card)
+            .child(remote_heading)
+            .child(remote_card)
             .when_some(reset_history, |this, card| this.child(card))
             .into_any_element()
     }
@@ -1319,6 +1695,7 @@ fn row_frame(
     theme: &Theme,
 ) -> AnyElement {
     div()
+        .w_full()
         .when(top_border, |this| {
             this.border_t_1().border_color(theme.border)
         })

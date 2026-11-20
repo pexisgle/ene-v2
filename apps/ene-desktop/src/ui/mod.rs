@@ -1102,6 +1102,7 @@ impl Hub {
         self.load_mind(cx);
         self.load_companion_templates(cx);
         self.load_policy_rules(cx);
+        self.load_plugins(cx);
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -1122,7 +1123,7 @@ impl Hub {
                 }
 
                 let hub_for_view = hub.clone();
-                let bounds = Bounds::centered(None, size(px(780.), px(580.)), cx);
+                let bounds = settings_window_bounds(cx);
                 let opened = cx.open_window(
                     WindowOptions {
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -1765,6 +1766,134 @@ impl Hub {
             },
             |list| Update::Plugins(list.plugins),
         );
+    }
+
+    pub(crate) fn install_plugin(&mut self, source_path: String, cx: &mut Context<Self>) {
+        let trimmed = source_path.trim().to_owned();
+        if trimmed.is_empty() {
+            return;
+        }
+        let Some(host) = self.host() else {
+            return;
+        };
+        self.request(
+            "プラグインの導入",
+            async move {
+                let _ = host
+                    .settings
+                    .install_plugin(w::InstallPluginRequest {
+                        source_path: trimmed,
+                        ..Default::default()
+                    })
+                    .await?;
+                let list = host.settings.list_plugins(w::Empty::default()).await?;
+                list.view().to_owned_message().map_err(decode)
+            },
+            |list| Update::Plugins(list.plugins),
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn remote_host_config_path() -> Option<std::path::PathBuf> {
+        directories::ProjectDirs::from("", "", "ene")
+            .map(|dirs| dirs.config_dir().join("remote_host.json"))
+    }
+
+    pub(crate) fn current_remote_host() -> Option<String> {
+        let path = Self::remote_host_config_path()?;
+        match crate::host::HostTarget::read_remote(&path) {
+            Ok(Some(crate::host::HostTarget::Remote { endpoint, .. })) => Some(endpoint),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn save_remote_host(
+        &mut self,
+        endpoint: String,
+        token: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let Some(path) = Self::remote_host_config_path() else {
+            return Err("設定ディレクトリを特定できませんでした。".into());
+        };
+        crate::host::HostTarget::write_remote(&path, endpoint.trim(), token.trim())
+            .map_err(|error| error.to_string())?;
+        self.model.notice(
+            NoticeKind::Failed,
+            "遠隔ホスト設定を保存しました",
+            format!(
+                "{} を保存しました。アプリ再起動時に遠隔 HTTPS ホストへ接続できます。",
+                endpoint.trim()
+            ),
+        );
+        cx.notify();
+        Ok(())
+    }
+
+    pub(crate) fn clear_remote_host(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = Self::remote_host_config_path()
+            && path.exists()
+        {
+            let _ = std::fs::remove_file(path);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn assign_search_connection(
+        &mut self,
+        connection_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(settings) = self.model.settings().cloned() else {
+            return;
+        };
+        let Some(host) = self.host() else {
+            return;
+        };
+        let inputs: Vec<w::ConnectionInput> = settings
+            .connections
+            .iter()
+            .filter(|conn| conn.kind == w::ConnectionKind::Search)
+            .map(|conn| w::ConnectionInput {
+                id: conn.id.clone(),
+                name: conn.name.clone(),
+                enabled: connection_id.as_deref() == Some(conn.id.as_str()),
+                expected_revision: conn.revision,
+                kind: conn.kind,
+                config: conn.config.as_option().cloned().into(),
+                ..Default::default()
+            })
+            .collect();
+        if inputs.is_empty() {
+            return;
+        }
+        self.request(
+            "Web 検索接続の割当",
+            async move {
+                let response = host
+                    .settings
+                    .update_settings(w::UpdateSettingsRequest {
+                        expected_revision: settings.revision,
+                        connections: inputs,
+                        ..Default::default()
+                    })
+                    .await?;
+                response.view().to_owned_message().map_err(decode)
+            },
+            |updated| {
+                Update::Notification(Box::new(w::Notification {
+                    kind: "settings".into(),
+                    event: Some(w::notification::Event::SettingsUpdated(Box::new(
+                        w::SettingsUpdated {
+                            settings: Some(updated).into(),
+                            ..Default::default()
+                        },
+                    ))),
+                    ..Default::default()
+                }))
+            },
+        );
+        cx.notify();
     }
 
     pub(crate) fn set_plugin_enabled(
@@ -3576,6 +3705,25 @@ where
         }
     }
     inputs
+}
+
+fn settings_window_bounds(cx: &gpui::App) -> Bounds<gpui::Pixels> {
+    let default_size = size(px(820.), px(720.));
+    if let Some(display) = cx.primary_display() {
+        let visible = display.bounds();
+        let width = px(820.).min((visible.size.width - px(96.)).max(px(680.)));
+        let height = px(740.).min((visible.size.height - px(96.)).max(px(480.)));
+        // Place the settings window on the left half when wide enough so it
+        // does not collide with the centered desktop avatar.
+        if visible.size.width >= px(1240.) {
+            return Bounds::new(
+                gpui::point(visible.origin.x + px(48.), visible.origin.y + px(44.)),
+                size(width, height),
+            );
+        }
+        return Bounds::centered(Some(display.id()), size(width, height), cx);
+    }
+    Bounds::centered(None, default_size, cx)
 }
 
 fn build_stt_assignment_inputs(

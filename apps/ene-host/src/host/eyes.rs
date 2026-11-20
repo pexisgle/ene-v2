@@ -31,6 +31,7 @@ use std::{
 
 const EVALUATION_INTERVAL: Duration = Duration::from_secs(20);
 const REACTION_INTERVAL: Duration = Duration::from_secs(60);
+const QUIET_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 const OBSERVATION_LIFETIME: Duration = Duration::from_secs(60);
 const PREVIEW_LIFETIME: Duration = Duration::from_secs(180);
 const PREVIEW_FRAMES: usize = 8;
@@ -67,6 +68,7 @@ struct Session {
     pending: Option<Reaction>,
     pending_important: VecDeque<Reaction>,
     delivered: Option<Delivered>,
+    last_delivery: Instant,
     last_automatic: Option<(Instant, String)>,
     last_important: Option<String>,
 }
@@ -87,6 +89,7 @@ struct Reaction {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReportKind {
     Automatic,
+    Heartbeat,
     Important,
     ResponseCheck,
     Watch,
@@ -145,9 +148,35 @@ impl Session {
             pending: None,
             pending_important: VecDeque::new(),
             delivered: None,
+            last_delivery: now,
             last_automatic: None,
             last_important: None,
         }
+    }
+
+    fn quiet_summary(&self) -> String {
+        if let Some((false, idle_secs)) = self.activity {
+            return format!("特に目立った変化はありません（ユーザーは離席中・約{idle_secs}秒）");
+        }
+        if let Some(window) = self.window.as_ref() {
+            let label = window["title"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    window["app"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                });
+            if let Some(label) = label {
+                return format!(
+                    "特に目立った変化はありません（前面: {}）",
+                    truncate(label, 120)
+                );
+            }
+        }
+        "特に目立った変化はありません（静かに見守り中）".into()
     }
 
     fn event(&mut self, now: Instant, value: Value) {
@@ -207,6 +236,21 @@ impl Session {
         }
         let summary = &self.previous;
         if !assessment.notify {
+            if self.pending.is_none()
+                && now.duration_since(self.last_delivery) >= QUIET_HEARTBEAT_INTERVAL
+            {
+                let heartbeat_summary = if summary.trim().is_empty() {
+                    self.quiet_summary()
+                } else {
+                    format!("特に大きな変化はありません（現在の様子: {summary}）")
+                };
+                self.pending = Some(Reaction {
+                    summary: heartbeat_summary,
+                    kind: ReportKind::Heartbeat,
+                    at: now,
+                });
+                return "heartbeat_queued";
+            }
             return "not_important";
         }
         if self
@@ -483,11 +527,21 @@ pub(crate) fn poll(world: &mut World) {
                 session.pending_important.retain(current);
                 if world.get::<ActiveTurn>(entity).is_none() {
                     session.delivered = None;
-                    if let Some(reaction) = session
+                    let next_reaction = session
                         .pending_important
                         .pop_front()
                         .or_else(|| session.pending.take().filter(current))
-                    {
+                        .or_else(|| {
+                            (session.task.is_none()
+                                && now.duration_since(session.last_delivery)
+                                    >= QUIET_HEARTBEAT_INTERVAL)
+                                .then(|| Reaction {
+                                    summary: session.quiet_summary(),
+                                    kind: ReportKind::Heartbeat,
+                                    at: now,
+                                })
+                        });
+                    if let Some(reaction) = next_reaction {
                         deliver(world, entity, companion_id, session, reaction, now);
                     }
                 }
@@ -529,14 +583,21 @@ fn deliver(
             world,
             companion,
             "delivered",
-            json!({"watch": reaction.kind == ReportKind::Watch, "important": reaction.kind.important(), "report_id": id.0, "summary": reaction.summary}),
+            json!({
+                "watch": reaction.kind == ReportKind::Watch,
+                "important": reaction.kind.important(),
+                "heartbeat": reaction.kind == ReportKind::Heartbeat,
+                "report_id": id.0,
+                "summary": reaction.summary
+            }),
         );
+        session.last_delivery = now;
         match reaction.kind {
             ReportKind::Automatic => session.last_automatic = Some((now, reaction.summary.clone())),
             ReportKind::Important | ReportKind::ResponseCheck => {
                 session.last_important = Some(reaction.summary.clone())
             }
-            ReportKind::Watch => {}
+            ReportKind::Watch | ReportKind::Heartbeat => {}
         }
         session.delivered = Some(Delivered {
             id,
@@ -1203,5 +1264,43 @@ mod tests {
             session.pending_important.front().unwrap().summary,
             "ビルドが失敗"
         );
+    }
+
+    #[test]
+    fn quiet_heartbeat_delivers_no_change_report_after_one_minute() {
+        let now = Instant::now();
+        let mut session = Session::new("client".into(), "subscription".into(), now);
+        // Before 1 minute has elapsed, notify=false stays suppressed.
+        assert_eq!(
+            session.queue_assessment(
+                now + Duration::from_secs(30),
+                Assessment {
+                    notify: false,
+                    summary: "静かな作業中".into(),
+                    important: None,
+                },
+                false,
+            ),
+            "not_important"
+        );
+        assert!(session.pending.is_none());
+
+        // Once QUIET_HEARTBEAT_INTERVAL (60s) has elapsed, even a no-change assessment
+        // queues a periodic Heartbeat report so the head can react with idle motions.
+        assert_eq!(
+            session.queue_assessment(
+                now + QUIET_HEARTBEAT_INTERVAL,
+                Assessment {
+                    notify: false,
+                    summary: String::new(),
+                    important: None,
+                },
+                false,
+            ),
+            "heartbeat_queued"
+        );
+        let pending = session.pending.as_ref().expect("heartbeat queued");
+        assert!(pending.kind == ReportKind::Heartbeat);
+        assert!(pending.summary.contains("特に目立った変化はありません"));
     }
 }

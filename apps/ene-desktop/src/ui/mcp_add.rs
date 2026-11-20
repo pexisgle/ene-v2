@@ -2,7 +2,7 @@ use super::SettingsStudio;
 use super::icons::Icon;
 use super::studio::labeled_field;
 use super::theme::Theme;
-use super::widgets::{Tone, pill_button};
+use super::widgets::{Tone, disclosure_row, pill_button};
 use ene_rpc as w;
 use gpui::{AnyElement, Context, FontWeight, div, prelude::*, px};
 
@@ -119,12 +119,164 @@ impl SettingsStudio {
                 )
             }
         };
-        let mut error = target.as_ref().err().copied();
+        let adv_open = self.mcp_add_advanced_open;
+        let studio_adv = studio.clone();
+        let adv_toggle = disclosure_row(
+            "mcp-add-adv-toggle",
+            if mode == Mode::Http {
+                "認証・ヘッダー設定（任意）"
+            } else {
+                "環境変数・作業ディレクトリ・認証（任意）"
+            },
+            adv_open,
+            theme,
+            move |_, cx| {
+                studio_adv.update(cx, |this, cx| {
+                    this.mcp_add_advanced_open = !this.mcp_add_advanced_open;
+                    cx.notify();
+                });
+            },
+        );
+        let (mcp_secret, adv_fields, adv_error, extra_cfg) = if mode == Mode::Http {
+            let auth_hdr_d = self.draft(
+                cx,
+                "add:mcp:auth-header",
+                "空欄時は Authorization: Bearer",
+                None,
+                theme,
+            );
+            let secret_d = self.masked_draft(
+                cx,
+                "add:mcp:secret",
+                "認証トークン（任意・暗号保存）",
+                true,
+                theme,
+            );
+            let headers_d = self.description_draft(
+                cx,
+                "add:mcp:headers",
+                "例: X-Custom-Header: value（1行1件）",
+                None,
+                theme,
+            );
+            let auth_hdr = auth_hdr_d.read(cx).text().trim().to_owned();
+            let secret = secret_d.read(cx).text().trim().to_owned();
+            let headers_parsed = parse_mcp_kv(headers_d.read(cx).text(), ':');
+            let adv_err = headers_parsed.as_ref().err().copied();
+            let panel = div()
+                .w_full()
+                .rounded(px(10.))
+                .bg(theme.bg_blush)
+                .p(px(12.))
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(labeled_field("認証トークン（任意）", secret_d, theme))
+                .child(labeled_field(
+                    "認証ヘッダー名（任意・空欄時は Bearer）",
+                    auth_hdr_d,
+                    theme,
+                ))
+                .child(labeled_field(
+                    "追加 HTTP ヘッダー（Key: Value）",
+                    headers_d,
+                    theme,
+                ))
+                .into_any_element();
+            (
+                secret,
+                panel,
+                adv_err,
+                (
+                    String::new(),
+                    String::new(),
+                    auth_hdr,
+                    Vec::new(),
+                    headers_parsed.unwrap_or_default(),
+                ),
+            )
+        } else {
+            let cwd_d = self.draft(cx, "add:mcp:cwd", "例: C:/work/project", None, theme);
+            let secret_env_d = self.draft(
+                cx,
+                "add:mcp:secret-env",
+                "例: GITHUB_TOKEN / API_KEY",
+                None,
+                theme,
+            );
+            let secret_d = self.masked_draft(
+                cx,
+                "add:mcp:secret",
+                "環境変数へ渡すシークレット値（任意）",
+                true,
+                theme,
+            );
+            let env_d = self.description_draft(
+                cx,
+                "add:mcp:env",
+                "例: NODE_ENV=production（1行1件）",
+                None,
+                theme,
+            );
+            let cwd = cwd_d.read(cx).text().trim().to_owned();
+            let secret_env = secret_env_d.read(cx).text().trim().to_owned();
+            let secret = secret_d.read(cx).text().trim().to_owned();
+            let env_parsed = parse_mcp_kv(env_d.read(cx).text(), '=');
+            let adv_err = env_parsed.as_ref().err().copied();
+            let panel = div()
+                .w_full()
+                .rounded(px(10.))
+                .bg(theme.bg_blush)
+                .p(px(12.))
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(labeled_field("作業ディレクトリ (cwd)", cwd_d, theme))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .gap(px(8.))
+                        .child(div().flex_1().min_w_0().child(labeled_field(
+                            "認証環境変数名",
+                            secret_env_d,
+                            theme,
+                        )))
+                        .child(div().flex_1().min_w_0().child(labeled_field(
+                            "認証シークレット",
+                            secret_d,
+                            theme,
+                        ))),
+                )
+                .child(labeled_field("追加環境変数（KEY=VALUE）", env_d, theme))
+                .into_any_element();
+            (
+                secret,
+                panel,
+                adv_err,
+                (
+                    cwd,
+                    secret_env,
+                    String::new(),
+                    env_parsed.unwrap_or_default(),
+                    Vec::new(),
+                ),
+            )
+        };
+
+        let mut error = target.as_ref().err().copied().or(adv_error);
         let chosen_name = name.read(cx).text().trim();
         if chosen_name.chars().count() > 128 {
             error = Some("名前は128文字以内で入力してください。");
         }
-        let connection = target.ok().flatten().map(|(config, suggested_name)| {
+        let connection = target.ok().flatten().map(|(mut config, suggested_name)| {
+            let (cwd, secret_env_var, auth_header, env, headers) = extra_cfg;
+            config.cwd = cwd;
+            config.secret_env_var = secret_env_var;
+            config.auth_header = auth_header;
+            config.env = env.into_iter().collect();
+            config.headers = headers.into_iter().collect();
             let name = if chosen_name.is_empty() {
                 suggested_name
             } else {
@@ -198,6 +350,8 @@ impl SettingsStudio {
                 )
             })
             .child(labeled_field("名前（任意）", name, theme))
+            .child(adv_toggle)
+            .when(adv_open, |this| this.child(adv_fields))
             .child(div().flex().justify_end().child(pill_button(
                 "mcp-add-submit",
                 "追加して接続を確認",
@@ -211,11 +365,18 @@ impl SettingsStudio {
                     };
                     input.id = uuid::Uuid::new_v4().to_string();
                     let id = input.id.clone();
-                    hub.update(cx, |hub, cx| hub.upsert_connection("MCP の追加", input, cx));
+                    let secret = mcp_secret.clone();
+                    hub.update(cx, |hub, cx| {
+                        hub.upsert_connection("MCP の追加", input, cx);
+                        if !secret.is_empty() {
+                            hub.register_secret(id.clone(), secret, cx);
+                        }
+                    });
                     submit.update(cx, |this, cx| {
                         this.pending_mcp = Some(id.clone());
                         this.expanded_connection_id = Some(id);
                         this.adding_connection = false;
+                        this.mcp_add_advanced_open = false;
                         this.open_dropdown = None;
                         cx.notify();
                     });
@@ -223,6 +384,29 @@ impl SettingsStudio {
             )))
             .into_any_element()
     }
+}
+
+fn parse_mcp_kv(raw: &str, sep: char) -> Result<Vec<(String, String)>, &'static str> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some((k, v)) = trimmed.split_once(sep) else {
+            return Err(if sep == ':' {
+                "追加ヘッダーは 1 行ごとに「Header: Value」形式で入力してください。"
+            } else {
+                "追加環境変数は 1 行ごとに「KEY=VALUE」形式で入力してください。"
+            });
+        };
+        let key = k.trim();
+        if key.is_empty() {
+            return Err("キー名が空の行があります。");
+        }
+        out.push((key.to_owned(), v.trim().to_owned()));
+    }
+    Ok(out)
 }
 
 type Target = Result<Option<(w::McpConnection, String)>, &'static str>;
@@ -517,5 +701,22 @@ mod tests {
         assert_eq!(config.args, ["-y", "pkg"]);
         assert!(npx_target("cmd /c echo hello").is_err());
         assert!(npx_target("cmd /k npx pkg").is_err());
+    }
+
+    #[test]
+    fn parse_mcp_kv_accepts_headers_and_env_and_rejects_malformed_lines() {
+        let env = parse_mcp_kv("FOO=bar\n  # comment=ok\nEMPTY=\n\n", '=').unwrap();
+        assert_eq!(env.len(), 3);
+        assert_eq!(env[0], ("FOO".into(), "bar".into()));
+        let headers = parse_mcp_kv("X-Tenant: acme\nX-Mode: strict", ':').unwrap();
+        assert_eq!(
+            headers,
+            vec![
+                ("X-Tenant".into(), "acme".into()),
+                ("X-Mode".into(), "strict".into()),
+            ]
+        );
+        assert!(parse_mcp_kv("INVALID_LINE_WITHOUT_SEP", '=').is_err());
+        assert!(parse_mcp_kv(": missing-key", ':').is_err());
     }
 }

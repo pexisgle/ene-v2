@@ -18,6 +18,7 @@ pub(crate) enum PolicyEffect {
     Allow,
     Deny,
     Confirm,
+    AskLlm,
 }
 
 /// The spelling stored in policy rules.
@@ -27,6 +28,7 @@ impl PolicyEffect {
             Self::Allow => "allow",
             Self::Deny => "deny",
             Self::Confirm => "confirm",
+            Self::AskLlm => "ask_llm",
         }
     }
 }
@@ -505,6 +507,7 @@ pub(crate) fn decide_action(rules: &[PolicyRule], action: &CandidateAction) -> V
     let raw_hash_hex = hex_digest(&raw_hash);
     let mut denied: Option<&PolicyRule> = None;
     let mut confirm = false;
+    let mut ask_llm = false;
     let mut allowed = false;
     for rule in rules.iter().filter(|rule| {
         matches_action(
@@ -523,6 +526,7 @@ pub(crate) fn decide_action(rules: &[PolicyRule], action: &CandidateAction) -> V
                 break;
             }
             PolicyEffect::Confirm => confirm = true,
+            PolicyEffect::AskLlm => ask_llm = true,
             PolicyEffect::Allow => allowed = true,
         }
     }
@@ -533,6 +537,11 @@ pub(crate) fn decide_action(rules: &[PolicyRule], action: &CandidateAction) -> V
     }
     if confirm {
         return Verdict::HumanRequired {
+            target: target_summary,
+        };
+    }
+    if ask_llm {
+        return Verdict::NeedsDecision {
             target: target_summary,
         };
     }
@@ -718,6 +727,26 @@ mod tests {
             &json!({"motion": "nod"}),
         );
         assert!(matches!(wildcard, Verdict::HumanRequired { .. }));
+        let ask_llm = rule(PolicyEffect::AskLlm, "device_request", "/tmp/ask");
+        let ask_over_allow = decide_capability(
+            &[allow.clone(), ask_llm.clone()],
+            Some(&spec(CapabilityApproval::Auto)),
+            "device.files",
+            "device_request",
+            &json!({"capability":"device.files","input":{"path": "/tmp/ask"}}),
+        );
+        assert!(matches!(ask_over_allow, Verdict::NeedsDecision { .. }));
+        let confirm_over_ask = decide_capability(
+            &[
+                ask_llm,
+                rule(PolicyEffect::Confirm, "device_request", "/tmp/ask"),
+            ],
+            Some(&spec(CapabilityApproval::Auto)),
+            "device.files",
+            "device_request",
+            &json!({"capability":"device.files","input":{"path": "/tmp/ask"}}),
+        );
+        assert!(matches!(confirm_over_ask, Verdict::HumanRequired { .. }));
         let mut deny = rule(PolicyEffect::Deny, "device_request", "*");
         deny.id = "r2".into();
         let verdict = decide_capability(

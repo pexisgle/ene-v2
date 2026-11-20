@@ -127,7 +127,7 @@ impl SettingsStudio {
             };
             rows.push(self.render_connection_row(conn, check, live, theme, cx));
         }
-        if rows.is_empty() {
+        if rows.is_empty() && !adding {
             rows.push(
                 div()
                     .w_full()
@@ -172,12 +172,15 @@ impl SettingsStudio {
         };
 
         div()
+            .w_full()
             .flex()
             .flex_col()
             .gap(px(16.))
             .child(header)
             .when_some(add_panel, |this, p| this.child(p))
-            .child(div().flex().flex_col().gap(px(10.)).children(rows))
+            .when(!rows.is_empty(), |this| {
+                this.child(div().w_full().flex().flex_col().gap(px(10.)).children(rows))
+            })
             .child(
                 div()
                     .pt(px(4.))
@@ -400,32 +403,72 @@ impl SettingsStudio {
                         cx.notify();
                     });
                 },
-            ))
-            .child(pill_button(
+            ));
+
+        let search_presets = [
+            (
                 "add-preset-search-mwmbl",
-                "Mwmbl (Web検索)",
-                Some(Icon::Search),
+                "Mwmbl（キー不要）",
+                "Web検索 (Mwmbl)",
+                "mwmbl",
+                "https://api.mwmbl.org/api/v2/search/",
+                Tone::Mint,
+            ),
+            (
+                "add-preset-search-searxng",
+                "SearXNG（自前・ローカル）",
+                "Web検索 (SearXNG)",
+                "searxng",
+                "http://127.0.0.1:8080/search",
                 Tone::Ghost,
+            ),
+            (
+                "add-preset-search-brave",
+                "Brave Search（APIキー）",
+                "Web検索 (Brave)",
+                "brave",
+                "https://api.search.brave.com/res/v1/web/search",
+                Tone::Ghost,
+            ),
+            (
+                "add-preset-search-tavily",
+                "Tavily（APIキー）",
+                "Web検索 (Tavily)",
+                "tavily",
+                "https://api.tavily.com/search",
+                Tone::Ghost,
+            ),
+        ];
+        let mut search_chips = div().flex().flex_row().flex_wrap().gap(px(6.));
+        for (btn_id, label, conn_name, adapter, url, tone) in search_presets {
+            let hub_s = hub_search.clone();
+            let studio_s = studio_search.clone();
+            search_chips = search_chips.child(pill_button(
+                btn_id,
+                label,
+                Some(Icon::Search),
+                tone,
                 live,
                 theme,
                 move |_, cx| {
                     if let Some(input) = build_custom_connection_input(
                         w::ConnectionKind::Search,
-                        "Web検索 (Mwmbl)",
-                        "mwmbl",
-                        "https://api.mwmbl.org/api/v2/search/",
+                        conn_name,
+                        adapter,
+                        url,
                     ) {
-                        hub_search.update(cx, |hub, cx| {
+                        hub_s.update(cx, |hub, cx| {
                             hub.upsert_connection("Web検索接続の追加", input, cx);
                         });
                     }
-                    studio_search.update(cx, |this, cx| {
+                    studio_s.update(cx, |this, cx| {
                         this.adding_connection = false;
                         this.open_dropdown = None;
                         cx.notify();
                     });
                 },
             ));
+        }
 
         let custom_kind = self.custom_kind;
         let mut kind_chips = Vec::new();
@@ -456,21 +499,38 @@ impl SettingsStudio {
             ));
         }
 
-        let name_d = self.draft(cx, "add:custom:name", "表示名", None, theme);
-        let adapter_d = self.draft(
+        let (adapter_label, adapter_placeholder, target_label, target_placeholder) =
+            match custom_kind {
+                w::ConnectionKind::Search => (
+                    "検索アダプタ",
+                    "例: mwmbl / searxng / brave / tavily",
+                    "検索 API URL",
+                    "例: http://127.0.0.1:8080/search",
+                ),
+                w::ConnectionKind::Acp | w::ConnectionKind::Mcp => (
+                    "実行コマンド",
+                    "例: npx / python / my-agent",
+                    "引数（スペース区切り）",
+                    "例: --stdio --workspace .",
+                ),
+                _ => (
+                    "アダプタ名",
+                    "例: openai / voicevox / whisper",
+                    "エンドポイント URL",
+                    "例: http://127.0.0.1:11434/v1",
+                ),
+            };
+        let name_d = self.draft(
             cx,
-            "add:custom:adapter",
-            "アダプタ名またはコマンド",
+            "add:custom:name",
+            "表示名（例: ローカル LLM）",
             None,
             theme,
         );
-        let target_d = self.draft(
-            cx,
-            "add:custom:target",
-            "エンドポイントURLまたは引数（スペース区切り）",
-            None,
-            theme,
-        );
+        let adapter_d = self.draft(cx, "add:custom:adapter", adapter_placeholder, None, theme);
+        adapter_d.update(cx, |d, cx| d.set_placeholder(adapter_placeholder, cx));
+        let target_d = self.draft(cx, "add:custom:target", target_placeholder, None, theme);
+        target_d.update(cx, |d, cx| d.set_placeholder(target_placeholder, cx));
         let c_name = name_d.read(cx).text().trim().to_owned();
         let c_adapter = adapter_d.read(cx).text().trim().to_owned();
         let c_target = target_d.read(cx).text().trim().to_owned();
@@ -524,6 +584,20 @@ impl SettingsStudio {
                     )
                     .child(voice_chips),
             )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(theme.ink_muted)
+                            .child("Web 検索を追加"),
+                    )
+                    .child(search_chips),
+            )
             .child(disclosure_row(
                 "custom-connection",
                 "カスタム接続",
@@ -560,12 +634,12 @@ impl SettingsStudio {
                                 .flex_row()
                                 .gap(px(10.))
                                 .child(div().flex_1().min_w_0().child(labeled_field(
-                                    "アダプタ / コマンド",
+                                    adapter_label,
                                     adapter_d,
                                     theme,
                                 )))
                                 .child(div().flex_1().min_w_0().child(labeled_field(
-                                    "URL / 引数",
+                                    target_label,
                                     target_d,
                                     theme,
                                 ))),
@@ -2728,6 +2802,173 @@ impl SettingsStudio {
                                 )
                                 .child(pill_button(
                                     spec.add_btn_id,
+                                    "接続を追加を開く",
+                                    Some(Icon::Plus),
+                                    Tone::Ghost,
+                                    true,
+                                    theme,
+                                    move |_, cx| {
+                                        studio_add.update(cx, |this, cx| {
+                                            this.adding_connection = true;
+                                            cx.notify();
+                                        });
+                                    },
+                                )),
+                        )
+                    })
+                    .into_any_element(),
+            );
+        }
+
+        // Web Search role assignment (F13)
+        let (search_conns, active_search_id) = {
+            let hub = self.hub.read(cx);
+            let list: Vec<(String, String, String)> = hub
+                .model
+                .settings()
+                .map(|s| {
+                    s.connections
+                        .iter()
+                        .filter(|c| c.kind == w::ConnectionKind::Search)
+                        .map(|c| {
+                            let adapter = c
+                                .config
+                                .as_option()
+                                .and_then(|cfg| match cfg.config.as_ref()? {
+                                    w::connection_config::Config::Search(s) => {
+                                        s.endpoint.as_option().map(|e| e.adapter.clone())
+                                    }
+                                    _ => None,
+                                })
+                                .unwrap_or_else(|| "search".into());
+                            (c.id.clone(), c.name.clone(), adapter)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let active = hub.model.settings().and_then(|s| {
+                s.connections
+                    .iter()
+                    .find(|c| c.kind == w::ConnectionKind::Search && c.enabled)
+                    .map(|c| c.id.clone())
+            });
+            (list, active)
+        };
+        {
+            let dd_key = "adv-role:search";
+            let dd_open = self.open_dropdown.as_deref() == Some(dd_key);
+            let mut options = Vec::with_capacity(search_conns.len() + 1);
+            options.push(DropdownOption {
+                value: "__off__".to_owned(),
+                label: "無効（Web 検索オフ）".to_owned(),
+                detail: None,
+            });
+            for (cid, name, adapter) in &search_conns {
+                options.push(DropdownOption {
+                    value: cid.clone(),
+                    label: name.clone(),
+                    detail: Some(adapter.clone()),
+                });
+            }
+            let current_value = active_search_id
+                .clone()
+                .unwrap_or_else(|| "__off__".to_owned());
+            let current_text = active_search_id
+                .as_ref()
+                .and_then(|aid| {
+                    search_conns
+                        .iter()
+                        .find(|(cid, _, _)| cid == aid)
+                        .map(|(_, name, adapter)| format!("{name} ({adapter})"))
+                })
+                .unwrap_or_else(|| "無効（Web 検索オフ）".to_owned());
+            let no_search = search_conns.is_empty();
+            let studio_toggle = cx.entity();
+            let studio_pick = cx.entity();
+            let studio_add = cx.entity();
+            let hub_assign = self.hub.clone();
+            rows.push(
+                div()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .pt(px(12.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(theme.ink)
+                                    .child("Web 検索"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.ink_muted)
+                                    .truncate()
+                                    .child(current_text.clone()),
+                            ),
+                    )
+                    .child(dropdown_select(
+                        dd_key,
+                        Some(current_value.as_str()),
+                        Some(current_text.as_str()),
+                        "検索プロバイダを選択…",
+                        &options,
+                        dd_open,
+                        live,
+                        180.,
+                        None,
+                        "",
+                        "Web 検索接続がありません（「接続を追加」から追加してください）",
+                        theme,
+                        move |_, cx| {
+                            studio_toggle.update(cx, |this, cx| {
+                                this.open_dropdown =
+                                    if this.open_dropdown.as_deref() == Some(dd_key) {
+                                        None
+                                    } else {
+                                        Some(dd_key.to_owned())
+                                    };
+                                cx.notify();
+                            });
+                        },
+                        move |picked, _, cx| {
+                            let target = if picked == "__off__" {
+                                None
+                            } else {
+                                Some(picked)
+                            };
+                            hub_assign.update(cx, |hub, cx| {
+                                hub.assign_search_connection(target, cx);
+                            });
+                            studio_pick.update(cx, |this, cx| {
+                                this.open_dropdown = None;
+                                cx.notify();
+                            });
+                        },
+                    ))
+                    .when(no_search, |this| {
+                        this.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(8.))
+                                .child(div().text_xs().text_color(theme.ink_muted).child(
+                                    "Web 検索接続がありません。未設定の間は外部検索を行いません。",
+                                ))
+                                .child(pill_button(
+                                    "adv-role-search-add",
                                     "接続を追加を開く",
                                     Some(Icon::Plus),
                                     Tone::Ghost,

@@ -3999,7 +3999,7 @@ checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
 name = "ene-avatar"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "bevy",
  "ene-avatar-ipc",
@@ -4013,7 +4013,7 @@ dependencies = [
 
 [[package]]
 name = "ene-avatar-ipc"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -4021,7 +4021,7 @@ dependencies = [
 
 [[package]]
 name = "ene-desktop"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64 0.23.1",
  "buffa",
@@ -4062,7 +4062,7 @@ dependencies = [
 
 [[package]]
 name = "ene-host"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-stream",
  "axum",
@@ -4124,7 +4124,7 @@ dependencies = [
 
 [[package]]
 name = "ene-openrouter-wasm"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64 0.23.1",
  "ene-plugin",
@@ -4133,7 +4133,7 @@ dependencies = [
 
 [[package]]
 name = "ene-plugin"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "agent-client-protocol-schema",
  "ene-rpc",
@@ -4144,7 +4144,7 @@ dependencies = [
 
 [[package]]
 name = "ene-plugin-runtime"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64 0.23.1",
  "cap-fs-ext",
@@ -4169,7 +4169,7 @@ dependencies = [
 
 [[package]]
 name = "ene-reference-wasm"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "ene-plugin",
  "serde_json",
@@ -4177,7 +4177,7 @@ dependencies = [
 
 [[package]]
 name = "ene-rpc"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "buffa",
  "buffa-build",
@@ -4192,7 +4192,7 @@ dependencies = [
 
 [[package]]
 name = "ene-vrm"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "bevy",
  "gltf",

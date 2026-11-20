@@ -31,6 +31,7 @@ pub struct SettingsStudio {
     pub(crate) custom_connection_open: bool,
     pub(crate) custom_kind: w::ConnectionKind,
     pub(crate) mcp_add_mode: super::mcp_add::Mode,
+    pub(crate) mcp_add_advanced_open: bool,
     pub(crate) pending_mcp: Option<String>,
     pub(crate) expanded_connection_id: Option<String>,
     pub(crate) revealed_secret_for: Option<String>,
@@ -46,6 +47,10 @@ pub struct SettingsStudio {
     pub(crate) delete_armed_policy_text: Option<String>,
     pub(crate) editing_policy_text_id: Option<String>,
     pub(crate) adding_policy_text_open: bool,
+    pub(crate) adding_plugin_open: bool,
+    pub(crate) remote_host_open: bool,
+    pub(crate) skip_confirm_armed: bool,
+    content_scroll: gpui::ScrollHandle,
     _observe: Subscription,
 }
 
@@ -67,6 +72,7 @@ impl SettingsStudio {
             custom_connection_open: false,
             custom_kind: w::ConnectionKind::Llm,
             mcp_add_mode: super::mcp_add::Mode::Npx,
+            mcp_add_advanced_open: false,
             pending_mcp: None,
             expanded_connection_id: None,
             revealed_secret_for: None,
@@ -81,6 +87,10 @@ impl SettingsStudio {
             delete_armed_policy_text: None,
             editing_policy_text_id: None,
             adding_policy_text_open: false,
+            adding_plugin_open: false,
+            remote_host_open: false,
+            skip_confirm_armed: false,
+            content_scroll: gpui::ScrollHandle::new(),
             _observe,
         }
     }
@@ -286,6 +296,8 @@ impl SettingsStudio {
                     .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _, cx| {
                         studio.update(cx, |this, _| {
                             this.open_dropdown = None;
+                            this.skip_confirm_armed = false;
+                            this.content_scroll.set_offset(gpui::point(px(0.), px(0.)));
                         });
                         hub.update(cx, |hub, cx| {
                             hub.settings_section = section;
@@ -298,6 +310,7 @@ impl SettingsStudio {
                                 hub.load_providers(cx);
                             } else if section == SettingsSection::Device {
                                 hub.load_policy_rules(cx);
+                                hub.load_plugins(cx);
                             }
                             cx.notify();
                         });
@@ -478,7 +491,12 @@ impl Render for SettingsStudio {
                             .when_some(notice_block, |this, n| this.child(n))
                             .child(
                                 div()
-                                    .id("studio-content-scroll")
+                                    .id(SharedString::from(format!(
+                                        "studio-content-scroll-{}",
+                                        section.key()
+                                    )))
+                                    .track_scroll(&self.content_scroll)
+                                    .w_full()
                                     .flex_1()
                                     .min_h_0()
                                     .overflow_y_scroll()

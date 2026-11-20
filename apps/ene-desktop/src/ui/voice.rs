@@ -6,11 +6,11 @@
 //! own. A level bar that moves with a closed gate, or a gate that opens with no
 //! bytes sent, names the broken stage without reading logs.
 
-use super::SettingsStudio;
 use super::icons::Icon;
 use super::studio::labeled_field;
 use super::theme::Theme;
 use super::widgets::{Tone, pill_button, status_pill};
+use super::{SettingsSection, SettingsStudio};
 use crate::state::Device;
 use ene_rpc as w;
 use gpui::{AnyElement, Context, FontWeight, div, prelude::*, px};
@@ -73,6 +73,8 @@ impl SettingsStudio {
         let (
             live,
             capture,
+            capture_mode,
+            ptt_active,
             recognized,
             transcription,
             devices,
@@ -86,6 +88,8 @@ impl SettingsStudio {
             (
                 hub.live(),
                 hub.model.capture,
+                hub.model.capture_mode,
+                hub.model.ptt_active,
                 hub.model.recognized.clone(),
                 hub.model.transcription.clone(),
                 hub.model.devices.clone(),
@@ -96,6 +100,8 @@ impl SettingsStudio {
                 hub.model.speech_report.clone(),
             )
         };
+        let is_ptt = capture_mode == crate::audio::CaptureMode::Ptt;
+        let mic_ready = matches!(devices.input, Device::Ready(_));
 
         let header = div()
             .flex()
@@ -167,13 +173,33 @@ impl SettingsStudio {
                 theme.ink_muted,
             )
         };
+        let hub_stt_conn = self.hub.clone();
         let stt_state = if !has_stt {
-            status_pill(
-                "音声認識の接続が必要",
-                None,
-                theme.amber_soft,
-                theme.amber_fg,
-            )
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .child(status_pill(
+                    "音声認識の接続が必要",
+                    None,
+                    theme.amber_soft,
+                    theme.amber_fg,
+                ))
+                .child(pill_button(
+                    "voice-stt-open-conn",
+                    "接続設定を開く",
+                    Some(Icon::Plug),
+                    Tone::Soft,
+                    true,
+                    theme,
+                    move |_, cx| {
+                        hub_stt_conn.update(cx, |hub, cx| {
+                            hub.open_settings(SettingsSection::Connections, cx);
+                        });
+                    },
+                ))
+                .into_any_element()
         } else if live {
             status_pill("待機中", Some(theme.mint), theme.mint_soft, theme.mint_fg)
         } else {
@@ -184,6 +210,78 @@ impl SettingsStudio {
                 theme.danger_fg,
             )
         };
+
+        let hub_mode_vad = self.hub.clone();
+        let hub_mode_ptt = self.hub.clone();
+        let hub_ptt_toggle = self.hub.clone();
+        let hub_ptt_cancel = self.hub.clone();
+        let capture_mode_controls = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_wrap()
+            .gap(px(6.))
+            .child(pill_button(
+                "voice-mode-vad",
+                "VAD（自動検出）",
+                None,
+                if !is_ptt { Tone::Primary } else { Tone::Ghost },
+                true,
+                theme,
+                move |_, cx| {
+                    hub_mode_vad.update(cx, |hub, cx| {
+                        if hub.model.capture_mode != crate::audio::CaptureMode::Vad {
+                            hub.toggle_capture_mode(cx);
+                        }
+                    });
+                },
+            ))
+            .child(pill_button(
+                "voice-mode-ptt",
+                "PTT（押して話す）",
+                None,
+                if is_ptt { Tone::Primary } else { Tone::Ghost },
+                true,
+                theme,
+                move |_, cx| {
+                    hub_mode_ptt.update(cx, |hub, cx| {
+                        if hub.model.capture_mode != crate::audio::CaptureMode::Ptt {
+                            hub.toggle_capture_mode(cx);
+                        }
+                    });
+                },
+            ))
+            .when(is_ptt, |row| {
+                row.child(pill_button(
+                    "voice-ptt-toggle",
+                    if ptt_active {
+                        "送信（話す終了）"
+                    } else {
+                        "押して話す"
+                    },
+                    Some(Icon::Mic),
+                    if ptt_active { Tone::Mint } else { Tone::Soft },
+                    mic_ready && !mic_muted && has_stt && live,
+                    theme,
+                    move |_, cx| {
+                        hub_ptt_toggle.update(cx, |hub, cx| hub.ptt_toggle(cx));
+                    },
+                ))
+                .when(ptt_active, |row| {
+                    row.child(pill_button(
+                        "voice-ptt-cancel",
+                        "キャンセル",
+                        Some(Icon::Close),
+                        Tone::Danger,
+                        true,
+                        theme,
+                        move |_, cx| {
+                            hub_ptt_cancel.update(cx, |hub, cx| hub.ptt_cancel(cx));
+                        },
+                    ))
+                })
+            })
+            .into_any_element();
 
         let preview = transcription
             .as_ref()
@@ -260,7 +358,17 @@ impl SettingsStudio {
                 theme,
                 true,
             ))
-            .child(stage_row("VAD（声の検出）", gate_state, theme, true))
+            .child(stage_row("入力モード", capture_mode_controls, theme, true))
+            .child(stage_row(
+                if is_ptt {
+                    "PTT（収録状態）"
+                } else {
+                    "VAD（声の検出）"
+                },
+                gate_state,
+                theme,
+                true,
+            ))
             .child(stage_row("ホストへの送信", sent_state, theme, true))
             .child(stage_row("音声認識の接続", stt_state, theme, true))
             .child(stage_row(
@@ -348,15 +456,35 @@ impl SettingsStudio {
                 theme.ink_muted,
             ),
         };
+        let hub_tts_conn = self.hub.clone();
         let tts_state = if has_tts {
             status_pill("設定済み", Some(theme.mint), theme.mint_soft, theme.mint_fg)
         } else {
-            status_pill(
-                "読み上げの接続が必要",
-                None,
-                theme.amber_soft,
-                theme.amber_fg,
-            )
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .child(status_pill(
+                    "読み上げの接続が必要",
+                    None,
+                    theme.amber_soft,
+                    theme.amber_fg,
+                ))
+                .child(pill_button(
+                    "voice-tts-open-conn",
+                    "接続設定を開く",
+                    Some(Icon::Plug),
+                    Tone::Soft,
+                    true,
+                    theme,
+                    move |_, cx| {
+                        hub_tts_conn.update(cx, |hub, cx| {
+                            hub.open_settings(SettingsSection::Connections, cx);
+                        });
+                    },
+                ))
+                .into_any_element()
         };
 
         let hub_speak = self.hub.clone();
@@ -450,6 +578,7 @@ impl SettingsStudio {
             });
 
         div()
+            .w_full()
             .flex()
             .flex_col()
             .gap(px(16.))

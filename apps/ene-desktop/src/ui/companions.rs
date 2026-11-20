@@ -212,7 +212,7 @@ impl SettingsStudio {
                                     div()
                                         .text_xs()
                                         .text_color(theme.ink_muted)
-                                        .line_clamp(2)
+                                        .truncate()
                                         .child(persona_line),
                                 ),
                         ),
@@ -365,13 +365,14 @@ impl SettingsStudio {
         }
 
         div()
+            .w_full()
             .flex()
             .flex_col()
             .gap(px(16.))
             .child(header)
             .when_some(import_panel, |this, p| this.child(p))
             .when_some(create_panel, |this, p| this.child(p))
-            .child(div().flex().flex_col().gap(px(10.)).children(rows))
+            .child(div().w_full().flex().flex_col().gap(px(10.)).children(rows))
             .into_any_element()
     }
 
@@ -818,7 +819,7 @@ impl SettingsStudio {
         let voice_style_d = self.draft(
             cx,
             format!("comp:{id}:r{rev}:voice-style"),
-            "読み上げ調（任意・OpenAI互換等）",
+            "例: 丁寧・元気（任意）",
             current_voice.style.as_deref(),
             theme,
         );
@@ -1186,6 +1187,77 @@ impl SettingsStudio {
         let hub_export = self.hub.clone();
         let save_id = id.clone();
 
+        let model_d_pick = body_model_d.clone();
+        let model_d_default = body_model_d.clone();
+        let model_field = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(theme.ink_muted)
+                            .child("見た目（VRM モデル）"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(pill_button(
+                                SharedString::from(format!("comp-model-default-{id}")),
+                                "ENE.vrm",
+                                None,
+                                Tone::Ghost,
+                                true,
+                                theme,
+                                move |_, cx| {
+                                    model_d_default
+                                        .update(cx, |d, cx| d.set("ENE.vrm".to_owned(), cx));
+                                },
+                            ))
+                            .child(pill_button(
+                                SharedString::from(format!("comp-model-browse-{id}")),
+                                "ファイルを選択",
+                                None,
+                                Tone::Soft,
+                                true,
+                                theme,
+                                move |_, cx| {
+                                    let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+                                        files: true,
+                                        directories: false,
+                                        multiple: false,
+                                        prompt: Some("VRM モデル (.vrm) を選択".into()),
+                                    });
+                                    let draft = model_d_pick.clone();
+                                    cx.spawn(async move |cx| {
+                                        if let Ok(Ok(Some(paths))) = rx.await
+                                            && let Some(path) = paths.into_iter().next()
+                                        {
+                                            let path_str = path.to_string_lossy().into_owned();
+                                            let _ = cx.update(|cx| {
+                                                draft.update(cx, |d, cx| d.set(path_str, cx));
+                                            });
+                                        }
+                                    })
+                                    .detach();
+                                },
+                            )),
+                    ),
+            )
+            .child(body_model_d);
+
         div()
             .border_t_1()
             .border_color(theme.border)
@@ -1197,7 +1269,7 @@ impl SettingsStudio {
             .child(labeled_field("名前", name_d, theme))
             .child(labeled_field("人格の核", mind_d, theme))
             .child(labeled_field("話し方", persona_d, theme))
-            .child(labeled_field("見た目（VRM モデル）", body_model_d, theme))
+            .child(model_field)
             .child(voice_selector)
             .child(disclosure)
             .when_some(mind_strip, |this, strip| this.child(strip))

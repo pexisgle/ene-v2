@@ -723,6 +723,7 @@ fn rule_from(rule: w::PolicyRule) -> Result<permission::PolicyRule, HostError> {
         Some(w::PolicyEffect::Allow) => permission::PolicyEffect::Allow,
         Some(w::PolicyEffect::Deny) => permission::PolicyEffect::Deny,
         Some(w::PolicyEffect::Confirm) => permission::PolicyEffect::Confirm,
+        Some(w::PolicyEffect::AskLlm) => permission::PolicyEffect::AskLlm,
         Some(w::PolicyEffect::Unspecified) | None => {
             return Err(HostError::Invalid(("a policy effect is required").into()));
         }

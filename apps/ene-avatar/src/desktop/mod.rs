@@ -270,11 +270,13 @@ impl HitMask {
     }
 
     /// Returns `true` when no cell is occupied.
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.occupied == 0
     }
 
     /// Tests whether a local logical pixel coordinate hits an occupied cell.
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
     pub fn contains_local(&self, local: Vec2) -> bool {
         if self.occupied == 0
             || !local.is_finite()

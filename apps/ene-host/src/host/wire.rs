@@ -322,7 +322,7 @@ pub(crate) fn approval(value: &Approval) -> w::ApprovalRequest {
 }
 
 wire_enum!(policy_effect: PolicyEffect => w::PolicyEffect {
-    Allow, Deny, Confirm
+    Allow, Deny, Confirm, AskLlm
 });
 
 pub(crate) fn policy_rule(value: &PolicyRule) -> w::PolicyRule {

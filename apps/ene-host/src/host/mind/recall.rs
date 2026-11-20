@@ -226,6 +226,8 @@ fn inject_tail(
             );
             if report.kind == ReportKind::ResponseCheck {
                 tail.push_str("\n今回の要点は、画面が見えているかの確認です。今応じるのが適切なら『見えてるよ』程度の一言で答えてください。");
+            } else if report.kind == ReportKind::Heartbeat {
+                tail.push_str("\n今回は1分ごとの定期見守り報告（特に変化なし）です。声かけ不要なら、body_motion で状況や気分に合う待機・くつろぎ仕草と表情をひとつ実行してから noop を呼んで静かに見守ってください。");
             }
         }
         let at = history.start_of(tail_entry);

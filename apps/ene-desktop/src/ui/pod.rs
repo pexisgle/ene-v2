@@ -186,17 +186,14 @@ impl CompanionPod {
 
     fn desired_size(&self, cx: &App) -> Size<Pixels> {
         let hub = self.hub.read(cx);
-        if hub.pod_mode == PodMode::ExpandedChat {
-            return PodMode::ExpandedChat.size();
-        }
         let needs_conn = self.needs_connection(cx);
         let model_setup = self.in_model_setup(cx);
         if needs_conn || model_setup {
             let base = if needs_conn {
                 if hub.setup_error_detail.is_some() {
-                    452.
+                    520.
                 } else {
-                    432.
+                    496.
                 }
             } else if self.setup_model_dropdown_open || self.setup_voice_dropdown_open {
                 580.
@@ -208,8 +205,12 @@ impl CompanionPod {
             } else {
                 base + 44.
             };
-            gpui::size(px(444.), px(h))
-        } else if !hub.model.approvals().is_empty() || self.roster_open {
+            return gpui::size(px(444.), px(h));
+        }
+        if hub.pod_mode == PodMode::ExpandedChat {
+            return PodMode::ExpandedChat.size();
+        }
+        if !hub.model.approvals().is_empty() || self.roster_open {
             gpui::size(px(444.), px(376.))
         } else {
             let speech_text = active_mini_speech_text(&hub.model);
@@ -421,17 +422,19 @@ impl CompanionPod {
             self.render_mini_body(&streaming_preview, is_busy, stop_requested, &theme, cx)
         };
 
+        let expanded_chat = expanded && !in_onboarding;
+
         let drag_strip = window_drag_area(
             div()
                 .w_full()
-                .h(if expanded { px(18.) } else { px(10.) })
+                .h(if expanded_chat { px(18.) } else { px(10.) })
                 .flex()
                 .flex_row()
                 .items_center()
                 .justify_end(),
             false,
         )
-        .when(expanded, |this| {
+        .when(expanded_chat, |this| {
             this.child(
                 div()
                     .text_size(px(11.))
@@ -465,7 +468,7 @@ impl CompanionPod {
 
         let bubble = div()
             .w_full()
-            .when(expanded, |this| this.flex_1().min_h_0())
+            .when(expanded_chat, |this| this.flex_1().min_h_0())
             .bg(theme.bg_surface)
             .border_2()
             .border_color(theme.border_float)
@@ -770,7 +773,6 @@ impl CompanionPod {
             let hub_connect = self.hub.clone();
             let hub_settings = self.hub.clone();
             let pod = cx.entity();
-            let selector = cx.entity();
             let hub = self.hub.read(cx);
             let pending = hub.setup_pending;
             let name = picked
@@ -791,21 +793,43 @@ impl CompanionPod {
                 "sakura" => Some("https://secure.sakura.ad.jp/cloud/"),
                 _ => None,
             });
+            let hub_open_settings = hub_settings.clone();
             return div()
                 .flex()
                 .flex_col()
                 .gap(px(8.))
                 .child(
                     div()
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .child("eneと話す準備"),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .child("eneと話す準備"),
+                        )
+                        .child(pill_button(
+                            "setup-open-settings",
+                            "詳細設定",
+                            Some(Icon::Sliders),
+                            Tone::Ghost,
+                            !pending,
+                            theme,
+                            move |_, cx| {
+                                hub_open_settings.update(cx, |hub, cx| {
+                                    hub.open_settings(SettingsSection::Connections, cx);
+                                });
+                            },
+                        )),
                 )
                 .child(div().text_sm().child(if is_agent_platform {
-                    "Express mode の API キーを入力してください。Cloud プロジェクトを指定する場合は接続設定で登録できます。".into()
+                    "Express mode の API キーを入力してください。Cloud プロジェクトを指定する場合は詳細設定で登録できます。".into()
                 } else if needs_key {
-                    format!("会話は{name}に送られます。{name}の設定で発行したAPIキーを貼り付けてください。")
+                    format!("お使いの AI サービスを選んで API キーを入力してください（現在: {name}）。ローカル接続は詳細設定から追加できます。")
                 } else {
-                    format!("会話は{name}に送られます。接続して会話を始めてください。")
+                    format!("選択中の接続先（{name}）で会話を始められます。")
                 }))
                 .child(
                     div()
@@ -813,68 +837,36 @@ impl CompanionPod {
                         .flex_row()
                         .flex_wrap()
                         .gap(px(6.))
-                        .when_some(keys_url, |row, url| {
-                            row.child(pill_button(
-                                "setup-keys",
-                                "キーの取得先を開く",
-                                None,
-                                Tone::Soft,
-                                !pending,
-                                theme,
-                                move |_, cx| cx.open_url(url),
-                            ))
-                        })
-                        .when(is_agent_platform, |row| {
-                            let hub = hub_settings.clone();
-                            row.child(pill_button(
-                                "setup-agent-platform-settings",
-                                "接続設定を開く",
-                                None,
-                                Tone::Ghost,
-                                !pending,
-                                theme,
-                                move |_, cx| {
-                                    hub.update(cx, |hub, cx| {
-                                        hub.open_settings(SettingsSection::Connections, cx)
-                                    })
-                                },
-                            ))
-                        })
+                        .children(provider_chips)
                         .child(pill_button(
-                            "setup-choose",
-                            "接続先を変更",
+                            "setup-local",
+                            "その他・ローカル接続",
                             None,
                             Tone::Ghost,
                             !pending,
                             theme,
                             move |_, cx| {
-                                selector.update(cx, |this, cx| {
-                                    this.choosing_provider = !this.choosing_provider;
-                                    cx.notify();
+                                hub_settings.update(cx, |hub, cx| {
+                                    hub.open_settings(SettingsSection::Connections, cx)
                                 })
                             },
                         )),
                 )
-                .when(self.choosing_provider && !pending, |this| {
+                .when_some(keys_url, |this, url| {
                     this.child(
                         div()
                             .flex()
                             .flex_row()
                             .flex_wrap()
                             .gap(px(6.))
-                            .children(provider_chips)
                             .child(pill_button(
-                                "setup-local",
-                                "自分の接続先を設定",
+                                "setup-keys",
+                                format!("{name} のキー取得先を開く"),
                                 None,
-                                Tone::Ghost,
-                                true,
+                                Tone::Soft,
+                                !pending,
                                 theme,
-                                move |_, cx| {
-                                    hub_settings.update(cx, |hub, cx| {
-                                        hub.open_settings(SettingsSection::Connections, cx)
-                                    })
-                                },
+                                move |_, cx| cx.open_url(url),
                             )),
                     )
                 })
@@ -1887,6 +1879,7 @@ impl CompanionPod {
             .id("pod-controls")
             .absolute()
             .bottom(px(52.))
+            .left(px(0.))
             .right(px(0.))
             .occlude()
             .rounded(px(18.))
@@ -1894,18 +1887,21 @@ impl CompanionPod {
             .border_color(theme.border_float)
             .bg(theme.bg_surface)
             .shadow(theme.float_shadow())
-            .p(px(8.))
+            .p(px(10.))
             .flex()
             .flex_col()
-            .gap(px(5.))
+            .gap(px(6.))
             .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
                 this.controls_open = false;
                 cx.notify();
             }))
             .child(
                 div()
+                    .w_full()
                     .flex()
-                    .gap(px(5.))
+                    .flex_row()
+                    .flex_wrap()
+                    .gap(px(6.))
                     .child(button(
                         "pod-control-companions",
                         "コンパニオン",
@@ -1948,23 +1944,11 @@ impl CompanionPod {
             )
             .child(
                 div()
+                    .w_full()
                     .flex()
-                    .gap(px(5.))
-                    .child(button(
-                        "pod-control-history",
-                        if expanded {
-                            "履歴を閉じる"
-                        } else {
-                            "履歴を表示"
-                        },
-                        if expanded {
-                            Icon::ChatCollapse
-                        } else {
-                            Icon::ChatBubble
-                        },
-                        Tone::Ghost,
-                        ChatControl::History,
-                    ))
+                    .flex_row()
+                    .flex_wrap()
+                    .gap(px(6.))
                     .child(button(
                         "pod-control-capture-mode",
                         if is_ptt {
@@ -1980,7 +1964,7 @@ impl CompanionPod {
                         row.child(button(
                             "pod-control-ptt-toggle",
                             if ptt_active {
-                                "送信 (話す終了)"
+                                "送信（話す終了）"
                             } else {
                                 "押して話す"
                             },
@@ -2001,7 +1985,30 @@ impl CompanionPod {
                                 ChatControl::PttCancel,
                             ))
                         })
-                    })
+                    }),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap(px(6.))
+                    .child(button(
+                        "pod-control-history",
+                        if expanded {
+                            "履歴を閉じる"
+                        } else {
+                            "履歴を表示"
+                        },
+                        if expanded {
+                            Icon::ChatCollapse
+                        } else {
+                            Icon::ChatBubble
+                        },
+                        Tone::Ghost,
+                        ChatControl::History,
+                    ))
                     .child(button(
                         "pod-control-settings",
                         "設定",
@@ -2021,7 +2028,11 @@ impl CompanionPod {
     }
 
     fn use_control(&mut self, action: ChatControl, window: &mut Window, cx: &mut Context<Self>) {
-        self.controls_open = false;
+        let keep_open = matches!(action, ChatControl::CaptureMode)
+            || (matches!(action, ChatControl::PttToggle) && !self.hub.read(cx).model.ptt_active);
+        if !keep_open {
+            self.controls_open = false;
+        }
         cx.notify();
         match action {
             ChatControl::Companions => self.roster_open = true,

@@ -410,7 +410,7 @@ impl CapabilityPolicy {
                             break;
                         }
                         PolicyEffect::Allow => rule_allowed = true,
-                        PolicyEffect::Confirm => {}
+                        PolicyEffect::Confirm | PolicyEffect::AskLlm => {}
                     }
                 }
                 !denied && (self.allows(capability) || rule_allowed)

@@ -396,6 +396,7 @@ enum PolicyEffect {
   POLICY_EFFECT_ALLOW = 1;
   POLICY_EFFECT_DENY = 2;
   POLICY_EFFECT_CONFIRM = 3;
+  POLICY_EFFECT_ASK_LLM = 4;
 }
 message ApprovalRequest {
   string request_id = 1;

@@ -196,13 +196,19 @@ where
     F: Fn(&mut Window, &mut gpui::App) + 'static,
 {
     let track_bg = if !enabled {
-        theme.bg_blush
+        theme.border.alpha(0.7)
     } else if checked {
         theme.mint
     } else {
         theme.border_float
     };
-    let thumb = div().size(px(16.)).rounded_full().bg(theme.bg_surface);
+    let thumb = div()
+        .size(px(16.))
+        .rounded_full()
+        .bg(theme.bg_surface)
+        .when(!enabled, |this| {
+            this.border_1().border_color(theme.border_float)
+        });
     let mut track = div()
         .id(id)
         .flex_none()
@@ -211,6 +217,9 @@ where
         .px(px(3.))
         .rounded_full()
         .bg(track_bg)
+        .when(!enabled, |this| {
+            this.border_1().border_color(theme.border_float)
+        })
         .flex()
         .items_center()
         .when(checked, |this| this.justify_end())
