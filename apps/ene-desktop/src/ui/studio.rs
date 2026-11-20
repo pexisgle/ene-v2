@@ -188,11 +188,30 @@ impl SettingsStudio {
             && seq != self.last_cleared_secret_seq
         {
             self.last_cleared_secret_seq = seq;
-            let key = format!("conn:secret:{conn_id}");
-            if let Some(d) = self.drafts.get(&key).cloned() {
-                d.update(cx, |draft, cx| draft.clear(cx));
+            let adapter = self.hub.read(cx).model.settings().and_then(|s| {
+                s.connections
+                    .iter()
+                    .find(|c| c.id == conn_id)
+                    .and_then(super::search_adapter_of)
+                    .map(|a| a.to_ascii_lowercase())
+            });
+            let mut keys = vec![format!("conn:secret:{conn_id}")];
+            if let Some(adapter) = adapter {
+                keys.push(format!("search-card:secret:{adapter}"));
+            } else if let Some(suffix) = conn_id.strip_prefix("search-") {
+                keys.push(format!("search-card:secret:{suffix}"));
             }
-            if self.revealed_secret_for.as_deref() == Some(conn_id.as_str()) {
+            for key in keys {
+                if let Some(d) = self.drafts.get(&key).cloned() {
+                    d.update(cx, |draft, cx| draft.clear(cx));
+                }
+            }
+            if self.revealed_secret_for.as_deref() == Some(conn_id.as_str())
+                || self
+                    .revealed_secret_for
+                    .as_deref()
+                    .is_some_and(|r| r.starts_with("search-card:"))
+            {
                 self.revealed_secret_for = None;
             }
         }

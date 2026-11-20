@@ -394,8 +394,10 @@ impl w::SettingsService for Services {
         let credentials = self.runtime.credentials();
         let agent_platform = connection.endpoint().adapter == model::agent_platform::ADAPTER;
         let is_mcp = connection.kind == settings::ConnectionKind::Mcp;
-        let checked_revision = (agent_platform || is_mcp).then_some(connection.revision);
-        let checked_credentials = agent_platform.then(|| credentials.generation());
+        let is_search = connection.kind == settings::ConnectionKind::Search;
+        let checked_revision =
+            (agent_platform || is_mcp || is_search).then_some(connection.revision);
+        let checked_credentials = (agent_platform || is_search).then(|| credentials.generation());
         // The probe performs a network request, so it must not run on the ECS
         // thread; the connection was captured above.
         let check = if is_mcp {

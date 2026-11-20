@@ -131,9 +131,11 @@ impl Store {
                 }
             };
             let reset_check = existing.is_some_and(|previous| {
-                input.endpoint().adapter == agent_platform::ADAPTER
-                    && input.config != previous.config
-                    && !keeps_verified_model_list(previous, input)
+                (input.kind == crate::host::settings::ConnectionKind::Search
+                    && input.config != previous.config)
+                    || (input.endpoint().adapter == agent_platform::ADAPTER
+                        && input.config != previous.config
+                        && !keeps_verified_model_list(previous, input))
             });
             let changed = transaction
                 .prepare_cached(
@@ -184,9 +186,10 @@ impl Store {
         id: &str,
         state: crate::host::settings::CredentialState,
     ) -> Result<()> {
-        let reset_check = self
-            .connection(id)?
-            .is_some_and(|connection| connection.endpoint().adapter == agent_platform::ADAPTER);
+        let reset_check = self.connection(id)?.is_some_and(|connection| {
+            connection.kind == crate::host::settings::ConnectionKind::Search
+                || connection.endpoint().adapter == agent_platform::ADAPTER
+        });
         let changed = self
             .conn()?
             .prepare_cached(

@@ -116,6 +116,8 @@ impl SettingsStudio {
             None
         };
 
+        let search_card = self.render_web_search_card(&connections, &checks, live, theme, cx);
+
         let mut rows: Vec<AnyElement> = Vec::new();
         for conn in &connections {
             let check = if super::llm_endpoint(conn)
@@ -178,6 +180,7 @@ impl SettingsStudio {
             .gap(px(16.))
             .child(header)
             .when_some(add_panel, |this, p| this.child(p))
+            .child(search_card)
             .when(!rows.is_empty(), |this| {
                 this.child(div().w_full().flex().flex_col().gap(px(10.)).children(rows))
             })
@@ -190,6 +193,392 @@ impl SettingsStudio {
                     .child(adv_toggle)
                     .when_some(adv_panel, |this, p| this.child(p)),
             )
+            .into_any_element()
+    }
+
+    fn render_web_search_card(
+        &mut self,
+        connections: &[w::Connection],
+        checks: &std::collections::BTreeMap<String, w::ConnectionCheck>,
+        live: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let search_conns: Vec<&w::Connection> = connections
+            .iter()
+            .filter(|c| c.kind == w::ConnectionKind::Search)
+            .collect();
+        let active_conn = search_conns.iter().copied().find(|c| {
+            c.enabled
+                && (!super::search_adapter_of(c).is_some_and(super::search_adapter_requires_key)
+                    || matches!(c.credential_state.as_str(), "registered" | "environment"))
+        });
+        let active_fallback =
+            active_conn.or_else(|| search_conns.iter().copied().find(|c| c.enabled));
+
+        let (summary_label, summary_dot, summary_bg, summary_fg) = match active_conn {
+            Some(conn) => (
+                format!("使用中: {}", conn.name),
+                theme.mint,
+                theme.mint_soft,
+                theme.mint_fg,
+            ),
+            None => match active_fallback {
+                Some(conn) => (
+                    format!("{}（キー登録が必要）", conn.name),
+                    theme.amber,
+                    theme.amber_soft,
+                    theme.amber_fg,
+                ),
+                None => (
+                    "未設定（検索オフ）".into(),
+                    theme.ink_placeholder,
+                    theme.bg_blush,
+                    theme.ink_muted,
+                ),
+            },
+        };
+
+        let mut provider_rows: Vec<AnyElement> = Vec::new();
+        for (adapter, display_name, placeholder, env_hint) in [
+            ("exa", "Exa", "Exa API キーを入力…", "EXA_API_KEY"),
+            (
+                "tavily",
+                "Tavily",
+                "Tavily API キーを入力… (tvly-...)",
+                "TAVILY_API_KEY",
+            ),
+        ] {
+            let existing = search_conns.iter().copied().find(|c| {
+                super::search_adapter_of(c).is_some_and(|a| a.eq_ignore_ascii_case(adapter))
+            });
+            let conn_id = existing.map(|c| c.id.clone());
+            let has_cred = existing.is_some_and(|c| {
+                matches!(c.credential_state.as_str(), "registered" | "environment")
+            });
+            let is_active = existing.is_some_and(|c| c.enabled);
+            let is_checking = conn_id
+                .as_ref()
+                .is_some_and(|id| self.hub.read(cx).checking_connections.contains(id));
+            let check =
+                existing.and_then(|c| checks.get(&c.id).or_else(|| c.last_check.as_option()));
+
+            let reveal_key = format!("search-card:{adapter}");
+            let revealed = self.revealed_secret_for.as_deref() == Some(reveal_key.as_str());
+            let draft = self.masked_draft(
+                cx,
+                format!("search-card:secret:{adapter}"),
+                placeholder,
+                !revealed,
+                theme,
+            );
+            let key_text = draft.read(cx).text().trim().to_owned();
+
+            let (cred_label, cred_bg, cred_fg) = match existing.map(|c| c.credential_state.as_str())
+            {
+                Some("registered") => ("キー登録済み", theme.mint_soft, theme.mint_fg),
+                Some("environment") => ("環境変数", theme.mint_soft, theme.mint_fg),
+                _ => ("未登録", theme.bg_surface, theme.ink_muted),
+            };
+            let check_badge = if is_checking {
+                Some(("確認中…", theme.amber_soft, theme.amber_fg))
+            } else {
+                match check.map(|c| c.healthy) {
+                    Some(true) => Some(("確認済み", theme.mint_soft, theme.mint_fg)),
+                    Some(false) => Some(("接続エラー", theme.danger_soft, theme.danger_fg)),
+                    None => None,
+                }
+            };
+            let err_msg = check
+                .filter(|c| !c.healthy)
+                .and_then(|c| c.failure.as_option())
+                .map(|f| f.message.trim().to_owned())
+                .filter(|m| !m.is_empty());
+
+            let studio_eye = cx.entity();
+            let reveal_key_click = reveal_key.clone();
+            let hub_save = self.hub.clone();
+            let key_for_save = key_text.clone();
+            let hub_use = self.hub.clone();
+            let use_id = conn_id.clone();
+            let hub_check = self.hub.clone();
+            let check_id = conn_id.clone();
+
+            provider_rows.push(
+                div()
+                    .w_full()
+                    .rounded(px(10.))
+                    .bg(theme.bg_blush)
+                    .p(px(12.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .flex_wrap()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(theme.ink)
+                                            .child(display_name),
+                                    )
+                                    .child(status_pill(cred_label, None, cred_bg, cred_fg))
+                                    .when_some(check_badge, |this, (label, bg, fg)| {
+                                        this.child(status_pill(label, None, bg, fg))
+                                    })
+                                    .when(is_active && has_cred, |this| {
+                                        this.child(status_pill(
+                                            "使用中",
+                                            Some(theme.mint),
+                                            theme.mint_soft,
+                                            theme.mint_fg,
+                                        ))
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .when_some(
+                                        use_id.filter(|_| has_cred && !is_active),
+                                        |this, cid| {
+                                            this.child(pill_button(
+                                                SharedString::from(format!(
+                                                    "search-card-use-{adapter}"
+                                                )),
+                                                "この検索を使う",
+                                                Some(Icon::Check),
+                                                Tone::Soft,
+                                                live,
+                                                theme,
+                                                move |_, cx| {
+                                                    hub_use.update(cx, |hub, cx| {
+                                                        hub.assign_search_connection(
+                                                            Some(cid.clone()),
+                                                            cx,
+                                                        );
+                                                    });
+                                                },
+                                            ))
+                                        },
+                                    )
+                                    .when_some(check_id.filter(|_| has_cred), |this, cid| {
+                                        this.child(pill_button(
+                                            SharedString::from(format!(
+                                                "search-card-check-{adapter}"
+                                            )),
+                                            if is_checking {
+                                                "確認中…"
+                                            } else {
+                                                "確認"
+                                            },
+                                            Some(Icon::Refresh),
+                                            Tone::Ghost,
+                                            live && !is_checking,
+                                            theme,
+                                            move |_, cx| {
+                                                hub_check.update(cx, |hub, cx| {
+                                                    hub.check_connection(cid.clone(), cx);
+                                                });
+                                            },
+                                        ))
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(div().flex_1().min_w_0().child(draft))
+                            .child(circle_icon_button(
+                                SharedString::from(format!("search-card-eye-{adapter}")),
+                                if revealed { Icon::EyeOff } else { Icon::Eye },
+                                30.,
+                                14.,
+                                Tone::Ghost,
+                                true,
+                                theme,
+                                move |_, cx| {
+                                    studio_eye.update(cx, |this, cx| {
+                                        this.revealed_secret_for = if revealed {
+                                            None
+                                        } else {
+                                            Some(reveal_key_click.clone())
+                                        };
+                                        cx.notify();
+                                    });
+                                },
+                            ))
+                            .child(pill_button(
+                                SharedString::from(format!("search-card-save-{adapter}")),
+                                if has_cred {
+                                    "キーを更新"
+                                } else {
+                                    "登録して使う"
+                                },
+                                Some(Icon::Check),
+                                Tone::Primary,
+                                live && !key_text.is_empty(),
+                                theme,
+                                move |_, cx| {
+                                    hub_save.update(cx, |hub, cx| {
+                                        hub.save_search_provider_key(
+                                            adapter,
+                                            key_for_save.clone(),
+                                            true,
+                                            cx,
+                                        );
+                                    });
+                                },
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.ink_muted)
+                            .child(format!("環境変数 {env_hint} でも設定できます")),
+                    )
+                    .when_some(err_msg, |this, msg| {
+                        this.child(
+                            div()
+                                .rounded(px(8.))
+                                .bg(theme.danger_soft)
+                                .px(px(10.))
+                                .py(px(6.))
+                                .text_xs()
+                                .text_color(theme.danger_fg)
+                                .child(msg),
+                        )
+                    })
+                    .into_any_element(),
+            );
+        }
+
+        // Quick active-service switcher when at least one search connection exists.
+        let switcher = (!search_conns.is_empty()).then(|| {
+            let mut chips: Vec<AnyElement> = Vec::new();
+            for conn in &search_conns {
+                let cid = conn.id.clone();
+                let selected = active_fallback.is_some_and(|a| a.id == conn.id);
+                let hub_sw = self.hub.clone();
+                chips.push(
+                    pill_button(
+                        SharedString::from(format!("search-switch-{}", conn.id)),
+                        conn.name.clone(),
+                        selected.then_some(Icon::Check),
+                        if selected { Tone::Primary } else { Tone::Ghost },
+                        live,
+                        theme,
+                        move |_, cx| {
+                            hub_sw.update(cx, |hub, cx| {
+                                hub.assign_search_connection(Some(cid.clone()), cx);
+                            });
+                        },
+                    )
+                    .into_any_element(),
+                );
+            }
+            let hub_off = self.hub.clone();
+            let is_off = active_fallback.is_none();
+            chips.push(
+                pill_button(
+                    "search-switch-off",
+                    "オフ",
+                    is_off.then_some(Icon::Check),
+                    if is_off { Tone::Soft } else { Tone::Ghost },
+                    live,
+                    theme,
+                    move |_, cx| {
+                        hub_off.update(cx, |hub, cx| {
+                            hub.assign_search_connection(None, cx);
+                        });
+                    },
+                )
+                .into_any_element(),
+            );
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(theme.ink_muted)
+                        .child("使用する検索サービス"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(6.))
+                        .children(chips),
+                )
+        });
+
+        div()
+            .w_full()
+            .bg(theme.bg_surface)
+            .border_1()
+            .border_color(theme.border)
+            .rounded(px(14.))
+            .p(px(16.))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(theme.ink)
+                                    .child("Web 検索（Exa / Tavily）"),
+                            ),
+                    )
+                    .child(status_pill(
+                        summary_label,
+                        Some(summary_dot),
+                        summary_bg,
+                        summary_fg,
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.ink_muted)
+                    .child("Exa や Tavily の API キーを登録して使用する検索サービスを選べます（Mwmbl・SearXNG・Brave は「接続を追加」からも設定できます）。"),
+            )
+            .when_some(switcher, |this, sw| this.child(sw))
+            .children(provider_rows)
             .into_any_element()
     }
 
@@ -407,7 +796,35 @@ impl SettingsStudio {
 
         let search_presets = [
             (
+                "add-preset-search-exa",
+                "search-exa",
+                "Exa（APIキー）",
+                "Web検索 (Exa)",
+                "exa",
+                "https://api.exa.ai/search",
+                Tone::Soft,
+            ),
+            (
+                "add-preset-search-tavily",
+                "search-tavily",
+                "Tavily（APIキー）",
+                "Web検索 (Tavily)",
+                "tavily",
+                "https://api.tavily.com/search",
+                Tone::Soft,
+            ),
+            (
+                "add-preset-search-brave",
+                "search-brave",
+                "Brave Search（APIキー）",
+                "Web検索 (Brave)",
+                "brave",
+                "https://api.search.brave.com/res/v1/web/search",
+                Tone::Ghost,
+            ),
+            (
                 "add-preset-search-mwmbl",
+                "search-mwmbl",
                 "Mwmbl（キー不要）",
                 "Web検索 (Mwmbl)",
                 "mwmbl",
@@ -416,31 +833,16 @@ impl SettingsStudio {
             ),
             (
                 "add-preset-search-searxng",
+                "search-searxng",
                 "SearXNG（自前・ローカル）",
                 "Web検索 (SearXNG)",
                 "searxng",
                 "http://127.0.0.1:8080/search",
                 Tone::Ghost,
             ),
-            (
-                "add-preset-search-brave",
-                "Brave Search（APIキー）",
-                "Web検索 (Brave)",
-                "brave",
-                "https://api.search.brave.com/res/v1/web/search",
-                Tone::Ghost,
-            ),
-            (
-                "add-preset-search-tavily",
-                "Tavily（APIキー）",
-                "Web検索 (Tavily)",
-                "tavily",
-                "https://api.tavily.com/search",
-                Tone::Ghost,
-            ),
         ];
         let mut search_chips = div().flex().flex_row().flex_wrap().gap(px(6.));
-        for (btn_id, label, conn_name, adapter, url, tone) in search_presets {
+        for (btn_id, preset_id, label, conn_name, adapter, url, tone) in search_presets {
             let hub_s = hub_search.clone();
             let studio_s = studio_search.clone();
             search_chips = search_chips.child(pill_button(
@@ -451,18 +853,12 @@ impl SettingsStudio {
                 live,
                 theme,
                 move |_, cx| {
-                    if let Some(input) = build_custom_connection_input(
-                        w::ConnectionKind::Search,
-                        conn_name,
-                        adapter,
-                        url,
-                    ) {
-                        hub_s.update(cx, |hub, cx| {
-                            hub.upsert_connection("Web検索接続の追加", input, cx);
-                        });
-                    }
+                    let target_id = hub_s.update(cx, |hub, cx| {
+                        hub.add_search_preset(preset_id, conn_name, adapter, url, true, cx)
+                    });
                     studio_s.update(cx, |this, cx| {
                         this.adding_connection = false;
+                        this.expanded_connection_id = Some(target_id);
                         this.open_dropdown = None;
                         cx.notify();
                     });
@@ -503,9 +899,9 @@ impl SettingsStudio {
             match custom_kind {
                 w::ConnectionKind::Search => (
                     "検索アダプタ",
-                    "例: mwmbl / searxng / brave / tavily",
+                    "例: exa / tavily / brave / mwmbl / searxng",
                     "検索 API URL",
-                    "例: http://127.0.0.1:8080/search",
+                    "例: https://api.exa.ai/search",
                 ),
                 w::ConnectionKind::Acp | w::ConnectionKind::Mcp => (
                     "実行コマンド",

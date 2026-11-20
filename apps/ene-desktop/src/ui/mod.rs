@@ -1896,6 +1896,213 @@ impl Hub {
         cx.notify();
     }
 
+    pub(crate) fn add_search_preset(
+        &mut self,
+        preset_id: &'static str,
+        name: &'static str,
+        adapter: &'static str,
+        endpoint: &'static str,
+        activate: bool,
+        cx: &mut Context<Self>,
+    ) -> String {
+        let Some(settings) = self.model.settings().cloned() else {
+            return preset_id.to_owned();
+        };
+        let Some(host) = self.host() else {
+            return preset_id.to_owned();
+        };
+        let existing = settings.connections.iter().find(|conn| {
+            conn.id == preset_id
+                || search_adapter_of(conn)
+                    .is_some_and(|existing_adapter| existing_adapter.eq_ignore_ascii_case(adapter))
+        });
+        let target_id = existing
+            .map(|conn| conn.id.clone())
+            .unwrap_or_else(|| preset_id.to_owned());
+        let has_enabled_other = settings.connections.iter().any(|conn| {
+            conn.kind == w::ConnectionKind::Search && conn.enabled && conn.id != target_id
+        });
+        let should_enable = activate || !has_enabled_other || existing.is_some_and(|c| c.enabled);
+        let mut inputs = Vec::new();
+        if let Some(conn) = existing {
+            inputs.push(w::ConnectionInput {
+                id: conn.id.clone(),
+                name: conn.name.clone(),
+                enabled: should_enable,
+                expected_revision: conn.revision,
+                kind: conn.kind,
+                config: conn.config.as_option().cloned().into(),
+                ..Default::default()
+            });
+        } else {
+            inputs.push(search_connection_input(
+                target_id.clone(),
+                name.to_owned(),
+                adapter.to_owned(),
+                endpoint.to_owned(),
+                should_enable,
+                0,
+                5,
+            ));
+        }
+        if activate {
+            for conn in &settings.connections {
+                if conn.kind == w::ConnectionKind::Search && conn.enabled && conn.id != target_id {
+                    inputs.push(w::ConnectionInput {
+                        id: conn.id.clone(),
+                        name: conn.name.clone(),
+                        enabled: false,
+                        expected_revision: conn.revision,
+                        kind: conn.kind,
+                        config: conn.config.as_option().cloned().into(),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        self.request(
+            "Web 検索接続の追加",
+            async move {
+                let response = host
+                    .settings
+                    .update_settings(w::UpdateSettingsRequest {
+                        expected_revision: settings.revision,
+                        connections: inputs,
+                        ..Default::default()
+                    })
+                    .await?;
+                response.view().to_owned_message().map_err(decode)
+            },
+            settings_update,
+        );
+        cx.notify();
+        target_id
+    }
+
+    pub(crate) fn save_search_provider_key(
+        &mut self,
+        adapter: &'static str,
+        secret: String,
+        activate: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let secret = secret.trim().to_owned();
+        if secret.is_empty() {
+            return;
+        }
+        let Some(settings) = self.model.settings().cloned() else {
+            return;
+        };
+        let Some(host) = self.host() else {
+            return;
+        };
+        let (default_id, default_name, default_endpoint) = match adapter {
+            "exa" => ("search-exa", "Web検索 (Exa)", "https://api.exa.ai/search"),
+            "tavily" => (
+                "search-tavily",
+                "Web検索 (Tavily)",
+                "https://api.tavily.com/search",
+            ),
+            "brave" => (
+                "search-brave",
+                "Web検索 (Brave)",
+                "https://api.search.brave.com/res/v1/web/search",
+            ),
+            _ => return,
+        };
+        let existing = settings.connections.iter().find(|conn| {
+            conn.id == default_id
+                || search_adapter_of(conn)
+                    .is_some_and(|existing_adapter| existing_adapter.eq_ignore_ascii_case(adapter))
+        });
+        let target_id = existing
+            .map(|conn| conn.id.clone())
+            .unwrap_or_else(|| default_id.to_owned());
+        let has_enabled_other = settings.connections.iter().any(|conn| {
+            conn.kind == w::ConnectionKind::Search && conn.enabled && conn.id != target_id
+        });
+        let should_enable = activate || !has_enabled_other || existing.is_some_and(|c| c.enabled);
+        let mut inputs = Vec::new();
+        if let Some(conn) = existing {
+            if conn.enabled != should_enable {
+                inputs.push(w::ConnectionInput {
+                    id: conn.id.clone(),
+                    name: conn.name.clone(),
+                    enabled: should_enable,
+                    expected_revision: conn.revision,
+                    kind: conn.kind,
+                    config: conn.config.as_option().cloned().into(),
+                    ..Default::default()
+                });
+            }
+        } else {
+            inputs.push(search_connection_input(
+                target_id.clone(),
+                default_name.to_owned(),
+                adapter.to_owned(),
+                default_endpoint.to_owned(),
+                should_enable,
+                0,
+                5,
+            ));
+        }
+        if activate {
+            for conn in &settings.connections {
+                if conn.kind == w::ConnectionKind::Search && conn.enabled && conn.id != target_id {
+                    inputs.push(w::ConnectionInput {
+                        id: conn.id.clone(),
+                        name: conn.name.clone(),
+                        enabled: false,
+                        expected_revision: conn.revision,
+                        kind: conn.kind,
+                        config: conn.config.as_option().cloned().into(),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        self.checking_connections.insert(target_id.clone());
+        let updates = self.updates.clone();
+        let check_id = target_id.clone();
+        let return_id = target_id.clone();
+        let settings_revision = settings.revision;
+        self.request(
+            "Web 検索APIキーの登録",
+            async move {
+                if !inputs.is_empty() {
+                    let response = host
+                        .settings
+                        .update_settings(w::UpdateSettingsRequest {
+                            expected_revision: settings_revision,
+                            connections: inputs,
+                            ..Default::default()
+                        })
+                        .await?;
+                    let updated = response.view().to_owned_message().map_err(decode)?;
+                    let _ = updates.send(settings_update(updated));
+                }
+                host.settings
+                    .register_credentials(w::CredentialRequest {
+                        id: target_id.clone(),
+                        secret: Some(secret),
+                        ..Default::default()
+                    })
+                    .await?;
+                let check_host = host.clone();
+                let check_updates = updates.clone();
+                tokio::spawn(async move {
+                    let update = workflows::probe_connection(check_host, check_id).await;
+                    let _ = check_updates.send(update);
+                });
+                Ok::<_, connectrpc::ConnectError>(())
+            },
+            move |_| Update::CredentialRegistered {
+                connection_id: return_id,
+            },
+        );
+        cx.notify();
+    }
+
     pub(crate) fn set_plugin_enabled(
         &mut self,
         plugin_id: String,
@@ -3035,25 +3242,45 @@ impl Hub {
         secret: String,
         cx: &mut Context<Self>,
     ) {
-        if secret.trim().is_empty() {
+        let secret = secret.trim().to_owned();
+        if secret.is_empty() {
             return;
         }
         let Some(host) = self.host() else {
             return;
         };
+        let is_search = self.model.settings().is_some_and(|s| {
+            s.connections
+                .iter()
+                .any(|c| c.id == connection_id && c.kind == w::ConnectionKind::Search)
+        });
+        if is_search {
+            self.checking_connections.insert(connection_id.clone());
+        }
         let id = connection_id.clone();
+        let updates = self.updates.clone();
         self.request(
             "資格情報の登録",
             async move {
                 let response = host
                     .settings
                     .register_credentials(w::CredentialRequest {
-                        id: connection_id,
+                        id: connection_id.clone(),
                         secret: Some(secret),
                         ..Default::default()
                     })
                     .await?;
-                response.view().to_owned_message().map_err(decode)
+                let out = response.view().to_owned_message().map_err(decode)?;
+                if is_search {
+                    let check_host = host.clone();
+                    let check_id = connection_id;
+                    let check_updates = updates.clone();
+                    tokio::spawn(async move {
+                        let update = workflows::probe_connection(check_host, check_id).await;
+                        let _ = check_updates.send(update);
+                    });
+                }
+                Ok(out)
             },
             move |_| Update::CredentialRegistered { connection_id: id },
         );
@@ -3928,17 +4155,79 @@ fn can_start_chat(conn: &w::Connection, providers: &[w::LlmProvider]) -> bool {
             .is_none_or(|check| check.healthy)
 }
 
-fn needs_key(conn: &w::Connection, providers: &[w::LlmProvider]) -> bool {
-    !matches!(conn.credential_state.as_str(), "registered" | "environment")
-        && llm_endpoint(conn).is_some_and(|ep| {
-            providers.iter().any(|p| {
-                p.requires_credentials
-                    && p.adapter == ep.adapter
-                    && (ep.endpoint.trim().is_empty()
-                        || p.endpoint.trim_end_matches('/')
-                            == ep.endpoint.trim().trim_end_matches('/'))
-            })
+pub(crate) fn search_adapter_of(conn: &w::Connection) -> Option<&str> {
+    if conn.kind != w::ConnectionKind::Search {
+        return None;
+    }
+    match conn.config.as_option()?.config.as_ref()? {
+        w::connection_config::Config::Search(s) => s
+            .endpoint
+            .as_option()
+            .map(|e| e.adapter.trim())
+            .filter(|a| !a.is_empty()),
+        _ => None,
+    }
+}
+
+pub(crate) fn search_adapter_requires_key(adapter: &str) -> bool {
+    matches!(
+        adapter.trim().to_ascii_lowercase().as_str(),
+        "exa" | "tavily" | "brave"
+    )
+}
+
+fn search_connection_input(
+    id: String,
+    name: String,
+    adapter: String,
+    endpoint: String,
+    enabled: bool,
+    expected_revision: u64,
+    max_results: u32,
+) -> w::ConnectionInput {
+    w::ConnectionInput {
+        id,
+        name,
+        enabled,
+        expected_revision,
+        kind: w::ConnectionKind::Search.into(),
+        config: Some(w::ConnectionConfig {
+            config: Some(w::connection_config::Config::Search(Box::new(
+                w::SearchConnection {
+                    endpoint: Some(w::ConnectionEndpoint {
+                        adapter,
+                        endpoint,
+                        options_schema: String::new(),
+                        options: "{}".into(),
+                        ..Default::default()
+                    })
+                    .into(),
+                    max_results,
+                    ..Default::default()
+                },
+            ))),
+            ..Default::default()
         })
+        .into(),
+        ..Default::default()
+    }
+}
+
+fn needs_key(conn: &w::Connection, providers: &[w::LlmProvider]) -> bool {
+    if matches!(conn.credential_state.as_str(), "registered" | "environment") {
+        return false;
+    }
+    if search_adapter_of(conn).is_some_and(search_adapter_requires_key) {
+        return true;
+    }
+    llm_endpoint(conn).is_some_and(|ep| {
+        providers.iter().any(|p| {
+            p.requires_credentials
+                && p.adapter == ep.adapter
+                && (ep.endpoint.trim().is_empty()
+                    || p.endpoint.trim_end_matches('/') == ep.endpoint.trim().trim_end_matches('/'))
+        })
+    })
 }
 
 fn llm_provider_input(
@@ -4310,5 +4599,64 @@ mod setup_tests {
         assert_eq!(opts["model"], "shikokumetan");
         assert_eq!(opts["voice"], "amaama");
         assert_eq!(opts["protocol"], "sakura");
+    }
+
+    #[test]
+    fn search_connections_detect_key_requirements_for_exa_and_tavily() {
+        let make_search = |id: &str, adapter: &str, endpoint: &str, cred_state: &str| {
+            let input = search_connection_input(
+                id.into(),
+                format!("Web検索 ({adapter})"),
+                adapter.into(),
+                endpoint.into(),
+                true,
+                0,
+                5,
+            );
+            w::Connection {
+                id: input.id,
+                name: input.name,
+                enabled: input.enabled,
+                kind: input.kind,
+                config: input.config,
+                credential_state: cred_state.into(),
+                revision: 1,
+                ..Default::default()
+            }
+        };
+
+        let exa_absent = make_search("search-exa", "exa", "https://api.exa.ai/search", "absent");
+        let exa_registered = make_search(
+            "search-exa",
+            "exa",
+            "https://api.exa.ai/search",
+            "registered",
+        );
+        let tavily_absent = make_search(
+            "search-tavily",
+            "tavily",
+            "https://api.tavily.com/search",
+            "absent",
+        );
+        let tavily_env = make_search(
+            "search-tavily",
+            "tavily",
+            "https://api.tavily.com/search",
+            "environment",
+        );
+        let mwmbl_absent = make_search(
+            "search-mwmbl",
+            "mwmbl",
+            "https://api.mwmbl.org/api/v2/search/",
+            "absent",
+        );
+
+        assert_eq!(search_adapter_of(&exa_absent), Some("exa"));
+        assert_eq!(search_adapter_of(&tavily_absent), Some("tavily"));
+        assert!(needs_key(&exa_absent, &[]));
+        assert!(!needs_key(&exa_registered, &[]));
+        assert!(needs_key(&tavily_absent, &[]));
+        assert!(!needs_key(&tavily_env, &[]));
+        assert!(!needs_key(&mwmbl_absent, &[]));
     }
 }

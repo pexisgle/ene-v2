@@ -226,10 +226,14 @@ impl ConnectionConfig {
                 }
             }
             Self::Search(config) => {
-                let adapter = config.endpoint.adapter.trim();
-                if !matches!(adapter, "mwmbl" | "searxng" | "brave" | "tavily") {
+                let adapter = config.endpoint.adapter.trim().to_ascii_lowercase();
+                if !matches!(
+                    adapter.as_str(),
+                    "mwmbl" | "searxng" | "brave" | "tavily" | "exa"
+                ) {
                     return Err(HostError::Invalid(format!(
-                        "unsupported search adapter `{adapter}`"
+                        "unsupported search adapter `{}`",
+                        config.endpoint.adapter.trim()
                     )));
                 }
                 if adapter == "searxng" && config.endpoint.endpoint.trim().is_empty() {
@@ -321,6 +325,14 @@ impl Connection {
     }
 
     pub(crate) fn environment_variable(&self, loaded: &Providers) -> Option<String> {
+        if self.kind == ConnectionKind::Search {
+            return match self.endpoint().adapter.trim().to_ascii_lowercase().as_str() {
+                "exa" => Some("EXA_API_KEY".into()),
+                "tavily" => Some("TAVILY_API_KEY".into()),
+                "brave" => Some("BRAVE_API_KEY".into()),
+                _ => None,
+            };
+        }
         provider(&self.endpoint().adapter, loaded)
             .and_then(|provider| provider.environment_variable)
     }
