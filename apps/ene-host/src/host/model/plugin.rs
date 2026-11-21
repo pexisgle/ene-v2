@@ -21,7 +21,7 @@ use rig_core::{
     },
     operation::Completion,
     providers::{
-        openai::{OpenAIConfig, Route},
+        openai::{OpenAIConfig, Route, wire::Dialect},
         registry::ProviderConfig,
     },
 };
@@ -61,12 +61,18 @@ pub(crate) fn completion(
     image_input: bool,
 ) -> DynModel<Completion> {
     let endpoint = context.endpoint.clone();
+    let provider_id = provider.provider_id();
     // An unlisted model is assumed to call tools; the host cannot prove
     // otherwise without a probe. Its limits stay unknown rather than guessed.
-    let mut spec = ModelSpec::new(provider.provider_id(), model.clone()).with_tools(true);
+    let mut spec = ModelSpec::new(provider_id, model.clone()).with_tools(true);
     spec.input.image = image_input;
+    // Match the wire descriptor's vendor name to `spec.provider` so
+    // `ModelFacts::for_model` returns the bound spec even when a plugin
+    // shadows a catalog-known vendor (where `ProviderId::declare` returns the
+    // registered/catalog-only id rather than a declared id).
+    let dialect = Dialect::gateway(provider_id.vendor(), "", "");
     let config = ProviderConfig::OpenAi(
-        OpenAIConfig::new(BROKER_KEY)
+        OpenAIConfig::with_key(&dialect, BROKER_KEY)
             .with_base_url(endpoint)
             .with_route(Route::Chat),
     );

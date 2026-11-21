@@ -416,9 +416,13 @@ pub(crate) struct Harness {
 
 impl Harness {
     pub(crate) async fn start(destinations: Option<Vec<String>>) -> Self {
+        Self::start_as("openrouter-test", destinations).await
+    }
+
+    async fn start_as(provider_id: &str, destinations: Option<Vec<String>>) -> Self {
         let fixture = Fixture::start().await;
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("plugins").join("openrouter-test");
+        let root = temp.path().join("plugins").join(provider_id);
         std::fs::create_dir_all(&root).unwrap();
         #[cfg(unix)]
         {
@@ -437,14 +441,14 @@ impl Harness {
             &root.join("manifest.json"),
             json!({
                 "contract_version": ene_plugin::CONTRACT_VERSION,
-                "id": "openrouter-test",
+                "id": provider_id,
                 "name": "OpenRouter fixture",
                 "version": "1",
                 "entrypoints": [{
                     "id": "llm", "target": "host", "file": "provider.wasm",
                     "provides": ["llm"], "uses": ["http"],
                     "provider": {
-                        "id": "openrouter-test",
+                        "id": provider_id,
                         "endpoint": fixture.base(),
                         "auth": {"type": "bearer"},
                         "destinations": destinations,
@@ -454,10 +458,7 @@ impl Harness {
             .to_string(),
         );
         let providers = Providers::load(temp.path());
-        let running = providers
-            .start("openrouter-test", Extension::Llm)
-            .await
-            .unwrap();
+        let running = providers.start(provider_id, Extension::Llm).await.unwrap();
         Self {
             fixture,
             _temp: temp,
@@ -812,4 +813,89 @@ async fn a_plugin_model_binds_through_the_agent_path() {
     };
     assert_eq!(answer.text(), "Hello world");
     assert_eq!(harness.fixture.request_count(), 1);
+}
+
+/// A plugin that shadows a catalog-known vendor (such as `openrouter`) still
+/// binds through `ensure_model` for catalog-unlisted models because the wire
+/// descriptor matches the plugin's vendor instead of hardcoding `openai`.
+#[tokio::test]
+async fn a_plugin_shadowing_a_catalog_vendor_binds_through_ensure_model() {
+    use crate::host::{
+        agent,
+        db::Store,
+        mind,
+        notify::Notifier,
+        settings::{
+            Connection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint, LlmConnection,
+        },
+    };
+    use rig_ecs::model::{Connection as ModelConnection, Models};
+
+    let harness = Harness::start_as("openrouter", None).await;
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+    store
+        .update_settings(
+            store.settings_revision().unwrap(),
+            &[(
+                Connection {
+                    id: CONNECTION.to_owned(),
+                    name: "shadowed-openrouter".into(),
+                    enabled: true,
+                    kind: ConnectionKind::Llm,
+                    config: ConnectionConfig::Llm(LlmConnection {
+                        endpoint: Endpoint {
+                            adapter: "openrouter".into(),
+                            endpoint: harness.fixture.base().to_owned(),
+                            ..Default::default()
+                        },
+                        model_ids: Vec::new(),
+                    }),
+                    credential_state: CredentialState::Registered,
+                    revision: 1,
+                    last_check: None,
+                },
+                0,
+            )],
+        )
+        .unwrap();
+    let credentials = Credentials::new(true);
+    credentials.remember(CONNECTION, SECRET.to_owned());
+    let mut world = bevy_ecs::prelude::World::new();
+    world.insert_resource(store);
+    world.insert_resource(credentials);
+    world.insert_resource(harness.providers.clone());
+    world.insert_resource(super::ModelFactory::default());
+    world.insert_resource(Models::default());
+    world.insert_resource(Notifier::new());
+    let assignment = crate::host::mind::Assignment {
+        connection_id: CONNECTION.into(),
+        model_id: "vendor/test-unlisted".into(),
+    };
+    let created = mind::create(
+        &mut world,
+        ene_rpc::CreateCompanionRequest {
+            name: "Mio".into(),
+            mind: "kind".into(),
+            assignments: Some(crate::host::wire::assignments(
+                &crate::host::mind::Assignments {
+                    companion: assignment.clone(),
+                    task: assignment,
+                    ..Default::default()
+                },
+            ))
+            .into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let entity = agent::agent_of(&mut world, &created.id).expect("the companion agent");
+    let spec = world
+        .get::<ModelConnection>(entity)
+        .expect("shadowed catalog vendor plugin model binds through ensure_model")
+        .spec
+        .clone();
+    assert_eq!(spec.id, "vendor/test-unlisted");
+    assert_eq!(spec.provider.vendor(), "openrouter");
+    assert!(spec.tools);
 }

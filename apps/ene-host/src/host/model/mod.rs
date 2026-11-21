@@ -289,6 +289,13 @@ pub(crate) fn is_non_chat_sakura_model(id: &str) -> bool {
         || is_sakura_tts_model_id(&lower)
 }
 
+fn sakura_model_spec(model_id: &str) -> ModelSpec {
+    let provider = ProviderId::declare("sakura").expect("valid provider name");
+    let mut spec = ModelSpec::new(provider, model_id).with_tools(true);
+    spec.input.image = SAKURA_VISION_MODELS.contains(&model_id);
+    spec
+}
+
 /// The rig provider a host adapter names.
 ///
 pub(crate) fn provider_of(adapter: &str) -> Option<ProviderId> {
@@ -365,7 +372,7 @@ pub(crate) fn connect_assignment(
     credentials: &Credentials,
     catalog: &Catalog,
     assignment: &super::mind::Assignment,
-    role: Role,
+    _role: Role,
     providers: &super::providers::Providers,
 ) -> Result<DynModel<Completion>> {
     let connection = store
@@ -410,14 +417,10 @@ pub(crate) fn connect_assignment(
         let config = OpenAIConfig::with_key(&sakura_dialect(), secret.unwrap_or_default())
             .with_base_url(base)
             .with_route(Route::Chat);
-        let mut chat = config.chat(assignment.model_id.clone());
-        if role == Role::Perception && SAKURA_VISION_MODELS.contains(&assignment.model_id.as_str())
-        {
-            let provider = ProviderId::declare("sakura").expect("valid provider name");
-            let mut spec = ModelSpec::new(provider, assignment.model_id.clone());
-            spec.input.image = true;
-            chat = chat.with_facts(ModelFacts::new(Arc::new(spec)));
-        }
+        let spec = Arc::new(sakura_model_spec(&assignment.model_id));
+        let chat = config
+            .chat(assignment.model_id.clone())
+            .with_facts(ModelFacts::new(spec).with_catalog(catalog));
         return Ok(Model::new(chat, http).erase());
     }
     let provider = provider_of(&endpoint.adapter).ok_or_else(|| {
@@ -428,6 +431,12 @@ pub(crate) fn connect_assignment(
     let catalog_reference = format!("{}/{}", provider.vendor(), assignment.model_id);
     let spec = match catalog.resolve(&catalog_reference) {
         Ok(resolved) => resolved.shared(),
+        Err(_) if endpoint.adapter == agent_platform::ADAPTER => catalog
+            .resolve(&format!("gcp.gemini/{}", assignment.model_id))
+            .map(|resolved| resolved.shared())
+            .unwrap_or_else(|_| {
+                Arc::new(ModelSpec::new(provider, &assignment.model_id).with_tools(true))
+            }),
         Err(_) => {
             let mut spec = ModelSpec::new(provider, &assignment.model_id).with_tools(true);
             if endpoint.adapter == "openrouter" {
@@ -440,7 +449,7 @@ pub(crate) fn connect_assignment(
     };
     let secret = connection_secret(&connection, Some(credentials), providers)?;
     if endpoint.adapter == agent_platform::ADAPTER {
-        return agent_platform::model(endpoint, secret, spec);
+        return agent_platform::model(endpoint, secret, spec, catalog);
     }
     let default = super::settings::provider(&endpoint.adapter, providers)
         .map_or_else(String::new, |p| p.endpoint);
@@ -592,13 +601,22 @@ pub(crate) fn models(connection: &Connection, catalog: &Catalog) -> Vec<(String,
         .into_iter()
         .take(MAX_MODELS)
         .map(|model| {
-            let provider = provider_of(adapter)
-                .unwrap_or_else(|| ProviderId::catalog("openai").expect("openai is registered"));
-            let reference = format!("{}/{}", provider.vendor(), model);
-            let spec = catalog
-                .resolve(&reference)
-                .map(|resolved| resolved.spec.clone())
-                .unwrap_or_else(|_| ModelSpec::new(provider, &model).with_tools(true));
+            let spec = if is_sakura_connection(adapter, &connection.endpoint().endpoint) {
+                sakura_model_spec(&model)
+            } else {
+                let provider = provider_of(adapter).unwrap_or_else(|| {
+                    ProviderId::catalog("openai").expect("openai is registered")
+                });
+                let reference = format!("{}/{}", provider.vendor(), model);
+                let resolved = catalog.resolve(&reference).ok().or_else(|| {
+                    (adapter == agent_platform::ADAPTER)
+                        .then(|| catalog.resolve(&format!("gcp.gemini/{model}")).ok())
+                        .flatten()
+                });
+                resolved
+                    .map(|resolved| resolved.spec.clone())
+                    .unwrap_or_else(|| ModelSpec::new(provider, &model).with_tools(true))
+            };
             (model, spec)
         })
         .collect()
@@ -992,11 +1010,233 @@ mod tests {
                 &super::super::providers::Providers::none(),
             )
             .unwrap();
-            assert_eq!(
-                model.spec().is_some_and(|spec| spec.input.image),
-                supports_image
-            );
+            let spec = model
+                .spec()
+                .expect("sakura completion model must expose catalog facts");
+            assert_eq!(spec.id, id);
+            assert_eq!(spec.provider.vendor(), "sakura");
+            assert!(spec.tools);
+            assert_eq!(spec.input.image, supports_image);
         }
+    }
+
+    /// Every built-in LLM provider binds through `agent::ensure_model` for
+    /// both companion and task roles, including catalog-unlisted models and
+    /// provider-specific models returned by model listing.
+    #[test]
+    fn all_builtin_providers_bind_through_ensure_model_for_companion_and_task() {
+        use crate::host::{agent, mind::Assignment, notify::Notifier};
+        use rig_ecs::model::{Connection as ModelConnection, Models};
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        let credentials = Credentials::new(true);
+        let cases: &[(&str, &str, &str)] = &[
+            ("openai", "https://api.openai.com/v1", "ene-unlisted-openai"),
+            (
+                "openrouter",
+                "https://openrouter.ai/api/v1",
+                "vendor/ene-unlisted-openrouter",
+            ),
+            (
+                "anthropic",
+                "https://api.anthropic.com",
+                "claude-ene-unlisted",
+            ),
+            (
+                "gemini",
+                "https://generativelanguage.googleapis.com",
+                "gemini-ene-unlisted",
+            ),
+            (
+                agent_platform::ADAPTER,
+                agent_platform::ENDPOINT,
+                "gemini-4-neon",
+            ),
+            (
+                agent_platform::ADAPTER,
+                agent_platform::ENDPOINT,
+                agent_platform::DEFAULT_MODEL,
+            ),
+            (
+                "sakura",
+                super::super::settings::SAKURA_AI_ENDPOINT,
+                "gpt-oss-120b",
+            ),
+            (
+                "sakura",
+                super::super::settings::SAKURA_AI_ENDPOINT,
+                "preview/DeepSeek-V4.1-Flash-1017",
+            ),
+        ];
+
+        for (index, (adapter, endpoint, model_id)) in cases.iter().enumerate() {
+            let conn_id = format!("conn-{index}");
+            let mut connection = llm_connection(adapter, endpoint, &[*model_id]);
+            connection.id = conn_id.clone();
+            credentials.remember(&conn_id, "test-secret".into());
+            store
+                .update_settings(store.settings_revision().unwrap(), &[(connection, 0)])
+                .unwrap();
+
+            let assignment = Assignment {
+                connection_id: conn_id,
+                model_id: (*model_id).to_owned(),
+            };
+            let mut world = bevy_ecs::prelude::World::new();
+            world.insert_resource(store.clone());
+            world.insert_resource(credentials.clone());
+            world.insert_resource(super::super::providers::Providers::none());
+            world.insert_resource(ModelFactory::default());
+            world.insert_resource(Models::default());
+            world.insert_resource(Notifier::new());
+
+            let created = crate::host::mind::create(
+                &mut world,
+                ene_rpc::CreateCompanionRequest {
+                    name: format!("Ene-{index}"),
+                    mind: "helpful".into(),
+                    assignments: Some(crate::host::wire::assignments(
+                        &crate::host::mind::Assignments {
+                            companion: assignment.clone(),
+                            task: assignment,
+                            ..Default::default()
+                        },
+                    ))
+                    .into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let companion = store.companion(&created.id).unwrap().unwrap();
+            let companion_entity =
+                agent::agent_of(&mut world, &companion.id).expect("companion agent");
+            agent::ensure_model(&mut world, companion_entity).unwrap_or_else(|error| {
+                panic!("companion ensure_model failed for {adapter}/{model_id}: {error}")
+            });
+            let companion_spec = &world.get::<ModelConnection>(companion_entity).unwrap().spec;
+            assert_eq!(companion_spec.id, *model_id, "{adapter}/{model_id}");
+            assert!(companion_spec.tools, "{adapter}/{model_id}");
+
+            let work_entity = agent::spawn_work_agent(
+                &mut world,
+                &companion,
+                &format!("work-{index}"),
+                &format!("run-{index}"),
+                "do work",
+            );
+            agent::ensure_model(&mut world, work_entity).unwrap_or_else(|error| {
+                panic!("task ensure_model failed for {adapter}/{model_id}: {error}")
+            });
+            let work_spec = &world.get::<ModelConnection>(work_entity).unwrap().spec;
+            assert_eq!(work_spec.id, *model_id, "{adapter}/{model_id}");
+            assert!(work_spec.tools, "{adapter}/{model_id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn sakura_companion_binds_and_answers_over_chat_completions() {
+        use crate::host::{agent, mind::Assignment, notify::Notifier};
+        use rig_core::{
+            completion::CompletionRequest,
+            effect::{Answered, EffectKind},
+            serve::serve_inline,
+        };
+        use rig_ecs::model::{Connection as ModelConnection, Models};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let read = stream.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..read]);
+            assert!(
+                request.starts_with("POST /v1/chat/completions "),
+                "unexpected request: {request}"
+            );
+            let body = serde_json::json!({
+                "id": "chatcmpl-sakura-1",
+                "object": "chat.completion",
+                "created": 1_700_000_000,
+                "model": "gpt-oss-120b",
+                "choices": [{
+                    "index": 0,
+                    "message": { "role": "assistant", "content": "こんにちは！" },
+                    "finish_reason": "stop"
+                }],
+                "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
+            })
+            .to_string();
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(reply.as_bytes()).await.unwrap();
+        });
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        let credentials = Credentials::new(true);
+        let mut connection = llm_connection("sakura", &format!("http://{addr}/v1"), &[]);
+        connection.id = "sakura-conn".into();
+        credentials.remember("sakura-conn", "sakura-key".into());
+        store
+            .update_settings(store.settings_revision().unwrap(), &[(connection, 0)])
+            .unwrap();
+
+        let assignment = Assignment {
+            connection_id: "sakura-conn".into(),
+            model_id: "gpt-oss-120b".into(),
+        };
+        let mut world = bevy_ecs::prelude::World::new();
+        world.insert_resource(store);
+        world.insert_resource(credentials);
+        world.insert_resource(super::super::providers::Providers::none());
+        world.insert_resource(ModelFactory::default());
+        world.insert_resource(Models::default());
+        world.insert_resource(Notifier::new());
+
+        let created = crate::host::mind::create(
+            &mut world,
+            ene_rpc::CreateCompanionRequest {
+                name: "Ene".into(),
+                mind: "helpful".into(),
+                assignments: Some(crate::host::wire::assignments(
+                    &crate::host::mind::Assignments {
+                        companion: assignment.clone(),
+                        task: assignment,
+                        ..Default::default()
+                    },
+                ))
+                .into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let entity = agent::agent_of(&mut world, &created.id).expect("companion agent");
+        let bound = world
+            .get::<ModelConnection>(entity)
+            .expect("sakura companion model must bind without catalog-facts error");
+        assert_eq!(bound.spec.id, "gpt-oss-120b");
+        assert_eq!(bound.spec.provider.vendor(), "sakura");
+        assert!(bound.spec.tools);
+
+        let handler = bound.handler.0.clone();
+        let answer = serve_inline(
+            &handler,
+            EffectKind::Completion {
+                request: CompletionRequest::new("hello").into(),
+                stream: false,
+            },
+        )
+        .await
+        .unwrap();
+        let Answered::Completion(answer) = answer else {
+            panic!("expected completion answer");
+        };
+        assert_eq!(answer.text(), "こんにちは！");
+        server.await.unwrap();
     }
 
     /// Serves the model listing the request path asks for: Gemini's native

@@ -7,11 +7,14 @@ use bytes::Bytes;
 use futures_util::{StreamExt, stream};
 use http::{HeaderValue, Method, Request, Response, StatusCode, Uri};
 use rig_core::{
-    catalog::{ModelFacts, ModelSpec},
+    catalog::{Catalog, ModelFacts, ModelSpec},
     driver::{DynModel, Model},
     http_client::{self, HttpClientExt, LazyBody, MultipartForm, StreamingResponse},
     operation::Completion,
-    providers::gemini::{GeminiConfig, completion::GenerateContent},
+    providers::{
+        gemini::{GeminiConfig, completion::GenerateContent},
+        registry::ProviderId,
+    },
 };
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
@@ -241,12 +244,14 @@ pub(super) fn model(
     endpoint: &Endpoint,
     secret: Option<String>,
     spec: Arc<ModelSpec>,
+    catalog: &Catalog,
 ) -> Result<DynModel<Completion>> {
     let client = net::model_client().map_err(HostError::Unavailable)?;
     model_with_http(
         endpoint,
         secret,
         spec,
+        catalog,
         rig_reqwest::ReqwestClient::from(client),
     )
 }
@@ -255,6 +260,7 @@ fn model_with_http(
     endpoint: &Endpoint,
     secret: Option<String>,
     spec: Arc<ModelSpec>,
+    catalog: &Catalog,
     http: impl HttpClientExt + Clone + 'static,
 ) -> Result<DynModel<Completion>> {
     let publisher = publisher_endpoint(endpoint)?;
@@ -264,8 +270,18 @@ fn model_with_http(
         ));
     }
     let key = api_key(secret.as_deref())?;
-    let wire = GenerateContent::new(GeminiConfig::new("").with_base_url(ENDPOINT), &spec.id)
-        .with_facts(ModelFacts::new(spec.clone()));
+    // `GenerateContent` reports descriptor vendor `"gcp.gemini"`, while the
+    // incoming spec is resolved under `"vertexai"` (a catalog-only vendor).
+    // `ModelFacts::for_model` returns a bound spec only when its provider is
+    // declared or matches the wire's descriptor vendor, so bind under the
+    // declared adapter vendor while keeping all catalog facts intact.
+    let mut bound_spec = (*spec).clone();
+    bound_spec.provider = ProviderId::declare(ADAPTER).expect("valid provider name");
+    let wire = GenerateContent::new(
+        GeminiConfig::new("").with_base_url(ENDPOINT),
+        &bound_spec.id,
+    )
+    .with_facts(ModelFacts::new(Arc::new(bound_spec)).with_catalog(catalog));
     Ok(Model::new(
         wire,
         AgentPlatformHttp {
@@ -485,9 +501,17 @@ mod tests {
             &Endpoint::default(),
             Some("test-key".into()),
             spec(),
+            Catalog::builtin(),
             http.clone(),
         )
         .unwrap();
+        let bound_spec = model
+            .spec()
+            .expect("Agent Platform completion model must expose catalog facts");
+        assert_eq!(bound_spec.id, DEFAULT_MODEL);
+        assert_eq!(bound_spec.provider.vendor(), ADAPTER);
+        assert!(bound_spec.context_window.is_some());
+        assert!(bound_spec.tools);
         let tool = ToolDefinition {
             name: ToolName::new("lookup").unwrap(),
             description: "Lookup test".into(),
@@ -532,5 +556,25 @@ mod tests {
             body["contents"][2]["parts"][0]["functionResponse"]["id"],
             "call-a"
         );
+    }
+
+    #[test]
+    fn unlisted_gemini_model_keeps_bound_spec_facts() {
+        let vertex = ProviderId::catalog("vertexai").unwrap();
+        let unlisted = Arc::new(ModelSpec::new(vertex, "gemini-4-neon").with_tools(true));
+        let model = model_with_http(
+            &Endpoint::default(),
+            Some("test-key".into()),
+            unlisted,
+            Catalog::builtin(),
+            SequencedHttpClient::new([]),
+        )
+        .unwrap();
+        let bound = model
+            .spec()
+            .expect("unlisted Agent Platform model must still expose bound facts");
+        assert_eq!(bound.id, "gemini-4-neon");
+        assert_eq!(bound.provider.vendor(), ADAPTER);
+        assert!(bound.tools);
     }
 }
