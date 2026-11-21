@@ -2,13 +2,14 @@
 //! `Search` connections (`exa`, `tavily`, `brave`, `mwmbl`, `searxng`).
 use super::{
     background,
-    db::{self, Store, truncate},
+    db::Store,
     error::Failure,
     model::{Credentials, connection_secret},
     net,
     providers::Providers,
     resources::HostRuntime,
     settings::{Check, Connection, ConnectionConfig, ConnectionKind, endpoint_of},
+    util::{self, truncate},
 };
 use rig_core::{
     completion::ToolAnnotations,
@@ -196,7 +197,7 @@ pub(crate) async fn probe(
     credentials: &Credentials,
     providers: &Providers,
 ) -> Check {
-    let checked_at = db::now();
+    let checked_at = util::now();
     let resolved = match resolve_connection(connection, Some(credentials), providers) {
         Ok(resolved) => resolved,
         Err(message) => {
@@ -1125,7 +1126,7 @@ mod tests {
                     tool_name: NAME.into(),
                     pattern: "*".into(),
                     effect: crate::host::permission::PolicyEffect::Allow,
-                    created_at: db::now(),
+                    created_at: util::now(),
                 }],
                 &[],
             )
@@ -1273,7 +1274,7 @@ mod tests {
                     tool_name: NAME.into(),
                     pattern: "*".into(),
                     effect: crate::host::permission::PolicyEffect::Allow,
-                    created_at: db::now(),
+                    created_at: util::now(),
                 }],
                 &[],
             )

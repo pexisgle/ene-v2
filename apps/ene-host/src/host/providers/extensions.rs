@@ -170,11 +170,10 @@ pub(crate) fn apply_character_actions(
     for action in actions {
         match action {
             CharacterAction::Speak { text } => {
-                let spoken = crate::host::voice::speech::for_speech(&text);
-                if !spoken.is_empty() {
-                    crate::host::voice::on_stream_text(world, companion_id, &spoken);
-                    crate::host::voice::on_turn_end(world, companion_id);
-                }
+                world.trigger(crate::host::resources::SpeakCharacterText {
+                    companion_id: companion_id.to_owned(),
+                    text,
+                });
             }
             CharacterAction::Expression { name, .. } => {
                 if let Some(client_id) = bound_client.as_deref()
@@ -391,22 +390,16 @@ pub(crate) fn register_plugin_tools(world: &mut World, tools: Vec<(String, Plugi
             runtime: runtime.clone(),
         });
         if let Some(entity) = world.spawn_tool(tool_def, handler, ToolOptions::default()) {
-            world.entity_mut(entity).insert(PluginTool { plugin_id });
+            world.entity_mut(entity).insert((
+                PluginTool { plugin_id },
+                crate::host::resources::HostExternalTool,
+            ));
             changed = true;
         }
     }
-    if changed && let Err(error) = crate::host::client::dynamic::sync_tools(world) {
-        tracing::warn!(%error, "could not refresh tool access for plugin tools");
+    if changed {
+        crate::host::tools::sync::sync_access(world);
     }
-}
-
-/// Model-facing names currently contributed by `Extension::Tool` plugins.
-pub(crate) fn tool_names(world: &mut World) -> HashSet<String> {
-    let mut query = world.query::<(&ToolDef, &PluginTool)>();
-    query
-        .iter(world)
-        .map(|(def, _)| def.0.name.as_str().to_owned())
-        .collect()
 }
 
 /// Maps each registered plugin tool name to its owning `plugin_id`.
@@ -492,12 +485,25 @@ fn drain_character_actions(world: &mut World) {
     }
 }
 
+fn observe_character_event(
+    trigger: On<crate::host::resources::TriggerCharacterEvent>,
+    mut commands: Commands,
+) {
+    let event = trigger.event();
+    let companion_id = event.companion_id.clone();
+    let character_event = event.event.clone();
+    commands.queue(move |world: &mut World| {
+        trigger_character_event(world, &companion_id, character_event);
+    });
+}
+
 /// Registers host-side extension support (`F17`, `F18`, `F20`).
 pub(crate) struct ExtensionPlugin;
 
 impl Plugin for ExtensionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PendingCharacterActions>()
+            .add_observer(observe_character_event)
             .add_systems(Update, drain_character_actions.after(AgentLoop));
     }
 }

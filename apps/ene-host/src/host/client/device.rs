@@ -10,13 +10,13 @@ use super::{
     computer::{self, ComputerUse},
 };
 use crate::host::{
-    agent::{CompanionAgent, WorkAgent},
     client::{CapabilitySpec, DeviceOperation, DeviceStatus},
-    db::{Result, Store, now},
+    db::{Result, Store},
     error::{Failure, HostError},
     notify::Notifier,
     permission::{self, CallBinding},
-    resources::{DeviceHub, DeviceTimeout, Waiting, WaitingOperation},
+    resources::{CompanionAgent, DeviceHub, DeviceTimeout, Waiting, WaitingOperation, WorkAgent},
+    util::now,
     wire,
 };
 use bevy_ecs::prelude::*;

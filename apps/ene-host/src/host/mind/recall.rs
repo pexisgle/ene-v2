@@ -9,10 +9,11 @@ use crate::host::{
     agent::{self, CompanionAgent, WorkAgent},
     background::{self, AbortOnDropHandle},
     compaction,
-    db::{Store, now},
+    db::Store,
     eyes::{Eyes, ReportKind, ReportOfTurn},
     model::Credentials,
     resources::{DeviceHub, Perception},
+    util::now,
 };
 use bevy_ecs::prelude::*;
 use rig_core::completion::Message;

@@ -27,6 +27,9 @@ rest_pat_in_fully_bound_structs = "warn"
 [workspace.dependencies]
 ene-rpc = { path = "crates/ene-rpc" }
 ene-avatar-ipc = { path = "crates/ene-avatar-ipc" }
+ene-catalog = { path = "crates/ene-catalog" }
+ene-mind = { path = "crates/ene-mind" }
+ene-policy = { path = "crates/ene-policy" }
 ene-plugin = { path = "crates/ene-plugin" }
 ene-plugin-runtime = { path = "crates/ene-plugin-runtime" }
 # A Wasm guest cannot depend on the full ACP SDK, because the SDK pulls `uuid`
@@ -66,6 +69,7 @@ rig-rmcp = "=0.46.0"
 rmcp = { version = "3.5", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "which-command"] }
 rig-reqwest = { version = "=0.46.0", features = ["rustls"] }
 rustix = { version = "1", features = ["fs", "process"] }
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

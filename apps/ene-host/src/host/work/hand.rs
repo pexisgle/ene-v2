@@ -22,11 +22,12 @@
 use super::{Run, RunState, WorkSession, WorkStatus};
 use crate::host::{
     background::{self, AbortOnDropHandle},
-    db::{Result, Store, now},
+    db::{Result, Store},
     error::HostError,
     permission::{self, ApprovalStatus},
     providers::{Providers, Running},
     resources::HostRuntime,
+    util::now,
 };
 use bevy_ecs::prelude::*;
 use ene_plugin::{
@@ -651,7 +652,7 @@ fn request_permission(
     }
     let target = format!(
         "{tool_name} {}",
-        crate::host::db::truncate(&approval.normalized_arguments, 200)
+        crate::host::util::truncate(&approval.normalized_arguments, 200)
     );
     permission::notify_approval_card(world, companion, &approval, &target);
 }

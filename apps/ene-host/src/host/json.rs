@@ -9,41 +9,7 @@ use hashlink::LruCache;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// A schema-tagged JSON document, the `JsonDocument` wire type.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct JsonDoc {
-    pub(crate) schema: String,
-    pub(crate) json: Value,
-}
-
-impl JsonDoc {
-    pub(crate) fn new(schema: impl Into<String>, json: Value) -> Self {
-        Self {
-            schema: schema.into(),
-            json,
-        }
-    }
-
-    pub(crate) fn empty() -> Self {
-        Self::new("", json!({}))
-    }
-
-    /// Checks the schema identifier and that a schema'd document is an object
-    /// or an array; plain JSON text is accepted when no schema is named.
-    pub(crate) fn validate(&self) -> Result<()> {
-        if self.schema.chars().count() > 128 {
-            return Err(HostError::Invalid(
-                ("json document schema is too long").into(),
-            ));
-        }
-        if !self.schema.is_empty() && !self.json.is_object() && !self.json.is_array() {
-            return Err(HostError::Invalid(
-                ("a schema'd json document must be an object or an array").into(),
-            ));
-        }
-        Ok(())
-    }
-}
+pub(crate) use ene_mind::JsonDoc;
 
 /// Parses an optional capability input or output, which the contract types as
 /// JSON object text.

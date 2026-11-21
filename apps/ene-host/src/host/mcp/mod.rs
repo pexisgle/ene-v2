@@ -17,7 +17,9 @@ mod projection;
 mod supervisor;
 
 pub(crate) use npx::is_npx_command;
-pub(crate) use projection::{tool_names, tool_servers};
+#[cfg(test)]
+use projection::tool_names;
+pub(crate) use projection::tool_servers;
 pub(crate) use supervisor::{CheckState, McpServers, check_state, request_reconnect};
 
 use bevy_ecs::prelude::*;

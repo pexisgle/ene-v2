@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 ene-avatar-ipc.workspace = true
+ene-catalog.workspace = true
 ene-plugin.workspace = true
 ene-plugin-runtime.workspace = true
 ene-rpc = { workspace = true, features = ["client", "client-tls"] }

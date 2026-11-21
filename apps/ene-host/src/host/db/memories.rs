@@ -2,16 +2,13 @@
 //! consolidation commits and the user profile.
 use super::{Result, Store, digest, json, json_column, now, open_connection, to_json};
 use crate::host::error::HostError;
-use crate::host::json::JsonDoc;
-use crate::host::mind::consolidate::{Batch, Commit, Fact, MemoryContext, validate_citations};
-use crate::host::mind::embedding::{PendingEmbedding, dimensions_of_space};
-use crate::host::mind::memory::{
-    MAX_IMPORTANCE, Memory, PINNED_BUDGET_CHARS, RecallMode, SHARED_SCOPE, Scored, fuse, in_scope,
-    score, tokens,
+pub(crate) use ene_mind::{
+    Batch, Commit, Fact, MAX_IMPORTANCE, Memory, MemoryActionKind, MemoryContext, MemoryRecord,
+    MindStateChange, MindUpdate, NewMemory, PINNED_BUDGET_CHARS, PendingEmbedding, RecallMode,
+    RecallOutcome, SHARED_SCOPE, Scored, StateUpdate, dimensions_of_space, fuse, in_scope, score,
+    tokens, validate_citations,
 };
 use rusqlite::{OptionalExtension, Row, params};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json as value};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -56,93 +53,6 @@ fn row_to_memory(row: &Row<'_>) -> rusqlite::Result<Memory> {
             "stored memory source context is corrupt",
         )?,
     })
-}
-
-/// What a caller may write when a memory is first recorded.
-pub(crate) struct MemoryRecord {
-    pub(crate) id: String,
-    pub(crate) scope: String,
-    pub(crate) content: String,
-    pub(crate) importance: u8,
-    pub(crate) occurred_at: Option<String>,
-    pub(crate) source_context: Value,
-}
-
-/// One element of `mind_update`: a new memory, a correction or a forget.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct NewMemory {
-    /// Correct an existing memory instead of recording a new one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) id: Option<String>,
-    /// The memory text; a correction may omit it to change only importance.
-    #[serde(default)]
-    pub(crate) content: String,
-    /// 0-10; 10 is injected every turn, 0-1 are effectively forgotten.
-    #[serde(default)]
-    pub(crate) importance: Option<u8>,
-    #[serde(default)]
-    pub(crate) occurred_at: Option<String>,
-    /// The revision that was read; a stale value is a conflict.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) expected_revision: Option<u64>,
-    /// An existing memory this record supersedes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) supersedes: Option<String>,
-    /// Forget the addressed memory by lowering its importance to zero.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub(crate) forget: bool,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
-/// The mind state patch of a `mind_update`; each part is a schema'd document.
-/// A part the caller leaves out keeps its stored value.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct StateUpdate {
-    #[serde(default)]
-    pub(crate) emotion: Option<Value>,
-    #[serde(default)]
-    pub(crate) relationships: Option<Value>,
-    #[serde(default)]
-    pub(crate) tendencies: Option<Value>,
-    #[serde(default)]
-    pub(crate) concerns: Option<Value>,
-}
-
-impl StateUpdate {
-    pub(crate) fn apply(&self, state: &mut crate::host::mind::State) {
-        if let Some(emotion) = &self.emotion {
-            state.emotion = JsonDoc::new("ene.emotion.v1", emotion.clone());
-        }
-        if let Some(relationships) = &self.relationships {
-            state.relationships = JsonDoc::new("ene.relationships.v1", relationships.clone());
-        }
-        if let Some(tendencies) = &self.tendencies {
-            state.tendencies = JsonDoc::new("ene.tendencies.v1", tendencies.clone());
-        }
-        if let Some(concerns) = &self.concerns {
-            state.concerns = JsonDoc::new("ene.concerns.v1", concerns.clone());
-        }
-    }
-}
-
-/// The mind state half of a `mind_update`, already serialised.
-pub(crate) struct MindStateChange {
-    pub(crate) expected_revision: u64,
-    pub(crate) state: String,
-}
-
-/// Everything a `mind_update` commits atomically.
-pub(crate) struct MindUpdate {
-    pub(crate) operation_id: String,
-    pub(crate) companion_id: String,
-    pub(crate) request_hash: Vec<u8>,
-    pub(crate) memories: Vec<NewMemory>,
-    pub(crate) state: Option<MindStateChange>,
 }
 
 fn check_content(content: &str) -> Result<()> {
@@ -865,7 +775,7 @@ impl Store {
         // refrain from reviving it.
         let retrieved = self.recall_hybrid(
             companion,
-            &crate::host::db::truncate(query, 2_000),
+            &super::truncate(query, 2_000),
             RecallMode::Explicit,
             semantic,
             limit.saturating_mul(2),
@@ -1117,6 +1027,28 @@ pub(crate) fn write_embedding(
     Ok(updated > 0)
 }
 
+impl Store {
+    pub(crate) fn missing_embeddings_on(
+        connection: &rusqlite::Connection,
+        companion: &str,
+        space: &str,
+        limit: usize,
+    ) -> Result<Vec<PendingEmbedding>> {
+        missing_embeddings(connection, companion, space, limit)
+    }
+
+    pub(crate) fn write_embedding_on(
+        connection: &rusqlite::Connection,
+        id: &str,
+        content_revision: u64,
+        space: &str,
+        dimensions: usize,
+        bytes: &[u8],
+    ) -> Result<bool> {
+        write_embedding(connection, id, content_revision, space, dimensions, bytes)
+    }
+}
+
 fn forget_memory_tx(
     transaction: &rusqlite::Transaction<'_>,
     update: &MindUpdate,
@@ -1247,22 +1179,6 @@ pub(crate) fn profile_lines(store: &Store) -> Result<Vec<String>> {
         lines.push(format!("制約: {}", static_constraints.join("、")));
     }
     Ok(lines)
-}
-
-/// The result of a hybrid recall: the ranked items plus whether a semantic
-/// candidate list was actually used.
-#[derive(Clone, Debug)]
-pub(crate) struct RecallOutcome {
-    pub(crate) items: Vec<Scored>,
-    pub(crate) semantic: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MemoryActionKind {
-    Forget,
-    Remember,
-    Share,
-    Unshare,
 }
 
 /// The memory detail returned by `mind_read`: the record plus its edges.
@@ -1494,7 +1410,7 @@ mod tests {
     }
 
     fn companion_row(store: &Store) {
-        let initial_state = serde_json::to_string(&crate::host::mind::State::default()).unwrap();
+        let initial_state = serde_json::to_string(&ene_mind::State::default()).unwrap();
         let document = r#"{"schema":"ene.body.v1","json":{}}"#;
         let assignments = r#"{"companion":{"connection_id":"c","model_id":"m"},"task":{"connection_id":"c","model_id":"m"}}"#;
         store
@@ -1517,7 +1433,7 @@ mod tests {
             Vec::new(),
             Some(MindStateChange {
                 expected_revision: 1,
-                state: serde_json::to_string(&crate::host::mind::State::default()).unwrap(),
+                state: serde_json::to_string(&ene_mind::State::default()).unwrap(),
             }),
         )
     }

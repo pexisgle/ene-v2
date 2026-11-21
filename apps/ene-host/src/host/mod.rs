@@ -25,6 +25,7 @@ pub(crate) mod providers;
 pub(crate) mod resources;
 pub(crate) mod settings;
 pub(crate) mod tools;
+pub(crate) mod util;
 pub(crate) mod voice;
 pub(crate) mod web_search;
 
@@ -184,6 +185,7 @@ impl Runtime {
                         agent::AgentPlugin,
                         permission::GatePlugin,
                         client::ClientPlugin,
+                        tools::sync::ToolsSyncPlugin,
                         work::WorkPlugin,
                         mind::MindPlugin,
                         mcp::McpPlugin,
@@ -588,7 +590,7 @@ pub(crate) fn subscribe(
 )> {
     let store = app.world().resource::<Store>().clone();
     if let Some(client_id) = client_id.filter(|id| !id.is_empty()) {
-        db::validate_id(client_id)?;
+        util::validate_id(client_id)?;
         if store.client(client_id)?.is_none() {
             return Err(HostError::NotFound("client not found".into()));
         }

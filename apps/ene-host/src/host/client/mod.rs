@@ -5,153 +5,11 @@ use super::error::{Failure, HostError, Result};
 use super::json;
 use serde::{Deserialize, Serialize};
 
-pub(crate) const WORKSPACE_CAPABILITY_PREFIX: &str = "work.";
-
-/// Tools the host itself owns. A client capability may not shadow one.
-pub(crate) const BUILTIN_TOOLS: &[&str] = ene_rpc::BUILTIN_TOOLS;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum CapabilityApproval {
-    /// Follow the host's default policy; an unknown capability needs confirmation.
-    #[default]
-    Unspecified,
-    /// Run when policy allows it.
-    Auto,
-    /// A Stage::Gate approval is required for every operation.
-    Confirm,
-}
-
-/// A capability a client declares, with the JSON Schema the host validates
-/// operations against.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CapabilitySpec {
-    pub(crate) name: String,
-    #[serde(default)]
-    pub(crate) tool_name: String,
-    #[serde(default)]
-    pub(crate) description: String,
-    #[serde(default = "default_schema")]
-    pub(crate) input_schema: String,
-    #[serde(default)]
-    pub(crate) presets: Vec<String>,
-    #[serde(default)]
-    pub(crate) approval: CapabilityApproval,
-    #[serde(default)]
-    pub(crate) approval_target: String,
-    #[serde(default)]
-    pub(crate) output_schema: String,
-}
-
-fn default_schema() -> String {
-    r#"{"type":"object"}"#.into()
-}
-
-impl CapabilitySpec {
-    pub(crate) fn validate(&self) -> Result<()> {
-        let name = self.name.trim();
-        if name.is_empty() || name.chars().count() > 64 || name.contains(char::is_whitespace) {
-            return Err(HostError::Invalid(
-                ("capability names must be 1-64 non-space characters").into(),
-            ));
-        }
-        if !self.tool_name.is_empty() {
-            if self.tool_name.chars().count() > 64
-                || self
-                    .tool_name
-                    .bytes()
-                    .any(|byte| !(byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'))
-            {
-                return Err(HostError::Invalid(
-                    ("capability tool names must be 1-64 [A-Za-z0-9_-] characters").into(),
-                ));
-            }
-            if BUILTIN_TOOLS.contains(&self.tool_name.as_str()) {
-                return Err(HostError::Invalid(format!(
-                    "tool name `{}` is reserved by the host",
-                    self.tool_name
-                )));
-            }
-        }
-        if self.description.chars().count() > 2_000 {
-            return Err(HostError::Invalid(
-                ("capability description is too long").into(),
-            ));
-        }
-        if self.approval_target.chars().count() > 500 {
-            return Err(HostError::Invalid(
-                ("capability approval target is too long").into(),
-            ));
-        }
-        let schema = json::parse_schema(&self.input_schema)?;
-        if !schema.is_object() {
-            return Err(HostError::Invalid(
-                ("capability input schema must be an object").into(),
-            ));
-        }
-        if !self.output_schema.trim().is_empty() {
-            json::parse_schema(&self.output_schema)?;
-        }
-        if self.presets.len() > 64
-            || self
-                .presets
-                .iter()
-                .any(|preset| preset.chars().count() > 64)
-        {
-            return Err(HostError::Invalid(
-                ("capability presets are too long").into(),
-            ));
-        }
-        Ok(())
-    }
-
-    /// The model-facing description, with the presets the client declared.
-    pub(crate) fn tool_description(&self) -> String {
-        let mut description = self.description.clone();
-        if !self.presets.is_empty() {
-            if !description.is_empty() {
-                description.push(' ');
-            }
-            description.push_str("Presets: ");
-            description.push_str(&self.presets.join(", "));
-            description.push('.');
-        }
-        description
-    }
-}
-
-/// Validates a whole declaration set: every spec names a declared capability,
-/// names are unique and tool names do not collide.
-pub(crate) fn validate_declarations(
-    capabilities: &[String],
-    specs: &[CapabilitySpec],
-) -> Result<()> {
-    let mut seen = std::collections::HashSet::new();
-    let mut tools = std::collections::HashSet::new();
-    for capability in capabilities {
-        if !seen.insert(capability.as_str()) {
-            return Err(HostError::Invalid(format!(
-                "capability `{capability}` is declared twice"
-            )));
-        }
-    }
-    for spec in specs {
-        if !capabilities.iter().any(|name| name == &spec.name) {
-            return Err(HostError::Invalid(format!(
-                "capability spec `{}` is not in capabilities",
-                spec.name
-            )));
-        }
-        spec.validate()?;
-        if !spec.tool_name.is_empty() && !tools.insert(spec.tool_name.as_str()) {
-            return Err(HostError::Invalid(format!(
-                "tool name `{}` is declared twice",
-                spec.tool_name
-            )));
-        }
-    }
-    Ok(())
-}
+#[cfg(test)]
+pub(crate) use ene_policy::{BUILTIN_TOOLS, approval_target};
+pub(crate) use ene_policy::{
+    CapabilityApproval, CapabilitySpec, WORKSPACE_CAPABILITY_PREFIX, validate_declarations,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Client {
@@ -243,37 +101,6 @@ pub(crate) fn validate_output(spec: &CapabilitySpec, output: &serde_json::Value)
     json::validate(&schema, output).map_err(HostError::Invalid)
 }
 
-/// Fills the approval-card target from the client's template and the verified
-/// input. A template that references a field the input lacks leaves that part
-/// empty; the host never trusts a client-supplied target.
-pub(crate) fn approval_target(spec: &CapabilitySpec, input: &serde_json::Value) -> String {
-    if spec.approval_target.trim().is_empty() {
-        return format!("{} {}", spec.name, summarise(input));
-    }
-    let mut rendered = String::new();
-    let mut rest = spec.approval_target.as_str();
-    while let Some(start) = rest.find('{') {
-        rendered.push_str(&rest[..start]);
-        let inner = &rest[start + 1..];
-        let Some(end) = inner.find('}') else {
-            rendered.push_str(&rest[start..]);
-            return rendered;
-        };
-        let key = &inner[..end];
-        let value = input
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        rendered.push_str(value);
-        rest = &inner[end + 1..];
-    }
-    rendered.push_str(rest);
-    rendered
-}
-
-fn summarise(input: &serde_json::Value) -> String {
-    super::db::truncate(&input.to_string(), 200)
-}
 // Clients: capability declarations, the active client and perception.
 //
 // The host stores capability names, JSON Schema, presets and approval
@@ -470,7 +297,6 @@ impl Plugin for ClientPlugin {
             Update,
             (
                 dynamic::drain.after(AgentLoop),
-                dynamic::refresh.before(AgentLoop),
                 super::eyes::poll.after(AgentLoop),
             ),
         );
@@ -621,7 +447,7 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
         .companion(&request.companion_id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     if !request.release {
-        super::db::validate_id(&request.client_id)?;
+        super::util::validate_id(&request.client_id)?;
         store
             .client(&request.client_id)?
             .ok_or_else(|| HostError::NotFound(("client not found").into()))?;
@@ -671,7 +497,7 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
 /// Routes live observations to the eyes and supports legacy passive summaries.
 pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) -> Result<()> {
     let store = world.resource::<Store>().clone();
-    super::db::validate_id(&event.client_id)?;
+    super::util::validate_id(&event.client_id)?;
     let client = store
         .client(&event.client_id)?
         .ok_or_else(|| HostError::NotFound(("client not found").into()))?;
@@ -727,10 +553,9 @@ pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) ->
     }
     if let Some((kind, character_id, region)) = avatar_interaction {
         for companion_id in targets {
-            super::providers::extensions::trigger_character_event(
-                world,
-                &companion_id,
-                ene_plugin::CharacterEvent::Custom {
+            world.trigger(super::resources::TriggerCharacterEvent {
+                companion_id,
+                event: ene_plugin::CharacterEvent::Custom {
                     name: "avatar_interaction".into(),
                     data: serde_json::json!({
                         "kind": kind,
@@ -738,7 +563,7 @@ pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) ->
                         "region": region,
                     }),
                 },
-            );
+            });
         }
     }
     Ok(())
@@ -782,14 +607,7 @@ fn perception_summary(event: &w::PerceptionEvent) -> Option<String> {
         }
         _ => return None,
     };
-    Some(super::db::truncate(&summary, 1_000))
-}
-
-/// The tools a parent agent can use before any capability tool is published.
-/// Capability tools are added by `dynamic::sync_tools`; a work agent uses its
-/// own `ToolAccess::Only`.
-pub(crate) fn parent_tool_access() -> rig_ecs::prelude::ToolAccess {
-    rig_ecs::prelude::ToolAccess::Only(dynamic::parent_names(&[]))
+    Some(super::util::truncate(&summary, 1_000))
 }
 
 #[cfg(test)]

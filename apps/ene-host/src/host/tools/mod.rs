@@ -1,5 +1,7 @@
 //! The one dispatch path for host-bound open tools: run a handler against the
 //! world and answer the effect with a tool result or a refusal.
+pub(crate) mod sync;
+
 use super::error::HostError;
 use bevy_ecs::prelude::*;
 use rig_ecs::prelude::*;

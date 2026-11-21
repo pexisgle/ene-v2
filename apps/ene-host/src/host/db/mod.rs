@@ -10,9 +10,8 @@ pub(crate) mod settings;
 pub(crate) mod work;
 
 pub(crate) use super::error::{HostError, Result};
-use jiff::Timestamp;
+pub(super) use super::util::{digest, epoch, now, or_stamp, truncate, validate_id};
 use rusqlite::{Connection, OptionalExtension};
-use sha2::{Digest, Sha256};
 use std::{
     path::Path,
     sync::{Arc, Mutex, MutexGuard},
@@ -122,37 +121,6 @@ impl Store {
     }
 }
 
-/// The current time in UTC, RFC 3339.
-pub(crate) fn now() -> String {
-    // The stored columns are compared as text, so every stamp keeps the same
-    // second precision the schedule rows are written with.
-    format!("{:.0}", Timestamp::now())
-}
-
-/// Parses RFC 3339 into seconds since the Unix epoch.
-pub(crate) fn epoch(text: &str) -> Option<i64> {
-    text.parse::<Timestamp>().ok().map(Timestamp::as_second)
-}
-
-/// The SHA-256 of `bytes`, used for action payloads and idempotency hashes.
-pub(crate) fn digest(bytes: &[u8]) -> Vec<u8> {
-    Sha256::digest(bytes).to_vec()
-}
-
-/// Opaque ids are 1..=128 printable ASCII characters. Anything else is a
-/// client mistake, not a lookup miss.
-pub(crate) fn validate_id(id: &str) -> Result<()> {
-    if id.is_empty()
-        || id.chars().count() > 128
-        || id.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
-    {
-        return Err(HostError::Invalid(
-            ("id must be 1-128 printable ASCII characters").into(),
-        ));
-    }
-    Ok(())
-}
-
 /// Parses a stored JSON column.
 pub(crate) fn json(text: &str) -> Result<serde_json::Value> {
     serde_json::from_str(text).map_err(|_| HostError::Storage(("stored JSON is corrupt").into()))
@@ -206,16 +174,6 @@ pub(crate) fn to_json(value: &impl serde::Serialize) -> Result<String> {
     serde_json::to_string(value).map_err(|error| HostError::Storage(error.to_string()))
 }
 
-/// The caller's stamp, or `fallback` (one `now()` shared by a row) when the
-/// caller did not set one.
-pub(crate) fn or_stamp(value: &str, fallback: &str) -> String {
-    if value.is_empty() {
-        fallback.to_owned()
-    } else {
-        value.to_owned()
-    }
-}
-
 /// Turns a zero-row write into the conflict it represents.
 pub(crate) fn require(changed: usize, message: &str) -> Result<()> {
     if changed == 0 {
@@ -230,11 +188,6 @@ pub(crate) fn require_found(changed: usize, message: &str) -> Result<()> {
         return Err(HostError::NotFound((message).into()));
     }
     Ok(())
-}
-
-/// Truncates `value` to at most `limit` characters.
-pub(crate) fn truncate(value: &str, limit: usize) -> String {
-    value.chars().take(limit).collect()
 }
 
 #[cfg(test)]

@@ -4019,6 +4019,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-catalog"
+version = "0.1.8"
+dependencies = [
+ "ene-rpc",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "ene-desktop"
 version = "0.1.8"
 dependencies = [
@@ -4030,6 +4039,7 @@ dependencies = [
  "directories",
  "earshot",
  "ene-avatar-ipc",
+ "ene-catalog",
  "ene-plugin",
  "ene-plugin-runtime",
  "ene-rpc",
@@ -4072,8 +4082,11 @@ dependencies = [
  "croner",
  "crossbeam-channel",
  "directories",
+ "ene-catalog",
+ "ene-mind",
  "ene-plugin",
  "ene-plugin-runtime",
+ "ene-policy",
  "ene-rpc",
  "futures-util",
  "getrandom 0.4.3",
@@ -4121,6 +4134,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-mind"
+version = "0.1.8"
+dependencies = [
+ "jiff",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "sha2 0.11.1",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "ene-openrouter-wasm"
 version = "0.1.8"
 dependencies = [
@@ -4163,6 +4189,19 @@ dependencies = [
  "url",
  "wasmtime",
  "wat",
+]
+
+[[package]]
+name = "ene-policy"
+version = "0.1.8"
+dependencies = [
+ "ene-rpc",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "sha2 0.11.1",
+ "thiserror 2.0.21",
+ "url",
 ]
 
 [[package]]

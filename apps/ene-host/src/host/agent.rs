@@ -20,21 +20,7 @@ use rig_ecs::model::{Connection as ModelConnection, Models};
 use rig_ecs::prelude::*;
 use std::collections::HashMap;
 
-/// One agent per companion, addressed by the companion id.
-#[derive(Component, Clone, Debug, PartialEq, Eq)]
-#[require(LastProjectedEntry)]
-pub(crate) struct CompanionAgent {
-    pub(crate) companion_id: String,
-}
-
-/// One agent per open run, addressed by its run id.
-#[derive(Component, Clone, Debug, PartialEq, Eq)]
-#[require(LastProjectedEntry)]
-pub(crate) struct WorkAgent {
-    pub(crate) work_id: String,
-    pub(crate) run_id: String,
-    pub(crate) companion_id: String,
-}
+pub(crate) use super::resources::{CompanionAgent, LastProjectedEntry, WorkAgent};
 
 #[derive(Resource, Default)]
 struct Connections {
@@ -47,9 +33,6 @@ struct Connections {
 pub(crate) fn clear_model_cache(world: &mut World) {
     world.resource_mut::<Connections>().models.clear();
 }
-
-#[derive(Component, Default)]
-pub(crate) struct LastProjectedEntry(Option<u64>);
 
 /// The last summary a work run reported through `report`.
 #[derive(Resource, Default)]
@@ -209,7 +192,7 @@ pub(crate) fn spawn_companion(world: &mut World, companion: &Companion) -> Entit
             companion_id: companion.id.clone(),
         },
         SystemPrompt(system_prompt(companion)),
-        crate::host::client::parent_tool_access(),
+        crate::host::tools::sync::parent_tool_access(),
     ));
     world.entity_mut(entity).insert(published);
     entity
@@ -233,7 +216,7 @@ pub(crate) fn spawn_work_agent(
             .id(),
     };
     let published = published_through(world, entity);
-    let access = crate::host::client::dynamic::hand_tool_access(world);
+    let access = crate::host::tools::sync::hand_tool_access(world);
     world.entity_mut(entity).insert((
         WorkAgent {
             work_id: work_id.to_owned(),
@@ -328,7 +311,7 @@ pub(crate) fn notice_model_unavailable(world: &mut World, companion_id: &str, er
     notifier.notice(
         Some(companion_id),
         "model_unavailable",
-        &crate::host::db::truncate(&error.to_string(), 300),
+        &crate::host::util::truncate(&error.to_string(), 300),
     );
 }
 
@@ -655,7 +638,7 @@ fn turn_settled(
                 w::TurnStatus::Failed,
                 Some(w::Failure {
                     code: "turn_failed".into(),
-                    message: crate::host::db::truncate(why, 500),
+                    message: crate::host::util::truncate(why, 500),
                     ..Default::default()
                 }),
             ),
@@ -722,7 +705,7 @@ fn eye_report_result(
             .filter_map(|entry| entry_text(&entry))
             .map(|text| super::voice::speech::strip_motion_leak(&text))
             .rfind(|text| !text.is_empty())
-            .map(|text| super::db::truncate(&text, 1500))
+            .map(|text| super::util::truncate(&text, 1500))
     });
     let disposition = match (reply.is_some(), watched, completed) {
         (true, _, _) => Disposition::Replied,

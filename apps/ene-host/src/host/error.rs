@@ -107,6 +107,18 @@ impl From<rusqlite::Error> for HostError {
     }
 }
 
+impl From<ene_mind::MindError> for HostError {
+    fn from(error: ene_mind::MindError) -> Self {
+        Self::Invalid(error.to_string())
+    }
+}
+
+impl From<ene_policy::PolicyError> for HostError {
+    fn from(error: ene_policy::PolicyError) -> Self {
+        Self::Invalid(error.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

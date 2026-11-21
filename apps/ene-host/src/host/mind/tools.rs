@@ -5,7 +5,6 @@ use crate::host::{
     db::{
         Result, Store,
         memories::{MindStateChange, MindUpdate, NewMemory, StateUpdate, detail},
-        now,
     },
     error::HostError,
     mind::{
@@ -15,6 +14,7 @@ use crate::host::{
     model::Credentials,
     resources::HostRuntime,
     tools::run_tool,
+    util::now,
 };
 use bevy_ecs::prelude::*;
 use rig_ecs::prelude::*;

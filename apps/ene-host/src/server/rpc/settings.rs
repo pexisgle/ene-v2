@@ -406,7 +406,7 @@ impl w::SettingsService for Services {
             if !connection.enabled {
                 crate::host::settings::Check {
                     healthy: false,
-                    checked_at: crate::host::db::now(),
+                    checked_at: crate::host::util::now(),
                     failure: Some(crate::host::error::Failure::new(
                         "connection_check",
                         "MCP 接続が無効化されています。",
@@ -467,14 +467,14 @@ impl w::SettingsService for Services {
                 match outcome {
                     Ok(Ok(Ok(tools))) => crate::host::settings::Check {
                         healthy: true,
-                        checked_at: crate::host::db::now(),
+                        checked_at: crate::host::util::now(),
                         failure: None,
                         capabilities: Vec::new(),
                         resources: tools,
                     },
                     Ok(Ok(Err(reason))) => crate::host::settings::Check {
                         healthy: false,
-                        checked_at: crate::host::db::now(),
+                        checked_at: crate::host::util::now(),
                         failure: Some(crate::host::error::Failure::new(
                             "connection_check",
                             format!("{default_message} ({reason})"),
@@ -485,7 +485,7 @@ impl w::SettingsService for Services {
                     Ok(Err(error)) => return Err(error.into()),
                     Err(_) => crate::host::settings::Check {
                         healthy: false,
-                        checked_at: crate::host::db::now(),
+                        checked_at: crate::host::util::now(),
                         failure: Some(crate::host::error::Failure::new(
                             "connection_check",
                             default_message,
@@ -744,7 +744,7 @@ async fn probe_voicevox_tts(
     connection: &crate::host::settings::Connection,
     voicevox: &crate::host::voice::voicevox::VoicevoxManager,
 ) -> crate::host::settings::Check {
-    let checked_at = crate::host::db::now();
+    let checked_at = crate::host::util::now();
     let base = connection.endpoint().endpoint.trim().trim_end_matches('/');
     let base = if base.is_empty() {
         "http://127.0.0.1:50021"
@@ -866,7 +866,7 @@ async fn probe_openai_speech(
     credentials: &model::Credentials,
     providers: &crate::host::providers::Providers,
 ) -> crate::host::settings::Check {
-    let checked_at = crate::host::db::now();
+    let checked_at = crate::host::util::now();
     let fail = |message: String| crate::host::settings::Check {
         healthy: false,
         checked_at: checked_at.clone(),
@@ -1012,7 +1012,7 @@ async fn probe_embedding(
     credentials: &model::Credentials,
     providers: &crate::host::providers::Providers,
 ) -> crate::host::settings::Check {
-    let checked_at = crate::host::db::now();
+    let checked_at = crate::host::util::now();
     let fail = |message: String, resources: Vec<String>| crate::host::settings::Check {
         healthy: false,
         checked_at: checked_at.clone(),

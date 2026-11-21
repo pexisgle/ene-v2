@@ -306,7 +306,7 @@ pub(crate) struct Connection {
 
 impl Connection {
     pub(crate) fn validate(&self) -> Result<()> {
-        super::db::validate_id(&self.id)?;
+        super::util::validate_id(&self.id)?;
         if self.name.trim().is_empty() || self.name.chars().count() > 128 {
             return Err(HostError::Invalid(
                 ("connection name must be 1-128 characters").into(),
@@ -375,8 +375,7 @@ fn catalog_entry(id: &str, name: &str, settings: &[(&str, &str)]) -> Option<w::L
     })
 }
 
-pub(crate) const SAKURA_AI_ENDPOINT: &str = "https://api.ai.sakura.ad.jp/v1";
-pub(crate) const SAKURA_AI_API_KEY_ENV: &str = "SAKURA_AI_API_KEY";
+pub(crate) use ene_catalog::{SAKURA_AI_API_KEY_ENV, SAKURA_AI_ENDPOINT};
 
 /// The provider catalogue the host can speak to through rig-core. It is a
 /// fixed alpha list; extensions add adapters, not host code paths.

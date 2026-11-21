@@ -1,0 +1,80 @@
+//! Pure domain types and scoring/validation rules for companion minds and episodic memory.
+pub mod companion;
+pub mod consolidate;
+pub mod embedding;
+pub mod error;
+pub mod json;
+pub mod memory;
+
+pub use companion::{
+    Assignment, Assignments, Companion, Profile, Role, State, default_ene_companion, validate_id,
+};
+pub use consolidate::{Batch, Commit, Fact, MemoryContext, Turn, validate_citations};
+pub use embedding::{PREP_VERSION, PendingEmbedding, dimensions_of_space, space_id};
+pub use error::{MindError, Result};
+pub use json::JsonDoc;
+pub use memory::{
+    MAX_IMPORTANCE, Memory, MemoryActionKind, MemoryRecord, MindStateChange, MindUpdate, NewMemory,
+    PINNED_BUDGET_CHARS, RecallMode, RecallOutcome, SHARED_SCOPE, Scored, StateUpdate, fuse,
+    in_scope, score, tokens,
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_ene_companion_validates_and_resolves_role_fallbacks() {
+        let mut companion = default_ene_companion("2026-11-21T00:00:00Z");
+        assert!(companion.validate().is_ok());
+
+        companion.assignments.companion = Assignment {
+            connection_id: "conn-1".into(),
+            model_id: "gpt-5.4-mini".into(),
+        };
+        companion.assignments.task = Assignment {
+            connection_id: "conn-2".into(),
+            model_id: "gpt-5.4".into(),
+        };
+        assert_eq!(
+            companion.model(Role::Perception),
+            Some(&companion.assignments.companion)
+        );
+        assert_eq!(
+            companion.model(Role::Decision),
+            Some(&companion.assignments.task)
+        );
+        assert!(companion.model(Role::Embedding).is_none());
+    }
+
+    #[test]
+    fn recall_scoring_rrf_and_citation_guard_preserve_invariants() {
+        let s_high = score(0.9, 8, None, None, "2026-11-21T00:00:00Z", 1_795_219_200);
+        let s_low = score(0.9, 1, None, None, "2026-11-21T00:00:00Z", 1_795_219_200);
+        assert!(s_high > s_low);
+
+        let l1 = vec!["a".to_owned(), "b".to_owned()];
+        let l2 = vec!["b".to_owned(), "c".to_owned()];
+        let fused = fuse(&[&l1, &l2], 60.0);
+        assert_eq!(fused[0].0, "b");
+
+        assert_eq!(
+            tokens("hi rust, メモリ管理!"),
+            vec!["\"rust\"", "\"メモリ管理\""]
+        );
+        assert_eq!(
+            validate_citations(&["m1".into(), "m2".into(), "m1".into()], &["m1".into()]),
+            vec!["m1".to_owned()]
+        );
+
+        let space = space_id(
+            "openai",
+            "https://api.openai.com/v1/",
+            r#"{"b":2,"a":1}"#,
+            "text-embedding-3-small",
+            1536,
+        );
+        assert_eq!(dimensions_of_space(&space), Some(1536));
+        assert_eq!(dimensions_of_space("bad:v0"), None);
+    }
+}

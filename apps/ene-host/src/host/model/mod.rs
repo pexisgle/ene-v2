@@ -183,67 +183,11 @@ pub(crate) fn connection_secret(
         .filter(|secret| !secret.is_empty()))
 }
 
-pub(crate) const SAKURA_CHAT_MODELS: &[&str] = &[
-    "gpt-oss-120b",
-    "llm-jp-3.1-8x13b-instruct4",
-    "preview/Qwen3.6-35B-A3B",
-    "preview/gemma-4-31B-it",
-    "preview/Kimi-K2.6",
-    "preview/Kimi-K2.7-Code",
-    "preview/Qwen3-VL-30B-A3B-Instruct",
-    "preview/GLM-5.3-Flash",
-    "preview/DeepSeek-V4.1-Flash-1017",
-    "preview/Phi-4-mini-instruct-cpu",
-    "preview/Qwen3-0.6B-cpu",
-];
-
-// https://manual.sakura.ad.jp/cloud/ai-engine/chat-models.html
-const SAKURA_VISION_MODELS: &[&str] = &[
-    "preview/gemma-4-31B-it",
-    "preview/Qwen3-VL-30B-A3B-Instruct",
-    "preview/Qwen3.6-35B-A3B",
-    "preview/Kimi-K2.7-Code",
-    "preview/GLM-5.3-Flash",
-    "preview/DeepSeek-V4.1-Flash-1017",
-];
-
-pub(crate) const SAKURA_STT_MODELS: &[&str] = &["whisper-large-v3-turbo"];
-
-pub(crate) const SAKURA_EMBEDDING_MODELS: &[&str] =
-    &["multilingual-e5-large", "preview/Qwen3-Embedding-4B-FP16"];
-
-pub(crate) const SAKURA_TTS_VOICES: &[&str] = &[
-    "zundamon/normal:VOICEVOX:ずんだもん（ノーマル）",
-    "zundamon/amaama:VOICEVOX:ずんだもん（あまあま）",
-    "zundamon/tsuntsun:VOICEVOX:ずんだもん（ツンツン）",
-    "zundamon/sexy:VOICEVOX:ずんだもん（セクシー）",
-    "zundamon/sasayaki:VOICEVOX:ずんだもん（ささやき）",
-    "shikokumetan/normal:VOICEVOX:四国めたん（ノーマル）",
-    "shikokumetan/amaama:VOICEVOX:四国めたん（あまあま）",
-    "shikokumetan/tsuntsun:VOICEVOX:四国めたん（ツンツン）",
-    "shikokumetan/sexy:VOICEVOX:四国めたん（セクシー）",
-    "kasukabetsumugi/normal:VOICEVOX:春日部つむぎ（ノーマル）",
-    "meimeihimari/normal:VOICEVOX:冥鳴ひまり（ノーマル）",
-    "tohokuzunko/normal:VOICEVOX:東北ずん子（ノーマル）",
-    "tohokukiritan/normal:VOICEVOX:東北きりたん（ノーマル）",
-    "tohokuitako/normal:VOICEVOX:東北イタコ（ノーマル）",
-    "ankomon/normal:VOICEVOX:あんこもん（ノーマル）",
-];
-
-pub(crate) fn is_sakura_endpoint(url: &str) -> bool {
-    url::Url::parse(url.trim())
-        .ok()
-        .and_then(|parsed| {
-            parsed
-                .host_str()
-                .map(|host| host.eq_ignore_ascii_case("api.ai.sakura.ad.jp"))
-        })
-        .unwrap_or(false)
-}
-
-pub(crate) fn is_sakura_connection(adapter: &str, endpoint: &str) -> bool {
-    adapter.eq_ignore_ascii_case("sakura") || is_sakura_endpoint(endpoint)
-}
+use ene_catalog::SAKURA_VISION_MODELS;
+pub(crate) use ene_catalog::{
+    SAKURA_CHAT_MODELS, SAKURA_EMBEDDING_MODELS, SAKURA_STT_MODELS, SAKURA_TTS_VOICES,
+    is_non_chat_sakura_model, is_sakura_connection, is_sakura_endpoint, is_sakura_tts_model_id,
+};
 
 pub(crate) fn sakura_dialect() -> Dialect {
     let mut quirks = Quirks::openai();
@@ -259,34 +203,6 @@ pub(crate) fn sakura_dialect() -> Dialect {
         super::settings::SAKURA_AI_API_KEY_ENV,
     )
     .with_quirks(quirks)
-}
-
-pub(crate) fn is_sakura_tts_model_id(id: &str) -> bool {
-    let lower = id.trim().to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "zundamon"
-            | "shikokumetan"
-            | "kasukabetsumugi"
-            | "meimeihimari"
-            | "tohokuzunko"
-            | "tohokukiritan"
-            | "tohokuitako"
-            | "ankomon"
-            | "zunko"
-            | "kiritan"
-            | "itako"
-            | "himari"
-    )
-}
-
-pub(crate) fn is_non_chat_sakura_model(id: &str) -> bool {
-    let lower = id.trim().to_ascii_lowercase();
-    lower.contains("whisper")
-        || lower.contains("transcribe")
-        || lower.contains("embedding")
-        || lower.contains("multilingual-e5")
-        || is_sakura_tts_model_id(&lower)
 }
 
 fn sakura_model_spec(model_id: &str) -> Option<ModelSpec> {
@@ -633,7 +549,7 @@ pub(crate) async fn probe(
     connection: &Connection,
     providers: &super::providers::Providers,
 ) -> Check {
-    let checked_at = super::db::now();
+    let checked_at = super::util::now();
     let failure = |message: String| Check {
         healthy: false,
         checked_at: checked_at.clone(),

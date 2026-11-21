@@ -18,9 +18,10 @@ use rig_core::{
 };
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
-pub(crate) const ADAPTER: &str = "google-agent-platform";
-pub(crate) const ENDPOINT: &str = "https://aiplatform.googleapis.com";
-pub(super) const DEFAULT_MODEL: &str = "gemini-3.8-flash";
+pub(super) use ene_catalog::GOOGLE_AGENT_PLATFORM_DEFAULT_MODEL as DEFAULT_MODEL;
+pub(crate) use ene_catalog::{
+    GOOGLE_AGENT_PLATFORM as ADAPTER, GOOGLE_AGENT_PLATFORM_ENDPOINT as ENDPOINT,
+};
 pub(crate) const VERIFIED_MODEL_LIST: &str = "verified_model_list";
 
 // Google Cloud's Gemini chat model IDs. Use the same candidates for both

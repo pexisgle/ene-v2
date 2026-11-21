@@ -1,10 +1,9 @@
 //! Run-bound computer operations and request-only screen images.
 
 use crate::host::{
-    agent::WorkAgent,
     db::Store,
     error::{HostError, Result},
-    resources::DeviceHub,
+    resources::{DeviceHub, WorkAgent},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bevy_ecs::prelude::*;

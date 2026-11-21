@@ -5,9 +5,10 @@
 //! and `skill_save`.
 use crate::host::{
     agent::{CompanionAgent, WorkAgent},
-    db::{Result, Store, now},
+    db::{Result, Store},
     error::HostError,
     tools::run_tool,
+    util::now,
 };
 use bevy_ecs::prelude::*;
 use rig_ecs::prelude::*;

@@ -154,3 +154,45 @@ mod tests {
 /// without creating a runtime or thread of their own.
 #[derive(Resource, Clone)]
 pub(crate) struct HostRuntime(pub(crate) tokio::runtime::Handle);
+
+/// Tracks the last conversation entry projected into notifications for an agent.
+#[derive(Component, Default)]
+pub(crate) struct LastProjectedEntry(pub(crate) Option<u64>);
+
+/// One agent per companion, addressed by the companion id.
+#[derive(Component, Clone, Debug, PartialEq, Eq)]
+#[require(LastProjectedEntry)]
+pub(crate) struct CompanionAgent {
+    pub(crate) companion_id: String,
+}
+
+/// One agent per open run, addressed by its run id.
+#[derive(Component, Clone, Debug, PartialEq, Eq)]
+#[require(LastProjectedEntry)]
+pub(crate) struct WorkAgent {
+    pub(crate) work_id: String,
+    pub(crate) run_id: String,
+    pub(crate) companion_id: String,
+}
+
+/// Marks an ECS tool entity contributed by an MCP server or plugin extension.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub(crate) struct HostExternalTool;
+
+/// Capability tool names currently granted to each active companion.
+#[derive(Resource, Clone, Debug, Default)]
+pub(crate) struct GrantedCompanionTools(pub(crate) HashMap<String, Vec<String>>);
+
+/// Dispatches a character lifecycle event to installed `Extension::Character` plugins.
+#[derive(Event, Clone, Debug)]
+pub(crate) struct TriggerCharacterEvent {
+    pub(crate) companion_id: String,
+    pub(crate) event: ene_plugin::CharacterEvent,
+}
+
+/// Speaks character-plugin text via the voice pipeline.
+#[derive(Event, Clone, Debug)]
+pub(crate) struct SpeakCharacterText {
+    pub(crate) companion_id: String,
+    pub(crate) text: String,
+}

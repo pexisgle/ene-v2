@@ -362,8 +362,8 @@ mod tests {
             persona: None,
             voice_identifier: None,
             revision: 1,
-            created_at: crate::host::db::now(),
-            updated_at: crate::host::db::now(),
+            created_at: crate::host::util::now(),
+            updated_at: crate::host::util::now(),
         }
     }
 

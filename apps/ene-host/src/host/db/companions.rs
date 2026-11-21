@@ -1,6 +1,6 @@
 //! Companions and their mind: persistence and revision checks.
 use super::{Result, Store, json_column, now, require, to_json};
-use crate::host::mind::{Companion, Profile};
+use ene_mind::{Companion, Profile};
 use rusqlite::{OptionalExtension, Row, TransactionBehavior, params};
 
 const INITIAL_ENE_SEED: &str = "default_companion_ene";
@@ -85,7 +85,7 @@ impl Store {
         let count: i64 =
             transaction.query_row("SELECT COUNT(*) FROM companions", [], |row| row.get(0))?;
         let inserted = if count == 0 {
-            let companion = crate::host::mind::default_ene_companion(&stamp);
+            let companion = ene_mind::default_ene_companion(&stamp);
             companion.validate()?;
             insert_companion_with(&transaction, &companion)?;
             true
@@ -164,7 +164,7 @@ fn refresh_initial_ene_instructions(
     seed_stamp: &str,
     stamp: &str,
 ) -> Result<()> {
-    let defaults = crate::host::mind::default_ene_companion(stamp);
+    let defaults = ene_mind::default_ene_companion(stamp);
     // Profile and companion settings have independent edit histories.
     connection.execute(
         "UPDATE companions SET
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn startup_refreshes_only_the_original_ene_instructions() {
         let seed_stamp = "2026-01-01T00:00:00Z";
-        let defaults = crate::host::mind::default_ene_companion(seed_stamp);
+        let defaults = ene_mind::default_ene_companion(seed_stamp);
         for (original, edited_profile, edited_persona) in [
             (true, false, false),
             (true, true, false),

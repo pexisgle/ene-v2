@@ -4,9 +4,9 @@ use super::{
     require_found, to_json,
 };
 use crate::host::error::HostError;
-use crate::host::mind::Companion;
 use crate::host::model::{Credentials, agent_platform, delete_secret};
 use crate::host::settings::{Check, Connection, ConnectionConfig, Settings};
+use ene_mind::Companion;
 use rusqlite::{Row, params};
 use std::collections::HashSet;
 
@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn removing_a_connection_checks_revision_and_clears_only_its_bindings_and_secret() {
-        use crate::host::mind::{Assignment, default_ene_companion};
+        use ene_mind::{Assignment, default_ene_companion};
 
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("state.sqlite3")).unwrap();

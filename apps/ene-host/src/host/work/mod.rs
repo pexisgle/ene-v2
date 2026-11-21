@@ -14,10 +14,11 @@ mod tools;
 
 use super::{
     agent::{self, WorkAgent, WorkReports},
-    db::{Result, Store, now},
+    db::{Result, Store},
     error::{Failure, HostError},
     mind::Companion,
     notify::Notifier,
+    util::now,
     wire,
 };
 use bevy_ecs::prelude::*;
@@ -391,7 +392,7 @@ pub(crate) fn start(world: &mut World, request: w::StartWorkRequest) -> Result<w
         id: uuid::Uuid::new_v4().to_string(),
         companion_id: companion.id.clone(),
         title: if request.title.trim().is_empty() {
-            super::db::truncate(&request.instruction, 80)
+            super::util::truncate(&request.instruction, 80)
         } else {
             request.title.clone()
         },
@@ -497,7 +498,7 @@ fn binding_for(store: &Store, request: &w::StartWorkRequest) -> Result<Option<St
     if request.client_id.is_empty() {
         return Ok(activation.and_then(|activation| activation.client_id));
     }
-    super::db::validate_id(&request.client_id)?;
+    super::util::validate_id(&request.client_id)?;
     store
         .client(&request.client_id)?
         .ok_or_else(|| HostError::NotFound("client not found".into()))?;
@@ -520,7 +521,7 @@ pub(crate) fn send(world: &mut World, request: w::SendWorkRequest) -> Result<w::
     if session.status == WorkStatus::Closed {
         return Err(HostError::Conflict(("work session is closed").into()));
     }
-    let hash = super::db::digest(format!("{}:{}", request.work_id, request.text).as_bytes());
+    let hash = super::util::digest(format!("{}:{}", request.work_id, request.text).as_bytes());
     let agent = agent_of(world, &request.work_id);
     if !request.request_key.is_empty()
         && let Some((stored, request_id)) =

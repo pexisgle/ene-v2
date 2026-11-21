@@ -1011,7 +1011,7 @@ mod tests {
     }
 
     fn companion() -> Companion {
-        let now = crate::host::db::now();
+        let now = crate::host::util::now();
         Companion {
             id: "ene".into(),
             name: "ene".into(),

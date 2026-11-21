@@ -9,7 +9,9 @@ use rig_core::{
 };
 use rig_ecs::prelude::*;
 use rig_rmcp::McpConnection;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
 
 /// The registration an MCP tool entity came from: the library generation that
 /// keeps a stale refresh from replacing a newer handler, and the server that
@@ -111,10 +113,13 @@ pub(super) fn project(
         if let Some(entity) =
             world.spawn_tool(definition, tool.handler().clone(), ToolOptions::default())
         {
-            world.entity_mut(entity).insert(McpTool {
-                server: id.to_owned(),
-                key: tool.key().clone(),
-            });
+            world.entity_mut(entity).insert((
+                McpTool {
+                    server: id.to_owned(),
+                    key: tool.key().clone(),
+                },
+                crate::host::resources::HostExternalTool,
+            ));
             changed = true;
         }
     }
@@ -127,10 +132,8 @@ pub(super) fn project(
     changed
 }
 
-/// The model-facing names MCP servers contribute right now. The tool entities
-/// are the only owner: the gate and the per-agent access read this set instead
-/// of a second table kept in step with them.
-pub(crate) fn tool_names(world: &mut World) -> HashSet<String> {
+#[cfg(test)]
+pub(super) fn tool_names(world: &mut World) -> HashSet<String> {
     let mut query = world.query::<(&ToolDef, &McpTool)>();
     query
         .iter(world)
@@ -147,9 +150,7 @@ pub(crate) fn tool_servers(world: &mut World) -> HashMap<String, String> {
 }
 
 fn refresh_access(world: &mut World) {
-    if let Err(error) = crate::host::client::dynamic::sync_tools(world) {
-        tracing::warn!(%error, "the MCP tools are not offered");
-    }
+    crate::host::tools::sync::sync_access(world);
 }
 
 /// Closes one server and removes the tools it contributed.

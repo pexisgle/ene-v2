@@ -64,7 +64,7 @@ pub(super) fn backfill(
                     notifier.notice(
                         Some(&companion),
                         "embedding_failed",
-                        &crate::host::db::truncate(&error.to_string(), 300),
+                        &crate::host::util::truncate(&error.to_string(), 300),
                     );
                 }
             }
@@ -158,7 +158,7 @@ pub(super) async fn fill(
         let Some(target) = target(store, credentials, companion, embeddings)? else {
             break;
         };
-        let pending = crate::host::db::memories::missing_embeddings(
+        let pending = Store::missing_embeddings_on(
             &connection,
             &companion.id,
             &target.space,
@@ -180,7 +180,7 @@ pub(super) async fn fill(
                     ("embedding dimensions do not match the connection").into(),
                 ));
             }
-            if crate::host::db::memories::write_embedding(
+            if Store::write_embedding_on(
                 &connection,
                 &row.id,
                 row.content_revision,

@@ -22,14 +22,14 @@
 //! client answers; a named capability tool is immediate and answers at once
 //! with the operation id and dispatch status. Its failure or non-delivery is
 //! observed through `GetOperation` or the device notification.
-use super::{BUILTIN_TOOLS, CapabilitySpec, Client};
+use super::{CapabilitySpec, Client};
 use crate::host::{
-    agent::{CompanionAgent, WorkAgent},
     client::device,
     db::{Result, Store},
     error::HostError,
     json,
     permission::CallBinding,
+    resources::{CompanionAgent, GrantedCompanionTools},
 };
 use bevy_ecs::prelude::*;
 use rig_core::{
@@ -44,21 +44,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
 
-/// The tools a hand may call. A capability tool is offered to the parent
-/// only, so a work agent never sees another companion's tools.
 /// How many capability calls may queue before a handler waits.
 const QUEUE: usize = 64;
-
-const WORK_AGENT_TOOLS: &[&str] = &[
-    "device_request",
-    "mind_read",
-    "mind_recall",
-    "report",
-    "skill_list",
-    "skill_read",
-    "skill_save",
-    crate::host::web_search::NAME,
-];
 
 /// One active companion/client a shared tool dispatches for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -315,7 +302,9 @@ pub(crate) fn sync_tools(world: &mut World) -> Result<()> {
         }
     }
     world.resource_mut::<CapabilityTools>().entities = entities.clone();
-    sync_access(world, &entities);
+    let granted = granted_names(world, &entities);
+    world.insert_resource(GrantedCompanionTools(granted));
+    crate::host::tools::sync::sync_access(world);
     Ok(())
 }
 
@@ -358,97 +347,9 @@ fn granted_names(
     granted
 }
 
-/// The tools a parent agent is offered: its built-ins and the capability
-/// tools its active client granted.
-pub(super) fn parent_names(granted: &[String]) -> Vec<String> {
-    let mut names: Vec<String> = BUILTIN_TOOLS
-        .iter()
-        .copied()
-        .filter(|name| !matches!(*name, "report" | crate::host::web_search::NAME))
-        .map(str::to_owned)
-        .collect();
-    names.extend(granted.iter().cloned());
-    names.sort();
-    names.dedup();
-    names
-}
-
-/// The tools a work agent ("hand") is offered: its built-ins plus MCP tools.
-pub(crate) fn hand_names(host: &std::collections::HashSet<String>) -> Vec<String> {
-    let mut names: Vec<String> = WORK_AGENT_TOOLS
-        .iter()
-        .copied()
-        .map(str::to_owned)
-        .collect();
-    names.extend(host.iter().cloned());
-    names.sort();
-    names.dedup();
-    names
-}
-
-/// Initial `ToolAccess` for a newly spawned or restored work agent.
-pub(crate) fn hand_tool_access(world: &mut World) -> ToolAccess {
-    let mut host = crate::host::mcp::tool_names(world);
-    host.extend(crate::host::providers::extensions::tool_names(world));
-    ToolAccess::Only(hand_names(&host))
-}
-
-/// Refreshes tool access for both the parent and work agents.
-/// This corrects the `ToolAccess::All` that a freshly spawned or restored
-/// agent starts with.
-fn sync_access(world: &mut World, entities: &HashMap<String, Entity>) {
-    let granted = granted_names(world, entities);
-    let parents: Vec<(Entity, String)> = {
-        let mut query = world.query::<(Entity, &CompanionAgent)>();
-        query
-            .iter(world)
-            .map(|(entity, agent)| (entity, agent.companion_id.clone()))
-            .collect()
-    };
-    let mut host = crate::host::mcp::tool_names(world);
-    host.extend(crate::host::providers::extensions::tool_names(world));
-    for (entity, companion) in parents {
-        let granted: &[String] = granted.get(&companion).map_or(&[], Vec::as_slice);
-        let names = parent_names(granted);
-        set_access(world, entity, &names);
-    }
-    let hands: Vec<Entity> = {
-        let mut query = world.query_filtered::<Entity, With<WorkAgent>>();
-        query.iter(world).collect()
-    };
-    let hand_tools = hand_names(&host);
-    for entity in hands {
-        set_access(world, entity, &hand_tools);
-    }
-}
-
-fn set_access(world: &mut World, entity: Entity, names: &[String]) {
-    let current = world.get::<ToolAccess>(entity);
-    if matches!(current, Some(ToolAccess::Only(current)) if current.as_slice() == names) {
-        return;
-    }
-    world
-        .entity_mut(entity)
-        .insert(ToolAccess::Only(names.to_vec()));
-}
-
 /// Startup: publishes the tools of the clients restored as active.
 pub(crate) fn init(world: &mut World) {
     if let Err(error) = sync_tools(world) {
-        crate::host::fail(world, error.to_string());
-    }
-}
-
-/// Corrects the tools a newly spawned agent may use before its first turn.
-/// `agent.rs` spawns the parent with `ToolAccess::All`; this narrows it as
-/// soon as the companion or hand exists, without editing the spawn site.
-pub(crate) fn refresh(world: &mut World) {
-    let added = {
-        let mut query =
-            world.query_filtered::<Entity, Or<(Added<CompanionAgent>, Added<WorkAgent>)>>();
-        query.iter(world).next().is_some()
-    };
-    if added && let Err(error) = sync_tools(world) {
         crate::host::fail(world, error.to_string());
     }
 }

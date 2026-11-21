@@ -1049,7 +1049,7 @@ fn the_head_cannot_resolve_another_companions_approval() {
             tool_name: "device_request".into(),
             normalized_arguments: r#"{"capability":"device.files"}"#.into(),
             status: permission::ApprovalStatus::Pending,
-            created_at: super::db::now(),
+            created_at: super::util::now(),
             resolved_at: None,
             client_id: Some("c2".into()),
             capability: Some("device.files".into()),
@@ -1960,8 +1960,8 @@ fn unassigned(id: &str) -> super::mind::Companion {
         persona: None,
         voice_identifier: None,
         revision: 1,
-        created_at: super::db::now(),
-        updated_at: super::db::now(),
+        created_at: super::util::now(),
+        updated_at: super::util::now(),
     }
 }
 

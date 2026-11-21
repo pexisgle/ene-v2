@@ -1,13 +1,14 @@
 //! Evaluate a bounded stream of observations and wake only the active head.
 use super::{
     agent, background,
-    db::{Store, truncate},
+    db::Store,
     error::{HostError, Result},
     mind::{Companion, Role},
     model::{Credentials, ModelFactory},
     notify::Notifier,
     providers::Providers,
     resources::{DeviceHub, HostRuntime, Perception},
+    util::truncate,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bevy_ecs::prelude::*;

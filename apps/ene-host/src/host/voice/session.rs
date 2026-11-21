@@ -6,12 +6,13 @@ use super::{
 };
 use crate::host::{
     agent,
-    db::{self, Result, Store},
+    db::{Result, Store},
     delegation,
     error::HostError,
     lock,
     notify::Notifier,
     resources::HostRuntime,
+    util,
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
@@ -792,7 +793,7 @@ pub(crate) fn bind_input(world: &World, client_id: &str) -> Result<InputBinding>
             ("client_id is required for audio input").into(),
         ));
     }
-    db::validate_id(client_id)?;
+    util::validate_id(client_id)?;
     let Some(store) = world.get_resource::<Store>() else {
         return Err(HostError::Unavailable(
             "the host state is not available".into(),
@@ -832,7 +833,7 @@ pub(crate) fn subscribe_audio(world: &mut World, client_id: &str) -> Result<Audi
     if client_id.is_empty() {
         return Err(HostError::Invalid(("client_id is required").into()));
     }
-    db::validate_id(client_id)?;
+    util::validate_id(client_id)?;
     let Some(store) = world.get_resource::<Store>().cloned() else {
         return Err(HostError::Unavailable(
             "the host state is not available".into(),
@@ -1071,12 +1072,29 @@ pub(crate) fn on_client_activated(world: &mut World, companion: &str, client: &s
     }
 }
 
+fn observe_speak_character_text(
+    trigger: On<crate::host::resources::SpeakCharacterText>,
+    mut commands: Commands,
+) {
+    let event = trigger.event();
+    let companion_id = event.companion_id.clone();
+    let text = event.text.clone();
+    commands.queue(move |world: &mut World| {
+        let spoken = super::speech::for_speech(&text);
+        if !spoken.is_empty() {
+            on_stream_text(world, &companion_id, &spoken);
+            on_turn_end(world, &companion_id);
+        }
+    });
+}
+
 pub(crate) struct VoicePlugin;
 
 impl Plugin for VoicePlugin {
     fn build(&self, app: &mut App) {
         let runtime = app.world().resource::<HostRuntime>().0.clone();
         app.init_resource::<delegation::DeliveredClaims>()
-            .insert_resource(Voice::new(runtime));
+            .insert_resource(Voice::new(runtime))
+            .add_observer(observe_speak_character_text);
     }
 }

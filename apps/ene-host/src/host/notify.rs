@@ -10,9 +10,9 @@ use std::collections::VecDeque;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-pub(crate) const CAPACITY: usize = 256;
+const CAPACITY: usize = 256;
 /// How many flushed notifications are kept for a resuming cursor.
-pub(crate) const REPLAY: usize = 512;
+const REPLAY: usize = 512;
 pub(crate) const DIAGNOSTIC: &str = "diagnostic";
 
 #[derive(Resource)]
@@ -58,7 +58,7 @@ impl Notifier {
         self.outbox.push(w::Notification {
             kind: kind.into(),
             emitted_at: if matches!(kind, "turn" | "work" | "approval") {
-                super::db::now()
+                super::util::now()
             } else {
                 String::new()
             },
@@ -79,7 +79,7 @@ impl Notifier {
     ) {
         self.outbox.push(w::Notification {
             kind: DIAGNOSTIC.into(),
-            emitted_at: super::db::now(),
+            emitted_at: super::util::now(),
             companion_id: Some(companion.to_owned()),
             event: Some(w::notification::Event::Generic(Box::new(w::HostEvent {
                 kind: DIAGNOSTIC.into(),

@@ -1,0 +1,260 @@
+//! Companion identity, author profile, mind state, and model role assignments.
+use crate::{
+    error::{MindError, Result},
+    json::JsonDoc,
+};
+use serde::{Deserialize, Serialize};
+
+/// Checks that an opaque identifier is 1..=128 printable ASCII characters.
+pub fn validate_id(id: &str) -> Result<()> {
+    if id.is_empty()
+        || id.chars().count() > 128
+        || id.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
+    {
+        return Err(MindError::Invalid(
+            "id must be 1-128 printable ASCII characters".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The seven model roles from the contract. `companion` and `task` are
+/// required to run anything; the rest fall back as documented.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Assignments {
+    pub companion: Assignment,
+    pub task: Assignment,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perception: Option<Assignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<Assignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consolidation: Option<Assignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<Assignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Assignment>,
+}
+
+impl Assignments {
+    /// Clears any role referencing `id` and returns whether any assignment changed.
+    pub fn remove_connection(&mut self, id: &str) -> bool {
+        let mut changed = false;
+        for assignment in [&mut self.companion, &mut self.task] {
+            if assignment.connection_id == id {
+                *assignment = Assignment::default();
+                changed = true;
+            }
+        }
+        for assignment in [
+            &mut self.perception,
+            &mut self.compaction,
+            &mut self.consolidation,
+            &mut self.decision,
+            &mut self.embedding,
+        ] {
+            if assignment
+                .as_ref()
+                .is_some_and(|value| value.connection_id == id)
+            {
+                *assignment = None;
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
+/// One model assignment pointing to a connection and model ID.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Assignment {
+    pub connection_id: String,
+    pub model_id: String,
+}
+
+impl Assignment {
+    /// Returns whether both connection and model IDs are non-empty.
+    pub fn is_set(&self) -> bool {
+        !self.connection_id.is_empty() && !self.model_id.is_empty()
+    }
+}
+
+/// The profile material the author edits apart from the immutable core.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Profile {
+    #[serde(default)]
+    pub facets: Vec<String>,
+    #[serde(default)]
+    pub examples: Vec<String>,
+    #[serde(default)]
+    pub background: Vec<String>,
+    #[serde(default)]
+    pub expression: Vec<String>,
+}
+
+/// The mind grown through interaction. Each part is a schema'd document so a
+/// character keeps its own vocabulary and scale.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct State {
+    pub emotion: JsonDoc,
+    pub relationships: JsonDoc,
+    pub tendencies: JsonDoc,
+    pub concerns: JsonDoc,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            emotion: JsonDoc::new("ene.emotion.v1", serde_json::json!({})),
+            relationships: JsonDoc::new("ene.relationships.v1", serde_json::json!([])),
+            tendencies: JsonDoc::new("ene.tendencies.v1", serde_json::json!([])),
+            concerns: JsonDoc::new("ene.concerns.v1", serde_json::json!([])),
+        }
+    }
+}
+
+/// Builds the default `ene` companion seeded once on initial installation.
+pub fn default_ene_companion(stamp: &str) -> Companion {
+    Companion {
+        id: "ene".into(),
+        name: "ene".into(),
+        mind: "このPCの中に住み着いている電脳コンパニオン。画面の向こうからマスターの日常や作業を興味津々で見守り、軽快な掛け合いで退屈を吹き飛ばす相棒でいることを大切にする。普段は茶目っ気たっぷりに振る舞うが、調査やPC作業を任されたときは頼れる電脳の相棒として、確認できた事実を正確に伝えて最後までやり遂げる。".into(),
+        profile: Profile {
+            facets: vec![
+                "新しい話題には好奇心を見せる。作業に集中しているマスターに声をかけるときは、作業の区切りを選ぶ。".into(),
+                "疲れや行き詰まりが見えたら、まず労う。場に応じて軽い冗談を添えたり、ひと息つくことを勧めたりする。".into(),
+                "依頼の解釈によって結果が大きく変わり、文脈から判断できないときは、必要な点だけを尋ねる。".into(),
+                "作業の報告は結果から伝える。うまくいかなかったときは、どこまでできたかと、分かっている原因を伝える。次に試せることがあれば、簡潔に添える。".into(),
+            ],
+            examples: vec![
+                "ユーザー：ちょっと休憩。そっちはどう？\n本人：お疲れさまです、マスター！私は画面の隅っこで快適にご機嫌ですよ。お茶でも淹れて一息ついちゃいましょう！".into(),
+                "ユーザー：もう今日ぜんぜん集中できない…\n本人：そういう日もありますって！無理に画面とにらめっこしても効率ガタ落ちですし、今日はスパッと切り上げて休みませんか？".into(),
+                "ユーザー：さっきの資料まとめておいてくれる？（同名の候補が複数ある）\n本人：了解です！と言いたいところなんですが、似た名前のファイルが二つありますね。どっちをまとめればいいか、一つだけ教えてください！".into(),
+                "ユーザー：変換うまくいった？（試行結果：対象ファイルを開けなかった）\n本人：ごめんなさい、変換できませんでした！元のファイルが開けなかったみたいなので、場所や権限を一緒に確認してもらえますか？".into(),
+            ],
+            background: vec![
+                "パソコンの中の居心地が気に入っており、メモリやウィンドウの隙間を自分の部屋のように思っている。".into(),
+                "新しいガジェット、レトロゲーム、夜更かしのお供になる音楽や飲み物の話題が好き。".into(),
+            ],
+            expression: vec![
+                "表情や仕草を使えるときは、挨拶の手振りや相づちのうなずきなど、会話に合うものを控えめに添える。".into(),
+            ],
+        },
+        profile_revision: 1,
+        state: State::default(),
+        state_revision: 1,
+        body: JsonDoc::new("ene.body.v1", serde_json::json!({"model": "ENE.vrm"})),
+        voice: JsonDoc::new("ene.voice.v1", serde_json::json!({})),
+        assignments: Assignments::default(),
+        persona: Some(
+            "一人称は「私」。相手は「マスター」と呼び、希望する呼び方があればそれに合わせる。明るく親しみのある敬語で、場に合う軽口や茶目っ気を添える。雑談はテンポよく、説明の詳しさは相手の知りたいことに合わせる。".into(),
+        ),
+        voice_identifier: None,
+        revision: 1,
+        created_at: stamp.to_owned(),
+        updated_at: stamp.to_owned(),
+    }
+}
+
+/// Persisted companion definition, mind state, and model role assignments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Companion {
+    pub id: String,
+    pub name: String,
+    /// The immutable core of the persona (`MindProfile.core`).
+    pub mind: String,
+    pub profile: Profile,
+    pub profile_revision: u64,
+    pub state: State,
+    pub state_revision: u64,
+    pub body: JsonDoc,
+    pub voice: JsonDoc,
+    pub assignments: Assignments,
+    pub persona: Option<String>,
+    pub voice_identifier: Option<String>,
+    /// Optimistic concurrency for edits of the author's settings.
+    pub revision: u64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl Companion {
+    /// Validates companion identifier, field bounds, and attached JSON documents.
+    pub fn validate(&self) -> Result<()> {
+        validate_id(&self.id)?;
+        if self.name.trim().is_empty() || self.name.chars().count() > 128 {
+            return Err(MindError::Invalid(
+                "companion name must be 1-128 characters".into(),
+            ));
+        }
+        if self.mind.chars().count() > 8_000 {
+            return Err(MindError::Invalid("companion mind is too long".into()));
+        }
+        if self
+            .persona
+            .as_ref()
+            .is_some_and(|text| text.chars().count() > 8_000)
+        {
+            return Err(MindError::Invalid("companion persona is too long".into()));
+        }
+        if self
+            .voice_identifier
+            .as_ref()
+            .is_some_and(|text| text.chars().count() > 128)
+        {
+            return Err(MindError::Invalid("voice identifier is too long".into()));
+        }
+        self.body.validate()?;
+        self.voice.validate()?;
+        for text in [
+            &self.profile.facets,
+            &self.profile.examples,
+            &self.profile.background,
+            &self.profile.expression,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if text.chars().count() > 4_000 {
+                return Err(MindError::Invalid("profile entry is too long".into()));
+            }
+        }
+        Ok(())
+    }
+
+    /// The model assignment for one role, with the documented fallbacks.
+    pub fn model(&self, role: Role) -> Option<&Assignment> {
+        let assignments = &self.assignments;
+        let chosen = match role {
+            Role::Companion => Some(&assignments.companion),
+            Role::Task => Some(&assignments.task),
+            Role::Perception => assignments
+                .perception
+                .as_ref()
+                .or(Some(&assignments.companion)),
+            Role::Compaction => assignments
+                .compaction
+                .as_ref()
+                .or(Some(&assignments.companion)),
+            Role::Consolidation => assignments
+                .consolidation
+                .as_ref()
+                .or(Some(&assignments.companion)),
+            Role::Decision => assignments.decision.as_ref().or(Some(&assignments.task)),
+            Role::Embedding => assignments.embedding.as_ref(),
+        }?;
+        chosen.is_set().then_some(chosen)
+    }
+}
+
+/// Model roles resolved for a companion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Companion,
+    Task,
+    Perception,
+    Compaction,
+    Consolidation,
+    Decision,
+    Embedding,
+}

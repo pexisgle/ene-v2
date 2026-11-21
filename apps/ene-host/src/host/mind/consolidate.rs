@@ -25,7 +25,6 @@ use rig_core::conversation::{Conversation as CoreConversation, TurnEnd};
 use rig_core::{DynModel, operation::Completion};
 use rig_ecs::model::Models;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 
 const MAX_FACTS: usize = 32;
 /// How many candidate memories the extraction model may merge into.
@@ -36,64 +35,7 @@ const MAX_QUERY_CHARS: usize = 2_000;
 /// How many newest turns are joined into that query.
 const QUERY_TURNS: usize = 4;
 
-/// One answered turn as data: the id its window position is measured in, and
-/// the text the extraction model reads.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Turn {
-    pub(crate) turn_id: String,
-    pub(crate) text: String,
-}
-
-/// An existing memory the extraction model may merge into or supersede. The
-/// revision is the CAS expectation captured before the model ran.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct MemoryContext {
-    pub(crate) id: String,
-    pub(crate) revision: u64,
-    pub(crate) importance: u8,
-    pub(crate) content: String,
-}
-
-/// The window one pass commits, with the material its commit needs. The turns
-/// are already consumed by the prompt.
-#[derive(Clone, Debug)]
-pub(crate) struct Batch {
-    pub(crate) companion_id: String,
-    /// The newest message the summary this pass runs beside stands for: the id
-    /// every memory and edge of the window is stamped with.
-    pub(crate) through: u64,
-    pub(crate) context: Vec<MemoryContext>,
-    /// Memory ids the host actually injected into those turns.
-    pub(crate) injected: Vec<String>,
-}
-
-/// The result of one committed pass.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Commit {
-    pub(crate) inserted: usize,
-    pub(crate) updated: usize,
-}
-
-/// One extracted fact. `scope` is empty (the recording companion's own scope)
-/// or `"shared"` (every companion).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[schemars(inline, deny_unknown_fields)]
-pub(crate) struct Fact {
-    #[schemars(length(max = 4000))]
-    pub(crate) content: String,
-    #[serde(default)]
-    #[schemars(range(min = 0, max = 10))]
-    pub(crate) importance: Option<u8>,
-    #[serde(default)]
-    #[schemars(length(max = 128))]
-    pub(crate) scope: Option<String>,
-    #[serde(default)]
-    #[schemars(length(max = 128))]
-    pub(crate) supersedes: Option<String>,
-    #[serde(default)]
-    #[schemars(inner(length(max = 128)))]
-    pub(crate) cited_memory_ids: Vec<String>,
-}
+pub(crate) use ene_mind::{Batch, Commit, Fact, MemoryContext, Turn};
 
 /// Everything one extraction returns: the facts of the interval, and the mind
 /// the interval moved (a part is absent when nothing changed it).
@@ -165,18 +107,6 @@ pub(crate) fn pending_turns(
         });
     }
     turns
-}
-
-/// Host-side citation guard: a cited id counts only when the host really
-/// injected it into the turn being consolidated.
-pub(crate) fn validate_citations(cited: &[String], injected: &[String]) -> Vec<String> {
-    let injected: HashSet<&str> = injected.iter().map(String::as_str).collect();
-    let mut seen = HashSet::new();
-    cited
-        .iter()
-        .filter(|id| injected.contains(id.as_str()) && seen.insert(id.as_str()))
-        .cloned()
-        .collect()
 }
 
 /// The host services one pass reads. Cloned into the compaction job, so the
@@ -422,13 +352,13 @@ fn turn_query(turns: &[Turn]) -> String {
         query.push_str(&turn.text);
         query.push('\n');
     }
-    crate::host::db::truncate(&query, MAX_QUERY_CHARS)
+    crate::host::util::truncate(&query, MAX_QUERY_CHARS)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::db::memories::MemoryRecord;
+    use ene_mind::{MemoryRecord, validate_citations};
     use rig_core::conversation::MessageId;
 
     fn answer(conversation: &mut CoreConversation, user: &str, reply: &str) -> MessageId {
