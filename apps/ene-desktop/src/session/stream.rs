@@ -1,6 +1,8 @@
 //! Event-stream multiplexing, audio/capture pumping, and notification handling for [`Session`].
 
-use super::{Binding, CAPTURE, LIP, Outcome, SAMPLE, Session, Step, persistent};
+use super::{
+    Binding, CAPTURE, LIP, Outcome, SAMPLE, Session, Step, commands::OperationError, persistent,
+};
 use crate::{
     audio::{self, Microphone, Player},
     host::Host,
@@ -471,7 +473,7 @@ impl Session {
         #[cfg(windows)]
         if operation.capability == w::COMPUTER_USE {
             let outcome = match refusal {
-                Some(reason) => Err(reason),
+                Some(reason) => Err(reason.into()),
                 None => Box::pin(self.computer_operation(host, &operation)).await,
             };
             let result = Self::operation_result(&self.options.id, &operation, outcome);
@@ -481,18 +483,18 @@ impl Session {
         if operation.capability.starts_with(work_tools::PREFIX) {
             let workspace = self.workspace.clone();
             let active_work = self.work.len();
-            let request = (|| {
+            let request: Result<_, OperationError> = (|| {
                 if let Some(reason) = refusal {
-                    return Err(reason);
+                    return Err(reason.into());
                 }
                 if operation.work_id.as_deref().is_none_or(str::is_empty) {
-                    return Err("workspace operations require a work session".into());
+                    return Err(OperationError::WorkMissingSession);
                 }
                 if active_work >= 8 {
-                    return Err("the workspace is busy".into());
+                    return Err(OperationError::WorkspaceBusy);
                 }
                 Ok((
-                    workspace.ok_or("no workspace is configured")?,
+                    workspace.ok_or(OperationError::NoWorkspace)?,
                     Self::operation_input(&operation)?,
                 ))
             })();
@@ -502,7 +504,11 @@ impl Session {
                     self.work.spawn(async move {
                         let output =
                             Box::pin(workspace.execute(&operation.capability, input)).await;
-                        Self::operation_result(&client_id, &operation, output)
+                        Self::operation_result(
+                            &client_id,
+                            &operation,
+                            output.map_err(OperationError::from),
+                        )
                     });
                 }
                 Err(reason) => {
@@ -512,7 +518,7 @@ impl Session {
             }
         } else {
             let outcome = match refusal {
-                Some(reason) => Err(reason),
+                Some(reason) => Err(reason.into()),
                 None => Box::pin(self.execute(&operation)).await,
             };
             let result = Self::operation_result(&self.options.id, &operation, outcome);
@@ -742,6 +748,16 @@ pub(super) struct Claim<'a> {
     pub(super) work_id: Option<&'a str>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum AdmitError {
+    #[error("this operation is addressed to `{0}`")]
+    WrongClient(String),
+    #[error("this operation belongs to an older device stream")]
+    StaleStream,
+    #[error("this client is not the active device for any companion")]
+    NotActiveDevice,
+}
+
 /// Whether this client may execute the operation, or why it must not.
 ///
 /// An operation executes when it names this client's own identity and its
@@ -754,21 +770,18 @@ pub(super) fn admits(
     our_subscription: &str,
     binding: Option<&Binding>,
     claim: &Claim<'_>,
-) -> Result<(), String> {
+) -> Result<(), AdmitError> {
     if claim.client_id != our_id {
-        return Err(format!(
-            "this operation is addressed to `{}`",
-            claim.client_id
-        ));
+        return Err(AdmitError::WrongClient(claim.client_id.to_owned()));
     }
     if !our_subscription.is_empty() && claim.subscription_id != our_subscription {
-        return Err("this operation belongs to an older device stream".into());
+        return Err(AdmitError::StaleStream);
     }
     if claim.work_id.is_some_and(|work_id| !work_id.is_empty()) {
         return Ok(());
     }
     match binding {
         Some(_) => Ok(()),
-        None => Err("this client is not the active device for any companion".into()),
+        None => Err(AdmitError::NotActiveDevice),
     }
 }

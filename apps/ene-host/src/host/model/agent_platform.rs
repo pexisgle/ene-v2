@@ -119,13 +119,37 @@ fn api_key(secret: Option<&str>) -> Result<HeaderValue> {
     Ok(key)
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum AgentPlatformError {
+    #[error("{0}")]
+    Host(#[from] HostError),
+    #[error(transparent)]
+    Net(#[from] net::NetError),
+    #[error("Google Agent Platform のモデル確認がタイムアウトしました。一覧を再取得してください")]
+    ProbeTimeout,
+    #[error("Google Agent Platform で利用できるモデルを確認できませんでした")]
+    NoModelsVerified,
+    #[error("Google Agent Platform のモデルを確認できませんでした")]
+    CountTokensRequestFailed,
+    #[error(
+        "Google Agent Platform がリクエストを拒否しました。API キー、プロジェクトと権限を確認してください"
+    )]
+    RequestRejected,
+    #[error("Google Agent Platform のモデル確認に失敗しました（HTTP {0}）")]
+    UnexpectedStatus(StatusCode),
+    #[error("Google Agent Platform のトークン数を取得できませんでした")]
+    InvalidTokenCount,
+    #[error("Google Agent Platform で {0} をこのロケーションでは利用できません")]
+    ModelUnavailable(String),
+}
+
 pub(super) async fn verify_models(
     endpoint: &Endpoint,
     secret: &str,
     configured: &[String],
-) -> std::result::Result<VerifiedModels, String> {
-    let publisher = publisher_endpoint(endpoint).map_err(|error| error.to_string())?;
-    let key = api_key(Some(secret)).map_err(|error| error.to_string())?;
+) -> std::result::Result<VerifiedModels, AgentPlatformError> {
+    let publisher = publisher_endpoint(endpoint)?;
+    let key = api_key(Some(secret))?;
     verify_candidates(&net::client()?, &publisher, &key, configured).await
 }
 
@@ -139,7 +163,7 @@ async fn verify_candidates(
     publisher: &str,
     key: &HeaderValue,
     configured: &[String],
-) -> std::result::Result<VerifiedModels, String> {
+) -> std::result::Result<VerifiedModels, AgentPlatformError> {
     let selected = configured.first().map(|id| id.trim());
     let mut seen = HashSet::new();
     // Check the selected model first, then every known chat candidate, then
@@ -160,15 +184,13 @@ async fn verify_candidates(
     futures_util::pin_mut!(requests);
     let deadline = tokio::time::Instant::now() + super::PROBE_TIMEOUT;
     let mut ids = Vec::new();
-    let mut failure = None;
+    let mut failure: Option<AgentPlatformError> = None;
     loop {
         match tokio::time::timeout_at(deadline, requests.next()).await {
             Ok(Some((id, Ok(true)))) => ids.push(id),
             Ok(Some((id, Ok(false)))) => {
                 if selected == Some(id.as_str()) {
-                    failure = Some(format!(
-                        "Google Agent Platform で {id} をこのロケーションでは利用できません"
-                    ));
+                    failure = Some(AgentPlatformError::ModelUnavailable(id));
                 }
             }
             Ok(Some((id, Err(error)))) => {
@@ -180,17 +202,18 @@ async fn verify_candidates(
             }
             Ok(None) => break,
             Err(_) => {
-                failure.get_or_insert_with(|| "Google Agent Platform のモデル確認がタイムアウトしました。一覧を再取得してください".into());
+                failure.get_or_insert(AgentPlatformError::ProbeTimeout);
                 break;
             }
         }
     }
     if ids.is_empty() {
-        return Err(failure.unwrap_or_else(|| {
-            "Google Agent Platform で利用できるモデルを確認できませんでした".into()
-        }));
+        return Err(failure.unwrap_or(AgentPlatformError::NoModelsVerified));
     }
-    Ok(VerifiedModels { ids, failure })
+    Ok(VerifiedModels {
+        ids,
+        failure: failure.map(|error| error.to_string()),
+    })
 }
 
 async fn count_tokens(
@@ -198,7 +221,7 @@ async fn count_tokens(
     publisher: &str,
     key: &HeaderValue,
     model: &str,
-) -> std::result::Result<bool, String> {
+) -> std::result::Result<bool, AgentPlatformError> {
     // ListPublisherModels requires OAuth. CountTokens accepts the connection's
     // API key and checks the exact model and location without generating text.
     let response = client
@@ -209,24 +232,25 @@ async fn count_tokens(
         .timeout(Duration::from_secs(4))
         .send()
         .await
-        .map_err(|_| "Google Agent Platform のモデルを確認できませんでした".to_owned())?;
+        .map_err(|_| AgentPlatformError::CountTokensRequestFailed)?;
     let status = response.status();
     if status == StatusCode::NOT_FOUND {
         return Ok(false);
     }
     if !status.is_success() {
         return Err(match status {
-            StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN =>
-                "Google Agent Platform がリクエストを拒否しました。API キー、プロジェクトと権限を確認してください".into(),
-            _ => format!("Google Agent Platform のモデル確認に失敗しました（HTTP {status}）"),
+            StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                AgentPlatformError::RequestRejected
+            }
+            _ => AgentPlatformError::UnexpectedStatus(status),
         });
     }
     let body =
         net::read_response_body(response, 16 * 1024, "Google Agent Platform token count").await?;
-    let result: serde_json::Value = serde_json::from_slice(&body)
-        .map_err(|_| "Google Agent Platform のトークン数を取得できませんでした".to_owned())?;
+    let result: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| AgentPlatformError::InvalidTokenCount)?;
     if result["totalTokens"].as_u64().is_none() {
-        return Err("Google Agent Platform のトークン数を取得できませんでした".into());
+        return Err(AgentPlatformError::InvalidTokenCount);
     }
     Ok(true)
 }
@@ -247,7 +271,7 @@ pub(super) fn model(
     spec: Arc<ModelSpec>,
     catalog: &Catalog,
 ) -> Result<DynModel<Completion>> {
-    let client = net::model_client().map_err(HostError::Unavailable)?;
+    let client = net::model_client().map_err(|error| HostError::Unavailable(error.to_string()))?;
     model_with_http(
         endpoint,
         secret,
@@ -470,9 +494,10 @@ mod tests {
         assert!(models.failure.unwrap().contains("gemini-missing"));
         let rejected =
             verify_candidates(&http, &url, &api_key(Some("wrong-key")).unwrap(), &[]).await;
-        let Err(message) = rejected else {
+        let Err(error) = rejected else {
             panic!("credentials should be rejected");
         };
+        let message = error.to_string();
         assert!(message.contains("API キー"));
         assert!(!message.contains("secret-rejected"));
         server.abort();

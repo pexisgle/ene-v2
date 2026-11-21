@@ -227,11 +227,7 @@ impl HttpBroker {
     /// Hands out the next chunk of `handle`. A streaming read awaits the next
     /// network chunk under the exchange deadline; dropping the read future
     /// drops the response and aborts the exchange.
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::too_many_lines)]
     pub async fn read(&self, handle: &str) -> Result<HttpChunk, Failure> {
-        use base64::Engine;
-
         let entry = self
             .open
             .lock()
@@ -244,120 +240,186 @@ impl HttpBroker {
                 headers,
                 body,
                 read,
-            } => {
-                let take = (body.len() - read).min(MAX_HTTP_CHUNK);
-                let end = read + take;
-                let done = end >= body.len();
-                // The reply headers ride the first chunk only.
-                let headers = if read == 0 { headers } else { BTreeMap::new() };
-                let chunk = base64::engine::general_purpose::STANDARD.encode(&body[read..end]);
-                if !done {
-                    self.open
-                        .lock()
-                        .map_err(|_| Failure::new("http_unavailable"))?
-                        .insert(
-                            handle.to_owned(),
-                            Open::Buffered {
-                                status,
-                                headers: BTreeMap::new(),
-                                body,
-                                read: end,
-                            },
-                        );
-                }
-                Ok(HttpChunk {
-                    handle: handle.to_owned(),
+            } => self.read_buffered_chunk(
+                handle,
+                BufferedChunk {
                     status,
                     headers,
-                    data_base64: chunk,
-                    done,
-                })
-            }
+                    body,
+                    read,
+                },
+            ),
             Open::Streaming {
                 status,
                 deadline,
-                mut total,
-                mut pending,
-                mut response,
+                total,
+                pending,
+                response,
             } => {
-                if let Some(bytes) = pending.pop_front() {
-                    self.open
-                        .lock()
-                        .map_err(|_| Failure::new("http_unavailable"))?
-                        .insert(
-                            handle.to_owned(),
-                            Open::Streaming {
-                                status,
-                                deadline,
-                                total,
-                                pending,
-                                response,
-                            },
-                        );
-                    return Ok(HttpChunk {
-                        handle: handle.to_owned(),
+                self.read_streaming_chunk(
+                    handle,
+                    StreamingChunk {
                         status,
-                        headers: BTreeMap::new(),
-                        data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                        done: false,
-                    });
-                }
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    return Err(Failure::new("http_timeout"));
-                }
-                let next = match tokio::time::timeout(remaining, response.chunk()).await {
-                    Err(_) => return Err(Failure::new("http_timeout")),
-                    Ok(Err(error)) => {
-                        return Err(Failure {
-                            code: "http_failed".into(),
-                            message: error.to_string(),
-                        });
-                    }
-                    Ok(Ok(None)) => None,
-                    Ok(Ok(Some(bytes))) => Some(bytes.to_vec()),
-                };
-                let Some(mut bytes) = next else {
-                    return Ok(HttpChunk {
-                        handle: handle.to_owned(),
-                        status,
-                        headers: BTreeMap::new(),
-                        data_base64: String::new(),
-                        done: true,
-                    });
-                };
-                total += bytes.len();
-                if total > MAX_HTTP_BODY {
-                    return Err(Failure::new("http_body_too_large"));
-                }
-                if bytes.len() > MAX_HTTP_CHUNK {
-                    let rest = bytes.split_off(MAX_HTTP_CHUNK);
-                    pending.push_back(rest);
-                }
-                self.open
-                    .lock()
-                    .map_err(|_| Failure::new("http_unavailable"))?
-                    .insert(
-                        handle.to_owned(),
-                        Open::Streaming {
-                            status,
-                            deadline,
-                            total,
-                            pending,
-                            response,
-                        },
-                    );
-                Ok(HttpChunk {
-                    handle: handle.to_owned(),
-                    status,
-                    headers: BTreeMap::new(),
-                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                    done: false,
-                })
+                        deadline,
+                        total,
+                        pending,
+                        response,
+                    },
+                )
+                .await
             }
         }
     }
 
+    fn read_buffered_chunk(
+        &self,
+        handle: &str,
+        chunk_state: BufferedChunk,
+    ) -> Result<HttpChunk, Failure> {
+        use base64::Engine;
+
+        let BufferedChunk {
+            status,
+            headers,
+            body,
+            read,
+        } = chunk_state;
+        let take = (body.len() - read).min(MAX_HTTP_CHUNK);
+        let end = read + take;
+        let done = end >= body.len();
+        // The reply headers ride the first chunk only.
+        let headers = if read == 0 { headers } else { BTreeMap::new() };
+        let chunk = base64::engine::general_purpose::STANDARD.encode(&body[read..end]);
+        if !done {
+            self.open
+                .lock()
+                .map_err(|_| Failure::new("http_unavailable"))?
+                .insert(
+                    handle.to_owned(),
+                    Open::Buffered {
+                        status,
+                        headers: BTreeMap::new(),
+                        body,
+                        read: end,
+                    },
+                );
+        }
+        Ok(HttpChunk {
+            handle: handle.to_owned(),
+            status,
+            headers,
+            data_base64: chunk,
+            done,
+        })
+    }
+
+    async fn read_streaming_chunk(
+        &self,
+        handle: &str,
+        stream: StreamingChunk,
+    ) -> Result<HttpChunk, Failure> {
+        use base64::Engine;
+
+        let StreamingChunk {
+            status,
+            deadline,
+            mut total,
+            mut pending,
+            mut response,
+        } = stream;
+        if let Some(bytes) = pending.pop_front() {
+            self.open
+                .lock()
+                .map_err(|_| Failure::new("http_unavailable"))?
+                .insert(
+                    handle.to_owned(),
+                    Open::Streaming {
+                        status,
+                        deadline,
+                        total,
+                        pending,
+                        response,
+                    },
+                );
+            return Ok(HttpChunk {
+                handle: handle.to_owned(),
+                status,
+                headers: BTreeMap::new(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                done: false,
+            });
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(Failure::new("http_timeout"));
+        }
+        let next = match tokio::time::timeout(remaining, response.chunk()).await {
+            Err(_) => return Err(Failure::new("http_timeout")),
+            Ok(Err(error)) => {
+                return Err(Failure {
+                    code: "http_failed".into(),
+                    message: error.to_string(),
+                });
+            }
+            Ok(Ok(None)) => None,
+            Ok(Ok(Some(bytes))) => Some(bytes.to_vec()),
+        };
+        let Some(mut bytes) = next else {
+            return Ok(HttpChunk {
+                handle: handle.to_owned(),
+                status,
+                headers: BTreeMap::new(),
+                data_base64: String::new(),
+                done: true,
+            });
+        };
+        total += bytes.len();
+        if total > MAX_HTTP_BODY {
+            return Err(Failure::new("http_body_too_large"));
+        }
+        if bytes.len() > MAX_HTTP_CHUNK {
+            let rest = bytes.split_off(MAX_HTTP_CHUNK);
+            pending.push_back(rest);
+        }
+        self.open
+            .lock()
+            .map_err(|_| Failure::new("http_unavailable"))?
+            .insert(
+                handle.to_owned(),
+                Open::Streaming {
+                    status,
+                    deadline,
+                    total,
+                    pending,
+                    response,
+                },
+            );
+        Ok(HttpChunk {
+            handle: handle.to_owned(),
+            status,
+            headers: BTreeMap::new(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            done: false,
+        })
+    }
+}
+
+struct BufferedChunk {
+    status: u16,
+    headers: BTreeMap<String, String>,
+    body: Vec<u8>,
+    read: usize,
+}
+
+struct StreamingChunk {
+    status: u16,
+    deadline: Instant,
+    total: usize,
+    pending: VecDeque<Vec<u8>>,
+    response: reqwest::Response,
+}
+
+impl HttpBroker {
     /// Drops `handle` without reading the rest. Closing a handle whose body was
     /// already read to its end succeeds: the end state is the same, so a guest
     /// may close unconditionally.

@@ -172,9 +172,12 @@ impl Hub {
     pub(crate) fn import_companion_json(&mut self, raw: String, cx: &mut Context<Self>) {
         let template = match workflows::parse_template_json(&raw) {
             Ok(template) => template,
-            Err(message) => {
-                self.model
-                    .notice(NoticeKind::Failed, "テンプレートの読み込み", message);
+            Err(error) => {
+                self.model.notice(
+                    NoticeKind::Failed,
+                    "テンプレートの読み込み",
+                    error.to_string(),
+                );
                 cx.notify();
                 return;
             }

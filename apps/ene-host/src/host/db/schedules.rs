@@ -186,18 +186,27 @@ impl Schedule {
     }
 }
 
+pub(crate) struct NewSchedule<'a> {
+    pub(crate) companion: &'a str,
+    pub(crate) title: &'a str,
+    pub(crate) instruction: &'a str,
+    pub(crate) run_at: Option<&'a str>,
+    pub(crate) cron_expr: Option<&'a str>,
+}
+
 impl Store {
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn insert_schedule(
         &self,
-        companion: &str,
-        title: &str,
-        instruction: &str,
-        run_at: Option<&str>,
-        cron_expr: Option<&str>,
+        input: NewSchedule<'_>,
         clock: &ScheduleClock,
     ) -> Result<Schedule> {
+        let NewSchedule {
+            companion,
+            title,
+            instruction,
+            run_at,
+            cron_expr,
+        } = input;
         // A schedule fires once or repeats, never both and never neither.
         let run_at = run_at.filter(|value| !value.trim().is_empty());
         let cron_expr = cron_expr.filter(|value| !value.trim().is_empty());
@@ -571,7 +580,16 @@ mod tests {
         let store = store();
         let clock = utc_clock();
         assert!(matches!(
-            store.insert_schedule("ene", "t", "i", None, Some("0 9 * *"), &clock),
+            store.insert_schedule(
+                NewSchedule {
+                    companion: "ene",
+                    title: "t",
+                    instruction: "i",
+                    run_at: None,
+                    cron_expr: Some("0 9 * *"),
+                },
+                &clock,
+            ),
             Err(HostError::Invalid(_))
         ));
     }
@@ -582,17 +600,28 @@ mod tests {
         let clock = utc_clock();
         // Neither or both is refused.
         assert!(matches!(
-            store.insert_schedule("ene", "t", "i", None, None, &clock),
+            store.insert_schedule(
+                NewSchedule {
+                    companion: "ene",
+                    title: "t",
+                    instruction: "i",
+                    run_at: None,
+                    cron_expr: None,
+                },
+                &clock,
+            ),
             Err(HostError::Invalid(_))
         ));
         assert!(matches!(
             store.insert_schedule(
-                "ene",
-                "t",
-                "i",
-                Some("2030-01-01T09:00:00Z"),
-                Some("0 9 * * *"),
-                &clock
+                NewSchedule {
+                    companion: "ene",
+                    title: "t",
+                    instruction: "i",
+                    run_at: Some("2030-01-01T09:00:00Z"),
+                    cron_expr: Some("0 9 * * *"),
+                },
+                &clock,
             ),
             Err(HostError::Invalid(_))
         ));
@@ -600,14 +629,32 @@ mod tests {
         for invalid in ["tomorrow", "2030-02-30T09:00:00", "2030-01-01"] {
             assert!(
                 matches!(
-                    store.insert_schedule("ene", "t", "i", Some(invalid), None, &clock),
+                    store.insert_schedule(
+                        NewSchedule {
+                            companion: "ene",
+                            title: "t",
+                            instruction: "i",
+                            run_at: Some(invalid),
+                            cron_expr: None,
+                        },
+                        &clock,
+                    ),
                     Err(HostError::Invalid(_))
                 ),
                 "{invalid}"
             );
         }
         let absolute = store
-            .insert_schedule("ene", "t", "i", Some("2030-01-01T09:00:00Z"), None, &clock)
+            .insert_schedule(
+                NewSchedule {
+                    companion: "ene",
+                    title: "t",
+                    instruction: "i",
+                    run_at: Some("2030-01-01T09:00:00Z"),
+                    cron_expr: None,
+                },
+                &clock,
+            )
             .unwrap();
         assert_eq!(
             absolute.next_run_at.as_deref(),
@@ -615,12 +662,30 @@ mod tests {
         );
         // A value without an offset is read on the host's wall clock.
         let local = store
-            .insert_schedule("ene", "t", "i", Some("2030-01-01T09:00:00"), None, &clock)
+            .insert_schedule(
+                NewSchedule {
+                    companion: "ene",
+                    title: "t",
+                    instruction: "i",
+                    run_at: Some("2030-01-01T09:00:00"),
+                    cron_expr: None,
+                },
+                &clock,
+            )
             .unwrap();
         assert_eq!(local.next_run_at.as_deref(), Some("2030-01-01T09:00:00Z"));
         assert!(
             store
-                .insert_schedule("ene", "t", "i", None, Some("* * * * *"), &clock)
+                .insert_schedule(
+                    NewSchedule {
+                        companion: "ene",
+                        title: "t",
+                        instruction: "i",
+                        run_at: None,
+                        cron_expr: Some("* * * * *"),
+                    },
+                    &clock,
+                )
                 .is_ok()
         );
     }
@@ -632,7 +697,16 @@ mod tests {
         let clock = ScheduleClock::fixed(tokyo.clone(), utc(2026, 11, 13, 0, 0));
         let store = store();
         let schedule = store
-            .insert_schedule("ene", "t", "i", Some("2026-11-15T09:00:00"), None, &clock)
+            .insert_schedule(
+                NewSchedule {
+                    companion: "ene",
+                    title: "t",
+                    instruction: "i",
+                    run_at: Some("2026-11-15T09:00:00"),
+                    cron_expr: None,
+                },
+                &clock,
+            )
             .unwrap();
         assert_eq!(
             schedule.next_run_at.as_deref(),
@@ -642,11 +716,13 @@ mod tests {
         // An explicit offset is still absolute.
         let schedule = store
             .insert_schedule(
-                "ene",
-                "t",
-                "i",
-                Some("2026-11-15T09:00:00+09:00"),
-                None,
+                NewSchedule {
+                    companion: "ene",
+                    title: "t",
+                    instruction: "i",
+                    run_at: Some("2026-11-15T09:00:00+09:00"),
+                    cron_expr: None,
+                },
                 &clock,
             )
             .unwrap();
@@ -664,16 +740,27 @@ mod tests {
         let clock = ScheduleClock::fixed(tokyo, utc(2026, 11, 13, 23, 0));
         let one_shot = store
             .insert_schedule(
-                "ene",
-                "reminder",
-                "say it",
-                Some("2000-01-01T00:00:00Z"),
-                None,
+                NewSchedule {
+                    companion: "ene",
+                    title: "reminder",
+                    instruction: "say it",
+                    run_at: Some("2000-01-01T00:00:00Z"),
+                    cron_expr: None,
+                },
                 &clock,
             )
             .unwrap();
         let repeating = store
-            .insert_schedule("ene", "daily", "say it", None, Some("0 9 * * *"), &clock)
+            .insert_schedule(
+                NewSchedule {
+                    companion: "ene",
+                    title: "daily",
+                    instruction: "say it",
+                    run_at: None,
+                    cron_expr: Some("0 9 * * *"),
+                },
+                &clock,
+            )
             .unwrap();
         assert_eq!(
             repeating.next_run_at.as_deref(),

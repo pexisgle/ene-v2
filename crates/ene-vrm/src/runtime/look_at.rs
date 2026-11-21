@@ -49,14 +49,19 @@ pub(crate) fn remap(
     (angle.abs() / (input_max as f32).max(f32::EPSILON)).min(1.) * output_scale as f32
 }
 
-#[allow(clippy::type_complexity)]
+type LookAtRoots<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static super::Vrm,
+        &'static Gaze,
+        Option<&'static GazeOverride>,
+        Option<&'static expressions::Binds>,
+    ),
+>;
+
 fn look_at(
-    roots: Query<(
-        &super::Vrm,
-        &Gaze,
-        Option<&GazeOverride>,
-        Option<&expressions::Binds>,
-    )>,
+    roots: LookAtRoots<'_, '_>,
     rests: Query<&RestPose>,
     gazes: Query<&GazeInput>,
     mut inputs: Query<&mut ExpressionInput>,

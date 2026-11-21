@@ -1,6 +1,5 @@
 //! The real provider path: rig's OpenAI wire through the in-process client,
 //! the Extism guest, the host broker, and a local OpenAI-compatible fixture.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use super::plugin_completion;
 use crate::host::{
@@ -198,8 +197,6 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> Option<Request> {
     })
 }
 
-// TODO(Phase 1-3): split during refactoring.
-#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 async fn serve(
     stream: &mut tokio::net::TcpStream,
     request: &Request,
@@ -226,153 +223,148 @@ async fn serve(
             let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 16777217\r\n\r\n";
             let _ = stream.write_all(head.as_bytes()).await;
         }
-        "test-broken" => {
-            stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n\
-                      data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-broken\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
-                )
-                .await
-                .unwrap();
-            let _ = stream.flush().await;
-            let _ = stream.write_all(b"data: {\"broken\":\n\n").await;
-        }
-        "test-slow" => {
-            stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n\
-                      data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-slow\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"first\"},\"finish_reason\":null}]}\n\n",
-                )
-                .await
-                .unwrap();
-            let _ = stream.flush().await;
-            let mut drain = [0u8; 1];
-            tokio::select! {
-                _ = cancel.cancelled() => {}
-                _ = tokio::time::sleep(Duration::from_secs(30)) => {}
-                _ = stream.read(&mut drain) => {}
-            }
-            closed.notify_one();
-        }
-        "test-delayed" => {
-            stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n\
-                      data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-delayed\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"first\"},\"finish_reason\":null}]}\n\n",
-                )
-                .await
-                .unwrap();
-            let _ = stream.flush().await;
-            tokio::time::sleep(Duration::from_millis(400)).await;
-            let chunk = json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-delayed","choices":[{"index":0,"delta":{"content":" second"},"finish_reason":"stop"}]});
-            let _ = stream
-                .write_all(format!("data: {chunk}\n\n").as_bytes())
-                .await;
-            let _ = stream.write_all(b"data: [DONE]\n\n").await;
-        }
-        "test-confirm-tool" => {
-            let arguments = r#"{"capability":"device.files","input":{"path":"/tmp/a"}}"#;
-            if streaming {
-                stream
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
-                    .await
-                    .unwrap();
-                let chunk = json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-confirm-tool","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_gate","type":"function","function":{"name":"device_request","arguments":arguments}}]},"finish_reason":"tool_calls"}]});
-                let _ = stream
-                    .write_all(format!("data: {chunk}\n\n").as_bytes())
-                    .await;
-                let _ = stream.write_all(b"data: [DONE]\n\n").await;
-            } else {
-                write_json(
-                    stream,
-                    200,
-                    &json!({
-                        "id":"1","object":"chat.completion","created":1,"model":"test-confirm-tool",
-                        "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_gate","type":"function","function":{"name":"device_request","arguments":arguments}}]},"finish_reason":"tool_calls"}],
-                        "usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}
-                    }),
-                )
-                .await;
-            }
-        }
-        "test-invalid-tool" => {
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
-                .await
-                .unwrap();
-            let chunk = json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-invalid-tool","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"","arguments":"{}"}}]},"finish_reason":"tool_calls"}]});
-            let _ = stream
-                .write_all(format!("data: {chunk}\n\n").as_bytes())
-                .await;
-            let _ = stream.write_all(b"data: [DONE]\n\n").await;
-        }
-        "test-tools" => {
-            if streaming {
-                stream
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
-                    .await
-                    .unwrap();
-                let chunks = [
-                    json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-tools","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":""}}]},"finish_reason":null}]}),
-                    json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-tools","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"x\":"}}]},"finish_reason":null}]}),
-                    json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-tools","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]},"finish_reason":null}]}),
-                    json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-tools","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}),
-                ];
-                for chunk in chunks {
-                    let _ = stream
-                        .write_all(format!("data: {chunk}\n\n").as_bytes())
-                        .await;
-                }
-                let _ = stream.write_all(b"data: [DONE]\n\n").await;
-            } else {
-                write_json(
-                    stream,
-                    200,
-                    &json!({
-                        "id":"1","object":"chat.completion","created":1,"model":"test-tools",
-                        "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"x\":1}"}}]},"finish_reason":"tool_calls"}],
-                        "usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}
-                    }),
-                )
-                .await;
-            }
-        }
-        _ => {
-            if streaming {
-                stream
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
-                    .await
-                    .unwrap();
-                for text in ["Hello", " world"] {
-                    let chunk = json!({"id":"1","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{"role":"assistant","content":text},"finish_reason":null}]});
-                    let _ = stream
-                        .write_all(format!("data: {chunk}\n\n").as_bytes())
-                        .await;
-                }
-                let stop = json!({"id":"1","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
-                let _ = stream
-                    .write_all(format!("data: {stop}\n\n").as_bytes())
-                    .await;
-                let usage = json!({"id":"1","object":"chat.completion.chunk","created":1,"model":model,"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}});
-                let _ = stream
-                    .write_all(format!("data: {usage}\n\n").as_bytes())
-                    .await;
-                let _ = stream.write_all(b"data: [DONE]\n\n").await;
-            } else {
-                write_json(
-                    stream,
-                    200,
-                    &json!({
-                        "id":"1","object":"chat.completion","created":1,"model":model,
-                        "choices":[{"index":0,"message":{"role":"assistant","content":"Hello world"},"finish_reason":"stop"}],
-                        "usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}
-                    }),
-                )
-                .await;
-            }
-        }
+        "test-broken" => serve_broken_sse(stream).await,
+        "test-slow" => serve_slow_sse(stream, closed, cancel).await,
+        "test-delayed" => serve_delayed_sse(stream).await,
+        "test-confirm-tool" => serve_confirm_tool(stream, streaming).await,
+        "test-invalid-tool" => serve_invalid_tool_sse(stream).await,
+        "test-tools" => serve_test_tools(stream, streaming).await,
+        _ => serve_normal_reply(stream, model, streaming).await,
     }
     let _ = stream.flush().await;
+}
+
+async fn write_sse_lines(stream: &mut tokio::net::TcpStream, payloads: &[Value]) {
+    let _ = stream
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+        .await;
+    for chunk in payloads {
+        let _ = stream
+            .write_all(format!("data: {chunk}\n\n").as_bytes())
+            .await;
+    }
+    let _ = stream.write_all(b"data: [DONE]\n\n").await;
+}
+
+async fn serve_broken_sse(stream: &mut tokio::net::TcpStream) {
+    stream
+        .write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n\
+              data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-broken\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+        )
+        .await
+        .unwrap();
+    let _ = stream.flush().await;
+    let _ = stream.write_all(b"data: {\"broken\":\n\n").await;
+}
+
+async fn serve_slow_sse(
+    stream: &mut tokio::net::TcpStream,
+    closed: &Notify,
+    cancel: &CancellationToken,
+) {
+    stream
+        .write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n\
+              data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-slow\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"first\"},\"finish_reason\":null}]}\n\n",
+        )
+        .await
+        .unwrap();
+    let _ = stream.flush().await;
+    let mut drain = [0u8; 1];
+    tokio::select! {
+        _ = cancel.cancelled() => {}
+        _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+        _ = stream.read(&mut drain) => {}
+    }
+    closed.notify_one();
+}
+
+async fn serve_delayed_sse(stream: &mut tokio::net::TcpStream) {
+    stream
+        .write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n\
+              data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-delayed\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"first\"},\"finish_reason\":null}]}\n\n",
+        )
+        .await
+        .unwrap();
+    let _ = stream.flush().await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let chunk = json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-delayed","choices":[{"index":0,"delta":{"content":" second"},"finish_reason":"stop"}]});
+    let _ = stream
+        .write_all(format!("data: {chunk}\n\n").as_bytes())
+        .await;
+    let _ = stream.write_all(b"data: [DONE]\n\n").await;
+}
+
+async fn serve_confirm_tool(stream: &mut tokio::net::TcpStream, streaming: bool) {
+    let arguments = r#"{"capability":"device.files","input":{"path":"/tmp/a"}}"#;
+    if streaming {
+        let chunk = json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-confirm-tool","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_gate","type":"function","function":{"name":"device_request","arguments":arguments}}]},"finish_reason":"tool_calls"}]});
+        write_sse_lines(stream, &[chunk]).await;
+    } else {
+        write_json(
+            stream,
+            200,
+            &json!({
+                "id":"1","object":"chat.completion","created":1,"model":"test-confirm-tool",
+                "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_gate","type":"function","function":{"name":"device_request","arguments":arguments}}]},"finish_reason":"tool_calls"}],
+                "usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}
+            }),
+        )
+        .await;
+    }
+}
+
+async fn serve_invalid_tool_sse(stream: &mut tokio::net::TcpStream) {
+    let chunk = json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-invalid-tool","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"","arguments":"{}"}}]},"finish_reason":"tool_calls"}]});
+    write_sse_lines(stream, &[chunk]).await;
+}
+
+async fn serve_test_tools(stream: &mut tokio::net::TcpStream, streaming: bool) {
+    if streaming {
+        let chunks = [
+            json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-tools","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":""}}]},"finish_reason":null}]}),
+            json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-tools","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"x\":"}}]},"finish_reason":null}]}),
+            json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-tools","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]},"finish_reason":null}]}),
+            json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-tools","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}),
+        ];
+        write_sse_lines(stream, &chunks).await;
+    } else {
+        write_json(
+            stream,
+            200,
+            &json!({
+                "id":"1","object":"chat.completion","created":1,"model":"test-tools",
+                "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"x\":1}"}}]},"finish_reason":"tool_calls"}],
+                "usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}
+            }),
+        )
+        .await;
+    }
+}
+
+async fn serve_normal_reply(stream: &mut tokio::net::TcpStream, model: &str, streaming: bool) {
+    if streaming {
+        let chunks = [
+            json!({"id":"1","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}),
+            json!({"id":"1","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{"role":"assistant","content":" world"},"finish_reason":null}]}),
+            json!({"id":"1","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+            json!({"id":"1","object":"chat.completion.chunk","created":1,"model":model,"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}),
+        ];
+        write_sse_lines(stream, &chunks).await;
+    } else {
+        write_json(
+            stream,
+            200,
+            &json!({
+                "id":"1","object":"chat.completion","created":1,"model":model,
+                "choices":[{"index":0,"message":{"role":"assistant","content":"Hello world"},"finish_reason":"stop"}],
+                "usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}
+            }),
+        )
+        .await;
+    }
 }
 
 async fn write_json(stream: &mut tokio::net::TcpStream, status: u16, body: &Value) {

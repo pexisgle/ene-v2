@@ -85,7 +85,8 @@ impl Session {
             }
             Err(error) => {
                 tracing::warn!("the renderer did not start: {error}");
-                self.set_avatar(Device::Unavailable(error)).await;
+                self.set_avatar(Device::Unavailable(error.to_string()))
+                    .await;
             }
         }
     }
@@ -139,7 +140,7 @@ impl Session {
                 }
                 Err(error) => {
                     tracing::warn!("no audio output: {error}");
-                    self.set_out(Device::Unavailable(error)).await;
+                    self.set_out(Device::Unavailable(error.to_string())).await;
                     return;
                 }
             }
@@ -161,7 +162,7 @@ impl Session {
             }
             Err(error) => {
                 tracing::warn!("no microphone: {error}");
-                self.set_in(Device::Unavailable(error)).await;
+                self.set_in(Device::Unavailable(error.to_string())).await;
             }
         }
     }

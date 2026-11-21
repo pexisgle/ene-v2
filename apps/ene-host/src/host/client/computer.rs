@@ -129,40 +129,49 @@ pub(super) fn prepare(
     Ok(pending)
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ResultError {
+    #[error("the client did not confirm the input")]
+    InputNotConfirmed,
+    #[error("the client returned an invalid Computer Use screenshot")]
+    InvalidScreenshot,
+}
+
 /// Strip the image before the result reaches the operation ledger or any event.
 pub(super) fn result(
     pending: Pending,
     output: Value,
-) -> std::result::Result<(Value, Option<Frame>), String> {
+) -> std::result::Result<(Value, Option<Frame>), ResultError> {
     if !pending.screenshot {
         return (output["applied"].as_bool() == Some(true))
             .then(|| (json!({"applied":true}), None))
-            .ok_or_else(|| "the client did not confirm the input".into());
+            .ok_or(ResultError::InputNotConfirmed);
     }
-    let invalid = || "the client returned an invalid Computer Use screenshot".to_owned();
     let id = output["frame_id"]
         .as_str()
         .filter(|id| uuid::Uuid::parse_str(id).is_ok())
-        .ok_or_else(invalid)?;
+        .ok_or(ResultError::InvalidScreenshot)?;
     let encoded = output["image_base64"]
         .as_str()
         .filter(|encoded| encoded.len() <= w::MAX_PERCEPTION_JPEG_BYTES.div_ceil(3) * 4)
-        .ok_or_else(invalid)?;
-    let bytes = STANDARD.decode(encoded).map_err(|_| invalid())?;
+        .ok_or(ResultError::InvalidScreenshot)?;
+    let bytes = STANDARD
+        .decode(encoded)
+        .map_err(|_| ResultError::InvalidScreenshot)?;
     if bytes.len() > w::MAX_PERCEPTION_JPEG_BYTES {
-        return Err(invalid());
+        return Err(ResultError::InvalidScreenshot);
     }
     let (width, height) =
         image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Jpeg)
             .into_dimensions()
-            .map_err(|_| invalid())?;
+            .map_err(|_| ResultError::InvalidScreenshot)?;
     if width == 0
         || height == 0
         || width.max(height) > w::MAX_PERCEPTION_FRAME_EDGE
         || output["width"].as_u64() != Some(u64::from(width))
         || output["height"].as_u64() != Some(u64::from(height))
     {
-        return Err(invalid());
+        return Err(ResultError::InvalidScreenshot);
     }
     Ok((
         json!({"frame_id": id, "width":width, "height":height}),

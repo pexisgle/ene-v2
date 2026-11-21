@@ -431,12 +431,8 @@ mod tests {
         runtime.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::too_many_lines)]
-    async fn f05_preview_companion_replies_without_persisting_companion_or_messages() {
+    async fn spawn_preview_response_server() -> std::net::SocketAddr {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -497,6 +493,12 @@ mod tests {
             let _ = stream.write_all(reply.as_bytes()).await;
             let _ = stream.shutdown().await;
         });
+        addr
+    }
+
+    #[tokio::test]
+    async fn f05_preview_companion_replies_without_persisting_companion_or_messages() {
+        let addr = spawn_preview_response_server().await;
 
         let state = tempfile::tempdir().unwrap();
         let runtime = Runtime::start(state.path()).await.unwrap();

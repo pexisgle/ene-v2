@@ -18,11 +18,90 @@ use std::{
     path::PathBuf,
     sync::{Arc, RwLock},
 };
-use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-// TODO(Phase 1-3): split during refactoring.
-#[allow(clippy::too_many_lines)]
+struct SessionRuntime {
+    handle: tokio::runtime::Handle,
+    worker: std::thread::JoinHandle<()>,
+}
+
+struct DesktopAppInit {
+    connection: Connection,
+    commands_tx: UnboundedSender<Command>,
+    updates_tx: UnboundedSender<ene_desktop::Update>,
+    updates_rx: UnboundedReceiver<ene_desktop::Update>,
+    tray_handle: Option<ene_desktop::TrayHandle>,
+    tray_rx: Option<UnboundedReceiver<TrayAction>>,
+    handle: tokio::runtime::Handle,
+    shown: String,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    #[cfg(windows)]
+    history_reset_ui: Option<ene_desktop::HistoryReset>,
+}
+
 fn main() {
+    init_tracing();
+    install_panic_hook();
+
+    let local_host = detect_local_host();
+    let path = discovery_path(local_host.is_some()).unwrap_or_else(|reason| {
+        // Without a runtime directory there is no host to find, so the
+        // window could only repeat this sentence.
+        eprintln!("ene-desktop: {reason}");
+        std::process::exit(1);
+    });
+
+    #[cfg(windows)]
+    let local_host_child = spawn_local_host(local_host.as_deref());
+    #[cfg(windows)]
+    let history_reset = local_host_child
+        .as_ref()
+        .map(|_| ene_desktop::HistoryReset {
+            requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            failure: std::env::var("ENE_DESKTOP_HISTORY_RESET_ERROR").ok(),
+        });
+
+    let (updates_tx, updates_rx) = unbounded_channel();
+    let (commands_tx, commands_rx) = unbounded_channel();
+    let connection: Connection = Arc::new(RwLock::new(None));
+    let session_runtime = start_session_runtime(
+        path.clone(),
+        connection.clone(),
+        updates_tx.clone(),
+        commands_rx,
+    );
+
+    let quit = commands_tx.clone();
+    let (tray_tx, tray_rx) = unbounded_channel::<TrayAction>();
+    let tray = Tray::spawn(TrayState::default(), tray_tx);
+    let tray_handle = tray.as_ref().map(Tray::handle);
+    let tray_rx = tray_handle.is_some().then_some(tray_rx);
+    let shutdown_rx = spawn_shutdown_signal(&session_runtime.handle);
+
+    run_gpui_app(DesktopAppInit {
+        connection,
+        commands_tx,
+        updates_tx,
+        updates_rx,
+        tray_handle,
+        tray_rx,
+        handle: session_runtime.handle.clone(),
+        shown: path.display().to_string(),
+        shutdown_rx,
+        #[cfg(windows)]
+        history_reset_ui: history_reset.clone(),
+    });
+
+    // The window is gone. The session stops serving, kills its child and returns;
+    // joining it is what makes the exit orderly rather than a race.
+    drop(tray);
+    let _ = quit.send(Command::Quit);
+    let _ = session_runtime.worker.join();
+    #[cfg(windows)]
+    maybe_finish_history_reset(history_reset, local_host, local_host_child);
+}
+
+fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -30,7 +109,9 @@ fn main() {
         )
         .with_writer(std::io::stderr)
         .init();
+}
 
+fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
@@ -48,27 +129,22 @@ fn main() {
         eprintln!("ene-desktop panic at {location}: {payload}");
         default_hook(info);
     }));
+}
 
-    let local_host = if cfg!(windows) && std::env::var_os("ENE_HOST_CONNECTION").is_none() {
+fn detect_local_host() -> Option<PathBuf> {
+    if cfg!(windows) && std::env::var_os("ENE_HOST_CONNECTION").is_none() {
         std::env::current_exe()
             .ok()
             .map(|exe| exe.with_file_name("ene-host.exe"))
             .filter(|host| host.is_file())
     } else {
         None
-    };
-    let path = match discovery_path(local_host.is_some()) {
-        Ok(path) => path,
-        Err(reason) => {
-            // Without a runtime directory there is no host to find, so the
-            // window could only repeat this sentence.
-            eprintln!("ene-desktop: {reason}");
-            std::process::exit(1);
-        }
-    };
+    }
+}
 
-    #[cfg(windows)]
-    let local_host_child = local_host.as_deref().and_then(|host| {
+#[cfg(windows)]
+fn spawn_local_host(local_host: Option<&std::path::Path>) -> Option<std::process::Child> {
+    local_host.and_then(|host| {
         match local_host_command(host)
             .env("ENE_HOST_EXIT_ON_STDIN_EOF", "1")
             .stdin(std::process::Stdio::piped())
@@ -80,125 +156,94 @@ fn main() {
                 None
             }
         }
-    });
-    #[cfg(windows)]
-    let history_reset = local_host_child
-        .as_ref()
-        .map(|_| ene_desktop::HistoryReset {
-            requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            failure: std::env::var("ENE_DESKTOP_HISTORY_RESET_ERROR").ok(),
-        });
-    #[cfg(windows)]
-    let history_reset_ui = history_reset.clone();
-    let (updates_tx, updates_rx) = unbounded_channel();
-    let (commands_tx, commands_rx) = unbounded_channel();
-    let connection: Connection = Arc::new(RwLock::new(None));
+    })
+}
 
-    let runtime = match tokio::runtime::Builder::new_current_thread()
+fn start_session_runtime(
+    path: PathBuf,
+    connection: Connection,
+    updates_tx: UnboundedSender<ene_desktop::Update>,
+    commands_rx: UnboundedReceiver<Command>,
+) -> SessionRuntime {
+    let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
+        .unwrap_or_else(|error| {
             eprintln!("ene-desktop: the async runtime did not start: {error}");
             std::process::exit(1);
-        }
-    };
+        });
     let handle = runtime.handle().clone();
-    let session = Session::new(
-        path.clone(),
-        options(),
-        connection.clone(),
-        updates_tx.clone(),
-        commands_rx,
-    );
-    let worker = match std::thread::Builder::new()
+    let session = Session::new(path, options(), connection, updates_tx, commands_rx);
+    let worker = std::thread::Builder::new()
         .name("ene-session".into())
         .spawn(move || {
             runtime.block_on(session.run());
-        }) {
-        Ok(worker) => worker,
-        Err(error) => {
+        })
+        .unwrap_or_else(|error| {
             eprintln!("ene-desktop: the session thread did not start: {error}");
             std::process::exit(1);
-        }
-    };
-
-    let quit = commands_tx.clone();
-    let shown = path.display().to_string();
-    let (tray_tx, tray_rx) = unbounded_channel::<TrayAction>();
-    let tray = Tray::spawn(TrayState::default(), tray_tx);
-    let tray_handle = tray.as_ref().map(Tray::handle);
-    let tray_rx = tray_handle.is_some().then_some(tray_rx);
-
-    let shutdown_rx = {
-        let (sig_tx, sig_rx) = tokio::sync::oneshot::channel::<()>();
-        handle.spawn(async move {
-            #[cfg(unix)]
-            let received = {
-                let mut sigterm =
-                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
-                tokio::select! {
-                    result = tokio::signal::ctrl_c() => result.is_ok(),
-                    result = async {
-                        match sigterm.as_mut() {
-                            Some(stream) => stream.recv().await.is_some(),
-                            None => std::future::pending::<bool>().await,
-                        }
-                    } => result,
-                }
-            };
-            #[cfg(not(unix))]
-            let received = tokio::signal::ctrl_c().await.is_ok();
-            if received {
-                let _ = sig_tx.send(());
-            }
         });
-        Some(sig_rx)
-    };
+    SessionRuntime { handle, worker }
+}
+
+fn spawn_shutdown_signal(handle: &tokio::runtime::Handle) -> tokio::sync::oneshot::Receiver<()> {
+    let (sig_tx, sig_rx) = tokio::sync::oneshot::channel::<()>();
+    handle.spawn(async move {
+        #[cfg(unix)]
+        let received = {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => result.is_ok(),
+                result = async {
+                    match sigterm.as_mut() {
+                        Some(stream) => stream.recv().await.is_some(),
+                        None => std::future::pending::<bool>().await,
+                    }
+                } => result,
+            }
+        };
+        #[cfg(not(unix))]
+        let received = tokio::signal::ctrl_c().await.is_ok();
+        if received {
+            let _ = sig_tx.send(());
+        }
+    });
+    sig_rx
+}
+
+fn run_gpui_app(init: DesktopAppInit) {
     Application::new()
         .with_assets(EmbeddedAssets)
         .run(move |cx: &mut App| {
             #[cfg(windows)]
-            if let Some(history_reset) = history_reset_ui {
+            if let Some(history_reset) = init.history_reset_ui {
                 cx.set_global(history_reset);
             }
-            if let Some(rx) = shutdown_rx {
-                cx.spawn(async move |cx| {
-                    if rx.await.is_ok() {
-                        let _ = cx.update(|cx| cx.quit());
-                    }
-                })
-                .detach();
-            }
+            let shutdown_rx = init.shutdown_rx;
+            cx.spawn(async move |cx| {
+                if shutdown_rx.await.is_ok() {
+                    let _ = cx.update(|cx| cx.quit());
+                }
+            })
+            .detach();
             let hub = cx.new(|cx| {
                 Hub::new(
                     cx,
                     ene_desktop::HubInit {
                         options: options(),
-                        connection: connection.clone(),
-                        commands: commands_tx.clone(),
-                        updates_tx: updates_tx.clone(),
-                        updates: updates_rx,
-                        tray: tray_handle,
-                        tray_rx,
-                        runtime: handle.clone(),
-                        discovery: shown.clone(),
+                        connection: init.connection.clone(),
+                        commands: init.commands_tx.clone(),
+                        updates_tx: init.updates_tx.clone(),
+                        updates: init.updates_rx,
+                        tray: init.tray_handle,
+                        tray_rx: init.tray_rx,
+                        runtime: init.handle.clone(),
+                        discovery: init.shown.clone(),
                     },
                 )
             });
-            let open_chat = std::env::var("ENE_DESKTOP_OPEN_SETTINGS")
-                .ok()
-                .is_some_and(|val| val.trim().eq_ignore_ascii_case("chat"));
-            let open_section = std::env::var("ENE_DESKTOP_OPEN_SETTINGS")
-                .ok()
-                .and_then(|val| match val.trim().to_ascii_lowercase().as_str() {
-                    "companions" => Some(ene_desktop::SettingsSection::Companions),
-                    "connections" | "1" | "true" => Some(ene_desktop::SettingsSection::Connections),
-                    "voice" => Some(ene_desktop::SettingsSection::Voice),
-                    "device" => Some(ene_desktop::SettingsSection::Device),
-                    _ => None,
-                });
+            let (open_chat, open_section) = env_open_options();
             if open_chat {
                 hub.update(cx, |hub, _cx| hub.pod_mode = PodMode::ExpandedChat);
             }
@@ -217,34 +262,66 @@ fn main() {
                 hub.update(cx, |hub, cx| hub.open_settings(section, cx));
             }
         });
+}
 
-    // The window is gone. The session stops serving, kills its child and returns;
-    // joining it is what makes the exit orderly rather than a race.
-    drop(tray);
-    let _ = quit.send(Command::Quit);
-    let _ = worker.join();
-    #[cfg(windows)]
+fn env_open_options() -> (bool, Option<ene_desktop::SettingsSection>) {
+    let raw = std::env::var("ENE_DESKTOP_OPEN_SETTINGS").ok();
+    let trimmed = raw.as_deref().map(str::trim);
+    let open_chat = trimmed.is_some_and(|val| val.eq_ignore_ascii_case("chat"));
+    let open_section = trimmed.and_then(|val| match val.to_ascii_lowercase().as_str() {
+        "companions" => Some(ene_desktop::SettingsSection::Companions),
+        "connections" | "1" | "true" => Some(ene_desktop::SettingsSection::Connections),
+        "voice" => Some(ene_desktop::SettingsSection::Voice),
+        "device" => Some(ene_desktop::SettingsSection::Device),
+        _ => None,
+    });
+    (open_chat, open_section)
+}
+
+#[cfg(windows)]
+fn maybe_finish_history_reset(
+    history_reset: Option<ene_desktop::HistoryReset>,
+    local_host: Option<PathBuf>,
+    local_host_child: Option<std::process::Child>,
+) {
     if history_reset.is_some_and(|reset| reset.requested.load(std::sync::atomic::Ordering::Relaxed))
         && let (Some(host), Some(child)) = (local_host, local_host_child)
     {
-        let reset_error = reset_local_history(&host, child).err();
+        let reset_error = reset_local_history(&host, child)
+            .err()
+            .map(|error| error.to_string());
         if let Err(error) = restart_desktop(reset_error) {
             tracing::error!(%error, "could not reopen ene after the history reset");
         }
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum DesktopInitError {
+    #[error("no runtime directory is configured; set ENE_HOST_CONNECTION")]
+    MissingRuntimeDir,
+    #[cfg(windows)]
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[cfg(windows)]
+    #[error("ローカルホストの停止を待ってから、もう一度お試しください。")]
+    HostStopTimeout,
+    #[cfg(windows)]
+    #[error("{0}")]
+    ResetFailed(String),
+}
+
 /// The discovery file: `ENE_HOST_CONNECTION`, or the host's default runtime
 /// directory.
-fn discovery_path(local_host: bool) -> Result<PathBuf, String> {
+fn discovery_path(local_host: bool) -> Result<PathBuf, DesktopInitError> {
     if let Some(path) = std::env::var_os("ENE_HOST_CONNECTION") {
         return Ok(PathBuf::from(path));
     }
     if local_host && let Some(runtime) = std::env::var_os("ENE_HOST_RUNTIME_DIR") {
         return Ok(PathBuf::from(runtime).join("connection.json"));
     }
-    let dirs = directories::ProjectDirs::from("", "", "ene")
-        .ok_or("no runtime directory is configured; set ENE_HOST_CONNECTION")?;
+    let dirs =
+        directories::ProjectDirs::from("", "", "ene").ok_or(DesktopInitError::MissingRuntimeDir)?;
     let runtime = dirs
         .runtime_dir()
         .map_or_else(|| dirs.cache_dir().join("runtime"), PathBuf::from);
@@ -271,29 +348,24 @@ fn local_host_command(host: &std::path::Path) -> std::process::Command {
 fn reset_local_history(
     host: &std::path::Path,
     mut child: std::process::Child,
-) -> Result<(), String> {
+) -> Result<(), DesktopInitError> {
     use std::time::{Duration, Instant};
 
     drop(child.stdin.take());
     let deadline = Instant::now() + Duration::from_secs(15);
-    while child
-        .try_wait()
-        .map_err(|error| error.to_string())?
-        .is_none()
-    {
+    while child.try_wait()?.is_none() {
         if Instant::now() >= deadline {
-            return Err("ローカルホストの停止を待ってから、もう一度お試しください。".into());
+            return Err(DesktopInitError::HostStopTimeout);
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let result = local_host_command(host)
-        .arg("--reset-history")
-        .output()
-        .map_err(|error| error.to_string())?;
+    let result = local_host_command(host).arg("--reset-history").output()?;
     if result.status.success() {
         Ok(())
     } else {
-        Err(String::from_utf8_lossy(&result.stderr).trim().to_owned())
+        Err(DesktopInitError::ResetFailed(
+            String::from_utf8_lossy(&result.stderr).trim().to_owned(),
+        ))
     }
 }
 

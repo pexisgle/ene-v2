@@ -19,6 +19,24 @@ struct ManagedProcess {
     child: Option<Box<dyn ChildWrapper>>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum VoicevoxError {
+    #[error("VOICEVOX自動起動はテスト実行中はスキップされます")]
+    SkippedInTests,
+    #[error("リモートのVOICEVOX接続先は自動起動できません")]
+    RemoteEndpointNotAutoStartable,
+    #[error(
+        "VOICEVOXエンジンが見つかりません。VOICEVOXをインストールするか、環境変数 ENE_VOICEVOX_ENGINE に run.exe のパスを設定してください。"
+    )]
+    EngineBinaryNotFound,
+    #[error("VOICEVOXエンジンが起動直後に終了しました（code: {0}）")]
+    ExitedEarly(std::process::ExitStatus),
+    #[error("VOICEVOXエンジンの起動待機がタイムアウトしました（25秒）")]
+    StartupTimeout,
+    #[error("VOICEVOXエンジンの起動に失敗しました ({path}): {error}")]
+    SpawnFailed { path: String, error: String },
+}
+
 /// Owns at most one locally spawned VOICEVOX Engine child process.
 #[derive(Clone, Default)]
 pub(crate) struct VoicevoxManager {
@@ -27,70 +45,26 @@ pub(crate) struct VoicevoxManager {
 
 impl VoicevoxManager {
     /// Ensures a local VOICEVOX Engine at `base_url` is reachable, launching it if needed.
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::cognitive_complexity)]
     pub(crate) async fn ensure_running(
         &self,
         base_url: &str,
         options_json: &str,
-    ) -> Result<(), String> {
-        let base = base_url.trim().trim_end_matches('/');
-        let base = if base.is_empty() {
-            "http://127.0.0.1:50021"
-        } else {
-            base
-        };
-
+    ) -> Result<(), VoicevoxError> {
+        let base = normalized_voicevox_base(base_url);
         if cfg!(test) && std::env::var_os("ENE_VOICEVOX_ENGINE").is_none() {
-            return Err("VOICEVOX自動起動はテスト実行中はスキップされます".into());
+            return Err(VoicevoxError::SkippedInTests);
         }
-
         let mut guard = self.inner.lock().await;
         if is_reachable(base, Duration::from_millis(1_200)).await {
             return Ok(());
         }
         let Some((host, port)) = is_local_voicevox_url(base) else {
-            return Err("リモートのVOICEVOX接続先は自動起動できません".into());
+            return Err(VoicevoxError::RemoteEndpointNotAutoStartable);
         };
-
-        let same_running = if guard.endpoint == base {
-            if let Some(child) = guard.child.as_mut() {
-                matches!(child.try_wait(), Ok(None))
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        if !same_running {
-            stop_inner(&mut guard).await;
-            let exe = find_engine_binary(options_json).ok_or_else(|| {
-                "VOICEVOXエンジンが見つかりません。VOICEVOXをインストールするか、環境変数 ENE_VOICEVOX_ENGINE に run.exe のパスを設定してください。".to_owned()
-            })?;
-            tracing::info!(engine = %exe.display(), host = %host, port, "starting local VOICEVOX engine");
-            let child = spawn_engine(&exe, &host, port)?;
-            guard.endpoint = base.to_owned();
-            guard.child = Some(child);
+        if !same_process_running(&mut guard, base) {
+            start_local_engine(&mut guard, base, &host, port, options_json).await?;
         }
-
-        let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
-        while tokio::time::Instant::now() < deadline {
-            if is_reachable(base, Duration::from_millis(1_000)).await {
-                tracing::info!(endpoint = %base, "VOICEVOX engine is ready");
-                return Ok(());
-            }
-            if let Some(child) = guard.child.as_mut()
-                && let Ok(Some(status)) = child.try_wait()
-            {
-                guard.child = None;
-                return Err(format!(
-                    "VOICEVOXエンジンが起動直後に終了しました（code: {status}）"
-                ));
-            }
-            tokio::time::sleep(POLL_INTERVAL).await;
-        }
-        Err("VOICEVOXエンジンの起動待機がタイムアウトしました（25秒）".into())
+        wait_for_engine_ready(&mut guard, base).await
     }
 
     /// Stops any VOICEVOX Engine child process managed by this host.
@@ -98,6 +72,62 @@ impl VoicevoxManager {
         let mut guard = self.inner.lock().await;
         stop_inner(&mut guard).await;
     }
+}
+
+fn normalized_voicevox_base(base_url: &str) -> &str {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        "http://127.0.0.1:50021"
+    } else {
+        base
+    }
+}
+
+fn same_process_running(managed: &mut ManagedProcess, base: &str) -> bool {
+    if managed.endpoint != base {
+        return false;
+    }
+    managed
+        .child
+        .as_mut()
+        .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+}
+
+async fn start_local_engine(
+    managed: &mut ManagedProcess,
+    base: &str,
+    host: &str,
+    port: u16,
+    options_json: &str,
+) -> Result<(), VoicevoxError> {
+    stop_inner(managed).await;
+    let exe = find_engine_binary(options_json).ok_or(VoicevoxError::EngineBinaryNotFound)?;
+    tracing::info!(engine = %exe.display(), host = %host, port, "starting local VOICEVOX engine");
+    let child = spawn_engine(&exe, host, port)?;
+    managed.endpoint = base.to_owned();
+    managed.child = Some(child);
+    Ok(())
+}
+
+async fn wait_for_engine_ready(
+    managed: &mut ManagedProcess,
+    base: &str,
+) -> Result<(), VoicevoxError> {
+    let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+    while tokio::time::Instant::now() < deadline {
+        if is_reachable(base, Duration::from_millis(1_000)).await {
+            tracing::info!(endpoint = %base, "VOICEVOX engine is ready");
+            return Ok(());
+        }
+        if let Some(child) = managed.child.as_mut()
+            && let Ok(Some(status)) = child.try_wait()
+        {
+            managed.child = None;
+            return Err(VoicevoxError::ExitedEarly(status));
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+    Err(VoicevoxError::StartupTimeout)
 }
 
 async fn stop_inner(managed: &mut ManagedProcess) {
@@ -108,7 +138,7 @@ async fn stop_inner(managed: &mut ManagedProcess) {
     managed.endpoint.clear();
 }
 
-fn spawn_engine(exe: &Path, host: &str, port: u16) -> Result<Box<dyn ChildWrapper>, String> {
+fn spawn_engine(exe: &Path, host: &str, port: u16) -> Result<Box<dyn ChildWrapper>, VoicevoxError> {
     let port_arg = port.to_string();
     let mut wrap = CommandWrap::with_new(exe, |cmd| {
         cmd.args(["--host", host, "--port", &port_arg])
@@ -132,12 +162,12 @@ fn spawn_engine(exe: &Path, host: &str, port: u16) -> Result<Box<dyn ChildWrappe
     {
         wrap.wrap(process_wrap::tokio::JobObject);
     }
-    wrap.wrap(KillOnDrop).spawn().map_err(|error| {
-        format!(
-            "VOICEVOXエンジンの起動に失敗しました ({}): {error}",
-            exe.display()
-        )
-    })
+    wrap.wrap(KillOnDrop)
+        .spawn()
+        .map_err(|error| VoicevoxError::SpawnFailed {
+            path: exe.display().to_string(),
+            error: error.to_string(),
+        })
 }
 
 pub(crate) async fn is_reachable(base_url: &str, timeout: Duration) -> bool {

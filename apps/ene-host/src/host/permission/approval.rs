@@ -85,14 +85,11 @@ pub(crate) fn submit(
     submit_with_outcome(world, request_id, decision).map(|outcome| outcome.approval)
 }
 
-// TODO(Phase 1-3): split during refactoring.
-#[allow(clippy::too_many_lines)]
-pub(crate) fn submit_with_outcome(
+fn load_verified_hold(
     world: &mut World,
+    store: &Store,
     request_id: &str,
-    decision: ApprovalDecision,
-) -> Result<SubmitOutcome> {
-    let store = world.resource::<Store>().clone();
+) -> Result<(Hold, Option<(String, Value)>)> {
     let approval = store
         .approval(request_id)?
         .ok_or_else(|| HostError::NotFound(("approval not found").into()))?;
@@ -134,55 +131,130 @@ pub(crate) fn submit_with_outcome(
             ("approval no longer matches the call arguments").into(),
         ));
     }
+    Ok((hold, request_snapshot))
+}
+
+fn validate_bound_approval_client(
+    world: &mut World,
+    store: &Store,
+    request_id: &str,
+    hold: Hold,
+    request_snapshot: Option<&(String, Value)>,
+) -> Result<Option<String>> {
+    let Some(binding) = world.get::<CallBinding>(hold.call).cloned() else {
+        return Ok(None);
+    };
+    let approval = store
+        .approval(request_id)?
+        .ok_or_else(|| HostError::NotFound(("approval not found").into()))?;
+    let target_id = bound_client(store, &approval)?.unwrap_or_else(|| binding.client_id.clone());
+    let client = store
+        .client(&target_id)?
+        .ok_or_else(|| HostError::Conflict(("the bound client is not registered").into()))?;
+    if !client.is_granted(&binding.capability) {
+        return Err(HostError::Conflict(format!(
+            "capability `{}` is no longer granted on `{target_id}`",
+            binding.capability
+        )));
+    }
+    if let Some((tool_name, raw_args)) = request_snapshot {
+        let empty = serde_json::json!({});
+        let input = if tool_name == "device_request" {
+            raw_args.get("input").unwrap_or(&empty).clone()
+        } else {
+            raw_args.clone()
+        };
+        let action = CandidateAction::DeviceCapability {
+            capability: binding.capability.clone(),
+            spec: client.spec(&binding.capability).cloned().map(Box::new),
+            tool_name: tool_name.clone(),
+            input,
+            raw_arguments: raw_args.clone(),
+        };
+        let typed_target = extract_target(&action);
+        if let Some(reason) = hard_denied_action(&action, &typed_target) {
+            store.resolve_approval(request_id, ApprovalStatus::Denied)?;
+            release(world, request_id);
+            refuse(world, hold.call, &reason);
+            return Err(HostError::Permission(reason));
+        }
+        if approval.client_id.as_deref() != Some(target_id.as_str()) {
+            let rules = store.policy_rules()?;
+            if let Verdict::Deny { reason } = decide_action(&rules, &action) {
+                store.resolve_approval(request_id, ApprovalStatus::Denied)?;
+                release(world, request_id);
+                refuse(world, hold.call, &reason);
+                return Err(HostError::Permission(reason));
+            }
+        }
+    }
+    Ok(Some(target_id))
+}
+
+fn persist_always_allow_rule(
+    world: &mut World,
+    store: &Store,
+    approval: &Approval,
+) -> (bool, Option<String>) {
+    let pattern = if approval.normalized_arguments.trim().is_empty() {
+        "*".to_owned()
+    } else if approval.normalized_arguments.chars().count() <= 4_000 {
+        approval.normalized_arguments.clone()
+    } else {
+        format!("exact_sha256:{}", hex_digest(&approval.action_payload_hash))
+    };
+    let rule = PolicyRule {
+        id: uuid::Uuid::new_v4().to_string(),
+        tool_name: approval.tool_name.clone(),
+        pattern,
+        effect: PolicyEffect::Allow,
+        created_at: String::new(),
+    };
+    match store.apply_policy_rules(&[rule], &[]) {
+        Ok(rules) => {
+            let wire_rules = rules.iter().map(crate::host::wire::policy_rule).collect();
+            world.resource_mut::<Notifier>().push(
+                None,
+                None,
+                w::notification::Event::PolicyRulesUpdated(Box::new(w::PolicyRulesUpdated {
+                    rules: wire_rules,
+                    ..Default::default()
+                })),
+            );
+            (true, None)
+        }
+        Err(error) => {
+            if error.is_storage() {
+                crate::host::fail(world, error.to_string());
+            }
+            let msg = error.to_string();
+            tracing::warn!(%error, "failed to persist AlwaysApprove policy rule");
+            world.resource_mut::<Notifier>().notice(
+                Some(&approval.session_id),
+                "policy_rule_save_failed",
+                &format!("承認は実行されましたが、常時許可ルールの保存に失敗しました: {msg}"),
+            );
+            (false, Some(msg))
+        }
+    }
+}
+
+pub(crate) fn submit_with_outcome(
+    world: &mut World,
+    request_id: &str,
+    decision: ApprovalDecision,
+) -> Result<SubmitOutcome> {
+    let store = world.resource::<Store>().clone();
+    let (hold, request_snapshot) = load_verified_hold(world, &store, request_id)?;
     match decision {
         ApprovalDecision::Approve | ApprovalDecision::AlwaysApprove => {
-            let call_binding = world.get::<CallBinding>(hold.call).cloned();
-            let mut rebound_client: Option<String> = None;
-            if let Some(binding) = &call_binding {
-                let target_id =
-                    bound_client(&store, &approval)?.unwrap_or_else(|| binding.client_id.clone());
-                let client = store.client(&target_id)?.ok_or_else(|| {
-                    HostError::Conflict(("the bound client is not registered").into())
-                })?;
-                if !client.is_granted(&binding.capability) {
-                    return Err(HostError::Conflict(format!(
-                        "capability `{}` is no longer granted on `{target_id}`",
-                        binding.capability
-                    )));
-                }
-                if let Some((tool_name, raw_args)) = &request_snapshot {
-                    let empty = serde_json::json!({});
-                    let input = if tool_name == "device_request" {
-                        raw_args.get("input").unwrap_or(&empty).clone()
-                    } else {
-                        raw_args.clone()
-                    };
-                    let action = CandidateAction::DeviceCapability {
-                        capability: binding.capability.clone(),
-                        spec: client.spec(&binding.capability).cloned().map(Box::new),
-                        tool_name: tool_name.clone(),
-                        input,
-                        raw_arguments: raw_args.clone(),
-                    };
-                    let typed_target = extract_target(&action);
-                    if let Some(reason) = hard_denied_action(&action, &typed_target) {
-                        store.resolve_approval(request_id, ApprovalStatus::Denied)?;
-                        release(world, request_id);
-                        refuse(world, hold.call, &reason);
-                        return Err(HostError::Permission(reason));
-                    }
-                    if approval.client_id.as_deref() != Some(target_id.as_str()) {
-                        let rules = store.policy_rules()?;
-                        if let Verdict::Deny { reason } = decide_action(&rules, &action) {
-                            store.resolve_approval(request_id, ApprovalStatus::Denied)?;
-                            release(world, request_id);
-                            refuse(world, hold.call, &reason);
-                            return Err(HostError::Permission(reason));
-                        }
-                    }
-                }
-                rebound_client = Some(target_id);
-            }
+            let rebound_client = validate_bound_approval_client(
+                world,
+                &store,
+                request_id,
+                hold,
+                request_snapshot.as_ref(),
+            )?;
             let approval = store.resolve_approval_with_client(
                 request_id,
                 ApprovalStatus::Approved,
@@ -195,57 +267,11 @@ pub(crate) fn submit_with_outcome(
                 binding.client_id = target_id;
             }
             world.entity_mut(hold.call).insert(Approved);
-            let mut rule_saved = false;
-            let mut rule_error = None;
-            if matches!(decision, ApprovalDecision::AlwaysApprove) {
-                let pattern = if approval.normalized_arguments.trim().is_empty() {
-                    "*".to_owned()
-                } else if approval.normalized_arguments.chars().count() <= 4_000 {
-                    approval.normalized_arguments.clone()
-                } else {
-                    format!("exact_sha256:{}", hex_digest(&approval.action_payload_hash))
-                };
-                let rule = PolicyRule {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    tool_name: approval.tool_name.clone(),
-                    pattern,
-                    effect: PolicyEffect::Allow,
-                    created_at: String::new(),
-                };
-                match store.apply_policy_rules(&[rule], &[]) {
-                    Ok(rules) => {
-                        rule_saved = true;
-                        let wire_rules = rules.iter().map(crate::host::wire::policy_rule).collect();
-                        let mut notifier = world.resource_mut::<Notifier>();
-                        notifier.push(
-                            None,
-                            None,
-                            w::notification::Event::PolicyRulesUpdated(Box::new(
-                                w::PolicyRulesUpdated {
-                                    rules: wire_rules,
-                                    ..Default::default()
-                                },
-                            )),
-                        );
-                    }
-                    Err(error) => {
-                        if error.is_storage() {
-                            crate::host::fail(world, error.to_string());
-                        }
-                        let msg = error.to_string();
-                        tracing::warn!(%error, "failed to persist AlwaysApprove policy rule");
-                        let mut notifier = world.resource_mut::<Notifier>();
-                        notifier.notice(
-                            Some(&approval.session_id),
-                            "policy_rule_save_failed",
-                            &format!(
-                                "承認は実行されましたが、常時許可ルールの保存に失敗しました: {msg}"
-                            ),
-                        );
-                        rule_error = Some(msg);
-                    }
-                }
-            }
+            let (rule_saved, rule_error) = if matches!(decision, ApprovalDecision::AlwaysApprove) {
+                persist_always_allow_rule(world, &store, &approval)
+            } else {
+                (false, None)
+            };
             notify_resolved(world, &approval);
             Ok(SubmitOutcome {
                 approval,

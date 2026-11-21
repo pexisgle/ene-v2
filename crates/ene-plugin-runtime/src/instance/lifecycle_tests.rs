@@ -152,9 +152,22 @@ fn fixture(site: WaitSite) -> (Package, tempfile::TempDir) {
     }
     (Package::load(&root).unwrap(), temp)
 }
-// TODO(Phase 1-3): split during refactoring.
-#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
-async fn gate(site: WaitSite, stop: Stop) {
+struct GateHandle {
+    instance: Instance,
+    native_exit: Option<tokio::sync::oneshot::Receiver<NativeExit>>,
+    permit: std::sync::Weak<tokio::sync::OwnedSemaphorePermit>,
+    services: Arc<PendingServices>,
+    native: std::sync::Weak<PendingServices>,
+}
+
+async fn start_gate_invocation(
+    site: WaitSite,
+) -> (
+    GateHandle,
+    mpsc::Sender<Event>,
+    mpsc::Receiver<Event>,
+    CancellationToken,
+) {
     let (package, _temp) = fixture(site);
     let cancel = CancellationToken::new();
     let mut instance = Instance::load(package, "main".into(), &cancel)
@@ -175,29 +188,63 @@ async fn gate(site: WaitSite, stop: Stop) {
         released: Arc::new(Notify::new()),
     });
     let native = Arc::downgrade(&services);
-    let (tx, mut rx) = mpsc::channel(1);
+    let (tx, rx) = mpsc::channel(1);
     if matches!(site, WaitSite::FullSend) {
         tx.try_send(event("queued before invocation")).unwrap();
     }
-    let mut run = Box::pin(instance.invoke(operation(), services.clone(), tx, &cancel));
+    let handle = GateHandle {
+        instance,
+        native_exit,
+        permit,
+        services,
+        native,
+    };
+    (handle, tx, rx, cancel)
+}
+
+async fn await_gate_readiness<F>(
+    site: WaitSite,
+    stop: Stop,
+    run: &mut F,
+    rx: &mut mpsc::Receiver<Event>,
+    services: &PendingServices,
+) where
+    F: std::future::Future<Output = Result<serde_json::Value>> + Unpin,
+{
     tokio::time::timeout(Duration::from_secs(5), async {
         tokio::select! {
-            result = &mut run => panic!("{site:?}/{stop:?} returned before readiness: {result:?}"),
+            result = &mut *run => panic!("{site:?}/{stop:?} returned before readiness: {result:?}"),
             _ = async {
                 if matches!(site, WaitSite::Cpu) {
-                    assert_eq!(serde_json::to_value(rx.recv().await.unwrap()).unwrap(), serde_json::to_value(event("ready")).unwrap());
+                    assert_eq!(
+                        serde_json::to_value(rx.recv().await.unwrap()).unwrap(),
+                        serde_json::to_value(event("ready")).unwrap()
+                    );
                 } else {
                     services.entered.notified().await;
                 }
             } => {}
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     if matches!(site, WaitSite::FullSend | WaitSite::Cpu) {
         tokio::select! {
-            result = &mut run => panic!("{site:?} did not remain pending: {result:?}"),
+            result = &mut *run => panic!("{site:?} did not remain pending: {result:?}"),
             _ = tokio::time::sleep(Duration::from_millis(10)) => {}
         }
     }
+}
+
+async fn drive_gate_stop<F>(
+    site: WaitSite,
+    stop: Stop,
+    run: std::pin::Pin<Box<F>>,
+    rx: &mut mpsc::Receiver<Event>,
+    cancel: &CancellationToken,
+) where
+    F: std::future::Future<Output = Result<serde_json::Value>>,
+{
     match stop {
         Stop::Drop => drop(run),
         Stop::Timeout => {
@@ -225,26 +272,63 @@ async fn gate(site: WaitSite, stop: Stop) {
             );
         }
     }
-    if let Some(native_exit) = native_exit {
-        let exit = tokio::time::timeout(Duration::from_secs(2), native_exit)
-            .await
-            .expect("CPU native call did not exit after the guard stopped it")
-            .expect("CPU native completion observer was dropped");
-        let consumed = exit.fuel_consumed.expect("CPU fuel accounting is enabled");
-        assert_eq!(
-            exit.error.as_deref(),
-            Some("timeout"),
-            "{site:?}/{stop:?} native exit with {consumed}/{WASM_FUEL} fuel consumed"
-        );
-        assert!(
-            consumed < WASM_FUEL,
-            "{site:?}/{stop:?} exhausted fuel instead of being interrupted"
-        );
-        eprintln!(
-            "native {site:?}/{stop:?}: SDK timeout interrupt, fuel consumed {consumed}, fuel remaining {}",
-            WASM_FUEL - consumed
-        );
-    }
+}
+
+async fn assert_native_exit(
+    site: WaitSite,
+    stop: Stop,
+    native_exit: Option<tokio::sync::oneshot::Receiver<NativeExit>>,
+) {
+    let Some(native_exit) = native_exit else {
+        return;
+    };
+    let exit = tokio::time::timeout(Duration::from_secs(2), native_exit)
+        .await
+        .expect("CPU native call did not exit after the guard stopped it")
+        .expect("CPU native completion observer was dropped");
+    let consumed = exit.fuel_consumed.expect("CPU fuel accounting is enabled");
+    assert_eq!(
+        exit.error.as_deref(),
+        Some("timeout"),
+        "{site:?}/{stop:?} native exit with {consumed}/{WASM_FUEL} fuel consumed"
+    );
+    assert!(
+        consumed < WASM_FUEL,
+        "{site:?}/{stop:?} exhausted fuel instead of being interrupted"
+    );
+    eprintln!(
+        "native {site:?}/{stop:?}: SDK timeout interrupt, fuel consumed {consumed}, fuel remaining {}",
+        WASM_FUEL - consumed
+    );
+}
+
+async fn gate(site: WaitSite, stop: Stop) {
+    let (mut gate_handle, tx, mut rx, cancel) = start_gate_invocation(site).await;
+    let mut run = Box::pin(gate_handle.instance.invoke(
+        operation(),
+        gate_handle.services.clone(),
+        tx,
+        &cancel,
+    ));
+    await_gate_readiness(site, stop, &mut run, &mut rx, &gate_handle.services).await;
+    drive_gate_stop(site, stop, run, &mut rx, &cancel).await;
+    assert_native_exit(site, stop, gate_handle.native_exit.take()).await;
+    assert_post_stop_cleanup(site, stop, gate_handle, &mut rx).await;
+}
+
+async fn assert_post_stop_cleanup(
+    site: WaitSite,
+    stop: Stop,
+    gate_handle: GateHandle,
+    rx: &mut mpsc::Receiver<Event>,
+) {
+    let GateHandle {
+        mut instance,
+        services,
+        native,
+        permit,
+        ..
+    } = gate_handle;
     if !matches!(site, WaitSite::FullSend | WaitSite::Cpu) {
         tokio::time::timeout(Duration::from_secs(2), services.released.notified())
             .await

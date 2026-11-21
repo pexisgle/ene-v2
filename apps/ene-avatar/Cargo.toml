@@ -13,6 +13,7 @@ bevy = { version = "=0.20.0", default-features = false, features = ["std", "asyn
 ene-avatar-ipc.workspace = true
 ene-vrm = { path = "../../crates/ene-vrm" }
 serde_json = "1"
+thiserror.workspace = true
 raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.dependencies]

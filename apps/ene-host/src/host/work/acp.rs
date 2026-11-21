@@ -285,95 +285,97 @@ mod tests {
     use super::*;
     use ene_plugin::{ContentChunk, PermissionOptionKind, SelectedPermissionOutcome, text_block};
 
+    async fn run_fake_acp_agent(
+        agent_read: tokio::io::DuplexStream,
+        mut agent_write: tokio::io::DuplexStream,
+    ) {
+        let mut lines = BufReader::new(agent_read).lines();
+        // 1. initialize
+        let init_req: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(init_req["method"], "initialize");
+        let init_resp = json!({
+            "jsonrpc": "2.0",
+            "id": init_req["id"],
+            "result": { "protocolVersion": 1 }
+        });
+        agent_write
+            .write_all(format!("{init_resp}\n").as_bytes())
+            .await
+            .unwrap();
+
+        // 2. session/new
+        let new_req: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(new_req["method"], "session/new");
+        let new_resp = json!({
+            "jsonrpc": "2.0",
+            "id": new_req["id"],
+            "result": { "sessionId": "acp-sess-1" }
+        });
+        agent_write
+            .write_all(format!("{new_resp}\n").as_bytes())
+            .await
+            .unwrap();
+
+        // 3. session/prompt -> emit session/update, request permission, finish EndTurn.
+        let prompt_req: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(prompt_req["method"], "session/prompt");
+        assert_eq!(prompt_req["params"]["sessionId"], "acp-sess-1");
+
+        let update = SessionUpdate::AgentMessageChunk(ContentChunk::new(text_block(
+            "ACPエージェントが作業中です",
+        )));
+        let notif = json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": { "sessionId": "acp-sess-1", "update": update }
+        });
+        agent_write
+            .write_all(format!("{notif}\n").as_bytes())
+            .await
+            .unwrap();
+
+        let perm_req = json!({
+            "jsonrpc": "2.0",
+            "id": "perm-42",
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "acp-sess-1",
+                "toolCall": ToolCallUpdate::new("call-1", Default::default()),
+                "options": [
+                    PermissionOption::new("allow_once", "Allow", PermissionOptionKind::AllowOnce)
+                ]
+            }
+        });
+        agent_write
+            .write_all(format!("{perm_req}\n").as_bytes())
+            .await
+            .unwrap();
+
+        let perm_reply: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(perm_reply["id"], "perm-42");
+        assert_eq!(perm_reply["result"]["outcome"]["optionId"], "allow_once");
+
+        let prompt_resp = json!({
+            "jsonrpc": "2.0",
+            "id": prompt_req["id"],
+            "result": { "stopReason": StopReason::EndTurn }
+        });
+        agent_write
+            .write_all(format!("{prompt_resp}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::too_many_lines)]
     async fn t19_acp_stdio_jsonrpc_bridge_runs_initialize_session_prompt_and_permission() {
-        let (client_read, mut agent_write) = tokio::io::duplex(16 * 1024);
+        let (client_read, agent_write) = tokio::io::duplex(16 * 1024);
         let (agent_read, client_write) = tokio::io::duplex(16 * 1024);
 
-        // Simulated ACP subprocess speaking JSON-RPC 2.0 over stdio.
-        let agent = tokio::spawn(async move {
-            let mut lines = BufReader::new(agent_read).lines();
-            // 1. initialize
-            let init_req: Value =
-                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-            assert_eq!(init_req["method"], "initialize");
-            let init_resp = json!({
-                "jsonrpc": "2.0",
-                "id": init_req["id"],
-                "result": { "protocolVersion": 1 }
-            });
-            agent_write
-                .write_all(format!("{init_resp}\n").as_bytes())
-                .await
-                .unwrap();
-
-            // 2. session/new
-            let new_req: Value =
-                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-            assert_eq!(new_req["method"], "session/new");
-            let new_resp = json!({
-                "jsonrpc": "2.0",
-                "id": new_req["id"],
-                "result": { "sessionId": "acp-sess-1" }
-            });
-            agent_write
-                .write_all(format!("{new_resp}\n").as_bytes())
-                .await
-                .unwrap();
-
-            // 3. session/prompt -> emit session/update, request permission, finish EndTurn.
-            let prompt_req: Value =
-                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-            assert_eq!(prompt_req["method"], "session/prompt");
-            assert_eq!(prompt_req["params"]["sessionId"], "acp-sess-1");
-
-            let update = SessionUpdate::AgentMessageChunk(ContentChunk::new(text_block(
-                "ACPエージェントが作業中です",
-            )));
-            let notif = json!({
-                "jsonrpc": "2.0",
-                "method": "session/update",
-                "params": { "sessionId": "acp-sess-1", "update": update }
-            });
-            agent_write
-                .write_all(format!("{notif}\n").as_bytes())
-                .await
-                .unwrap();
-
-            let perm_req = json!({
-                "jsonrpc": "2.0",
-                "id": "perm-42",
-                "method": "session/request_permission",
-                "params": {
-                    "sessionId": "acp-sess-1",
-                    "toolCall": ToolCallUpdate::new("call-1", Default::default()),
-                    "options": [
-                        PermissionOption::new("allow_once", "Allow", PermissionOptionKind::AllowOnce)
-                    ]
-                }
-            });
-            agent_write
-                .write_all(format!("{perm_req}\n").as_bytes())
-                .await
-                .unwrap();
-
-            let perm_reply: Value =
-                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-            assert_eq!(perm_reply["id"], "perm-42");
-            assert_eq!(perm_reply["result"]["outcome"]["optionId"], "allow_once");
-
-            let prompt_resp = json!({
-                "jsonrpc": "2.0",
-                "id": prompt_req["id"],
-                "result": { "stopReason": StopReason::EndTurn }
-            });
-            agent_write
-                .write_all(format!("{prompt_resp}\n").as_bytes())
-                .await
-                .unwrap();
-        });
+        let agent = tokio::spawn(run_fake_acp_agent(agent_read, agent_write));
 
         let mut bridge = AcpBridge::new(client_read, client_write);
         bridge.initialize().await.unwrap();

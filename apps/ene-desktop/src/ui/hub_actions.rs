@@ -9,6 +9,14 @@ use buffa::view::MessageView;
 use ene_rpc as w;
 use gpui::Context;
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RemoteHostError {
+    #[error("設定ディレクトリを特定できませんでした。")]
+    MissingConfigDir,
+    #[error(transparent)]
+    Save(#[from] crate::host::Connect),
+}
+
 pub(super) struct ApplyFlags {
     pub(super) conflicted: bool,
     pub(super) history_arrived: bool,
@@ -869,12 +877,11 @@ impl Hub {
         endpoint: String,
         token: String,
         cx: &mut Context<Self>,
-    ) -> Result<(), String> {
+    ) -> Result<(), RemoteHostError> {
         let Some(path) = Self::remote_host_config_path() else {
-            return Err("設定ディレクトリを特定できませんでした。".into());
+            return Err(RemoteHostError::MissingConfigDir);
         };
-        crate::host::HostTarget::write_remote(&path, endpoint.trim(), token.trim())
-            .map_err(|error| error.to_string())?;
+        crate::host::HostTarget::write_remote(&path, endpoint.trim(), token.trim())?;
         self.model.notice(
             NoticeKind::Failed,
             "遠隔ホスト設定を保存しました",

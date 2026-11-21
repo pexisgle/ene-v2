@@ -3,6 +3,7 @@
 //! Enable `client` for loopback HTTP/Bearer transport setup with `connect`.
 
 /// Generated v1 contract, available in every build.
+// Suppresses style and size lints inside generated `_connectrpc.rs`; remove when codegen complies.
 #[allow(
     missing_debug_implementations,
     clippy::all,

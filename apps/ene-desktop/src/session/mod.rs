@@ -223,14 +223,26 @@ pub(super) struct MotionPlan {
     pub(super) expression: Option<String>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum MotionPlanError {
+    #[error("body.motion requires a `motion` name")]
+    MissingMotion,
+    #[error("`{0}` is not a declared motion preset")]
+    UnknownPreset(String),
+    #[error("`{0}` is not a declared expression")]
+    UnknownExpression(String),
+    #[error("the motion asset for `{0}` is not installed, so nothing was shown")]
+    MissingMotionAsset(String),
+}
+
 impl MotionPlan {
-    pub(super) fn parse(input: &serde_json::Value) -> Result<Self, String> {
+    pub(super) fn parse(input: &serde_json::Value) -> Result<Self, MotionPlanError> {
         let motion = input
             .get("motion")
             .and_then(serde_json::Value::as_str)
-            .ok_or("body.motion requires a `motion` name")?;
+            .ok_or(MotionPlanError::MissingMotion)?;
         if !avatar::MOTIONS.iter().any(|(preset, _)| *preset == motion) {
-            return Err(format!("`{motion}` is not a declared motion preset"));
+            return Err(MotionPlanError::UnknownPreset(motion.to_owned()));
         }
         let expression = input
             .get("expression")
@@ -239,13 +251,11 @@ impl MotionPlan {
         if let Some(name) = &expression
             && !capabilities::EXPRESSIONS.contains(&name.as_str())
         {
-            return Err(format!("`{name}` is not a declared expression"));
+            return Err(MotionPlanError::UnknownExpression(name.clone()));
         }
         let clip = avatar::motion(motion);
         if clip.is_none() && motion != "idle" {
-            return Err(format!(
-                "the motion asset for `{motion}` is not installed, so nothing was shown"
-            ));
+            return Err(MotionPlanError::MissingMotionAsset(motion.to_owned()));
         }
         Ok(Self {
             motion: motion.to_owned(),
@@ -786,7 +796,9 @@ mod tests {
             subscription_id: "sub-1",
             work_id: None,
         };
-        let refused = admits("desktop", "sub-2", Some(&binding), &stale).unwrap_err();
+        let refused = admits("desktop", "sub-2", Some(&binding), &stale)
+            .unwrap_err()
+            .to_string();
         assert!(refused.contains("older device stream"), "{refused}");
 
         let elsewhere = Claim {
@@ -794,10 +806,14 @@ mod tests {
             subscription_id: "sub-1",
             work_id: None,
         };
-        let refused = admits("desktop", "sub-1", Some(&binding), &elsewhere).unwrap_err();
+        let refused = admits("desktop", "sub-1", Some(&binding), &elsewhere)
+            .unwrap_err()
+            .to_string();
         assert!(refused.contains("desk-1"), "{refused}");
 
-        let unbound = admits("desktop", "sub-1", None, &stale).unwrap_err();
+        let unbound = admits("desktop", "sub-1", None, &stale)
+            .unwrap_err()
+            .to_string();
         assert!(unbound.contains("not the active device"), "{unbound}");
 
         let work_op = Claim {
@@ -834,11 +850,16 @@ mod tests {
     #[test]
     fn a_motion_plan_rejects_what_this_client_never_declared() {
         let error = MotionPlan::parse(&serde_json::json!({"motion": "idle", "expression": "smug"}))
-            .unwrap_err();
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("not a declared expression"), "{error}");
-        let error = MotionPlan::parse(&serde_json::json!({"motion": "dance"})).unwrap_err();
+        let error = MotionPlan::parse(&serde_json::json!({"motion": "dance"}))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("not a declared motion preset"), "{error}");
-        let error = MotionPlan::parse(&serde_json::json!({})).unwrap_err();
+        let error = MotionPlan::parse(&serde_json::json!({}))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("requires a `motion`"), "{error}");
     }
 

@@ -93,8 +93,6 @@ pub(super) struct HttpEngine {
 }
 
 impl HttpEngine {
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::too_many_lines)]
     pub(super) fn new(
         connection: Connection,
         credentials: Option<&Credentials>,
@@ -106,27 +104,9 @@ impl HttpEngine {
         let endpoint = connection.endpoint().clone();
         let resolved_base = resolve_base(&connection, providers, label)?;
         let options: SpeechOptions = parse_options(&endpoint, label)?;
-        let secret = match credentials {
-            Some(creds) => model::connection_secret(
-                &connection,
-                Some(creds),
-                providers.unwrap_or(&Providers::none()),
-            )
-            .map_err(|error| SetupError::Broken(error.to_string()))?,
-            None => None,
-        };
-        let protocol = match (tts, nonempty(options.protocol).as_deref()) {
-            (true, None) if endpoint.adapter == "voicevox" => Protocol::Voicevox,
-            (true, None | Some("openai" | "sakura")) => Protocol::OpenAiTts,
-            (true, Some("voicevox")) => Protocol::Voicevox,
-            (false, None | Some("openai" | "sakura")) => Protocol::OpenAiStt,
-            (false, Some("raw")) => Protocol::Raw,
-            (_, Some(other)) => {
-                return Err(SetupError::Unsupported(format!(
-                    "the {label} adapter protocol `{other}` is not supported"
-                )));
-            }
-        };
+        let secret = load_connection_secret(&connection, credentials, providers)?;
+        let protocol =
+            resolve_protocol(tts, &endpoint.adapter, options.protocol.as_deref(), label)?;
         let sakura = model::is_sakura_connection(&endpoint.adapter, &resolved_base);
         let use_sakura_tts_v1 = protocol == Protocol::Voicevox
             && sakura
@@ -145,24 +125,8 @@ impl HttpEngine {
             ConnectionConfig::Stt(config) if !tts => &config.language_hints,
             _ => &[],
         };
-        let (default_sakura_model, default_sakura_voice) = match default_voice.as_deref() {
-            Some(raw) if sakura => {
-                let trimmed = raw.trim();
-                if let Some((m, v)) = trimmed.split_once('/') {
-                    let m = m.trim();
-                    let v = v.trim();
-                    (
-                        (!m.is_empty()).then(|| m.to_owned()),
-                        (!v.is_empty()).then(|| v.to_owned()),
-                    )
-                } else if !trimmed.is_empty() && model::is_sakura_tts_model_id(trimmed) {
-                    (Some(trimmed.to_owned()), None)
-                } else {
-                    (None, (!trimmed.is_empty()).then(|| trimmed.to_owned()))
-                }
-            }
-            _ => (None, default_voice.clone()),
-        };
+        let (default_sakura_model, default_sakura_voice) =
+            split_sakura_voice_defaults(default_voice.as_deref(), sakura);
         let default_speaker = default_voice
             .as_deref()
             .and_then(|v| v.trim().split(':').next())
@@ -180,20 +144,7 @@ impl HttpEngine {
             protocol,
             model: nonempty(options.model)
                 .or(default_sakura_model)
-                .unwrap_or_else(|| {
-                    if !tts {
-                        if sakura {
-                            "whisper-large-v3-turbo"
-                        } else {
-                            "whisper-1"
-                        }
-                    } else if sakura {
-                        "zundamon"
-                    } else {
-                        "tts-1"
-                    }
-                    .into()
-                }),
+                .unwrap_or_else(|| default_engine_model(tts, sakura)),
             voice: nonempty(options.voice)
                 .or(default_sakura_voice)
                 .unwrap_or_else(|| if sakura { "normal" } else { "alloy" }.into()),
@@ -237,7 +188,83 @@ impl HttpEngine {
             secret,
         })
     }
+}
 
+fn load_connection_secret(
+    connection: &Connection,
+    credentials: Option<&Credentials>,
+    providers: Option<&Providers>,
+) -> std::result::Result<Option<String>, SetupError> {
+    match credentials {
+        Some(creds) => model::connection_secret(
+            connection,
+            Some(creds),
+            providers.unwrap_or(&Providers::none()),
+        )
+        .map_err(|error| SetupError::Broken(error.to_string())),
+        None => Ok(None),
+    }
+}
+
+fn resolve_protocol(
+    tts: bool,
+    adapter: &str,
+    protocol_opt: Option<&str>,
+    label: &str,
+) -> std::result::Result<Protocol, SetupError> {
+    let trimmed = protocol_opt.map(str::trim).filter(|s| !s.is_empty());
+    match (tts, trimmed) {
+        (true, None) if adapter == "voicevox" => Ok(Protocol::Voicevox),
+        (true, None | Some("openai" | "sakura")) => Ok(Protocol::OpenAiTts),
+        (true, Some("voicevox")) => Ok(Protocol::Voicevox),
+        (false, None | Some("openai" | "sakura")) => Ok(Protocol::OpenAiStt),
+        (false, Some("raw")) => Ok(Protocol::Raw),
+        (_, Some(other)) => Err(SetupError::Unsupported(format!(
+            "the {label} adapter protocol `{other}` is not supported"
+        ))),
+    }
+}
+
+fn split_sakura_voice_defaults(
+    default_voice: Option<&str>,
+    sakura: bool,
+) -> (Option<String>, Option<String>) {
+    match default_voice {
+        Some(raw) if sakura => {
+            let trimmed = raw.trim();
+            if let Some((m, v)) = trimmed.split_once('/') {
+                let m = m.trim();
+                let v = v.trim();
+                (
+                    (!m.is_empty()).then(|| m.to_owned()),
+                    (!v.is_empty()).then(|| v.to_owned()),
+                )
+            } else if !trimmed.is_empty() && model::is_sakura_tts_model_id(trimmed) {
+                (Some(trimmed.to_owned()), None)
+            } else {
+                (None, (!trimmed.is_empty()).then(|| trimmed.to_owned()))
+            }
+        }
+        _ => (None, default_voice.map(str::to_owned)),
+    }
+}
+
+fn default_engine_model(tts: bool, sakura: bool) -> String {
+    if !tts {
+        if sakura {
+            "whisper-large-v3-turbo"
+        } else {
+            "whisper-1"
+        }
+    } else if sakura {
+        "zundamon"
+    } else {
+        "tts-1"
+    }
+    .into()
+}
+
+impl HttpEngine {
     pub(super) fn with_binding(mut self, binding: &w::VoiceBinding) -> Self {
         if let Some(speed) = binding.speed
             && speed.is_finite()
@@ -259,7 +286,7 @@ impl HttpEngine {
 
     async fn exchange(&self, call: reqwest::RequestBuilder, what: &str) -> HttpResult<Vec<u8>> {
         let response = post(call.timeout(self.timeout), self.secret.as_deref(), what).await?;
-        net::read_response_body(response, MAX_BODY_BYTES, what).await
+        Ok(net::read_response_body(response, MAX_BODY_BYTES, what).await?)
     }
 
     async fn openai_tts(&self, text: String, voice: String) -> HttpResult<(Vec<u8>, u32)> {
@@ -338,7 +365,7 @@ impl HttpEngine {
         ));
         let mut body: serde_json::Value =
             serde_json::from_slice(&self.exchange(call, "TTS").await?)
-                .map_err(|_| "the TTS endpoint answered a non-JSON audio query".to_owned())?;
+                .map_err(|_| super::VoiceHttpError::InvalidAudioQuery)?;
         if let Some(speed) = self.speed {
             body["speedScale"] = serde_json::json!(speed);
         }
@@ -364,7 +391,7 @@ impl HttpEngine {
         let file = reqwest::multipart::Part::bytes(wav_wrap(&pcm_16k, stt_rate)?)
             .file_name("audio.wav")
             .mime_str("audio/wav")
-            .map_err(|error| format!("the STT multipart body: {error}"))?;
+            .map_err(|error| super::VoiceHttpError::SttMultipart(error.to_string()))?;
         let mut form = reqwest::multipart::Form::new()
             .part("file", file)
             .text("model", self.model.clone());
@@ -378,8 +405,8 @@ impl HttpEngine {
             .post(format!("{}{}", self.base, self.path))
             .multipart(form);
         let body = self.exchange(call, "STT").await?;
-        let value: serde_json::Value = serde_json::from_slice(&body)
-            .map_err(|_| "the STT endpoint answered a non-JSON transcript".to_owned())?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).map_err(|_| super::VoiceHttpError::InvalidSttJson)?;
         Ok(value["text"].as_str().unwrap_or_default().trim().to_owned())
     }
 
@@ -395,7 +422,7 @@ impl HttpEngine {
             .body(wav_wrap(&pcm_16k, stt_rate)?);
         String::from_utf8(self.exchange(call, "STT").await?)
             .map(|text| text.trim().to_owned())
-            .map_err(|_| "the STT endpoint answered a non-UTF-8 transcript".to_owned())
+            .map_err(|_| super::VoiceHttpError::InvalidSttUtf8)
     }
 }
 
@@ -410,7 +437,7 @@ impl TtsEngine for HttpEngine {
                 Protocol::OpenAiTts => self.openai_tts(text, voice).await,
                 Protocol::Voicevox => self.voicevox(text, voice).await,
                 Protocol::OpenAiStt | Protocol::Raw => {
-                    Err("the TTS engine received an STT protocol".into())
+                    Err(super::VoiceHttpError::TtsProtocolMismatch)
                 }
             }
         })
@@ -428,7 +455,7 @@ impl SttEngine for HttpEngine {
                 Protocol::OpenAiStt => self.openai_stt(pcm, sample_rate).await,
                 Protocol::Raw => self.raw_stt(pcm, sample_rate).await,
                 Protocol::OpenAiTts | Protocol::Voicevox => {
-                    Err("the STT engine received a TTS protocol".into())
+                    Err(super::VoiceHttpError::SttProtocolMismatch)
                 }
             }
         })
@@ -444,17 +471,20 @@ async fn post(
         Some(secret) => call.bearer_auth(secret),
         None => call,
     };
-    let response = call
-        .send()
-        .await
-        .map_err(|error| format!("the {label} endpoint is unreachable: {error}"))?;
+    let response =
+        call.send()
+            .await
+            .map_err(|error| super::VoiceHttpError::EndpointUnreachable {
+                label: label.to_owned(),
+                error: error.to_string(),
+            })?;
     if response.status().is_success() {
         Ok(response)
     } else {
-        Err(format!(
-            "the {label} endpoint answered {}",
-            response.status().as_u16()
-        ))
+        Err(super::VoiceHttpError::EndpointStatus {
+            label: label.to_owned(),
+            status: response.status().as_u16(),
+        })
     }
 }
 

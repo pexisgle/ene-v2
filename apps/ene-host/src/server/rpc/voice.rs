@@ -20,8 +20,6 @@ use std::sync::Arc;
 
 #[allow(refining_impl_trait)]
 impl w::VoiceService for Services {
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::too_many_lines)]
     async fn stream_audio_input(
         &self,
         _: RequestContext,
@@ -53,18 +51,11 @@ impl w::VoiceService for Services {
                         }
                         Ok(Some(Ok(message))) => {
                             if recognition.binding.is_none() {
-                                let candidate = message.clone();
-                                match runtime
-                                    .read(move |app| {
-                                        let chunk = candidate.view();
-                                        Ok(voice::bind_input(app.world(), chunk.client_id))
-                                    })
-                                    .await
-                                    .map_err(ConnectError::from)?
-                                {
+                                let client_id = message.view().client_id.to_owned();
+                                match bind_recognition_client(&runtime, client_id).await {
                                     Ok(binding) => recognition.binding = Some(binding),
                                     Err(error) => {
-                                        yield Err(ConnectError::from(error));
+                                        yield Err(error);
                                         break;
                                     }
                                 }
@@ -79,24 +70,7 @@ impl w::VoiceService for Services {
                             }
                             if chunk.barge_in {
                                 if let Some(binding) = recognition.binding.as_ref() {
-                                    let client_id = binding.client_id.clone();
-                                    let _ = runtime
-                                        .call(move |app| {
-                                            let companions = app
-                                                .world()
-                                                .resource::<Store>()
-                                                .active_companions_for_client(&client_id)
-                                                .unwrap_or_default();
-                                            for companion_id in companions {
-                                                let _ = voice::flush(
-                                                    app.world_mut(),
-                                                    &companion_id,
-                                                    w::FlushReason::BargeIn,
-                                                );
-                                            }
-                                            Ok(())
-                                        })
-                                        .await;
+                                    flush_barge_in(&runtime, binding.client_id.clone()).await;
                                 }
                             } else if chunk.is_companion_speaking {
                                 recognition.pending.clear();
@@ -105,38 +79,20 @@ impl w::VoiceService for Services {
                                 continue;
                             }
                             if chunk.sample_rate != 0 {
-                                if !voice::STT_SAMPLE_RATES.contains(&chunk.sample_rate) {
-                                    yield Err(ConnectError::invalid_argument(
-                                        "audio must be 16 kHz or 24 kHz mono PCM",
-                                    ));
-                                    break;
+                                match validate_and_apply_sample_rate(&mut recognition, &runtime, &engine, chunk.sample_rate).await {
+                                    Ok(Some(event)) => yield Ok(event),
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        yield Err(error);
+                                        break;
+                                    }
                                 }
-                                if let Some(event) = if chunk.sample_rate
-                                    != recognition.sample_rate
-                                    && !recognition.pending.is_empty()
-                                {
-                                    recognition.flush(&runtime, &engine).await?
-                                } else {
-                                    None
-                                } {
-                                    yield Ok(event);
-                                }
-                                recognition.sample_rate = chunk.sample_rate;
                             }
                             if chunk.pcm_data.is_empty() {
                                 (true, false)
                             } else {
-                                if !recognition.speaking {
-                                    recognition.speaking = true;
-                                    if recognition.transcription_id.is_empty() {
-                                        recognition.transcription_id =
-                                            uuid::Uuid::new_v4().to_string();
-                                    }
-                                    yield Ok(w::TranscriptionEvent {
-                                        transcription_id: recognition.transcription_id.clone(),
-                                        is_speaking: true,
-                                        ..Default::default()
-                                    });
+                                if let Some(started) = recognition.start_speaking_if_needed() {
+                                    yield Ok(started);
                                 }
                                 recognition.pending.extend_from_slice(chunk.pcm_data);
                                 (
@@ -276,7 +232,7 @@ impl w::VoiceService for Services {
             .map_err(ConnectError::from)?;
         let (pcm, rate) = voice::synthesize_for_probe(source, &text, voice_name)
             .await
-            .map_err(ConnectError::unavailable)?;
+            .map_err(|error| ConnectError::unavailable(error.to_string()))?;
         self.runtime
             .read(move |app| voice::play_once(app.world(), &companion, pcm, rate))
             .await
@@ -305,6 +261,21 @@ struct Recognition {
 }
 
 impl Recognition {
+    fn start_speaking_if_needed(&mut self) -> Option<w::TranscriptionEvent> {
+        if self.speaking {
+            return None;
+        }
+        self.speaking = true;
+        if self.transcription_id.is_empty() {
+            self.transcription_id = uuid::Uuid::new_v4().to_string();
+        }
+        Some(w::TranscriptionEvent {
+            transcription_id: self.transcription_id.clone(),
+            is_speaking: true,
+            ..Default::default()
+        })
+    }
+
     async fn flush(
         &mut self,
         runtime: &Runtime,
@@ -385,6 +356,53 @@ impl Recognition {
     }
 }
 
+async fn bind_recognition_client(
+    runtime: &Runtime,
+    client_id: String,
+) -> std::result::Result<InputBinding, ConnectError> {
+    runtime
+        .read(move |app| Ok(voice::bind_input(app.world(), &client_id)))
+        .await
+        .map_err(ConnectError::from)?
+        .map_err(ConnectError::from)
+}
+
+async fn flush_barge_in(runtime: &Runtime, client_id: String) {
+    let _ = runtime
+        .call(move |app| {
+            let companions = app
+                .world()
+                .resource::<Store>()
+                .active_companions_for_client(&client_id)
+                .unwrap_or_default();
+            for companion_id in companions {
+                let _ = voice::flush(app.world_mut(), &companion_id, w::FlushReason::BargeIn);
+            }
+            Ok(())
+        })
+        .await;
+}
+
+async fn validate_and_apply_sample_rate(
+    recognition: &mut Recognition,
+    runtime: &Runtime,
+    engine: &Arc<dyn SttEngine>,
+    sample_rate: u32,
+) -> std::result::Result<Option<w::TranscriptionEvent>, ConnectError> {
+    if !voice::STT_SAMPLE_RATES.contains(&sample_rate) {
+        return Err(ConnectError::invalid_argument(
+            "audio must be 16 kHz or 24 kHz mono PCM",
+        ));
+    }
+    let flushed = if sample_rate != recognition.sample_rate && !recognition.pending.is_empty() {
+        recognition.flush(runtime, engine).await?
+    } else {
+        None
+    };
+    recognition.sample_rate = sample_rate;
+    Ok(flushed)
+}
+
 /// Checks for signal above the floor in a 40 ms window so quiet words survive
 /// silence at either end of the capture. Removing the mean ignores DC offset.
 fn voiced(pcm: &[u8], sample_rate: u32) -> bool {
@@ -434,7 +452,7 @@ mod tests {
             &'a self,
             pcm: Vec<u8>,
             sample_rate: u32,
-        ) -> voice::BoxFuture<'a, std::result::Result<String, String>> {
+        ) -> voice::BoxFuture<'a, voice::HttpResult<String>> {
             Box::pin(async move {
                 let samples = pcm
                     .as_chunks::<2>()
@@ -688,7 +706,7 @@ mod tests {
                 &'a self,
                 _: Vec<u8>,
                 _: u32,
-            ) -> voice::BoxFuture<'a, Result<String, String>> {
+            ) -> voice::BoxFuture<'a, voice::HttpResult<String>> {
                 Box::pin(async { Ok(String::new()) })
             }
         }

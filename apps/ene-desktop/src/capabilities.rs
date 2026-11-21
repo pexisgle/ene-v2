@@ -50,171 +50,188 @@ impl Declaration {
     }
 
     /// The declarations the host validates and stores.
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::too_many_lines)]
     pub fn specs(&self) -> Vec<w::ClientCapabilitySpec> {
         let mut specs = Vec::new();
         if !self.motions.is_empty() {
-            let mut properties = serde_json::Map::new();
-            properties.insert(
-                "motion".into(),
-                serde_json::json!({
-                    "type": "string",
-                    "enum": self.motions,
-                }),
-            );
-            if !self.expressions.is_empty() {
-                let mut expr_enum: Vec<serde_json::Value> = self
-                    .expressions
-                    .iter()
-                    .map(|name| serde_json::Value::String((*name).to_owned()))
-                    .collect();
-                expr_enum.push(serde_json::Value::Null);
-                properties.insert(
-                    "expression".into(),
-                    serde_json::json!({
-                        "type": ["string", "null"],
-                        "enum": expr_enum,
-                        "description": "A face to hold, or null to keep the current one. Use neutral to clear.",
-                    }),
-                );
-            }
-            let schema = serde_json::json!({
-                "type": "object",
-                "required": ["motion"],
-                "properties": properties,
-            });
-            specs.push(w::ClientCapabilitySpec {
-                name: "body.motion".into(),
-                tool_name: "body_motion".into(),
-                description: "Control the avatar's body motion, choosing only motions listed in the \
-                              schema. Looping postures stay active until changed: idle, idle_sway, \
-                              idle_hands_behind (standing rest), sit_idle and sit_swing_legs \
-                              (perched/seated rest), music_groove (rhythmic sway), and drag_held \
-                              (suspended). One-shot gestures play once and return to the active \
-                              resting posture: ambient (look_around, adjust_posture, sleepy_nod, \
-                              yawn, deep_breath, stretch), greetings/presence (wave, bow, goodbye, \
-                              peek, beckon, sit_wave while seated), reactions (head_pat, surprised, \
-                              shy, happy_bounce, clap, cheer), and conversation/work (nod, \
-                              shake_head, listen, explain, tilt_head, ask_question, aha, shrug, \
-                              task_complete, apologize). An optional expression sets the face \
-                              separately."
-                    .into(),
-                input_schema: schema.to_string(),
-                presets: self
-                    .motions
-                    .iter()
-                    .map(|motion| (*motion).to_owned())
-                    .collect(),
-                // A motion is reversible and cosmetic, so it runs without a card.
-                approval: w::CapabilityApproval::Auto.into(),
-                ..Default::default()
-            });
-
-            let look_at_schema = serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "yaw_deg": {
-                        "type": "number",
-                        "minimum": -90.0,
-                        "maximum": 90.0,
-                        "description": "Horizontal gaze angle in degrees (+left, -right)."
-                    },
-                    "pitch_deg": {
-                        "type": "number",
-                        "minimum": -60.0,
-                        "maximum": 60.0,
-                        "description": "Vertical gaze angle in degrees (+up, -down)."
-                    },
-                    "reset": {
-                        "type": "boolean",
-                        "description": "When true, clears any gaze override back to animation/neutral."
-                    }
-                }
-            });
-            specs.push(w::ClientCapabilitySpec {
-                name: "body.look_at".into(),
-                tool_name: "body_look_at".into(),
-                description:
-                    "Direct the avatar's eye gaze using yaw/pitch degrees, or reset to neutral."
-                        .into(),
-                input_schema: look_at_schema.to_string(),
-                presets: Vec::new(),
-                approval: w::CapabilityApproval::Auto.into(),
-                ..Default::default()
-            });
-
-            let perch_schema = serde_json::json!({
-                "type": "object",
-                "required": ["x", "y"],
-                "properties": {
-                    "x": {
-                        "type": "number",
-                        "description": "Logical X coordinate on the monitor."
-                    },
-                    "y": {
-                        "type": "number",
-                        "description": "Logical Y coordinate on the monitor."
-                    },
-                    "monitor": {
-                        "type": ["string", "null"],
-                        "description": "Optional target monitor name."
-                    },
-                    "posture": {
-                        "type": ["string", "null"],
-                        "enum": ["sit_idle", "sit_swing_legs", "idle", null],
-                        "description": "Optional resting posture to pair with the perch position."
-                    }
-                }
-            });
-            specs.push(w::ClientCapabilitySpec {
-                name: "body.perch".into(),
-                tool_name: "body_perch".into(),
-                description: "Move the avatar to logical screen coordinates (e.g. a window edge) and optionally sit."
-                    .into(),
-                input_schema: perch_schema.to_string(),
-                presets: Vec::new(),
-                approval: w::CapabilityApproval::Auto.into(),
-                ..Default::default()
-            });
+            specs.extend(self.body_specs());
         }
         if self.eyes {
-            let schema = serde_json::json!({
-                "type": "object",
-                "required": ["target_pattern", "match_kind", "notify_on", "enabled"],
-                "properties": {
-                    "target_pattern": {
-                        "type": "string",
-                        "description": "A substring or regular expression matched against the window title or app id.",
-                    },
-                    "match_kind": {
-                        "type": "string",
-                        "enum": ["title", "app_id"],
-                    },
-                    "notify_on": {
-                        "type": "string",
-                        "enum": ["focus", "blur", "title_change"],
-                    },
-                    "enabled": {
-                        "type": "boolean",
-                    },
-                },
-            });
-            specs.push(w::ClientCapabilitySpec {
-                name: "eye.watch".into(),
-                tool_name: "set_eye_watch".into(),
-                description:
-                    "Watch for a window becoming active, losing focus, or changing title, \
-                              and report it as soon as it matches."
-                        .into(),
-                input_schema: schema.to_string(),
-                presets: Vec::new(),
-                // Watching is read-only perception, never an action on the machine.
-                approval: w::CapabilityApproval::Auto.into(),
-                ..Default::default()
-            });
+            specs.push(eye_watch_spec());
         }
         specs
+    }
+
+    fn body_specs(&self) -> Vec<w::ClientCapabilitySpec> {
+        vec![
+            self.body_motion_spec(),
+            body_look_at_spec(),
+            body_perch_spec(),
+        ]
+    }
+
+    fn body_motion_spec(&self) -> w::ClientCapabilitySpec {
+        let mut properties = serde_json::Map::new();
+        properties.insert(
+            "motion".into(),
+            serde_json::json!({
+                "type": "string",
+                "enum": self.motions,
+            }),
+        );
+        if !self.expressions.is_empty() {
+            let mut expr_enum: Vec<serde_json::Value> = self
+                .expressions
+                .iter()
+                .map(|name| serde_json::Value::String((*name).to_owned()))
+                .collect();
+            expr_enum.push(serde_json::Value::Null);
+            properties.insert(
+                "expression".into(),
+                serde_json::json!({
+                    "type": ["string", "null"],
+                    "enum": expr_enum,
+                    "description": "A face to hold, or null to keep the current one. Use neutral to clear.",
+                }),
+            );
+        }
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["motion"],
+            "properties": properties,
+        });
+        w::ClientCapabilitySpec {
+            name: "body.motion".into(),
+            tool_name: "body_motion".into(),
+            description: "Control the avatar's body motion, choosing only motions listed in the \
+                          schema. Looping postures stay active until changed: idle, idle_sway, \
+                          idle_hands_behind (standing rest), sit_idle and sit_swing_legs \
+                          (perched/seated rest), music_groove (rhythmic sway), and drag_held \
+                          (suspended). One-shot gestures play once and return to the active \
+                          resting posture: ambient (look_around, adjust_posture, sleepy_nod, \
+                          yawn, deep_breath, stretch), greetings/presence (wave, bow, goodbye, \
+                          peek, beckon, sit_wave while seated), reactions (head_pat, surprised, \
+                          shy, happy_bounce, clap, cheer), and conversation/work (nod, \
+                          shake_head, listen, explain, tilt_head, ask_question, aha, shrug, \
+                          task_complete, apologize). An optional expression sets the face \
+                          separately."
+                .into(),
+            input_schema: schema.to_string(),
+            presets: self
+                .motions
+                .iter()
+                .map(|motion| (*motion).to_owned())
+                .collect(),
+            // A motion is reversible and cosmetic, so it runs without a card.
+            approval: w::CapabilityApproval::Auto.into(),
+            ..Default::default()
+        }
+    }
+}
+
+fn body_look_at_spec() -> w::ClientCapabilitySpec {
+    let look_at_schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "yaw_deg": {
+                "type": "number",
+                "minimum": -90.0,
+                "maximum": 90.0,
+                "description": "Horizontal gaze angle in degrees (+left, -right)."
+            },
+            "pitch_deg": {
+                "type": "number",
+                "minimum": -60.0,
+                "maximum": 60.0,
+                "description": "Vertical gaze angle in degrees (+up, -down)."
+            },
+            "reset": {
+                "type": "boolean",
+                "description": "When true, clears any gaze override back to animation/neutral."
+            }
+        }
+    });
+    w::ClientCapabilitySpec {
+        name: "body.look_at".into(),
+        tool_name: "body_look_at".into(),
+        description: "Direct the avatar's eye gaze using yaw/pitch degrees, or reset to neutral."
+            .into(),
+        input_schema: look_at_schema.to_string(),
+        presets: Vec::new(),
+        approval: w::CapabilityApproval::Auto.into(),
+        ..Default::default()
+    }
+}
+
+fn body_perch_spec() -> w::ClientCapabilitySpec {
+    let perch_schema = serde_json::json!({
+        "type": "object",
+        "required": ["x", "y"],
+        "properties": {
+            "x": {
+                "type": "number",
+                "description": "Logical X coordinate on the monitor."
+            },
+            "y": {
+                "type": "number",
+                "description": "Logical Y coordinate on the monitor."
+            },
+            "monitor": {
+                "type": ["string", "null"],
+                "description": "Optional target monitor name."
+            },
+            "posture": {
+                "type": ["string", "null"],
+                "enum": ["sit_idle", "sit_swing_legs", "idle", null],
+                "description": "Optional resting posture to pair with the perch position."
+            }
+        }
+    });
+    w::ClientCapabilitySpec {
+        name: "body.perch".into(),
+        tool_name: "body_perch".into(),
+        description:
+            "Move the avatar to logical screen coordinates (e.g. a window edge) and optionally sit."
+                .into(),
+        input_schema: perch_schema.to_string(),
+        presets: Vec::new(),
+        approval: w::CapabilityApproval::Auto.into(),
+        ..Default::default()
+    }
+}
+
+fn eye_watch_spec() -> w::ClientCapabilitySpec {
+    let schema = serde_json::json!({
+        "type": "object",
+        "required": ["target_pattern", "match_kind", "notify_on", "enabled"],
+        "properties": {
+            "target_pattern": {
+                "type": "string",
+                "description": "A substring or regular expression matched against the window title or app id.",
+            },
+            "match_kind": {
+                "type": "string",
+                "enum": ["title", "app_id"],
+            },
+            "notify_on": {
+                "type": "string",
+                "enum": ["focus", "blur", "title_change"],
+            },
+            "enabled": {
+                "type": "boolean",
+            },
+        },
+    });
+    w::ClientCapabilitySpec {
+        name: "eye.watch".into(),
+        tool_name: "set_eye_watch".into(),
+        description: "Watch for a window becoming active, losing focus, or changing title, \
+                      and report it as soon as it matches."
+            .into(),
+        input_schema: schema.to_string(),
+        presets: Vec::new(),
+        // Watching is read-only perception, never an action on the machine.
+        approval: w::CapabilityApproval::Auto.into(),
+        ..Default::default()
     }
 }
 

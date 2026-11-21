@@ -1,5 +1,3 @@
-#![allow(clippy::result_large_err, clippy::manual_async_fn)]
-
 //! A provider plugin as a rig completion model.
 //!
 //! The host keeps rig's OpenAI wire and gives it an in-process HTTP client.
@@ -107,6 +105,9 @@ struct Exchange {
     failed: bool,
 }
 
+// `rig_core::http_client::Error` (`HttpError`) is owned by an external crate and exceeds
+// Clippy's 128-byte error threshold; remove if rig-core boxes its error variants.
+#[allow(clippy::result_large_err)]
 impl Exchange {
     fn accept(&mut self, chunk: HttpChunk) -> Result<(), HttpError> {
         if self.done {
@@ -232,6 +233,8 @@ impl Drop for Exchange {
 }
 
 impl GuestClient {
+    // `HttpError` is defined by `rig-core` and exceeds 128 bytes; remove when `Exchange` no longer returns `HttpError`.
+    #[allow(clippy::result_large_err)]
     fn exchange(&self, parts: &http::request::Parts, body: Bytes) -> Result<Exchange, HttpError> {
         let url = if parts.uri.scheme().is_some() {
             parts.uri.to_string()
@@ -283,6 +286,9 @@ impl GuestClient {
     }
 }
 
+// `HttpClientExt` requires returning `'static` futures while extracting `&self` fields
+// synchronously, so `async fn` cannot be used; remove if `HttpClientExt` adopts async fn.
+#[allow(clippy::manual_async_fn, clippy::result_large_err)]
 impl HttpClientExt for GuestClient {
     fn send<T, U>(
         &self,

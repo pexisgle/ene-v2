@@ -414,34 +414,56 @@ fn resolve_operation_companion(store: &Store, operation: &DeviceOperation) -> Re
 }
 
 /// Replays operations that were never delivered after a client reconnects.
-// TODO(Phase 1-3): split during refactoring.
-#[allow(clippy::cognitive_complexity)]
 pub(crate) fn resend(world: &mut World, client: &str) {
     let subscription = world.resource::<DeviceHub>().subscription(client);
     computer::invalidate_client(world, client, subscription.as_deref());
     let store = world.resource::<Store>().clone();
-    let active_companion = match store.activation_for_client(client) {
-        Ok(companion) => companion,
+    let Some(active_companion) = read_resend_companion(world, &store, client) else {
+        return;
+    };
+    let Some(operations) = read_resend_operations(world, &store, client) else {
+        return;
+    };
+    replay_resend_operations(world, &operations, active_companion.as_deref());
+}
+
+fn read_resend_companion(world: &mut World, store: &Store, client: &str) -> Option<Option<String>> {
+    match store.activation_for_client(client) {
+        Ok(companion) => Some(companion),
         Err(error) => {
             if error.is_storage() {
                 crate::host::fail(world, error.to_string());
             } else {
                 tracing::warn!(client, %error, "failed to check client activation on resend");
             }
-            return;
+            None
         }
-    };
-    let operations = match store.outstanding_operations(client) {
-        Ok(operations) => operations,
+    }
+}
+
+fn read_resend_operations(
+    world: &mut World,
+    store: &Store,
+    client: &str,
+) -> Option<Vec<DeviceOperation>> {
+    match store.outstanding_operations(client) {
+        Ok(operations) => Some(operations),
         Err(error) => {
             if error.is_storage() {
                 crate::host::fail(world, error.to_string());
             } else {
                 tracing::warn!(client, %error, "failed to read outstanding operations on resend");
             }
-            return;
+            None
         }
-    };
+    }
+}
+
+fn replay_resend_operations(
+    world: &mut World,
+    operations: &[DeviceOperation],
+    active_companion: Option<&str>,
+) {
     for operation in operations {
         if operation.status != DeviceStatus::Pending {
             continue;
@@ -456,7 +478,7 @@ pub(crate) fn resend(world: &mut World, client: &str) {
                 "Computer Use operations are never replayed",
             );
         } else {
-            let _ = dispatch(world, &operation, None, active_companion.as_deref());
+            let _ = dispatch(world, operation, None, active_companion);
         }
     }
 }
@@ -492,8 +514,6 @@ pub(crate) fn disconnected(world: &mut World, client: &str) {
 
 /// Records a client's result and answers the waiting tool call. The result is
 /// matched to its operation by id; the client id it carries is the record.
-// TODO(Phase 1-3): split during refactoring.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn complete(
     world: &mut World,
     result: w::DeviceOperationResult,
@@ -510,37 +530,103 @@ pub(crate) fn complete(
     if operation.status.is_terminal() {
         return Ok(wire::device_state(&operation));
     }
-    let computer = if operation.capability == w::COMPUTER_USE {
-        let pending = world
-            .resource::<ComputerUse>()
-            .operations
-            .get(&operation.id)
-            .cloned();
-        if !pending
-            .as_ref()
-            .is_some_and(|pending| computer::active(&store, world.resource::<DeviceHub>(), pending))
-            || result
-                .failure
-                .as_option()
-                .is_some_and(|failure| failure.code == "operation_uncertain")
-        {
-            uncertain(
-                world,
-                &operation.id,
-                "the Computer Use operation's result is unknown; do not retry it",
-            );
-            return get(
-                world,
-                w::Id {
-                    id: operation.id,
-                    ..Default::default()
-                },
-            );
-        }
-        pending
-    } else {
-        None
+    let computer = match prepare_computer_use(world, &store, &operation, &result) {
+        std::ops::ControlFlow::Continue(pending) => pending,
+        std::ops::ControlFlow::Break(early) => return early,
     };
+    let (base_success, failure, validated) =
+        parse_and_validate_output(&store, &operation, &result)?;
+    let (validated, frame) =
+        apply_computer_use_output(world, &operation, computer, base_success, validated);
+    let (success, output, failure) = resolve_operation_outcome(base_success, validated, failure);
+    let updated = store
+        .complete_operation(&operation.id, success, output.as_ref(), failure.as_ref())?
+        .ok_or_else(|| HostError::Storage(("device operation update did not persist").into()))?;
+    if let Some(waiter) = world
+        .resource_mut::<Waiting>()
+        .by_operation
+        .remove(&operation.id)
+    {
+        if success {
+            if let Some(frame) = frame {
+                computer::save_frame(world, frame);
+            }
+            answer_successful_waiter(world, waiter.call, &operation, output.as_ref());
+        } else {
+            let reason = failure
+                .as_ref()
+                .map(|failure| failure.message.clone())
+                .unwrap_or_else(|| "the operation failed".into());
+            permission::refuse(world, waiter.call, &reason);
+        }
+    }
+    world.resource_mut::<Notifier>().push(
+        None,
+        Some(&operation.client_id),
+        w::notification::Event::DeviceOperationResult(Box::new(wire::device_result(&updated))),
+    );
+    Ok(wire::device_state(&updated))
+}
+
+fn prepare_computer_use(
+    world: &mut World,
+    store: &Store,
+    operation: &DeviceOperation,
+    result: &w::DeviceOperationResult,
+) -> std::ops::ControlFlow<Result<w::DeviceOperationState>, Option<computer::Pending>> {
+    if operation.capability != w::COMPUTER_USE {
+        return std::ops::ControlFlow::Continue(None);
+    }
+    let pending = world
+        .resource::<ComputerUse>()
+        .operations
+        .get(&operation.id)
+        .cloned();
+    if !pending
+        .as_ref()
+        .is_some_and(|pending| computer::active(store, world.resource::<DeviceHub>(), pending))
+        || result
+            .failure
+            .as_option()
+            .is_some_and(|failure| failure.code == "operation_uncertain")
+    {
+        uncertain(
+            world,
+            &operation.id,
+            "the Computer Use operation's result is unknown; do not retry it",
+        );
+        return std::ops::ControlFlow::Break(get(
+            world,
+            w::Id {
+                id: operation.id.clone(),
+                ..Default::default()
+            },
+        ));
+    }
+    std::ops::ControlFlow::Continue(pending)
+}
+
+#[derive(Debug, thiserror::Error)]
+enum OutputError {
+    #[error("{0}")]
+    Invalid(#[from] HostError),
+    #[error(transparent)]
+    ComputerResult(#[from] computer::ResultError),
+    #[error("the client returned an invalid Computer Use result")]
+    InvalidComputerUseResult,
+}
+
+type ParsedOutput = (
+    bool,
+    Option<Failure>,
+    Option<std::result::Result<Value, OutputError>>,
+);
+
+fn parse_and_validate_output(
+    store: &Store,
+    operation: &DeviceOperation,
+    result: &w::DeviceOperationResult,
+) -> Result<ParsedOutput> {
     // A capability without an output schema may answer with anything, even
     // an empty body; with a schema, validation happens below.
     let output = if result.output.trim().is_empty() {
@@ -562,34 +648,60 @@ pub(crate) fn complete(
     let spec = store
         .client(&operation.client_id)?
         .and_then(|client| client.spec(&operation.capability).cloned());
-    let mut validated = output.map(|output| match spec {
+    let validated = output.map(|output| match spec {
         Some(spec) => super::validate_output(&spec, &output)
             .map(|()| output)
-            .map_err(|error| error.to_string()),
+            .map_err(OutputError::from),
         None => Ok(output),
     });
+    Ok((success, failure, validated))
+}
+
+fn apply_computer_use_output(
+    world: &mut World,
+    operation: &DeviceOperation,
+    computer: Option<computer::Pending>,
+    success: bool,
+    validated: Option<std::result::Result<Value, OutputError>>,
+) -> (
+    Option<std::result::Result<Value, OutputError>>,
+    Option<computer::Frame>,
+) {
+    let Some(pending) = computer else {
+        return (validated, None);
+    };
+    world
+        .resource_mut::<ComputerUse>()
+        .operations
+        .remove(&operation.id);
     let mut frame = None;
-    if let Some(pending) = computer {
-        world
-            .resource_mut::<ComputerUse>()
-            .operations
-            .remove(&operation.id);
-        validated = match (success, validated) {
-            (true, Some(Ok(output))) => Some(computer::result(pending, output).map(
-                |(metadata, captured)| {
+    let validated = match (success, validated) {
+        (true, Some(Ok(output))) => Some(
+            computer::result(pending, output)
+                .map(|(metadata, captured)| {
                     frame = captured;
                     metadata
-                },
-            )),
-            (_, Some(Err(_))) => Some(Err(
-                "the client returned an invalid Computer Use result".into()
-            )),
-            (_, validated) => validated,
-        };
-    }
-    let (success, output, failure) = match (success, validated) {
+                })
+                .map_err(OutputError::from),
+        ),
+        (_, Some(Err(_))) => Some(Err(OutputError::InvalidComputerUseResult)),
+        (_, validated) => validated,
+    };
+    (validated, frame)
+}
+
+fn resolve_operation_outcome(
+    success: bool,
+    validated: Option<std::result::Result<Value, OutputError>>,
+    failure: Option<Failure>,
+) -> (bool, Option<Value>, Option<Failure>) {
+    match (success, validated) {
         (true, Some(Ok(output))) => (true, Some(output), failure),
-        (true, Some(Err(error))) => (false, None, Some(Failure::new("output_invalid", error))),
+        (true, Some(Err(error))) => (
+            false,
+            None,
+            Some(Failure::new("output_invalid", error.to_string())),
+        ),
         (true, None) => (
             false,
             None,
@@ -603,62 +715,45 @@ pub(crate) fn complete(
             None,
             failure.or_else(|| Some(Failure::new("operation_failed", "the operation failed"))),
         ),
-    };
-    let updated = store
-        .complete_operation(&operation.id, success, output.as_ref(), failure.as_ref())?
-        .ok_or_else(|| HostError::Storage(("device operation update did not persist").into()))?;
-    let waiter = world
-        .resource_mut::<Waiting>()
-        .by_operation
-        .remove(&operation.id);
-    if let Some(waiter) = waiter {
-        if success {
-            if let Some(frame) = frame {
-                computer::save_frame(world, frame);
-            }
-            if let Some(image) = read_image(&operation.capability, output.as_ref()) {
-                use rig_core::{
-                    message::ToolResultContent,
-                    tool::{ToolOutput, ToolResult},
-                };
-                let blocks = vec![
-                    ToolResultContent::text(json!({
-                        "operation_id": operation.id, "path": output.as_ref().and_then(|out| out["path"].as_str())
-                    }).to_string()),
-                    ToolResultContent::Image(image),
-                ];
-                match ToolOutput::content(blocks) {
-                    Ok(tool_output) => permission::decide(
-                        world,
-                        waiter.call,
-                        Outcome::from(ToolResult::success(tool_output)),
-                    ),
-                    Err(error) => {
-                        permission::refuse(world, waiter.call, &error.to_string());
-                    }
-                }
-            } else {
-                permission::answer(
-                    world,
-                    waiter.call,
-                    &json!({"operation_id": operation.id, "output": output}).to_string(),
-                );
-            }
-        } else {
-            let reason = failure
-                .as_ref()
-                .map(|failure| failure.message.clone())
-                .unwrap_or_else(|| "the operation failed".into());
-            permission::refuse(world, waiter.call, &reason);
-        }
     }
-    let mut notifier = world.resource_mut::<Notifier>();
-    notifier.push(
-        None,
-        Some(&operation.client_id),
-        w::notification::Event::DeviceOperationResult(Box::new(wire::device_result(&updated))),
-    );
-    Ok(wire::device_state(&updated))
+}
+
+fn answer_successful_waiter(
+    world: &mut World,
+    call: Entity,
+    operation: &DeviceOperation,
+    output: Option<&Value>,
+) {
+    if let Some(image) = read_image(&operation.capability, output) {
+        use rig_core::{
+            message::ToolResultContent,
+            tool::{ToolOutput, ToolResult},
+        };
+        let blocks = vec![
+            ToolResultContent::text(
+                json!({
+                    "operation_id": operation.id,
+                    "path": output.and_then(|out| out["path"].as_str()),
+                })
+                .to_string(),
+            ),
+            ToolResultContent::Image(image),
+        ];
+        match ToolOutput::content(blocks) {
+            Ok(tool_output) => {
+                permission::decide(world, call, Outcome::from(ToolResult::success(tool_output)));
+            }
+            Err(error) => {
+                permission::refuse(world, call, &error.to_string());
+            }
+        }
+    } else {
+        permission::answer(
+            world,
+            call,
+            &json!({"operation_id": operation.id, "output": output}).to_string(),
+        );
+    }
 }
 
 fn read_image(capability: &str, output: Option<&Value>) -> Option<rig_core::message::Image> {

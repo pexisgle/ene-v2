@@ -1,6 +1,7 @@
 //! A real host process: private discovery, owner auth and graceful shutdown.
 
-// Integration test helpers intentionally assert via expect/unwrap.
+// Integration test helpers outside `#[test]` functions do not fall under
+// clippy's `allow-unwrap-in-tests` heuristic; remove when helpers propagate Results.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};

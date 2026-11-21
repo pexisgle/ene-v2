@@ -74,6 +74,30 @@ pub(crate) struct CapabilityTools {
     pub(crate) entities: HashMap<String, Entity>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ForwardError {
+    #[error("the capability call is no longer live")]
+    CallNotLive,
+    #[error("the capability call was not accepted by the gate")]
+    NotAcceptedByGate,
+    #[error("the capability call has no tool request")]
+    MissingToolRequest,
+    #[error("the capability call names another tool")]
+    WrongToolName,
+    #[error("the capability call has no agent")]
+    MissingAgent,
+    #[error("capability tools are offered to the parent only")]
+    ParentOnly,
+    #[error("the bound client is not registered")]
+    ClientNotRegistered,
+    #[error("capability `{0}` is no longer declared")]
+    CapabilityNotDeclared(String),
+    #[error("the capability no longer matches the accepted operation")]
+    CapabilityMismatch,
+    #[error("{0}")]
+    Host(#[from] HostError),
+}
+
 /// One call of a capability tool, sent from its handler to the host thread.
 pub(crate) struct CapabilityCall {
     /// The effect the call runs as; the host reads its gate binding from it.
@@ -81,7 +105,7 @@ pub(crate) struct CapabilityCall {
     pub(crate) tool_name: String,
     pub(crate) input: Value,
     /// Sent back to the handler when the host accepted or refused the call.
-    pub(crate) reply: oneshot::Sender<std::result::Result<String, String>>,
+    pub(crate) reply: oneshot::Sender<std::result::Result<String, ForwardError>>,
 }
 
 /// The capability call queue shared by the spawned handlers and the host
@@ -166,7 +190,9 @@ impl Serve for CapabilityHandler {
                 result: ToolResult::success(ToolOutput::text(text)),
             })),
             Ok(Err(reason)) => {
-                Reply::Outcome(Err(ErrorReport::new(ErrorKind::Denied, reason).refused()))
+                Reply::Outcome(Err(
+                    ErrorReport::new(ErrorKind::Denied, reason.to_string()).refused()
+                ))
             }
             Err(_) => Reply::Outcome(Err(ErrorReport::new(
                 ErrorKind::HandlerUnavailable,
@@ -416,54 +442,47 @@ pub(crate) fn tool_spec_for(
     Ok(Some(spec))
 }
 
-fn forward(world: &mut World, request: &CapabilityCall) -> std::result::Result<String, String> {
+fn forward(
+    world: &mut World,
+    request: &CapabilityCall,
+) -> std::result::Result<String, ForwardError> {
     let Some(call) = effect_entity(world, request.effect) else {
-        return Err("the capability call is no longer live".into());
+        return Err(ForwardError::CallNotLive);
     };
     let Some(binding) = world.get::<CallBinding>(call).cloned() else {
         // Only the gate inserts a binding; without one the call was never
         // accepted and must not reach a client.
-        return Err("the capability call was not accepted by the gate".into());
+        return Err(ForwardError::NotAcceptedByGate);
     };
     let Some(sent) = world.get::<ToolRequest>(call) else {
-        return Err("the capability call has no tool request".into());
+        return Err(ForwardError::MissingToolRequest);
     };
     if sent.call.function.name.as_str() != request.tool_name {
-        return Err("the capability call names another tool".into());
+        return Err(ForwardError::WrongToolName);
     }
     let Some(agent) = world.get::<ForAgent>(call).map(|agent| agent.0) else {
-        return Err("the capability call has no agent".into());
+        return Err(ForwardError::MissingAgent);
     };
     // A capability tool is offered to the parent; a hand can only use the
     // generic `device_request` dispatcher. The calling companion comes from
     // the call's agent, not from the publication that served several
     // companions; its bound client must still be the client holding the tool.
     if world.get::<CompanionAgent>(agent).is_none() {
-        return Err("capability tools are offered to the parent only".into());
+        return Err(ForwardError::ParentOnly);
     }
     let store = world.resource::<Store>().clone();
-    let Some(client) = store
-        .client(&binding.client_id)
-        .map_err(|error| error.to_string())?
-    else {
-        return Err("the bound client is not registered".into());
+    let Some(client) = store.client(&binding.client_id)? else {
+        return Err(ForwardError::ClientNotRegistered);
     };
-    let Some(spec) =
-        tool_spec_for(world, &client, &request.tool_name).map_err(|error| error.to_string())?
-    else {
-        return Err(format!(
-            "capability `{}` is no longer declared",
-            binding.capability
-        ));
+    let Some(spec) = tool_spec_for(world, &client, &request.tool_name)? else {
+        return Err(ForwardError::CapabilityNotDeclared(binding.capability));
     };
     if spec.name != binding.capability {
-        return Err("the capability no longer matches the accepted operation".into());
+        return Err(ForwardError::CapabilityMismatch);
     }
     // The dispatch target is the client the gate bound; a later move does not
     // change it.
-    device::accept(world, call, agent, Some(&spec), request.input.clone())
-        .map(|(_, answer)| answer)
-        .map_err(|error| error.to_string())
+    Ok(device::accept(world, call, agent, Some(&spec), request.input.clone())?.1)
 }
 
 /// The effect entity an effect id names.

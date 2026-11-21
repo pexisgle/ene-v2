@@ -25,6 +25,62 @@ const GREP_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RESULTS: usize = 500;
 const COMMAND_TIMEOUT: u64 = 30;
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum WorkToolError {
+    #[error("the workspace has changed")]
+    WorkspaceChanged,
+    #[error("unknown workspace tool")]
+    UnknownTool,
+    #[error("file writer is unavailable")]
+    WriterUnavailable,
+    #[error("path must be a string")]
+    PathNotString,
+    #[error("path is required")]
+    MissingPath,
+    #[error("path must stay relative to the workspace")]
+    InvalidPath,
+    #[error("{0} must be a string")]
+    NotString(&'static str),
+    #[error("{0} must be a positive integer")]
+    NotPositiveInt(&'static str),
+    #[error("image exceeds the 512 KiB limit")]
+    ImageTooLarge,
+    #[error("line exceeds the output limit. Use grep or a shell command to inspect part of it.")]
+    LineTooLong,
+    #[error("file is binary")]
+    BinaryFile,
+    #[error("file is not UTF-8")]
+    NotUtf8,
+    #[error("edits must be a nonempty array")]
+    EmptyEdits,
+    #[error("oldText must not be empty")]
+    EmptyOldText,
+    #[error("oldText did not match the file")]
+    OldTextNotFound,
+    #[error("oldText matched more than once")]
+    OldTextNotUnique,
+    #[error("file exceeds the 4 MiB limit")]
+    FileTooLarge,
+    #[error("the requested shell is unavailable")]
+    ShellUnavailable,
+    #[error("command is empty")]
+    EmptyCommand,
+    #[error("the shell process is unavailable")]
+    ShellProcessUnavailable,
+    #[error("the shell process pipes are unavailable")]
+    ShellPipesUnavailable,
+    #[error("command exceeded {COMMAND_TIMEOUT} seconds")]
+    CommandTimedOut,
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Regex(#[from] regex::Error),
+    #[error(transparent)]
+    Glob(#[from] globset::Error),
+    #[error(transparent)]
+    Join(#[from] tokio::task::JoinError),
+}
+
 pub(crate) const PREFIX: &str = "work.";
 pub const WORKSPACE_FILE_CAPABILITIES: &[&str] = &[
     "work.read",
@@ -152,33 +208,29 @@ impl Workspace {
         }
     }
 
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::large_futures)]
     pub(crate) async fn execute(
         self: Arc<Self>,
         capability: &str,
         input: Value,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, WorkToolError> {
         if required(&input, "workspace")? != self.root.to_string_lossy() {
-            return Err("the workspace has changed".into());
+            return Err(WorkToolError::WorkspaceChanged);
         }
         let name = capability
             .strip_prefix(PREFIX)
-            .ok_or("unknown workspace tool")?;
+            .ok_or(WorkToolError::UnknownTool)?;
         if name == SHELL {
-            return self.shell(required(&input, "command")?).await;
+            return Box::pin(self.shell(required(&input, "command")?)).await;
         }
         let name = name.to_owned();
-        tokio::task::spawn_blocking(move || self.file_tool(&name, &input))
-            .await
-            .map_err(|error| error.to_string())?
+        tokio::task::spawn_blocking(move || self.file_tool(&name, &input)).await?
     }
 
-    fn file_tool(&self, name: &str, input: &Value) -> Result<Value, String> {
+    fn file_tool(&self, name: &str, input: &Value) -> Result<Value, WorkToolError> {
         let path = match input.get("path") {
-            Some(path) => path.as_str().ok_or("path must be a string")?,
+            Some(path) => path.as_str().ok_or(WorkToolError::PathNotString)?,
             None if matches!(name, "ls" | "grep" | "find") => ".",
-            None => return Err("path is required".into()),
+            None => return Err(WorkToolError::MissingPath),
         };
         let path = relative(path)?;
         let limit = positive(input, "limit", MAX_RESULTS)?.min(MAX_RESULTS);
@@ -188,19 +240,18 @@ impl Workspace {
                 let _guard = self
                     .edits
                     .lock()
-                    .map_err(|_| "file writer is unavailable")?;
+                    .map_err(|_| WorkToolError::WriterUnavailable)?;
                 let content = if name == "edit" {
-                    let bytes = self.load(path).map_err(|error| error.to_string())?;
+                    let bytes = self.load(path)?;
                     edit(text(&bytes)?, input)?
                 } else {
                     required(input, "content")?.to_owned()
                 };
-                self.save(path, &content, name == "write")
-                    .map_err(|error| error.to_string())?;
+                self.save(path, &content, name == "write")?;
                 Ok(json!({"path": path, "bytes": content.len()}))
             }
             "ls" | "find" | "grep" => self.search(name, path, input, limit),
-            _ => Err("unknown workspace tool".into()),
+            _ => Err(WorkToolError::UnknownTool),
         }
     }
 
@@ -227,11 +278,11 @@ impl Workspace {
         Ok(bytes)
     }
 
-    fn read(&self, path: &Path, offset: usize, limit: usize) -> Result<Value, String> {
-        let bytes = self.load(path).map_err(|error| error.to_string())?;
+    fn read(&self, path: &Path, offset: usize, limit: usize) -> Result<Value, WorkToolError> {
+        let bytes = self.load(path)?;
         if image(&bytes) {
             if bytes.len() > IMAGE_LIMIT {
-                return Err("image exceeds the 512 KiB limit".into());
+                return Err(WorkToolError::ImageTooLarge);
             }
             return Ok(json!({"path": path, "image_base64": STANDARD.encode(&bytes)}));
         }
@@ -245,7 +296,7 @@ impl Workspace {
             let Some(line) = lines.next() else { break };
             if content.len() + line.len() > OUTPUT_LIMIT {
                 if content.is_empty() {
-                    return Err("line exceeds the output limit. Use grep or a shell command to inspect part of it.".into());
+                    return Err(WorkToolError::LineTooLong);
                 }
                 return Ok(json!({"path": path, "text": content, "next_offset": next_line}));
             }
@@ -299,7 +350,7 @@ impl Workspace {
         path: &Path,
         input: &Value,
         limit: usize,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, WorkToolError> {
         let glob = match name {
             "find" => Some(glob(required(input, "pattern")?)?),
             "grep" => input
@@ -318,8 +369,7 @@ impl Workspace {
             Some(
                 regex::RegexBuilder::new(&pattern)
                     .case_insensitive(input["ignoreCase"].as_bool() == Some(true))
-                    .build()
-                    .map_err(|error| error.to_string())?,
+                    .build()?,
             )
         } else {
             None
@@ -393,8 +443,7 @@ impl Workspace {
         {
             visit(path, true, false);
         } else {
-            self.walk(path, name != "ls", &mut visit)
-                .map_err(|error| error.to_string())?;
+            self.walk(path, name != "ls", &mut visit)?;
         }
         entries.sort_by(|left, right| {
             left["path"]
@@ -441,15 +490,10 @@ impl Workspace {
         Ok(())
     }
 
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::large_futures)]
-    async fn shell(&self, command: &str) -> Result<Value, String> {
-        let program = self
-            .shell
-            .as_ref()
-            .ok_or("the requested shell is unavailable")?;
+    async fn shell(&self, command: &str) -> Result<Value, WorkToolError> {
+        let program = self.shell.as_ref().ok_or(WorkToolError::ShellUnavailable)?;
         if command.trim().is_empty() {
-            return Err("command is empty".into());
+            return Err(WorkToolError::EmptyCommand);
         }
         let mut process = CommandWrap::with_new(program, |child| {
             child
@@ -480,20 +524,21 @@ impl Workspace {
         #[cfg(windows)]
         process.wrap(process_wrap::tokio::JobObject);
         process.wrap(KillOnDrop);
-        let mut running = RunningShell(Some(process.spawn().map_err(|error| error.to_string())?));
+        let mut running = RunningShell(Some(process.spawn()?));
         let Some(child) = running.0.as_mut() else {
-            return Err("the shell process is unavailable".into());
+            return Err(WorkToolError::ShellProcessUnavailable);
         };
         let (Some(stdout), Some(stderr)) = (child.stdout().take(), child.stderr().take()) else {
-            return Err("the shell process pipes are unavailable".into());
+            return Err(WorkToolError::ShellPipesUnavailable);
         };
-        let outcome = tokio::time::timeout(Duration::from_secs(COMMAND_TIMEOUT), async {
-            tokio::try_join!(child.wait(), capture(stdout), capture(stderr))
-        })
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(COMMAND_TIMEOUT),
+            Box::pin(async { tokio::try_join!(child.wait(), capture(stdout), capture(stderr)) }),
+        )
         .await;
         let (status, (stdout, stdout_cut), (stderr, stderr_cut)) = match outcome {
-            Ok(result) => result.map_err(|error| error.to_string())?,
-            Err(_) => return Err(format!("command exceeded {COMMAND_TIMEOUT} seconds")),
+            Ok(result) => result?,
+            Err(_) => return Err(WorkToolError::CommandTimedOut),
         };
         running.0 = None;
         Ok(json!({
@@ -514,7 +559,7 @@ impl Drop for RunningShell {
     }
 }
 
-fn relative(path: &str) -> Result<&Path, String> {
+fn relative(path: &str) -> Result<&Path, WorkToolError> {
     let parsed = Path::new(path);
     if path.is_empty()
         || (cfg!(windows) && path.contains(':'))
@@ -522,33 +567,31 @@ fn relative(path: &str) -> Result<&Path, String> {
             .components()
             .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
     {
-        return Err("path must stay relative to the workspace".into());
+        return Err(WorkToolError::InvalidPath);
     }
     Ok(parsed)
 }
 
-fn required<'a>(input: &'a Value, name: &str) -> Result<&'a str, String> {
-    input[name]
-        .as_str()
-        .ok_or_else(|| format!("{name} must be a string"))
+fn required<'a>(input: &'a Value, name: &'static str) -> Result<&'a str, WorkToolError> {
+    input[name].as_str().ok_or(WorkToolError::NotString(name))
 }
 
-fn positive(input: &Value, name: &str, default: usize) -> Result<usize, String> {
+fn positive(input: &Value, name: &'static str, default: usize) -> Result<usize, WorkToolError> {
     match input.get(name) {
         None => Ok(default),
         Some(value) => value
             .as_u64()
             .and_then(|value| usize::try_from(value).ok())
             .filter(|&value| value > 0)
-            .ok_or_else(|| format!("{name} must be a positive integer")),
+            .ok_or(WorkToolError::NotPositiveInt(name)),
     }
 }
 
-fn text(bytes: &[u8]) -> Result<&str, String> {
+fn text(bytes: &[u8]) -> Result<&str, WorkToolError> {
     if bytes.contains(&0) {
-        return Err("file is binary".into());
+        return Err(WorkToolError::BinaryFile);
     }
-    std::str::from_utf8(bytes).map_err(|_| "file is not UTF-8".into())
+    std::str::from_utf8(bytes).map_err(|_| WorkToolError::NotUtf8)
 }
 
 fn image(bytes: &[u8]) -> bool {
@@ -559,44 +602,43 @@ fn image(bytes: &[u8]) -> bool {
         || (bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"))
 }
 
-fn edit(content: &str, input: &Value) -> Result<String, String> {
+fn edit(content: &str, input: &Value) -> Result<String, WorkToolError> {
     let edits = input["edits"]
         .as_array()
         .filter(|edits| !edits.is_empty())
-        .ok_or("edits must be a nonempty array")?;
+        .ok_or(WorkToolError::EmptyEdits)?;
     let mut content = content.to_owned();
     for edit in edits {
         let old = required(edit, "oldText")?;
         let new = required(edit, "newText")?;
         if old.is_empty() {
-            return Err("oldText must not be empty".into());
+            return Err(WorkToolError::EmptyOldText);
         }
         let Some(index) = content.find(old) else {
-            return Err("oldText did not match the file".into());
+            return Err(WorkToolError::OldTextNotFound);
         };
         let end = index + old.len();
         // Check overlapping occurrences as well.
         let Some(first_char) = old.chars().next() else {
-            return Err("oldText must not be empty".into());
+            return Err(WorkToolError::EmptyOldText);
         };
         let next = index + first_char.len_utf8();
         if content[next..].contains(old) {
-            return Err("oldText matched more than once".into());
+            return Err(WorkToolError::OldTextNotUnique);
         }
         if content.len() - old.len() + new.len() > FILE_LIMIT {
-            return Err("file exceeds the 4 MiB limit".into());
+            return Err(WorkToolError::FileTooLarge);
         }
         content.replace_range(index..end, new);
     }
     Ok(content)
 }
 
-fn glob(pattern: &str) -> Result<(GlobMatcher, bool), String> {
+fn glob(pattern: &str) -> Result<(GlobMatcher, bool), WorkToolError> {
     Ok((
         GlobBuilder::new(pattern)
             .literal_separator(true)
-            .build()
-            .map_err(|error| error.to_string())?
+            .build()?
             .compile_matcher(),
         pattern.contains('/'),
     ))
@@ -623,8 +665,6 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::large_futures)]
     async fn workspace_tools_read_search_and_edit_only_the_bound_workspace() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Arc::new(Workspace::open(directory.path()).unwrap());
@@ -632,7 +672,7 @@ mod tests {
             input["workspace"] = json!(workspace.root.to_string_lossy());
             let workspace = workspace.clone();
             let name = format!("work.{name}");
-            async move { workspace.execute(&name, input).await }
+            async move { Box::pin(workspace.execute(&name, input)).await }
         };
 
         call(

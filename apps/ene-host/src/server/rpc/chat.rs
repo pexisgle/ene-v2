@@ -102,13 +102,8 @@ mod tests {
         runtime.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::too_many_lines)]
-    async fn history_requests_preserve_paging_and_errors_for_proto_and_json() {
-        let state = tempfile::tempdir().unwrap();
-        let runtime = Runtime::start(state.path()).await.unwrap();
-        let companion = runtime
+    async fn seed_reader_companion(runtime: &Runtime) -> String {
+        runtime
             .read(|app| {
                 let companion = crate::host::mind::create(
                     app.world_mut(),
@@ -129,7 +124,88 @@ mod tests {
                 Ok(companion)
             })
             .await
+            .unwrap()
+    }
+
+    async fn assert_history_and_message_format(
+        router: &axum::Router,
+        companion: &str,
+        content_type: &str,
+        history_body: Vec<u8>,
+    ) {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/rpc/ene.host.v1.ChatService/GetHistory")
+                    .header("host", "localhost")
+                    .header("authorization", "Bearer owner")
+                    .header("content-type", content_type)
+                    .body(Body::from(history_body))
+                    .unwrap(),
+            )
+            .await
             .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let items: Vec<(String, String)> = if content_type == "application/proto" {
+            w::History::decode_view(&body)
+                .unwrap()
+                .items
+                .iter()
+                .map(|item| (item.id.to_owned(), item.text.to_owned()))
+                .collect()
+        } else {
+            serde_json::from_slice::<w::History>(&body)
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|item| (item.id, item.text))
+                .collect()
+        };
+        assert_eq!(
+            items
+                .iter()
+                .map(|(_, text)| text.as_str())
+                .collect::<Vec<_>>(),
+            ["second", "third"]
+        );
+        let request = w::MessageRequest {
+            companion_id: companion.to_owned(),
+            message_id: items[0].0.clone(),
+            ..Default::default()
+        };
+        let body = if content_type == "application/proto" {
+            StreamMessage::from_message(&request).bytes().to_vec()
+        } else {
+            serde_json::to_vec(&request).unwrap()
+        };
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/rpc/ene.host.v1.ChatService/GetMessage")
+                    .header("host", "localhost")
+                    .header("authorization", "Bearer owner")
+                    .header("content-type", content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = if content_type == "application/proto" {
+            w::Message::decode_view(&body).unwrap().text.to_owned()
+        } else {
+            serde_json::from_slice::<w::Message>(&body).unwrap().text
+        };
+        assert_eq!(text, "second");
+    }
+
+    #[tokio::test]
+    async fn history_requests_preserve_paging_and_errors_for_proto_and_json() {
+        let state = tempfile::tempdir().unwrap();
+        let runtime = Runtime::start(state.path()).await.unwrap();
+        let companion = seed_reader_companion(&runtime).await;
         let router = super::super::router(
             runtime.clone(),
             crate::server::auth::Guard::new("owner".into()),
@@ -146,72 +222,7 @@ mod tests {
             ("application/proto", proto),
             ("application/json", serde_json::to_vec(&request).unwrap()),
         ] {
-            let response = router
-                .clone()
-                .oneshot(
-                    Request::post("/rpc/ene.host.v1.ChatService/GetHistory")
-                        .header("host", "localhost")
-                        .header("authorization", "Bearer owner")
-                        .header("content-type", content_type)
-                        .body(Body::from(body))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = response.into_body().collect().await.unwrap().to_bytes();
-            let items: Vec<(String, String)> = if content_type == "application/proto" {
-                w::History::decode_view(&body)
-                    .unwrap()
-                    .items
-                    .iter()
-                    .map(|item| (item.id.to_owned(), item.text.to_owned()))
-                    .collect()
-            } else {
-                serde_json::from_slice::<w::History>(&body)
-                    .unwrap()
-                    .items
-                    .into_iter()
-                    .map(|item| (item.id, item.text))
-                    .collect()
-            };
-            assert_eq!(
-                items
-                    .iter()
-                    .map(|(_, text)| text.as_str())
-                    .collect::<Vec<_>>(),
-                ["second", "third"]
-            );
-            let request = w::MessageRequest {
-                companion_id: companion.clone(),
-                message_id: items[0].0.clone(),
-                ..Default::default()
-            };
-            let body = if content_type == "application/proto" {
-                StreamMessage::from_message(&request).bytes().to_vec()
-            } else {
-                serde_json::to_vec(&request).unwrap()
-            };
-            let response = router
-                .clone()
-                .oneshot(
-                    Request::post("/rpc/ene.host.v1.ChatService/GetMessage")
-                        .header("host", "localhost")
-                        .header("authorization", "Bearer owner")
-                        .header("content-type", content_type)
-                        .body(Body::from(body))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = response.into_body().collect().await.unwrap().to_bytes();
-            let text = if content_type == "application/proto" {
-                w::Message::decode_view(&body).unwrap().text.to_owned()
-            } else {
-                serde_json::from_slice::<w::Message>(&body).unwrap().text
-            };
-            assert_eq!(text, "second");
+            assert_history_and_message_format(&router, &companion, content_type, body).await;
         }
         for (path, body, code) in [
             (

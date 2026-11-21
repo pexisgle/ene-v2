@@ -24,6 +24,24 @@ const HELP: &str = "Commands (quote arguments containing spaces; backslashes are
   fps NUMBER            set FPS (0..1000; 0: unlimited)
   help | quit";
 
+#[derive(Debug, thiserror::Error)]
+enum CliError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Int(#[from] std::num::ParseIntError),
+    #[error("{0}")]
+    Message(String),
+}
+
+impl From<&'static str> for CliError {
+    fn from(message: &'static str) -> Self {
+        Self::Message(message.to_owned())
+    }
+}
+
 struct Client {
     child: Child,
     input: Option<ChildStdin>,
@@ -32,34 +50,32 @@ struct Client {
 }
 
 impl Client {
-    fn request(&mut self, mut request: Value) -> Result<Value, String> {
+    fn request(&mut self, mut request: Value) -> Result<Value, CliError> {
         self.next_id += 1;
         let id = self.next_id;
         request["id"] = json!(id);
         let input = self.input.as_mut().ok_or("renderer input closed")?;
-        writeln!(input, "{request}")
-            .and_then(|()| input.flush())
-            .map_err(|e| e.to_string())?;
+        writeln!(input, "{request}").and_then(|()| input.flush())?;
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let reply = self
                 .replies
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .map_err(|e| format!("renderer response unavailable: {e}"))?;
+                .map_err(|e| CliError::Message(format!("renderer response unavailable: {e}")))?;
             if reply["id"].as_u64() != Some(id) {
                 continue;
             }
             if let Some(error) = reply.get("error") {
-                return Err(error.to_string());
+                return Err(CliError::Message(error.to_string()));
             }
             return reply
                 .get("ok")
                 .cloned()
-                .ok_or("invalid renderer response".into());
+                .ok_or_else(|| "invalid renderer response".into());
         }
     }
 
-    fn execute(&mut self, words: &[String]) -> Result<(), String> {
+    fn execute(&mut self, words: &[String]) -> Result<(), CliError> {
         let args: Vec<_> = words.iter().map(String::as_str).collect();
         let request = match args.as_slice() {
             ["help"] => {
@@ -83,7 +99,7 @@ impl Client {
             ["center", id] => json!({"op":"center", "character":id, "monitor":null}),
             ["center", id, monitor] => json!({"op":"center", "character":id, "monitor":monitor}),
             ["fps", value] => {
-                json!({"op":"fps", "value":value.parse::<u32>().map_err(|e| e.to_string())?})
+                json!({"op":"fps", "value":value.parse::<u32>()?})
             }
             _ => {
                 let (id, patch) = match args.as_slice() {
@@ -106,7 +122,7 @@ impl Client {
                     .and_then(|characters| characters.iter().find(|c| c["character"] == id))
                     .and_then(|c| c["config"].as_object())
                     .cloned()
-                    .ok_or_else(|| format!("unknown character: {id}"))?;
+                    .ok_or_else(|| CliError::Message(format!("unknown character: {id}")))?;
                 if let Some(patch) = patch.as_object() {
                     config.extend(patch.clone());
                 }
@@ -117,10 +133,7 @@ impl Client {
         if result.is_null() {
             println!("ok");
         } else {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?
-            );
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Ok(())
     }
@@ -151,34 +164,35 @@ impl Drop for Client {
     }
 }
 
-fn number(text: &str) -> Result<f32, String> {
+fn number(text: &str) -> Result<f32, CliError> {
     text.parse::<f32>()
         .ok()
         .filter(|v| v.is_finite())
-        .ok_or_else(|| format!("expected a finite number: {text}"))
+        .ok_or_else(|| CliError::Message(format!("expected a finite number: {text}")))
 }
 
-fn absolute(path: &str) -> Result<String, String> {
-    std::path::absolute(path)
-        .map_err(|e| e.to_string())?
+fn absolute(path: &str) -> Result<String, CliError> {
+    std::path::absolute(path)?
         .into_os_string()
         .into_string()
         .map_err(|_| "path must be UTF-8".into())
 }
 
-fn default_motion() -> Result<String, String> {
+fn default_motion() -> Result<String, CliError> {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../assets/vrma/idle-breath.vrma"
     );
     if !Path::new(path).is_file() {
-        return Err(format!("bundled motion not found: {path}"));
+        return Err(CliError::Message(format!(
+            "bundled motion not found: {path}"
+        )));
     }
     absolute(path)
 }
 
 // Keep the cache layout in sync with scripts/fetch-assets.py.
-fn cached_model() -> Result<String, String> {
+fn cached_model() -> Result<String, CliError> {
     #[cfg(windows)]
     let cache = PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?)
         .join("ene/cache");
@@ -190,16 +204,16 @@ fn cached_model() -> Result<String, String> {
     .join("ene");
     let path = cache.join("models/Seed-san.vrm");
     if !path.is_file() {
-        return Err(format!(
+        return Err(CliError::Message(format!(
             "default model not found: {}; run `just fetch-assets`",
             path.display()
-        ));
+        )));
     }
     absolute(path.to_str().ok_or("cache path must be UTF-8")?)
 }
 
 // Deliberately not a shell: no expansion or escapes, so Windows paths keep '\'.
-fn words(line: &str) -> Result<Vec<String>, String> {
+fn words(line: &str) -> Result<Vec<String>, CliError> {
     let mut result = Vec::new();
     let mut word = String::new();
     let mut quote = None;
@@ -233,7 +247,7 @@ fn words(line: &str) -> Result<Vec<String>, String> {
     Ok(result)
 }
 
-fn run() -> Result<(), String> {
+fn run() -> Result<(), CliError> {
     let mut args = std::env::args_os().skip(1);
     let binary = args.next();
     if binary
@@ -248,8 +262,7 @@ fn run() -> Result<(), String> {
     }
     let binary = match binary {
         Some(path) => PathBuf::from(path),
-        None => std::env::current_exe()
-            .map_err(|e| e.to_string())?
+        None => std::env::current_exe()?
             .parent()
             .and_then(|p| p.parent())
             .ok_or("cannot locate target directory")?
@@ -261,10 +274,10 @@ fn run() -> Result<(), String> {
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| {
-            format!(
+            CliError::Message(format!(
                 "cannot start {}: {e}; build ene-avatar first",
                 binary.display()
-            )
+            ))
         })?;
     let input = child.stdin.take();
     let output = child.stdout.take().ok_or("renderer stdout unavailable")?;
@@ -272,8 +285,8 @@ fn run() -> Result<(), String> {
     thread::spawn(move || {
         for line in BufReader::new(output).lines() {
             let message = line
-                .map_err(|e| e.to_string())
-                .and_then(|line| serde_json::from_str::<Value>(&line).map_err(|e| e.to_string()));
+                .map_err(CliError::from)
+                .and_then(|line| serde_json::from_str::<Value>(&line).map_err(CliError::from));
             match message {
                 Ok(value) if value.get("event").is_some() => eprintln!("event: {value}"),
                 Ok(value) => {
@@ -309,18 +322,18 @@ fn run() -> Result<(), String> {
     loop {
         if interactive {
             print!("> ");
-            io::stdout().flush().map_err(|e| e.to_string())?;
+            io::stdout().flush()?;
         }
         let line = loop {
-            if let Some(status) = client.child.try_wait().map_err(|e| e.to_string())? {
+            if let Some(status) = client.child.try_wait()? {
                 return if status.success() {
                     Ok(())
                 } else {
-                    Err(format!("renderer exited: {status}"))
+                    Err(CliError::Message(format!("renderer exited: {status}")))
                 };
             }
             match lines.recv_timeout(Duration::from_millis(100)) {
-                Ok(line) => break Some(line.map_err(|e| e.to_string())?),
+                Ok(line) => break Some(line?),
                 Err(RecvTimeoutError::Disconnected) => break None,
                 Err(RecvTimeoutError::Timeout) => {}
             }
@@ -342,7 +355,7 @@ fn run() -> Result<(), String> {
     client.input.take();
     match reap(&mut client.child, Instant::now() + Duration::from_secs(5)) {
         Some(status) if status.success() => Ok(()),
-        Some(status) => Err(format!("renderer exited: {status}")),
+        Some(status) => Err(CliError::Message(format!("renderer exited: {status}"))),
         None => Err("renderer did not exit after quit".into()),
     }
 }

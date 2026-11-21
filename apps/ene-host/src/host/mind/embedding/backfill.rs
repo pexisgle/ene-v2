@@ -37,21 +37,31 @@ impl Default for Backfill {
 }
 
 /// Embeds what is missing for each companion with a usable connection. Each
+#[derive(bevy_ecs::system::SystemParam)]
+pub(super) struct BackfillParams<'w> {
+    store: Res<'w, Store>,
+    runtime: Option<Res<'w, crate::host::resources::HostRuntime>>,
+    credentials: Option<Res<'w, Credentials>>,
+    embeddings: Res<'w, Embeddings>,
+    state: ResMut<'w, Backfill>,
+    notifier: Option<ResMut<'w, crate::host::notify::Notifier>>,
+}
+
+/// Starts at most one background backfill per companion without starving the
+/// frame loop or opening concurrent writers per companion. Each background
 /// task writes through its own SQLite connection opened from the store's path
 /// (docs/design/mind.md §3.2), so the ECS thread's `Mutex<Connection>` is not
 /// held while the background writes; the ECS thread only schedules and
 /// reports.
-// TODO(Phase 1-3): split during refactoring.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn backfill(
-    mut commands: Commands,
-    store: Res<Store>,
-    runtime: Option<Res<crate::host::resources::HostRuntime>>,
-    credentials: Option<Res<Credentials>>,
-    embeddings: Res<Embeddings>,
-    mut state: ResMut<Backfill>,
-    mut notifier: Option<ResMut<crate::host::notify::Notifier>>,
-) {
+pub(super) fn backfill(mut commands: Commands, params: BackfillParams<'_>) {
+    let BackfillParams {
+        store,
+        runtime,
+        credentials,
+        embeddings,
+        mut state,
+        mut notifier,
+    } = params;
     while let Ok((companion, result)) = state.receiver.try_recv() {
         state.running.remove(&companion);
         match result {

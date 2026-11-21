@@ -62,7 +62,21 @@ pub(super) struct InFlight {
     engine: String,
 }
 
-type DecisionOutcome = std::result::Result<ModelDecision, String>;
+#[derive(Debug, thiserror::Error)]
+pub(super) enum DecisionError {
+    #[error("the decision model timed out")]
+    Timeout,
+    #[error("{0}")]
+    Model(String),
+    #[error("the decision reply was not the strict JSON asked for")]
+    InvalidJson,
+    #[error("the decision reply named an unknown verdict")]
+    UnknownVerdict,
+    #[error("the decision task ended without a result")]
+    TaskMissingResult,
+}
+
+pub(super) type DecisionOutcome = std::result::Result<ModelDecision, DecisionError>;
 
 /// One answer from the decision engine, with the short reason it gave.
 pub(super) struct ModelDecision {
@@ -181,14 +195,14 @@ pub(super) async fn run_decision(
     let request = CompletionRequest::new(decision_prompt(&inputs)).preamble(DECISION_SYSTEM_PROMPT);
     let response = tokio::time::timeout(DECISION_TIMEOUT, model.call(request))
         .await
-        .map_err(|_| "the decision model timed out".to_owned())?
-        .map_err(|error| error.to_string())?;
-    let reply: DecisionReply = serde_json::from_str(response.text().trim())
-        .map_err(|_| "the decision reply was not the strict JSON asked for".to_owned())?;
+        .map_err(|_| DecisionError::Timeout)?
+        .map_err(|error| DecisionError::Model(error.to_string()))?;
+    let reply: DecisionReply =
+        serde_json::from_str(response.text().trim()).map_err(|_| DecisionError::InvalidJson)?;
     let allow = match reply.decision.as_str() {
         "allow" => true,
         "require_approval" => false,
-        _ => return Err("the decision reply named an unknown verdict".to_owned()),
+        _ => return Err(DecisionError::UnknownVerdict),
     };
     Ok(ModelDecision {
         allow,
@@ -282,72 +296,109 @@ pub(super) fn start_decision(
         .start(pending, task, engine);
 }
 
-/// Lands one finished decision.
-// TODO(Phase 1-3): split during refactoring.
-#[allow(clippy::cognitive_complexity)]
-pub(super) fn collect_decisions(world: &mut World) {
-    let Some(flight) = world.resource_mut::<Decisions>().take_finished() else {
-        return;
-    };
-    let request = flight.pending.request.clone();
-    let outcome = background::take(flight.task)
-        .unwrap_or_else(|| Err("the decision task ended without a result".to_owned()));
+fn handle_decision_read_error(
+    world: &mut World,
+    pending: &Pending,
+    error: &crate::host::error::HostError,
+) {
+    if error.is_storage() {
+        crate::host::fail(world, error.to_string());
+    } else {
+        tracing::warn!(%error, request = %pending.request, "decision collection failed to read approval");
+        push_card(world, pending);
+    }
+}
+
+fn is_decision_approval_pending(world: &mut World, pending: &Pending) -> bool {
     let store = world.resource::<Store>().clone();
-    let approval = match store.approval(&request) {
+    let request = &pending.request;
+    let approval = match store.approval(request) {
         Ok(Some(approval)) => approval,
         Ok(None) => {
-            tracing::debug!(request = %request, "a late decision dropped: no such approval");
-            return;
+            tracing::debug!(%request, "a late decision dropped: no such approval");
+            return false;
         }
         Err(error) => {
-            if error.is_storage() {
-                crate::host::fail(world, error.to_string());
-                return;
-            }
-            tracing::warn!(%error, request = %request, "decision collection failed to read approval");
-            push_card(world, &flight.pending);
-            return;
+            handle_decision_read_error(world, pending, &error);
+            return false;
         }
     };
     if approval.status != ApprovalStatus::Pending {
         tracing::debug!(
-            request = %request,
+            %request,
             "a late decision dropped: the approval was already answered"
         );
+        return false;
+    }
+    true
+}
+
+/// Lands one finished decision.
+pub(super) fn collect_decisions(world: &mut World) {
+    let Some(flight) = world.resource_mut::<Decisions>().take_finished() else {
+        return;
+    };
+    if !is_decision_approval_pending(world, &flight.pending) {
         return;
     }
+    let outcome = background::take(flight.task).unwrap_or(Err(DecisionError::TaskMissingResult));
+    apply_decision_outcome(world, &flight.pending, &flight.engine, outcome);
+}
+
+fn apply_decision_outcome(
+    world: &mut World,
+    pending: &Pending,
+    engine: &str,
+    outcome: DecisionOutcome,
+) {
+    let request = &pending.request;
     match outcome {
-        Ok(decision) if decision.allow => {
-            match submit(world, &request, ApprovalDecision::Approve) {
-                Ok(_) => tracing::info!(
-                    companion = %flight.pending.companion,
-                    engine = %flight.engine,
-                    reason = %decision.reason,
-                    request = %request,
-                    "the decision engine allowed the operation"
-                ),
-                Err(error) => tracing::debug!(
-                    %error,
-                    request = %request,
-                    "a late decision dropped: the approval was already answered"
-                ),
-            }
-        }
-        Ok(decision) => {
-            tracing::info!(
-                companion = %flight.pending.companion,
-                engine = %flight.engine,
-                reason = %decision.reason,
-                request = %request,
-                "the decision engine requires the user's approval"
-            );
-            push_card(world, &flight.pending);
-        }
+        Ok(decision) if decision.allow => approve_from_decision(world, pending, engine, &decision),
+        Ok(decision) => require_approval_from_decision(world, pending, engine, &decision),
         Err(why) => {
-            tracing::warn!(%why, request = %request, "the decision failed; the card is shown");
-            push_card(world, &flight.pending);
+            tracing::warn!(%why, %request, "the decision failed; the card is shown");
+            push_card(world, pending);
         }
     }
+}
+
+fn approve_from_decision(
+    world: &mut World,
+    pending: &Pending,
+    engine: &str,
+    decision: &ModelDecision,
+) {
+    let request = &pending.request;
+    match submit(world, request, ApprovalDecision::Approve) {
+        Ok(_) => tracing::info!(
+            companion = %pending.companion,
+            %engine,
+            reason = %decision.reason,
+            %request,
+            "the decision engine allowed the operation"
+        ),
+        Err(error) => tracing::debug!(
+            %error,
+            %request,
+            "a late decision dropped: the approval was already answered"
+        ),
+    }
+}
+
+fn require_approval_from_decision(
+    world: &mut World,
+    pending: &Pending,
+    engine: &str,
+    decision: &ModelDecision,
+) {
+    tracing::info!(
+        companion = %pending.companion,
+        %engine,
+        reason = %decision.reason,
+        request = %pending.request,
+        "the decision engine requires the user's approval"
+    );
+    push_card(world, pending);
 }
 
 /// The approval card and its notice, pushed only if still pending.

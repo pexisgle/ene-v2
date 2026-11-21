@@ -1,6 +1,5 @@
 //! The plugin hand on the real built reference guest: the whole flow a
 //! companion's ACP task assignment names, from `start_work` to `stop_work`.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use super::hand;
 use crate::host::{

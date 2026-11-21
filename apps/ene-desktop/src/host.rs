@@ -21,12 +21,15 @@ pub struct Discovery {
 /// Selected host target: local discovery file or explicit remote HTTPS host.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
+// Remote/Local host target switching and helpers are exercised in tests and
+// reserved for remote host selection UI; remove once desktop switches targets directly.
 #[allow(dead_code)]
 pub enum HostTarget {
     Local { path: PathBuf },
     Remote { endpoint: String, token: String },
 }
 
+// See `HostTarget` above.
 #[allow(dead_code)]
 impl HostTarget {
     /// Reads a persisted remote target (`remote_host.json`), returning `Ok(None)`
@@ -148,6 +151,7 @@ impl Host {
 
     /// Connects to an explicitly configured remote HTTPS ingress using TLS +
     /// Bearer authentication (`ene_rpc::connect_remote`).
+    // Exercised by unit tests and reserved for remote ingress UI; remove once wired to UI.
     #[allow(dead_code)]
     pub fn connect_remote(endpoint: &str, token: &str) -> Result<Self, Connect> {
         let (transport, config) = ene_rpc::connect_remote(endpoint, token)
@@ -156,6 +160,7 @@ impl Host {
     }
 
     /// Connects according to a local or remote [`HostTarget`].
+    // Exercised by unit tests and reserved for remote ingress UI; remove once wired to UI.
     #[allow(dead_code)]
     pub fn connect_target(target: &HostTarget) -> Result<Self, Connect> {
         match target {

@@ -1,4 +1,5 @@
-// Integration test helpers intentionally assert via unwrap/expect.
+// Integration test helpers outside `#[test]` functions do not fall under
+// clippy's `allow-unwrap-in-tests` heuristic; remove when helpers propagate Results.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use ene_plugin::*;

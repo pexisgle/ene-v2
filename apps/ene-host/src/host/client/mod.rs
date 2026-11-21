@@ -89,7 +89,7 @@ pub(crate) struct DeviceOperation {
 /// Validates `input` against the declared schema of `spec`.
 pub(crate) fn validate_input(spec: &CapabilitySpec, input: &serde_json::Value) -> Result<()> {
     let schema = json::parse_schema(&spec.input_schema)?;
-    json::validate(&schema, input).map_err(HostError::Invalid)
+    json::validate(&schema, input).map_err(|error| HostError::Invalid(error.to_string()))
 }
 
 /// Validates a client's operation output against its declared output schema.
@@ -98,7 +98,7 @@ pub(crate) fn validate_output(spec: &CapabilitySpec, output: &serde_json::Value)
         return Ok(());
     }
     let schema = json::parse_schema(&spec.output_schema)?;
-    json::validate(&schema, output).map_err(HostError::Invalid)
+    json::validate(&schema, output).map_err(|error| HostError::Invalid(error.to_string()))
 }
 
 // Clients: capability declarations, the active client and perception.

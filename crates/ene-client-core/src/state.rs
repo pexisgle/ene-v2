@@ -156,6 +156,10 @@ impl ConnectionViewState {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct PreviewError(pub String);
+
 /// Companion selection, active conversation, mind views, and starter templates.
 #[derive(Debug, Default)]
 pub struct CompanionState {
@@ -166,11 +170,11 @@ pub struct CompanionState {
     pub work_active: bool,
     pub templates: Vec<w::CompanionTemplate>,
     pub exported_template: Option<(String, String)>,
-    pub preview_reply: Option<Result<String, String>>,
+    pub preview_reply: Option<Result<String, PreviewError>>,
 }
 
 /// Audio levels, mute flags, capture mode, and live speech recognition state.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct AudioState {
     pub output_rms: f32,
     pub input_rms: f32,

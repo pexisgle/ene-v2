@@ -79,7 +79,21 @@ async fn fetch() -> Option<Catalog> {
     }
 }
 
-async fn download() -> Result<Catalog, String> {
+#[derive(Debug, thiserror::Error)]
+enum CatalogError {
+    #[error(transparent)]
+    Net(#[from] net::NetError),
+    #[error(transparent)]
+    Http(#[from] reqwest::Error),
+    #[error(transparent)]
+    Utf8(#[from] std::str::Utf8Error),
+    #[error("{0}")]
+    Parse(String),
+    #[error("models.dev returned no model entries")]
+    EmptyCatalog,
+}
+
+async fn download() -> Result<Catalog, CatalogError> {
     let response = net::client()?
         .get(URL)
         .header(
@@ -90,17 +104,17 @@ async fn download() -> Result<Catalog, String> {
         .timeout(FETCH_TIMEOUT)
         .send()
         .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|error| error.to_string())?;
+        .and_then(reqwest::Response::error_for_status)?;
     let body = net::read_response_body(response, 16 * 1024 * 1024, "models.dev catalog").await?;
-    let json = std::str::from_utf8(&body).map_err(|error| error.to_string())?;
+    let json = std::str::from_utf8(&body)?;
     supplement(Catalog::builtin(), json)
 }
 
-fn supplement(base: &Catalog, json: &str) -> Result<Catalog, String> {
-    let (fetched, _) = Catalog::from_models_dev(json).map_err(|error| error.to_string())?;
+fn supplement(base: &Catalog, json: &str) -> Result<Catalog, CatalogError> {
+    let (fetched, _) =
+        Catalog::from_models_dev(json).map_err(|error| CatalogError::Parse(error.to_string()))?;
     if fetched.iter().next().is_none() {
-        return Err("models.dev returned no model entries".into());
+        return Err(CatalogError::EmptyCatalog);
     }
     let mut catalog = base.clone();
     for row in fetched.iter() {

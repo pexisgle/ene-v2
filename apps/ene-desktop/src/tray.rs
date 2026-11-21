@@ -401,29 +401,26 @@ mod windows_tray {
         }
     }
 
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::cognitive_complexity)]
-    fn try_register_tray_icon(hwnd: HWND, ctx: &WindowContext) {
-        let state = current_state(ctx);
-        let nid = build_nid(hwnd, ctx, &state.tooltip);
-        let mut last_err = None;
-        for attempt in 0..5 {
-            let msg = if ctx.added.get() { NIM_MODIFY } else { NIM_ADD };
-            if unsafe { Shell_NotifyIconW(msg, &nid) }.as_bool() {
-                ctx.added.set(true);
-                ctx.retry_ticks.set(0);
-                ctx.resident.store(true, Ordering::Release);
-                unsafe {
-                    let _ = KillTimer(Some(hwnd), TRAY_RETRY_TIMER_ID);
-                }
-                tracing::info!("system tray icon registered");
-                return;
+    fn try_send_tray_icon(
+        hwnd: HWND,
+        ctx: &WindowContext,
+        nid: &NOTIFYICONDATAW,
+    ) -> Option<windows::core::Error> {
+        let msg = if ctx.added.get() { NIM_MODIFY } else { NIM_ADD };
+        if unsafe { Shell_NotifyIconW(msg, nid) }.as_bool() {
+            ctx.added.set(true);
+            ctx.retry_ticks.set(0);
+            ctx.resident.store(true, Ordering::Release);
+            unsafe {
+                let _ = KillTimer(Some(hwnd), TRAY_RETRY_TIMER_ID);
             }
-            last_err = Some(windows::core::Error::from_thread());
-            if attempt + 1 < 5 {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
+            tracing::info!("system tray icon registered");
+            return None;
         }
+        Some(windows::core::Error::from_thread())
+    }
+
+    fn schedule_tray_retry(hwnd: HWND, last_err: Option<windows::core::Error>) {
         if let Some(err) = last_err {
             tracing::warn!(error = %err, "Shell_NotifyIconW(NIM_ADD) failed; scheduling retry");
         } else {
@@ -437,6 +434,22 @@ mod windows_tray {
                 None,
             );
         }
+    }
+
+    fn try_register_tray_icon(hwnd: HWND, ctx: &WindowContext) {
+        let state = current_state(ctx);
+        let nid = build_nid(hwnd, ctx, &state.tooltip);
+        let mut last_err = None;
+        for attempt in 0..5 {
+            match try_send_tray_icon(hwnd, ctx, &nid) {
+                None => return,
+                Some(err) => last_err = Some(err),
+            }
+            if attempt + 1 < 5 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        schedule_tray_retry(hwnd, last_err);
     }
 
     fn refresh_tray_tip(hwnd: HWND, ctx: &WindowContext) {

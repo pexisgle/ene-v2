@@ -453,10 +453,12 @@ fn apply(world: &mut World, adapter: &str, event: ene_plugin::Event) {
             if let Some(run) = active {
                 request_permission(
                     world,
-                    adapter,
-                    &run,
-                    &companion_id,
-                    &request_id,
+                    PermissionTarget {
+                        adapter,
+                        run: &run,
+                        companion: &companion_id,
+                        request: &request_id,
+                    },
                     tool_call,
                     options,
                 );
@@ -571,20 +573,28 @@ fn progress(hand: &mut Hand, update: &SessionUpdate) -> Option<String> {
     }
 }
 
+struct PermissionTarget<'a> {
+    adapter: &'a str,
+    run: &'a Run,
+    companion: &'a str,
+    request: &'a str,
+}
+
 /// Parks the turn in an approval row and a held call, through the same
 /// `Approvals` map and card the device gate uses: the user's card, the
 /// `SubmitApproval` call and the head's `resolve_approval` all resolve it.
-// TODO(Phase 1-3): split during refactoring.
-#[allow(clippy::too_many_arguments)]
 fn request_permission(
     world: &mut World,
-    adapter: &str,
-    run: &Run,
-    companion: &str,
-    request: &str,
+    target: PermissionTarget<'_>,
     tool_call: ToolCallUpdate,
     options: Vec<PermissionOption>,
 ) {
+    let PermissionTarget {
+        adapter,
+        run,
+        companion,
+        request,
+    } = target;
     let (tool_name, arguments) = {
         let mut hands = world.resource_mut::<Hands>();
         let Some(hand) = hands.by_adapter.get_mut(adapter) else {

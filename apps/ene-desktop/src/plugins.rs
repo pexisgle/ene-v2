@@ -24,6 +24,22 @@ use tokio_util::sync::CancellationToken;
 const PLUGINS_DIR: &str = "plugins";
 const PLUGINS_DIR_ENV: &str = "ENE_CLIENT_PLUGINS_DIR";
 
+#[derive(Debug, thiserror::Error)]
+pub enum ClientPluginError {
+    #[error("client plugin capability `{0}` is not installed")]
+    NotInstalled(String),
+    #[error("client plugin reload failed: {0}")]
+    ReloadFailed(String),
+    #[error("client plugin instance unavailable")]
+    InstanceUnavailable,
+    #[error("client plugin `{capability}` failed: {reason}")]
+    ExecutionFailed { capability: String, reason: String },
+    #[error("invalid client plugin tool result: {0}")]
+    InvalidToolResult(#[from] serde_json::Error),
+    #[error("{0}")]
+    ToolErrorOutput(Value),
+}
+
 struct LoadedClientPlugin {
     entrypoint: String,
     package: Package,
@@ -63,8 +79,6 @@ impl ClientPlugins {
         }
     }
 
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::cognitive_complexity)]
     pub async fn load_from(directory: &Path) -> Self {
         let Ok(entries) = std::fs::read_dir(directory) else {
             return Self::default();
@@ -72,103 +86,87 @@ impl ClientPlugins {
         let mut plugins = Self::default();
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Ok(package) = Package::load(&path) else {
-                tracing::warn!(plugin = %path.display(), "skipping invalid client plugin package");
-                continue;
-            };
-            let Some(ep) =
-                package.manifest.entrypoints.iter().find(|ep| {
-                    ep.target == Target::Client && ep.provides.contains(&Extension::Tool)
-                })
-            else {
-                continue;
-            };
-            let plugin_id = package.manifest.id.clone();
-            let entrypoint = ep.id.clone();
-            let cancel = CancellationToken::new();
-            let mut instance = match Instance::load_for_target(
-                package.clone(),
-                entrypoint.clone(),
-                Target::Client,
-                &cancel,
-            )
-            .await
-            {
-                Ok(instance) => instance,
-                Err(error) => {
-                    tracing::warn!(plugin = %plugin_id, %error, "client plugin failed to load");
-                    continue;
-                }
-            };
-            let (tx, mut rx) = mpsc::channel(16);
-            tokio::spawn(async move { while rx.recv().await.is_some() {} });
-            let defs = match instance
-                .invoke(Operation::ListTools, Arc::new(DenyServices), tx, &cancel)
-                .await
-                .and_then(|val| {
-                    serde_json::from_value::<Vec<PluginToolDefinition>>(val)
-                        .map_err(ene_plugin_runtime::Error::Json)
-                }) {
-                Ok(defs) => defs,
-                Err(error) => {
-                    tracing::warn!(plugin = %plugin_id, %error, "client plugin ListTools failed");
-                    continue;
-                }
-            };
-            let loaded = Arc::new(LoadedClientPlugin {
-                entrypoint,
-                package,
-                instance: Mutex::new(Some(instance)),
-            });
-            for def in defs {
-                if def.name.trim().is_empty()
-                    || w::BUILTIN_TOOLS.contains(&def.name.as_str())
-                    || def
-                        .name
-                        .bytes()
-                        .any(|b| !(b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
-                {
-                    continue;
-                }
-                let capability = format!("plugin.{plugin_id}.{}", def.name);
-                if capability.chars().count() > 64 || plugins.tools.contains_key(&capability) {
-                    continue;
-                }
-                let input_schema = serde_json::to_string(&def.parameters)
-                    .unwrap_or_else(|_| r#"{"type":"object"}"#.into());
-                plugins.specs.push(w::ClientCapabilitySpec {
-                    name: capability.clone(),
-                    tool_name: def.name.clone(),
-                    description: def.description.clone(),
-                    input_schema,
-                    approval: w::CapabilityApproval::Confirm.into(),
-                    ..Default::default()
-                });
-                plugins.tools.insert(
-                    capability.clone(),
-                    RegisteredClientTool {
-                        plugin: Arc::clone(&loaded),
-                        definition: def,
-                        capability,
-                    },
-                );
+            if path.is_dir() {
+                plugins.load_package_tools(&path).await;
             }
         }
         plugins
+    }
+
+    async fn load_package_tools(&mut self, path: &Path) {
+        let Ok(package) = Package::load(path) else {
+            tracing::warn!(plugin = %path.display(), "skipping invalid client plugin package");
+            return;
+        };
+        let Some(entrypoint) = package
+            .manifest
+            .entrypoints
+            .iter()
+            .find(|ep| ep.target == Target::Client && ep.provides.contains(&Extension::Tool))
+            .map(|ep| ep.id.clone())
+        else {
+            return;
+        };
+        let plugin_id = package.manifest.id.clone();
+        let Some((loaded, defs)) = discover_package_tools(package, entrypoint).await else {
+            return;
+        };
+        let loaded = Arc::new(loaded);
+        for def in defs {
+            self.register_tool(&plugin_id, &loaded, def);
+        }
+    }
+
+    fn register_tool(
+        &mut self,
+        plugin_id: &str,
+        loaded: &Arc<LoadedClientPlugin>,
+        def: PluginToolDefinition,
+    ) {
+        if def.name.trim().is_empty()
+            || w::BUILTIN_TOOLS.contains(&def.name.as_str())
+            || def
+                .name
+                .bytes()
+                .any(|b| !(b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+        {
+            return;
+        }
+        let capability = format!("plugin.{plugin_id}.{}", def.name);
+        if capability.chars().count() > 64 || self.tools.contains_key(&capability) {
+            return;
+        }
+        let input_schema = serde_json::to_string(&def.parameters)
+            .unwrap_or_else(|_| r#"{"type":"object"}"#.into());
+        self.specs.push(w::ClientCapabilitySpec {
+            name: capability.clone(),
+            tool_name: def.name.clone(),
+            description: def.description.clone(),
+            input_schema,
+            approval: w::CapabilityApproval::Confirm.into(),
+            ..Default::default()
+        });
+        self.tools.insert(
+            capability.clone(),
+            RegisteredClientTool {
+                plugin: Arc::clone(loaded),
+                definition: def,
+                capability,
+            },
+        );
     }
 
     pub fn specs(&self) -> &[w::ClientCapabilitySpec] {
         &self.specs
     }
 
-    pub async fn execute(&self, capability: &str, input: Value) -> Result<Value, String> {
+    pub async fn execute(
+        &self,
+        capability: &str,
+        input: Value,
+    ) -> Result<Value, ClientPluginError> {
         let Some(tool) = self.tools.get(capability) else {
-            return Err(format!(
-                "client plugin capability `{capability}` is not installed"
-            ));
+            return Err(ClientPluginError::NotInstalled(capability.to_owned()));
         };
         let mut slot = tool.plugin.instance.lock().await;
         let cancel = CancellationToken::new();
@@ -180,12 +178,12 @@ impl ClientPlugins {
                 &cancel,
             )
             .await
-            .map_err(|e| format!("client plugin reload failed: {e}"))?;
+            .map_err(|e| ClientPluginError::ReloadFailed(e.to_string()))?;
             *slot = Some(fresh);
         }
         let instance = slot
             .as_mut()
-            .ok_or_else(|| "client plugin instance unavailable".to_owned())?;
+            .ok_or(ClientPluginError::InstanceUnavailable)?;
         let (tx, mut rx) = mpsc::channel(16);
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let raw = instance
@@ -201,15 +199,62 @@ impl ClientPlugins {
                 &cancel,
             )
             .await
-            .map_err(|e| format!("client plugin `{}` failed: {e}", tool.capability))?;
-        let parsed: ToolInvokeResult = serde_json::from_value(raw)
-            .map_err(|e| format!("invalid client plugin tool result: {e}"))?;
+            .map_err(|e| ClientPluginError::ExecutionFailed {
+                capability: tool.capability.clone(),
+                reason: e.to_string(),
+            })?;
+        let parsed: ToolInvokeResult = serde_json::from_value(raw)?;
         if parsed.is_error {
-            Err(parsed.output.to_string())
+            Err(ClientPluginError::ToolErrorOutput(parsed.output))
         } else {
             Ok(parsed.output)
         }
     }
+}
+
+async fn discover_package_tools(
+    package: Package,
+    entrypoint: String,
+) -> Option<(LoadedClientPlugin, Vec<PluginToolDefinition>)> {
+    let plugin_id = package.manifest.id.clone();
+    let cancel = CancellationToken::new();
+    let mut instance = match Instance::load_for_target(
+        package.clone(),
+        entrypoint.clone(),
+        Target::Client,
+        &cancel,
+    )
+    .await
+    {
+        Ok(instance) => instance,
+        Err(error) => {
+            tracing::warn!(plugin = %plugin_id, %error, "client plugin failed to load");
+            return None;
+        }
+    };
+    let (tx, mut rx) = mpsc::channel(16);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let defs = match instance
+        .invoke(Operation::ListTools, Arc::new(DenyServices), tx, &cancel)
+        .await
+        .and_then(|val| {
+            serde_json::from_value::<Vec<PluginToolDefinition>>(val)
+                .map_err(ene_plugin_runtime::Error::Json)
+        }) {
+        Ok(defs) => defs,
+        Err(error) => {
+            tracing::warn!(plugin = %plugin_id, %error, "client plugin ListTools failed");
+            return None;
+        }
+    };
+    Some((
+        LoadedClientPlugin {
+            entrypoint,
+            package,
+            instance: Mutex::new(Some(instance)),
+        },
+        defs,
+    ))
 }
 
 fn plugins_dir() -> Option<PathBuf> {

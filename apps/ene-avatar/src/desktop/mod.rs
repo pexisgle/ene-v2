@@ -89,7 +89,6 @@ pub fn window(output: &Output) -> Window {
 }
 
 /// Derives placement and stacking depth; unchanged transforms stay untouched.
-#[allow(clippy::type_complexity)]
 fn place_avatars(
     outputs: Query<&Output>,
     mut avatars: Query<(Entity, &Character, &mut Transform)>,
@@ -145,11 +144,14 @@ fn cameras(mut commands: Commands, outputs: Query<(Entity, &Output), Changed<Out
 
 /// Keep the same depth margin around the entire stack as around a single avatar.
 /// Orthographic projection preserves XY placement and apparent size as Z moves.
-#[allow(clippy::type_complexity)]
-fn depth_range(
-    avatars: Query<&Transform, With<Character>>,
-    mut cameras: Query<(&mut Transform, &mut Projection), (With<Output>, Without<Character>)>,
-) {
+type CameraDepthQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut Transform, &'static mut Projection),
+    (With<Output>, Without<Character>),
+>;
+
+fn depth_range(avatars: Query<&Transform, With<Character>>, mut cameras: CameraDepthQuery<'_, '_>) {
     let front = avatars
         .iter()
         .map(|transform| transform.translation.z)
@@ -240,7 +242,7 @@ impl HitMask {
     }
 
     /// Builds a pixel-accurate coarse occupancy mask directly from an RGBA8 alpha buffer.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn from_alpha_buffer(
         width: u32,
         height: u32,
@@ -270,12 +272,16 @@ impl HitMask {
     }
 
     /// Returns `true` when no cell is occupied.
+    // Hit-testing queries live here for cross-platform parity, but only Windows calls them at runtime;
+    // remove this allow once non-Windows window hit-testing consumes HitMask.
     #[cfg_attr(not(any(windows, test)), allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.occupied == 0
     }
 
     /// Tests whether a local logical pixel coordinate hits an occupied cell.
+    // Hit-testing queries live here for cross-platform parity, but only Windows calls them at runtime;
+    // remove this allow once non-Windows window hit-testing consumes HitMask.
     #[cfg_attr(not(any(windows, test)), allow(dead_code))]
     pub fn contains_local(&self, local: Vec2) -> bool {
         if self.occupied == 0

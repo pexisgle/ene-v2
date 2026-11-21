@@ -282,8 +282,6 @@ mod tests {
     use super::*;
 
     #[test]
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::too_many_lines)]
     fn constraints_copy_twist_and_aim_from_rest_frames_and_reject_cycles() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, TransformPlugin));
@@ -291,6 +289,11 @@ mod tests {
         let source_rest = Quat::from_euler(EulerRot::XYZ, 0.2, -0.1, 0.4);
         let rest = Quat::from_euler(EulerRot::XYZ, 0.1, 0.5, -0.2);
 
+        assert_twist_constraints(&mut app, source_rest, rest);
+        assert_constraint_ordering_and_cycles(&mut app, source_rest, rest);
+    }
+
+    fn assert_twist_constraints(app: &mut App, source_rest: Quat, rest: Quat) {
         // A twist constraint keeps the rest axes and only accepts rotation
         // about the chosen axis. A half turn around an orthogonal axis is
         // dropped entirely.
@@ -340,7 +343,9 @@ mod tests {
                 app.world_mut().entity_mut(rig).despawn();
             }
         }
+    }
 
+    fn assert_constraint_ordering_and_cycles(app: &mut App, source_rest: Quat, rest: Quat) {
         let source = app
             .world_mut()
             .spawn(
@@ -435,6 +440,16 @@ mod tests {
         };
         assert!(error.to_string().contains("exactly one"));
 
+        assert_copy_and_aim_same_frame(app, source, target, source_rest, rest);
+    }
+
+    fn assert_copy_and_aim_same_frame(
+        app: &mut App,
+        source: Entity,
+        target: Entity,
+        source_rest: Quat,
+        rest: Quat,
+    ) {
         // Copy and aim share one plan: the copied rotation must be visible to
         // the aim target in the same frame.
         let rotated = app.world_mut().spawn(Transform::from_rotation(rest)).id();

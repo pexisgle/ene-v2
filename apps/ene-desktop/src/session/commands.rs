@@ -1,19 +1,87 @@
 //! UI command execution and capability operation dispatch for [`Session`].
 
-use super::stream::{Claim, admits};
-use super::{MotionPlan, Session, Step};
+use super::stream::{AdmitError, Claim, admits};
+use super::{MotionPlan, MotionPlanError, Session, Step};
 #[cfg(windows)]
 use crate::avatar::Avatar;
 use crate::{
     audio, avatar,
     host::Host,
-    perception::{Sensor, Watch},
+    perception::{Sensor, Watch, WatchParseError},
     update::{Command, Update},
 };
 #[cfg(windows)]
 use buffa::view::MessageView;
 use ene_rpc as w;
 use std::{path::PathBuf, time::Duration};
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum OperationError {
+    #[error(transparent)]
+    Admit(#[from] AdmitError),
+    #[cfg(windows)]
+    #[error(transparent)]
+    ComputerUse(#[from] crate::computer::ComputerUseError),
+    #[error(transparent)]
+    WorkTool(#[from] crate::work_tools::WorkToolError),
+    #[error(transparent)]
+    ClientPlugin(#[from] crate::plugins::ClientPluginError),
+    #[error(transparent)]
+    Avatar(#[from] avatar::AvatarError),
+    #[error(transparent)]
+    MotionPlan(#[from] MotionPlanError),
+    #[error(transparent)]
+    Watch(#[from] WatchParseError),
+    #[error("the operation input is not JSON: {0}")]
+    InvalidInputJson(#[from] serde_json::Error),
+    #[error("this client is not serving any companion")]
+    NoCompanionServed,
+    #[error("this client does not implement `{0}`")]
+    UnimplementedCapability(String),
+    #[cfg(windows)]
+    #[error("Computer Use is disabled or the device stream is not ready")]
+    ComputerUseUnavailable,
+    #[cfg(windows)]
+    #[error("Computer Use requires a work session")]
+    ComputerUseMissingWorkSession,
+    #[cfg(windows)]
+    #[error("Computer Use requires a bound run")]
+    ComputerUseMissingRun,
+    #[cfg(windows)]
+    #[error("could not verify the active run in time")]
+    RunVerifyTimeout,
+    #[cfg(windows)]
+    #[error("could not verify the active run")]
+    RunVerifyFailed,
+    #[cfg(windows)]
+    #[error("the work session is unavailable")]
+    WorkSessionUnavailable,
+    #[cfg(windows)]
+    #[error("the Computer Use operation is no longer active on this device")]
+    ComputerUseInactive,
+    #[error("body.look_at requires yaw_deg in [-90, 90] and pitch_deg in [-60, 60]")]
+    InvalidLookAtAngles,
+    #[error("no renderer is configured, so gaze was not updated")]
+    NoRendererForLookAt,
+    #[error("body.perch requires numeric `{0}`")]
+    MissingPerchCoord(&'static str),
+    #[error("body.perch coordinates must be finite")]
+    NonFinitePerchCoord,
+    #[error("no renderer is configured, so the avatar could not perch")]
+    NoRendererForPerch,
+    #[error("no model is configured for the renderer")]
+    NoModelForMotion,
+    #[error("no renderer is configured, so no motion was shown")]
+    NoRendererForMotion,
+    #[error("「目」はオフです")]
+    EyesDisabled,
+    #[error("workspace operations require a work session")]
+    WorkMissingSession,
+    #[error("the workspace is busy")]
+    WorkspaceBusy,
+    #[error("no workspace is configured")]
+    NoWorkspace,
+}
 
 impl Session {
     pub(super) async fn report_operation(host: &Host, result: w::DeviceOperationResult) {
@@ -37,20 +105,20 @@ impl Session {
         &mut self,
         host: &Host,
         operation: &w::DeviceOperation,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, OperationError> {
         if !self.computer_enabled || self.subscription.is_empty() {
-            return Err("Computer Use is disabled or the device stream is not ready".into());
+            return Err(OperationError::ComputerUseUnavailable);
         }
         let work_id = operation
             .work_id
             .as_deref()
             .filter(|id| !id.is_empty())
-            .ok_or("Computer Use requires a work session")?;
+            .ok_or(OperationError::ComputerUseMissingWorkSession)?;
         let run_id = operation
             .run_id
             .as_deref()
             .filter(|id| !id.is_empty())
-            .ok_or("Computer Use requires a bound run")?;
+            .ok_or(OperationError::ComputerUseMissingRun)?;
         let (work, state) = tokio::time::timeout(Duration::from_secs(2), async {
             tokio::try_join!(
                 host.work.get_work(w::WorkRequest {
@@ -64,13 +132,13 @@ impl Session {
             )
         })
         .await
-        .map_err(|_| "could not verify the active run in time")?
-        .map_err(|_| "could not verify the active run")?;
+        .map_err(|_| OperationError::RunVerifyTimeout)?
+        .map_err(|_| OperationError::RunVerifyFailed)?;
         let work = work.view();
         let session = work
             .session
             .as_option()
-            .ok_or("the work session is unavailable")?;
+            .ok_or(OperationError::WorkSessionUnavailable)?;
         if session.client_id != self.options.id
             || !self.bindings.contains_key(session.companion_id)
             || !work
@@ -79,22 +147,22 @@ impl Session {
                 .any(|run| run.run_id == run_id && run.state == w::RunStatus::Running)
             || state.view().status != w::DeviceOperationStatus::Dispatched
         {
-            return Err("the Computer Use operation is no longer active on this device".into());
+            return Err(OperationError::ComputerUseInactive);
         }
         let input = Self::operation_input(operation)?;
-        crate::computer::execute(
+        Ok(crate::computer::execute(
             &mut self.computer_frame,
             run_id,
             input,
             self.avatar.as_ref().map(Avatar::pid),
         )
-        .await
+        .await?)
     }
 
     pub(super) fn operation_result(
         client_id: &str,
         operation: &w::DeviceOperation,
-        outcome: Result<serde_json::Value, String>,
+        outcome: Result<serde_json::Value, OperationError>,
     ) -> w::DeviceOperationResult {
         match &outcome {
             Ok(_) => tracing::info!(
@@ -118,7 +186,12 @@ impl Session {
                     code: {
                         #[cfg(windows)]
                         if operation.capability == w::COMPUTER_USE
-                            && reason == crate::computer::PARTIAL_INPUT
+                            && matches!(
+                                reason,
+                                OperationError::ComputerUse(
+                                    crate::computer::ComputerUseError::PartialInput,
+                                )
+                            )
                         {
                             "operation_uncertain"
                         } else {
@@ -128,7 +201,7 @@ impl Session {
                         "operation_failed"
                     }
                     .into(),
-                    message: reason,
+                    message: reason.to_string(),
                     ..Default::default()
                 }),
             ),
@@ -144,7 +217,7 @@ impl Session {
     }
 
     /// Why this client must not execute the operation, if it must not.
-    pub(super) fn refusal(&self, operation: &w::DeviceOperation) -> Option<String> {
+    pub(super) fn refusal(&self, operation: &w::DeviceOperation) -> Option<AdmitError> {
         let claim = Claim {
             client_id: &operation.client_id,
             subscription_id: &operation.subscription_id,
@@ -160,21 +233,23 @@ impl Session {
 
     pub(super) fn operation_input(
         operation: &w::DeviceOperation,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, OperationError> {
         if operation.input.trim().is_empty() {
             Ok(serde_json::json!({}))
         } else {
-            serde_json::from_str(&operation.input)
-                .map_err(|error| format!("the operation input is not JSON: {error}"))
+            Ok(serde_json::from_str(&operation.input)?)
         }
     }
 
-    fn target_companion_id(&self, operation: &w::DeviceOperation) -> Result<String, String> {
+    fn target_companion_id(
+        &self,
+        operation: &w::DeviceOperation,
+    ) -> Result<String, OperationError> {
         if !operation.companion_id.is_empty() {
             Ok(operation.companion_id.clone())
         } else {
             self.focused_companion_id()
-                .ok_or_else(|| "this client is not serving any companion".to_owned())
+                .ok_or(OperationError::NoCompanionServed)
                 .map(str::to_owned)
         }
     }
@@ -183,7 +258,7 @@ impl Session {
     pub(super) async fn execute(
         &mut self,
         operation: &w::DeviceOperation,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, OperationError> {
         let input = Self::operation_input(operation)?;
         match operation.capability.as_str() {
             "body.motion" => {
@@ -200,9 +275,9 @@ impl Session {
             }
             "eye.watch" => self.watch(&input),
             other if other.starts_with("plugin.") => {
-                self.client_plugins.execute(other, input).await
+                Ok(self.client_plugins.execute(other, input).await?)
             }
-            other => Err(format!("this client does not implement `{other}`")),
+            other => Err(OperationError::UnimplementedCapability(other.to_owned())),
         }
     }
 
@@ -210,7 +285,7 @@ impl Session {
         &mut self,
         companion_id: &str,
         input: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, OperationError> {
         let reset = input
             .get("reset")
             .and_then(serde_json::Value::as_bool)
@@ -229,16 +304,14 @@ impl Session {
                 .map(|v| v as f32)
                 .unwrap_or(0.);
             if !yaw.is_finite() || !pitch.is_finite() || yaw.abs() > 90. || pitch.abs() > 60. {
-                return Err(
-                    "body.look_at requires yaw_deg in [-90, 90] and pitch_deg in [-60, 60]".into(),
-                );
+                return Err(OperationError::InvalidLookAtAngles);
             }
             (Some(yaw), Some(pitch))
         };
         let avatar = self
             .avatar
             .as_mut()
-            .ok_or("no renderer is configured, so gaze was not updated")?;
+            .ok_or(OperationError::NoRendererForLookAt)?;
         avatar.look_at(companion_id, yaw_deg, pitch_deg).await?;
         Ok(serde_json::json!({
             "reset": reset,
@@ -251,19 +324,19 @@ impl Session {
         &mut self,
         companion_id: &str,
         input: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, OperationError> {
         let x = input
             .get("x")
             .and_then(serde_json::Value::as_f64)
             .map(|v| v as f32)
-            .ok_or("body.perch requires numeric `x`")?;
+            .ok_or(OperationError::MissingPerchCoord("x"))?;
         let y = input
             .get("y")
             .and_then(serde_json::Value::as_f64)
             .map(|v| v as f32)
-            .ok_or("body.perch requires numeric `y`")?;
+            .ok_or(OperationError::MissingPerchCoord("y"))?;
         if !x.is_finite() || !y.is_finite() || x.abs() > 1_000_000. || y.abs() > 1_000_000. {
-            return Err("body.perch coordinates must be finite".into());
+            return Err(OperationError::NonFinitePerchCoord);
         }
         let monitor = input
             .get("monitor")
@@ -277,7 +350,7 @@ impl Session {
         let avatar = self
             .avatar
             .as_mut()
-            .ok_or("no renderer is configured, so the avatar could not perch")?;
+            .ok_or(OperationError::NoRendererForPerch)?;
         avatar.place(companion_id, monitor.clone(), [x, y]).await?;
         if let Some(posture_name) = posture.as_deref()
             && matches!(posture_name, "sit_idle" | "sit_swing_legs" | "idle")
@@ -303,15 +376,15 @@ impl Session {
         &mut self,
         companion_id: &str,
         input: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, OperationError> {
         let plan = MotionPlan::parse(input)?;
         let model = self
             .model_for(companion_id)
-            .ok_or("no model is configured for the renderer")?;
+            .ok_or(OperationError::NoModelForMotion)?;
         let avatar = self
             .avatar
             .as_mut()
-            .ok_or("no renderer is configured, so no motion was shown")?;
+            .ok_or(OperationError::NoRendererForMotion)?;
         if avatar
             .show_preset(companion_id, &model, &plan.motion, plan.clip.as_deref())
             .await?
@@ -334,9 +407,9 @@ impl Session {
     }
 
     /// Applies or clears a watch rule.
-    fn watch(&mut self, input: &serde_json::Value) -> Result<serde_json::Value, String> {
+    fn watch(&mut self, input: &serde_json::Value) -> Result<serde_json::Value, OperationError> {
         if !self.eyes_enabled {
-            return Err("「目」はオフです".into());
+            return Err(OperationError::EyesDisabled);
         }
         let watch = Watch::parse(input)?;
         let enabled = watch.enabled;
@@ -582,7 +655,7 @@ impl Session {
         {
             let _ = self.updates.send(Update::Failed {
                 context: "アバターのサイズ変更",
-                message: error,
+                message: error.to_string(),
             });
         } else if updated {
             let _ = self.updates.send(Update::AvatarScaleChanged(scale));
@@ -623,7 +696,7 @@ impl Session {
             if let Err(error) = avatar.center(&target).await {
                 let _ = self.updates.send(Update::Failed {
                     context: "アバターの中央移動",
-                    message: error,
+                    message: error.to_string(),
                 });
             }
         } else {

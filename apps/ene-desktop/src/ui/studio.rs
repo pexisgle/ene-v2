@@ -3,7 +3,7 @@
 
 use super::icons::{Icon, icon};
 use super::theme::{Theme, resolve_ui_font_family, ui_font_fallbacks};
-use super::widgets::{Tone, circle_icon_button, pill_button, window_drag_area};
+use super::widgets::{CircleButtonStyle, Tone, circle_icon_button, pill_button, window_drag_area};
 use super::{DraftSpec, Hub, SettingsSection, window_draft};
 use crate::{input::Draft, state::NoticeKind};
 use ene_rpc as w;
@@ -286,31 +286,19 @@ impl SettingsStudio {
                     .gap(px(6.))
                     .child(circle_icon_button(
                         "studio-win-min",
-                        Icon::Minimize,
-                        24.,
-                        12.,
-                        Tone::Ghost,
-                        true,
+                        CircleButtonStyle::new(Icon::Minimize, 24., 12.),
                         theme,
                         |window, _| window.minimize_window(),
                     ))
                     .child(circle_icon_button(
                         "studio-win-max",
-                        Icon::Maximize,
-                        24.,
-                        12.,
-                        Tone::Ghost,
-                        true,
+                        CircleButtonStyle::new(Icon::Maximize, 24., 12.),
                         theme,
                         |window, _| window.zoom_window(),
                     ))
                     .child(circle_icon_button(
                         "studio-win-close",
-                        Icon::Close,
-                        24.,
-                        12.,
-                        Tone::Danger,
-                        true,
+                        CircleButtonStyle::new(Icon::Close, 24., 12.).tone(Tone::Danger),
                         theme,
                         |window, _| window.remove_window(),
                     )),
@@ -458,9 +446,7 @@ impl SettingsStudio {
                         this.child(pill_button(
                             SharedString::from(format!("studio-notice-reload-{idx}")),
                             "再読み込み",
-                            Some(Icon::Refresh),
-                            Tone::Soft,
-                            true,
+                            Tone::Soft.icon(Icon::Refresh),
                             theme,
                             move |_, cx| {
                                 hub_reload.update(cx, |hub, cx| {
@@ -473,11 +459,7 @@ impl SettingsStudio {
                     })
                     .child(circle_icon_button(
                         SharedString::from(format!("studio-notice-close-{idx}")),
-                        Icon::Close,
-                        22.,
-                        11.,
-                        Tone::Ghost,
-                        true,
+                        CircleButtonStyle::new(Icon::Close, 22., 11.),
                         theme,
                         move |_, cx| {
                             hub_dismiss.update(cx, |hub, cx| hub.dismiss_notice(idx, cx));

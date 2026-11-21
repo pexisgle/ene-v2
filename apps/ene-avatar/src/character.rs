@@ -77,16 +77,27 @@ impl AvatarState {
 
 pub use ene_avatar_ipc::CharacterConfig as Config;
 
-pub fn validate_config(config: &Config) -> Result<(), String> {
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("{0}")]
+    AssetPath(String),
+    #[error("invalid size or position")]
+    InvalidSizeOrPosition,
+    #[error("expected .vrm or .vrma path")]
+    InvalidExtension,
+}
+
+pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     for path in std::iter::once(&config.model).chain(config.motion.iter()) {
-        bevy::asset::AssetPath::try_parse(path).map_err(|error| error.to_string())?;
+        bevy::asset::AssetPath::try_parse(path)
+            .map_err(|error| ConfigError::AssetPath(error.to_string()))?;
     }
     if !(50. ..=200.).contains(&config.size_percent)
         || config
             .position
             .is_some_and(|p| p.iter().any(|v| !v.is_finite() || v.abs() > 1_000_000.))
     {
-        return Err("invalid size or position".into());
+        return Err(ConfigError::InvalidSizeOrPosition);
     }
     if !config.model.ends_with(".vrm")
         || config
@@ -94,7 +105,7 @@ pub fn validate_config(config: &Config) -> Result<(), String> {
             .as_ref()
             .is_some_and(|path| !path.ends_with(".vrma"))
     {
-        return Err("expected .vrm or .vrma path".into());
+        return Err(ConfigError::InvalidExtension);
     }
     Ok(())
 }
@@ -272,32 +283,33 @@ pub fn queue_motion(world: &mut World, entity: Entity) {
     }
 }
 
-// TODO(Phase 1-3): split during refactoring.
-#[allow(clippy::too_many_arguments)]
-fn scene_ready(
-    event: On<WorldInstanceReady>,
-    parents: Query<&ChildOf>,
-    children: Query<&Children>,
-    mut characters: Query<&mut Character>,
-    mut players: Query<&mut AnimationPlayer, With<Vrm>>,
-    mut graphs: ResMut<Assets<AnimationGraph>>,
-    mut commands: Commands,
-) {
-    let Ok(parent) = parents.get(event.entity) else {
+#[derive(bevy::ecs::system::SystemParam)]
+struct SceneReadyParams<'w, 's> {
+    parents: Query<'w, 's, &'static ChildOf>,
+    children: Query<'w, 's, &'static Children>,
+    characters: Query<'w, 's, &'static mut Character>,
+    players: Query<'w, 's, &'static mut AnimationPlayer, With<Vrm>>,
+    graphs: ResMut<'w, Assets<AnimationGraph>>,
+    commands: Commands<'w, 's>,
+}
+
+fn scene_ready(event: On<WorldInstanceReady>, mut params: SceneReadyParams) {
+    let Ok(parent) = params.parents.get(event.entity) else {
         return;
     };
-    let Ok(mut character) = characters.get_mut(parent.parent()) else {
+    let Ok(mut character) = params.characters.get_mut(parent.parent()) else {
         return;
     };
-    let Some(root) = children
+    let Some(root) = params
+        .children
         .iter_descendants(event.entity)
-        .find(|e| players.contains(*e))
+        .find(|e| params.players.contains(*e))
     else {
         return;
     };
     character.root = Some(root);
     let graph = if let Some(clip) = &character.motion
-        && let Ok(mut player) = players.get_mut(root)
+        && let Ok(mut player) = params.players.get_mut(root)
     {
         let (graph, node) = AnimationGraph::from_clip(clip.clone());
         character.play_motion(&mut player, node);
@@ -305,9 +317,10 @@ fn scene_ready(
     } else {
         AnimationGraph::new()
     };
-    commands
+    params
+        .commands
         .entity(root)
-        .insert(AnimationGraphHandle(graphs.add(graph)));
+        .insert(AnimationGraphHandle(params.graphs.add(graph)));
 }
 
 fn load_error(server: &AssetServer, id: UntypedAssetId, retrying: bool) -> Option<String> {
@@ -320,38 +333,41 @@ fn load_error(server: &AssetServer, id: UntypedAssetId, retrying: bool) -> Optio
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn update(
-    mut characters: Query<(Entity, &mut Character, &mut Visibility)>,
-    outputs: Query<&Output>,
-    server: Res<AssetServer>,
-    models: Res<Assets<Gltf>>,
-    mut modified: MessageReader<AssetEvent<Gltf>>,
-    mut players: Query<(&mut AnimationPlayer, Option<&mut SpringRig>)>,
-    mut events: MessageWriter<Notification>,
-    mut commands: Commands,
-) {
-    let modified: Vec<_> = modified
+#[derive(bevy::ecs::system::SystemParam)]
+struct UpdateCharactersParams<'w, 's> {
+    characters: Query<'w, 's, (Entity, &'static mut Character, &'static mut Visibility)>,
+    outputs: Query<'w, 's, &'static Output>,
+    server: Res<'w, AssetServer>,
+    models: Res<'w, Assets<Gltf>>,
+    modified: MessageReader<'w, 's, AssetEvent<Gltf>>,
+    players: Query<'w, 's, (&'static mut AnimationPlayer, Option<&'static mut SpringRig>)>,
+    events: MessageWriter<'w, Notification>,
+    commands: Commands<'w, 's>,
+}
+
+fn update(mut params: UpdateCharactersParams) {
+    let modified: Vec<_> = params
+        .modified
         .read()
         .filter_map(|event| match event {
             AssetEvent::Modified { id } => Some(*id),
             _ => None,
         })
         .collect();
-    for (entity, mut character, mut visibility) in &mut characters {
+    for (entity, mut character, mut visibility) in &mut params.characters {
         let c = &mut *character;
 
         c.retrying &= !modified.contains(&c.model.id());
-        let error = load_error(&server, c.model.id().untyped(), c.retrying).or_else(|| {
+        let error = load_error(&params.server, c.model.id().untyped(), c.retrying).or_else(|| {
             c.motion
                 .as_ref()
-                .and_then(|motion| load_error(&server, motion.id().untyped(), false))
+                .and_then(|motion| load_error(&params.server, motion.id().untyped(), false))
         });
         let loaded = !c.retrying
-            && server.is_loaded_with_dependencies(c.model.id())
+            && params.server.is_loaded_with_dependencies(c.model.id())
             && c.motion
                 .as_ref()
-                .is_none_or(|motion| server.is_loaded_with_dependencies(motion.id()));
+                .is_none_or(|motion| params.server.is_loaded_with_dependencies(motion.id()));
         let next = if matches!(c.state, AvatarState::Error(_)) {
             c.state.clone()
         } else if let Some(error) = error {
@@ -359,13 +375,13 @@ fn update(
         } else if !loaded || c.root.is_none() {
             if loaded
                 && !c.spawned
-                && let Some(model) = models.get(&c.model)
+                && let Some(model) = params.models.get(&c.model)
                 && let Some(scene) = model
                     .default_scene
                     .as_ref()
                     .or_else(|| model.scenes.first())
             {
-                commands.spawn((
+                params.commands.spawn((
                     WorldAssetRoot(scene.clone()),
                     Transform::default(),
                     Visibility::Inherited,
@@ -374,7 +390,7 @@ fn update(
                 c.spawned = true;
             }
             AvatarState::Loading
-        } else if outputs.is_empty() {
+        } else if params.outputs.is_empty() {
             AvatarState::Suspended
         } else {
             AvatarState::Ready
@@ -386,10 +402,11 @@ fn update(
         });
         if c.state != next {
             c.state = next;
-            events.write(c.notification());
+            params.events.write(c.notification());
         }
         let running = c.config.playing && c.main.is_some() && c.state == AvatarState::Ready;
-        let Some((mut player, spring)) = c.root.and_then(|root| players.get_mut(root).ok()) else {
+        let Some((mut player, spring)) = c.root.and_then(|root| params.players.get_mut(root).ok())
+        else {
             continue;
         };
         if running {

@@ -196,26 +196,12 @@ fn desired(
 
 /// Connects what the settings ask for, retires what they no longer do, and
 /// attaches the tools a handler listed.
-// TODO(Phase 1-3): split during refactoring.
-#[allow(clippy::large_futures, clippy::too_many_lines)]
 pub(super) fn sync(world: &mut World) {
     let closing = world
         .get_resource::<crate::host::resources::HostState>()
         .is_some_and(|state| state.closing || state.failed.is_some());
     if closing {
-        world.resource_mut::<Connecting>().0.clear();
-        world.resource_mut::<McpFailures>().0.clear();
-        let ids: Vec<String> = world.resource::<McpServers>().0.keys().cloned().collect();
-        for id in ids {
-            retire_one(world, &id);
-        }
-        if let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) {
-            for event in drain(world) {
-                if let Event::Connected { connection, .. } = event {
-                    runtime.spawn(async move { connection.close().await });
-                }
-            }
-        }
+        handle_closing_servers(world);
         return;
     }
     let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) else {
@@ -232,29 +218,67 @@ pub(super) fn sync(world: &mut World) {
         }
     };
     let credentials = world.get_resource::<Credentials>().cloned();
-    let credential_generation = credentials.as_ref().map(Credentials::generation);
+    if !reload_desired_settings(world, &store, credentials.as_ref(), revision) {
+        return;
+    }
+    let wanted = world.resource::<McpSettings>().desired.clone();
+    prune_connecting_and_failures(world, &wanted);
+    for event in drain(world) {
+        accept_event(world, &wanted, event, &runtime);
+    }
+    retire_stale_or_changed(world, &wanted);
+    project_servers(world);
+    spawn_connect_tasks(world, wanted, &runtime);
+}
+
+fn handle_closing_servers(world: &mut World) {
+    world.resource_mut::<Connecting>().0.clear();
+    world.resource_mut::<McpFailures>().0.clear();
+    let ids: Vec<String> = world.resource::<McpServers>().0.keys().cloned().collect();
+    for id in ids {
+        retire_one(world, &id);
+    }
+    if let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) {
+        for event in drain(world) {
+            if let Event::Connected { connection, .. } = event {
+                runtime.spawn(async move { connection.close().await });
+            }
+        }
+    }
+}
+
+fn reload_desired_settings(
+    world: &mut World,
+    store: &Store,
+    credentials: Option<&Credentials>,
+    revision: u64,
+) -> bool {
+    let credential_generation = credentials.map(Credentials::generation);
     let needs_reload = {
         let current = world.resource::<McpSettings>();
         current.revision != Some(revision) || current.credential_generation != credential_generation
     };
-    if needs_reload {
-        let desired = match desired(&store, credentials.as_ref(), credential_generation) {
-            Ok(desired) => desired,
-            Err(error) => {
-                if error.is_storage() {
-                    crate::host::fail(world, error.to_string());
-                }
-                return;
-            }
-        };
-        *world.resource_mut::<McpSettings>() = McpSettings {
-            revision: Some(revision),
-            credential_generation,
-            desired,
-        };
+    if !needs_reload {
+        return true;
     }
-    let wanted = world.resource::<McpSettings>().desired.clone();
+    let desired = match desired(store, credentials, credential_generation) {
+        Ok(desired) => desired,
+        Err(error) => {
+            if error.is_storage() {
+                crate::host::fail(world, error.to_string());
+            }
+            return false;
+        }
+    };
+    *world.resource_mut::<McpSettings>() = McpSettings {
+        revision: Some(revision),
+        credential_generation,
+        desired,
+    };
+    true
+}
 
+fn prune_connecting_and_failures(world: &mut World, wanted: &[(String, Desired)]) {
     // Cancel pending connect tasks whose revision or credentials changed.
     world.resource_mut::<Connecting>().0.retain(|id, pending| {
         wanted.iter().any(|(wanted, want)| {
@@ -263,7 +287,6 @@ pub(super) fn sync(world: &mut World) {
                 && want.credential_generation == pending.launch.credential_generation
         })
     });
-
     // Clear failure holds/backoffs when connection config or credentials changed, or connection left wanted.
     world.resource_mut::<McpFailures>().0.retain(|id, failure| {
         wanted.iter().any(|(wanted, want)| {
@@ -272,11 +295,9 @@ pub(super) fn sync(world: &mut World) {
                 && want.credential_generation == failure.credential_generation
         })
     });
+}
 
-    for event in drain(world) {
-        accept_event(world, &wanted, event, &runtime);
-    }
-
+fn retire_stale_or_changed(world: &mut World, wanted: &[(String, Desired)]) {
     let wanted_ids: HashSet<&str> = wanted.iter().map(|(id, _)| id.as_str()).collect();
     let retire: Vec<String> = world
         .resource::<McpServers>()
@@ -298,9 +319,13 @@ pub(super) fn sync(world: &mut World) {
     for id in retire {
         retire_one(world, &id);
     }
+}
 
-    project_servers(world);
-
+fn spawn_connect_tasks(
+    world: &mut World,
+    wanted: Vec<(String, Desired)>,
+    runtime: &tokio::runtime::Handle,
+) {
     let now = Instant::now();
     let sender = world.resource::<McpEvents>().sender.clone();
     let wake = world.get_resource::<Wake>().cloned();
@@ -327,7 +352,7 @@ pub(super) fn sync(world: &mut World) {
         let event_launch = launch.clone();
         let sender = sender.clone();
         let wake = wake.clone();
-        let task = runtime.spawn(async move {
+        let task = runtime.spawn(Box::pin(async move {
             let event = match open(&want, registry.clone()).await {
                 Ok(connection) => Event::Connected {
                     id: event_id,
@@ -354,7 +379,7 @@ pub(super) fn sync(world: &mut World) {
                     }
                 }
             }
-        });
+        }));
         world.resource_mut::<Connecting>().0.insert(
             id,
             Pending {
@@ -497,134 +522,151 @@ fn drain(world: &mut World) -> Vec<Event> {
     out
 }
 
-// TODO(Phase 1-3): split during refactoring.
-#[allow(clippy::large_futures)]
 pub(super) async fn open(
     want: &Desired,
     registry: ToolServerHandle,
 ) -> Result<McpConnection, ConnectFailure> {
-    let handler = McpClientHandler::new(ClientConfig::default(), registry);
-    let connection = if !want.command.is_empty() {
-        // A stdio server is a child process the host owns.
-        #[cfg(windows)]
-        let mut command = if super::npx::is_npx_command(&want.command) {
-            super::npx::build_command(want).await?
-        } else {
-            let mut command = tokio::process::Command::new(&want.command);
-            command.args(&want.args);
-            command
-        };
-        #[cfg(not(windows))]
-        let mut command = {
-            let mut command = tokio::process::Command::new(&want.command);
-            command.args(&want.args);
-            command
-        };
-        if !want.cwd.is_empty() {
-            command.current_dir(&want.cwd);
-        }
-        if !want.env.is_empty() {
-            command.envs(&want.env);
-        }
-        if let Some(secret) = want.secret.as_deref().filter(|s| !s.is_empty())
-            && !want.secret_env_var.is_empty()
-        {
-            command.env(&want.secret_env_var, secret);
-        }
-        let mut wrap = process_wrap::tokio::CommandWrap::from(command);
-        // One process group, killed on drop, so a host that exits does not
-        // orphan the server.
-        #[cfg(unix)]
-        wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
-        #[cfg(windows)]
-        wrap.wrap(process_wrap::tokio::JobObject);
-        wrap.wrap(process_wrap::tokio::KillOnDrop);
-        let transport = TokioChildProcess::new(wrap).map_err(|error| ConnectFailure {
-            config_error: error.kind() == std::io::ErrorKind::NotFound,
-            reason: error.to_string(),
-        })?;
-        handler.connect(transport).await.map_err(|error| {
-            let reason = error.to_string();
-            ConnectFailure {
-                config_error: is_config_error_message(&reason),
-                reason,
-            }
-        })?
+    if !want.command.is_empty() {
+        Box::pin(open_stdio(want, registry)).await
     } else if !want.endpoint.is_empty() {
-        // The host's one HTTP client, so the server shares its connection pool
-        // with every other endpoint the host calls.
-        let client = crate::host::net::client().map_err(|reason| ConnectFailure {
-            reason,
-            config_error: true,
-        })?;
-        let mut config = StreamableHttpClientTransportConfig::with_uri(want.endpoint.clone());
-        for (name, value) in &want.headers {
-            let header_name =
-                HeaderName::from_bytes(name.trim().as_bytes()).map_err(|error| ConnectFailure {
-                    reason: format!("invalid MCP header `{name}`: {error}"),
-                    config_error: true,
-                })?;
-            let header_value = HeaderValue::from_str(value).map_err(|error| ConnectFailure {
-                reason: format!("invalid MCP header value for `{name}`: {error}"),
-                config_error: true,
-            })?;
-            config.custom_headers.insert(header_name, header_value);
-        }
-        if let Some(secret) = want
-            .secret
-            .as_deref()
-            .map(str::trim)
-            .filter(|secret| !secret.is_empty())
-        {
-            let auth_header = want.auth_header.trim();
-            if auth_header.is_empty() || auth_header.eq_ignore_ascii_case("authorization") {
-                if let Some(bearer) = secret
-                    .strip_prefix("Bearer ")
-                    .or_else(|| secret.strip_prefix("bearer "))
-                    .map(str::trim)
-                {
-                    config.auth_header = Some(bearer.to_owned());
-                } else if secret.contains(char::is_whitespace) {
-                    let header_value =
-                        HeaderValue::from_str(secret).map_err(|error| ConnectFailure {
-                            reason: format!("invalid MCP credential header: {error}"),
-                            config_error: true,
-                        })?;
-                    config.custom_headers.insert(AUTHORIZATION, header_value);
-                } else {
-                    config.auth_header = Some(secret.to_owned());
-                }
-            } else {
-                let header_name =
-                    HeaderName::from_bytes(auth_header.as_bytes()).map_err(|error| {
-                        ConnectFailure {
-                            reason: format!("invalid MCP auth_header `{auth_header}`: {error}"),
-                            config_error: true,
-                        }
-                    })?;
-                let header_value =
-                    HeaderValue::from_str(secret).map_err(|error| ConnectFailure {
-                        reason: format!("invalid MCP credential value: {error}"),
-                        config_error: true,
-                    })?;
-                config.custom_headers.insert(header_name, header_value);
-            }
-        }
-        let transport = StreamableHttpClientTransport::with_client(client, config);
-        handler.connect(transport).await.map_err(|error| {
-            let reason = error.to_string();
-            ConnectFailure {
-                config_error: is_config_error_message(&reason),
-                reason,
-            }
-        })?
+        Box::pin(open_http(want, registry)).await
     } else {
-        return Err(ConnectFailure {
+        Err(ConnectFailure {
             reason: "the MCP connection names neither a command nor an endpoint".to_owned(),
             config_error: true,
-        });
+        })
+    }
+}
+
+async fn open_stdio(
+    want: &Desired,
+    registry: ToolServerHandle,
+) -> Result<McpConnection, ConnectFailure> {
+    let handler = McpClientHandler::new(ClientConfig::default(), registry);
+    // A stdio server is a child process the host owns.
+    #[cfg(windows)]
+    let mut command = if super::npx::is_npx_command(&want.command) {
+        super::npx::build_command(want).await?
+    } else {
+        let mut command = tokio::process::Command::new(&want.command);
+        command.args(&want.args);
+        command
     };
-    Ok(connection)
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut command = tokio::process::Command::new(&want.command);
+        command.args(&want.args);
+        command
+    };
+    if !want.cwd.is_empty() {
+        command.current_dir(&want.cwd);
+    }
+    if !want.env.is_empty() {
+        command.envs(&want.env);
+    }
+    if let Some(secret) = want.secret.as_deref().filter(|s| !s.is_empty())
+        && !want.secret_env_var.is_empty()
+    {
+        command.env(&want.secret_env_var, secret);
+    }
+    let mut wrap = process_wrap::tokio::CommandWrap::from(command);
+    // One process group, killed on drop, so a host that exits does not
+    // orphan the server.
+    #[cfg(unix)]
+    wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
+    #[cfg(windows)]
+    wrap.wrap(process_wrap::tokio::JobObject);
+    wrap.wrap(process_wrap::tokio::KillOnDrop);
+    let transport = TokioChildProcess::new(wrap).map_err(|error| ConnectFailure {
+        config_error: error.kind() == std::io::ErrorKind::NotFound,
+        reason: error.to_string(),
+    })?;
+    Box::pin(handler.connect(transport)).await.map_err(|error| {
+        let reason = error.to_string();
+        ConnectFailure {
+            config_error: is_config_error_message(&reason),
+            reason,
+        }
+    })
+}
+
+async fn open_http(
+    want: &Desired,
+    registry: ToolServerHandle,
+) -> Result<McpConnection, ConnectFailure> {
+    let handler = McpClientHandler::new(ClientConfig::default(), registry);
+    // The host's one HTTP client, so the server shares its connection pool
+    // with every other endpoint the host calls.
+    let client = crate::host::net::client().map_err(|error| ConnectFailure {
+        reason: error.to_string(),
+        config_error: true,
+    })?;
+    let mut config = StreamableHttpClientTransportConfig::with_uri(want.endpoint.clone());
+    for (name, value) in &want.headers {
+        let header_name =
+            HeaderName::from_bytes(name.trim().as_bytes()).map_err(|error| ConnectFailure {
+                reason: format!("invalid MCP header `{name}`: {error}"),
+                config_error: true,
+            })?;
+        let header_value = HeaderValue::from_str(value).map_err(|error| ConnectFailure {
+            reason: format!("invalid MCP header value for `{name}`: {error}"),
+            config_error: true,
+        })?;
+        config.custom_headers.insert(header_name, header_value);
+    }
+    apply_http_auth_headers(&mut config, want)?;
+    let transport = StreamableHttpClientTransport::with_client(client, config);
+    Box::pin(handler.connect(transport)).await.map_err(|error| {
+        let reason = error.to_string();
+        ConnectFailure {
+            config_error: is_config_error_message(&reason),
+            reason,
+        }
+    })
+}
+
+fn apply_http_auth_headers(
+    config: &mut StreamableHttpClientTransportConfig,
+    want: &Desired,
+) -> Result<(), ConnectFailure> {
+    let Some(secret) = want
+        .secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|secret| !secret.is_empty())
+    else {
+        return Ok(());
+    };
+    let auth_header = want.auth_header.trim();
+    if auth_header.is_empty() || auth_header.eq_ignore_ascii_case("authorization") {
+        if let Some(bearer) = secret
+            .strip_prefix("Bearer ")
+            .or_else(|| secret.strip_prefix("bearer "))
+            .map(str::trim)
+        {
+            config.auth_header = Some(bearer.to_owned());
+        } else if secret.contains(char::is_whitespace) {
+            let header_value = HeaderValue::from_str(secret).map_err(|error| ConnectFailure {
+                reason: format!("invalid MCP credential header: {error}"),
+                config_error: true,
+            })?;
+            config.custom_headers.insert(AUTHORIZATION, header_value);
+        } else {
+            config.auth_header = Some(secret.to_owned());
+        }
+        return Ok(());
+    }
+    let header_name =
+        HeaderName::from_bytes(auth_header.as_bytes()).map_err(|error| ConnectFailure {
+            reason: format!("invalid MCP auth_header `{auth_header}`: {error}"),
+            config_error: true,
+        })?;
+    let header_value = HeaderValue::from_str(secret).map_err(|error| ConnectFailure {
+        reason: format!("invalid MCP credential value: {error}"),
+        config_error: true,
+    })?;
+    config.custom_headers.insert(header_name, header_value);
+    Ok(())
 }
 
 /// Clears any backoff or configuration hold on `id` so the supervisor attempts

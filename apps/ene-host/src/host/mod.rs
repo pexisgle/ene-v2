@@ -108,8 +108,6 @@ impl Runtime {
         Self::start_with(state, Options::default()).await
     }
 
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn start_with(
         state: &Path,
         options: Options,
@@ -128,11 +126,6 @@ impl Runtime {
         let (shutdown, shutdown_rx) = crossbeam_channel::bounded::<()>(1);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let hub = DeviceHub::default();
-        let device_timeout = options.device_timeout;
-        let wake = wake_tx.clone();
-        let thread_hub = hub.clone();
-        let host_runtime = tokio::runtime::Handle::current();
-        let thread_store = store.clone();
         // Plugin packages are read and verified once, before the kernel runs,
         // so every path that resolves a connection stays synchronous. The
         // instances the stored connections reference start here too, for the
@@ -150,111 +143,32 @@ impl Runtime {
             providers::extensions::discover_plugin_tools(&providers, &store),
             model::catalog::Refresh::initial()
         );
-        let thread_credentials = credentials.clone();
-        let thread = std::thread::Builder::new()
-            .name("ene-host-rig".into())
-            .spawn(move || {
-                let mut app = App::new();
-                app.set_error_handler(bevy_ecs::error::warn)
-                    .add_plugins(TaskPoolPlugin {
-                        task_pool_options: TaskPoolOptions {
-                            max_total_threads: 4,
-                            ..Default::default()
-                        },
-                    })
-                    .insert_resource(thread_store)
-                    .insert_resource(providers)
-                    .insert_resource(thread_credentials)
-                    .insert_resource(models)
-                    .insert_resource(catalog_refresh)
-                    .insert_resource(HostRuntime(host_runtime.clone()))
-                    .insert_resource(thread_hub.clone())
-                    .insert_resource(HostState::default())
-                    .insert_resource(Notifier::new())
-                    .insert_resource(Waiting::default())
-                    .insert_resource(Perception::default())
-                    .insert_resource(Approvals::default())
-                    .insert_resource(DeviceTimeout(device_timeout))
-                    .insert_resource(rig_ecs::tasks::Wake::new(move || {
-                        let _ = wake.try_send(());
-                    }))
-                    .insert_resource(SessionStore::new(logs))
-                    .add_plugins((
-                        AgentPlugin,
-                        SessionLogPlugin,
-                        agent::AgentPlugin,
-                        permission::GatePlugin,
-                        client::ClientPlugin,
-                        tools::sync::ToolsSyncPlugin,
-                        work::WorkPlugin,
-                        mind::MindPlugin,
-                        mcp::McpPlugin,
-                        providers::extensions::ExtensionPlugin,
-                        autonomy::AutonomyPlugin,
-                        compaction::CompactionPlugin,
-                        voice::VoicePlugin,
-                    ))
-                    .add_systems(Update, model::catalog::refresh.before(AgentLoop));
-                app.finish();
-                if let Some(mut time) = app.world_mut().get_resource_mut::<Time<Virtual>>() {
-                    time.set_max_delta(Duration::from_secs(60));
-                }
-                let result = (|| -> Result<()> {
-                    restore(app.world_mut())?;
-                    providers::extensions::register_plugin_tools(
-                        app.world_mut(),
-                        initial_plugin_tools,
-                    );
-                    tick(&mut app);
-                    restore_after_first_frame(app.world_mut())?;
-                    Ok(())
-                })();
-                let ok = result.is_ok();
-                let _ = ready_tx.send(result);
-                if !ok {
-                    return Ok(());
-                }
-                loop {
-                    match next(&command_rx, &wake_rx, &shutdown_rx) {
-                        Step::Job(job) => job(&mut app),
-                        Step::Wake => tick(&mut app),
-                        Step::Stop => {
-                            app.world_mut().resource_mut::<HostState>().closing = true;
-                            app.world_mut().write_message(AppExit::Success);
-                            tick(&mut app);
-                            return match &app.world().resource::<HostState>().failed {
-                                Some(reason) => Err(HostError::Unavailable(reason.clone())),
-                                None => Ok(()),
-                            };
-                        }
-                    }
-                }
-            })
-            .map_err(boxed)?;
+        let thread = spawn_kernel_thread(KernelLaunch {
+            resources: KernelResources {
+                store: store.clone(),
+                providers,
+                credentials: credentials.clone(),
+                models,
+                catalog_refresh,
+                host_runtime: tokio::runtime::Handle::current(),
+                hub: hub.clone(),
+                device_timeout: options.device_timeout,
+                wake: wake_tx,
+                logs,
+            },
+            initial_plugin_tools,
+            ready_tx,
+            command_rx,
+            wake_rx,
+            shutdown_rx,
+        })
+        .map_err(boxed)?;
         ready_rx
             .recv()
             .map_err(|_| boxed("Rig kernel did not start"))?
             .map_err(boxed)?;
         let voicevox = voice::voicevox::VoicevoxManager::default();
-        if !cfg!(test)
-            && let Ok(settings) = store.settings()
-            && let Some(vv) = settings.connections.iter().find(|conn| {
-                conn.enabled
-                    && conn.kind == settings::ConnectionKind::Tts
-                    && conn.endpoint().adapter.eq_ignore_ascii_case("voicevox")
-                    && !model::is_sakura_endpoint(&conn.endpoint().endpoint)
-                    && runtime_providers.get("voicevox").is_none()
-            })
-        {
-            let mgr = voicevox.clone();
-            let base = vv.endpoint().endpoint.clone();
-            let options = vv.endpoint().options.clone();
-            tokio::spawn(async move {
-                if let Err(error) = mgr.ensure_running(&base, &options).await {
-                    tracing::warn!(%error, "could not auto-start VOICEVOX engine at startup");
-                }
-            });
-        }
+        maybe_auto_start_voicevox(&store, &runtime_providers, &voicevox);
         Ok(Self {
             handle: Arc::new(Handle {
                 commands,
@@ -603,6 +517,155 @@ pub(crate) fn subscribe(
         )
     };
     Ok((snapshot(app)?, receiver, replayed))
+}
+
+struct KernelResources {
+    store: Store,
+    providers: providers::Providers,
+    credentials: Credentials,
+    models: rig_ecs::model::Models,
+    catalog_refresh: model::catalog::Refresh,
+    host_runtime: tokio::runtime::Handle,
+    hub: DeviceHub,
+    device_timeout: Duration,
+    wake: crossbeam_channel::Sender<()>,
+    logs: DirStore,
+}
+
+struct KernelLaunch {
+    resources: KernelResources,
+    initial_plugin_tools: Vec<(String, ene_plugin::PluginToolDefinition)>,
+    ready_tx: mpsc::SyncSender<Result<()>>,
+    command_rx: crossbeam_channel::Receiver<Job>,
+    wake_rx: crossbeam_channel::Receiver<()>,
+    shutdown_rx: crossbeam_channel::Receiver<()>,
+}
+
+fn spawn_kernel_thread(launch: KernelLaunch) -> std::io::Result<JoinHandle<Result<()>>> {
+    std::thread::Builder::new()
+        .name("ene-host-rig".into())
+        .spawn(move || {
+            let mut app = build_kernel_app(launch.resources);
+            let result = (|| -> Result<()> {
+                restore(app.world_mut())?;
+                providers::extensions::register_plugin_tools(
+                    app.world_mut(),
+                    launch.initial_plugin_tools,
+                );
+                tick(&mut app);
+                restore_after_first_frame(app.world_mut())?;
+                Ok(())
+            })();
+            let ok = result.is_ok();
+            let _ = launch.ready_tx.send(result);
+            if !ok {
+                return Ok(());
+            }
+            run_kernel_loop(
+                &mut app,
+                &launch.command_rx,
+                &launch.wake_rx,
+                &launch.shutdown_rx,
+            )
+        })
+}
+
+fn build_kernel_app(res: KernelResources) -> App {
+    let mut app = App::new();
+    app.set_error_handler(bevy_ecs::error::warn)
+        .add_plugins(TaskPoolPlugin {
+            task_pool_options: TaskPoolOptions {
+                max_total_threads: 4,
+                ..Default::default()
+            },
+        })
+        .insert_resource(res.store)
+        .insert_resource(res.providers)
+        .insert_resource(res.credentials)
+        .insert_resource(res.models)
+        .insert_resource(res.catalog_refresh)
+        .insert_resource(HostRuntime(res.host_runtime))
+        .insert_resource(res.hub)
+        .insert_resource(HostState::default())
+        .insert_resource(Notifier::new())
+        .insert_resource(Waiting::default())
+        .insert_resource(Perception::default())
+        .insert_resource(Approvals::default())
+        .insert_resource(DeviceTimeout(res.device_timeout))
+        .insert_resource(rig_ecs::tasks::Wake::new(move || {
+            let _ = res.wake.try_send(());
+        }))
+        .insert_resource(SessionStore::new(res.logs))
+        .add_plugins((
+            AgentPlugin,
+            SessionLogPlugin,
+            agent::AgentPlugin,
+            permission::GatePlugin,
+            client::ClientPlugin,
+            tools::sync::ToolsSyncPlugin,
+            work::WorkPlugin,
+            mind::MindPlugin,
+            mcp::McpPlugin,
+            providers::extensions::ExtensionPlugin,
+            autonomy::AutonomyPlugin,
+            compaction::CompactionPlugin,
+            voice::VoicePlugin,
+        ))
+        .add_systems(Update, model::catalog::refresh.before(AgentLoop));
+    app.finish();
+    if let Some(mut time) = app.world_mut().get_resource_mut::<Time<Virtual>>() {
+        time.set_max_delta(Duration::from_secs(60));
+    }
+    app
+}
+
+fn run_kernel_loop(
+    app: &mut App,
+    command_rx: &crossbeam_channel::Receiver<Job>,
+    wake_rx: &crossbeam_channel::Receiver<()>,
+    shutdown_rx: &crossbeam_channel::Receiver<()>,
+) -> Result<()> {
+    loop {
+        match next(command_rx, wake_rx, shutdown_rx) {
+            Step::Job(job) => job(app),
+            Step::Wake => tick(app),
+            Step::Stop => {
+                app.world_mut().resource_mut::<HostState>().closing = true;
+                app.world_mut().write_message(AppExit::Success);
+                tick(app);
+                return match &app.world().resource::<HostState>().failed {
+                    Some(reason) => Err(HostError::Unavailable(reason.clone())),
+                    None => Ok(()),
+                };
+            }
+        }
+    }
+}
+
+fn maybe_auto_start_voicevox(
+    store: &Store,
+    providers: &providers::Providers,
+    voicevox: &voice::voicevox::VoicevoxManager,
+) {
+    if !cfg!(test)
+        && let Ok(settings) = store.settings()
+        && let Some(vv) = settings.connections.iter().find(|conn| {
+            conn.enabled
+                && conn.kind == settings::ConnectionKind::Tts
+                && conn.endpoint().adapter.eq_ignore_ascii_case("voicevox")
+                && !model::is_sakura_endpoint(&conn.endpoint().endpoint)
+                && providers.get("voicevox").is_none()
+        })
+    {
+        let mgr = voicevox.clone();
+        let base = vv.endpoint().endpoint.clone();
+        let options = vv.endpoint().options.clone();
+        tokio::spawn(async move {
+            if let Err(error) = mgr.ensure_running(&base, &options).await {
+                tracing::warn!(%error, "could not auto-start VOICEVOX engine at startup");
+            }
+        });
+    }
 }
 
 #[cfg(test)]

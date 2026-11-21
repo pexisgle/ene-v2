@@ -60,7 +60,7 @@ impl Operation {
 }
 
 // Built once per plugin event and consumed immediately; boxing the harness
-// variant would add an allocation to every update.
+// variant would add an allocation to every update. Remove if `Event` is kept in collections.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]

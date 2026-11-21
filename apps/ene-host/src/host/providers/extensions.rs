@@ -44,8 +44,6 @@ pub(crate) struct HookOutcome {
 }
 
 /// Runs all installed `Extension::Hook` plugins in sorted plugin-ID order (`F18`).
-// TODO(Phase 1-3): split during refactoring.
-#[allow(clippy::cognitive_complexity)]
 pub(crate) async fn run_hooks(
     providers: &Providers,
     store: &Store,
@@ -53,55 +51,60 @@ pub(crate) async fn run_hooks(
 ) -> HookOutcome {
     let mut outcome = HookOutcome::default();
     for plugin_id in providers.with_extension(Extension::Hook) {
-        let running = match providers.start(&plugin_id, Extension::Hook).await {
-            Ok(running) => running,
-            Err(error) => {
-                tracing::warn!(plugin = %plugin_id, %error, "hook plugin failed to start");
-                continue;
+        match invoke_hook_plugin(providers, store, &plugin_id, &event).await {
+            Some(HookDecision::Continue) | None => {}
+            Some(HookDecision::Block { reason }) => {
+                outcome.blocked = Some(if reason.trim().is_empty() {
+                    format!("blocked by hook plugin `{plugin_id}`")
+                } else {
+                    reason
+                });
+                return outcome;
             }
-        };
-        let services = PluginServices::new(plugin_id.clone(), store.clone());
-        match running
-            .invoke(
-                Operation::Hook {
-                    event: event.clone(),
-                },
-                services,
-            )
-            .await
-        {
-            Ok(raw) => match serde_json::from_value::<HookDecision>(raw) {
-                Ok(HookDecision::Continue) => {}
-                Ok(HookDecision::Block { reason }) => {
-                    outcome.blocked = Some(if reason.trim().is_empty() {
-                        format!("blocked by hook plugin `{plugin_id}`")
-                    } else {
-                        reason
-                    });
-                    return outcome;
+            Some(HookDecision::InjectContext { text }) => {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    outcome.injected_context.push(trimmed.to_owned());
                 }
-                Ok(HookDecision::InjectContext { text }) => {
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() {
-                        outcome.injected_context.push(trimmed.to_owned());
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(plugin = %plugin_id, %error, "hook plugin returned invalid decision");
-                }
-            },
-            Err(error) => {
-                tracing::warn!(plugin = %plugin_id, %error, "hook plugin invocation failed");
             }
         }
     }
     outcome
 }
 
+async fn invoke_hook_plugin(
+    providers: &Providers,
+    store: &Store,
+    plugin_id: &str,
+    event: &HookEvent,
+) -> Option<HookDecision> {
+    let running = providers
+        .start(plugin_id, Extension::Hook)
+        .await
+        .map_err(|error| tracing::warn!(plugin = %plugin_id, %error, "hook plugin failed to start"))
+        .ok()?;
+    let services = PluginServices::new(plugin_id.to_owned(), store.clone());
+    let raw = running
+        .invoke(
+            Operation::Hook {
+                event: event.clone(),
+            },
+            services,
+        )
+        .await
+        .map_err(
+            |error| tracing::warn!(plugin = %plugin_id, %error, "hook plugin invocation failed"),
+        )
+        .ok()?;
+    serde_json::from_value::<HookDecision>(raw)
+        .map_err(|error| {
+            tracing::warn!(plugin = %plugin_id, %error, "hook plugin returned invalid decision")
+        })
+        .ok()
+}
+
 /// Dispatches one `CharacterEvent` to all installed `Extension::Character`
 /// plugins for `companion_id` and collects validated `CharacterAction`s (`F17`).
-// TODO(Phase 1-3): split during refactoring.
-#[allow(clippy::cognitive_complexity)]
 pub(crate) async fn dispatch_character_event(
     providers: &Providers,
     store: &Store,
@@ -110,49 +113,59 @@ pub(crate) async fn dispatch_character_event(
 ) -> Vec<CharacterAction> {
     let mut actions = Vec::new();
     for plugin_id in providers.with_extension(Extension::Character) {
-        let running = match providers.start(&plugin_id, Extension::Character).await {
-            Ok(running) => running,
-            Err(error) => {
-                tracing::warn!(plugin = %plugin_id, %error, "character plugin failed to start");
-                continue;
-            }
-        };
-        let services = PluginServices::new(plugin_id.clone(), store.clone());
-        let (tx, mut rx) = mpsc::channel(32);
-        let expected_target = target.clone();
-        let collector = tokio::spawn(async move {
-            let mut collected = Vec::new();
-            while let Some(ev) = rx.recv().await {
-                if let Event::Character {
-                    target: emitted_target,
-                    action,
-                } = ev
-                    && emitted_target == expected_target
-                {
-                    collected.push(action);
-                }
-            }
-            collected
-        });
-        if let Err(error) = running
-            .invoke_streaming(
-                Operation::Character {
-                    target: target.clone(),
-                    event: event.clone(),
-                },
-                services,
-                tx,
-            )
-            .await
-        {
-            tracing::warn!(plugin = %plugin_id, %error, "character plugin invocation failed");
-            continue;
-        }
-        if let Ok(mut collected) = collector.await {
-            actions.append(&mut collected);
-        }
+        let mut collected =
+            invoke_character_plugin(providers, store, &plugin_id, &target, &event).await;
+        actions.append(&mut collected);
     }
     actions
+}
+
+async fn invoke_character_plugin(
+    providers: &Providers,
+    store: &Store,
+    plugin_id: &str,
+    target: &CharacterTarget,
+    event: &CharacterEvent,
+) -> Vec<CharacterAction> {
+    let running = match providers.start(plugin_id, Extension::Character).await {
+        Ok(running) => running,
+        Err(error) => {
+            tracing::warn!(plugin = %plugin_id, %error, "character plugin failed to start");
+            return Vec::new();
+        }
+    };
+    let services = PluginServices::new(plugin_id.to_owned(), store.clone());
+    let (tx, mut rx) = mpsc::channel(32);
+    let expected_target = target.clone();
+    let collector = tokio::spawn(async move {
+        let mut collected = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            if let Event::Character {
+                target: emitted_target,
+                action,
+            } = ev
+                && emitted_target == expected_target
+            {
+                collected.push(action);
+            }
+        }
+        collected
+    });
+    if let Err(error) = running
+        .invoke_streaming(
+            Operation::Character {
+                target: target.clone(),
+                event: event.clone(),
+            },
+            services,
+            tx,
+        )
+        .await
+    {
+        tracing::warn!(plugin = %plugin_id, %error, "character plugin invocation failed");
+        return Vec::new();
+    }
+    collector.await.unwrap_or_default()
 }
 
 /// Applies validated `CharacterAction`s emitted by an `Extension::Character`
@@ -297,8 +310,6 @@ impl Serve for PluginToolHandler {
 }
 
 /// Discovers tool definitions from all installed `Extension::Tool` plugins (`F20`).
-// TODO(Phase 1-3): split during refactoring.
-#[allow(clippy::cognitive_complexity)]
 pub(crate) async fn discover_plugin_tools(
     providers: &Providers,
     store: &Store,
@@ -306,42 +317,63 @@ pub(crate) async fn discover_plugin_tools(
     let mut discovered = Vec::new();
     let mut seen_names = HashSet::new();
     for plugin_id in providers.with_extension(Extension::Tool) {
-        let running = match providers.start(&plugin_id, Extension::Tool).await {
-            Ok(running) => running,
-            Err(error) => {
-                tracing::warn!(plugin = %plugin_id, %error, "tool plugin failed to start");
-                continue;
-            }
-        };
-        let services = PluginServices::new(plugin_id.clone(), store.clone());
-        match running.invoke(Operation::ListTools, services).await {
-            Ok(raw) => match serde_json::from_value::<Vec<PluginToolDefinition>>(raw) {
-                Ok(defs) => {
-                    for def in defs {
-                        if def.name.trim().is_empty()
-                            || ene_rpc::BUILTIN_TOOLS.contains(&def.name.as_str())
-                            || !seen_names.insert(def.name.clone())
-                        {
-                            tracing::warn!(
-                                plugin = %plugin_id,
-                                tool = %def.name,
-                                "skipping invalid or colliding plugin tool name"
-                            );
-                            continue;
-                        }
-                        discovered.push((plugin_id.clone(), def));
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(plugin = %plugin_id, %error, "tool plugin returned invalid ListTools payload");
-                }
-            },
-            Err(error) => {
-                tracing::warn!(plugin = %plugin_id, %error, "tool plugin ListTools failed");
-            }
-        }
+        let mut tools =
+            discover_tools_from_plugin(providers, store, &plugin_id, &mut seen_names).await;
+        discovered.append(&mut tools);
     }
     discovered
+}
+
+async fn discover_tools_from_plugin(
+    providers: &Providers,
+    store: &Store,
+    plugin_id: &str,
+    seen_names: &mut HashSet<String>,
+) -> Vec<(String, PluginToolDefinition)> {
+    let Ok(running) = providers.start(plugin_id, Extension::Tool).await.map_err(
+        |error| tracing::warn!(plugin = %plugin_id, %error, "tool plugin failed to start"),
+    ) else {
+        return Vec::new();
+    };
+    let services = PluginServices::new(plugin_id.to_owned(), store.clone());
+    let Ok(raw) = running
+        .invoke(Operation::ListTools, services)
+        .await
+        .map_err(
+            |error| tracing::warn!(plugin = %plugin_id, %error, "tool plugin ListTools failed"),
+        )
+    else {
+        return Vec::new();
+    };
+    filter_plugin_tool_defs(plugin_id, raw, seen_names)
+}
+
+fn filter_plugin_tool_defs(
+    plugin_id: &str,
+    raw: Value,
+    seen_names: &mut HashSet<String>,
+) -> Vec<(String, PluginToolDefinition)> {
+    let Ok(defs) = serde_json::from_value::<Vec<PluginToolDefinition>>(raw).map_err(|error| {
+        tracing::warn!(plugin = %plugin_id, %error, "tool plugin returned invalid ListTools payload");
+    }) else {
+        return Vec::new();
+    };
+    defs.into_iter()
+        .filter(|def| {
+            let valid = !def.name.trim().is_empty()
+                && !ene_rpc::BUILTIN_TOOLS.contains(&def.name.as_str())
+                && seen_names.insert(def.name.clone());
+            if !valid {
+                tracing::warn!(
+                    plugin = %plugin_id,
+                    tool = %def.name,
+                    "skipping invalid or colliding plugin tool name"
+                );
+            }
+            valid
+        })
+        .map(|def| (plugin_id.to_owned(), def))
+        .collect()
 }
 
 /// Spawns discovered plugin tools as ECS tool entities and refreshes agent `ToolAccess`.

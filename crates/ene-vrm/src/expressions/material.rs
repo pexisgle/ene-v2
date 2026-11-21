@@ -50,26 +50,35 @@ pub(super) fn world_ready(
     }
 }
 
-#[allow(clippy::type_complexity)]
+type MaterialInitRoots<'w, 's, M> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        Ref<'static, Binds>,
+        Has<PendingMaterials<M>>,
+        Has<MaterialInitializationRequested>,
+    ),
+    Without<MaterialBinds<M>>,
+>;
+
+type MaterialMeshReadQuery<'w, 's, M> = Query<
+    'w,
+    's,
+    (
+        &'static crate::material::MaterialSlot,
+        &'static MeshMaterial3d<M>,
+        Option<&'static BaseUv>,
+        Option<&'static EmissiveStrength>,
+    ),
+>;
+
 pub(super) fn initialize_materials<M: bevy::pbr::Material + Clone>(
     mut commands: Commands,
-    roots: Query<
-        (
-            Entity,
-            Ref<Binds>,
-            Has<PendingMaterials<M>>,
-            Has<MaterialInitializationRequested>,
-        ),
-        Without<MaterialBinds<M>>,
-    >,
+    roots: MaterialInitRoots<'_, '_, M>,
     children: Query<&Children>,
     mut meshes: ParamSet<(
-        Query<(
-            &crate::material::MaterialSlot,
-            &MeshMaterial3d<M>,
-            Option<&BaseUv>,
-            Option<&EmissiveStrength>,
-        )>,
+        MaterialMeshReadQuery<'_, '_, M>,
         Query<&mut MeshMaterial3d<M>>,
     )>,
     mut materials: ResMut<Assets<M>>,
@@ -195,11 +204,14 @@ pub(super) fn apply_material<M: BindMaterial>(
         };
         let (cur_base, cur_toon) = current.base();
         let (color, emissive, uv, toon, bounds) = compute_material(
-            (base_color, emissive),
-            *emissive_strength,
-            *base_uv,
-            rest_toon.as_ref(),
-            toon_uv,
+            &MaterialRestState {
+                base_color,
+                emissive,
+                emissive_strength: *emissive_strength,
+                base_uv: *base_uv,
+                rest_toon: rest_toon.as_ref(),
+                toon_uv,
+            },
             index,
             effective,
         );
@@ -251,17 +263,20 @@ pub(super) fn apply_material<M: BindMaterial>(
     }
 }
 
+struct MaterialRestState<'a> {
+    base_color: Color,
+    emissive: LinearRgba,
+    emissive_strength: f32,
+    base_uv: UvTransform,
+    rest_toon: Option<&'a schema::ToonParams>,
+    toon_uv: Option<[UvTransform; 6]>,
+}
+
 /// `emissive` is the loaded value, which already includes
 /// `KHR_materials_emissive_strength`; expression targets are raw
 /// `emissiveFactor` values, so only the target is scaled again.
-// TODO(Phase 1-3): split during refactoring.
-#[allow(clippy::too_many_arguments)]
 fn compute_material(
-    (base_color, emissive): (Color, LinearRgba),
-    emissive_strength: f32,
-    base_uv: UvTransform,
-    rest_toon: Option<&schema::ToonParams>,
-    toon_uv: Option<[UvTransform; 6]>,
+    rest_state: &MaterialRestState<'_>,
     index: usize,
     weights: &[(&ExpressionBinding, f32)],
 ) -> (
@@ -271,6 +286,14 @@ fn compute_material(
     Option<schema::ToonParams>,
     MaterialBounds,
 ) {
+    let MaterialRestState {
+        base_color,
+        emissive,
+        emissive_strength,
+        base_uv,
+        rest_toon,
+        toon_uv,
+    } = *rest_state;
     let mut value = base_color.to_linear().to_vec4();
     let mut emission = emissive.to_vec3();
     let mut bounds = MaterialBounds::default();

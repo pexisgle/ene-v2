@@ -449,21 +449,11 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore = "requires a GPU; runs in CI with lavapipe"]
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::too_many_lines)]
-    fn review_transformed_shading_shift_gradient_matches_reference_pixels() {
+    fn setup_gradient_shift_scene(app: &mut App) -> (Entity, Handle<Image>, Handle<Image>) {
         use bevy::{
             camera::{Exposure, RenderTarget, ScalingMode},
             core_pipeline::tonemapping::Tonemapping,
-            render::view::screenshot::{Screenshot, ScreenshotCaptured},
         };
-        #[derive(Resource, Default)]
-        struct Capture(Option<Image>);
-
-        let mut app = gpu_app(ClearColor(Color::NONE));
-        app.init_resource::<Capture>();
         app.insert_resource(GlobalAmbientLight {
             brightness: 0.,
             ..default()
@@ -524,6 +514,19 @@ mod tests {
             illuminance: std::f32::consts::PI / Exposure::BLENDER.exposure(),
             ..default()
         });
+        (body, target, gradient)
+    }
+
+    #[test]
+    #[ignore = "requires a GPU; runs in CI with lavapipe"]
+    fn review_transformed_shading_shift_gradient_matches_reference_pixels() {
+        use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
+        #[derive(Resource, Default)]
+        struct Capture(Option<Image>);
+
+        let mut app = gpu_app(ClearColor(Color::NONE));
+        app.init_resource::<Capture>();
+        let (body, target, gradient) = setup_gradient_shift_scene(&mut app);
         for (scale, rotation, offset) in [
             ([-0.6f32, 0.4], std::f32::consts::FRAC_PI_3, [0.7f32, 0.1]),
             ([0., -0.75], std::f32::consts::FRAC_PI_2, [0.9, 0.2]),
@@ -577,44 +580,42 @@ mod tests {
                 .try_into_dynamic()
                 .unwrap()
                 .to_rgba8();
-            for y in [6, 15, 24] {
-                for x in [5, 14, 25] {
-                    let uv = [(x as f32 + 0.5) / 32., (y as f32 + 0.5) / 32.];
-                    let u = offset[0]
-                        + rotation.cos() * scale[0] * uv[0]
-                        + rotation.sin() * scale[1] * uv[1];
-                    let texel = (u.clamp(0., 1.) * 16.).floor().min(15.);
-                    let linear = texel / 15.;
-                    let expected = Color::linear_rgb(linear, linear, linear)
-                        .to_srgba()
-                        .to_u8_array();
-                    let actual = image.get_pixel(x, y).0;
-                    eprintln!(
-                        "shift scale={scale:?} pixel=({x},{y}) u={u} actual={actual:?} expected={expected:?}"
+            assert_gradient_pixels(|x, y| image.get_pixel(x, y).0, scale, rotation, offset);
+        }
+    }
+
+    fn assert_gradient_pixels(
+        pixel: impl Fn(u32, u32) -> [u8; 4],
+        scale: [f32; 2],
+        rotation: f32,
+        offset: [f32; 2],
+    ) {
+        for y in [6, 15, 24] {
+            for x in [5, 14, 25] {
+                let uv = [(x as f32 + 0.5) / 32., (y as f32 + 0.5) / 32.];
+                let u = offset[0]
+                    + rotation.cos() * scale[0] * uv[0]
+                    + rotation.sin() * scale[1] * uv[1];
+                let texel = (u.clamp(0., 1.) * 16.).floor().min(15.);
+                let linear = texel / 15.;
+                let expected = Color::linear_rgb(linear, linear, linear)
+                    .to_srgba()
+                    .to_u8_array();
+                let actual = pixel(x, y);
+                eprintln!(
+                    "shift scale={scale:?} pixel=({x},{y}) u={u} actual={actual:?} expected={expected:?}"
+                );
+                for channel in 0..4 {
+                    assert!(
+                        actual[channel].abs_diff(expected[channel]) <= 2,
+                        "scale={scale:?}, ({x},{y}): rendered {actual:?}, expected {expected:?}"
                     );
-                    for channel in 0..4 {
-                        assert!(
-                            actual[channel].abs_diff(expected[channel]) <= 2,
-                            "scale={scale:?}, ({x},{y}): rendered {actual:?}, expected {expected:?}"
-                        );
-                    }
                 }
             }
         }
     }
 
-    #[test]
-    #[ignore = "requires a GPU; runs in CI with lavapipe"]
-    // TODO(Phase 1-3): split during refactoring.
-    #[allow(clippy::too_many_lines)]
-    fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
-        use bevy::mesh::PrimitiveTopology;
-        use bevy::render::{
-            RenderApp,
-            render_resource::{CachedPipelineState, PipelineCache},
-        };
-        let mut app = gpu_app(ClearColor(Color::NONE));
-
+    fn build_smoke_materials(app: &mut App) -> (Handle<MToonMaterial>, Handle<MToonMaterial>) {
         let color_image = app
             .world_mut()
             .resource_mut::<Assets<Image>>()
@@ -704,7 +705,11 @@ mod tests {
                     },
                     extension: outline_extension,
                 });
+        (body_material, outline_material)
+    }
 
+    fn build_smoke_mesh(app: &mut App) -> Handle<Mesh> {
+        use bevy::mesh::PrimitiveTopology;
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::default(),
@@ -729,7 +734,19 @@ mod tests {
             MorphAttributes::new(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
             3
         ]);
-        let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh);
+        app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh)
+    }
+
+    #[test]
+    #[ignore = "requires a GPU; runs in CI with lavapipe"]
+    fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
+        use bevy::render::{
+            RenderApp,
+            render_resource::{CachedPipelineState, PipelineCache},
+        };
+        let mut app = gpu_app(ClearColor(Color::NONE));
+        let (body_material, outline_material) = build_smoke_materials(&mut app);
+        let mesh = build_smoke_mesh(&mut app);
         let joint = app.world_mut().spawn(Transform::default()).id();
         let inverse_bindposes = app
             .world_mut()

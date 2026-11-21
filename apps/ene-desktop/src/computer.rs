@@ -14,10 +14,26 @@ use windows::Win32::{
 };
 
 pub(crate) const PREFERENCE: &str = "desktop-computer-use";
-pub(crate) const PARTIAL_INPUT: &str =
+const PARTIAL_INPUT: &str =
     "Windows accepted only part of the input; outcome unknown, do not retry it";
 const FRAME_LIFETIME: Duration = Duration::from_secs(60);
 const REFRESH: &str = "the screen or user input changed; take a new screenshot";
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ComputerUseError {
+    #[error("invalid Computer Use action: {0}")]
+    InvalidAction(#[from] serde_json::Error),
+    #[error("{PARTIAL_INPUT}")]
+    PartialInput,
+    #[error("{0}")]
+    Message(&'static str),
+}
+
+impl From<&'static str> for ComputerUseError {
+    fn from(message: &'static str) -> Self {
+        Self::Message(message)
+    }
+}
 
 pub(crate) fn spec() -> ene_rpc::ClientCapabilitySpec {
     fn action(name: &str, mut properties: Value) -> Value {
@@ -187,9 +203,8 @@ pub(crate) async fn execute(
     run: &str,
     input: Value,
     avatar_pid: Option<u32>,
-) -> Result<Value, String> {
-    let action: Action = serde_json::from_value(input)
-        .map_err(|error| format!("invalid Computer Use action: {error}"))?;
+) -> Result<Value, ComputerUseError> {
+    let action: Action = serde_json::from_value(input)?;
     let frame_id = match &action {
         Action::Screenshot => {
             *frame = None;
@@ -214,7 +229,7 @@ pub(crate) async fn execute(
         .ok_or("could not check physical desktop coordinates")?
 }
 
-fn capture(run: String) -> Result<(Frame, Value), String> {
+fn capture(run: String) -> Result<(Frame, Value), ComputerUseError> {
     let desktop = screen::physical(Desktop::read)
         .flatten()
         .ok_or("the interactive desktop is unavailable")?;
@@ -252,7 +267,11 @@ fn capture(run: String) -> Result<(Frame, Value), String> {
     ))
 }
 
-fn apply(frame: &Frame, action: Action, avatar_pid: Option<u32>) -> Result<Value, String> {
+fn apply(
+    frame: &Frame,
+    action: Action,
+    avatar_pid: Option<u32>,
+) -> Result<Value, ComputerUseError> {
     let mut events = Vec::new();
     let check_focus = !matches!(action, Action::Click { .. });
     let point = match action {
@@ -330,7 +349,7 @@ fn apply(frame: &Frame, action: Action, avatar_pid: Option<u32>) -> Result<Value
             )
         };
     }
-    Err(PARTIAL_INPUT.into())
+    Err(ComputerUseError::PartialInput)
 }
 
 fn verify_target(
@@ -338,7 +357,7 @@ fn verify_target(
     point: Option<POINT>,
     check_focus: bool,
     avatar_pid: Option<u32>,
-) -> Result<(), String> {
+) -> Result<(), ComputerUseError> {
     if Desktop::read().as_ref() != Some(&frame.desktop) {
         return Err(REFRESH.into());
     }
@@ -388,7 +407,7 @@ fn verify_target(
     Ok(())
 }
 
-fn verify_window(target: HWND, avatar_pid: Option<u32>) -> Result<(), String> {
+fn verify_window(target: HWND, avatar_pid: Option<u32>) -> Result<(), ComputerUseError> {
     if target.is_invalid() {
         return Err("the input target is unavailable".into());
     }
@@ -407,7 +426,7 @@ fn verify_window(target: HWND, avatar_pid: Option<u32>) -> Result<(), String> {
     Ok(())
 }
 
-fn point(frame: &Frame, x: u32, y: u32) -> Result<POINT, String> {
+fn point(frame: &Frame, x: u32, y: u32) -> Result<POINT, ComputerUseError> {
     if x >= frame.width || y >= frame.height {
         return Err("coordinates are outside the screenshot".into());
     }
@@ -422,9 +441,9 @@ fn point(frame: &Frame, x: u32, y: u32) -> Result<POINT, String> {
     })
 }
 
-fn movement(desktop: &Desktop, point: POINT) -> Result<input::INPUT, String> {
+fn movement(desktop: &Desktop, point: POINT) -> Result<input::INPUT, ComputerUseError> {
     let screen = desktop.virtual_screen;
-    let axis = |position, start, end| -> Result<i32, String> {
+    let axis = |position, start, end| -> Result<i32, ComputerUseError> {
         if !(start..end).contains(&position) || end - start > 65536 {
             return Err("the pointer position cannot be addressed on the current desktop".into());
         }

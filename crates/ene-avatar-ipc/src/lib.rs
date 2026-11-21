@@ -58,12 +58,20 @@ pub struct Request {
     pub command: Command,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum EncodeError {
+    #[error("{0}")]
+    Serialize(#[from] serde_json::Error),
+    #[error("the request exceeds the renderer's 64 KiB line limit")]
+    LineTooLong,
+}
+
 impl Request {
-    pub fn encode_line(&self) -> Result<String, String> {
-        let mut line = serde_json::to_string(self).map_err(|error| error.to_string())?;
+    pub fn encode_line(&self) -> Result<String, EncodeError> {
+        let mut line = serde_json::to_string(self)?;
         line.push('\n');
         if line.len() > MAX_LINE {
-            return Err("the request exceeds the renderer's 64 KiB line limit".into());
+            return Err(EncodeError::LineTooLong);
         }
         Ok(line)
     }

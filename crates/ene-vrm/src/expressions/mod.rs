@@ -350,13 +350,18 @@ pub(crate) fn look_at_scale(binds: &Binds, raw: impl Fn(&ExpressionBinding) -> f
     1. - rate.clamp(0., 1.)
 }
 
-#[allow(clippy::type_complexity)]
+type ExpressionRoots<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Binds,
+        Option<&'static MaterialBinds<StandardMaterial>>,
+        Option<&'static MaterialBinds<MToonMaterial>>,
+    ),
+>;
+
 pub(crate) fn apply(
-    roots: Query<(
-        &Binds,
-        Option<&MaterialBinds<StandardMaterial>>,
-        Option<&MaterialBinds<MToonMaterial>>,
-    )>,
+    roots: ExpressionRoots<'_, '_>,
     inputs: Query<&animation::ExpressionInput>,
     mut morphs: Query<&mut MorphWeights>,
     mut standard: ResMut<Assets<StandardMaterial>>,

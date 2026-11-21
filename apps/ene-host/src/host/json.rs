@@ -42,17 +42,26 @@ pub(crate) fn parse_schema(text: &str) -> Result<Value> {
     Ok(value)
 }
 
-fn validator(schema: &Value) -> std::result::Result<Arc<jsonschema::Validator>, String> {
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SchemaError {
+    #[error("input: schema is not serializable: {0}")]
+    SchemaSerialize(#[from] serde_json::Error),
+    #[error("input: schema is not valid: {0}")]
+    InvalidSchema(String),
+    #[error("input: {0}")]
+    Validation(String),
+}
+
+fn validator(schema: &Value) -> std::result::Result<Arc<jsonschema::Validator>, SchemaError> {
     static CACHE: OnceLock<Mutex<LruCache<String, Arc<jsonschema::Validator>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(LruCache::new(256)));
-    let key = serde_json::to_string(schema)
-        .map_err(|error| format!("input: schema is not serializable: {error}"))?;
+    let key = serde_json::to_string(schema)?;
     if let Some(validator) = cache.lock().ok().and_then(|mut map| map.get(&key).cloned()) {
         return Ok(validator);
     }
     let validator = Arc::new(
         jsonschema::validator_for(schema)
-            .map_err(|error| format!("input: schema is not valid: {error}"))?,
+            .map_err(|error| SchemaError::InvalidSchema(error.to_string()))?,
     );
     if let Ok(mut map) = cache.lock() {
         if let Some(cached) = map.get(&key) {
@@ -65,8 +74,8 @@ fn validator(schema: &Value) -> std::result::Result<Arc<jsonschema::Validator>, 
 
 /// Validates `instance` against `schema` with the standard JSON Schema
 /// validator. An error is a client-visible explanation without a path dump.
-pub(crate) fn validate(schema: &Value, instance: &Value) -> std::result::Result<(), String> {
+pub(crate) fn validate(schema: &Value, instance: &Value) -> std::result::Result<(), SchemaError> {
     validator(schema)?
         .validate(instance)
-        .map_err(|error| format!("input: {error}"))
+        .map_err(|error| SchemaError::Validation(error.to_string()))
 }

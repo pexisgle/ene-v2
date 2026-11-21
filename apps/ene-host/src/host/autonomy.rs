@@ -110,11 +110,13 @@ fn create(world: &mut World, agent: Entity, args: CreateArgs) -> Result<String> 
     let store = world.resource::<Store>().clone();
     let clock = world.resource::<ScheduleClock>().clone();
     let schedule = store.insert_schedule(
-        &companion,
-        &args.title,
-        &args.instruction,
-        args.run_at.as_deref(),
-        args.cron_expr.as_deref(),
+        super::db::schedules::NewSchedule {
+            companion: &companion,
+            title: &args.title,
+            instruction: &args.instruction,
+            run_at: args.run_at.as_deref(),
+            cron_expr: args.cron_expr.as_deref(),
+        },
         &clock,
     )?;
     Ok(json!({
@@ -226,8 +228,12 @@ fn confirm_delivered_schedules(world: &mut World) {
 ///   pending and retry cleanly once the model is bound.
 /// - Restarts after the conversation persisted the message mark the occurrence
 ///   `delivered` without queuing a duplicate.
-// TODO(Phase 1-3): split during refactoring.
-#[allow(clippy::cognitive_complexity)]
+enum OccurrenceOutcome {
+    Delivered,
+    Skipped,
+    FatalStorage,
+}
+
 pub(crate) fn poll_schedules(world: &mut World, now: Timestamp) -> usize {
     let Some(store) = world.get_resource::<Store>().cloned() else {
         return 0;
@@ -256,46 +262,60 @@ pub(crate) fn poll_schedules(world: &mut World, now: Timestamp) -> usize {
     };
     let mut fired = 0;
     for occ in occurrences {
-        let Some(agent) = agent::agent_of(world, &occ.companion_id) else {
-            continue;
-        };
-        if conversation_has_occurrence(world, agent, &occ.occurrence_key) {
-            if let Err(error) = store.mark_occurrence_delivered(&occ.occurrence_key, now) {
-                if error.is_storage() {
-                    super::fail(world, error.to_string());
-                    return fired;
-                }
-                tracing::warn!(%error, key = %occ.occurrence_key, "delivered schedule occurrence was not recorded");
-            }
-            continue;
-        }
-        if inbox_has_occurrence(world, agent, &occ.occurrence_key) {
-            continue;
-        }
-        // The head decides what to do; the reason is the only extra context it
-        // gets, and the message waits for a running turn instead of cutting in.
-        let text = format!("[スケジュール実行: {}] {}", occ.title, occ.instruction);
-        if agent::deliver(
-            world,
-            agent,
-            &occ.companion_id,
-            text,
-            DeliveryMode::Queue,
-            schedule_author(&occ.occurrence_key),
-        ) {
-            // Flush the deferred `Deliver` spawn so a back-to-back poll in the
-            // same frame sees the queued `Incoming` entity and stays idempotent.
-            world.flush();
-            fired += 1;
-        } else if let Err(error) =
-            store.record_occurrence_attempt(&occ.occurrence_key, "model unavailable")
-            && error.is_storage()
-        {
-            super::fail(world, error.to_string());
-            return fired;
+        match dispatch_due_occurrence(world, &store, &occ, now) {
+            OccurrenceOutcome::Delivered => fired += 1,
+            OccurrenceOutcome::Skipped => {}
+            OccurrenceOutcome::FatalStorage => return fired,
         }
     }
     fired
+}
+
+fn dispatch_due_occurrence(
+    world: &mut World,
+    store: &Store,
+    occ: &super::db::schedules::ScheduleOccurrence,
+    now: Timestamp,
+) -> OccurrenceOutcome {
+    let Some(agent) = agent::agent_of(world, &occ.companion_id) else {
+        return OccurrenceOutcome::Skipped;
+    };
+    if conversation_has_occurrence(world, agent, &occ.occurrence_key) {
+        if let Err(error) = store.mark_occurrence_delivered(&occ.occurrence_key, now) {
+            if error.is_storage() {
+                super::fail(world, error.to_string());
+                return OccurrenceOutcome::FatalStorage;
+            }
+            tracing::warn!(%error, key = %occ.occurrence_key, "delivered schedule occurrence was not recorded");
+        }
+        return OccurrenceOutcome::Skipped;
+    }
+    if inbox_has_occurrence(world, agent, &occ.occurrence_key) {
+        return OccurrenceOutcome::Skipped;
+    }
+    // The head decides what to do; the reason is the only extra context it
+    // gets, and the message waits for a running turn instead of cutting in.
+    let text = format!("[スケジュール実行: {}] {}", occ.title, occ.instruction);
+    if agent::deliver(
+        world,
+        agent,
+        &occ.companion_id,
+        text,
+        DeliveryMode::Queue,
+        schedule_author(&occ.occurrence_key),
+    ) {
+        // Flush the deferred `Deliver` spawn so a back-to-back poll in the
+        // same frame sees the queued `Incoming` entity and stays idempotent.
+        world.flush();
+        return OccurrenceOutcome::Delivered;
+    }
+    if let Err(error) = store.record_occurrence_attempt(&occ.occurrence_key, "model unavailable")
+        && error.is_storage()
+    {
+        super::fail(world, error.to_string());
+        return OccurrenceOutcome::FatalStorage;
+    }
+    OccurrenceOutcome::Skipped
 }
 
 /// Checks the schedules once a real-time second and delivers the due ones.
@@ -376,11 +396,13 @@ mod tests {
         let schedule = harness
             .store()
             .insert_schedule(
-                &harness.companion,
-                "朝会",
-                "9時に集合と伝える",
-                Some("2000-01-01T00:00:00Z"),
-                None,
+                crate::host::db::schedules::NewSchedule {
+                    companion: &harness.companion,
+                    title: "朝会",
+                    instruction: "9時に集合と伝える",
+                    run_at: Some("2000-01-01T00:00:00Z"),
+                    cron_expr: None,
+                },
                 &clock,
             )
             .unwrap();
@@ -436,11 +458,13 @@ mod tests {
         let schedule = harness
             .store()
             .insert_schedule(
-                &harness.companion,
-                "定時",
-                "声をかける",
-                None,
-                Some("0 9 * * *"),
+                crate::host::db::schedules::NewSchedule {
+                    companion: &harness.companion,
+                    title: "定時",
+                    instruction: "声をかける",
+                    run_at: None,
+                    cron_expr: Some("0 9 * * *"),
+                },
                 &clock,
             )
             .unwrap();
@@ -484,11 +508,13 @@ mod tests {
         let schedule = harness
             .store()
             .insert_schedule(
-                &harness.companion,
-                "定時",
-                "声をかける",
-                None,
-                Some("0 9 * * *"),
+                crate::host::db::schedules::NewSchedule {
+                    companion: &harness.companion,
+                    title: "定時",
+                    instruction: "声をかける",
+                    run_at: None,
+                    cron_expr: Some("0 9 * * *"),
+                },
                 &created,
             )
             .unwrap();
@@ -518,11 +544,13 @@ mod tests {
         let schedule = harness
             .store()
             .insert_schedule(
-                "missing-companion",
-                "no head",
-                "never delivered",
-                Some("2000-01-01T00:00:00Z"),
-                None,
+                crate::host::db::schedules::NewSchedule {
+                    companion: "missing-companion",
+                    title: "no head",
+                    instruction: "never delivered",
+                    run_at: Some("2000-01-01T00:00:00Z"),
+                    cron_expr: None,
+                },
                 &clock,
             )
             .unwrap();
@@ -549,11 +577,13 @@ mod tests {
         let schedule = harness
             .store()
             .insert_schedule(
-                &harness.companion,
-                "大事な予定",
-                "会議が始まるよ",
-                Some("2026-11-14T08:00:00Z"),
-                None,
+                crate::host::db::schedules::NewSchedule {
+                    companion: &harness.companion,
+                    title: "大事な予定",
+                    instruction: "会議が始まるよ",
+                    run_at: Some("2026-11-14T08:00:00Z"),
+                    cron_expr: None,
+                },
                 &clock,
             )
             .unwrap();

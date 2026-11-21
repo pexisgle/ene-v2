@@ -8,34 +8,45 @@ use ene_rpc as w;
 
 pub(crate) const TEMPLATE_FORMAT_VERSION: u32 = 1;
 
-pub(crate) fn export_template_json(template: &w::CompanionTemplate) -> Result<String, String> {
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TemplateError {
+    #[error("テンプレートの書き出しに失敗しました: {0}")]
+    Export(serde_json::Error),
+    #[error("テンプレート JSON を入力してください")]
+    EmptyInput,
+    #[error("テンプレート JSON の形式が正しくありません: {0}")]
+    InvalidJson(#[from] serde_json::Error),
+    #[error("未対応のテンプレート形式バージョン ({0}) です")]
+    UnsupportedVersion(u32),
+    #[error("テンプレートにコンパニオン名が含まれていません")]
+    MissingName,
+}
+
+pub(crate) fn export_template_json(
+    template: &w::CompanionTemplate,
+) -> Result<String, TemplateError> {
     let mut sanitized = template.clone();
     if sanitized.format_version == 0 {
         sanitized.format_version = TEMPLATE_FORMAT_VERSION;
     }
     sanitize_template(&mut sanitized);
-    serde_json::to_string_pretty(&sanitized)
-        .map_err(|error| format!("テンプレートの書き出しに失敗しました: {error}"))
+    serde_json::to_string_pretty(&sanitized).map_err(TemplateError::Export)
 }
 
-pub(crate) fn parse_template_json(raw: &str) -> Result<w::CompanionTemplate, String> {
+pub(crate) fn parse_template_json(raw: &str) -> Result<w::CompanionTemplate, TemplateError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err("テンプレート JSON を入力してください".into());
+        return Err(TemplateError::EmptyInput);
     }
-    let mut template: w::CompanionTemplate = serde_json::from_str(trimmed)
-        .map_err(|error| format!("テンプレート JSON の形式が正しくありません: {error}"))?;
+    let mut template: w::CompanionTemplate = serde_json::from_str(trimmed)?;
     if template.format_version > TEMPLATE_FORMAT_VERSION {
-        return Err(format!(
-            "未対応のテンプレート形式バージョン ({}) です",
-            template.format_version
-        ));
+        return Err(TemplateError::UnsupportedVersion(template.format_version));
     }
     if template.format_version == 0 {
         template.format_version = TEMPLATE_FORMAT_VERSION;
     }
     if template.name.trim().is_empty() {
-        return Err("テンプレートにコンパニオン名が含まれていません".into());
+        return Err(TemplateError::MissingName);
     }
     sanitize_template(&mut template);
     Ok(template)
@@ -270,7 +281,8 @@ pub(crate) async fn export_companion(
         })
         .await?;
     let template = response.view().to_owned_message().map_err(decode)?;
-    export_template_json(&template).map_err(connectrpc::ConnectError::internal)
+    export_template_json(&template)
+        .map_err(|error| connectrpc::ConnectError::internal(error.to_string()))
 }
 
 pub(crate) async fn import_companion(

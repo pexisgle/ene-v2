@@ -176,7 +176,9 @@ fn apply_companion_update(model: &mut Model, update: Update) {
         Update::CompanionPreview { reply, error } => {
             companions.preview_reply = Some(match reply {
                 Some(text) => Ok(text),
-                None => Err(error.unwrap_or_else(|| "プレビューに失敗しました".into())),
+                None => Err(crate::state::PreviewError(
+                    error.unwrap_or_else(|| "プレビューに失敗しました".into()),
+                )),
             });
         }
         _ => {}
