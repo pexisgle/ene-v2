@@ -12,9 +12,11 @@
 //!
 //! A server that is disabled, deleted, re-configured or disconnected loses its
 //! tools: the connection closes and the tool entities despawn.
+mod npx;
 mod projection;
 mod supervisor;
 
+pub(crate) use npx::is_npx_command;
 pub(crate) use projection::{tool_names, tool_servers};
 pub(crate) use supervisor::{CheckState, McpServers, check_state, request_reconnect};
 

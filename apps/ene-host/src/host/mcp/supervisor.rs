@@ -500,18 +500,20 @@ pub(super) async fn open(
     let handler = McpClientHandler::new(ClientConfig::default(), registry);
     let connection = if !want.command.is_empty() {
         // A stdio server is a child process the host owns.
-        let mut command = tokio::process::Command::new(&want.command);
         #[cfg(windows)]
-        if want.command.eq_ignore_ascii_case("npx") || want.command.eq_ignore_ascii_case("npx.cmd")
-        {
-            command = rig_rmcp::rmcp::transport::which_command("npx.cmd").map_err(|error| {
-                ConnectFailure {
-                    reason: format!("npx.cmd was not found on PATH: {error}"),
-                    config_error: true,
-                }
-            })?;
-        }
-        command.args(&want.args);
+        let mut command = if super::npx::is_npx_command(&want.command) {
+            super::npx::build_command(want).await?
+        } else {
+            let mut command = tokio::process::Command::new(&want.command);
+            command.args(&want.args);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = tokio::process::Command::new(&want.command);
+            command.args(&want.args);
+            command
+        };
         if !want.cwd.is_empty() {
             command.current_dir(&want.cwd);
         }

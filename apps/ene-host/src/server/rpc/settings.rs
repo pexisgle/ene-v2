@@ -421,8 +421,7 @@ impl w::SettingsService for Services {
                 .await?;
                 let uses_npx = matches!(&connection.config,
                     settings::ConnectionConfig::Mcp(config)
-                        if config.command.eq_ignore_ascii_case("npx")
-                            || config.command.eq_ignore_ascii_case("npx.cmd"));
+                        if crate::host::mcp::is_npx_command(&config.command));
                 // npm may have to download a package before the server can list tools.
                 let timeout = std::time::Duration::from_secs(if uses_npx { 60 } else { 20 });
                 let outcome = tokio::time::timeout(timeout, async {
