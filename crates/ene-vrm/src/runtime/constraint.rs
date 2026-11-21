@@ -282,6 +282,8 @@ mod tests {
     use super::*;
 
     #[test]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn constraints_copy_twist_and_aim_from_rest_frames_and_reject_cycles() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, TransformPlugin));

@@ -352,12 +352,10 @@ pub(crate) struct Settings {
 /// One built-in LLM provider adapter in the contract's own shape. TTS/STT/MCP/ACP
 /// use connection configs. The catalogue is derived, never stored, so there is
 /// no second representation to keep in step with the wire.
-fn catalog_entry(id: &str, name: &str, settings: &[(&str, &str)]) -> w::LlmProvider {
-    let provider = super::model::provider_of(id).expect("built-in provider is registered in Rig");
-    let config = provider
-        .config("")
-        .expect("built-in provider has API-key config");
-    w::LlmProvider {
+fn catalog_entry(id: &str, name: &str, settings: &[(&str, &str)]) -> Option<w::LlmProvider> {
+    let provider = super::model::provider_of(id)?;
+    let config = provider.config("")?;
+    Some(w::LlmProvider {
         id: id.into(),
         name: name.into(),
         adapter: id.into(),
@@ -374,7 +372,7 @@ fn catalog_entry(id: &str, name: &str, settings: &[(&str, &str)]) -> w::LlmProvi
         requires_credentials: provider.requires_credential(),
         environment_variable: provider.api_key_envs().first().map(|name| (*name).into()),
         ..Default::default()
-    }
+    })
 }
 
 pub(crate) const SAKURA_AI_ENDPOINT: &str = "https://api.ai.sakura.ad.jp/v1";
@@ -383,7 +381,7 @@ pub(crate) const SAKURA_AI_API_KEY_ENV: &str = "SAKURA_AI_API_KEY";
 /// The provider catalogue the host can speak to through rig-core. It is a
 /// fixed alpha list; extensions add adapters, not host code paths.
 fn builtin_providers() -> Vec<w::LlmProvider> {
-    vec![
+    let mut entries: Vec<w::LlmProvider> = [
         catalog_entry(
             "openai",
             "OpenAI",
@@ -400,6 +398,11 @@ fn builtin_providers() -> Vec<w::LlmProvider> {
         ),
         catalog_entry("anthropic", "Anthropic", &[("base_url", "Base URL")]),
         catalog_entry("gemini", "Google Gemini", &[("base_url", "Base URL")]),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    entries.extend([
         w::LlmProvider {
             id: agent_platform::ADAPTER.into(),
             name: "Google Agent Platform（旧 Vertex AI）".into(),
@@ -435,7 +438,8 @@ fn builtin_providers() -> Vec<w::LlmProvider> {
             environment_variable: Some(SAKURA_AI_API_KEY_ENV.into()),
             ..Default::default()
         },
-    ]
+    ]);
+    entries
 }
 
 /// Every provider a connection can name: the built-ins no loaded plugin

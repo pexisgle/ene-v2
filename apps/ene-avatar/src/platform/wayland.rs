@@ -65,10 +65,12 @@ fn run(mut app: App) -> AppExit {
     let mut compositor = None;
     let mut cursor = Vec2::ZERO;
     let mut deadline = Instant::now();
-    let wake = app
+    let Some(wake) = app
         .world_mut()
         .remove_non_send::<exwlshellev::calloop::channel::Channel<()>>()
-        .unwrap();
+    else {
+        return AppExit::error();
+    };
     let (exit_tx, exit_rx) = std::sync::mpsc::sync_channel(1);
     let result = state.running_with_proxy(wake, move |event, state, id| {
         match event {
@@ -118,8 +120,9 @@ fn run(mut app: App) -> AppExit {
                             units_per_logical_pixel: 1.,
                         };
                         let wrapper = WindowWrapper::new(unit.gen_wrapper());
-                        let handle =
-                            RawHandleWrapper::new(&wrapper).expect("valid Wayland surface handle");
+                        let Ok(handle) = RawHandleWrapper::new(&wrapper) else {
+                            return ReturnData::None;
+                        };
                         let window = app
                             .world_mut()
                             .spawn((desktop::window(&output), handle, output))
@@ -202,9 +205,10 @@ fn run(mut app: App) -> AppExit {
                                 .set_buffer_scale(unit.scale_float().ceil() as i32);
                             unit.scale_float().ceil() as f32
                         };
-                        let mut window = app.world_mut().get_mut::<Window>(window).unwrap();
-                        window.resolution.set_scale_factor(scale);
-                        window.resolution.set(width as f32, height as f32);
+                        if let Some(mut window) = app.world_mut().get_mut::<Window>(window) {
+                            window.resolution.set_scale_factor(scale);
+                            window.resolution.set(width as f32, height as f32);
+                        }
                         surface_sizes.insert(id, size_key);
                         // Also commit geometry changes on an empty, inactive surface.
                         surface_regions.remove(&id);

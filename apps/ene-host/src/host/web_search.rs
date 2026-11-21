@@ -419,6 +419,8 @@ impl Tool for WebSearch {
     }
 }
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_lines)]
 async fn execute(
     resolved: &ResolvedSearch,
     query: &str,
@@ -686,6 +688,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     async fn f13_configured_search_adapters_execute_and_respect_credentials() {
         use axum::{
             Json, Router,
@@ -987,6 +991,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     async fn f13_b04_unconfigured_search_refuses_without_http_and_gates_on_configured_host() {
         use crate::host::agent::WorkAgent;
         use crate::host::tests::Harness;
@@ -1162,6 +1168,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     async fn exa_and_tavily_work_end_to_end_and_switch_cleanly_in_work_agent() {
         use crate::host::agent::WorkAgent;
         use crate::host::tests::Harness;

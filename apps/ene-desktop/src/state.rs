@@ -149,6 +149,7 @@ pub struct Effects {
 }
 
 /// Everything the window draws.
+#[derive(Debug)]
 pub struct Model {
     pub link: Link,
     /// Monotonically incremented whenever the host connection leaves or enters
@@ -347,6 +348,8 @@ impl Model {
     }
 
     /// Folds one update into the view and reports what must be refetched.
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
     pub fn apply(&mut self, update: Update) -> Effects {
         let mut effects = Effects::default();
         match update {
@@ -661,6 +664,8 @@ pub fn is_user_facing_message(message: &w::Message) -> bool {
 }
 
 /// Merges one host notification into the display copy.
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 fn merge_notification(model: &mut Model, notification: w::Notification, effects: &mut Effects) {
     match notification.event {
         Some(w::notification::Event::InitialState(snapshot)) => {

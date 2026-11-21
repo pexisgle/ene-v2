@@ -23,19 +23,23 @@ use vrm_spec::{
 
 pub(crate) fn setup(app: &mut App) {
     app.preregister_asset_loader::<VrmLoader>(&["vrm", "vrma"]);
-    app.world()
-        .get_resource::<GltfExtensionHandlers>()
-        .expect("VrmPlugin requires GltfPlugin")
+    let Some(handlers) = app.world().get_resource::<GltfExtensionHandlers>() else {
+        panic!("VrmPlugin requires GltfPlugin");
+    };
+    handlers
         .0
         .write_blocking()
         .push(Box::<VrmExtensions>::default());
 }
 
 pub(crate) fn finish(app: &mut App) {
-    let plugin = *app
+    let Some(plugin) = app
         .get_added_plugins::<bevy::gltf::GltfPlugin>()
         .first()
-        .expect("VrmPlugin requires GltfPlugin");
+        .copied()
+    else {
+        panic!("VrmPlugin requires GltfPlugin");
+    };
     let world = app.world();
     app.register_asset_loader(VrmLoader(GltfLoader {
         supported_compressed_formats: world
@@ -125,7 +129,10 @@ impl AssetLoader for VrmLoader {
             mesh_compression: settings.mesh_compression.clone(),
         };
         let mut asset = GltfLoader::load_gltf(&self.0, &bytes, context, &loader_settings).await?;
-        let source = asset.source.take().expect("native include_source setting");
+        let source = asset
+            .source
+            .take()
+            .ok_or_else(|| invalid("native include_source setting missing"))?;
         let scene_label = asset
             .default_scene
             .as_ref()
@@ -365,8 +372,9 @@ impl GltfExtensionHandler for VrmExtensions {
                     .map_err(invalid)?;
                 require_v1(&authored.spec_version, "VRMC_materials_mtoon")?;
                 let toon = schema::Toon::compile(authored).map_err(invalid)?;
-                self.materials
-                    .insert(material.index().expect("indexed material"), toon);
+                if let Some(index) = material.index() {
+                    self.materials.insert(index, toon);
+                }
             }
             self.springs = source
                 .extension_value(VRMC_SPRING_BONE)

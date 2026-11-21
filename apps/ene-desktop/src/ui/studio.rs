@@ -54,6 +54,14 @@ pub struct SettingsStudio {
     _observe: Subscription,
 }
 
+impl std::fmt::Debug for SettingsStudio {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SettingsStudio")
+            .field("initialized", &self.initialized)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SettingsStudio {
     pub fn new(hub: Entity<Hub>, cx: &mut Context<Self>) -> Self {
         let _observe = cx.observe(&hub, |_, _, cx| cx.notify());

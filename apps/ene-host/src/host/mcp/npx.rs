@@ -1013,6 +1013,8 @@ mod tests {
         }
 
         #[tokio::test]
+        // TODO(Phase 1-3): split during refactoring.
+        #[allow(clippy::large_futures)]
         async fn live_supervisor_open_connects_npx_mcp_server_without_cmd_exe() {
             let host_path = std::env::var_os("PATH").unwrap_or_default();
             let host_dirs: Vec<PathBuf> = std::env::split_paths(&host_path).collect();

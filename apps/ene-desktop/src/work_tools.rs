@@ -152,6 +152,8 @@ impl Workspace {
         }
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::large_futures)]
     pub(crate) async fn execute(
         self: Arc<Self>,
         capability: &str,
@@ -439,6 +441,8 @@ impl Workspace {
         Ok(())
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::large_futures)]
     async fn shell(&self, command: &str) -> Result<Value, String> {
         let program = self
             .shell
@@ -477,9 +481,12 @@ impl Workspace {
         process.wrap(process_wrap::tokio::JobObject);
         process.wrap(KillOnDrop);
         let mut running = RunningShell(Some(process.spawn().map_err(|error| error.to_string())?));
-        let child = running.0.as_mut().expect("the shell just started");
-        let stdout = child.stdout().take().expect("stdout was piped");
-        let stderr = child.stderr().take().expect("stderr was piped");
+        let Some(child) = running.0.as_mut() else {
+            return Err("the shell process is unavailable".into());
+        };
+        let (Some(stdout), Some(stderr)) = (child.stdout().take(), child.stderr().take()) else {
+            return Err("the shell process pipes are unavailable".into());
+        };
         let outcome = tokio::time::timeout(Duration::from_secs(COMMAND_TIMEOUT), async {
             tokio::try_join!(child.wait(), capture(stdout), capture(stderr))
         })
@@ -569,7 +576,10 @@ fn edit(content: &str, input: &Value) -> Result<String, String> {
         };
         let end = index + old.len();
         // Check overlapping occurrences as well.
-        let next = index + old.chars().next().expect("oldText is nonempty").len_utf8();
+        let Some(first_char) = old.chars().next() else {
+            return Err("oldText must not be empty".into());
+        };
+        let next = index + first_char.len_utf8();
         if content[next..].contains(old) {
             return Err("oldText matched more than once".into());
         }
@@ -613,6 +623,8 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::large_futures)]
     async fn workspace_tools_read_search_and_edit_only_the_bound_workspace() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Arc::new(Workspace::open(directory.path()).unwrap());

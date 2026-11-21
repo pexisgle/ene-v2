@@ -412,6 +412,8 @@ impl ContextBuilder {
     }
 }
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn dynamic_tail(
     store: &Store,
     perception: &Perception,
@@ -476,6 +478,8 @@ fn render_tail(
     )
 }
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_arguments)]
 fn render_tail_with_budget(
     store: &Store,
     perception: &Perception,

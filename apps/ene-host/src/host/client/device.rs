@@ -414,6 +414,8 @@ fn resolve_operation_companion(store: &Store, operation: &DeviceOperation) -> Re
 }
 
 /// Replays operations that were never delivered after a client reconnects.
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::cognitive_complexity)]
 pub(crate) fn resend(world: &mut World, client: &str) {
     let subscription = world.resource::<DeviceHub>().subscription(client);
     computer::invalidate_client(world, client, subscription.as_deref());
@@ -490,6 +492,8 @@ pub(crate) fn disconnected(world: &mut World, client: &str) {
 
 /// Records a client's result and answers the waiting tool call. The result is
 /// matched to its operation by id; the client id it carries is the record.
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn complete(
     world: &mut World,
     result: w::DeviceOperationResult,
@@ -623,13 +627,16 @@ pub(crate) fn complete(
                     }).to_string()),
                     ToolResultContent::Image(image),
                 ];
-                permission::decide(
-                    world,
-                    waiter.call,
-                    Outcome::from(ToolResult::success(
-                        ToolOutput::content(blocks).expect("a text and image result"),
-                    )),
-                );
+                match ToolOutput::content(blocks) {
+                    Ok(tool_output) => permission::decide(
+                        world,
+                        waiter.call,
+                        Outcome::from(ToolResult::success(tool_output)),
+                    ),
+                    Err(error) => {
+                        permission::refuse(world, waiter.call, &error.to_string());
+                    }
+                }
             } else {
                 permission::answer(
                     world,

@@ -20,6 +20,8 @@ use std::{
 };
 use tokio::sync::mpsc::unbounded_channel;
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_lines)]
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -110,12 +112,17 @@ fn main() {
         updates_tx.clone(),
         commands_rx,
     );
-    let worker = std::thread::Builder::new()
+    let worker = match std::thread::Builder::new()
         .name("ene-session".into())
         .spawn(move || {
             runtime.block_on(session.run());
-        })
-        .expect("the session thread starts");
+        }) {
+        Ok(worker) => worker,
+        Err(error) => {
+            eprintln!("ene-desktop: the session thread did not start: {error}");
+            std::process::exit(1);
+        }
+    };
 
     let quit = commands_tx.clone();
     let shown = path.display().to_string();

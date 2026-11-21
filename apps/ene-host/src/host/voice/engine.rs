@@ -93,6 +93,8 @@ pub(super) struct HttpEngine {
 }
 
 impl HttpEngine {
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     pub(super) fn new(
         connection: Connection,
         credentials: Option<&Credentials>,

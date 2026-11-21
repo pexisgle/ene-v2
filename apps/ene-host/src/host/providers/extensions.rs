@@ -44,6 +44,8 @@ pub(crate) struct HookOutcome {
 }
 
 /// Runs all installed `Extension::Hook` plugins in sorted plugin-ID order (`F18`).
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::cognitive_complexity)]
 pub(crate) async fn run_hooks(
     providers: &Providers,
     store: &Store,
@@ -98,6 +100,8 @@ pub(crate) async fn run_hooks(
 
 /// Dispatches one `CharacterEvent` to all installed `Extension::Character`
 /// plugins for `companion_id` and collects validated `CharacterAction`s (`F17`).
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::cognitive_complexity)]
 pub(crate) async fn dispatch_character_event(
     providers: &Providers,
     store: &Store,
@@ -294,6 +298,8 @@ impl Serve for PluginToolHandler {
 }
 
 /// Discovers tool definitions from all installed `Extension::Tool` plugins (`F20`).
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::cognitive_complexity)]
 pub(crate) async fn discover_plugin_tools(
     providers: &Providers,
     store: &Store,

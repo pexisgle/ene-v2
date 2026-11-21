@@ -26,12 +26,13 @@ pub(crate) struct NativeInput(VecDeque<PointerInput>);
 
 impl NativeInput {
     pub fn send(&mut self, output: Entity, position: Vec2, action: PointerAction) {
+        let Some(target) = WindowRef::Entity(output).normalize(None) else {
+            return;
+        };
         self.0.push_back(PointerInput::new(
             PointerId::Mouse,
             Location {
-                target: NormalizedRenderTarget::Window(
-                    WindowRef::Entity(output).normalize(None).unwrap(),
-                ),
+                target: NormalizedRenderTarget::Window(target),
                 position,
             },
             action,
@@ -140,11 +141,8 @@ fn step(world: &mut World, input: PointerInput) {
     if matches!(
         action,
         PointerAction::Cancel | PointerAction::Release(PointerButton::Primary)
-    ) {
-        let pointer = world
-            .resource::<PointerMap>()
-            .get_entity(PointerId::Mouse)
-            .unwrap();
+    ) && let Some(pointer) = world.resource::<PointerMap>().get_entity(PointerId::Mouse)
+    {
         let mut pointer = world.entity_mut(pointer);
         pointer.remove::<Placement>();
         // Bevy clears PointerState on Cancel, but not PointerPressState.
@@ -170,10 +168,9 @@ pub(crate) fn pointer(world: &mut World) {
         };
         let position = desktop_position(screen, input.location.position);
         let scale = screen.units_per_logical_pixel;
-        let pointer = world
-            .resource::<PointerMap>()
-            .get_entity(PointerId::Mouse)
-            .unwrap();
+        let Some(pointer) = world.resource::<PointerMap>().get_entity(PointerId::Mouse) else {
+            continue;
+        };
         let dragging = world
             .resource::<PointerState>()
             .get(PointerId::Mouse, PointerButton::Primary)
@@ -272,12 +269,12 @@ fn capture_press(
         let start = desktop_position(screen, event.pointer.position);
         let anchor = Vec2::new(transform.translation.x, -transform.translation.y);
         capture.capture(PointerId::Mouse, event.entity, event.hit.clone());
-        commands
-            .entity(map.get_entity(PointerId::Mouse).unwrap())
-            .insert(Placement {
+        if let Some(pointer_entity) = map.get_entity(PointerId::Mouse) {
+            commands.entity(pointer_entity).insert(Placement {
                 start,
                 offset: (anchor - start) / screen.units_per_logical_pixel,
             });
+        }
     }
 }
 

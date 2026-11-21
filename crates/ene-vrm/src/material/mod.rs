@@ -451,6 +451,8 @@ mod tests {
 
     #[test]
     #[ignore = "requires a GPU; runs in CI with lavapipe"]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn review_transformed_shading_shift_gradient_matches_reference_pixels() {
         use bevy::{
             camera::{Exposure, RenderTarget, ScalingMode},
@@ -603,6 +605,8 @@ mod tests {
 
     #[test]
     #[ignore = "requires a GPU; runs in CI with lavapipe"]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn synthetic_mtoon_uv1_outline_pipeline_smoke() {
         use bevy::mesh::PrimitiveTopology;
         use bevy::render::{

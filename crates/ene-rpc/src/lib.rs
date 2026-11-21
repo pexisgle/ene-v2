@@ -3,6 +3,13 @@
 //! Enable `client` for loopback HTTP/Bearer transport setup with `connect`.
 
 /// Generated v1 contract, available in every build.
+#[allow(
+    missing_debug_implementations,
+    clippy::all,
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    clippy::large_futures
+)]
 pub mod rpc {
     include!(concat!(env!("OUT_DIR"), "/_connectrpc.rs"));
     pub use ene::host::v1::*;

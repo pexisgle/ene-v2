@@ -14,6 +14,8 @@ use ene_rpc as w;
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
 impl SettingsStudio {
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn render_companions(
         &mut self,
         theme: &Theme,
@@ -490,6 +492,8 @@ impl SettingsStudio {
             .into_any_element()
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn render_create_panel(
         &mut self,
         live: bool,
@@ -716,6 +720,8 @@ impl SettingsStudio {
     }
 
     #[allow(clippy::too_many_arguments)]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn render_companion_editor(
         &mut self,
         comp: &w::Companion,

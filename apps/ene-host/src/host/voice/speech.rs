@@ -8,12 +8,12 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-static EMOJI: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:[#*0-9]\u{fe0f}?\u{20e3}|[\p{Extended_Pictographic}\p{Emoji_Presentation}](?:\u{fe0f}|\p{Emoji_Modifier})*(?:\u{200d}[\p{Extended_Pictographic}\p{Emoji_Presentation}](?:\u{fe0f}|\p{Emoji_Modifier})*)*)").unwrap()
+static EMOJI: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r"(?:[#*0-9]\u{fe0f}?\u{20e3}|[\p{Extended_Pictographic}\p{Emoji_Presentation}](?:\u{fe0f}|\p{Emoji_Modifier})*(?:\u{200d}[\p{Extended_Pictographic}\p{Emoji_Presentation}](?:\u{fe0f}|\p{Emoji_Modifier})*)*)").ok()
 });
 
-static BARE_URL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"https?://[^\s\)\]>」』）】]+").unwrap());
+static BARE_URL: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r"https?://[^\s\)\]>」』）】]+").ok());
 
 fn motion_line(line: &str) -> bool {
     let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(line) else {
@@ -84,8 +84,14 @@ pub(crate) fn for_speech(raw: &str) -> String {
             }
             Event::Text(_) if code => {}
             Event::Text(text) => {
-                let no_urls = BARE_URL.replace_all(&text, "");
-                let clean = EMOJI.replace_all(&no_urls, "");
+                let no_urls = match &*BARE_URL {
+                    Some(re) => re.replace_all(&text, ""),
+                    None => std::borrow::Cow::Borrowed(text.as_ref()),
+                };
+                let clean = match &*EMOJI {
+                    Some(re) => re.replace_all(&no_urls, ""),
+                    None => no_urls,
+                };
                 out.push_str(&clean);
             }
             Event::Code(text) => out.push_str(&text),

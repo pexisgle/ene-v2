@@ -103,6 +103,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     async fn history_requests_preserve_paging_and_errors_for_proto_and_json() {
         let state = tempfile::tempdir().unwrap();
         let runtime = Runtime::start(state.path()).await.unwrap();

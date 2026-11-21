@@ -4,6 +4,7 @@ use gpui::{AssetSource, Hsla, Result, SharedString, Svg, prelude::*, px, svg};
 use std::borrow::Cow;
 
 /// Provides embedded SVG icons to GPUI without reading external files at runtime.
+#[derive(Debug)]
 pub struct EmbeddedAssets;
 
 /// Drawn SVG icon identifiers used across the pod and settings UI.

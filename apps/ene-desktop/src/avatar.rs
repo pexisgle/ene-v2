@@ -142,13 +142,19 @@ impl Avatar {
             return Err("the renderer input closed".into());
         };
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, reply_tx);
+        self.pending
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(id, reply_tx);
         if write_tx
             .send(WriteItem::Request { id, line })
             .await
             .is_err()
         {
-            self.pending.lock().unwrap().remove(&id);
+            self.pending
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .remove(&id);
             self.healthy = false;
             return Err("the renderer input closed".into());
         }
@@ -159,7 +165,10 @@ impl Avatar {
                 Err("the renderer exited".into())
             }
             Err(_) => {
-                self.pending.lock().unwrap().remove(&id);
+                self.pending
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .remove(&id);
                 self.healthy = false;
                 let _ = self.child.kill();
                 Err("the renderer timed out answering an IPC command".into())
@@ -560,7 +569,10 @@ fn write_loop(mut stdin: ChildStdin, mut rx: mpsc::Receiver<WriteItem>, pending:
         {
             let reason = format!("the renderer input closed: {error}");
             if let Some(id) = id
-                && let Some(tx) = pending.lock().unwrap().remove(&id)
+                && let Some(tx) = pending
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .remove(&id)
             {
                 let _ = tx.send(Err(reason));
             }
@@ -583,7 +595,11 @@ fn read_loop(
             Ok(0) => break,
             Ok(_) => match serde_json::from_str::<AvatarMessage>(&line) {
                 Ok(AvatarMessage::Reply { id, ok, error }) => {
-                    if let Some(tx) = pending.lock().unwrap().remove(&id) {
+                    if let Some(tx) = pending
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .remove(&id)
+                    {
                         let _ = tx.send(match error {
                             Some(error) => Err(error),
                             None => Ok(ok),
@@ -604,7 +620,12 @@ fn read_loop(
             }
         }
     }
-    let waiters: Vec<_> = pending.lock().unwrap().drain().map(|(_, tx)| tx).collect();
+    let waiters: Vec<_> = pending
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .drain()
+        .map(|(_, tx)| tx)
+        .collect();
     for tx in waiters {
         let _ = tx.send(Err(fail_reason.clone()));
     }

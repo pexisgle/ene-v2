@@ -19,7 +19,6 @@ buffa.workspace = true
 cap-std.workspace = true
 connectrpc.workspace = true
 directories = "6"
-futures-util.workspace = true
 gpui.workspace = true
 globset = "0.4"
 process-wrap.workspace = true

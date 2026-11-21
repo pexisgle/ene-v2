@@ -573,6 +573,8 @@ fn progress(hand: &mut Hand, update: &SessionUpdate) -> Option<String> {
 /// Parks the turn in an approval row and a held call, through the same
 /// `Approvals` map and card the device gate uses: the user's card, the
 /// `SubmitApproval` call and the head's `resolve_approval` all resolve it.
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_arguments)]
 fn request_permission(
     world: &mut World,
     adapter: &str,

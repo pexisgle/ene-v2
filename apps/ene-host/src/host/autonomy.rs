@@ -226,6 +226,8 @@ fn confirm_delivered_schedules(world: &mut World) {
 ///   pending and retry cleanly once the model is bound.
 /// - Restarts after the conversation persisted the message mark the occurrence
 ///   `delivered` without queuing a duplicate.
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::cognitive_complexity)]
 pub(crate) fn poll_schedules(world: &mut World, now: Timestamp) -> usize {
     let Some(store) = world.get_resource::<Store>().cloned() else {
         return 0;

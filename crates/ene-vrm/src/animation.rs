@@ -150,7 +150,9 @@ fn collect_native_targets(
     visited: &mut HashSet<usize>,
     targets: &mut HashMap<usize, AnimationTargetId>,
 ) {
-    let node = world.get::<NativeNode>(entity).expect("native source node");
+    let Some(node) = world.get::<NativeNode>(entity) else {
+        return;
+    };
     if !visited.insert(node.0) {
         return;
     }
@@ -173,7 +175,9 @@ fn collect_native_targets(
             if !entity.contains::<NativeNode>() {
                 break;
             }
-            path.push(entity.get::<Name>().expect("native node name").clone());
+            if let Some(name) = entity.get::<Name>() {
+                path.push(name.clone());
+            }
             current = entity.get::<ChildOf>().map(ChildOf::parent);
         }
         AnimationTargetId::from_names(path.iter().rev())
@@ -248,6 +252,8 @@ fn motion_expressions(motion: &schema::Motion) -> HashMap<usize, ExpressionName>
     expressions
 }
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn retarget_motion(
     motion: &schema::Motion,
     source: &gltf::Document,
@@ -258,7 +264,7 @@ pub(crate) fn retarget_motion(
 ) -> std::io::Result<Vec<(String, AnimationClip)>> {
     let root_inv = world
         .get::<GlobalTransform>(root)
-        .expect("native scene transform")
+        .ok_or_else(|| invalid("missing native scene transform"))?
         .affine()
         .inverse();
     let hips = motion
@@ -374,11 +380,11 @@ pub(crate) fn retarget_motion(
                         }),
                         FunctionCurve::new(domain, move |t| {
                             frame.normalize(
-                                *curve
+                                curve
                                     .0
                                     .sample_clamped(t)
                                     .downcast::<Quat>()
-                                    .expect("rotation curve"),
+                                    .map_or(Quat::IDENTITY, |q| *q),
                             )
                         }),
                     ),
@@ -394,11 +400,11 @@ pub(crate) fn retarget_motion(
                         }),
                         FunctionCurve::new(domain, move |t| {
                             parent.transform_vector3(
-                                *curve
+                                curve
                                     .0
                                     .sample_clamped(t)
                                     .downcast::<Vec3>()
-                                    .expect("translation curve")
+                                    .map_or(Vec3::ZERO, |v| *v)
                                     - local.translation,
                             ) / height
                         }),
@@ -419,8 +425,7 @@ pub(crate) fn retarget_motion(
                                 .0
                                 .sample_clamped(t)
                                 .downcast::<Vec3>()
-                                .expect("translation curve")
-                                .x
+                                .map_or(0., |v| v.x)
                         }),
                     ),
                 );
@@ -433,11 +438,11 @@ pub(crate) fn retarget_motion(
                             input.rotation.get_or_insert(Quat::IDENTITY)
                         }),
                         FunctionCurve::new(domain, move |t| {
-                            *curve
+                            curve
                                 .0
                                 .sample_clamped(t)
                                 .downcast::<Quat>()
-                                .expect("rotation curve")
+                                .map_or(Quat::IDENTITY, |q| *q)
                         }),
                     ),
                 );

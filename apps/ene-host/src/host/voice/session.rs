@@ -963,6 +963,8 @@ pub(crate) fn accept_transcription(
     Ok(true)
 }
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::cognitive_complexity)]
 pub(crate) fn on_stream_text(world: &mut World, companion: &str, text: &str) {
     if text.is_empty() {
         return;

@@ -1,5 +1,8 @@
 //! A real host process: private discovery, owner auth and graceful shutdown.
 
+// Integration test helpers intentionally assert via expect/unwrap.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use std::{path::Path, time::Duration};
 

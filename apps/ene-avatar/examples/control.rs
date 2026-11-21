@@ -107,7 +107,9 @@ impl Client {
                     .and_then(|c| c["config"].as_object())
                     .cloned()
                     .ok_or_else(|| format!("unknown character: {id}"))?;
-                config.extend(patch.as_object().unwrap().clone());
+                if let Some(patch) = patch.as_object() {
+                    config.extend(patch.clone());
+                }
                 json!({"op":"set", "character":id, "config":config})
             }
         };

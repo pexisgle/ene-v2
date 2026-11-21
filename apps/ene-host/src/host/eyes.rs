@@ -283,6 +283,8 @@ pub(crate) fn clear(world: &mut World, companion: &str) {
     }
 }
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn report(
     world: &mut World,
     companion: String,
@@ -307,7 +309,9 @@ pub(crate) fn report(
     match event_type {
         Event::Enabled(true) => {
             if same_stream {
-                eyes.sessions.get_mut(&companion).unwrap().seen = now;
+                if let Some(session) = eyes.sessions.get_mut(&companion) {
+                    session.seen = now;
+                }
             } else {
                 eyes.sessions.insert(
                     companion.clone(),
@@ -328,7 +332,9 @@ pub(crate) fn report(
         _ if !same_stream => return Ok(()),
         _ => {}
     }
-    let session = eyes.sessions.get_mut(&companion).unwrap();
+    let Some(session) = eyes.sessions.get_mut(&companion) else {
+        return Ok(());
+    };
     session.seen = now;
     let diagnostic_event = match event_type {
         Event::ActiveWindow(window) => {
@@ -892,6 +898,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     async fn the_head_can_stay_silent_on_routine_reports_and_answer_the_important_fact() {
         let mut harness = Harness::new([]);
         let store = harness.store();

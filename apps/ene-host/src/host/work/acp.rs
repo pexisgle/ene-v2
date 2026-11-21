@@ -286,6 +286,8 @@ mod tests {
     use ene_plugin::{ContentChunk, PermissionOptionKind, SelectedPermissionOutcome, text_block};
 
     #[tokio::test]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     async fn t19_acp_stdio_jsonrpc_bridge_runs_initialize_session_prompt_and_permission() {
         let (client_read, mut agent_write) = tokio::io::duplex(16 * 1024);
         let (agent_read, client_write) = tokio::io::duplex(16 * 1024);

@@ -98,6 +98,8 @@ mod tests {
         }
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::large_futures)]
     async fn connect_echo(
         echo: Echo,
     ) -> (
@@ -165,6 +167,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::large_futures)]
     async fn http_tools_use_the_shared_redirect_refusing_client() {
         use axum::{Json, Router, response::IntoResponse, routing::post};
         use std::sync::{
@@ -430,6 +434,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::large_futures)]
     async fn registry_refresh_replaces_handlers_and_keeps_pinned_calls() {
         let (connection, registry, _, task) = connect_echo(Echo::new()).await;
         let expected = registry.add_managed_tools(vec![local_tool("echo", 1)]);
@@ -515,6 +521,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::large_futures)]
     async fn projection_refuses_collisions_and_retires_only_owned_entities() {
         let (first, registry, _, task1) = connect_echo(Echo::new()).await;
         let (second, other_registry, _, task2) = connect_echo(Echo::new()).await;
@@ -577,6 +585,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::large_futures)]
     async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
         let old_echo = Echo::new();
         let old_generation = old_echo.generation.clone();
@@ -704,6 +714,8 @@ mod tests {
     /// offered exclusively to the work agent ("hand", never the head), passes
     /// the gate and runs.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::large_futures, clippy::too_many_lines)]
     async fn an_mcp_tool_runs_through_the_gate() {
         use crate::host::agent::{CompanionAgent, WorkAgent};
         use crate::host::tests::Harness;

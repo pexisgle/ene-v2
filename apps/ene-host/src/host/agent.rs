@@ -624,6 +624,8 @@ fn log_tools(
 
 /// Publishes the final turn event once a companion turn settles, and settles
 /// the run when a work agent's turn finishes.
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_arguments)]
 fn turn_settled(
     settled: On<Add<Settled>>,
     mut commands: Commands,

@@ -69,6 +69,8 @@ fn stage_row(
 }
 
 impl SettingsStudio {
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn render_voice(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let (
             live,

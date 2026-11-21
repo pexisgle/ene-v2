@@ -174,6 +174,8 @@ pub(crate) fn default_dimensions(model_id: &str) -> Option<u32> {
     }
 }
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_arguments)]
 fn connect_with_ndims(
     connection: &Connection,
     credentials: Option<&Credentials>,
@@ -488,6 +490,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     async fn embedding_credentials_rotate_and_revoke_across_clones() {
         use crate::host::{
             model,
@@ -912,6 +916,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
         use crate::host::{
             settings::{Connection, CredentialState, EmbeddingConnection, Endpoint},

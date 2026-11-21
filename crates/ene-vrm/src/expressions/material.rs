@@ -112,10 +112,9 @@ pub(super) fn initialize_materials<M: bevy::pbr::Material + Clone>(
             let clone = match instances.entry((target.slot, target.original.clone())) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
-                    let material = materials
-                        .get(&target.original)
-                        .cloned()
-                        .expect("checked above");
+                    let Some(material) = materials.get(&target.original).cloned() else {
+                        continue;
+                    };
                     entry.insert((materials.add(material), target.uv, target.emission))
                 }
             };
@@ -255,6 +254,8 @@ pub(super) fn apply_material<M: BindMaterial>(
 /// `emissive` is the loaded value, which already includes
 /// `KHR_materials_emissive_strength`; expression targets are raw
 /// `emissiveFactor` values, so only the target is scaled again.
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_arguments)]
 fn compute_material(
     (base_color, emissive): (Color, LinearRgba),
     emissive_strength: f32,

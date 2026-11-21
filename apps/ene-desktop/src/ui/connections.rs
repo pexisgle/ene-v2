@@ -15,6 +15,8 @@ use ene_rpc as w;
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
 impl SettingsStudio {
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn render_connections(
         &mut self,
         theme: &Theme,
@@ -36,13 +38,12 @@ impl SettingsStudio {
             )
         };
 
-        if let Some(id) = self.pending_mcp.as_ref()
-            && connections.iter().any(|connection| &connection.id == id)
+        if self
+            .pending_mcp
+            .as_ref()
+            .is_some_and(|id| connections.iter().any(|connection| &connection.id == id))
+            && let Some(id) = self.pending_mcp.take()
         {
-            let id = self
-                .pending_mcp
-                .take()
-                .expect("the new MCP connection is saved");
             self.clear_mcp_drafts();
             let hub = self.hub.clone();
             cx.defer(move |cx| hub.update(cx, |hub, cx| hub.check_connection(id, cx)));
@@ -196,6 +197,8 @@ impl SettingsStudio {
             .into_any_element()
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn render_web_search_card(
         &mut self,
         connections: &[w::Connection],
@@ -582,6 +585,8 @@ impl SettingsStudio {
             .into_any_element()
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn render_add_connection_panel(
         &mut self,
         live: bool,
@@ -1070,6 +1075,8 @@ impl SettingsStudio {
             .into_any_element()
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn render_connection_row(
         &mut self,
         conn: &w::Connection,
@@ -1277,6 +1284,8 @@ impl SettingsStudio {
             .into_any_element()
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
     fn render_connection_editor(
         &mut self,
         conn: &w::Connection,
@@ -2606,6 +2615,8 @@ impl SettingsStudio {
             .into_any_element()
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn render_options_schema(
         &mut self,
         id: &str,
@@ -2783,6 +2794,8 @@ impl SettingsStudio {
         (controls, serialized)
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn render_advanced_roles_panel(
         &mut self,
         companion: Option<&w::Companion>,
@@ -3536,6 +3549,12 @@ fn toggle_comma_item(items: &[String], item: &str) -> String {
     next.join(", ")
 }
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(
+    clippy::cognitive_complexity,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
 fn apply_connection_edits(
     conn: &w::Connection,
     name: &str,

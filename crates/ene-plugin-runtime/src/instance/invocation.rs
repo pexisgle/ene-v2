@@ -20,6 +20,7 @@ pub trait Services: Send + Sync {
     -> BoxFuture<'_, std::result::Result<Value, Failure>>;
     fn check(&self) -> BoxFuture<'_, std::result::Result<(), Failure>>;
 }
+#[derive(Debug)]
 pub struct DenyServices;
 impl Services for DenyServices {
     fn handle(&self, _: ServiceRequest) -> BoxFuture<'_, std::result::Result<Value, Failure>> {

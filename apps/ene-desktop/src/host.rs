@@ -117,6 +117,12 @@ pub struct Host {
     pub client: w::ClientServiceClient<connectrpc::client::HttpClient>,
 }
 
+impl std::fmt::Debug for Host {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Host").finish_non_exhaustive()
+    }
+}
+
 impl Host {
     fn from_parts(
         transport: connectrpc::client::HttpClient,

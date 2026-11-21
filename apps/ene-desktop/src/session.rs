@@ -200,6 +200,16 @@ pub struct Session {
     last_ui_audio: (f32, f32, bool),
 }
 
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("path", &self.path)
+            .field("focused", &self.focused)
+            .field("subscription", &self.subscription)
+            .finish_non_exhaustive()
+    }
+}
+
 /// One validated `body.motion` request, before anything is sent anywhere.
 #[derive(Debug, PartialEq)]
 struct MotionPlan {
@@ -343,6 +353,8 @@ impl Session {
     }
 
     /// Serves until the window closes or the session is asked to quit.
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::cognitive_complexity, clippy::large_futures)]
     pub async fn run(mut self) {
         let _ = self.updates.send(Update::EyesEnabled(self.eyes_enabled));
         #[cfg(windows)]
@@ -387,8 +399,13 @@ impl Session {
     }
 
     /// One connection attempt: read discovery, register, bind, serve.
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::large_futures)]
     async fn attempt(&mut self) -> Outcome {
-        *self.connection.write().unwrap() = None;
+        *self
+            .connection
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = None;
         let discovery = match Discovery::read(&self.path) {
             Ok(discovery) => discovery,
             Err(Connect::Missing(path)) => {
@@ -418,7 +435,10 @@ impl Session {
                 return Outcome::Dropped(error.to_string());
             }
         };
-        *self.connection.write().unwrap() = Some(host.clone());
+        *self
+            .connection
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(host.clone());
         self.report(Link::Connecting {
             endpoint: discovery.endpoint.clone(),
             attempt: 1,
@@ -643,6 +663,8 @@ impl Session {
     }
 
     /// Serves the device stream, audio, the microphone and the subscription.
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
     async fn serve(&mut self, host: Host) -> Outcome {
         self.subscription.clear();
         #[cfg(windows)]
@@ -918,6 +940,8 @@ impl Session {
     }
 
     /// Handles one device event, executing only from the device stream.
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::large_futures)]
     async fn device_event(&mut self, host: &Host, event: w::device_event::Event) -> Step {
         match event {
             w::device_event::Event::Ready(ready) => {
@@ -1435,6 +1459,8 @@ impl Session {
     }
 
     /// Handles one window command.
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
     async fn command(&mut self, host: &Host, command: Command) -> Step {
         match command {
             Command::Serve(companion_id) => {
@@ -1721,6 +1747,8 @@ impl Session {
 
     /// Reconciles all resident companions onto the running renderer with their
     /// resolved `BodyBinding` models and placements.
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::cognitive_complexity)]
     async fn sync_avatars(&mut self) {
         if self.avatar.is_none() {
             return;
@@ -1804,6 +1832,8 @@ impl Session {
     }
 
     /// Plays one audio event. Only one utterance is audible at a time.
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::cognitive_complexity)]
     async fn play(&mut self, event: w::audio_output_event::Event) {
         match event {
             w::audio_output_event::Event::Chunk(chunk) => {
@@ -1859,6 +1889,8 @@ impl Session {
     }
 
     /// Returns to idle when the renderer finishes a gesture and detects dead renderers.
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::cognitive_complexity)]
     async fn drain_renderer(&mut self) {
         let Some(mut avatar) = self.avatar.take() else {
             return;

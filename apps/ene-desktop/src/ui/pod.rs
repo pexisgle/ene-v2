@@ -80,6 +80,15 @@ pub struct CompanionPod {
     _observe: Subscription,
 }
 
+impl std::fmt::Debug for CompanionPod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompanionPod")
+            .field("roster_open", &self.roster_open)
+            .field("controls_open", &self.controls_open)
+            .finish_non_exhaustive()
+    }
+}
+
 impl CompanionPod {
     pub fn new(hub: Entity<Hub>, cx: &mut Context<Self>) -> Self {
         let chat_input = cx.new(|cx| Draft::new(cx, "メッセージを入力…", "ChatInput"));
@@ -288,6 +297,8 @@ impl CompanionPod {
         }
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn render_bubble_stage(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let hub = self.hub.read(cx);
         let theme = hub.theme();
@@ -685,6 +696,8 @@ impl CompanionPod {
             .into_any_element()
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn render_onboarding_body(
         &self,
         needs_connection: bool,
@@ -1283,6 +1296,8 @@ impl CompanionPod {
         .into_any_element()
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn render_mini_body(
         &self,
         streaming_preview: &str,
@@ -1436,6 +1451,8 @@ impl CompanionPod {
             .into_any_element()
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn render_expanded_timeline(
         &self,
         streaming_preview: &str,
@@ -1650,6 +1667,8 @@ impl CompanionPod {
             .into_any_element()
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn render_capsule_dock(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let (theme, live, has_companion, unsent) = {
             let hub = self.hub.read(cx);
@@ -1850,6 +1869,8 @@ impl CompanionPod {
             .into_any_element()
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn render_controls(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let hub = self.hub.read(cx);
         let mic_ready = matches!(hub.model.devices.input, Device::Ready(_))
@@ -2068,6 +2089,8 @@ impl CompanionPod {
         }
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn render_roster_popover(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let hub = self.hub.read(cx);
         let companions = hub

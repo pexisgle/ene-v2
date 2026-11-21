@@ -23,6 +23,7 @@ pub enum VrmSystems {
     SpringBone,
 }
 
+#[derive(Debug)]
 pub struct VrmPlugin;
 
 impl Plugin for VrmPlugin {
@@ -437,6 +438,8 @@ mod tests {
     }
 
     #[test]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
     fn scene_instances_remap_bones_and_preserve_native_and_vrma_playback() {
         let files = Files::new();
         let mut app = app();
@@ -759,6 +762,8 @@ mod tests {
         assert_eq!(app.world_mut().query::<&Vrm>().iter(app.world()).count(), 0);
     }
     #[test]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn typed_expression_and_gaze_inputs_keep_native_interpolation_and_pause() {
         let mut app = app();
         for interpolation in ["STEP", "LINEAR", "CUBICSPLINE"] {
@@ -911,6 +916,8 @@ mod tests {
     }
 
     #[test]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn expression_materials_wait_atomically_and_isolate_ready_instances() {
         use crate::material::{BaseUv, EmissiveStrength, MaterialSlot};
         use bevy::{platform::collections::HashMap, world_serialization::WorldInstanceReady};
@@ -1050,6 +1057,8 @@ mod tests {
     }
 
     #[test]
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn review_pending_materials_follow_live_handles_slots_and_children() {
         use crate::material::MaterialSlot;
         use bevy::platform::collections::HashMap;

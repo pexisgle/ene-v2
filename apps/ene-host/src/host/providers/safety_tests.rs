@@ -788,9 +788,7 @@ async fn p08_construction_failure_is_scoped_and_not_an_invalid_destination() {
     use ene_plugin_runtime::service::DenyHttp;
     {
         let _failure = construction_failure::Guard::enter();
-        let error = http_broker(Arc::new(DenyHttp))
-            .err()
-            .expect("builder failure");
+        let error = http_broker(Arc::new(DenyHttp)).unwrap_err();
         assert!(error.is_builder());
     }
     let broker = http_broker(Arc::new(DenyHttp)).unwrap();

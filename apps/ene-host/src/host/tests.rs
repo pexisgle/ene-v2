@@ -1340,6 +1340,8 @@ fn an_auto_capability_tool_becomes_a_device_operation() {
 }
 
 #[test]
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_lines)]
 fn a_shared_capability_tool_serves_each_companion_that_declares_it() {
     let mut harness = Harness::new([
         tool_turn(
@@ -1636,6 +1638,8 @@ fn computer_model(
 }
 
 #[test]
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_lines)]
 fn computer_use_sends_a_request_only_image_and_never_replays_input() {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use rig_core::message::UserContent;

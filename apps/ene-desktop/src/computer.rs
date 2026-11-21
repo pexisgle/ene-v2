@@ -25,7 +25,10 @@ pub(crate) fn spec() -> ene_rpc::ClientCapabilitySpec {
         if name != "screenshot" {
             properties["frame_id"] = json!({"type":"string","format":"uuid"});
         }
-        let required: Vec<_> = properties.as_object().unwrap().keys().collect();
+        let required: Vec<_> = properties
+            .as_object()
+            .map(|object| object.keys().collect())
+            .unwrap_or_default();
         json!({
             "type": "object", "properties": properties, "required": required,
             "additionalProperties": false
@@ -202,12 +205,11 @@ pub(crate) async fn execute(
         | Action::TypeText { frame_id, .. }
         | Action::Key { frame_id, .. } => frame_id,
     };
-    if !frame.as_ref().is_some_and(|frame| {
+    let Some(frame) = frame.take().filter(|frame| {
         frame.id == *frame_id && frame.run == run && frame.at.elapsed() < FRAME_LIFETIME
-    }) {
+    }) else {
         return Err("this action needs a fresh screenshot from the same run".into());
-    }
-    let frame = frame.take().expect("the frame was checked");
+    };
     screen::physical(|| apply(&frame, action, avatar_pid))
         .ok_or("could not check physical desktop coordinates")?
 }

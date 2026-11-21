@@ -196,6 +196,8 @@ fn desired(
 
 /// Connects what the settings ask for, retires what they no longer do, and
 /// attaches the tools a handler listed.
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::large_futures, clippy::too_many_lines)]
 pub(super) fn sync(world: &mut World) {
     let closing = world
         .get_resource::<crate::host::resources::HostState>()
@@ -397,7 +399,9 @@ pub(super) fn accept_event(
             registry,
         } => {
             world.resource_mut::<McpFailures>().0.remove(&id);
-            let want = &wanted.iter().find(|(wanted, _)| wanted == &id).unwrap().1;
+            let Some((_, want)) = wanted.iter().find(|(wanted, _)| wanted == &id) else {
+                return;
+            };
             attach(world, &id, launch, connection, registry, want);
         }
         Event::Failed {
@@ -493,6 +497,8 @@ fn drain(world: &mut World) -> Vec<Event> {
     out
 }
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::large_futures)]
 pub(super) async fn open(
     want: &Desired,
     registry: ToolServerHandle,

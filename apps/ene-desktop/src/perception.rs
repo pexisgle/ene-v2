@@ -34,7 +34,9 @@ pub(crate) fn save_enabled(enabled: bool) -> io::Result<()> {
 
 pub(crate) fn save_preference(name: &str, enabled: bool) -> io::Result<()> {
     let path = preference_path(name)?;
-    let directory = path.parent().expect("a preference path has a directory");
+    let directory = path
+        .parent()
+        .ok_or_else(|| io::Error::other("a preference path has no directory"))?;
     std::fs::create_dir_all(directory)?;
     let mut file = tempfile::NamedTempFile::new_in(directory)?;
     file.write_all(if enabled { b"on" } else { b"off" })?;

@@ -374,6 +374,8 @@ impl w::SettingsService for Services {
         .await
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
     async fn check_connection(
         &self,
         _: RequestContext,
@@ -857,6 +859,8 @@ async fn probe_voicevox_tts(
     }
 }
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 async fn probe_openai_speech(
     connection: &crate::host::settings::Connection,
     credentials: &model::Credentials,

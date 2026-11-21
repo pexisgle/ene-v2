@@ -276,7 +276,8 @@ fn model_with_http(
     // declared or matches the wire's descriptor vendor, so bind under the
     // declared adapter vendor while keeping all catalog facts intact.
     let mut bound_spec = (*spec).clone();
-    bound_spec.provider = ProviderId::declare(ADAPTER).expect("valid provider name");
+    bound_spec.provider = ProviderId::declare(ADAPTER)
+        .map_err(|error| HostError::Internal(format!("invalid adapter name: {error}")))?;
     let wire = GenerateContent::new(
         GeminiConfig::new("").with_base_url(ENDPOINT),
         &bound_spec.id,

@@ -14,6 +14,8 @@ pub(crate) enum Mode {
 }
 
 impl SettingsStudio {
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     pub(super) fn render_mcp_add(
         &mut self,
         live: bool,
@@ -566,7 +568,9 @@ fn npx_from_json(input: &str) -> Result<(Option<String>, Vec<String>), &'static 
                 .as_object()
                 .filter(|servers| servers.len() == 1)
                 .ok_or("JSON にはサーバーを1つだけ指定してください。")?;
-            let (name, config) = servers.iter().next().expect("one MCP server");
+            let Some((name, config)) = servers.iter().next() else {
+                return Err("JSON にはサーバーを1つだけ指定してください。");
+            };
             (Some(name.clone()), config.clone())
         } else {
             (None, value)

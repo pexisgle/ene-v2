@@ -31,6 +31,16 @@ pub struct Instance {
     /// providers declare nothing the host reads.
     pub capabilities: Option<LlmCapabilities>,
 }
+
+impl std::fmt::Debug for Instance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Instance")
+            .field("package", &self.package.manifest.id)
+            .field("entrypoint", &self.entrypoint)
+            .field("capabilities", &self.capabilities)
+            .finish_non_exhaustive()
+    }
+}
 fn extension_timeout(extension: Extension) -> Duration {
     if extension == Extension::Harness {
         HARNESS_EXECUTION_TIMEOUT

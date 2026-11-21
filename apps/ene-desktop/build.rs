@@ -10,16 +10,16 @@
 
 use std::path::PathBuf;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=ene-desktop.manifest");
     println!("cargo:rerun-if-changed=ene-desktop.rc");
     println!("cargo:rerun-if-changed=build.rs");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
-        return;
+        return Ok(());
     }
 
-    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set"));
-    let manifest_bytes = std::fs::read("ene-desktop.manifest").expect("read ene-desktop.manifest");
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("OUT_DIR is not set")?);
+    let manifest_bytes = std::fs::read("ene-desktop.manifest")?;
     let sizes = [16u32, 32, 48];
     let images: Vec<(u32, Vec<u8>)> = sizes
         .iter()
@@ -27,13 +27,13 @@ fn main() {
         .collect();
 
     let ico_path = out_dir.join("ene-desktop.ico");
-    std::fs::write(&ico_path, build_ico(&images)).expect("write ene-desktop.ico");
+    std::fs::write(&ico_path, build_ico(&images))?;
 
     let res_path = out_dir.join("ene-desktop.lib");
-    std::fs::write(&res_path, build_win32_res(&manifest_bytes, &images))
-        .expect("write ene-desktop.lib");
+    std::fs::write(&res_path, build_win32_res(&manifest_bytes, &images))?;
 
     println!("cargo:rustc-link-arg-bins={}", res_path.display());
+    Ok(())
 }
 
 fn build_win32_res(manifest: &[u8], images: &[(u32, Vec<u8>)]) -> Vec<u8> {

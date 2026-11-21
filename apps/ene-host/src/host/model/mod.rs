@@ -289,11 +289,13 @@ pub(crate) fn is_non_chat_sakura_model(id: &str) -> bool {
         || is_sakura_tts_model_id(&lower)
 }
 
-fn sakura_model_spec(model_id: &str) -> ModelSpec {
-    let provider = ProviderId::declare("sakura").expect("valid provider name");
+fn sakura_model_spec(model_id: &str) -> Option<ModelSpec> {
+    let provider = ProviderId::declare("sakura")
+        .ok()
+        .or_else(|| ProviderId::catalog("openai"))?;
     let mut spec = ModelSpec::new(provider, model_id).with_tools(true);
     spec.input.image = SAKURA_VISION_MODELS.contains(&model_id);
-    spec
+    Some(spec)
 }
 
 /// The rig provider a host adapter names.
@@ -417,7 +419,10 @@ pub(crate) fn connect_assignment(
         let config = OpenAIConfig::with_key(&sakura_dialect(), secret.unwrap_or_default())
             .with_base_url(base)
             .with_route(Route::Chat);
-        let spec = Arc::new(sakura_model_spec(&assignment.model_id));
+        let spec = Arc::new(
+            sakura_model_spec(&assignment.model_id)
+                .ok_or_else(|| HostError::Internal("sakura provider is unavailable".into()))?,
+        );
         let chat = config
             .chat(assignment.model_id.clone())
             .with_facts(ModelFacts::new(spec).with_catalog(catalog));
@@ -600,13 +605,11 @@ pub(crate) fn models(connection: &Connection, catalog: &Catalog) -> Vec<(String,
     ordered
         .into_iter()
         .take(MAX_MODELS)
-        .map(|model| {
+        .filter_map(|model| {
             let spec = if is_sakura_connection(adapter, &connection.endpoint().endpoint) {
-                sakura_model_spec(&model)
+                sakura_model_spec(&model)?
             } else {
-                let provider = provider_of(adapter).unwrap_or_else(|| {
-                    ProviderId::catalog("openai").expect("openai is registered")
-                });
+                let provider = provider_of(adapter).or_else(|| ProviderId::catalog("openai"))?;
                 let reference = format!("{}/{}", provider.vendor(), model);
                 let resolved = catalog.resolve(&reference).ok().or_else(|| {
                     (adapter == agent_platform::ADAPTER)
@@ -617,7 +620,7 @@ pub(crate) fn models(connection: &Connection, catalog: &Catalog) -> Vec<(String,
                     .map(|resolved| resolved.spec.clone())
                     .unwrap_or_else(|| ModelSpec::new(provider, &model).with_tools(true))
             };
-            (model, spec)
+            Some((model, spec))
         })
         .collect()
 }

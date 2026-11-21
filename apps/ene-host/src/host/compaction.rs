@@ -101,6 +101,8 @@ fn injected_tokens(history: &History) -> u64 {
     head.saturating_add(estimate_tokens(&[Message::system(NOTICE)]))
 }
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fit(
     history: &mut History,
     model: &str,

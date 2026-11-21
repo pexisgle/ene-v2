@@ -27,6 +27,8 @@ pub(crate) struct VoicevoxManager {
 
 impl VoicevoxManager {
     /// Ensures a local VOICEVOX Engine at `base_url` is reachable, launching it if needed.
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::cognitive_complexity)]
     pub(crate) async fn ensure_running(
         &self,
         base_url: &str,

@@ -9,6 +9,7 @@ use crate::{
 };
 use ene_plugin::*;
 
+#[derive(Debug)]
 pub struct Events {
     extension: Extension,
     models: bool,

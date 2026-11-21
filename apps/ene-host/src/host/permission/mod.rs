@@ -427,6 +427,8 @@ fn hex_digest(bytes: &[u8]) -> String {
 
 /// Evaluates any `CandidateAction` against Hard Deny, saved `PolicyRule`s, and
 /// default approval policy (`docs/design/permissions.md` §3).
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn decide_action(rules: &[PolicyRule], action: &CandidateAction) -> Verdict {
     let typed_target = extract_target(action);
     if let Some(reason) = hard_denied_action(action, &typed_target) {
@@ -591,6 +593,8 @@ pub(crate) fn decide_capability(
     decide_action(rules, &action)
 }
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_arguments)]
 fn matches_action(
     rule: &PolicyRule,
     tool_name: &str,
@@ -973,6 +977,8 @@ impl Plugin for GatePlugin {
 /// Internal host tools pass; device capabilities, MCP tools, and web_search
 /// enter `Stage::Gate`, are checked against saved rules and, when needed, held
 /// for Decision API evaluation or user approval.
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 fn gate(world: &mut World) {
     let calls: Vec<(Entity, String, String, Value, Entity, Option<EffectId>)> = {
         let mut query = world.query_filtered::<
@@ -1720,6 +1726,8 @@ fn start_decision(world: &mut World, store: &Store, pending: Pending, inputs: De
 /// shows the card the gate would have shown. A decision that arrives after
 /// the approval was answered or expired drops (docs/design/permissions.md
 /// §4.2: an approval is resolved once).
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::cognitive_complexity)]
 fn collect_decisions(world: &mut World) {
     let Some(flight) = world.resource_mut::<Decisions>().take_finished() else {
         return;
@@ -1879,6 +1887,8 @@ pub(crate) fn submit(
     submit_with_outcome(world, request_id, decision).map(|outcome| outcome.approval)
 }
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn submit_with_outcome(
     world: &mut World,
     request_id: &str,

@@ -76,7 +76,9 @@ pub(super) fn project(
         let Ok(name) = ToolName::new(exposed.clone()) else {
             continue;
         };
-        let registration = catalog.unwrap().get(raw).unwrap();
+        let Some(registration) = catalog.and_then(|c| c.get(raw)) else {
+            continue;
+        };
         let mut definition = (**definition).clone();
         definition.name = name;
         desired.insert(exposed, (definition, registration));

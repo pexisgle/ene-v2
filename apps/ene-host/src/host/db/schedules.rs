@@ -187,6 +187,8 @@ impl Schedule {
 }
 
 impl Store {
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn insert_schedule(
         &self,
         companion: &str,

@@ -50,6 +50,8 @@ impl Declaration {
     }
 
     /// The declarations the host validates and stores.
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     pub fn specs(&self) -> Vec<w::ClientCapabilitySpec> {
         let mut specs = Vec::new();
         if !self.motions.is_empty() {

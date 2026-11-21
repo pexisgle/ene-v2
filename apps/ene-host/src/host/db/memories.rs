@@ -898,6 +898,8 @@ impl Store {
     /// Commits one consolidation pass. The memory revisions captured before the
     /// model ran are checked inside the transaction; any mismatch rolls back
     /// every memory and edge the pass would have written.
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn consolidate(&self, batch: &Batch, facts: &[Fact]) -> Result<Commit> {
         if batch.companion_id.trim().is_empty() {
             return Err(HostError::Invalid(

@@ -439,6 +439,8 @@ fn u16_to_f32(sample: u16) -> f32 {
 }
 
 /// Fills one device buffer from the deck, duplicating mono into every channel.
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_arguments)]
 fn fill_with<T: Copy>(
     output: &mut [T],
     channels: usize,
@@ -1178,6 +1180,8 @@ impl Microphone {
     }
 }
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_arguments)]
 fn push_captured_with<T: Copy>(
     input: &[T],
     channels: usize,

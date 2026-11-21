@@ -321,7 +321,11 @@ impl HttpClientExt for GuestClient {
     where
         U: From<Bytes> + Send + 'static,
     {
-        async { unimplemented!("chat completions does not use multipart") }
+        async {
+            Err(HttpError::Instance(Box::new(std::io::Error::other(
+                "chat completions does not use multipart",
+            ))))
+        }
     }
 
     fn send_streaming<T>(

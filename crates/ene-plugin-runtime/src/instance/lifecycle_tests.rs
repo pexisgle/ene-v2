@@ -152,6 +152,8 @@ fn fixture(site: WaitSite) -> (Package, tempfile::TempDir) {
     }
     (Package::load(&root).unwrap(), temp)
 }
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 async fn gate(site: WaitSite, stop: Stop) {
     let (package, _temp) = fixture(site);
     let cancel = CancellationToken::new();

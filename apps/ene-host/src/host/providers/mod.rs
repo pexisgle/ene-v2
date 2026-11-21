@@ -433,6 +433,8 @@ impl Running {
 
     /// The provider configuration this instance answers under. Only a
     /// provider extension has one; a harness caller never asks.
+    // Provider extensions always populate `provider` in `Running::start`; remove when non-provider handles are split.
+    #[allow(clippy::expect_used)]
     pub(crate) fn provider(&self) -> &ProviderConfiguration {
         self.provider
             .as_ref()
@@ -440,6 +442,8 @@ impl Running {
     }
 
     /// The catalog vendor this provider's models are filed under.
+    // Provider extensions always populate `provider_id` in `Running::start`; remove when non-provider handles are split.
+    #[allow(clippy::expect_used)]
     pub(crate) fn provider_id(&self) -> ProviderId {
         self.provider_id
             .expect("a provider extension serves a vendor name")

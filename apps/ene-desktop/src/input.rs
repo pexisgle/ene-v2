@@ -738,8 +738,8 @@ fn shape_wrapped(
     window
         .text_system()
         .shape_text(text, font_size, runs, width, None)
-        .expect("description text shapes")
-        .into_vec()
+        .map(|lines| lines.into_vec())
+        .unwrap_or_default()
 }
 
 struct Prepaint {
@@ -814,6 +814,8 @@ impl gpui::Element for FieldElement {
         (window.request_layout(style, [], cx), ())
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     fn prepaint(
         &mut self,
         _id: Option<&GlobalElementId>,
@@ -1003,25 +1005,32 @@ impl gpui::Element for FieldElement {
             window.paint_quad(selection);
         }
         let offset = prepaint.offset;
-        let layout = prepaint.layout.take().expect("the field was shaped");
+        let Some(layout) = prepaint.layout.take() else {
+            return;
+        };
         // The mask is what keeps a long value inside the border; the offset is
         // what keeps its end (and the caret) inside the same box.
         window.with_content_mask(Some(ContentMask { bounds }), |window| match &layout {
-            FieldLayout::Single(line) => line
-                .paint(
+            FieldLayout::Single(line) => {
+                let _ = line.paint(
                     bounds.origin - point(offset, px(0.)),
                     window.line_height(),
                     window,
                     cx,
-                )
-                .expect("the line paints"),
+                );
+            }
             FieldLayout::Multiline(lines, height) => {
                 let mut origin = bounds.origin;
                 for line in lines {
-                    line.paint_background(origin, *height, gpui::TextAlign::Left, None, window, cx)
-                        .expect("line background paints");
-                    line.paint(origin, *height, gpui::TextAlign::Left, None, window, cx)
-                        .expect("the line paints");
+                    let _ = line.paint_background(
+                        origin,
+                        *height,
+                        gpui::TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                    let _ = line.paint(origin, *height, gpui::TextAlign::Left, None, window, cx);
                     origin.y += line.size(*height).height;
                 }
             }

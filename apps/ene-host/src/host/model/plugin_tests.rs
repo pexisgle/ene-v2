@@ -198,6 +198,8 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> Option<Request> {
     })
 }
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 async fn serve(
     stream: &mut tokio::net::TcpStream,
     request: &Request,

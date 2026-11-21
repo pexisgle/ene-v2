@@ -27,10 +27,13 @@ pub struct Control {
 pub struct FrameEnd;
 
 pub fn run(mut app: App) -> AppExit {
-    let done = app
+    let Some(done) = app
         .world_mut()
         .remove_non_send::<Receiver<std::io::Result<()>>>()
-        .expect("control plugin must be installed");
+    else {
+        error!("control plugin must be installed");
+        return AppExit::error();
+    };
     let exit = app.run();
     match done.recv_timeout(Duration::from_secs(2)) {
         Ok(Ok(())) => exit,
@@ -110,6 +113,8 @@ pub fn setup(app: &mut App) {
 /// Exclusive on purpose: a batch that arrives in one frame is applied to the
 /// World immediately, so `add` followed by `get` in the same batch is coherent
 /// and no artificial one-request-per-frame throttle is needed.
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 fn requests(world: &mut World, avatars: &mut QueryState<(Entity, &mut Character)>) {
     for _ in 0..64 {
         let request = match world

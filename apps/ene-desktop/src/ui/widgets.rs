@@ -402,6 +402,8 @@ pub struct DropdownOption {
 
 /// Searchable inline dropdown selector built to `DESIGN.md` Strawberry Milk Capsule rules.
 #[allow(clippy::too_many_arguments)]
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_lines)]
 pub fn dropdown_select<T, S>(
     id: impl Into<String>,
     selected_value: Option<&str>,
@@ -599,8 +601,7 @@ where
             );
         }
 
-        let search_bar = show_search.then(|| {
-            let draft = filter_draft.expect("checked is_some above");
+        let search_bar = filter_draft.filter(|_| show_search).map(|draft| {
             div()
                 .flex()
                 .flex_row()

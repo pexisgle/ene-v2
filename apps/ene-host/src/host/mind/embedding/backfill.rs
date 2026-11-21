@@ -41,6 +41,8 @@ impl Default for Backfill {
 /// (docs/design/mind.md §3.2), so the ECS thread's `Mutex<Connection>` is not
 /// held while the background writes; the ECS thread only schedules and
 /// reports.
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn backfill(
     mut commands: Commands,
     store: Res<Store>,

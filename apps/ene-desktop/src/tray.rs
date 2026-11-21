@@ -48,7 +48,7 @@ impl Default for TrayState {
 }
 
 /// Cloneable UI-side handle to refresh tray state and check residency.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TrayHandle {
     shared: Arc<RwLock<TrayState>>,
     #[cfg(windows)]
@@ -85,6 +85,7 @@ impl TrayHandle {
 }
 
 /// Owned tray lifecycle guard; closes the tray thread and removes the icon on exit.
+#[derive(Debug)]
 pub struct Tray {
     handle: TrayHandle,
     #[cfg(windows)]
@@ -400,6 +401,8 @@ mod windows_tray {
         }
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::cognitive_complexity)]
     fn try_register_tray_icon(hwnd: HWND, ctx: &WindowContext) {
         let state = current_state(ctx);
         let nid = build_nid(hwnd, ctx, &state.tooltip);

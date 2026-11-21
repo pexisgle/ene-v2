@@ -25,3 +25,7 @@ connectrpc.workspace = true
 [build-dependencies]
 buffa-build = "0.9"
 connectrpc-build = "0.9"
+
+# `OUT_DIR/_connectrpc.rs` (included via `include!`) uses `buffa` and `serde_json`.
+[package.metadata.cargo-machete]
+ignored = ["buffa", "serde_json"]

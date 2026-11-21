@@ -43,6 +43,8 @@ fn tool_confirmation_request(skip: bool) -> w::UpdatePolicyRulesRequest {
 }
 
 impl SettingsStudio {
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
     pub(crate) fn render_device(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let (
             live,

@@ -55,7 +55,7 @@ impl Default for SpringJointProps {
 }
 
 /// One simulated joint and the tail it swings.
-#[derive(Clone, Reflect, MapEntities)]
+#[derive(Clone, Debug, Reflect, MapEntities)]
 pub(crate) struct Swing {
     #[entities]
     pub(crate) entity: Entity,
@@ -72,7 +72,7 @@ pub(crate) struct Swing {
 }
 
 /// A spring: its joints in hierarchy order, plus the colliders it samples.
-#[derive(Clone, Reflect, MapEntities)]
+#[derive(Clone, Debug, Reflect, MapEntities)]
 pub(crate) struct Chain {
     #[entities]
     pub(crate) joints: Vec<Swing>,
@@ -82,7 +82,7 @@ pub(crate) struct Chain {
 }
 
 /// A sphere (two equal endpoints) or capsule the joints are pushed out of.
-#[derive(Clone, Reflect, MapEntities)]
+#[derive(Clone, Debug, Reflect, MapEntities)]
 pub(crate) struct Collider {
     #[entities]
     pub(crate) entity: Entity,
@@ -91,7 +91,7 @@ pub(crate) struct Collider {
 }
 
 /// Spring state of one scene root.
-#[derive(Component, Clone, Default, Reflect)]
+#[derive(Component, Clone, Debug, Default, Reflect)]
 #[reflect(Component, Clone)]
 pub struct SpringRig {
     #[entities]

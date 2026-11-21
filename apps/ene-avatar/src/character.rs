@@ -202,7 +202,9 @@ pub fn setup(app: &mut App) {
 }
 
 pub fn reload(world: &mut World, entity: Entity) {
-    let character = world.get::<Character>(entity).unwrap();
+    let Some(character) = world.get::<Character>(entity) else {
+        return;
+    };
     let server = world.resource::<AssetServer>();
     // Bevy denies paths outside its approved roots. The client selected these
     // files explicitly, so approve exactly these two loads and nothing else.
@@ -231,7 +233,9 @@ pub fn reload(world: &mut World, entity: Entity) {
         .entity_mut(entity)
         .despawn_children()
         .insert(Visibility::Hidden);
-    let mut character = world.get_mut::<Character>(entity).unwrap();
+    let Some(mut character) = world.get_mut::<Character>(entity) else {
+        return;
+    };
     character.model = model;
     character.motion = motion;
     character.pending = None;
@@ -253,19 +257,23 @@ fn load_motion(server: &AssetServer, path: &str) -> Handle<AnimationClip> {
 }
 
 pub fn queue_motion(world: &mut World, entity: Entity) {
-    let path = world
+    let Some(path) = world
         .get::<Character>(entity)
-        .unwrap()
-        .config
-        .motion
-        .as_deref();
-    let pending = match path {
-        Some(path) => Pending::Fade(load_motion(world.resource::<AssetServer>(), path)),
-        None => Pending::Rest,
+        .and_then(|character| character.config.motion.as_deref())
+    else {
+        if let Some(mut character) = world.get_mut::<Character>(entity) {
+            character.pending = Some(Pending::Rest);
+        }
+        return;
     };
-    world.get_mut::<Character>(entity).unwrap().pending = Some(pending);
+    let pending = Pending::Fade(load_motion(world.resource::<AssetServer>(), path));
+    if let Some(mut character) = world.get_mut::<Character>(entity) {
+        character.pending = Some(pending);
+    }
 }
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_arguments)]
 fn scene_ready(
     event: On<WorldInstanceReady>,
     parents: Query<&ChildOf>,

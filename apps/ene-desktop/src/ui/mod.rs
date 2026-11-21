@@ -37,7 +37,7 @@ use gpui::{
 use std::collections::{BTreeMap, HashSet};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct HistoryReset {
     pub requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub failure: Option<String>,
@@ -217,6 +217,16 @@ pub struct Hub {
     tray: Option<TrayHandle>,
     _tray_pump: Option<Task<()>>,
     _pump: Task<()>,
+}
+
+impl std::fmt::Debug for Hub {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hub")
+            .field("pod_mode", &self.pod_mode)
+            .field("settings_section", &self.settings_section)
+            .field("pod_visible", &self.pod_visible)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Hub {
@@ -481,6 +491,8 @@ impl Hub {
         });
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
     fn apply(&mut self, mut update: Update, cx: &mut Context<Self>) {
         if let Update::Scoped {
             epoch,
@@ -1896,6 +1908,8 @@ impl Hub {
         cx.notify();
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_search_preset(
         &mut self,
         preset_id: &'static str,
@@ -4176,6 +4190,8 @@ pub(crate) fn search_adapter_requires_key(adapter: &str) -> bool {
     )
 }
 
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_arguments)]
 fn search_connection_input(
     id: String,
     name: String,
@@ -4300,6 +4316,8 @@ fn settings_update(settings: w::Settings) -> Update {
 }
 
 /// Keeps a per-window draft entity map synced with the active field theme.
+// TODO(Phase 1-3): split during refactoring.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn window_draft(
     drafts: &mut BTreeMap<String, gpui::Entity<crate::input::Draft>>,
     cx: &mut gpui::App,

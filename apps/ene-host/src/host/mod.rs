@@ -107,6 +107,8 @@ impl Runtime {
         Self::start_with(state, Options::default()).await
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn start_with(
         state: &Path,
         options: Options,

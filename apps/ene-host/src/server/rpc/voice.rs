@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 #[allow(refining_impl_trait)]
 impl w::VoiceService for Services {
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     async fn stream_audio_input(
         &self,
         _: RequestContext,

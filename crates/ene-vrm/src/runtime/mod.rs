@@ -26,7 +26,7 @@ use vrm_spec::vrmc_vrm_1_0::Meta;
 /// `vrm-spec` types do not implement `Reflect`, so the component is opaque.
 /// Scene instancing clones the whole component and then remaps [`Self::bones`]
 /// through [`MapEntities`].
-#[derive(Component, Clone, Reflect)]
+#[derive(Component, Clone, Debug, Reflect)]
 #[reflect(Component, Clone, opaque)]
 #[component(map_entities)]
 pub struct Vrm {
@@ -79,7 +79,7 @@ pub(crate) fn attach(
     let constraints = constraint::compile_constraints(constraints, world, nodes)?;
     let root_inv = world
         .get::<GlobalTransform>(root)
-        .expect("native scene transform")
+        .ok_or_else(|| crate::loader::invalid("missing native scene transform"))?
         .affine()
         .inverse();
     let hips = model

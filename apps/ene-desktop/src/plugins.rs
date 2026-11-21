@@ -63,6 +63,8 @@ impl ClientPlugins {
         }
     }
 
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::cognitive_complexity)]
     pub async fn load_from(directory: &Path) -> Self {
         let Ok(entries) = std::fs::read_dir(directory) else {
             return Self::default();

@@ -36,6 +36,7 @@ pub trait HttpGrants: Send + Sync {
 }
 
 /// Refuses every exchange. The default for a host that has not opted in.
+#[derive(Debug)]
 pub struct DenyHttp;
 impl HttpGrants for DenyHttp {
     fn allows(&self, _: &str, _: &Url) -> bool {
@@ -77,6 +78,14 @@ pub struct HttpBroker {
     next: AtomicU64,
     /// How long one exchange may take, end to end.
     deadline: Duration,
+}
+
+impl std::fmt::Debug for HttpBroker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpBroker")
+            .field("deadline", &self.deadline)
+            .finish_non_exhaustive()
+    }
 }
 
 impl HttpBroker {
@@ -218,6 +227,8 @@ impl HttpBroker {
     /// Hands out the next chunk of `handle`. A streaming read awaits the next
     /// network chunk under the exchange deadline; dropping the read future
     /// drops the response and aborts the exchange.
+    // TODO(Phase 1-3): split during refactoring.
+    #[allow(clippy::too_many_lines)]
     pub async fn read(&self, handle: &str) -> Result<HttpChunk, Failure> {
         use base64::Engine;
 

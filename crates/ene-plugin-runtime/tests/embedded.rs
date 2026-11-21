@@ -1,3 +1,6 @@
+// Integration test helpers intentionally assert via unwrap/expect.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use ene_plugin::*;
 use ene_plugin_runtime::{
     Package,
