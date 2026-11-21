@@ -4028,6 +4028,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-client-core"
+version = "0.1.8"
+dependencies = [
+ "ene-catalog",
+ "ene-rpc",
+ "serde_json",
+]
+
+[[package]]
 name = "ene-desktop"
 version = "0.1.8"
 dependencies = [
@@ -4040,6 +4049,7 @@ dependencies = [
  "earshot",
  "ene-avatar-ipc",
  "ene-catalog",
+ "ene-client-core",
  "ene-plugin",
  "ene-plugin-runtime",
  "ene-rpc",

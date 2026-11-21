@@ -30,8 +30,8 @@ impl SettingsStudio {
                     .settings()
                     .map(|s| s.connections.clone())
                     .unwrap_or_default(),
-                hub.model.providers.clone().unwrap_or_default(),
-                hub.model.checks.clone(),
+                hub.model.connections.providers.clone().unwrap_or_default(),
+                hub.model.connections.checks.clone(),
                 hub.model.companion().cloned(),
                 hub.all_llm_models(),
                 hub.all_embedding_models(),
@@ -39,10 +39,11 @@ impl SettingsStudio {
         };
 
         if self
+            .connection_form
             .pending_mcp
             .as_ref()
             .is_some_and(|id| connections.iter().any(|connection| &connection.id == id))
-            && let Some(id) = self.pending_mcp.take()
+            && let Some(id) = self.connection_form.pending_mcp.take()
         {
             self.clear_mcp_drafts();
             let hub = self.hub.clone();
@@ -50,7 +51,7 @@ impl SettingsStudio {
         }
         let studio_add = cx.entity();
         let studio_mcp = cx.entity();
-        let adding = self.adding_connection;
+        let adding = self.connection_form.adding_connection;
         let header = div()
             .flex()
             .flex_row()
@@ -78,10 +79,10 @@ impl SettingsStudio {
                         theme,
                         move |_, cx| {
                             studio_mcp.update(cx, |this, cx| {
-                                this.adding_connection = true;
-                                this.custom_connection_open = true;
-                                this.custom_kind = w::ConnectionKind::Mcp;
-                                this.mcp_add_mode = super::mcp_add::Mode::Npx;
+                                this.connection_form.adding_connection = true;
+                                this.connection_form.custom_connection_open = true;
+                                this.connection_form.custom_kind = w::ConnectionKind::Mcp;
+                                this.connection_form.mcp_add_mode = super::mcp_add::Mode::Npx;
                                 cx.notify();
                             });
                         },
@@ -99,11 +100,12 @@ impl SettingsStudio {
                         theme,
                         move |_, cx| {
                             studio_add.update(cx, |this, cx| {
-                                this.adding_connection = !this.adding_connection;
-                                if this.adding_connection
-                                    && this.custom_kind == w::ConnectionKind::Mcp
+                                this.connection_form.adding_connection =
+                                    !this.connection_form.adding_connection;
+                                if this.connection_form.adding_connection
+                                    && this.connection_form.custom_kind == w::ConnectionKind::Mcp
                                 {
-                                    this.custom_kind = w::ConnectionKind::Llm;
+                                    this.connection_form.custom_kind = w::ConnectionKind::Llm;
                                 }
                                 cx.notify();
                             });
@@ -148,7 +150,7 @@ impl SettingsStudio {
         }
 
         let studio_adv = cx.entity();
-        let adv_open = self.advanced_roles_open;
+        let adv_open = self.connection_form.advanced_roles_open;
         let adv_toggle = disclosure_row(
             "conn-advanced-roles-toggle",
             "詳細設定（役割別のモデル割当・エンドポイント）",
@@ -156,7 +158,8 @@ impl SettingsStudio {
             theme,
             move |_, cx| {
                 studio_adv.update(cx, |this, cx| {
-                    this.advanced_roles_open = !this.advanced_roles_open;
+                    this.connection_form.advanced_roles_open =
+                        !this.connection_form.advanced_roles_open;
                     cx.notify();
                 });
             },
@@ -267,7 +270,8 @@ impl SettingsStudio {
                 existing.and_then(|c| checks.get(&c.id).or_else(|| c.last_check.as_option()));
 
             let reveal_key = format!("search-card:{adapter}");
-            let revealed = self.revealed_secret_for.as_deref() == Some(reveal_key.as_str());
+            let revealed =
+                self.connection_form.revealed_secret_for.as_deref() == Some(reveal_key.as_str());
             let draft = self.masked_draft(
                 cx,
                 format!("search-card:secret:{adapter}"),
@@ -419,7 +423,7 @@ impl SettingsStudio {
                                 theme,
                                 move |_, cx| {
                                     studio_eye.update(cx, |this, cx| {
-                                        this.revealed_secret_for = if revealed {
+                                        this.connection_form.revealed_secret_for = if revealed {
                                             None
                                         } else {
                                             Some(reveal_key_click.clone())
@@ -594,7 +598,9 @@ impl SettingsStudio {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.custom_connection_open && self.custom_kind == w::ConnectionKind::Mcp {
+        if self.connection_form.custom_connection_open
+            && self.connection_form.custom_kind == w::ConnectionKind::Mcp
+        {
             return self.render_mcp_add(live, theme, cx);
         }
         let mut llm_chips: Vec<AnyElement> = Vec::new();
@@ -614,7 +620,7 @@ impl SettingsStudio {
                         hub.add_llm_from_provider(p.clone(), vec![], cx)
                     });
                     studio.update(cx, |this, cx| {
-                        this.adding_connection = false;
+                        this.connection_form.adding_connection = false;
                         cx.notify();
                     });
                 },
@@ -655,8 +661,8 @@ impl SettingsStudio {
                 move |_, cx| {
                     hub_vv.update(cx, |hub, cx| hub.add_voicevox_preset(3, None, cx));
                     studio_vv.update(cx, |this, cx| {
-                        this.adding_connection = false;
-                        this.expanded_connection_id = Some("voicevox".into());
+                        this.connection_form.adding_connection = false;
+                        this.connection_form.expanded_connection_id = Some("voicevox".into());
                         this.open_dropdown = None;
                         cx.notify();
                     });
@@ -672,8 +678,8 @@ impl SettingsStudio {
                 move |_, cx| {
                     hub_sakura_tts.update(cx, |hub, cx| hub.add_sakura_tts_preset(cx));
                     studio_sakura_tts.update(cx, |this, cx| {
-                        this.adding_connection = false;
-                        this.expanded_connection_id = Some("sakura-tts".into());
+                        this.connection_form.adding_connection = false;
+                        this.connection_form.expanded_connection_id = Some("sakura-tts".into());
                         this.open_dropdown = None;
                         cx.notify();
                     });
@@ -696,7 +702,7 @@ impl SettingsStudio {
                         );
                     });
                     studio_oai.update(cx, |this, cx| {
-                        this.adding_connection = false;
+                        this.connection_form.adding_connection = false;
                         cx.notify();
                     });
                 },
@@ -711,8 +717,8 @@ impl SettingsStudio {
                 move |_, cx| {
                     hub_sakura_stt.update(cx, |hub, cx| hub.add_sakura_stt_preset(cx));
                     studio_sakura_stt.update(cx, |this, cx| {
-                        this.adding_connection = false;
-                        this.expanded_connection_id = Some("sakura-stt".into());
+                        this.connection_form.adding_connection = false;
+                        this.connection_form.expanded_connection_id = Some("sakura-stt".into());
                         this.open_dropdown = None;
                         cx.notify();
                     });
@@ -736,7 +742,7 @@ impl SettingsStudio {
                         );
                     });
                     studio_oai_stt.update(cx, |this, cx| {
-                        this.adding_connection = false;
+                        this.connection_form.adding_connection = false;
                         cx.notify();
                     });
                 },
@@ -759,7 +765,7 @@ impl SettingsStudio {
                         );
                     });
                     studio_stt.update(cx, |this, cx| {
-                        this.adding_connection = false;
+                        this.connection_form.adding_connection = false;
                         cx.notify();
                     });
                 },
@@ -774,8 +780,9 @@ impl SettingsStudio {
                 move |_, cx| {
                     hub_sakura_emb.update(cx, |hub, cx| hub.add_sakura_embedding_preset(cx));
                     studio_sakura_emb.update(cx, |this, cx| {
-                        this.adding_connection = false;
-                        this.expanded_connection_id = Some("sakura-embedding".into());
+                        this.connection_form.adding_connection = false;
+                        this.connection_form.expanded_connection_id =
+                            Some("sakura-embedding".into());
                         this.open_dropdown = None;
                         cx.notify();
                     });
@@ -791,8 +798,9 @@ impl SettingsStudio {
                 move |_, cx| {
                     hub_oai_emb.update(cx, |hub, cx| hub.add_openai_embedding_preset(cx));
                     studio_oai_emb.update(cx, |this, cx| {
-                        this.adding_connection = false;
-                        this.expanded_connection_id = Some("openai-embedding".into());
+                        this.connection_form.adding_connection = false;
+                        this.connection_form.expanded_connection_id =
+                            Some("openai-embedding".into());
                         this.open_dropdown = None;
                         cx.notify();
                     });
@@ -859,11 +867,20 @@ impl SettingsStudio {
                 theme,
                 move |_, cx| {
                     let target_id = hub_s.update(cx, |hub, cx| {
-                        hub.add_search_preset(preset_id, conn_name, adapter, url, true, cx)
+                        hub.add_search_preset(
+                            super::SearchPresetSpec {
+                                preset_id,
+                                name: conn_name,
+                                adapter,
+                                endpoint: url,
+                                activate: true,
+                            },
+                            cx,
+                        )
                     });
                     studio_s.update(cx, |this, cx| {
-                        this.adding_connection = false;
-                        this.expanded_connection_id = Some(target_id);
+                        this.connection_form.adding_connection = false;
+                        this.connection_form.expanded_connection_id = Some(target_id);
                         this.open_dropdown = None;
                         cx.notify();
                     });
@@ -871,7 +888,7 @@ impl SettingsStudio {
             ));
         }
 
-        let custom_kind = self.custom_kind;
+        let custom_kind = self.connection_form.custom_kind;
         let mut kind_chips = Vec::new();
         for kind in [
             w::ConnectionKind::Llm,
@@ -893,7 +910,7 @@ impl SettingsStudio {
                 theme,
                 move |_, cx| {
                     studio.update(cx, |this, cx| {
-                        this.custom_kind = kind;
+                        this.connection_form.custom_kind = kind;
                         cx.notify();
                     });
                 },
@@ -1002,19 +1019,20 @@ impl SettingsStudio {
             .child(disclosure_row(
                 "custom-connection",
                 "カスタム接続",
-                self.custom_connection_open,
+                self.connection_form.custom_connection_open,
                 theme,
                 {
                     let studio = cx.entity();
                     move |_, cx| {
                         studio.update(cx, |this, cx| {
-                            this.custom_connection_open = !this.custom_connection_open;
+                            this.connection_form.custom_connection_open =
+                                !this.connection_form.custom_connection_open;
                             cx.notify();
                         })
                     }
                 },
             ))
-            .when(self.custom_connection_open, |panel| {
+            .when(self.connection_form.custom_connection_open, |panel| {
                 panel.child(
                     div()
                         .flex()
@@ -1065,7 +1083,7 @@ impl SettingsStudio {
                                     hub.upsert_connection("接続の追加", input, cx);
                                 });
                                 studio_done.update(cx, |this, cx| {
-                                    this.adding_connection = false;
+                                    this.connection_form.adding_connection = false;
                                     cx.notify();
                                 });
                             },
@@ -1090,13 +1108,14 @@ impl SettingsStudio {
             .kind
             .as_known()
             .unwrap_or(w::ConnectionKind::Unspecified);
-        let expanded = self.expanded_connection_id.as_deref() == Some(id.as_str());
+        let expanded = self.connection_form.expanded_connection_id.as_deref() == Some(id.as_str());
 
         let needs_key_flag = super::needs_key(
             conn,
             self.hub
                 .read(cx)
                 .model
+                .connections
                 .providers
                 .as_deref()
                 .unwrap_or_default(),
@@ -1240,20 +1259,24 @@ impl SettingsStudio {
                         move |_, cx| {
                             let mut probe_id = None;
                             studio_expand.update(cx, |this, cx| {
-                                if this.expanded_connection_id.as_deref()
+                                if this.connection_form.expanded_connection_id.as_deref()
                                     == Some(expand_id.as_str())
                                 {
-                                    this.expanded_connection_id = None;
+                                    this.connection_form.expanded_connection_id = None;
                                 } else {
-                                    this.expanded_connection_id = Some(expand_id.clone());
+                                    this.connection_form.expanded_connection_id =
+                                        Some(expand_id.clone());
                                     if should_auto_probe
-                                        && this.auto_probed_connections.insert(expand_id.clone())
+                                        && this
+                                            .connection_form
+                                            .auto_probed_connections
+                                            .insert(expand_id.clone())
                                     {
                                         probe_id = Some(expand_id.clone());
                                     }
                                 }
                                 this.open_dropdown = None;
-                                this.revoke_armed_for = None;
+                                this.connection_form.revoke_armed_for = None;
                                 cx.notify();
                             });
                             if let Some(pid) = probe_id {
@@ -1318,7 +1341,7 @@ impl SettingsStudio {
             });
 
         // Credentials strip
-        let revealed = self.revealed_secret_for.as_deref() == Some(id.as_str());
+        let revealed = self.connection_form.revealed_secret_for.as_deref() == Some(id.as_str());
         let secret_d = self.masked_draft(
             cx,
             format!("conn:secret:{id}"),
@@ -1338,7 +1361,7 @@ impl SettingsStudio {
         let eye_id = id.clone();
         let hub_reg = self.hub.clone();
         let reg_id = id.clone();
-        let revoke_armed = self.revoke_armed_for.as_deref() == Some(id.as_str());
+        let revoke_armed = self.connection_form.revoke_armed_for.as_deref() == Some(id.as_str());
         let studio_rev_arm = cx.entity();
         let studio_rev_cancel = cx.entity();
         let hub_rev = self.hub.clone();
@@ -1416,7 +1439,7 @@ impl SettingsStudio {
                         theme,
                         move |_, cx| {
                             studio_eye.update(cx, |this, cx| {
-                                this.revealed_secret_for =
+                                this.connection_form.revealed_secret_for =
                                     if revealed { None } else { Some(eye_id.clone()) };
                                 cx.notify();
                             });
@@ -1475,7 +1498,7 @@ impl SettingsStudio {
                                 theme,
                                 move |_, cx| {
                                     studio_rev_cancel.update(cx, |this, cx| {
-                                        this.revoke_armed_for = None;
+                                        this.connection_form.revoke_armed_for = None;
                                         cx.notify();
                                     });
                                 },
@@ -1503,7 +1526,7 @@ impl SettingsStudio {
                             theme,
                             move |_, cx| {
                                 studio_rev_arm.update(cx, |this, cx| {
-                                    this.revoke_armed_for = Some(arm_id.clone());
+                                    this.connection_form.revoke_armed_for = Some(arm_id.clone());
                                     cx.notify();
                                 });
                             },
@@ -3218,7 +3241,7 @@ impl SettingsStudio {
                                     theme,
                                     move |_, cx| {
                                         studio_add.update(cx, |this, cx| {
-                                            this.adding_connection = true;
+                                            this.connection_form.adding_connection = true;
                                             cx.notify();
                                         });
                                     },
@@ -3385,7 +3408,7 @@ impl SettingsStudio {
                                     theme,
                                     move |_, cx| {
                                         studio_add.update(cx, |this, cx| {
-                                            this.adding_connection = true;
+                                            this.connection_form.adding_connection = true;
                                             cx.notify();
                                         });
                                     },

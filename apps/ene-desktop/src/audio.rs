@@ -657,15 +657,7 @@ const VAD_PRE_ROLL_SAMPLES: usize = VAD_FRAME_SAMPLES * 35; // 560 ms
 const VAD_START_SCORE: f32 = 0.55;
 const VAD_CONTINUE_SCORE: f32 = 0.35;
 
-/// Microphone capture mode (`F07`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CaptureMode {
-    /// Continuous voice-activity detection.
-    #[default]
-    Vad,
-    /// Push-to-Talk: captures only while held, commits on release, discards on cancel.
-    Ptt,
-}
+pub use ene_client_core::CaptureMode;
 
 /// Far-end reference echo suppressor with barge-in detection (`F08`).
 ///

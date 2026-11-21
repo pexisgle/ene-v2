@@ -174,15 +174,17 @@ fn main() {
             let hub = cx.new(|cx| {
                 Hub::new(
                     cx,
-                    options(),
-                    connection.clone(),
-                    commands_tx.clone(),
-                    updates_tx.clone(),
-                    updates_rx,
-                    tray_handle,
-                    tray_rx,
-                    handle.clone(),
-                    shown.clone(),
+                    ene_desktop::HubInit {
+                        options: options(),
+                        connection: connection.clone(),
+                        commands: commands_tx.clone(),
+                        updates_tx: updates_tx.clone(),
+                        updates: updates_rx,
+                        tray: tray_handle,
+                        tray_rx,
+                        runtime: handle.clone(),
+                        discovery: shown.clone(),
+                    },
                 )
             });
             let open_chat = std::env::var("ENE_DESKTOP_OPEN_SETTINGS")

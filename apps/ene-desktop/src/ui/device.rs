@@ -79,15 +79,15 @@ impl SettingsStudio {
             let policy_texts = hub.model.policy_texts().to_vec();
             (
                 hub.live(),
-                hub.model.link.clone(),
+                hub.model.connections.link.clone(),
                 hub.model.is_active_client(&our_id),
                 hub.model.companion_id().is_some(),
-                hub.model.devices.clone(),
-                hub.model.mic_muted,
-                hub.model.output_muted,
-                hub.model.eyes_enabled,
-                hub.model.eyes_status.clone(),
-                hub.model.avatar_scale,
+                hub.model.connections.devices.clone(),
+                hub.model.audio.mic_muted,
+                hub.model.audio.output_muted,
+                hub.model.perception.eyes_enabled,
+                hub.model.perception.eyes_status.clone(),
+                hub.model.perception.avatar_scale,
                 rules,
                 policy_texts,
                 caps,
@@ -166,7 +166,7 @@ impl SettingsStudio {
                         .iter()
                         .any(|name| name == w::COMPUTER_USE)
                 });
-            (hub.model.computer_use_enabled, granted)
+            (hub.model.perception.computer_use_enabled, granted)
         };
         #[cfg(windows)]
         let hub_computer = self.hub.clone();
@@ -525,7 +525,7 @@ impl SettingsStudio {
                 ),
                 _ => ("確認", theme.amber, theme.amber_soft, theme.amber_fg),
             };
-            let armed = self.delete_armed_policy.as_deref() == Some(rule.id.as_str());
+            let armed = self.device_form.delete_armed_policy.as_deref() == Some(rule.id.as_str());
             let studio_arm = cx.entity();
             let studio_cancel = cx.entity();
             let hub_remove = self.hub.clone();
@@ -547,7 +547,7 @@ impl SettingsStudio {
                         theme,
                         move |_, cx| {
                             studio_cancel.update(cx, |this, cx| {
-                                this.delete_armed_policy = None;
+                                this.device_form.delete_armed_policy = None;
                                 cx.notify();
                             });
                         },
@@ -575,7 +575,7 @@ impl SettingsStudio {
                     theme,
                     move |_, cx| {
                         studio_arm.update(cx, |this, cx| {
-                            this.delete_armed_policy = Some(arm_id.clone());
+                            this.device_form.delete_armed_policy = Some(arm_id.clone());
                             cx.notify();
                         });
                     },
@@ -638,7 +638,7 @@ impl SettingsStudio {
             );
         }
 
-        let skip_armed = self.skip_confirm_armed;
+        let skip_armed = self.device_form.skip_confirm_armed;
         let studio_arm_skip = cx.entity();
         let studio_cancel_skip = cx.entity();
         let studio_exec_skip = cx.entity();
@@ -729,7 +729,7 @@ impl SettingsStudio {
                             theme,
                             move |_, cx| {
                                 studio_arm_skip.update(cx, |this, cx| {
-                                    this.skip_confirm_armed = true;
+                                    this.device_form.skip_confirm_armed = true;
                                     cx.notify();
                                 });
                             },
@@ -747,7 +747,7 @@ impl SettingsStudio {
                                 theme,
                                 move |_, cx| {
                                     studio_cancel_skip.update(cx, |this, cx| {
-                                        this.skip_confirm_armed = false;
+                                        this.device_form.skip_confirm_armed = false;
                                         cx.notify();
                                     });
                                 },
@@ -761,7 +761,7 @@ impl SettingsStudio {
                                 theme,
                                 move |_, cx| {
                                     studio_exec_skip.update(cx, |this, cx| {
-                                        this.skip_confirm_armed = false;
+                                        this.device_form.skip_confirm_armed = false;
                                         cx.notify();
                                     });
                                     hub_skip.update(cx, |hub, cx| {
@@ -780,7 +780,7 @@ impl SettingsStudio {
             .children(rule_items);
 
         let studio_add_pol = cx.entity();
-        let add_open = self.adding_policy_open;
+        let add_open = self.device_form.adding_policy_open;
         let add_toggle = disclosure_row(
             "dev-policy-add-disclosure",
             "ルールを手動追加",
@@ -788,7 +788,7 @@ impl SettingsStudio {
             theme,
             move |_, cx| {
                 studio_add_pol.update(cx, |this, cx| {
-                    this.adding_policy_open = !this.adding_policy_open;
+                    this.device_form.adding_policy_open = !this.device_form.adding_policy_open;
                     cx.notify();
                 });
             },
@@ -804,7 +804,7 @@ impl SettingsStudio {
             let pattern_d = self.draft(cx, "policy:pattern", "例: * / C:/work/*", None, theme);
             let tool_val = tool_d.read(cx).text().trim().to_owned();
             let pattern_val = pattern_d.read(cx).text().trim().to_owned();
-            let eff_choice = self.new_policy_effect;
+            let eff_choice = self.device_form.new_policy_effect;
 
             let eff_chip = |eff: w::PolicyEffect, label: &'static str| {
                 let selected = eff_choice == eff;
@@ -818,7 +818,7 @@ impl SettingsStudio {
                     theme,
                     move |_, cx| {
                         studio.update(cx, |this, cx| {
-                            this.new_policy_effect = eff;
+                            this.device_form.new_policy_effect = eff;
                             cx.notify();
                         });
                     },
@@ -968,8 +968,10 @@ impl SettingsStudio {
 
         let mut text_items: Vec<AnyElement> = Vec::new();
         for (index, item) in policy_texts.iter().enumerate() {
-            let editing = self.editing_policy_text_id.as_deref() == Some(item.id.as_str());
-            let armed = self.delete_armed_policy_text.as_deref() == Some(item.id.as_str());
+            let editing =
+                self.device_form.editing_policy_text_id.as_deref() == Some(item.id.as_str());
+            let armed =
+                self.device_form.delete_armed_policy_text.as_deref() == Some(item.id.as_str());
             if editing {
                 let edit_d = self.description_draft(
                     cx,
@@ -1029,7 +1031,7 @@ impl SettingsStudio {
                                             theme,
                                             move |_, cx| {
                                                 studio_cancel.update(cx, |this, cx| {
-                                                    this.editing_policy_text_id = None;
+                                                    this.device_form.editing_policy_text_id = None;
                                                     cx.notify();
                                                 });
                                             },
@@ -1051,7 +1053,7 @@ impl SettingsStudio {
                                                     hub.upsert_policy_text(Some(id), val, cx);
                                                 });
                                                 studio_save.update(cx, |this, cx| {
-                                                    this.editing_policy_text_id = None;
+                                                    this.device_form.editing_policy_text_id = None;
                                                     cx.notify();
                                                 });
                                             },
@@ -1084,7 +1086,7 @@ impl SettingsStudio {
                         theme,
                         move |_, cx| {
                             studio_cancel.update(cx, |this, cx| {
-                                this.delete_armed_policy_text = None;
+                                this.device_form.delete_armed_policy_text = None;
                                 cx.notify();
                             });
                         },
@@ -1117,8 +1119,8 @@ impl SettingsStudio {
                         theme,
                         move |_, cx| {
                             studio_edit.update(cx, |this, cx| {
-                                this.editing_policy_text_id = Some(edit_id.clone());
-                                this.delete_armed_policy_text = None;
+                                this.device_form.editing_policy_text_id = Some(edit_id.clone());
+                                this.device_form.delete_armed_policy_text = None;
                                 cx.notify();
                             });
                         },
@@ -1132,7 +1134,7 @@ impl SettingsStudio {
                         theme,
                         move |_, cx| {
                             studio_arm.update(cx, |this, cx| {
-                                this.delete_armed_policy_text = Some(arm_id.clone());
+                                this.device_form.delete_armed_policy_text = Some(arm_id.clone());
                                 cx.notify();
                             });
                         },
@@ -1183,7 +1185,7 @@ impl SettingsStudio {
             .children(text_items);
 
         let studio_add_poltxt = cx.entity();
-        let add_txt_open = self.adding_policy_text_open;
+        let add_txt_open = self.device_form.adding_policy_text_open;
         let add_txt_toggle = disclosure_row(
             "dev-policy-text-add-disclosure",
             "自由文ポリシーを追加",
@@ -1191,7 +1193,8 @@ impl SettingsStudio {
             theme,
             move |_, cx| {
                 studio_add_poltxt.update(cx, |this, cx| {
-                    this.adding_policy_text_open = !this.adding_policy_text_open;
+                    this.device_form.adding_policy_text_open =
+                        !this.device_form.adding_policy_text_open;
                     cx.notify();
                 });
             },
@@ -1252,7 +1255,7 @@ impl SettingsStudio {
                                     });
                                     draft_clear.update(cx, |draft, cx| draft.clear(cx));
                                     studio_clear.update(cx, |this, cx| {
-                                        this.adding_policy_text_open = false;
+                                        this.device_form.adding_policy_text_open = false;
                                         cx.notify();
                                     });
                                 },
@@ -1263,8 +1266,8 @@ impl SettingsStudio {
             None
         };
 
-        let plugins = self.hub.read(cx).model.plugins.clone();
-        let adding_plugin = self.adding_plugin_open;
+        let plugins = self.hub.read(cx).model.connections.plugins.clone();
+        let adding_plugin = self.device_form.adding_plugin_open;
         let studio_add_plugin = cx.entity();
         let plugins_heading = div()
             .w_full()
@@ -1324,7 +1327,7 @@ impl SettingsStudio {
                         theme,
                         move |_, cx| {
                             studio_add_plugin.update(cx, |this, cx| {
-                                this.adding_plugin_open = !this.adding_plugin_open;
+                                this.device_form.adding_plugin_open = !this.device_form.adding_plugin_open;
                                 cx.notify();
                             });
                         },
@@ -1404,7 +1407,7 @@ impl SettingsStudio {
                                     hub_install.update(cx, |h, cx| h.install_plugin(path, cx));
                                     draft_clear.update(cx, |d, cx| d.clear(cx));
                                     studio_close.update(cx, |this, cx| {
-                                        this.adding_plugin_open = false;
+                                        this.device_form.adding_plugin_open = false;
                                         cx.notify();
                                     });
                                 },
@@ -1513,7 +1516,7 @@ impl SettingsStudio {
 
         // --- Remote HTTPS host target (F10) -----------------------------------
         let current_remote = super::Hub::current_remote_host();
-        let remote_open = self.remote_host_open;
+        let remote_open = self.device_form.remote_host_open;
         let studio_remote_toggle = cx.entity();
         let remote_heading = div()
             .w_full()
@@ -1596,7 +1599,8 @@ impl SettingsStudio {
                         theme,
                         move |_, cx| {
                             studio_remote_toggle.update(cx, |this, cx| {
-                                this.remote_host_open = !this.remote_host_open;
+                                this.device_form.remote_host_open =
+                                    !this.device_form.remote_host_open;
                                 cx.notify();
                             });
                         },

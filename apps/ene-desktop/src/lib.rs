@@ -17,22 +17,19 @@ mod input;
 mod perception;
 mod plugins;
 mod session;
-mod state;
 mod tray;
 mod ui;
-mod update;
 mod work_tools;
 
 pub use avatar::{bundled_ene_model, default_model, default_renderer};
 pub use capabilities::default_allowed_capabilities;
+pub use ene_client_core::{Command, Link, Model, Update, state, update};
 pub use host::{Connect, Discovery, Host};
 pub use session::{Connection, Options, Session, persistent_client_id};
-pub use state::{Link, Model};
 pub use tray::{Tray, TrayAction, TrayHandle, TrayState};
 pub use ui::{
-    CompanionPod, Desktop, EmbeddedAssets, HistoryReset, Hub, PodMode, SettingsSection,
+    CompanionPod, Desktop, EmbeddedAssets, HistoryReset, Hub, HubInit, PodMode, SettingsSection,
     SettingsStudio, bind as bind_actions, focus_chat, initial_pod_bounds,
     initial_pod_bounds_for_mode, open_pod_window,
 };
-pub use update::{Command, Update};
 pub use work_tools::WORKSPACE_FILE_CAPABILITIES;

@@ -28,6 +28,7 @@ rest_pat_in_fully_bound_structs = "warn"
 ene-rpc = { path = "crates/ene-rpc" }
 ene-avatar-ipc = { path = "crates/ene-avatar-ipc" }
 ene-catalog = { path = "crates/ene-catalog" }
+ene-client-core = { path = "crates/ene-client-core" }
 ene-mind = { path = "crates/ene-mind" }
 ene-policy = { path = "crates/ene-policy" }
 ene-plugin = { path = "crates/ene-plugin" }

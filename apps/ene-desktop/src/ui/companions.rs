@@ -57,17 +57,17 @@ impl SettingsStudio {
                 !hub.model_choices().is_empty(),
                 hub.tts_voice_choices(),
                 tts_ids,
-                hub.model.minds.clone(),
-                hub.model.templates.clone(),
-                hub.model.exported_template.clone(),
-                hub.model.preview_reply.clone(),
+                hub.model.companions.minds.clone(),
+                hub.model.companions.templates.clone(),
+                hub.model.companions.exported_template.clone(),
+                hub.model.companions.preview_reply.clone(),
             )
         };
 
         let studio_toggle_create = cx.entity();
         let studio_toggle_import = cx.entity();
-        let creating = self.creating_companion;
-        let importing = self.importing_template;
+        let creating = self.companion_form.creating_companion;
+        let importing = self.companion_form.importing_template;
         let header = div()
             .flex()
             .flex_row()
@@ -100,9 +100,10 @@ impl SettingsStudio {
                         theme,
                         move |_, cx| {
                             studio_toggle_import.update(cx, |this, cx| {
-                                this.importing_template = !this.importing_template;
-                                if this.importing_template {
-                                    this.creating_companion = false;
+                                this.companion_form.importing_template =
+                                    !this.companion_form.importing_template;
+                                if this.companion_form.importing_template {
+                                    this.companion_form.creating_companion = false;
                                 }
                                 cx.notify();
                             });
@@ -121,9 +122,10 @@ impl SettingsStudio {
                         theme,
                         move |_, cx| {
                             studio_toggle_create.update(cx, |this, cx| {
-                                this.creating_companion = !this.creating_companion;
-                                if this.creating_companion {
-                                    this.importing_template = false;
+                                this.companion_form.creating_companion =
+                                    !this.companion_form.creating_companion;
+                                if this.companion_form.creating_companion {
+                                    this.companion_form.importing_template = false;
                                 }
                                 cx.notify();
                             });
@@ -155,7 +157,8 @@ impl SettingsStudio {
             let rev = comp.revision;
             let active = active_id.as_deref() == Some(id.as_str());
             let resident = resident_ids.iter().any(|rid| rid == &id);
-            let expanded = self.expanded_companion_id.as_deref() == Some(id.as_str());
+            let expanded =
+                self.companion_form.expanded_companion_id.as_deref() == Some(id.as_str());
             let persona_line = comp
                 .persona
                 .as_deref()
@@ -270,15 +273,16 @@ impl SettingsStudio {
                             move |_, cx| {
                                 let mut next_open = None;
                                 studio_expand.update(cx, |this, cx| {
-                                    if this.expanded_companion_id.as_deref()
+                                    if this.companion_form.expanded_companion_id.as_deref()
                                         == Some(expand_id.as_str())
                                     {
-                                        this.expanded_companion_id = None;
+                                        this.companion_form.expanded_companion_id = None;
                                     } else {
-                                        this.expanded_companion_id = Some(expand_id.clone());
+                                        this.companion_form.expanded_companion_id =
+                                            Some(expand_id.clone());
                                         next_open = Some(expand_id.clone());
                                     }
-                                    this.delete_armed_companion = None;
+                                    this.companion_form.delete_armed_companion = None;
                                     cx.notify();
                                 });
                                 if let Some(target_id) = next_open {
@@ -356,7 +360,7 @@ impl SettingsStudio {
                             theme,
                             move |_, cx| {
                                 studio.update(cx, |this, cx| {
-                                    this.creating_companion = true;
+                                    this.companion_form.creating_companion = true;
                                     cx.notify();
                                 });
                             },
@@ -470,7 +474,7 @@ impl SettingsStudio {
                         theme,
                         move |_, cx| {
                             studio_close.update(cx, |this, cx| {
-                                this.importing_template = false;
+                                this.companion_form.importing_template = false;
                                 cx.notify();
                             });
                         },
@@ -528,7 +532,7 @@ impl SettingsStudio {
         let hub_preview = self.hub.clone();
         let studio_cancel = cx.entity();
         let studio_preview = cx.entity();
-        let preview_pending = self.preview_pending;
+        let preview_pending = self.companion_form.preview_pending;
 
         let mut template_chips: Vec<AnyElement> = Vec::new();
         for tpl in templates {
@@ -659,8 +663,8 @@ impl SettingsStudio {
                         theme,
                         move |_, cx| {
                             studio_cancel.update(cx, |this, cx| {
-                                this.creating_companion = false;
-                                this.preview_pending = false;
+                                this.companion_form.creating_companion = false;
+                                this.companion_form.preview_pending = false;
                                 cx.notify();
                             });
                         },
@@ -681,7 +685,7 @@ impl SettingsStudio {
                         theme,
                         move |_, cx| {
                             studio_preview.update(cx, |this, cx| {
-                                this.preview_pending = true;
+                                this.companion_form.preview_pending = true;
                                 cx.notify();
                             });
                             hub_preview.update(cx, |hub, cx| {
@@ -1022,7 +1026,7 @@ impl SettingsStudio {
             );
 
         let studio_disc = cx.entity();
-        let mind_open = self.mind_disclosure_open;
+        let mind_open = self.companion_form.mind_disclosure_open;
         let disclosure = disclosure_row(
             SharedString::from(format!("comp-mind-disc-{id}")),
             "詳細設定（性格の側面・セリフ例・背景・表現のクセ）",
@@ -1030,7 +1034,8 @@ impl SettingsStudio {
             theme,
             move |_, cx| {
                 studio_disc.update(cx, |this, cx| {
-                    this.mind_disclosure_open = !this.mind_disclosure_open;
+                    this.companion_form.mind_disclosure_open =
+                        !this.companion_form.mind_disclosure_open;
                     cx.notify();
                 });
             },
@@ -1127,7 +1132,7 @@ impl SettingsStudio {
             None
         };
 
-        let armed = self.delete_armed_companion.as_deref() == Some(id.as_str());
+        let armed = self.companion_form.delete_armed_companion.as_deref() == Some(id.as_str());
         let studio_arm = cx.entity();
         let studio_disarm = cx.entity();
         let hub_del = self.hub.clone();
@@ -1156,7 +1161,7 @@ impl SettingsStudio {
                     theme,
                     move |_, cx| {
                         studio_disarm.update(cx, |this, cx| {
-                            this.delete_armed_companion = None;
+                            this.companion_form.delete_armed_companion = None;
                             cx.notify();
                         });
                     },
@@ -1182,7 +1187,7 @@ impl SettingsStudio {
                 theme,
                 move |_, cx| {
                     studio_arm.update(cx, |this, cx| {
-                        this.delete_armed_companion = Some(arm_id.clone());
+                        this.companion_form.delete_armed_companion = Some(arm_id.clone());
                         cx.notify();
                     });
                 },
@@ -1344,12 +1349,14 @@ impl SettingsStudio {
                                 move |_, cx| {
                                     hub_save.update(cx, |hub, cx| {
                                         hub.update_companion_profile(
-                                            save_id.clone(),
-                                            name_val.clone(),
-                                            persona_val.clone(),
-                                            mind_val.clone(),
-                                            next_body.clone(),
-                                            next_voice.clone(),
+                                            super::CompanionProfilePatch {
+                                                companion_id: save_id.clone(),
+                                                name: name_val.clone(),
+                                                persona: persona_val.clone(),
+                                                mind: mind_val.clone(),
+                                                body: next_body.clone(),
+                                                voice: next_voice.clone(),
+                                            },
                                             cx,
                                         );
                                     });

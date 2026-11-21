@@ -1,12 +1,18 @@
 //! The two messages across the one boundary the client needs: the session
 //! reports to the window, and the window asks the session to act.
-//!
-//! Nothing else crosses a thread. The window owns what it draws, the session
-//! owns the socket and the devices, and each request is a single future that
-//! reports its own outcome, so there is no generic event bus to keep in sync.
 
 use crate::state::{Devices, Link};
 use ene_rpc as w;
+
+/// Microphone capture mode (`F07`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CaptureMode {
+    /// Continuous voice-activity detection.
+    #[default]
+    Vad,
+    /// Push-to-Talk: captures only while held, commits on release, discards on cancel.
+    Ptt,
+}
 
 /// One report from the background session or one finished request.
 #[derive(Debug)]
@@ -45,8 +51,7 @@ pub enum Update {
         text: String,
         reason: String,
     },
-    /// The host accepted a stop request. The turn itself ends later, and the
-    /// window says so.
+    /// The host accepted a stop request.
     StopRequested {
         companion_id: String,
     },
@@ -85,8 +90,7 @@ pub enum Update {
     },
     /// The host's pending approvals, as refetched.
     Approvals(Vec<w::ApprovalRequest>),
-    /// An approval is no longer pending: another device resolved it, or it
-    /// expired. The window refetches and stops offering the card.
+    /// An approval is no longer pending.
     ApprovalStale {
         message: String,
     },
@@ -113,14 +117,10 @@ pub enum Update {
         input: f32,
         speaking: bool,
     },
-    /// Local capture state, so the settings probe can show where a spoken
-    /// phrase stops: microphone, VAD gate, bytes actually sent to the host.
+    /// Local capture state for voice probes.
     Capture {
-        /// RMS of the frames the device delivered since the last report.
         level: f32,
-        /// Whether the voice gate is passing audio right now.
         open: bool,
-        /// Wire bytes handed to the host since the previous report.
         sent: usize,
     },
     /// Current local mute flags.
@@ -169,7 +169,7 @@ pub enum Update {
     },
     /// Microphone capture mode / PTT state confirmed by the session (`F07`).
     CaptureModeChanged {
-        mode: crate::audio::CaptureMode,
+        mode: CaptureMode,
         ptt_active: bool,
     },
     /// Installed host plugins from `SettingsService.ListPlugins` (`F12`).
@@ -193,7 +193,7 @@ pub enum Command {
     /// Mute or unmute local microphone capture.
     SetMicMuted(bool),
     /// Switch between VAD and Push-to-Talk capture mode (`F07`).
-    SetCaptureMode(crate::audio::CaptureMode),
+    SetCaptureMode(CaptureMode),
     /// Begin capturing in Push-to-Talk mode (`F07`).
     PttStart,
     /// Commit the current Push-to-Talk utterance (`F07`).

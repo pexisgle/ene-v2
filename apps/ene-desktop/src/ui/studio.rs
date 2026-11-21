@@ -4,7 +4,7 @@
 use super::icons::{Icon, icon};
 use super::theme::{Theme, resolve_ui_font_family, ui_font_fallbacks};
 use super::widgets::{Tone, circle_icon_button, pill_button, window_drag_area};
-use super::{Hub, SettingsSection, window_draft};
+use super::{DraftSpec, Hub, SettingsSection, window_draft};
 use crate::{input::Draft, state::NoticeKind};
 use ene_rpc as w;
 use gpui::{
@@ -13,12 +13,9 @@ use gpui::{
 };
 use std::collections::{BTreeMap, HashSet};
 
-/// Settings window managing companions, connections and local device permissions.
-pub struct SettingsStudio {
-    pub(crate) hub: Entity<Hub>,
-    drafts: BTreeMap<String, Entity<Draft>>,
-    initialized: bool,
-    // Companions state
+/// Form and expansion state for the Companions tab in [`SettingsStudio`].
+#[derive(Default)]
+pub(crate) struct CompanionFormState {
     pub(crate) creating_companion: bool,
     pub(crate) importing_template: bool,
     pub(crate) preview_pending: bool,
@@ -26,7 +23,10 @@ pub struct SettingsStudio {
     pub(crate) mind_disclosure_open: bool,
     pub(crate) delete_armed_companion: Option<String>,
     last_created_ping: u64,
-    // Connections state
+}
+
+/// Form and disclosure state for the Connections tab in [`SettingsStudio`].
+pub(crate) struct ConnectionFormState {
     pub(crate) adding_connection: bool,
     pub(crate) custom_connection_open: bool,
     pub(crate) custom_kind: w::ConnectionKind,
@@ -37,10 +37,31 @@ pub struct SettingsStudio {
     pub(crate) revealed_secret_for: Option<String>,
     pub(crate) revoke_armed_for: Option<String>,
     pub(crate) advanced_roles_open: bool,
-    pub(crate) open_dropdown: Option<String>,
     pub(crate) auto_probed_connections: HashSet<String>,
     last_cleared_secret_seq: u64,
-    // Device & Policy state
+}
+
+impl Default for ConnectionFormState {
+    fn default() -> Self {
+        Self {
+            adding_connection: false,
+            custom_connection_open: false,
+            custom_kind: w::ConnectionKind::Llm,
+            mcp_add_mode: super::mcp_add::Mode::Npx,
+            mcp_add_advanced_open: false,
+            pending_mcp: None,
+            expanded_connection_id: None,
+            revealed_secret_for: None,
+            revoke_armed_for: None,
+            advanced_roles_open: false,
+            auto_probed_connections: HashSet::new(),
+            last_cleared_secret_seq: 0,
+        }
+    }
+}
+
+/// Form and arming state for the Device & Policy tab in [`SettingsStudio`].
+pub(crate) struct DeviceFormState {
     pub(crate) delete_armed_policy: Option<String>,
     pub(crate) adding_policy_open: bool,
     pub(crate) new_policy_effect: w::PolicyEffect,
@@ -50,6 +71,33 @@ pub struct SettingsStudio {
     pub(crate) adding_plugin_open: bool,
     pub(crate) remote_host_open: bool,
     pub(crate) skip_confirm_armed: bool,
+}
+
+impl Default for DeviceFormState {
+    fn default() -> Self {
+        Self {
+            delete_armed_policy: None,
+            adding_policy_open: false,
+            new_policy_effect: w::PolicyEffect::Allow,
+            delete_armed_policy_text: None,
+            editing_policy_text_id: None,
+            adding_policy_text_open: false,
+            adding_plugin_open: false,
+            remote_host_open: false,
+            skip_confirm_armed: false,
+        }
+    }
+}
+
+/// Settings window managing companions, connections and local device permissions.
+pub struct SettingsStudio {
+    pub(crate) hub: Entity<Hub>,
+    drafts: BTreeMap<String, Entity<Draft>>,
+    initialized: bool,
+    pub(crate) companion_form: CompanionFormState,
+    pub(crate) connection_form: ConnectionFormState,
+    pub(crate) device_form: DeviceFormState,
+    pub(crate) open_dropdown: Option<String>,
     content_scroll: gpui::ScrollHandle,
     _observe: Subscription,
 }
@@ -69,35 +117,10 @@ impl SettingsStudio {
             hub,
             drafts: BTreeMap::new(),
             initialized: false,
-            creating_companion: false,
-            importing_template: false,
-            preview_pending: false,
-            expanded_companion_id: None,
-            mind_disclosure_open: false,
-            delete_armed_companion: None,
-            last_created_ping: 0,
-            adding_connection: false,
-            custom_connection_open: false,
-            custom_kind: w::ConnectionKind::Llm,
-            mcp_add_mode: super::mcp_add::Mode::Npx,
-            mcp_add_advanced_open: false,
-            pending_mcp: None,
-            expanded_connection_id: None,
-            revealed_secret_for: None,
-            revoke_armed_for: None,
-            advanced_roles_open: false,
+            companion_form: CompanionFormState::default(),
+            connection_form: ConnectionFormState::default(),
+            device_form: DeviceFormState::default(),
             open_dropdown: None,
-            auto_probed_connections: HashSet::new(),
-            last_cleared_secret_seq: 0,
-            delete_armed_policy: None,
-            adding_policy_open: false,
-            new_policy_effect: w::PolicyEffect::Allow,
-            delete_armed_policy_text: None,
-            editing_policy_text_id: None,
-            adding_policy_text_open: false,
-            adding_plugin_open: false,
-            remote_host_open: false,
-            skip_confirm_armed: false,
             content_scroll: gpui::ScrollHandle::new(),
             _observe,
         }
@@ -114,11 +137,13 @@ impl SettingsStudio {
         window_draft(
             &mut self.drafts,
             cx,
-            key,
-            placeholder,
-            initial,
-            theme.field_look(false, false),
-            "TextField",
+            DraftSpec {
+                key: key.into(),
+                placeholder,
+                initial,
+                look: theme.field_look(false, false),
+                context: "TextField",
+            },
         )
     }
 
@@ -133,11 +158,13 @@ impl SettingsStudio {
         window_draft(
             &mut self.drafts,
             cx,
-            key,
-            placeholder,
-            initial,
-            theme.field_look(false, false),
-            "TextField Multiline",
+            DraftSpec {
+                key: key.into(),
+                placeholder,
+                initial,
+                look: theme.field_look(false, false),
+                context: "TextField Multiline",
+            },
         )
     }
 
@@ -167,25 +194,26 @@ impl SettingsStudio {
                 hub.created_ping,
                 hub.cleared_secret_for.clone(),
                 hub.model.companion_id().map(str::to_owned),
-                hub.model.preview_reply.is_some(),
+                hub.model.companions.preview_reply.is_some(),
             )
         };
         if has_preview {
-            self.preview_pending = false;
+            self.companion_form.preview_pending = false;
         }
         if !self.initialized {
             self.initialized = true;
-            self.expanded_companion_id = active_comp;
-            self.last_created_ping = created_ping;
-            self.last_cleared_secret_seq = cleared.as_ref().map_or(0, |(_, seq)| *seq);
+            self.companion_form.expanded_companion_id = active_comp;
+            self.companion_form.last_created_ping = created_ping;
+            self.connection_form.last_cleared_secret_seq =
+                cleared.as_ref().map_or(0, |(_, seq)| *seq);
             return;
         }
-        if created_ping != self.last_created_ping {
-            self.last_created_ping = created_ping;
-            self.creating_companion = false;
-            self.importing_template = false;
-            self.preview_pending = false;
-            self.expanded_companion_id = active_comp;
+        if created_ping != self.companion_form.last_created_ping {
+            self.companion_form.last_created_ping = created_ping;
+            self.companion_form.creating_companion = false;
+            self.companion_form.importing_template = false;
+            self.companion_form.preview_pending = false;
+            self.companion_form.expanded_companion_id = active_comp;
             for key in ["new:name", "new:mind", "new:persona", "import:json"] {
                 if let Some(d) = self.drafts.get(key).cloned() {
                     d.update(cx, |draft, cx| draft.clear(cx));
@@ -193,9 +221,9 @@ impl SettingsStudio {
             }
         }
         if let Some((conn_id, seq)) = cleared
-            && seq != self.last_cleared_secret_seq
+            && seq != self.connection_form.last_cleared_secret_seq
         {
-            self.last_cleared_secret_seq = seq;
+            self.connection_form.last_cleared_secret_seq = seq;
             let adapter = self.hub.read(cx).model.settings().and_then(|s| {
                 s.connections
                     .iter()
@@ -214,13 +242,14 @@ impl SettingsStudio {
                     d.update(cx, |draft, cx| draft.clear(cx));
                 }
             }
-            if self.revealed_secret_for.as_deref() == Some(conn_id.as_str())
+            if self.connection_form.revealed_secret_for.as_deref() == Some(conn_id.as_str())
                 || self
+                    .connection_form
                     .revealed_secret_for
                     .as_deref()
                     .is_some_and(|r| r.starts_with("search-card:"))
             {
-                self.revealed_secret_for = None;
+                self.connection_form.revealed_secret_for = None;
             }
         }
     }
@@ -323,7 +352,7 @@ impl SettingsStudio {
                     .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _, cx| {
                         studio.update(cx, |this, _| {
                             this.open_dropdown = None;
-                            this.skip_confirm_armed = false;
+                            this.device_form.skip_confirm_armed = false;
                             this.content_scroll.set_offset(gpui::point(px(0.), px(0.)));
                         });
                         hub.update(cx, |hub, cx| {

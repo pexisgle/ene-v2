@@ -22,7 +22,7 @@ impl SettingsStudio {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mode = self.mcp_add_mode;
+        let mode = self.connection_form.mcp_add_mode;
         let studio = cx.entity();
         let choice_studio = studio.clone();
         let choices = [
@@ -46,7 +46,7 @@ impl SettingsStudio {
                 theme,
                 move |_, cx| {
                     studio.update(cx, |this, cx| {
-                        this.mcp_add_mode = choice;
+                        this.connection_form.mcp_add_mode = choice;
                         cx.notify();
                     });
                 },
@@ -121,7 +121,7 @@ impl SettingsStudio {
                 )
             }
         };
-        let adv_open = self.mcp_add_advanced_open;
+        let adv_open = self.connection_form.mcp_add_advanced_open;
         let studio_adv = studio.clone();
         let adv_toggle = disclosure_row(
             "mcp-add-adv-toggle",
@@ -134,7 +134,8 @@ impl SettingsStudio {
             theme,
             move |_, cx| {
                 studio_adv.update(cx, |this, cx| {
-                    this.mcp_add_advanced_open = !this.mcp_add_advanced_open;
+                    this.connection_form.mcp_add_advanced_open =
+                        !this.connection_form.mcp_add_advanced_open;
                     cx.notify();
                 });
             },
@@ -331,7 +332,7 @@ impl SettingsStudio {
                         theme,
                         move |_, cx| {
                             studio.update(cx, |this, cx| {
-                                this.custom_kind = w::ConnectionKind::Llm;
+                                this.connection_form.custom_kind = w::ConnectionKind::Llm;
                                 cx.notify();
                             });
                         },
@@ -375,10 +376,10 @@ impl SettingsStudio {
                         }
                     });
                     submit.update(cx, |this, cx| {
-                        this.pending_mcp = Some(id.clone());
-                        this.expanded_connection_id = Some(id);
-                        this.adding_connection = false;
-                        this.mcp_add_advanced_open = false;
+                        this.connection_form.pending_mcp = Some(id.clone());
+                        this.connection_form.expanded_connection_id = Some(id);
+                        this.connection_form.adding_connection = false;
+                        this.connection_form.mcp_add_advanced_open = false;
                         this.open_dropdown = None;
                         cx.notify();
                     });

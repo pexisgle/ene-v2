@@ -89,17 +89,17 @@ impl SettingsStudio {
             let hub = self.hub.read(cx);
             (
                 hub.live(),
-                hub.model.capture,
-                hub.model.capture_mode,
-                hub.model.ptt_active,
-                hub.model.recognized.clone(),
-                hub.model.transcription.clone(),
-                hub.model.devices.clone(),
+                hub.model.audio.capture,
+                hub.model.audio.capture_mode,
+                hub.model.audio.ptt_active,
+                hub.model.audio.recognized.clone(),
+                hub.model.audio.transcription.clone(),
+                hub.model.connections.devices.clone(),
                 hub.has_audio_connection(w::ConnectionKind::Stt),
                 hub.has_audio_connection(w::ConnectionKind::Tts),
-                hub.model.output_muted,
-                hub.model.mic_muted,
-                hub.model.speech_report.clone(),
+                hub.model.audio.output_muted,
+                hub.model.audio.mic_muted,
+                hub.model.audio.speech_report.clone(),
             )
         };
         let is_ptt = capture_mode == crate::audio::CaptureMode::Ptt;
@@ -232,7 +232,7 @@ impl SettingsStudio {
                 theme,
                 move |_, cx| {
                     hub_mode_vad.update(cx, |hub, cx| {
-                        if hub.model.capture_mode != crate::audio::CaptureMode::Vad {
+                        if hub.model.audio.capture_mode != crate::audio::CaptureMode::Vad {
                             hub.toggle_capture_mode(cx);
                         }
                     });
@@ -247,7 +247,7 @@ impl SettingsStudio {
                 theme,
                 move |_, cx| {
                     hub_mode_ptt.update(cx, |hub, cx| {
-                        if hub.model.capture_mode != crate::audio::CaptureMode::Ptt {
+                        if hub.model.audio.capture_mode != crate::audio::CaptureMode::Ptt {
                             hub.toggle_capture_mode(cx);
                         }
                     });

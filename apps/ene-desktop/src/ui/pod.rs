@@ -135,12 +135,17 @@ impl CompanionPod {
             && hub.model.settings().is_some_and(|settings| {
                 hub.setup_pending
                     || hub.setup_error.is_some()
-                    || hub.model.providers.as_deref().is_none_or(|providers| {
-                        !settings
-                            .connections
-                            .iter()
-                            .any(|c| super::can_start_chat(c, providers))
-                    })
+                    || hub
+                        .model
+                        .connections
+                        .providers
+                        .as_deref()
+                        .is_none_or(|providers| {
+                            !settings
+                                .connections
+                                .iter()
+                                .any(|c| super::can_start_chat(c, providers))
+                        })
             })
     }
 
@@ -230,13 +235,13 @@ impl CompanionPod {
             }
             estimated_lines = estimated_lines.clamp(2, 7);
             let mut h = 152.0 + (estimated_lines as f32) * 20.0;
-            if estimated_lines > 6 || hub.model.chat.messages.is_empty() {
+            if estimated_lines > 6 || hub.model.companions.chat.messages.is_empty() {
                 h += 40.0;
             }
             if !extract_urls(&speech_text).is_empty() {
                 h += 28.0;
             }
-            if hub.model.transcription.is_some() {
+            if hub.model.audio.transcription.is_some() {
                 h += 38.0;
             }
             if !hub.model.notices.is_empty() {
@@ -244,14 +249,15 @@ impl CompanionPod {
             }
             let turn_failed = hub
                 .model
+                .companions
                 .chat
                 .turn
                 .as_ref()
                 .and_then(|t| t.status.as_known())
                 == Some(w::TurnStatus::Failed);
-            if hub.model.companion_speaking
-                || !hub.model.streaming.is_empty()
-                || hub.model.chat.stop_requested
+            if hub.model.audio.companion_speaking
+                || !hub.model.companions.streaming.is_empty()
+                || hub.model.companions.chat.stop_requested
                 || turn_failed
             {
                 h += 36.0;
@@ -314,29 +320,31 @@ impl CompanionPod {
 
         let streaming_preview: String = hub
             .model
+            .companions
             .streaming
             .iter()
-            .filter(|((c, _), _)| c == &hub.model.chat.companion_id)
+            .filter(|((c, _), _)| c == &hub.model.companions.chat.companion_id)
             .map(|(_, text)| text.as_str())
             .collect();
-        let speaking = hub.model.companion_speaking;
-        let stop_requested = hub.model.chat.stop_requested;
+        let speaking = hub.model.audio.companion_speaking;
+        let stop_requested = hub.model.companions.chat.stop_requested;
         let is_busy = speaking || !streaming_preview.is_empty() || stop_requested;
 
         let in_onboarding = self.needs_connection(cx) || self.in_model_setup(cx);
 
-        let status_word = match &hub.model.link {
+        let status_word = match &hub.model.connections.link {
             Link::Connecting { .. } => "接続中",
             Link::Lost { .. } | Link::Unset { .. } | Link::Unusable { .. } => "未接続",
             Link::Live { .. } if !approvals.is_empty() => "確認待ち",
             Link::Live { .. } if in_onboarding => "初期設定",
-            Link::Live { .. } if hub.model.work_active => "作業中",
+            Link::Live { .. } if hub.model.companions.work_active => "作業中",
             Link::Live { .. } if speaking => "発話中",
-            Link::Live { .. } if !hub.model.chat.sending.is_empty() => "送信中",
+            Link::Live { .. } if !hub.model.companions.chat.sending.is_empty() => "送信中",
             Link::Live { .. }
                 if !streaming_preview.is_empty()
                     || hub
                         .model
+                        .companions
                         .chat
                         .turn
                         .as_ref()
@@ -344,7 +352,7 @@ impl CompanionPod {
             {
                 "返答を考え中"
             }
-            Link::Live { .. } if hub.model.transcription.is_some() => "音声入力中",
+            Link::Live { .. } if hub.model.audio.transcription.is_some() => "音声入力中",
             Link::Live { .. } => "待機中",
         };
         let badge_label = format!("{companion_name} ・ {status_word}");
@@ -422,7 +430,7 @@ impl CompanionPod {
         });
 
         let body: AnyElement = if !live {
-            self.render_offline_body(&hub.model.link, &theme)
+            self.render_offline_body(&hub.model.connections.link, &theme)
         } else if let Some(approval) = approvals.first().cloned() {
             self.render_approval_body(&approval, approvals.len(), &theme)
         } else if in_onboarding {
@@ -709,6 +717,7 @@ impl CompanionPod {
                 .hub
                 .read(cx)
                 .model
+                .connections
                 .providers
                 .clone()
                 .unwrap_or_default();
@@ -942,7 +951,7 @@ impl CompanionPod {
         ) = {
             let hub = self.hub.read(cx);
             let target_conn_id = hub.pending_setup_connection_id.clone().or_else(|| {
-                let providers = hub.model.providers.as_deref()?;
+                let providers = hub.model.connections.providers.as_deref()?;
                 hub.model.settings().and_then(|settings| {
                     settings
                         .connections
@@ -1325,6 +1334,7 @@ impl CompanionPod {
         let url_pills = render_url_pills(&speech_text, "mini", theme);
         let failed_turn = hub
             .model
+            .companions
             .chat
             .turn
             .as_ref()
@@ -1337,7 +1347,7 @@ impl CompanionPod {
                     .unwrap_or_else(|| "応答の生成に失敗しました".to_owned())
             });
 
-        let transcription = hub.model.transcription.clone();
+        let transcription = hub.model.audio.transcription.clone();
         let hub_stop = self.hub.clone();
 
         div()
@@ -1368,9 +1378,9 @@ impl CompanionPod {
                 ))
             })
             .when(
-                hub.model.chat.messages.is_empty()
-                    && !hub.model.chat.loading
-                    && hub.model.chat.sending.is_empty()
+                hub.model.companions.chat.messages.is_empty()
+                    && !hub.model.companions.chat.loading
+                    && hub.model.companions.chat.sending.is_empty()
                     && !is_busy,
                 |body| {
                     let greeting = self.hub.clone();
@@ -1464,7 +1474,7 @@ impl CompanionPod {
         let hub = self.hub.read(cx);
         let mut rows: Vec<AnyElement> = Vec::new();
 
-        if hub.model.chat.loading && hub.model.chat.messages.is_empty() {
+        if hub.model.companions.chat.loading && hub.model.companions.chat.messages.is_empty() {
             rows.push(
                 div()
                     .py(px(16.))
@@ -1475,7 +1485,7 @@ impl CompanionPod {
                     .into_any_element(),
             );
         }
-        if let Some(err) = hub.model.chat.error.as_ref() {
+        if let Some(err) = hub.model.companions.chat.error.as_ref() {
             rows.push(
                 div()
                     .rounded(px(12.))
@@ -1489,7 +1499,7 @@ impl CompanionPod {
             );
         }
 
-        for (msg_idx, msg) in hub.model.chat.messages.iter().enumerate() {
+        for (msg_idx, msg) in hub.model.companions.chat.messages.iter().enumerate() {
             let is_user = msg.role == w::MessageRole::User;
             let body_text = msg.text.clone();
             let url_pills = (!is_user)
@@ -1561,6 +1571,7 @@ impl CompanionPod {
 
         if hub
             .model
+            .companions
             .chat
             .turn
             .as_ref()
@@ -1570,6 +1581,7 @@ impl CompanionPod {
         {
             let msg = hub
                 .model
+                .companions
                 .chat
                 .turn
                 .as_ref()
@@ -1591,7 +1603,7 @@ impl CompanionPod {
             );
         }
 
-        if rows.is_empty() && !hub.model.chat.loading {
+        if rows.is_empty() && !hub.model.companions.chat.loading {
             rows.push(
                 div()
                     .py(px(20.))
@@ -1603,7 +1615,7 @@ impl CompanionPod {
             );
         }
 
-        let transcription = hub.model.transcription.clone();
+        let transcription = hub.model.audio.transcription.clone();
         let hub_stop = self.hub.clone();
 
         div()
@@ -1676,7 +1688,7 @@ impl CompanionPod {
                 hub.theme(),
                 hub.live(),
                 hub.model.companion().is_some(),
-                hub.model.chat.unsent.clone(),
+                hub.model.companions.chat.unsent.clone(),
             )
         };
 
@@ -1873,14 +1885,14 @@ impl CompanionPod {
     #[allow(clippy::too_many_lines)]
     fn render_controls(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let hub = self.hub.read(cx);
-        let mic_ready = matches!(hub.model.devices.input, Device::Ready(_))
+        let mic_ready = matches!(hub.model.connections.devices.input, Device::Ready(_))
             && hub.has_audio_connection(w::ConnectionKind::Stt);
-        let speaker_ready = matches!(hub.model.devices.output, Device::Ready(_))
+        let speaker_ready = matches!(hub.model.connections.devices.output, Device::Ready(_))
             && hub.has_audio_connection(w::ConnectionKind::Tts);
-        let mic_on = mic_ready && !hub.model.mic_muted;
-        let is_ptt = hub.model.capture_mode == crate::audio::CaptureMode::Ptt;
-        let ptt_active = hub.model.ptt_active;
-        let speaker_on = hub.live() && speaker_ready && !hub.model.output_muted;
+        let mic_on = mic_ready && !hub.model.audio.mic_muted;
+        let is_ptt = hub.model.audio.capture_mode == crate::audio::CaptureMode::Ptt;
+        let ptt_active = hub.model.audio.ptt_active;
+        let speaker_on = hub.live() && speaker_ready && !hub.model.audio.output_muted;
         let expanded = hub.pod_mode == PodMode::ExpandedChat;
         let button = |id, label, icon, tone, action| {
             let pod = cx.entity();
@@ -2050,7 +2062,8 @@ impl CompanionPod {
 
     fn use_control(&mut self, action: ChatControl, window: &mut Window, cx: &mut Context<Self>) {
         let keep_open = matches!(action, ChatControl::CaptureMode)
-            || (matches!(action, ChatControl::PttToggle) && !self.hub.read(cx).model.ptt_active);
+            || (matches!(action, ChatControl::PttToggle)
+                && !self.hub.read(cx).model.audio.ptt_active);
         if !keep_open {
             self.controls_open = false;
         }
@@ -2363,7 +2376,8 @@ pub fn bind(cx: &mut App, hub: Entity<Hub>) {
                 return;
             }
             let hub = this.hub.read(cx);
-            let busy = hub.model.companion_speaking || !hub.model.streaming.is_empty();
+            let busy =
+                hub.model.audio.companion_speaking || !hub.model.companions.streaming.is_empty();
             let expanded = hub.pod_mode == PodMode::ExpandedChat;
             if busy {
                 this.hub.update(cx, |hub, cx| hub.stop(cx));
@@ -2404,16 +2418,18 @@ pub(crate) fn ensure_pod_topmost() {
 
 fn active_mini_speech_text(model: &crate::state::Model) -> String {
     let streaming: String = model
+        .companions
         .streaming
         .iter()
-        .filter(|((c, _), _)| c == &model.chat.companion_id)
+        .filter(|((c, _), _)| c == &model.companions.chat.companion_id)
         .map(|(_, text)| text.as_str())
         .collect();
     if !streaming.is_empty() {
         return streaming;
     }
-    if !model.chat.sending.is_empty()
+    if !model.companions.chat.sending.is_empty()
         || model
+            .companions
             .chat
             .turn
             .as_ref()
@@ -2422,6 +2438,7 @@ fn active_mini_speech_text(model: &crate::state::Model) -> String {
         return "返答を考えています…".to_owned();
     }
     model
+        .companions
         .chat
         .messages
         .iter()
