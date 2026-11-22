@@ -37,7 +37,7 @@ pub(super) fn reset(state: &Path, requested: bool) -> Result<(), Box<dyn Error +
          DELETE FROM work_runs;
          DELETE FROM work_sessions;",
     )?;
-    let empty = crate::host::db::to_json(&State::default())?;
+    let empty = serde_json::to_string(&State::default())?;
     transaction.execute(
         "UPDATE companions SET state = ?1, state_revision = state_revision + 1 WHERE state <> ?1",
         [empty],
@@ -69,7 +69,7 @@ mod tests {
         let state = temp.path();
         let db = state.join("host.sqlite3");
         let store = Store::open(&db).unwrap();
-        store.seed_initial_companion().unwrap();
+        store.companion_repo().seed_initial_companion().unwrap();
         store
             .conn()
             .unwrap()
@@ -114,6 +114,6 @@ mod tests {
             "policy"
         );
         drop(connection);
-        assert_eq!(store.companions().unwrap()[0].id, "ene");
+        assert_eq!(store.companion_repo().companions().unwrap()[0].id, "ene");
     }
 }

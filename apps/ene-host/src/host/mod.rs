@@ -113,7 +113,10 @@ impl Runtime {
         options: Options,
     ) -> std::result::Result<Self, StartError> {
         let store = Store::open(&state.join("host.sqlite3")).map_err(boxed)?;
-        store.seed_initial_companion().map_err(boxed)?;
+        store
+            .companion_repo()
+            .seed_initial_companion()
+            .map_err(boxed)?;
         // A unit test has no operator to ask for a keyring, and the machine it
         // runs on may have none. Keeping the store in memory there makes the
         // tests independent of the platform backend; the binary still reads
@@ -371,8 +374,8 @@ pub(crate) fn fail(world: &mut World, reason: String) {
 /// operations whose answers can no longer arrive.
 fn restore(world: &mut World) -> Result<()> {
     let store = world.resource::<Store>().clone();
-    store.expire_pending_approvals()?;
-    store.mark_unanswered_operations_uncertain()?;
+    store.approval_repo().expire_pending_approvals()?;
+    store.client_repo().mark_unanswered_operations_uncertain()?;
     Ok(())
 }
 
@@ -398,15 +401,20 @@ pub(crate) fn snapshot(app: &mut App) -> Result<w::Snapshot> {
     let state = app.world().resource::<HostState>();
     let notifier = app.world().resource::<Notifier>();
     let hub = app.world().resource::<DeviceHub>();
-    let companions: Vec<w::Companion> = store.companions()?.iter().map(wire::companion).collect();
-    let activations = store.activations()?;
+    let companions: Vec<w::Companion> = store
+        .companion_repo()
+        .companions()?
+        .iter()
+        .map(wire::companion)
+        .collect();
+    let activations = store.client_repo().activations()?;
     let active_companion_id = activations
         .iter()
         .find(|activation| activation.client_id.is_some())
         .map(|activation| activation.companion_id.clone());
     let mut work_sessions = Vec::new();
     for companion in &companions {
-        for session in store.work_sessions(&companion.id)? {
+        for session in store.work_repo().work_sessions(&companion.id)? {
             work_sessions.push(wire::work_session(&session));
         }
     }
@@ -466,11 +474,12 @@ pub(crate) fn snapshot(app: &mut App) -> Result<w::Snapshot> {
             ..Default::default()
         }
         .into(),
-        settings: Some(wire::settings(&store.settings()?)).into(),
+        settings: Some(wire::settings(&store.settings_repo().settings()?)).into(),
         companions,
         work_sessions,
         active_companion_id,
         pending_approvals: store
+            .approval_repo()
             .approvals(permission::ApprovalStatus::Pending)?
             .iter()
             .map(wire::approval)
@@ -478,11 +487,12 @@ pub(crate) fn snapshot(app: &mut App) -> Result<w::Snapshot> {
         clients,
         cursor: Some(notifier.cursor()).into(),
         policy_rules: store
+            .policy_repo()
             .policy_rules()?
             .iter()
             .map(wire::policy_rule)
             .collect(),
-        activations,
+        activations: activations.iter().map(wire::activation).collect(),
         ..Default::default()
     })
 }
@@ -505,7 +515,7 @@ pub(crate) fn subscribe(
     let store = app.world().resource::<Store>().clone();
     if let Some(client_id) = client_id.filter(|id| !id.is_empty()) {
         util::validate_id(client_id)?;
-        if store.client(client_id)?.is_none() {
+        if store.client_repo().client(client_id)?.is_none() {
             return Err(HostError::NotFound("client not found".into()));
         }
     }
@@ -648,7 +658,7 @@ fn maybe_auto_start_voicevox(
     voicevox: &voice::voicevox::VoicevoxManager,
 ) {
     if !cfg!(test)
-        && let Ok(settings) = store.settings()
+        && let Ok(settings) = store.settings_repo().settings()
         && let Some(vv) = settings.connections.iter().find(|conn| {
             conn.enabled
                 && conn.kind == settings::ConnectionKind::Tts
@@ -735,7 +745,14 @@ mod runtime_tests {
                 })
                 .await
                 .unwrap();
-            let broken = |app: &mut App| app.world().resource::<Store>().client("c1").map(|_| ());
+            let broken = |app: &mut App| {
+                app.world()
+                    .resource::<Store>()
+                    .client_repo()
+                    .client("c1")
+                    .map(|_| ())
+                    .map_err(HostError::from)
+            };
             if mutation {
                 drop(runtime.call(broken));
             } else {

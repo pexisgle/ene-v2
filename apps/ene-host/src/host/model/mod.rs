@@ -158,8 +158,7 @@ pub(crate) fn credential_state(
     if credentials.secret(&connection.id)?.is_some() {
         return Ok(CredentialState::Registered);
     }
-    if connection
-        .environment_variable(loaded)
+    if super::settings::environment_variable(connection, loaded)
         .is_some_and(|name| std::env::var_os(name).is_some())
     {
         return Ok(CredentialState::Environment);
@@ -177,8 +176,7 @@ pub(crate) fn connection_secret(
     {
         return Ok(Some(secret));
     }
-    Ok(connection
-        .environment_variable(loaded)
+    Ok(super::settings::environment_variable(connection, loaded)
         .and_then(|name| std::env::var(name).ok())
         .filter(|secret| !secret.is_empty()))
 }
@@ -294,6 +292,7 @@ pub(crate) fn connect_assignment(
     providers: &super::providers::Providers,
 ) -> Result<DynModel<Completion>> {
     let connection = store
+        .settings_repo()
         .connection(&assignment.connection_id)?
         .ok_or_else(|| HostError::Unavailable(("the assigned connection does not exist").into()))?;
     if !connection.enabled {
@@ -404,7 +403,7 @@ pub(crate) fn preview_assignment(
     if requested.is_set() {
         return Ok(requested.clone());
     }
-    let settings = store.settings()?;
+    let settings = store.settings_repo().settings()?;
     let connection = settings
         .connections
         .into_iter()

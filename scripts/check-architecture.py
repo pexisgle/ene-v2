@@ -21,7 +21,6 @@ MAX_DB_UPWARD_REFS = 0
 MAX_PROVIDERS_MODEL_REFS = 0
 DEFAULT_MAX_IMPL_FILES = 3
 IMPL_SPREAD_ALLOWLIST: dict[tuple[str, str], int] = {
-    ("apps/ene-host", "Store"): 11,
     ("crates/ene-plugin-runtime", "Events"): 4,
 }
 

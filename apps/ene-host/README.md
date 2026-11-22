@@ -77,7 +77,7 @@ RPC では LLM 接続の `adapter` に `google-agent-platform` を指定し、�
 | `src/host/work/` | WorkSession/Run、1セッション1エージェント、`start_work` などのツール、`report`、停止・途絶検知 |
 | `src/host/model.rs` | 資格情報、LLM接続、モデル一覧、接続チェック |
 | `src/host/net.rs` | HTTPクライアントの共有、ループバック/SSRF検証、サイズ上限付きボディ読み取り |
-| `src/host/db/` | typed SQLite store とbaseline schema |
+| `src/host/db.rs` | `ene-store` への薄い ECS リソースラッパー |
 | `src/host/tests.rs` | ECSループを含む挙動テスト（受理、ゲート、端末束縛、作業報告） |
 
 ## データベース

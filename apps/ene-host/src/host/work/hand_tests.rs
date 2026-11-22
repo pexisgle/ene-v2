@@ -122,7 +122,11 @@ impl HandWorld {
             .insert_resource(HostRuntime(runtime.handle().clone()));
         let store = harness.store();
         store
-            .update_settings(store.settings_revision().unwrap(), &[(acp_connection(), 0)])
+            .settings_repo()
+            .update_settings(
+                store.settings_repo().settings_revision().unwrap(),
+                &[(acp_connection(), 0)],
+            )
             .unwrap();
         let created = mind::create(
             harness.app.world_mut(),
@@ -201,6 +205,7 @@ impl HandWorld {
     fn pending(&self) -> permission::Approval {
         self.harness
             .store()
+            .approval_repo()
             .approvals(ApprovalStatus::Pending)
             .unwrap()
             .first()
@@ -223,6 +228,7 @@ fn an_acp_assignment_drives_the_plugin_hand_end_to_end() {
     world.harness.run_until(|frame| {
         frame
             .resource::<Store>()
+            .approval_repo()
             .approvals(ApprovalStatus::Pending)
             .unwrap()
             .iter()
@@ -249,11 +255,18 @@ fn an_acp_assignment_drives_the_plugin_hand_end_to_end() {
     world.harness.run_until(|frame| {
         frame
             .resource::<Store>()
+            .work_repo()
             .run(&run_id)
             .unwrap()
             .is_some_and(|run| run.state.is_terminal())
     });
-    let run = world.harness.store().run(&run_id).unwrap().unwrap();
+    let run = world
+        .harness
+        .store()
+        .work_repo()
+        .run(&run_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(run.state, work::RunState::Completed);
     let companion = world.companion.clone();
     world
@@ -301,7 +314,7 @@ fn an_acp_assignment_drives_the_plugin_hand_end_to_end() {
     world
         .harness
         .run_until(move |frame| head_received(frame, &companion, "追加指示"));
-    let runs = world.harness.store().runs(&session.id).unwrap();
+    let runs = world.harness.store().work_repo().runs(&session.id).unwrap();
     assert!(
         runs.iter()
             .all(|run| run.state == work::RunState::Completed),
@@ -330,6 +343,7 @@ fn stop_work_cancels_a_parked_plugin_hand_run() {
     world.harness.run_until(|frame| {
         !frame
             .resource::<Store>()
+            .approval_repo()
             .approvals(ApprovalStatus::Pending)
             .unwrap()
             .is_empty()
@@ -339,7 +353,14 @@ fn stop_work_cancels_a_parked_plugin_hand_run() {
     // The stop is final at once, the way the rig hand's stop is.
     work::stop(world.harness.app.world_mut(), &session.id).unwrap();
     assert_eq!(
-        world.harness.store().run(&run_id).unwrap().unwrap().state,
+        world
+            .harness
+            .store()
+            .work_repo()
+            .run(&run_id)
+            .unwrap()
+            .unwrap()
+            .state,
         work::RunState::Cancelled
     );
 
@@ -348,12 +369,20 @@ fn stop_work_cancels_a_parked_plugin_hand_run() {
     world.harness.run_until(|frame| {
         frame
             .resource::<Store>()
+            .approval_repo()
             .approvals(ApprovalStatus::Pending)
             .unwrap()
             .is_empty()
     });
     assert_eq!(
-        world.harness.store().run(&run_id).unwrap().unwrap().state,
+        world
+            .harness
+            .store()
+            .work_repo()
+            .run(&run_id)
+            .unwrap()
+            .unwrap()
+            .state,
         work::RunState::Cancelled,
         "the late guest stop does not touch the settled run"
     );
@@ -368,6 +397,7 @@ fn stop_work_cancels_a_parked_plugin_hand_run() {
     world.harness.run_until(|frame| {
         !frame
             .resource::<Store>()
+            .approval_repo()
             .approvals(ApprovalStatus::Pending)
             .unwrap()
             .is_empty()
@@ -399,7 +429,11 @@ fn the_rig_hand_stays_the_default_without_an_acp_assignment() {
         last_check: None,
     };
     store
-        .update_settings(store.settings_revision().unwrap(), &[(llm, 0)])
+        .settings_repo()
+        .update_settings(
+            store.settings_repo().settings_revision().unwrap(),
+            &[(llm, 0)],
+        )
         .unwrap();
     let created = mind::create(
         world.harness.app.world_mut(),
@@ -441,13 +475,14 @@ fn the_rig_hand_stays_the_default_without_an_acp_assignment() {
     world.harness.run_until(|frame| {
         frame
             .resource::<Store>()
+            .work_repo()
             .runs(&session.id)
             .unwrap()
             .iter()
             .any(|run| run.state.is_terminal())
     });
     assert_eq!(
-        world.harness.store().runs(&session.id).unwrap()[0].state,
+        world.harness.store().work_repo().runs(&session.id).unwrap()[0].state,
         work::RunState::Completed
     );
 }

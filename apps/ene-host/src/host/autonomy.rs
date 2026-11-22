@@ -6,7 +6,7 @@
 //! and a one-shot row is disabled (docs/features/autonomy/schedule.md).
 use crate::host::{
     agent::{self, CompanionAgent},
-    db::{Result, Store, schedules::ScheduleClock},
+    db::{Result, ScheduleClock, Store},
     error::HostError,
     tools::run_tool,
 };
@@ -109,7 +109,7 @@ fn create(world: &mut World, agent: Entity, args: CreateArgs) -> Result<String> 
     let companion = companion(world, agent)?;
     let store = world.resource::<Store>().clone();
     let clock = world.resource::<ScheduleClock>().clone();
-    let schedule = store.insert_schedule(
+    let schedule = store.schedule_repo().insert_schedule(
         super::db::schedules::NewSchedule {
             companion: &companion,
             title: &args.title,
@@ -131,6 +131,7 @@ fn list(world: &mut World, agent: Entity, _args: ListArgs) -> Result<String> {
     let companion = companion(world, agent)?;
     let store = world.resource::<Store>().clone();
     let schedules: Vec<serde_json::Value> = store
+        .schedule_repo()
         .schedules(&companion)?
         .into_iter()
         .map(|schedule| {
@@ -149,7 +150,9 @@ fn list(world: &mut World, agent: Entity, _args: ListArgs) -> Result<String> {
 fn cancel(world: &mut World, agent: Entity, args: CancelArgs) -> Result<String> {
     let companion = companion(world, agent)?;
     let store = world.resource::<Store>().clone();
-    let removed = store.cancel_schedule(&companion, &args.schedule_id)?;
+    let removed = store
+        .schedule_repo()
+        .cancel_schedule(&companion, &args.schedule_id)?;
     Ok(json!({"schedule_id": args.schedule_id, "removed": removed}).to_string())
 }
 
@@ -188,7 +191,7 @@ fn confirm_delivered_schedules(world: &mut World) {
     let Some(store) = world.get_resource::<Store>().cloned() else {
         return;
     };
-    let pending = match store.pending_schedule_occurrences() {
+    let pending = match store.schedule_repo().pending_schedule_occurrences() {
         Ok(pending) => pending,
         Err(error) => {
             if error.is_storage() {
@@ -210,7 +213,9 @@ fn confirm_delivered_schedules(world: &mut World) {
             continue;
         };
         if conversation_has_occurrence(world, agent, &occ.occurrence_key)
-            && let Err(error) = store.mark_occurrence_delivered(&occ.occurrence_key, now)
+            && let Err(error) = store
+                .schedule_repo()
+                .mark_occurrence_delivered(&occ.occurrence_key, now)
             && error.is_storage()
         {
             super::fail(world, error.to_string());
@@ -249,17 +254,21 @@ pub(crate) fn poll_schedules(world: &mut World, now: Timestamp) -> usize {
             .map(|agent| agent.companion_id.clone())
             .collect()
     };
-    let occurrences = match store.materialize_due_occurrences(now, &clock, &ready_companions) {
-        Ok(occurrences) => occurrences,
-        Err(error) => {
-            if error.is_storage() {
-                super::fail(world, error.to_string());
-            } else {
-                tracing::warn!(%error, "schedules could not be materialized");
+    let occurrences =
+        match store
+            .schedule_repo()
+            .materialize_due_occurrences(now, &clock, &ready_companions)
+        {
+            Ok(occurrences) => occurrences,
+            Err(error) => {
+                if error.is_storage() {
+                    super::fail(world, error.to_string());
+                } else {
+                    tracing::warn!(%error, "schedules could not be materialized");
+                }
+                return 0;
             }
-            return 0;
-        }
-    };
+        };
     let mut fired = 0;
     for occ in occurrences {
         match dispatch_due_occurrence(world, &store, &occ, now) {
@@ -281,7 +290,10 @@ fn dispatch_due_occurrence(
         return OccurrenceOutcome::Skipped;
     };
     if conversation_has_occurrence(world, agent, &occ.occurrence_key) {
-        if let Err(error) = store.mark_occurrence_delivered(&occ.occurrence_key, now) {
+        if let Err(error) = store
+            .schedule_repo()
+            .mark_occurrence_delivered(&occ.occurrence_key, now)
+        {
             if error.is_storage() {
                 super::fail(world, error.to_string());
                 return OccurrenceOutcome::FatalStorage;
@@ -309,7 +321,9 @@ fn dispatch_due_occurrence(
         world.flush();
         return OccurrenceOutcome::Delivered;
     }
-    if let Err(error) = store.record_occurrence_attempt(&occ.occurrence_key, "model unavailable")
+    if let Err(error) = store
+        .schedule_repo()
+        .record_occurrence_attempt(&occ.occurrence_key, "model unavailable")
         && error.is_storage()
     {
         super::fail(world, error.to_string());
@@ -395,6 +409,7 @@ mod tests {
         let clock = ScheduleClock::fixed(jiff::tz::TimeZone::UTC, utc(2026, 11, 14, 8, 0));
         let schedule = harness
             .store()
+            .schedule_repo()
             .insert_schedule(
                 crate::host::db::schedules::NewSchedule {
                     companion: &harness.companion,
@@ -457,6 +472,7 @@ mod tests {
         let mut harness = Harness::with_clock([], clock.clone());
         let schedule = harness
             .store()
+            .schedule_repo()
             .insert_schedule(
                 crate::host::db::schedules::NewSchedule {
                     companion: &harness.companion,
@@ -507,6 +523,7 @@ mod tests {
         let mut harness = Harness::with_clock([], ScheduleClock::fixed(zone, now));
         let schedule = harness
             .store()
+            .schedule_repo()
             .insert_schedule(
                 crate::host::db::schedules::NewSchedule {
                     companion: &harness.companion,
@@ -543,6 +560,7 @@ mod tests {
         let clock = ScheduleClock::fixed(jiff::tz::TimeZone::UTC, utc(2026, 11, 14, 8, 0));
         let schedule = harness
             .store()
+            .schedule_repo()
             .insert_schedule(
                 crate::host::db::schedules::NewSchedule {
                     companion: "missing-companion",
@@ -576,6 +594,7 @@ mod tests {
             .insert_resource(crate::host::model::ModelFactory::default());
         let schedule = harness
             .store()
+            .schedule_repo()
             .insert_schedule(
                 crate::host::db::schedules::NewSchedule {
                     companion: &harness.companion,
@@ -589,7 +608,11 @@ mod tests {
             .unwrap();
         let now = utc(2026, 11, 14, 8, 5);
         assert_eq!(poll_schedules(harness.app.world_mut(), now), 0);
-        let pending = harness.store().pending_schedule_occurrences().unwrap();
+        let pending = harness
+            .store()
+            .schedule_repo()
+            .pending_schedule_occurrences()
+            .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].schedule_id, schedule.id);
         assert_eq!(pending[0].attempts, 1);
@@ -614,6 +637,7 @@ mod tests {
         assert!(
             harness
                 .store()
+                .schedule_repo()
                 .pending_schedule_occurrences()
                 .unwrap()
                 .is_empty(),
@@ -637,6 +661,7 @@ mod tests {
         assert!(
             harness
                 .store()
+                .schedule_repo()
                 .pending_schedule_occurrences()
                 .unwrap()
                 .is_empty(),

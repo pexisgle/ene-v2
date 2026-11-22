@@ -96,6 +96,8 @@ pub(crate) enum ForwardError {
     CapabilityMismatch,
     #[error("{0}")]
     Host(#[from] HostError),
+    #[error("{0}")]
+    Store(#[from] ene_store::StoreError),
 }
 
 /// One call of a capability tool, sent from its handler to the host thread.
@@ -208,11 +210,11 @@ impl Serve for CapabilityHandler {
 fn desired(store: &Store) -> Result<Vec<(String, CapabilityTool)>> {
     let mut desired: Vec<(String, CapabilityTool)> = Vec::new();
     let mut by_name: HashMap<String, usize> = HashMap::new();
-    for activation in store.activations()? {
+    for activation in store.client_repo().activations()? {
         let Some(client_id) = activation.client_id else {
             continue;
         };
-        let Some(client) = store.client(&client_id)? else {
+        let Some(client) = store.client_repo().client(&client_id)? else {
             continue;
         };
         for spec in client.tool_specs() {
@@ -471,7 +473,7 @@ fn forward(
         return Err(ForwardError::ParentOnly);
     }
     let store = world.resource::<Store>().clone();
-    let Some(client) = store.client(&binding.client_id)? else {
+    let Some(client) = store.client_repo().client(&binding.client_id)? else {
         return Err(ForwardError::ClientNotRegistered);
     };
     let Some(spec) = tool_spec_for(world, &client, &request.tool_name)? else {

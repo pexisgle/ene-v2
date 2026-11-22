@@ -316,6 +316,7 @@ mod tests {
             .read(|app| {
                 app.world()
                     .resource::<Store>()
+                    .client_repo()
                     .register_client(&ClientDeclaration {
                         id: "c1",
                         name: "desk",
@@ -412,7 +413,7 @@ mod tests {
         runtime
             .call(|app| {
                 let store = app.world().resource::<Store>().clone();
-                let mut ene = store.companion("ene")?.unwrap();
+                let mut ene = store.companion_repo().companion("ene")?.unwrap();
                 ene.voice = host::json::JsonDoc::new(
                     "ene.voice.v1",
                     serde_json::json!({
@@ -421,7 +422,7 @@ mod tests {
                         "speed": 1.1
                     }),
                 );
-                store.update_companion(&ene, 1)?;
+                store.companion_repo().update_companion(&ene, 1)?;
                 Ok(())
             })
             .await
@@ -578,7 +579,7 @@ mod tests {
                     revision: 1,
                     last_check: None,
                 };
-                store.update_settings(1, &[(conn, 0)])?;
+                store.settings_repo().update_settings(1, &[(conn, 0)])?;
                 app.world()
                     .resource::<host::model::Credentials>()
                     .remember("llm-preview", "test-key".into());
@@ -613,7 +614,14 @@ mod tests {
             .body;
         assert_eq!(resp.reply, "はじめまして、プレビュー応答です！");
         let count = runtime
-            .read(|app| Ok(app.world().resource::<Store>().companions()?.len()))
+            .read(|app| {
+                Ok(app
+                    .world()
+                    .resource::<Store>()
+                    .companion_repo()
+                    .companions()?
+                    .len())
+            })
             .await
             .unwrap();
         assert_eq!(count, 1, "preview must not create a companion row");

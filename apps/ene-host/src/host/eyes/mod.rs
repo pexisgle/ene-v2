@@ -551,6 +551,7 @@ pub(crate) fn poll(world: &mut World) {
         eyes.sessions.retain(|companion_id, session| {
             if !session.valid(&hub, now)
                 || store
+                    .client_repo()
                     .activation_for_client(&session.client)
                     .ok()
                     .flatten()
@@ -635,7 +636,7 @@ pub(crate) fn poll(world: &mut World) {
                 if session.dirty && session.task.is_none() && now >= session.next_evaluation {
                     session.next_evaluation = now + EVALUATION_INTERVAL;
                     session.dirty = false;
-                    if let Ok(Some(companion)) = store.companion(companion_id) {
+                    if let Ok(Some(companion)) = store.companion_repo().companion(companion_id) {
                         evaluate(world, entity, &store, &companion, session, now);
                     }
                 }

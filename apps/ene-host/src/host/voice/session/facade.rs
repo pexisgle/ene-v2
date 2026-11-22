@@ -43,10 +43,14 @@ pub(crate) fn bind_input(world: &World, client_id: &str) -> Result<InputBinding>
             "the host state is not available".into(),
         ));
     };
-    if store.client(client_id)?.is_none() {
+    if store.client_repo().client(client_id)?.is_none() {
         return Err(HostError::NotFound(("client not found").into()));
     }
-    if store.activation_for_client(client_id)?.is_none() {
+    if store
+        .client_repo()
+        .activation_for_client(client_id)?
+        .is_none()
+    {
         return Err(HostError::Conflict(
             ("the client is not the active client of any companion").into(),
         ));
@@ -61,6 +65,7 @@ pub(crate) fn is_still_active(world: &World, binding: &InputBinding) -> bool {
         return false;
     };
     store
+        .client_repo()
         .activation_for_client(&binding.client_id)
         .is_ok_and(|activation| activation.is_some())
 }
@@ -83,10 +88,11 @@ pub(crate) fn subscribe_audio(world: &mut World, client_id: &str) -> Result<Audi
             "the host state is not available".into(),
         ));
     };
-    if store.client(client_id)?.is_none() {
+    if store.client_repo().client(client_id)?.is_none() {
         return Err(HostError::NotFound(("client not found").into()));
     }
     let owned: Vec<String> = store
+        .client_repo()
         .activations()?
         .into_iter()
         .filter(|activation| activation.client_id.as_deref() == Some(client_id))
@@ -180,7 +186,9 @@ pub(crate) fn accept_transcription(
     let Some(store) = world.get_resource::<Store>().cloned() else {
         return Ok(false);
     };
-    let companions: Vec<String> = store.active_companions_for_client(&binding.client_id)?;
+    let companions: Vec<String> = store
+        .client_repo()
+        .active_companions_for_client(&binding.client_id)?;
     let author = Author {
         request: Some(RequestId(transcription_id.to_owned())),
         ..Author::user()
@@ -234,7 +242,7 @@ pub(crate) fn on_stream_text(world: &mut World, companion: &str, text: &str) {
 fn try_begin_utterance(world: &mut World, voice: &Voice, companion: &str) -> bool {
     let companion_record = world
         .get_resource::<Store>()
-        .and_then(|store| store.companion(companion).ok().flatten());
+        .and_then(|store| store.companion_repo().companion(companion).ok().flatten());
     let Ok(source) = companion_tts_source(world, companion_record.as_ref()) else {
         tracing::debug!(companion, "speech skipped: no TTS engine is configured");
         return false;

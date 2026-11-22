@@ -1,5 +1,5 @@
-use super::ops::write_embedding;
 use super::*;
+use crate::util::digest;
 use serde_json::json as value;
 
 fn store() -> Store {
@@ -33,7 +33,7 @@ fn apply(
     memories: Vec<NewMemory>,
     state: Option<MindStateChange>,
 ) -> Result<Value> {
-    store.apply_mind_update(&MindUpdate {
+    store.memory_repo().apply_mind_update(&MindUpdate {
         operation_id: operation.into(),
         companion_id: "ene".into(),
         request_hash: hash.to_vec(),
@@ -46,14 +46,15 @@ fn apply(
 fn recurring_cached_embedding_writes_keep_bindings_and_revision_guards() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
-    let first = store.insert_memory(new_memory("first", 3)).unwrap();
-    let second = store.insert_memory(new_memory("second", 4)).unwrap();
+    let repo = store.memory_repo();
+    let first = repo.insert_memory(new_memory("first", 3)).unwrap();
+    let second = repo.insert_memory(new_memory("second", 4)).unwrap();
     let connection = store.open_secondary().unwrap();
     let a = 1.0_f32.to_le_bytes();
     let b = 2.0_f32.to_le_bytes();
     for (memory, bytes) in [(&first, &a), (&second, &b), (&first, &b)] {
         assert!(
-            write_embedding(
+            write_embedding_on(
                 &connection,
                 &memory.id,
                 memory.content_revision,
@@ -65,7 +66,7 @@ fn recurring_cached_embedding_writes_keep_bindings_and_revision_guards() {
         );
     }
     assert!(
-        !write_embedding(
+        !write_embedding_on(
             &connection,
             &first.id,
             first.content_revision + 1,
@@ -76,7 +77,7 @@ fn recurring_cached_embedding_writes_keep_bindings_and_revision_guards() {
         .unwrap()
     );
     assert!(
-        write_embedding(
+        write_embedding_on(
             &connection,
             &second.id,
             second.content_revision,
@@ -87,11 +88,11 @@ fn recurring_cached_embedding_writes_keep_bindings_and_revision_guards() {
         .unwrap()
     );
     assert_eq!(
-        store.embedding_blob(&first.id, "fake:1:v1").unwrap(),
+        repo.embedding_blob(&first.id, "fake:1:v1").unwrap(),
         Some((1, b.to_vec()))
     );
     assert_eq!(
-        store.embedding_blob(&second.id, "fake:1:v1").unwrap(),
+        repo.embedding_blob(&second.id, "fake:1:v1").unwrap(),
         Some((1, a.to_vec()))
     );
 }
@@ -101,6 +102,7 @@ fn historical_hash_receipts_replay_after_reopening() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("host.sqlite3");
     let store = Store::open(&path).unwrap();
+    let repo = store.memory_repo();
     let fixtures = [
         ("float", r#"{"n":1.0}"#),
         ("unicode", "{\"\u{e000}\":1,\"\u{10000}\":2}"),
@@ -108,24 +110,29 @@ fn historical_hash_receipts_replay_after_reopening() {
     for (operation, historical) in fixtures {
         let request: Value = serde_json::from_str(historical).unwrap();
         let legacy_hash = digest(historical.as_bytes());
-        assert_eq!(store.mind_hash(&request), legacy_hash);
+        assert_eq!(repo.mind_hash(&request), legacy_hash);
         let canonical = serde_json_canonicalizer::to_string(&request).unwrap();
         assert_ne!(digest(canonical.as_bytes()), legacy_hash);
-        store.conn().unwrap().execute(
-            "INSERT INTO mind_operations (operation_id, companion_id, request_hash, result, created_at) \
-             VALUES (?1, 'ene', ?2, '{\"replayed\":true}', ?3)",
-            params![operation, legacy_hash, now()],
-        ).unwrap();
+        store
+            .conn()
+            .unwrap()
+            .execute(
+                "INSERT INTO mind_operations (operation_id, companion_id, request_hash, result, created_at) \
+                 VALUES (?1, 'ene', ?2, '{\"replayed\":true}', ?3)",
+                params![operation, legacy_hash, now()],
+            )
+            .unwrap();
     }
     drop(store);
     let store = Store::open(&path).unwrap();
+    let repo = store.memory_repo();
     for (operation, historical) in fixtures {
         let request: Value = serde_json::from_str(historical).unwrap();
         assert_eq!(
             apply(
                 &store,
                 operation,
-                &store.mind_hash(&request),
+                &repo.mind_hash(&request),
                 Vec::new(),
                 None
             )
@@ -141,7 +148,7 @@ fn historical_hash_receipts_replay_after_reopening() {
                 Vec::new(),
                 None
             ),
-            Err(HostError::Conflict(_))
+            Err(StoreError::Conflict(_))
         ));
     }
 }
@@ -149,13 +156,14 @@ fn historical_hash_receipts_replay_after_reopening() {
 #[test]
 fn hybrid_recall_fuses_and_forgetting_excludes_auto_but_keeps_explicit() {
     let store = store();
-    let lexical = store
+    let repo = store.memory_repo();
+    let lexical = repo
         .insert_memory(new_memory("東京都の紅茶の店", 6))
         .unwrap();
-    let semantic_only = store
+    let semantic_only = repo
         .insert_memory(new_memory("a favourite drink", 5))
         .unwrap();
-    let outcome = store
+    let outcome = repo
         .recall_hybrid(
             "ene",
             "紅茶",
@@ -172,34 +180,29 @@ fn hybrid_recall_fuses_and_forgetting_excludes_auto_but_keeps_explicit() {
             .iter()
             .any(|item| item.memory.id == semantic_only.id)
     );
-    let lexical_only = store
+    let lexical_only = repo
         .recall_hybrid("ene", "紅茶", RecallMode::Auto, &[], 8)
         .unwrap();
     assert!(!lexical_only.semantic);
     assert_eq!(lexical_only.items.len(), 1);
 
-    store
-        .control_memory(&lexical.id, MemoryActionKind::Forget, "ene")
+    repo.control_memory(&lexical.id, MemoryActionKind::Forget, "ene")
         .unwrap();
-    assert_eq!(store.memory(&lexical.id).unwrap().unwrap().importance, 0);
-    // Auto recall drops the forgotten memory from both halves.
+    assert_eq!(repo.memory(&lexical.id).unwrap().unwrap().importance, 0);
     assert!(
-        store
-            .recall_hybrid(
-                "ene",
-                "紅茶",
-                RecallMode::Auto,
-                std::slice::from_ref(&lexical.id),
-                4,
-            )
-            .unwrap()
-            .items
-            .is_empty()
+        repo.recall_hybrid(
+            "ene",
+            "紅茶",
+            RecallMode::Auto,
+            std::slice::from_ref(&lexical.id),
+            4,
+        )
+        .unwrap()
+        .items
+        .is_empty()
     );
-    // An explicit question about the past still reaches it.
     assert_eq!(
-        store
-            .recall_hybrid("ene", "紅茶", RecallMode::Explicit, &[], 4)
+        repo.recall_hybrid("ene", "紅茶", RecallMode::Explicit, &[], 4)
             .unwrap()
             .items
             .len(),
@@ -227,7 +230,7 @@ fn state_only(store: &Store, operation: &str, version: i64) -> Result<Value> {
     apply(
         store,
         operation,
-        &store.mind_hash(&value!({"state": version})),
+        &store.memory_repo().mind_hash(&value!({"state": version})),
         Vec::new(),
         Some(MindStateChange {
             expected_revision: 1,
@@ -239,34 +242,32 @@ fn state_only(store: &Store, operation: &str, version: i64) -> Result<Value> {
 #[test]
 fn mind_update_is_idempotent_and_corrections_forgets_and_state_use_cas() {
     let store = store();
+    let repo = store.memory_repo();
+    let companions = store.companion_repo();
     companion_row(&store);
-    let hash = store.mind_hash(&value!({"content": "tea", "v": 1}));
+    let hash = repo.mind_hash(&value!({"content": "tea", "v": 1}));
     let write = input("tea", 5);
     let result = apply(&store, "op-1", &hash, vec![write.clone()], None).unwrap();
     let id = result["memories"][0].as_str().unwrap().to_owned();
-    // The same operation and content replays the receipt.
     assert_eq!(
         apply(&store, "op-1", &hash, vec![write], None).unwrap(),
         result
     );
-    assert_eq!(store.list_memories("ene", None, 10).unwrap().0.len(), 1);
-    // The same operation id with another payload is a conflict.
+    assert_eq!(repo.list_memories("ene", None, 10).unwrap().0.len(), 1);
     assert!(matches!(
         apply(
             &store,
             "op-1",
-            &store.mind_hash(&value!({"content": "coffee"})),
+            &repo.mind_hash(&value!({"content": "coffee"})),
             vec![input("coffee", 5)],
             None
         ),
-        Err(HostError::Conflict(_))
+        Err(StoreError::Conflict(_))
     ));
-    // A correction with the revision the caller read succeeds; a stale
-    // revision is rejected without changing anything.
     apply(
         &store,
         "op-2",
-        &store.mind_hash(&value!({"content": "green tea"})),
+        &repo.mind_hash(&value!({"content": "green tea"})),
         vec![NewMemory {
             id: Some(id.clone()),
             content: "green tea".into(),
@@ -281,7 +282,7 @@ fn mind_update_is_idempotent_and_corrections_forgets_and_state_use_cas() {
         apply(
             &store,
             "op-3",
-            &store.mind_hash(&value!({"content": "black tea"})),
+            &repo.mind_hash(&value!({"content": "black tea"})),
             vec![NewMemory {
                 id: Some(id.clone()),
                 content: "black tea".into(),
@@ -290,18 +291,16 @@ fn mind_update_is_idempotent_and_corrections_forgets_and_state_use_cas() {
             }],
             None,
         ),
-        Err(HostError::Conflict(_))
+        Err(StoreError::Conflict(_))
     ));
-    let corrected = store.memory(&id).unwrap().unwrap();
+    let corrected = repo.memory(&id).unwrap().unwrap();
     assert_eq!(corrected.content, "green tea");
     assert_eq!(corrected.importance, 7);
     assert_eq!(corrected.memory_revision, 2);
-    // Forgetting lowers importance and advances the revision, but keeps
-    // the record.
     apply(
         &store,
         "op-4",
-        &store.mind_hash(&value!({"forget": 1})),
+        &repo.mind_hash(&value!({"forget": 1})),
         vec![NewMemory {
             id: Some(id.clone()),
             forget: true,
@@ -311,29 +310,32 @@ fn mind_update_is_idempotent_and_corrections_forgets_and_state_use_cas() {
         None,
     )
     .unwrap();
-    let forgotten = store.memory(&id).unwrap().unwrap();
+    let forgotten = repo.memory(&id).unwrap().unwrap();
     assert_eq!(forgotten.importance, 0);
     assert_eq!(forgotten.memory_revision, 3);
-    // The state CAS and the receipt commit together; a stale state
-    // revision rolls the whole operation back.
     state_only(&store, "op-5", 1).unwrap();
-    assert_eq!(store.companion("ene").unwrap().unwrap().state_revision, 2);
+    assert_eq!(
+        companions.companion("ene").unwrap().unwrap().state_revision,
+        2
+    );
     assert!(matches!(
         state_only(&store, "op-6", 2),
-        Err(HostError::Conflict(_))
+        Err(StoreError::Conflict(_))
     ));
-    assert_eq!(store.companion("ene").unwrap().unwrap().state_revision, 2);
+    assert_eq!(
+        companions.companion("ene").unwrap().unwrap().state_revision,
+        2
+    );
 }
 
 #[test]
 fn another_companions_scope_is_private_and_sharing_moves_the_row_to_the_pool() {
     let store = store();
+    let repo = store.memory_repo();
     let mut other = new_memory("other companion's secret", 8);
     other.scope = "other".into();
-    let other = store.insert_memory(other).unwrap();
-    // A scope only one companion names keeps the row out of every other
-    // companion's lexical and semantic candidates.
-    let private = store
+    let other = repo.insert_memory(other).unwrap();
+    let private = repo
         .recall_hybrid(
             "ene",
             "secret",
@@ -343,21 +345,18 @@ fn another_companions_scope_is_private_and_sharing_moves_the_row_to_the_pool() {
         )
         .unwrap();
     assert!(private.items.is_empty());
-    // Sharing rewrites the scope to the shared pool instead of adding an id.
-    let shared = store
+    let shared = repo
         .control_memory(&other.id, MemoryActionKind::Share, "other")
         .unwrap();
     assert_eq!(shared.scope, SHARED_SCOPE);
     assert_eq!(shared.memory_revision, 2);
-    // Sharing again changes nothing, so it is not a revision bump.
     assert_eq!(
-        store
-            .control_memory(&other.id, MemoryActionKind::Share, "other")
+        repo.control_memory(&other.id, MemoryActionKind::Share, "other")
             .unwrap()
             .memory_revision,
         2
     );
-    let recalled = store
+    let recalled = repo
         .recall_hybrid(
             "ene",
             "secret",
@@ -368,15 +367,13 @@ fn another_companions_scope_is_private_and_sharing_moves_the_row_to_the_pool() {
         .unwrap();
     assert_eq!(recalled.items.len(), 1);
     assert_eq!(recalled.items[0].memory.id, other.id);
-    // Unsharing returns the row to that companion's own scope.
-    let unshared = store
+    let unshared = repo
         .control_memory(&other.id, MemoryActionKind::Unshare, "other")
         .unwrap();
     assert_eq!(unshared.scope, "other");
     assert_eq!(unshared.memory_revision, 3);
     assert!(
-        store
-            .recall_hybrid("ene", "secret", RecallMode::Explicit, &[], 8)
+        repo.recall_hybrid("ene", "secret", RecallMode::Explicit, &[], 8)
             .unwrap()
             .items
             .is_empty()
@@ -386,19 +383,17 @@ fn another_companions_scope_is_private_and_sharing_moves_the_row_to_the_pool() {
 #[test]
 fn a_shared_pinned_memory_is_injected_for_every_companion() {
     let store = store();
-    let memory = store
+    let repo = store.memory_repo();
+    let memory = repo
         .insert_memory(new_memory("the user's name is A", 10))
         .unwrap();
-    assert_eq!(store.pinned("ene").unwrap().len(), 1);
-    assert!(store.pinned("other").unwrap().is_empty());
-    // Sharing must not unpin the memory for anyone: the shared pool is one
-    // scope, so every companion injects and lists it.
-    store
-        .control_memory(&memory.id, MemoryActionKind::Share, "ene")
+    assert_eq!(repo.pinned("ene").unwrap().len(), 1);
+    assert!(repo.pinned("other").unwrap().is_empty());
+    repo.control_memory(&memory.id, MemoryActionKind::Share, "ene")
         .unwrap();
-    assert_eq!(store.pinned("ene").unwrap().len(), 1);
-    assert_eq!(store.pinned("other").unwrap().len(), 1);
-    assert_eq!(store.list_memories("other", None, 10).unwrap().0.len(), 1);
+    assert_eq!(repo.pinned("ene").unwrap().len(), 1);
+    assert_eq!(repo.pinned("other").unwrap().len(), 1);
+    assert_eq!(repo.list_memories("other", None, 10).unwrap().0.len(), 1);
 }
 
 fn batch(through: u64, context: Vec<MemoryContext>) -> Batch {
@@ -413,16 +408,17 @@ fn batch(through: u64, context: Vec<MemoryContext>) -> Batch {
 #[test]
 fn consolidation_context_retrieves_instead_of_ranking_importance() {
     let store = store();
-    let relevant = store
+    let repo = store.memory_repo();
+    let relevant = repo
         .insert_memory(new_memory("東京都の紅茶の店", 6))
         .unwrap();
-    let important = store
+    let important = repo
         .insert_memory(new_memory("unrelated pinned fact", 10))
         .unwrap();
-    let forgotten = store
+    let forgotten = repo
         .insert_memory(new_memory("紅茶はもう忘れて", 1))
         .unwrap();
-    let contexts = store.consolidation_context("ene", "紅茶", &[], 2).unwrap();
+    let contexts = repo.consolidation_context("ene", "紅茶", &[], 2).unwrap();
     let ids: Vec<&str> = contexts.iter().map(|context| context.id.as_str()).collect();
     assert!(ids.contains(&relevant.id.as_str()));
     assert!(
@@ -433,19 +429,18 @@ fn consolidation_context_retrieves_instead_of_ranking_importance() {
         !ids.contains(&important.id.as_str()),
         "an unrelated importance-10 memory does not crowd out retrieval"
     );
-    // With no lexical or semantic match the important memories fill in.
-    let fallback = store.consolidation_context("ene", "zzz", &[], 2).unwrap();
+    let fallback = repo.consolidation_context("ene", "zzz", &[], 2).unwrap();
     assert_eq!(fallback.len(), 2);
 }
 
 #[test]
 fn consolidation_does_not_resurrect_a_forgotten_memory() {
     let store = store();
-    let memory = store.insert_memory(new_memory("coffee", 5)).unwrap();
-    store
-        .control_memory(&memory.id, MemoryActionKind::Forget, "ene")
+    let repo = store.memory_repo();
+    let memory = repo.insert_memory(new_memory("coffee", 5)).unwrap();
+    repo.control_memory(&memory.id, MemoryActionKind::Forget, "ene")
         .unwrap();
-    let forgotten = store.memory(&memory.id).unwrap().unwrap();
+    let forgotten = repo.memory(&memory.id).unwrap().unwrap();
     assert_eq!(forgotten.importance, 0);
 
     let fact = Fact {
@@ -460,16 +455,14 @@ fn consolidation_does_not_resurrect_a_forgotten_memory() {
         importance: forgotten.importance,
         content: forgotten.content.clone(),
     }];
-    let commit = store.consolidate(&batch(7, context), &[fact]).unwrap();
+    let commit = repo.consolidate(&batch(7, context), &[fact]).unwrap();
     assert_eq!(commit.inserted, 0);
     assert_eq!(commit.updated, 0);
-    let after = store.memory(&memory.id).unwrap().unwrap();
+    let after = repo.memory(&memory.id).unwrap().unwrap();
     assert_eq!(after.importance, 0, "the forgotten row stays forgotten");
     assert_eq!(after.content, "coffee");
 
-    // A supersede of a forgotten id that is no longer a candidate is
-    // dropped as well: it cannot be re-created as a new memory.
-    let commit = store
+    let commit = repo
         .consolidate(
             &batch(9, Vec::new()),
             &[Fact {
@@ -481,7 +474,7 @@ fn consolidation_does_not_resurrect_a_forgotten_memory() {
         )
         .unwrap();
     assert_eq!(commit.inserted, 0);
-    assert_eq!(store.memory(&memory.id).unwrap().unwrap().importance, 0);
+    assert_eq!(repo.memory(&memory.id).unwrap().unwrap().importance, 0);
 }
 
 #[test]
@@ -490,34 +483,29 @@ fn injected_memory_ids_survive_a_restart() {
     let path = temp.path().join("host.sqlite3");
     {
         let store = Store::open(&path).unwrap();
-        store
-            .record_injections("ene", "5", &["m1".into(), "m2".into()])
+        let repo = store.memory_repo();
+        repo.record_injections("ene", "5", &["m1".into(), "m2".into()])
             .unwrap();
-        store.record_injections("ene", "7", &["m3".into()]).unwrap();
-        store
-            .record_injections("other", "5", &["m9".into()])
+        repo.record_injections("ene", "7", &["m3".into()]).unwrap();
+        repo.record_injections("other", "5", &["m9".into()])
             .unwrap();
     }
-    // A new host process reads the verified injection set back.
     let store = Store::open(&path).unwrap();
+    let repo = store.memory_repo();
     assert_eq!(
-        store.injected_between("ene", Some(5), 7).unwrap(),
+        repo.injected_between("ene", Some(5), 7).unwrap(),
         vec!["m3".to_owned()]
     );
     assert_eq!(
-        store.injected_between("ene", None, 7).unwrap(),
+        repo.injected_between("ene", None, 7).unwrap(),
         vec!["m1".to_owned(), "m2".to_owned(), "m3".to_owned()]
     );
     assert!(
-        store
-            .injected_between("ene", Some(5), 5)
-            .unwrap()
-            .is_empty(),
+        repo.injected_between("ene", Some(5), 5).unwrap().is_empty(),
         "after is exclusive, so an empty range has no ids"
     );
-    // Another companion's records are not part of this ledger.
     assert_eq!(
-        store.injected_between("other", None, 5).unwrap(),
+        repo.injected_between("other", None, 5).unwrap(),
         vec!["m9".to_owned()]
     );
 }

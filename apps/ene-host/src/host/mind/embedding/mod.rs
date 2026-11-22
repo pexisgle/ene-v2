@@ -287,7 +287,10 @@ fn target(
     let Some(assignment) = companion.model(Role::Embedding) else {
         return Ok(None);
     };
-    let Some(connection) = store.connection(&assignment.connection_id)? else {
+    let Some(connection) = store
+        .settings_repo()
+        .connection(&assignment.connection_id)?
+    else {
         return Ok(None);
     };
     if !connection.enabled || connection.kind != ConnectionKind::Embedding {
@@ -314,7 +317,7 @@ fn target(
     else {
         return Ok(None);
     };
-    let revision = store.settings_revision()?;
+    let revision = store.settings_repo().settings_revision()?;
     let key = (connection.id.clone(), model_id.to_owned());
     let mut models = crate::host::lock(&embeddings.models);
     let credential_generation = credentials.map(Credentials::generation);
@@ -357,7 +360,7 @@ pub(crate) async fn semantic_ids(
     companion: &str,
     query: &str,
 ) -> Vec<String> {
-    let Ok(Some(record)) = store.companion(companion) else {
+    let Ok(Some(record)) = store.companion_repo().companion(companion) else {
         return Vec::new();
     };
     let Ok(Some(target)) = target(store, credentials, &record, embeddings) else {

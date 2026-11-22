@@ -32,8 +32,12 @@ impl w::SettingsService for Services {
         _: RequestContext,
         _: ServiceRequest<'_, w::Empty>,
     ) -> ServiceResult<w::Settings> {
-        self.read(|app| Ok(wire::settings(&app.world().resource::<Store>().settings()?)))
-            .await
+        self.read(|app| {
+            Ok(wire::settings(
+                &app.world().resource::<Store>().settings_repo().settings()?,
+            ))
+        })
+        .await
     }
 
     #[tracing::instrument(
@@ -84,7 +88,9 @@ impl w::SettingsService for Services {
         let view = self
             .call(move |app| {
                 let store = app.world().resource::<Store>().clone();
-                let settings = store.update_settings(expected_revision, &inputs)?;
+                let settings = store
+                    .settings_repo()
+                    .update_settings(expected_revision, &inputs)?;
                 let view = wire::settings(&settings);
                 notify_settings(app, view.clone());
                 Ok(view)
@@ -99,7 +105,7 @@ impl w::SettingsService for Services {
             .await
             .map_err(ConnectError::from)?;
         self.runtime.providers().start_used(&store).await;
-        if let Ok(current) = store.settings() {
+        if let Ok(current) = store.settings_repo().settings() {
             let providers = self.runtime.providers();
             let active_vv = current
                 .connections
@@ -141,6 +147,7 @@ impl w::SettingsService for Services {
             let store = app.world().resource::<Store>();
             Ok(w::PendingApprovals {
                 items: store
+                    .approval_repo()
                     .approvals(permission::ApprovalStatus::Pending)?
                     .iter()
                     .map(wire::approval)
@@ -171,7 +178,7 @@ impl w::SettingsService for Services {
         let credentials = self.runtime.credentials();
         let response = self.call(move |app| {
             let store = app.world().resource::<Store>().clone();
-            let (settings, companions) = store.delete_connection(&id, revision, || {
+            let (settings, companions) = store.settings_repo().delete_connection(&id, revision, || {
                 crate::host::model::delete_secret(&credentials, &id)
             })?;
             let view = wire::settings(&settings);
@@ -191,6 +198,7 @@ impl w::SettingsService for Services {
                 Ok(app
                     .world()
                     .resource::<Store>()
+                    .settings_repo()
                     .settings()?
                     .connections
                     .iter()
@@ -257,6 +265,7 @@ impl w::SettingsService for Services {
             let store = app.world().resource::<Store>();
             Ok(w::PolicyRules {
                 items: store
+                    .policy_repo()
                     .policy_rules()?
                     .iter()
                     .map(wire::policy_rule)
@@ -289,7 +298,9 @@ impl w::SettingsService for Services {
         let remove_ids = request.remove_ids;
         self.call(move |app| {
             let store = app.world().resource::<Store>().clone();
-            let updated = store.apply_policy_rules(&rules, &remove_ids)?;
+            let updated = store
+                .policy_repo()
+                .apply_policy_rules(&rules, &remove_ids)?;
             let items: Vec<w::PolicyRule> = updated.iter().map(wire::policy_rule).collect();
             app.world_mut().resource_mut::<Notifier>().push(
                 None,
@@ -325,6 +336,7 @@ impl w::SettingsService for Services {
             let store = app.world().resource::<Store>();
             Ok(w::PolicyTexts {
                 items: store
+                    .policy_repo()
                     .policy_texts()?
                     .iter()
                     .map(wire::policy_text)
@@ -357,7 +369,9 @@ impl w::SettingsService for Services {
         let remove_ids = request.remove_ids;
         self.call(move |app| {
             let store = app.world().resource::<Store>().clone();
-            let updated = store.apply_policy_texts(&texts, &remove_ids)?;
+            let updated = store
+                .policy_repo()
+                .apply_policy_texts(&texts, &remove_ids)?;
             let items: Vec<w::PolicyText> = updated.iter().map(wire::policy_text).collect();
             app.world_mut().resource_mut::<Notifier>().push(
                 None,
@@ -415,6 +429,7 @@ impl w::SettingsService for Services {
             let world = app.world();
             let connection = world
                 .resource::<Store>()
+                .settings_repo()
                 .connection(&id)?
                 .ok_or_else(|| HostError::NotFound(("connection not found").into()))?;
             let catalog = world.resource::<rig_ecs::model::Models>().0.catalog();
@@ -453,12 +468,14 @@ impl w::SettingsService for Services {
         let credentials = self.runtime.credentials();
         self.call(move |app| {
             let store = app.world().resource::<Store>().clone();
-            if store.connection(&id)?.is_none() {
+            if store.settings_repo().connection(&id)?.is_none() {
                 return Err(HostError::NotFound("connection not found".into()));
             }
             model::save_secret(&credentials, &id, &secret)?;
-            store.set_credential_state(&id, CredentialState::Registered)?;
-            notify_settings(app, wire::settings(&store.settings()?));
+            store
+                .settings_repo()
+                .set_credential_state(&id, CredentialState::Registered)?;
+            notify_settings(app, wire::settings(&store.settings_repo().settings()?));
             Ok(w::CredentialResult {
                 credential_state: CredentialState::Registered.as_str().into(),
                 ..Default::default()
@@ -488,12 +505,13 @@ impl w::SettingsService for Services {
         self.call(move |app| {
             let store = app.world().resource::<Store>().clone();
             let connection = store
+                .settings_repo()
                 .connection(&id)?
                 .ok_or_else(|| HostError::NotFound("connection not found".into()))?;
             model::delete_secret(&credentials, &id)?;
             let state = model::credential_state(&connection, &credentials, &providers)?;
-            store.set_credential_state(&id, state)?;
-            notify_settings(app, wire::settings(&store.settings()?));
+            store.settings_repo().set_credential_state(&id, state)?;
+            notify_settings(app, wire::settings(&store.settings_repo().settings()?));
             Ok(w::Empty::default())
         })
         .await
@@ -520,6 +538,7 @@ impl w::SettingsService for Services {
             .read(move |app| {
                 let store = app.world().resource::<Store>().clone();
                 let connection = store
+                    .settings_repo()
                     .connection(&id)?
                     .ok_or_else(|| HostError::NotFound(("connection not found").into()))?;
                 Ok((connection, store))
@@ -545,6 +564,7 @@ impl w::SettingsService for Services {
                 && (checked_credentials
                     .is_some_and(|generation| credentials.generation() != generation)
                     || store
+                        .settings_repo()
                         .connection(&id)?
                         .is_some_and(|current| current.revision != revision))
             {
@@ -552,9 +572,9 @@ impl w::SettingsService for Services {
                     "connection changed during the check".into(),
                 ));
             }
-            store.set_check(&id, &check)?;
+            store.settings_repo().set_check(&id, &check)?;
             if checked_revision.is_some() {
-                notify_settings(app, wire::settings(&store.settings()?));
+                notify_settings(app, wire::settings(&store.settings_repo().settings()?));
             }
             Ok(w::CheckResult {
                 request_id,
@@ -584,7 +604,7 @@ impl w::SettingsService for Services {
         let providers = self.runtime.providers();
         self.read(move |app| {
             let store = app.world().resource::<Store>();
-            let entries = store.plugin_entries()?;
+            let entries = store.plugin_repo().plugin_entries()?;
             let mut by_id: std::collections::BTreeMap<String, w::PluginInfo> = entries
                 .into_iter()
                 .map(|entry| {
@@ -698,13 +718,17 @@ impl w::SettingsService for Services {
         let req = request.to_owned_message();
         self.call(move |app| {
             let store = app.world().resource::<Store>();
-            if !store.set_plugin_enabled(&req.plugin_id, req.enabled)? {
+            if !store
+                .plugin_repo()
+                .set_plugin_enabled(&req.plugin_id, req.enabled)?
+            {
                 return Err(HostError::NotFound(format!(
                     "plugin `{}` not found",
                     req.plugin_id
                 )));
             }
             let entry = store
+                .plugin_repo()
                 .plugin_entries()?
                 .into_iter()
                 .find(|e| e.plugin_id == req.plugin_id)
@@ -919,6 +943,7 @@ async fn probe_mcp_connection(
                     let world = app.world();
                     if !world
                         .resource::<Store>()
+                        .settings_repo()
                         .connection(&id)?
                         .is_some_and(|current| current.revision == revision)
                     {

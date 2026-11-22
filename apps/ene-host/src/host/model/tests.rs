@@ -79,7 +79,11 @@ async fn completion_keeps_catalog_overrides_and_unknown_tool_support() {
 
     let harness = Harness::new([]);
     let store = harness.store();
-    let mut companion = store.companion(&harness.companion).unwrap().unwrap();
+    let mut companion = store
+        .companion_repo()
+        .companion(&harness.companion)
+        .unwrap()
+        .unwrap();
     let credentials = Credentials::new(true);
     let providers = super::super::providers::Providers::none();
     let mut overrides = Catalog::default();
@@ -97,7 +101,11 @@ async fn completion_keeps_catalog_overrides_and_unknown_tool_support() {
         connection.id = adapter.into();
         credentials.remember(adapter, "explicit-key".into());
         store
-            .update_settings(store.settings_revision().unwrap(), &[(connection, 0)])
+            .settings_repo()
+            .update_settings(
+                store.settings_repo().settings_revision().unwrap(),
+                &[(connection, 0)],
+            )
             .unwrap();
         for id in ["gpt-4o-mini", "ene-unlisted-model"] {
             companion.assignments.companion = Assignment {
@@ -140,11 +148,19 @@ fn sakura_perception_exposes_vision_only_for_supported_models() {
 
     let harness = Harness::new([]);
     let store = harness.store();
-    let mut companion = store.companion(&harness.companion).unwrap().unwrap();
+    let mut companion = store
+        .companion_repo()
+        .companion(&harness.companion)
+        .unwrap()
+        .unwrap();
     let connection = connection_for("sakura", "http://127.0.0.1:1234");
     let connection_id = connection.id.clone();
     store
-        .update_settings(store.settings_revision().unwrap(), &[(connection, 0)])
+        .settings_repo()
+        .update_settings(
+            store.settings_repo().settings_revision().unwrap(),
+            &[(connection, 0)],
+        )
         .unwrap();
     for (id, supports_image) in [
         ("preview/DeepSeek-V4.1-Flash-1017", true),
@@ -229,7 +245,11 @@ fn all_builtin_providers_bind_through_ensure_model_for_companion_and_task() {
         connection.id = conn_id.clone();
         credentials.remember(&conn_id, "test-secret".into());
         store
-            .update_settings(store.settings_revision().unwrap(), &[(connection, 0)])
+            .settings_repo()
+            .update_settings(
+                store.settings_repo().settings_revision().unwrap(),
+                &[(connection, 0)],
+            )
             .unwrap();
 
         let assignment = Assignment {
@@ -261,7 +281,11 @@ fn all_builtin_providers_bind_through_ensure_model_for_companion_and_task() {
             },
         )
         .unwrap();
-        let companion = store.companion(&created.id).unwrap().unwrap();
+        let companion = store
+            .companion_repo()
+            .companion(&created.id)
+            .unwrap()
+            .unwrap();
         let companion_entity = agent::agent_of(&mut world, &companion.id).expect("companion agent");
         agent::ensure_model(&mut world, companion_entity).unwrap_or_else(|error| {
             panic!("companion ensure_model failed for {adapter}/{model_id}: {error}")
@@ -334,7 +358,11 @@ async fn sakura_companion_binds_and_answers_over_chat_completions() {
     connection.id = "sakura-conn".into();
     credentials.remember("sakura-conn", "sakura-key".into());
     store
-        .update_settings(store.settings_revision().unwrap(), &[(connection, 0)])
+        .settings_repo()
+        .update_settings(
+            store.settings_repo().settings_revision().unwrap(),
+            &[(connection, 0)],
+        )
         .unwrap();
 
     let assignment = Assignment {

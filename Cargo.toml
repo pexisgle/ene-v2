@@ -34,6 +34,7 @@ ene-mind = { path = "crates/ene-mind" }
 ene-policy = { path = "crates/ene-policy" }
 ene-plugin = { path = "crates/ene-plugin" }
 ene-plugin-runtime = { path = "crates/ene-plugin-runtime" }
+ene-store = { path = "crates/ene-store" }
 # A Wasm guest cannot depend on the full ACP SDK, because the SDK pulls `uuid`
 # without a randomness source for `wasm32-unknown-unknown`. `crates/ene-plugin`
 # therefore depends on the types-only crate directly, with a caret requirement
@@ -54,6 +55,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 # pins the exact version its observed API was written against.
 gpui = { version = "=0.2.2", default-features = false }
 http = "1"
+hashlink = "0.12"
 croner = { version = "4", default-features = false, features = ["jiff"] }
 rubato = "5.1"
 jsonschema = "0.61"
@@ -70,6 +72,7 @@ rig-rmcp = "=0.46.0"
 # The transports rig-rmcp re-exports are behind rmcp features it does not turn on.
 rmcp = { version = "3.5", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "which-command"] }
 rig-reqwest = { version = "=0.46.0", features = ["rustls"] }
+rusqlite = { version = "0.42", features = ["bundled", "fallible_uint"] }
 rustix = { version = "1", features = ["fs", "process"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

@@ -651,6 +651,7 @@ fn voice_connection_by_id(
         return Err(SetupError::Broken("the host state is not available".into()));
     };
     let settings = store
+        .settings_repo()
         .settings()
         .map_err(|error| SetupError::Broken(error.to_string()))?;
     let Some(connection) = settings
@@ -678,6 +679,7 @@ pub(super) fn voice_connection(
         return Err(SetupError::Broken("the host state is not available".into()));
     };
     let settings = store
+        .settings_repo()
         .settings()
         .map_err(|error| SetupError::Broken(error.to_string()))?;
     let mut first_disabled = None;

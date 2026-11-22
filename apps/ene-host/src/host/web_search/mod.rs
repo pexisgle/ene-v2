@@ -124,6 +124,7 @@ pub(crate) fn resolve(
     providers: &Providers,
 ) -> Result<ResolvedSearch, SearchConfigError> {
     let settings = store
+        .settings_repo()
         .settings()
         .map_err(|error| SearchConfigError(format!("could not read search settings: {error}")))?;
     let enabled: Vec<&Connection> = settings

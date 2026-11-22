@@ -75,6 +75,7 @@ impl w::ClientService for Services {
             move |app| {
                 let store = app.world().resource::<Store>().clone();
                 store
+                    .client_repo()
                     .client(&client_id)?
                     .ok_or_else(|| HostError::NotFound(("client not found").into()))?;
                 Ok(())
@@ -179,7 +180,7 @@ mod tests {
                     ("sent", DeviceStatus::Dispatched),
                     ("unsent", DeviceStatus::Pending),
                 ] {
-                    store.insert_operation(&DeviceOperation {
+                    store.client_repo().insert_operation(&DeviceOperation {
                         id: id.into(),
                         client_id: "c1".into(),
                         capability: "device.files".into(),
@@ -217,6 +218,7 @@ mod tests {
                 Ok(app
                     .world()
                     .resource::<Store>()
+                    .client_repo()
                     .operation("sent")?
                     .unwrap()
                     .status)
@@ -234,8 +236,8 @@ mod tests {
             .read(|app| {
                 let store = app.world().resource::<Store>();
                 Ok((
-                    store.operation("sent")?.unwrap().status,
-                    store.operation("unsent")?.unwrap().status,
+                    store.client_repo().operation("sent")?.unwrap().status,
+                    store.client_repo().operation("unsent")?.unwrap().status,
                 ))
             })
             .await

@@ -108,16 +108,19 @@ impl Services for PluginServices {
                     Ok(Value::Null)
                 }
                 ServiceRequest::Configuration => store
+                    .plugin_repo()
                     .plugin_config(&plugin_id)
                     .map_err(|_| Failure::new("service_failed")),
                 ServiceRequest::StateRead { key } => {
                     let val = store
+                        .plugin_repo()
                         .plugin_state_read(&plugin_id, &key)
                         .map_err(|_| Failure::new("service_failed"))?;
                     Ok(val.unwrap_or(Value::Null))
                 }
                 ServiceRequest::StateWrite { key, value } => {
                     store
+                        .plugin_repo()
                         .plugin_state_write(&plugin_id, &key, &value)
                         .map_err(|_| Failure::new("service_failed"))?;
                     Ok(Value::Null)

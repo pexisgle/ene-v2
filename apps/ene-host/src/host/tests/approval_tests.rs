@@ -36,6 +36,7 @@ async fn a_real_guest_tool_call_is_held_and_denied_by_the_gate() {
     harness.run_until(|world| {
         !world
             .resource::<Store>()
+            .approval_repo()
             .approvals(permission::ApprovalStatus::Pending)
             .unwrap()
             .is_empty()
@@ -119,6 +120,7 @@ fn the_gate_refuses_a_reply_over_the_call_count_limit() {
     assert!(
         harness
             .store()
+            .approval_repo()
             .approvals(permission::ApprovalStatus::Pending)
             .unwrap()
             .is_empty()
@@ -161,6 +163,7 @@ fn the_gate_refuses_an_identifier_over_the_length_limit() {
     assert!(
         harness
             .store()
+            .approval_repo()
             .approvals(permission::ApprovalStatus::Pending)
             .unwrap()
             .is_empty()
@@ -209,6 +212,7 @@ fn a_confirm_capability_is_gated_and_delivered_to_the_bound_client() {
     harness.run_until(|world| {
         !world
             .resource::<Store>()
+            .approval_repo()
             .approvals(permission::ApprovalStatus::Pending)
             .unwrap()
             .is_empty()
@@ -219,6 +223,7 @@ fn a_confirm_capability_is_gated_and_delivered_to_the_bound_client() {
     );
     let request = harness
         .store()
+        .approval_repo()
         .approvals(permission::ApprovalStatus::Pending)
         .unwrap()[0]
         .clone();
@@ -243,6 +248,7 @@ fn a_confirm_capability_is_gated_and_delivered_to_the_bound_client() {
     harness.run_until(|world| {
         !world
             .resource::<Store>()
+            .client_repo()
             .outstanding_operations("c1")
             .unwrap()
             .is_empty()
@@ -314,7 +320,9 @@ fn a_work_approval_is_bound_to_the_work_session_not_the_head_activation() {
     // The hand stays bound to c1; only the head moves to c2.
     activate(harness.app.world_mut(), &harness.companion, "c2");
     let request = pending_approval(&mut harness);
-    let run = harness.store().runs(&session.id).unwrap()[0].run_id.clone();
+    let run = harness.store().work_repo().runs(&session.id).unwrap()[0]
+        .run_id
+        .clone();
     assert_eq!(request.run_id, run);
     assert_eq!(request.work_id.as_deref(), Some(session.id.as_str()));
     assert_eq!(request.client_id.as_deref(), Some("c1"));
@@ -329,6 +337,7 @@ fn a_work_approval_is_bound_to_the_work_session_not_the_head_activation() {
     harness.run_until(|world| {
         !world
             .resource::<Store>()
+            .client_repo()
             .outstanding_operations("c1")
             .unwrap()
             .is_empty()
@@ -362,6 +371,7 @@ fn a_work_approval_without_a_stored_work_id_falls_back_to_its_run() {
     harness.run_until(|world| {
         !world
             .resource::<Store>()
+            .client_repo()
             .outstanding_operations("c1")
             .unwrap()
             .is_empty()
@@ -396,6 +406,7 @@ fn an_approval_whose_stored_session_is_gone_still_runs_on_its_client() {
     assert_eq!(
         harness
             .store()
+            .approval_repo()
             .approval(&request.request_id)
             .unwrap()
             .unwrap()
@@ -405,6 +416,7 @@ fn an_approval_whose_stored_session_is_gone_still_runs_on_its_client() {
     harness.run_until(|world| {
         !world
             .resource::<Store>()
+            .client_repo()
             .outstanding_operations("c1")
             .unwrap()
             .is_empty()
@@ -457,6 +469,7 @@ fn the_head_resolves_its_own_pending_approval_with_the_tool() {
     assert_eq!(
         harness
             .store()
+            .approval_repo()
             .approval(&request.request_id)
             .unwrap()
             .unwrap()
@@ -467,6 +480,7 @@ fn the_head_resolves_its_own_pending_approval_with_the_tool() {
     harness.run_until(|world| {
         !world
             .resource::<Store>()
+            .client_repo()
             .outstanding_operations("c1")
             .unwrap()
             .is_empty()
@@ -480,6 +494,7 @@ fn the_head_cannot_resolve_another_companions_approval() {
     // A card of another companion, stored as the gate would store it.
     harness
         .store()
+        .approval_repo()
         .insert_approval(&permission::Approval {
             request_id: "a1".into(),
             session_id: "other".into(),
@@ -518,7 +533,13 @@ fn the_head_cannot_resolve_another_companions_approval() {
         Err(crate::host::error::HostError::Invalid(_))
     ));
     assert_eq!(
-        harness.store().approval("a1").unwrap().unwrap().status,
+        harness
+            .store()
+            .approval_repo()
+            .approval("a1")
+            .unwrap()
+            .unwrap()
+            .status,
         permission::ApprovalStatus::Pending,
         "a refused resolution leaves the card pending"
     );
@@ -548,6 +569,7 @@ fn a_moved_client_keeps_a_held_approval_and_serves_the_new_active_client() {
     assert_eq!(
         harness
             .store()
+            .approval_repo()
             .approval(&request.request_id)
             .unwrap()
             .unwrap()
@@ -566,6 +588,7 @@ fn a_moved_client_keeps_a_held_approval_and_serves_the_new_active_client() {
     harness.run_until(|world| {
         !world
             .resource::<Store>()
+            .client_repo()
             .outstanding_operations("c2")
             .unwrap()
             .is_empty()
@@ -573,6 +596,7 @@ fn a_moved_client_keeps_a_held_approval_and_serves_the_new_active_client() {
     assert!(
         harness
             .store()
+            .client_repo()
             .outstanding_operations("c1")
             .unwrap()
             .is_empty()
@@ -617,6 +641,7 @@ fn moving_the_active_client_moves_the_published_tools() {
     );
     let activation = harness
         .store()
+        .client_repo()
         .activation(&harness.companion)
         .unwrap()
         .unwrap();
@@ -703,6 +728,7 @@ fn a_capability_tool_call_is_dispatched_after_gate_approval() {
     assert!(
         harness
             .store()
+            .client_repo()
             .outstanding_operations("c1")
             .unwrap()
             .is_empty(),
@@ -717,11 +743,17 @@ fn a_capability_tool_call_is_dispatched_after_gate_approval() {
     harness.run_until(|world| {
         !world
             .resource::<Store>()
+            .client_repo()
             .outstanding_operations("c1")
             .unwrap()
             .is_empty()
     });
-    let operation = harness.store().outstanding_operations("c1").unwrap()[0].clone();
+    let operation = harness
+        .store()
+        .client_repo()
+        .outstanding_operations("c1")
+        .unwrap()[0]
+        .clone();
     assert_eq!(operation.capability, "device.files");
     assert_eq!(operation.client_id, "c1");
     device::complete(
@@ -761,17 +793,24 @@ fn an_auto_capability_tool_becomes_a_device_operation() {
     harness.run_until(|world| {
         !world
             .resource::<Store>()
+            .client_repo()
             .outstanding_operations("c1")
             .unwrap()
             .is_empty()
     });
-    let operation = harness.store().outstanding_operations("c1").unwrap()[0].clone();
+    let operation = harness
+        .store()
+        .client_repo()
+        .outstanding_operations("c1")
+        .unwrap()[0]
+        .clone();
     assert_eq!(operation.capability, "body.motion");
     assert_eq!(operation.client_id, "c1");
     assert_eq!(operation.input, serde_json::json!({"motion": "nod"}));
     assert!(
         harness
             .store()
+            .approval_repo()
             .approvals(permission::ApprovalStatus::Pending)
             .unwrap()
             .is_empty(),

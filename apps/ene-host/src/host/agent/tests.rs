@@ -80,12 +80,17 @@ async fn connected_assignments_observe_cloned_credential_mutations() {
 
     let mut harness = Harness::new([]);
     let store = harness.store();
-    let mut companion = store.companion(&harness.companion).unwrap().unwrap();
+    let mut companion = store
+        .companion_repo()
+        .companion(&harness.companion)
+        .unwrap()
+        .unwrap();
     companion.assignments.companion = crate::host::mind::Assignment {
         connection_id: "credential-model".into(),
         model_id: "fake".into(),
     };
     store
+        .companion_repo()
         .update_companion(&companion, companion.revision)
         .unwrap();
     let credentials = Credentials::new(true);
@@ -231,6 +236,7 @@ fn turn_events_publish_for_companion_turns_only() {
     let mut harness = Harness::new([text_turn("work answer"), text_turn("companion answer")]);
     let companion = harness
         .store()
+        .companion_repo()
         .companion(&harness.companion)
         .unwrap()
         .unwrap();

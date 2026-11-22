@@ -50,7 +50,7 @@ fn release(world: &mut World, request: &str) -> Option<Hold> {
 /// The client an approval is bound to.
 fn bound_client(store: &Store, approval: &Approval) -> Result<Option<String>> {
     if let Some(work_id) = approval.work_id.as_deref().filter(|id| !id.is_empty()) {
-        let Some(session) = store.work_session(work_id)? else {
+        let Some(session) = store.work_repo().work_session(work_id)? else {
             return Ok(None);
         };
         if session.companion_id != approval.session_id {
@@ -60,13 +60,14 @@ fn bound_client(store: &Store, approval: &Approval) -> Result<Option<String>> {
     }
     if approval.run_id.is_empty() {
         return Ok(store
+            .client_repo()
             .activation(&approval.session_id)?
             .and_then(|activation| activation.client_id));
     }
-    let Some(run) = store.run(&approval.run_id)? else {
+    let Some(run) = store.work_repo().run(&approval.run_id)? else {
         return Ok(None);
     };
-    let Some(session) = store.work_session(&run.work_id)? else {
+    let Some(session) = store.work_repo().work_session(&run.work_id)? else {
         return Ok(None);
     };
     if session.companion_id != approval.session_id {
@@ -91,6 +92,7 @@ fn load_verified_hold(
     request_id: &str,
 ) -> Result<(Hold, Option<(String, Value)>)> {
     let approval = store
+        .approval_repo()
         .approval(request_id)?
         .ok_or_else(|| HostError::NotFound(("approval not found").into()))?;
     if approval.status != ApprovalStatus::Pending {
@@ -104,7 +106,9 @@ fn load_verified_hold(
         .get(request_id)
         .copied()
     else {
-        store.resolve_approval(request_id, ApprovalStatus::Expired)?;
+        store
+            .approval_repo()
+            .resolve_approval(request_id, ApprovalStatus::Expired)?;
         return Err(HostError::Conflict(
             ("approval is not attached to a live tool call").into(),
         ));
@@ -120,7 +124,9 @@ fn load_verified_hold(
         .map(|(name, args)| canonicalise(name, args).1)
         .is_none_or(|hash| hash != approval.action_payload_hash);
     if changed {
-        store.resolve_approval(request_id, ApprovalStatus::Expired)?;
+        store
+            .approval_repo()
+            .resolve_approval(request_id, ApprovalStatus::Expired)?;
         release(world, request_id);
         refuse(
             world,
@@ -145,10 +151,12 @@ fn validate_bound_approval_client(
         return Ok(None);
     };
     let approval = store
+        .approval_repo()
         .approval(request_id)?
         .ok_or_else(|| HostError::NotFound(("approval not found").into()))?;
     let target_id = bound_client(store, &approval)?.unwrap_or_else(|| binding.client_id.clone());
     let client = store
+        .client_repo()
         .client(&target_id)?
         .ok_or_else(|| HostError::Conflict(("the bound client is not registered").into()))?;
     if !client.is_granted(&binding.capability) {
@@ -173,15 +181,19 @@ fn validate_bound_approval_client(
         };
         let typed_target = extract_target(&action);
         if let Some(reason) = hard_denied_action(&action, &typed_target) {
-            store.resolve_approval(request_id, ApprovalStatus::Denied)?;
+            store
+                .approval_repo()
+                .resolve_approval(request_id, ApprovalStatus::Denied)?;
             release(world, request_id);
             refuse(world, hold.call, &reason);
             return Err(HostError::Permission(reason));
         }
         if approval.client_id.as_deref() != Some(target_id.as_str()) {
-            let rules = store.policy_rules()?;
+            let rules = store.policy_repo().policy_rules()?;
             if let Verdict::Deny { reason } = decide_action(&rules, &action) {
-                store.resolve_approval(request_id, ApprovalStatus::Denied)?;
+                store
+                    .approval_repo()
+                    .resolve_approval(request_id, ApprovalStatus::Denied)?;
                 release(world, request_id);
                 refuse(world, hold.call, &reason);
                 return Err(HostError::Permission(reason));
@@ -210,7 +222,7 @@ fn persist_always_allow_rule(
         effect: PolicyEffect::Allow,
         created_at: String::new(),
     };
-    match store.apply_policy_rules(&[rule], &[]) {
+    match store.policy_repo().apply_policy_rules(&[rule], &[]) {
         Ok(rules) => {
             let wire_rules = rules.iter().map(crate::host::wire::policy_rule).collect();
             world.resource_mut::<Notifier>().push(
@@ -255,7 +267,7 @@ pub(crate) fn submit_with_outcome(
                 hold,
                 request_snapshot.as_ref(),
             )?;
-            let approval = store.resolve_approval_with_client(
+            let approval = store.approval_repo().resolve_approval_with_client(
                 request_id,
                 ApprovalStatus::Approved,
                 rebound_client.as_deref(),
@@ -280,7 +292,9 @@ pub(crate) fn submit_with_outcome(
             })
         }
         ApprovalDecision::Deny | ApprovalDecision::Unspecified => {
-            let approval = store.resolve_approval(request_id, ApprovalStatus::Denied)?;
+            let approval = store
+                .approval_repo()
+                .resolve_approval(request_id, ApprovalStatus::Denied)?;
             release(world, request_id);
             refuse(world, hold.call, "the user denied this operation");
             notify_resolved(world, &approval);
@@ -324,6 +338,7 @@ pub(crate) fn resolve_approval(
     };
     let store = world.resource::<Store>().clone();
     let approval = store
+        .approval_repo()
         .approval(&args.request_id)?
         .ok_or_else(|| HostError::NotFound(("approval not found").into()))?;
     if approval.session_id != companion_id {
@@ -352,11 +367,13 @@ pub(super) fn expire_orphaned_approvals(world: &mut World) {
     };
     for request in orphans {
         release(world, &request);
-        if let Ok(store) = world.resource::<Store>().approval(&request)
+        if let Ok(store) = world.resource::<Store>().approval_repo().approval(&request)
             && store.is_some_and(|approval| approval.status == ApprovalStatus::Pending)
         {
             let store = world.resource::<Store>().clone();
-            let _ = store.resolve_approval(&request, ApprovalStatus::Expired);
+            let _ = store
+                .approval_repo()
+                .resolve_approval(&request, ApprovalStatus::Expired);
         }
     }
 }

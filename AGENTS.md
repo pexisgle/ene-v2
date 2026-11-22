@@ -8,6 +8,6 @@ Read README.md carefully and follow the development instructions provided there 
 - Any `#[allow(clippy::...)]` attribute must include an immediately preceding comment explaining why it is required and the condition for removing it.
 - Keep crate dependencies strictly acyclic and unidirectional:
   - `apps/*` (`ene-host`, `ene-desktop`, `ene-avatar`)
-  - -> Layer 2 (`ene-client-core`, `ene-plugin-runtime`, `ene-vrm`)
+  - -> Layer 2 (`ene-client-core`, `ene-plugin-runtime`, `ene-store`, `ene-vrm`)
   - -> Layer 1 (`ene-domain`, `ene-policy`, `ene-mind`, `ene-catalog`, `ene-rpc`)
   - -> Layer 0 (`ene-plugin`, `ene-avatar-ipc`)

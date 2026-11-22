@@ -1,20 +1,20 @@
 //! Forward-only SQLite schema initialization and incremental migrations.
 
-use super::{HostError, Result};
+use crate::{StoreError, error::Result, util::now};
 use rusqlite::{Connection, params};
 
 /// Baseline schema version for `schema.sql`. Databases older than this baseline
 /// (version 1..=5, or unversioned non-empty version 0 databases) are refused.
-pub(crate) const BASELINE_VERSION: i64 = 6;
+pub const BASELINE_VERSION: i64 = 6;
 
 /// Latest database schema version managed by [`MIGRATIONS`].
-pub(crate) const VERSION: i64 = 7;
+pub const VERSION: i64 = 7;
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Migration {
-    pub(super) version: i64,
-    pub(super) name: &'static str,
-    pub(super) sql: &'static str,
+struct Migration {
+    version: i64,
+    name: &'static str,
+    sql: &'static str,
 }
 
 const MIGRATIONS: &[Migration] = &[Migration {
@@ -28,14 +28,14 @@ const MIGRATIONS: &[Migration] = &[Migration {
 }];
 
 /// Verifies `PRAGMA user_version` before mutating connection pragmas (such as WAL).
-pub(super) fn validate_open_version(connection: &Connection) -> Result<i64> {
+pub(crate) fn validate_open_version(connection: &Connection) -> Result<i64> {
     validate_version_for(connection, VERSION)
 }
 
 fn validate_version_for(connection: &Connection, latest: i64) -> Result<i64> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version > latest {
-        return Err(HostError::Storage(format!(
+        return Err(StoreError::Storage(format!(
             "state database version {version} is newer than this host ({latest})"
         )));
     }
@@ -47,7 +47,7 @@ fn validate_version_for(connection: &Connection, latest: i64) -> Result<i64> {
             |row| row.get(0),
         )?;
         if version > 0 || tables > 0 {
-            return Err(HostError::Storage(format!(
+            return Err(StoreError::Storage(format!(
                 "state database version {version} predates this host's baseline ({BASELINE_VERSION}); it is not migrated in place"
             )));
         }
@@ -56,7 +56,7 @@ fn validate_version_for(connection: &Connection, latest: i64) -> Result<i64> {
 }
 
 /// Initializes an empty DB from baseline v6 and applies all pending forward migrations.
-pub(super) fn apply_migrations(connection: &mut Connection) -> Result<()> {
+pub(crate) fn apply_migrations(connection: &mut Connection) -> Result<()> {
     apply_migrations_with(connection, MIGRATIONS)
 }
 
@@ -79,7 +79,7 @@ fn apply_migrations_with(connection: &mut Connection, migrations: &[Migration]) 
             continue;
         }
         if migration.version != current + 1 {
-            return Err(HostError::Storage(format!(
+            return Err(StoreError::Storage(format!(
                 "non-contiguous database migration: expected version {}, got {} (`{}`)",
                 current + 1,
                 migration.version,
@@ -98,7 +98,7 @@ fn apply_single_migration(connection: &mut Connection, migration: Migration) -> 
     transaction.execute_batch(migration.sql)?;
     transaction.execute(
         "INSERT OR REPLACE INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![migration.version, migration.name, super::now()],
+        params![migration.version, migration.name, now()],
     )?;
     transaction.pragma_update(None, "user_version", migration.version)?;
     transaction.commit()?;
@@ -108,12 +108,11 @@ fn apply_single_migration(connection: &mut Connection, migration: Migration) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::db::Store;
-    use crate::host::settings::{
-        Connection as HostConnection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint,
-        LlmConnection,
+    use crate::Store;
+    use ene_domain::{
+        Client, Connection as DomainConnection, ConnectionConfig, ConnectionKind, CredentialState,
+        Endpoint, LlmConnection, WorkSession, WorkStatus,
     };
-    use ene_domain::{Client, WorkSession, WorkStatus};
     use ene_mind::default_ene_companion;
     use ene_policy::{PolicyEffect, PolicyRule};
 
@@ -156,7 +155,7 @@ mod tests {
             [stamp],
         )
         .unwrap();
-        let conn_row = HostConnection {
+        let conn_row = DomainConnection {
             id: "c-v6".into(),
             name: "Legacy v6 OpenAI".into(),
             enabled: true,
@@ -281,24 +280,24 @@ mod tests {
 
         let store = Store::open(&path).unwrap();
         assert_eq!(user_version(&store.conn().unwrap()), VERSION);
-        let settings = store.settings().unwrap();
+        let settings = store.settings_repo().settings().unwrap();
         assert_eq!(settings.revision, 3);
         assert_eq!(settings.connections.len(), 1);
         assert_eq!(settings.connections[0].id, seeded[1].0);
         assert_eq!(settings.connections[0].name, seeded[1].1);
 
-        let companions = store.companions().unwrap();
+        let companions = store.companion_repo().companions().unwrap();
         assert_eq!(companions.len(), 1);
         assert_eq!(companions[0].id, seeded[0].0);
 
-        let rules: Vec<PolicyRule> = store.policy_rules().unwrap();
+        let rules: Vec<PolicyRule> = store.policy_repo().policy_rules().unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].effect, PolicyEffect::Allow);
 
-        let client: Client = store.client("client-v6").unwrap().unwrap();
+        let client: Client = store.client_repo().client("client-v6").unwrap().unwrap();
         assert_eq!(client.name, "Desktop");
 
-        let work: WorkSession = store.work_session("work-v6").unwrap().unwrap();
+        let work: WorkSession = store.work_repo().work_session("work-v6").unwrap().unwrap();
         assert_eq!(work.status, WorkStatus::Active);
 
         let recorded: i64 = store
@@ -314,7 +313,7 @@ mod tests {
 
         drop(store);
         let reopened = Store::open(&path).unwrap();
-        assert_eq!(reopened.settings().unwrap(), settings);
+        assert_eq!(reopened.settings_repo().settings().unwrap(), settings);
         assert_eq!(user_version(&reopened.conn().unwrap()), VERSION);
     }
 
@@ -326,11 +325,11 @@ mod tests {
             .unwrap();
         assert!(matches!(
             validate_open_version(&v0_populated),
-            Err(HostError::Storage(_))
+            Err(StoreError::Storage(_))
         ));
         assert!(matches!(
             apply_migrations(&mut v0_populated),
-            Err(HostError::Storage(_))
+            Err(StoreError::Storage(_))
         ));
         assert_eq!(user_version(&v0_populated), 0);
 
@@ -340,11 +339,11 @@ mod tests {
                 .unwrap();
             assert!(matches!(
                 validate_open_version(&old),
-                Err(HostError::Storage(_))
+                Err(StoreError::Storage(_))
             ));
             assert!(matches!(
                 apply_migrations(&mut old),
-                Err(HostError::Storage(_))
+                Err(StoreError::Storage(_))
             ));
             assert_eq!(user_version(&old), pre_baseline);
         }
@@ -362,7 +361,7 @@ mod tests {
             },
         ];
         let result = apply_migrations_with(&mut conn, &bad_migrations);
-        assert!(matches!(result, Err(HostError::Storage(_))));
+        assert!(matches!(result, Err(StoreError::Storage(_))));
         assert_eq!(user_version(&conn), VERSION);
         let leaked_table: i64 = conn
             .query_row(

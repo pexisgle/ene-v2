@@ -142,25 +142,11 @@ fn spawn_credential_rotation_server(
     })
 }
 
-#[tokio::test]
-async fn embedding_credentials_rotate_and_revoke_across_clones() {
-    use crate::host::{
-        model,
-        settings::{Connection, CredentialState, EmbeddingConnection, Endpoint},
-        tests::Harness,
-    };
-
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .unwrap();
-    let address = listener.local_addr().unwrap();
-    let credentials = Credentials::new(true);
-    let endpoint = spawn_credential_rotation_server(listener, credentials.clone());
-    let harness = Harness::new([]);
-    let store = harness.store();
-    let writer = credentials.clone();
-    let embeddings = Embeddings::default();
-    let connection = Connection {
+fn credential_embedding_connection(
+    address: std::net::SocketAddr,
+) -> crate::host::settings::Connection {
+    use crate::host::settings::{Connection, CredentialState, EmbeddingConnection, Endpoint};
+    Connection {
         id: "credential-embedding".into(),
         name: "embedding".into(),
         enabled: true,
@@ -178,25 +164,52 @@ async fn embedding_credentials_rotate_and_revoke_across_clones() {
             model_id: "credential-model".into(),
             dimensions: 2,
         }),
-    };
-    store
-        .update_settings(store.settings_revision().unwrap(), &[(connection, 0)])
+    }
+}
+
+#[tokio::test]
+async fn embedding_credentials_rotate_and_revoke_across_clones() {
+    use crate::host::{model, settings::CredentialState, tests::Harness};
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
         .unwrap();
-    let mut companion = store.companion(&harness.companion).unwrap().unwrap();
+    let address = listener.local_addr().unwrap();
+    let credentials = Credentials::new(true);
+    let endpoint = spawn_credential_rotation_server(listener, credentials.clone());
+    let harness = Harness::new([]);
+    let store = harness.store();
+    let writer = credentials.clone();
+    let embeddings = Embeddings::default();
+    let connection = credential_embedding_connection(address);
+    store
+        .settings_repo()
+        .update_settings(
+            store.settings_repo().settings_revision().unwrap(),
+            &[(connection, 0)],
+        )
+        .unwrap();
+    let mut companion = store
+        .companion_repo()
+        .companion(&harness.companion)
+        .unwrap()
+        .unwrap();
     companion.assignments.embedding = Some(super::super::Assignment {
         connection_id: "credential-embedding".into(),
         model_id: "credential-model".into(),
     });
     store
+        .companion_repo()
         .update_companion(&companion, companion.revision)
         .unwrap();
-    let revision = store.settings_revision().unwrap();
+    let revision = store.settings_repo().settings_revision().unwrap();
     for secret in [Some("old-key"), Some("new-key"), None] {
         match secret {
             Some(secret) => model::save_secret(&writer, "credential-embedding", secret).unwrap(),
             None => model::delete_secret(&writer, "credential-embedding").unwrap(),
         }
         store
+            .settings_repo()
             .set_credential_state(
                 "credential-embedding",
                 if secret.is_some() {
@@ -229,7 +242,7 @@ async fn embedding_credentials_rotate_and_revoke_across_clones() {
     for index in 0..pending {
         let mut record = memory(&format!("memory {index}"));
         record.scope = companion.id.clone();
-        store.insert_memory(record).unwrap();
+        store.memory_repo().insert_memory(record).unwrap();
     }
     assert_eq!(
         fill(
@@ -243,7 +256,7 @@ async fn embedding_credentials_rotate_and_revoke_across_clones() {
         .unwrap(),
         pending
     );
-    assert_eq!(store.settings_revision().unwrap(), revision);
+    assert_eq!(store.settings_repo().settings_revision().unwrap(), revision);
     let headers = tokio::time::timeout(Duration::from_secs(3), endpoint)
         .await
         .unwrap()
@@ -281,7 +294,7 @@ fn memory(content: &str) -> MemoryRecord {
 }
 
 fn embed(store: &Store, memory: &Memory, space: &str, dimensions: usize, vector: &[f32]) {
-    Store::write_embedding_on(
+    crate::host::db::memories::write_embedding_on(
         &store.conn().unwrap(),
         &memory.id,
         memory.content_revision,
@@ -295,8 +308,8 @@ fn embed(store: &Store, memory: &Memory, space: &str, dimensions: usize, vector:
 #[test]
 fn the_index_mirrors_only_the_matching_space_and_revision() {
     let store = store();
-    let first = store.insert_memory(memory("tea")).unwrap();
-    let second = store.insert_memory(memory("coffee")).unwrap();
+    let first = store.memory_repo().insert_memory(memory("tea")).unwrap();
+    let second = store.memory_repo().insert_memory(memory("coffee")).unwrap();
     let two = test_space("fake", 2);
     let three = test_space("other", 3);
     embed(&store, &first, &two, 2, &[1.0, 0.0]);
@@ -342,14 +355,14 @@ fn the_index_mirrors_only_the_matching_space_and_revision() {
 fn another_companions_vectors_cannot_take_the_companions_top_k() {
     let store = store();
     let space = test_space("fake", 2);
-    let mine = store.insert_memory(memory("mine")).unwrap();
+    let mine = store.memory_repo().insert_memory(memory("mine")).unwrap();
     embed(&store, &mine, &space, 2, &[1.0, 0.0]);
     // Other companions hold equally close vectors for the same query.
     let mut others = Vec::new();
     for index in 0..5 {
         let mut other = memory(&format!("other {index}"));
         other.scope = format!("other-{index}");
-        let other = store.insert_memory(other).unwrap();
+        let other = store.memory_repo().insert_memory(other).unwrap();
         embed(&store, &other, &space, 2, &[1.0, 0.0]);
         others.push(other);
     }
@@ -388,7 +401,7 @@ fn ranking_keeps_database_order_for_ties_and_bounds_top_k() {
     ] {
         let mut record = memory(id);
         record.id = id.into();
-        let memory = store.insert_memory(record).unwrap();
+        let memory = store.memory_repo().insert_memory(record).unwrap();
         embed(&store, &memory, &space, 2, &vector);
         ids.push(memory.id);
     }
@@ -425,7 +438,7 @@ fn invalid_comparisons_stay_finite_zero_evidence() {
         [f32::INFINITY, 0.0],
         [-1.0, 0.0],
     ] {
-        let memory = store.insert_memory(memory("vector")).unwrap();
+        let memory = store.memory_repo().insert_memory(memory("vector")).unwrap();
         embed(&store, &memory, &space, 2, &vector);
         ids.push(memory.id);
     }
@@ -567,18 +580,26 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
     let conn_a = custom_embedding_conn("emb-alpha", "Alpha", endpoint_a, r#"{"profile":"alpha"}"#);
     let conn_b = custom_embedding_conn("emb-beta", "Beta", endpoint_b, r#"{"profile":"beta"}"#);
     store
+        .settings_repo()
         .update_settings(
-            store.settings_revision().unwrap(),
+            store.settings_repo().settings_revision().unwrap(),
             &[(conn_a, 0), (conn_b, 0)],
         )
         .unwrap();
 
-    let mut comp_a = store.companion(&harness.companion).unwrap().unwrap();
+    let mut comp_a = store
+        .companion_repo()
+        .companion(&harness.companion)
+        .unwrap()
+        .unwrap();
     comp_a.assignments.embedding = Some(super::super::Assignment {
         connection_id: "emb-alpha".into(),
         model_id: "shared-name".into(),
     });
-    store.update_companion(&comp_a, comp_a.revision).unwrap();
+    store
+        .companion_repo()
+        .update_companion(&comp_a, comp_a.revision)
+        .unwrap();
 
     let mut comp_b = comp_a.clone();
     comp_b.id = "beta".into();
@@ -587,15 +608,15 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
         connection_id: "emb-beta".into(),
         model_id: "shared-name".into(),
     });
-    store.insert_companion(&comp_b).unwrap();
+    store.companion_repo().insert_companion(&comp_b).unwrap();
 
     let mut mem_a = memory("alpha private memory");
     mem_a.scope = comp_a.id.clone();
-    let mem_a = store.insert_memory(mem_a).unwrap();
+    let mem_a = store.memory_repo().insert_memory(mem_a).unwrap();
 
     let mut mem_b = memory("beta private memory");
     mem_b.scope = comp_b.id.clone();
-    let mem_b = store.insert_memory(mem_b).unwrap();
+    let mem_b = store.memory_repo().insert_memory(mem_b).unwrap();
 
     let embeddings = Embeddings::default();
     let target_a = target(&store, None, &comp_a, &embeddings).unwrap().unwrap();
@@ -603,6 +624,7 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
     assert_ne!(target_a.space, target_b.space);
 
     let missing_a = store
+        .memory_repo()
         .memories_missing_embedding(&comp_a.id, &target_a.space, 10)
         .unwrap();
     assert_eq!(
@@ -621,12 +643,14 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
     .unwrap();
     assert!(
         store
+            .memory_repo()
             .embedding_blob(&mem_a.id, &target_a.space)
             .unwrap()
             .is_some()
     );
     assert!(
         store
+            .memory_repo()
             .embedding_blob(&mem_b.id, &target_a.space)
             .unwrap()
             .is_none()
@@ -643,6 +667,7 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
     .unwrap();
     assert!(
         store
+            .memory_repo()
             .embedding_blob(&mem_b.id, &target_b.space)
             .unwrap()
             .is_some()
@@ -747,9 +772,16 @@ async fn sakura_embedding_omits_dimensions_and_decodes_without_usage() {
 
     let harness = Harness::new([]);
     let store = harness.store();
-    let rev = store.settings_revision().unwrap();
-    store.update_settings(rev, &[(connection, 0)]).unwrap();
-    let mut comp = store.companion(&harness.companion).unwrap().unwrap();
+    let rev = store.settings_repo().settings_revision().unwrap();
+    store
+        .settings_repo()
+        .update_settings(rev, &[(connection, 0)])
+        .unwrap();
+    let mut comp = store
+        .companion_repo()
+        .companion(&harness.companion)
+        .unwrap()
+        .unwrap();
     comp.assignments.embedding = Some(super::super::Assignment {
         connection_id: "sakura-emb".into(),
         model_id: "multilingual-e5-large".into(),

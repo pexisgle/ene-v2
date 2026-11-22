@@ -124,12 +124,17 @@ fn setup_eye_and_head_harness(
 ) -> (Harness, MockCompletionModel, MockCompletionModel) {
     let mut harness = Harness::new([]);
     let store = harness.store();
-    let mut companion = store.companion(&harness.companion).unwrap().unwrap();
+    let mut companion = store
+        .companion_repo()
+        .companion(&harness.companion)
+        .unwrap()
+        .unwrap();
     companion.assignments.companion = Assignment {
         connection_id: "head".into(),
         model_id: "shared".into(),
     };
     store
+        .companion_repo()
         .update_companion(&companion, companion.revision)
         .unwrap();
     let eye = MockCompletionModel::from_turns(eye_turns).priced_as(

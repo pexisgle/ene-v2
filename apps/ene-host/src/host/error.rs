@@ -105,6 +105,25 @@ impl From<ene_policy::PolicyError> for HostError {
     }
 }
 
+impl From<ene_domain::DomainError> for HostError {
+    fn from(error: ene_domain::DomainError) -> Self {
+        Self::Invalid(error.to_string())
+    }
+}
+
+impl From<ene_store::StoreError> for HostError {
+    fn from(error: ene_store::StoreError) -> Self {
+        match error {
+            ene_store::StoreError::Invalid(message) => Self::Invalid(message),
+            ene_store::StoreError::NotFound(message) => Self::NotFound(message),
+            ene_store::StoreError::Conflict(message) => Self::Conflict(message),
+            ene_store::StoreError::Permission(message) => Self::Permission(message),
+            ene_store::StoreError::Unavailable(message) => Self::Unavailable(message),
+            ene_store::StoreError::Storage(message) => Self::Storage(message),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -129,7 +129,7 @@ impl Harness {
 
     pub(crate) fn with_clock(
         turns: impl IntoIterator<Item = Vec<MockStreamEvent>>,
-        clock: super::db::schedules::ScheduleClock,
+        clock: super::db::ScheduleClock,
     ) -> Self {
         let mut harness = Self::new(turns);
         harness.app.world_mut().insert_resource(clock);
@@ -367,12 +367,14 @@ pub(super) fn pending_approval(harness: &mut Harness) -> permission::Approval {
     harness.run_until(|world| {
         !world
             .resource::<Store>()
+            .approval_repo()
             .approvals(permission::ApprovalStatus::Pending)
             .unwrap()
             .is_empty()
     });
     harness
         .store()
+        .approval_repo()
         .approvals(permission::ApprovalStatus::Pending)
         .unwrap()[0]
         .clone()

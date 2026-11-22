@@ -203,7 +203,7 @@ impl Providers {
     /// fails to start is logged and skipped: the host still serves the
     /// connections that do work, and that connection resolves to nothing.
     pub(crate) async fn start_used(&self, store: &crate::host::db::Store) {
-        let Ok(settings) = store.settings() else {
+        let Ok(settings) = store.settings_repo().settings() else {
             return;
         };
         for connection in settings.connections {

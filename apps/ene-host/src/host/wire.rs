@@ -375,6 +375,14 @@ pub(crate) fn capability_spec_from(value: &w::ClientCapabilitySpec) -> Capabilit
     }
 }
 
+pub(crate) fn activation(value: &ene_domain::Activation) -> w::Activation {
+    w::Activation {
+        companion_id: value.companion_id.clone(),
+        client_id: value.client_id.clone(),
+        ..Default::default()
+    }
+}
+
 pub(crate) fn client(value: &Client, connected: bool, active: Vec<String>) -> w::Client {
     w::Client {
         id: value.id.clone(),

@@ -264,7 +264,7 @@ fn load_gate_rules(
     if let Some(rules) = &ctx.cached_rules {
         return std::ops::ControlFlow::Continue(rules.clone());
     }
-    match ctx.store.policy_rules() {
+    match ctx.store.policy_repo().policy_rules() {
         Ok(rules) => {
             ctx.cached_rules = Some(rules.clone());
             std::ops::ControlFlow::Continue(rules)
@@ -392,7 +392,7 @@ fn resolve_device_candidate(
     work_id: Option<&str>,
     item: &GateCall,
 ) -> std::ops::ControlFlow<(), Option<CandidateResolution>> {
-    let client_id = match store.target(companion_id, work_id) {
+    let client_id = match store.client_repo().target(companion_id, work_id) {
         Ok(Some(client_id)) => client_id,
         Ok(None) => {
             refuse(
@@ -411,7 +411,7 @@ fn resolve_device_candidate(
             );
         }
     };
-    let client = match store.client(&client_id) {
+    let client = match store.client_repo().client(&client_id) {
         Ok(Some(client)) => client,
         Ok(None) => {
             refuse(world, item.entity, "the bound client is not registered");
@@ -480,7 +480,7 @@ fn resolve_device_candidate(
 fn handle_gate_store_error<T>(
     world: &mut World,
     call: Entity,
-    error: &HostError,
+    error: &ene_store::StoreError,
     fallback: &str,
 ) -> std::ops::ControlFlow<(), Option<T>> {
     if error.is_storage() {
@@ -510,7 +510,7 @@ fn apply_gate_verdict(
             let tool_name = binding.call.tool_name.clone();
             let run_id = binding.run_id.clone();
             let (pending, arguments_view) = issue_gate_hold(world, store, &binding, target)?;
-            let policies = match store.policy_texts() {
+            let policies = match store.policy_repo().policy_texts() {
                 Ok(policies) => policies,
                 Err(error) => {
                     if error.is_storage() {
@@ -594,7 +594,7 @@ pub(crate) fn issue_hold(
     call: Entity,
 ) -> Result<Hold> {
     let request_id = approval.request_id.clone();
-    store.insert_approval(&approval)?;
+    store.approval_repo().insert_approval(&approval)?;
     let hold = world.spawn(HoldOf(call)).id();
     let entry = Hold { call, hold };
     world

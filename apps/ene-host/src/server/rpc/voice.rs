@@ -231,13 +231,16 @@ impl w::VoiceService for Services {
                     let store = app.world().resource::<Store>();
                     let companion = match requested_companion {
                         Some(id) => id,
-                        None => store.activation_for_client(&client_id)?.ok_or_else(|| {
-                            HostError::FailedPrecondition(
-                                "the client is not the active client of any companion".into(),
-                            )
-                        })?,
+                        None => store
+                            .client_repo()
+                            .activation_for_client(&client_id)?
+                            .ok_or_else(|| {
+                                HostError::FailedPrecondition(
+                                    "the client is not the active client of any companion".into(),
+                                )
+                            })?,
                     };
-                    let companion_record = store.companion(&companion)?;
+                    let companion_record = store.companion_repo().companion(&companion)?;
                     let source =
                         voice::companion_tts_source(app.world(), companion_record.as_ref())
                             .map_err(|error| match error {
@@ -402,6 +405,7 @@ async fn flush_barge_in(runtime: &Runtime, client_id: String) {
             let companions = app
                 .world()
                 .resource::<Store>()
+                .client_repo()
                 .active_companions_for_client(&client_id)
                 .unwrap_or_default();
             for companion_id in companions {
@@ -508,7 +512,7 @@ mod tests {
         runtime
             .read(move |app| {
                 let store = app.world().resource::<Store>();
-                store.register_client(&ClientDeclaration {
+                store.client_repo().register_client(&ClientDeclaration {
                     id: "c1",
                     name: "desk",
                     platform: "linux",
@@ -516,7 +520,7 @@ mod tests {
                     specs: &[],
                     expected_revision: 0,
                 })?;
-                store.activate("ene", Some("c1"))?;
+                store.client_repo().activate("ene", Some("c1"))?;
                 app.world_mut().insert_resource(voice::Engines {
                     stt: Some(Arc::new(recording)),
                     ..Default::default()
@@ -619,7 +623,7 @@ mod tests {
                 app.insert_resource(Frames::default())
                     .add_systems(Update, |mut frames: ResMut<Frames>| frames.0 += 1);
                 let store = app.world().resource::<Store>();
-                store.register_client(&ClientDeclaration {
+                store.client_repo().register_client(&ClientDeclaration {
                     id: "c1",
                     name: "desk",
                     platform: "linux",
@@ -627,7 +631,7 @@ mod tests {
                     specs: &[],
                     expected_revision: 0,
                 })?;
-                store.activate("ene", Some("c1"))?;
+                store.client_repo().activate("ene", Some("c1"))?;
                 Ok(())
             })
             .await
@@ -745,7 +749,7 @@ mod tests {
         runtime
             .read(|app| {
                 let store = app.world().resource::<Store>();
-                store.register_client(&ClientDeclaration {
+                store.client_repo().register_client(&ClientDeclaration {
                     id: "c1",
                     name: "desk",
                     platform: "linux",
@@ -753,7 +757,7 @@ mod tests {
                     specs: &[],
                     expected_revision: 0,
                 })?;
-                store.activate("ene", Some("c1"))?;
+                store.client_repo().activate("ene", Some("c1"))?;
                 app.world_mut().insert_resource(voice::Engines {
                     stt: Some(Arc::new(EmptyStt)),
                     ..Default::default()

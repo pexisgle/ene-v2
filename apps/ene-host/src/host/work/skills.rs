@@ -275,6 +275,7 @@ mod tests {
         ]);
         let store = harness.store();
         store
+            .memory_repo()
             .insert_memory(MemoryRecord {
                 id: "m-release".into(),
                 scope: harness.companion.clone(),

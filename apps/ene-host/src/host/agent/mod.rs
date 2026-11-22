@@ -258,6 +258,7 @@ pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
     tracing::Span::current().record("companion_id", companion_id.as_str());
     let store = world.resource::<Store>().clone();
     let companion = store
+        .companion_repo()
         .companion(&companion_id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     let assignment = companion.model(role).map(|assignment| {
@@ -266,7 +267,7 @@ pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
             assignment.model_id.clone(),
         )
     });
-    let revision = store.settings_revision()?;
+    let revision = store.settings_repo().settings_revision()?;
     let credentials = world.resource::<Credentials>().clone();
     let credential_generation = credentials.generation();
     let factory = world.resource::<ModelFactory>().clone();
@@ -357,7 +358,7 @@ pub(crate) fn deliver(
 pub(crate) fn sync_companion(world: &mut World, companion_id: &str) -> Result<()> {
     let store = world.resource::<Store>().clone();
     let entity = agent_of(world, companion_id);
-    match store.companion(companion_id)? {
+    match store.companion_repo().companion(companion_id)? {
         Some(companion) => {
             let entity = entity.unwrap_or_else(|| spawn_companion(world, &companion));
             world
@@ -390,7 +391,7 @@ pub(crate) fn sync_companion(world: &mut World, companion_id: &str) -> Result<()
 /// start, because read as an empty list it would retire every restored agent.
 pub(crate) fn reconcile(world: &mut World) -> Result<()> {
     let store = world.resource::<Store>().clone();
-    let companions = store.companions()?;
+    let companions = store.companion_repo().companions()?;
     let existing: Vec<Entity> = world
         .query_filtered::<Entity, Or<(With<CompanionAgent>, With<WorkAgent>)>>()
         .iter(world)
@@ -398,8 +399,8 @@ pub(crate) fn reconcile(world: &mut World) -> Result<()> {
     for companion in &companions {
         spawn_companion(world, companion);
         // Work agents for runs that are still open.
-        for session in store.work_sessions(&companion.id)? {
-            if let Some(run) = store.active_run(&session.id)? {
+        for session in store.work_repo().work_sessions(&companion.id)? {
+            if let Some(run) = store.work_repo().active_run(&session.id)? {
                 spawn_work_agent(world, companion, &session.id, &run.run_id, &run.instruction);
             }
         }
@@ -416,12 +417,14 @@ pub(crate) fn reconcile(world: &mut World) -> Result<()> {
     for entity in existing {
         let keep = world.get::<CompanionAgent>(entity).is_some_and(|agent| {
             store
+                .companion_repo()
                 .companion(&agent.companion_id)
                 .ok()
                 .flatten()
                 .is_some()
         }) || world.get::<WorkAgent>(entity).is_some_and(|agent| {
             store
+                .work_repo()
                 .run(&agent.run_id)
                 .ok()
                 .flatten()

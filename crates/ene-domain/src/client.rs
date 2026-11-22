@@ -40,6 +40,13 @@ impl Client {
     }
 }
 
+/// Active client binding for one companion.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Activation {
+    pub companion_id: String,
+    pub client_id: Option<String>,
+}
+
 /// Execution lifecycle status of a queued or dispatched device operation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

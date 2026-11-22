@@ -53,24 +53,30 @@ pub(crate) fn model_supported(connection: Option<&Connection>) -> bool {
 pub(super) fn active(store: &Store, hub: &DeviceHub, pending: &Pending) -> bool {
     hub.subscription(&pending.client).as_deref() == Some(pending.subscription.as_str())
         && store
+            .client_repo()
             .client(&pending.client)
             .is_ok_and(|client| client.is_some_and(|client| client.is_granted(w::COMPUTER_USE)))
         && store
+            .work_repo()
             .active_run(&pending.work)
             .is_ok_and(|run| run.is_some_and(|run| run.run_id == pending.run))
-        && store.work_session(&pending.work).is_ok_and(|session| {
-            session.is_some_and(|session| {
-                session.client_id.as_deref() == Some(pending.client.as_str())
-                    && store
-                        .activation(&session.companion_id)
-                        .is_ok_and(|activation| {
-                            activation
-                                .and_then(|activation| activation.client_id)
-                                .as_deref()
-                                == Some(pending.client.as_str())
-                        })
+        && store
+            .work_repo()
+            .work_session(&pending.work)
+            .is_ok_and(|session| {
+                session.is_some_and(|session| {
+                    session.client_id.as_deref() == Some(pending.client.as_str())
+                        && store
+                            .client_repo()
+                            .activation(&session.companion_id)
+                            .is_ok_and(|activation| {
+                                activation
+                                    .and_then(|activation| activation.client_id)
+                                    .as_deref()
+                                    == Some(pending.client.as_str())
+                            })
+                })
             })
-        })
 }
 
 pub(super) fn prepare(

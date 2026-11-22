@@ -1,14 +1,19 @@
 //! Memory persistence: insertion, CAS updates, sharing, hybrid recall,
 //! consolidation commits and the user profile.
+
 mod ops;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use ops::{detail, profile_lines};
+pub use ops::{detail, missing_embeddings_on, profile_lines, write_embedding_on};
 
-use super::{Result, Store, digest, json, json_column, now, open_connection, to_json, truncate};
-use crate::host::error::HostError;
-pub(crate) use ene_mind::{
+use crate::{
+    Store, StoreError,
+    error::Result,
+    json, json_column, to_json,
+    util::{digest, epoch, now, truncate},
+};
+pub use ene_mind::{
     Batch, Commit, Fact, MAX_IMPORTANCE, Memory, MemoryActionKind, MemoryContext, MemoryRecord,
     MindStateChange, MindUpdate, NewMemory, PINNED_BUDGET_CHARS, PendingEmbedding, RecallMode,
     RecallOutcome, SHARED_SCOPE, Scored, StateUpdate, fuse, score, tokens, validate_citations,
@@ -17,9 +22,7 @@ use rusqlite::{OptionalExtension, Row, params};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-/// The most memory ids one turn's injection record keeps.
 const MAX_INJECTED: usize = 64;
-/// The newest turns whose injection records stay in the database.
 const KEEP_INJECTED_TURNS: usize = 64;
 
 const FIELDS: &str = "id, scope, content, importance, occurred_at, recorded_at, \
@@ -28,15 +31,10 @@ const FIELDS: &str = "id, scope, content, importance, occurred_at, recorded_at, 
 pub(super) const COLUMNS: &str = "rowid, id, scope, content, importance, occurred_at, \
      recorded_at, last_accessed_at, memory_revision, content_revision, emotion, source_context";
 
-/// `COLUMNS` qualified with the `m` alias for the FTS join, where `content`
-/// and `rowid` otherwise collide with the external-content table.
 const JOINED_COLUMNS: &str = "m.rowid, m.id, m.scope, m.content, m.importance, \
      m.occurred_at, m.recorded_at, m.last_accessed_at, m.memory_revision, \
      m.content_revision, m.emotion, m.source_context";
 
-/// The visibility predicate every read path shares: the reader's own scope or
-/// the shared pool (docs/design/mind.md §3.3). `scope` holds `'shared'` or a
-/// companion id, so no value other than the literal widens visibility.
 pub(super) const VISIBLE: &str = "(m.scope = ?1 OR m.scope = 'shared')";
 
 pub(super) fn row_to_memory(row: &Row<'_>) -> rusqlite::Result<Memory> {
@@ -61,8 +59,8 @@ pub(super) fn row_to_memory(row: &Row<'_>) -> rusqlite::Result<Memory> {
 
 pub(super) fn check_content(content: &str) -> Result<()> {
     if content.trim().is_empty() || content.chars().count() > 4_000 {
-        return Err(HostError::Invalid(
-            ("memory content must be 1-4000 characters").into(),
+        return Err(StoreError::Invalid(
+            "memory content must be 1-4000 characters".into(),
         ));
     }
     Ok(())
@@ -70,12 +68,11 @@ pub(super) fn check_content(content: &str) -> Result<()> {
 
 pub(super) fn check_importance(importance: u8) -> Result<()> {
     if importance > MAX_IMPORTANCE {
-        return Err(HostError::Invalid(("importance must be 0-10").into()));
+        return Err(StoreError::Invalid("importance must be 0-10".into()));
     }
     Ok(())
 }
 
-/// Inserts one memory and returns the stored row, so no re-SELECT is needed.
 pub(super) fn insert_row(
     connection: &rusqlite::Connection,
     memory: &MemoryRecord,
@@ -104,7 +101,6 @@ pub(super) fn insert_row(
         .map_err(Into::into)
 }
 
-/// Adds a cognitive edge, ignoring one that already exists.
 pub(super) fn add_edge(
     transaction: &rusqlite::Transaction<'_>,
     from_id: &str,
@@ -115,20 +111,20 @@ pub(super) fn add_edge(
     transaction
         .prepare_cached(
             "INSERT OR IGNORE INTO memory_edges (from_id, relation, to_id, created_at) \
-         VALUES (?1, ?2, ?3, ?4)",
+             VALUES (?1, ?2, ?3, ?4)",
         )?
         .execute(params![from_id, relation, to_id, created_at])?;
     Ok(())
 }
 
-struct StoredMemory {
-    scope: String,
-    content: String,
-    importance: u8,
-    memory_revision: u64,
+pub(super) struct StoredMemory {
+    pub(super) scope: String,
+    pub(super) content: String,
+    pub(super) importance: u8,
+    pub(super) memory_revision: u64,
 }
 
-fn read_memory_tx(
+pub(super) fn read_memory_tx(
     transaction: &rusqlite::Transaction<'_>,
     id: &str,
 ) -> Result<Option<StoredMemory>> {
@@ -149,8 +145,6 @@ fn read_memory_tx(
         .map_err(Into::into)
 }
 
-/// Adds a `supersedes` edge only when the old memory is in the companion's
-/// scope, then lowers it out of the pinned band.
 pub(super) fn supersede_tx(
     transaction: &rusqlite::Transaction<'_>,
     companion_id: &str,
@@ -173,8 +167,6 @@ pub(super) fn supersede_tx(
     lower_superseded_tx(transaction, companion_id, old_id, new_id)
 }
 
-/// A correction that supersedes another memory lowers the old one out of the
-/// pinned band; it is never deleted (docs/design/mind.md §4.3).
 fn lower_superseded_tx(
     transaction: &rusqlite::Transaction<'_>,
     companion_id: &str,
@@ -187,22 +179,30 @@ fn lower_superseded_tx(
     transaction
         .prepare_cached(
             "UPDATE memories SET importance = MIN(importance, 2), \
-         memory_revision = memory_revision + 1 \
-         WHERE id = ?1 AND (scope = ?2 OR scope = ?3)",
+             memory_revision = memory_revision + 1 \
+             WHERE id = ?1 AND (scope = ?2 OR scope = ?3)",
         )?
         .execute(params![old_id, companion_id, SHARED_SCOPE])?;
     Ok(())
 }
 
-impl Store {
-    #[cfg(test)]
-    pub(crate) fn insert_memory(&self, memory: MemoryRecord) -> Result<Memory> {
-        let connection = self.conn()?;
+/// Repository managing episodic `memories`, `memory_edges`, `memory_injections`,
+/// `mind_operations`, and `user_profiles`.
+#[derive(Clone, Copy, Debug)]
+pub struct MemoryRepo<'a>(&'a Store);
+
+impl<'a> MemoryRepo<'a> {
+    pub(crate) fn new(store: &'a Store) -> Self {
+        Self(store)
+    }
+
+    pub fn insert_memory(&self, memory: MemoryRecord) -> Result<Memory> {
+        let connection = self.0.conn()?;
         insert_row(&connection, &memory, &now())
     }
 
-    pub(crate) fn memory(&self, id: &str) -> Result<Option<Memory>> {
-        let connection = self.conn()?;
+    pub fn memory(&self, id: &str) -> Result<Option<Memory>> {
+        let connection = self.0.conn()?;
         let memory = connection
             .prepare_cached(&format!("SELECT {COLUMNS} FROM memories WHERE id = ?1"))?
             .query_row([id], row_to_memory)
@@ -210,11 +210,7 @@ impl Store {
         Ok(memory)
     }
 
-    /// `ControlMemory`: forget lowers importance, remember raises it, share
-    /// moves the scope to the shared pool and unshare returns it to
-    /// `companion`. The memory's content is never changed, and an action that
-    /// changes nothing does not bump the revision.
-    pub(crate) fn control_memory(
+    pub fn control_memory(
         &self,
         id: &str,
         action: MemoryActionKind,
@@ -222,7 +218,7 @@ impl Store {
     ) -> Result<Memory> {
         let memory = self
             .memory(id)?
-            .ok_or_else(|| HostError::NotFound(("memory not found").into()))?;
+            .ok_or_else(|| StoreError::NotFound("memory not found".into()))?;
         let (importance, scope) = match action {
             MemoryActionKind::Forget => (0u8, memory.scope.clone()),
             MemoryActionKind::Remember => (memory.importance.max(3), memory.scope.clone()),
@@ -233,31 +229,30 @@ impl Store {
             return Ok(memory);
         }
         let updated = self
+            .0
             .conn()?
             .prepare_cached(&format!(
                 "UPDATE memories SET importance = ?2, scope = ?3, \
-                     memory_revision = memory_revision + 1 \
-                     WHERE id = ?1 AND memory_revision = ?4 RETURNING {FIELDS}"
+                 memory_revision = memory_revision + 1 \
+                 WHERE id = ?1 AND memory_revision = ?4 RETURNING {FIELDS}"
             ))?
             .query_row(
                 params![id, importance, scope, memory.memory_revision],
                 row_to_memory,
             )
             .optional()?;
-        updated.ok_or_else(|| HostError::Conflict(("memory changed since it was read").into()))
+        updated.ok_or_else(|| StoreError::Conflict("memory changed since it was read".into()))
     }
 
-    /// Marks a memory as actually used. Only explicit tool use or a verified
-    /// citation calls this, never a plain search.
-    pub(crate) fn cite_memory(&self, id: &str, turn_id: &str, estimated: bool) -> Result<()> {
-        let connection = self.conn()?;
+    pub fn cite_memory(&self, id: &str, turn_id: &str, estimated: bool) -> Result<()> {
+        let connection = self.0.conn()?;
         connection
             .prepare_cached("UPDATE memories SET last_accessed_at = ?2 WHERE id = ?1")?
             .execute(params![id, now()])?;
         connection
             .prepare_cached(
                 "INSERT OR IGNORE INTO memory_edges (from_id, relation, to_id, created_at) \
-             VALUES (?1, ?2, ?3, ?4)",
+                 VALUES (?1, ?2, ?3, ?4)",
             )?
             .execute(params![
                 id,
@@ -272,11 +267,7 @@ impl Store {
         Ok(())
     }
 
-    /// Hybrid recall: FTS5 lexical candidates and vector candidates are fused
-    /// with RRF (k=60) and scored with the documented formula. `semantic` is
-    /// the ranked memory ids the caller obtained from `CompactVectorIndex`;
-    /// when it is empty the result is lexical only and `semantic` is `false`.
-    pub(crate) fn recall_hybrid(
+    pub fn recall_hybrid(
         &self,
         companion: &str,
         query: &str,
@@ -304,7 +295,7 @@ impl Store {
         for memory in lexical.into_iter().chain(semantic) {
             memories.entry(memory.id.clone()).or_insert(memory);
         }
-        let now_epoch = super::epoch(&now()).unwrap_or(0);
+        let now_epoch = epoch(&now()).unwrap_or(0);
         let mut scored: Vec<Scored> = memories
             .into_values()
             .map(|memory| {
@@ -338,9 +329,6 @@ impl Store {
         })
     }
 
-    /// Reads semantic candidates by id, keeping the caller's rank order and
-    /// applying the same visibility and importance filter as the lexical
-    /// query.
     fn memories_by_ids(
         &self,
         companion: &str,
@@ -357,7 +345,7 @@ impl Store {
             return Ok(Vec::new());
         }
         let minimum = mode.minimum_importance();
-        let connection = self.conn()?;
+        let connection = self.0.conn()?;
         let mut statement = connection.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance >= ?2 \
              AND m.id IN (SELECT value FROM json_each(?3))"
@@ -375,10 +363,8 @@ impl Store {
             .collect())
     }
 
-    /// The pinned core memories (`importance == 10`) the companion recalls,
-    /// within the documented character budget, newest first.
-    pub(crate) fn pinned(&self, companion: &str) -> Result<Vec<Memory>> {
-        let connection = self.conn()?;
+    pub fn pinned(&self, companion: &str) -> Result<Vec<Memory>> {
+        let connection = self.0.conn()?;
         let mut statement = connection.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance = 10 \
              ORDER BY COALESCE(m.last_accessed_at, m.recorded_at) DESC, m.rowid DESC"
@@ -398,14 +384,13 @@ impl Store {
         Ok(pinned)
     }
 
-    /// One page of the memories the companion recalls, newest first.
-    pub(crate) fn list_memories(
+    pub fn list_memories(
         &self,
         companion: &str,
         cursor: Option<i64>,
         limit: usize,
     ) -> Result<(Vec<Memory>, Option<i64>)> {
-        let connection = self.conn()?;
+        let connection = self.0.conn()?;
         let mut statement = connection.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.rowid > ?2 \
              ORDER BY m.rowid LIMIT ?3"
@@ -434,7 +419,7 @@ impl Store {
         mode: RecallMode,
     ) -> Result<Vec<Memory>> {
         let minimum = mode.minimum_importance();
-        let connection = self.conn()?;
+        let connection = self.0.conn()?;
         let terms = tokens(query);
         let mut memories = Vec::new();
         if terms.is_empty() {
@@ -469,49 +454,36 @@ impl Store {
         Ok(memories)
     }
 
-    /// Records the memory ids the host injected into `turn_id`, one row each,
-    /// so the citation guard still knows them after a restart instead of
-    /// relying on the volatile in-memory ledger (docs/design/mind.md §4.2).
-    pub(crate) fn record_injections(
-        &self,
-        companion: &str,
-        turn_id: &str,
-        ids: &[String],
-    ) -> Result<()> {
-        let mut connection = self.conn()?;
+    pub fn record_injections(&self, companion: &str, turn_id: &str, ids: &[String]) -> Result<()> {
+        let mut connection = self.0.conn()?;
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         for id in ids.iter().filter(|id| !id.is_empty()).take(MAX_INJECTED) {
             transaction
                 .prepare_cached(
                     "INSERT OR REPLACE INTO memory_injections \
-                 (companion_id, turn_id, memory_id, created_at) VALUES (?1, ?2, ?3, ?4)",
+                     (companion_id, turn_id, memory_id, created_at) VALUES (?1, ?2, ?3, ?4)",
                 )?
                 .execute(params![companion, turn_id, id, now()])?;
         }
-        // Keep the ledger bounded: a citation whose injection record is gone is
-        // dropped by the guard, which is the safe side of the guard.
         transaction
             .prepare_cached(
                 "DELETE FROM memory_injections WHERE companion_id = ?1 AND turn_id NOT IN (\
-             SELECT turn_id FROM memory_injections WHERE companion_id = ?1 \
-             GROUP BY turn_id ORDER BY CAST(turn_id AS INTEGER) DESC LIMIT ?2)",
+                 SELECT turn_id FROM memory_injections WHERE companion_id = ?1 \
+                 GROUP BY turn_id ORDER BY CAST(turn_id AS INTEGER) DESC LIMIT ?2)",
             )?
             .execute(params![companion, KEEP_INJECTED_TURNS as i64])?;
         transaction.commit()?;
         Ok(())
     }
 
-    /// The ids injected into the turns of the window `(after, through]`, in
-    /// injection order: what the citation guard may accept for that interval.
-    /// A turn id the ledger cannot read is skipped rather than guessed at.
-    pub(crate) fn injected_between(
+    pub fn injected_between(
         &self,
         companion: &str,
         after: Option<u64>,
         through: u64,
     ) -> Result<Vec<String>> {
-        let connection = self.conn()?;
+        let connection = self.0.conn()?;
         let mut statement = connection.prepare_cached(
             "SELECT turn_id, memory_id FROM memory_injections \
              WHERE companion_id = ?1 ORDER BY rowid",
@@ -536,9 +508,7 @@ impl Store {
         Ok(ids)
     }
 
-    /// Hashes the historical serialized JSON bytes. RFC 8785 changes number
-    /// spellings and Unicode key order, invalidating persisted replay receipts.
-    pub(crate) fn mind_hash(&self, value: &Value) -> Vec<u8> {
+    pub fn mind_hash(&self, value: &Value) -> Vec<u8> {
         digest(to_json(value).unwrap_or_default().as_bytes())
     }
 }

@@ -230,8 +230,9 @@ impl Plugin for ClientPlugin {
 
 /// Every registered client, with its live connection state.
 pub(crate) fn clients(store: &Store, hub: &DeviceHub) -> Result<Vec<w::Client>> {
-    let activations = store.activations()?;
+    let activations = store.client_repo().activations()?;
     Ok(store
+        .client_repo()
         .clients()?
         .into_iter()
         .map(|client| {
@@ -269,6 +270,7 @@ fn publish(world: &mut World, client: &Client) -> Result<w::Client> {
     let connected = world.resource::<DeviceHub>().connected(&client.id);
     let active = world
         .resource::<Store>()
+        .client_repo()
         .active_companions_for_client(&client.id)?;
     let view = wire::client(client, connected, active);
     dynamic::sync_tools(world)?;
@@ -285,12 +287,12 @@ fn publish(world: &mut World, client: &Client) -> Result<w::Client> {
 pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> Result<w::Client> {
     let store = world.resource::<Store>().clone();
     let specs = declarations(&request.capability_specs, &request.capabilities)?;
-    let rules = store.policy_rules()?;
+    let rules = store.policy_repo().policy_rules()?;
     let granted = world
         .resource::<CapabilityPolicy>()
         .grants_with_rules(&request.capabilities, &rules);
-    let previous = store.client(&request.id)?;
-    let client = store.register_client_with_grants(
+    let previous = store.client_repo().client(&request.id)?;
+    let client = store.client_repo().register_client_with_grants(
         &super::db::clients::ClientDeclaration {
             id: &request.id,
             name: &request.name,
@@ -305,9 +307,9 @@ pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> 
         Ok(view) => Ok(view),
         Err(error) => {
             if let Some(previous) = previous {
-                let _ = store.restore_client(&previous);
+                let _ = store.client_repo().restore_client(&previous);
             } else {
-                let _ = store.delete_client(&request.id);
+                let _ = store.client_repo().delete_client(&request.id);
             }
             let _ = dynamic::sync_tools(world);
             Err(error)
@@ -326,12 +328,12 @@ pub(crate) fn set_capabilities(
             ("a client cannot grant capabilities to itself").into(),
         ));
     }
-    let rules = store.policy_rules()?;
+    let rules = store.policy_repo().policy_rules()?;
     let granted = world
         .resource::<CapabilityPolicy>()
         .grants_with_rules(&request.capabilities, &rules);
-    let previous = store.client(&request.client_id)?;
-    let client = store.set_capabilities(
+    let previous = store.client_repo().client(&request.client_id)?;
+    let client = store.client_repo().set_capabilities(
         &request.client_id,
         &request.capabilities,
         &granted,
@@ -342,7 +344,7 @@ pub(crate) fn set_capabilities(
         Ok(view) => Ok(view),
         Err(error) => {
             if let Some(previous) = previous {
-                let _ = store.restore_client(&previous);
+                let _ = store.client_repo().restore_client(&previous);
             }
             let _ = dynamic::sync_tools(world);
             Err(error)
@@ -369,24 +371,28 @@ fn notify_client(world: &mut World, client: &w::Client) {
 pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Result<w::Activation> {
     let store = world.resource::<Store>().clone();
     store
+        .companion_repo()
         .companion(&request.companion_id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     if !request.release {
         super::util::validate_id(&request.client_id)?;
         store
+            .client_repo()
             .client(&request.client_id)?
             .ok_or_else(|| HostError::NotFound(("client not found").into()))?;
     }
-    let previous = store.activation(&request.companion_id)?;
+    let previous = store.client_repo().activation(&request.companion_id)?;
     let client = (!request.release).then_some(request.client_id.as_str());
-    let activation = store.activate(&request.companion_id, client)?;
+    let activation = store
+        .client_repo()
+        .activate(&request.companion_id, client)?;
     // Publish the new active client first: a conflicting tool declaration must
     // roll the move back before any notification is visible.
     if let Err(error) = dynamic::sync_tools(world) {
         if let Some(previous) = previous.as_ref() {
-            let _ = store.restore_activation(previous);
+            let _ = store.client_repo().restore_activation(previous);
         } else {
-            let _ = store.delete_activation(&request.companion_id);
+            let _ = store.client_repo().delete_activation(&request.companion_id);
         }
         let _ = dynamic::sync_tools(world);
         return Err(error);
@@ -402,9 +408,9 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
             .remove(&request.companion_id);
         super::eyes::clear(world, &request.companion_id);
         // The old client keeps its stream but is no longer the active one.
-        if let Some(old) = store.client(&old_client)? {
+        if let Some(old) = store.client_repo().client(&old_client)? {
             let hub = world.resource::<DeviceHub>();
-            let active = store.active_companions_for_client(&old.id)?;
+            let active = store.client_repo().active_companions_for_client(&old.id)?;
             notify_client(world, &wire::client(&old, hub.connected(&old.id), active));
         }
     }
@@ -414,9 +420,9 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
     world.resource_mut::<Notifier>().push(
         Some(&request.companion_id),
         None,
-        w::notification::Event::ActivationUpdated(Box::new(activation.clone())),
+        w::notification::Event::ActivationUpdated(Box::new(wire::activation(&activation))),
     );
-    Ok(activation)
+    Ok(wire::activation(&activation))
 }
 
 /// Routes live observations to the eyes and supports legacy passive summaries.
@@ -424,9 +430,12 @@ pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) ->
     let store = world.resource::<Store>().clone();
     super::util::validate_id(&event.client_id)?;
     let client = store
+        .client_repo()
         .client(&event.client_id)?
         .ok_or_else(|| HostError::NotFound(("client not found").into()))?;
-    let active_companions = store.active_companions_for_client(&event.client_id)?;
+    let active_companions = store
+        .client_repo()
+        .active_companions_for_client(&event.client_id)?;
     if active_companions.is_empty() {
         // A connected client that is not active produces nothing the head may
         // act on. Not an error: the event is simply discarded.

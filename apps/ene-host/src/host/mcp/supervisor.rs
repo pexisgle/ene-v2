@@ -158,7 +158,7 @@ fn desired(
     credentials: Option<&Credentials>,
     credential_generation: Option<u64>,
 ) -> crate::host::db::Result<Vec<(String, Desired)>> {
-    let settings = store.settings()?;
+    let settings = store.settings_repo().settings()?;
     let no_providers = Providers::none();
     Ok(settings
         .connections
@@ -208,7 +208,7 @@ pub(super) fn sync(world: &mut World) {
         return;
     };
     let store = world.resource::<Store>().clone();
-    let revision = match store.settings_revision() {
+    let revision = match store.settings_repo().settings_revision() {
         Ok(revision) => revision,
         Err(error) => {
             if error.is_storage() {

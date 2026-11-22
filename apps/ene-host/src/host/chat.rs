@@ -42,6 +42,7 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
     let world = app.world_mut();
     let store = world.resource::<Store>().clone();
     store
+        .companion_repo()
         .companion(&request.companion_id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     let agent = agent::agent_of(world, &request.companion_id)
@@ -176,6 +177,7 @@ fn has_input(world: &World, agent: Entity, request_id: &str) -> bool {
 pub(crate) fn stop(world: &mut World, request: w::StopRequest) -> Result<()> {
     let store = world.resource::<Store>().clone();
     store
+        .companion_repo()
         .companion(&request.companion_id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     if let Some(agent) = agent::agent_of(world, &request.companion_id) {
@@ -196,6 +198,7 @@ pub(crate) fn history(
 ) -> Result<w::History> {
     let store = world.resource::<Store>().clone();
     store
+        .companion_repo()
         .companion(request.companion_id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     let agent = agent::agent_of(world, request.companion_id)

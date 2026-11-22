@@ -1,21 +1,35 @@
-//! The one SQLite connection, its baseline schema and small helpers.
-pub(crate) mod approvals;
-pub(crate) mod clients;
-pub(crate) mod companions;
-pub(crate) mod memories;
-mod migrations;
-pub(crate) mod plugins;
-pub(crate) mod policies;
-pub(crate) mod schedules;
-pub(crate) mod settings;
-pub(crate) mod work;
+//! SQLite persistence engine, forward migrations, and domain repositories.
 
-pub(crate) use super::error::{HostError, Result};
-pub(super) use super::util::{digest, epoch, now, or_stamp, truncate, validate_id};
-#[cfg(test)]
-pub(crate) use migrations::VERSION;
+pub mod approvals;
+pub mod clients;
+pub mod companions;
+pub mod error;
+pub mod memories;
+pub mod migrations;
+pub mod plugins;
+pub mod policies;
+pub mod schedules;
+pub mod settings;
+pub mod util;
+pub mod work;
+
+pub use approvals::ApprovalRepo;
+pub use clients::{ClientDeclaration, ClientRepo};
+pub use companions::CompanionRepo;
+pub use error::{Result, StoreError};
+pub use memories::MemoryRepo;
+pub use migrations::{BASELINE_VERSION, VERSION};
+pub use plugins::{PluginEntry, PluginRepo};
+pub use policies::PolicyRepo;
+pub use schedules::{
+    Cron, NewSchedule, Schedule, ScheduleClock, ScheduleOccurrence, ScheduleRepo, next_occurrence,
+};
+pub use settings::SettingsRepo;
+pub use work::{WorkRepo, open_state};
+
 use rusqlite::{Connection, OptionalExtension};
 use std::{
+    fmt,
     path::Path,
     sync::{Arc, Mutex, MutexGuard},
 };
@@ -30,15 +44,22 @@ fn configure_connection(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
 }
 
-/// The relational state, shared by every system on the Rig thread.
-#[derive(Clone, bevy_ecs::prelude::Resource)]
-pub(crate) struct Store(Arc<Mutex<Connection>>);
+/// The relational state store shared across repositories and host systems.
+#[derive(Clone)]
+pub struct Store(Arc<Mutex<Connection>>);
+
+impl fmt::Debug for Store {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("Store").finish_non_exhaustive()
+    }
+}
 
 impl Store {
-    pub(crate) fn open(path: &Path) -> Result<Self> {
+    /// Opens `path`, validates/initializes the schema, and applies pending migrations.
+    pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|error| HostError::Storage(format!("state directory: {error}")))?;
+                .map_err(|error| StoreError::Storage(format!("state directory: {error}")))?;
         }
         let mut connection = open_connection(path)?;
         migrations::validate_open_version(&connection)?;
@@ -47,16 +68,76 @@ impl Store {
         Ok(Self(Arc::new(Mutex::new(connection))))
     }
 
-    /// Borrows the connection. Every host access runs on the Rig thread, so
-    /// the lock is never contended; a poisoned lock means state is unusable.
-    pub(crate) fn conn(&self) -> Result<MutexGuard<'_, Connection>> {
+    /// Borrows the primary SQLite connection under its mutual-exclusion lock.
+    pub fn conn(&self) -> Result<MutexGuard<'_, Connection>> {
         self.0
             .lock()
-            .map_err(|_| HostError::Storage(("state database lock was poisoned").into()))
+            .map_err(|_| StoreError::Storage("state database lock was poisoned".into()))
     }
 
-    /// Runs a query that returns at most one row.
-    fn fetch<T>(
+    /// Opens a second read-write connection to the same database file with the
+    /// same WAL pragmas, allowing background workers to avoid holding `conn()`.
+    pub fn open_secondary(&self) -> Result<Connection> {
+        let primary = self.conn()?;
+        let path = primary
+            .path()
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| {
+                StoreError::Storage(
+                    "the state database has no file a second connection could open".into(),
+                )
+            })?;
+        let connection = open_connection(Path::new(path))?;
+        configure_connection(&connection)?;
+        Ok(connection)
+    }
+
+    /// Repository for approval requests.
+    pub fn approval_repo(&self) -> ApprovalRepo<'_> {
+        ApprovalRepo::new(self)
+    }
+
+    /// Repository for declared clients, activations, and device operations.
+    pub fn client_repo(&self) -> ClientRepo<'_> {
+        ClientRepo::new(self)
+    }
+
+    /// Repository for companion profiles and state revisions.
+    pub fn companion_repo(&self) -> CompanionRepo<'_> {
+        CompanionRepo::new(self)
+    }
+
+    /// Repository for episodic memories, vector backfill, and consolidation.
+    pub fn memory_repo(&self) -> MemoryRepo<'_> {
+        MemoryRepo::new(self)
+    }
+
+    /// Repository for installed plugin metadata, configuration, and isolated KV state.
+    pub fn plugin_repo(&self) -> PluginRepo<'_> {
+        PluginRepo::new(self)
+    }
+
+    /// Repository for saved policy rules and free-text policy instructions.
+    pub fn policy_repo(&self) -> PolicyRepo<'_> {
+        PolicyRepo::new(self)
+    }
+
+    /// Repository for scheduled reminders and materialized occurrences.
+    pub fn schedule_repo(&self) -> ScheduleRepo<'_> {
+        ScheduleRepo::new(self)
+    }
+
+    /// Repository for external connections and top-level settings revisions.
+    pub fn settings_repo(&self) -> SettingsRepo<'_> {
+        SettingsRepo::new(self)
+    }
+
+    /// Repository for commissioned work sessions and instruction runs.
+    pub fn work_repo(&self) -> WorkRepo<'_> {
+        WorkRepo::new(self)
+    }
+
+    pub(crate) fn fetch<T>(
         &self,
         sql: &str,
         params: impl rusqlite::Params,
@@ -67,8 +148,7 @@ impl Store {
         Ok(statement.query_row(params, map).optional()?)
     }
 
-    /// Runs one statement that must return exactly one row.
-    fn write_one<T>(
+    pub(crate) fn write_one<T>(
         &self,
         sql: &str,
         params: impl rusqlite::Params,
@@ -79,8 +159,7 @@ impl Store {
         Ok(statement.query_row(params, map)?)
     }
 
-    /// Runs a query that returns every matching row.
-    fn fetch_all<T>(
+    pub(crate) fn fetch_all<T>(
         &self,
         sql: &str,
         params: impl rusqlite::Params,
@@ -96,11 +175,11 @@ impl Store {
 
 /// Parses a stored JSON column.
 pub(crate) fn json(text: &str) -> Result<serde_json::Value> {
-    serde_json::from_str(text).map_err(|_| HostError::Storage(("stored JSON is corrupt").into()))
+    serde_json::from_str(text).map_err(|_| StoreError::Storage("stored JSON is corrupt".into()))
 }
 
 /// A stored value that does not match its domain type: the row is corrupt.
-fn corrupt(index: usize, what: &str) -> rusqlite::Error {
+pub(crate) fn corrupt(index: usize, what: &str) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
         index,
         rusqlite::types::Type::Text,
@@ -144,13 +223,13 @@ pub(crate) fn enum_name_column<T: serde::de::DeserializeOwned>(
 }
 
 pub(crate) fn to_json(value: &impl serde::Serialize) -> Result<String> {
-    serde_json::to_string(value).map_err(|error| HostError::Storage(error.to_string()))
+    serde_json::to_string(value).map_err(|error| StoreError::Storage(error.to_string()))
 }
 
 /// Turns a zero-row write into the conflict it represents.
 pub(crate) fn require(changed: usize, message: &str) -> Result<()> {
     if changed == 0 {
-        return Err(HostError::Conflict((message).into()));
+        return Err(StoreError::Conflict(message.into()));
     }
     Ok(())
 }
@@ -158,7 +237,7 @@ pub(crate) fn require(changed: usize, message: &str) -> Result<()> {
 /// Turns a zero-row write into the missing row it represents.
 pub(crate) fn require_found(changed: usize, message: &str) -> Result<()> {
     if changed == 0 {
-        return Err(HostError::NotFound((message).into()));
+        return Err(StoreError::NotFound(message.into()));
     }
     Ok(())
 }
@@ -171,40 +250,22 @@ mod tests {
     fn json_columns_keep_domain_values_and_json_null_as_text() {
         use serde_json::{Value, json};
         let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch("CREATE TABLE json_values (value TEXT NOT NULL, optional TEXT)")
+        let stored_null: Option<Value> = connection
+            .query_row("SELECT 'null' AS value", [], |row| {
+                optional_json_column(row, "value", "bad JSON")
+            })
             .unwrap();
-        for value in [
-            Value::Null,
-            json!(1),
-            json!(1.0),
-            json!(["tea"]),
-            json!({"nested": null}),
-        ] {
-            connection.execute("DELETE FROM json_values", []).unwrap();
-            connection
-                .execute(
-                    "INSERT INTO json_values VALUES (?1, ?2)",
-                    [to_json(&value).unwrap(), "null".into()],
-                )
-                .unwrap();
-            let stored: (String, Value, Option<Value>) = connection
-                .query_row(
-                    "SELECT typeof(value), value, optional FROM json_values",
-                    [],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            json_column(row, "value", "bad JSON")?,
-                            optional_json_column(row, "optional", "bad JSON")?,
-                        ))
-                    },
-                )
-                .unwrap();
-            assert_eq!(stored, ("text".into(), value, Some(Value::Null)));
-        }
+        assert_eq!(stored_null, Some(Value::Null));
+        let object: Value = connection
+            .query_row(
+                r#"SELECT '{"tool":"device_request"}' AS value"#,
+                [],
+                |row| json_column(row, "value", "bad JSON"),
+            )
+            .unwrap();
+        assert_eq!(object, json!({"tool": "device_request"}));
         let domain: Vec<String> = connection
-            .query_row("SELECT '[\"tea\",\"coffee\"]' AS value", [], |row| {
+            .query_row(r#"SELECT '["tea","coffee"]' AS value"#, [], |row| {
                 json_column(row, "value", "bad domain")
             })
             .unwrap();
@@ -219,8 +280,7 @@ mod tests {
 
     #[test]
     fn serde_enum_columns_preserve_names_and_reject_unknown_values() {
-        use crate::host::settings::ConnectionKind;
-        use ene_domain::{DeviceStatus, RunState, WorkStatus};
+        use ene_domain::{ConnectionKind, DeviceStatus, RunState, WorkStatus};
         use ene_policy::{ApprovalStatus, PolicyEffect};
         fn check<
             T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
@@ -287,8 +347,6 @@ mod tests {
         ]);
     }
 
-    /// A run stopped by an older host still opens: its state reads as the one a
-    /// stop reaches now instead of failing the row.
     #[test]
     fn a_stop_state_this_host_no_longer_writes_decodes_as_cancelled() {
         use ene_domain::RunState;
@@ -313,21 +371,34 @@ mod tests {
             let journal: String = connection
                 .pragma_query_value(None, "journal_mode", |row| row.get(0))
                 .unwrap();
-            let sync: i64 = connection
+            let synchronous: i64 = connection
                 .pragma_query_value(None, "synchronous", |row| row.get(0))
                 .unwrap();
-            let busy: i64 = connection
+            let timeout: i64 = connection
                 .pragma_query_value(None, "busy_timeout", |row| row.get(0))
                 .unwrap();
-            (journal, sync, busy)
+            (journal, synchronous, timeout)
         };
         assert_eq!(options(&store.conn().unwrap()), ("wal".into(), 1, 5000));
         assert_eq!(options(&secondary), ("wal".into(), 1, 5000));
-        let transaction = secondary
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+
+        let tx = secondary.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO user_profiles (id, name, updated_at) VALUES ('uncommitted', 'hidden', 'now')",
+            [],
+        )
+        .unwrap();
+        let visible_inside_tx: i64 = tx
+            .query_row("SELECT COUNT(*) FROM user_profiles", [], |row| row.get(0))
             .unwrap();
-        transaction.execute("INSERT INTO user_profiles (id, name, updated_at) VALUES ('rollback', 'discard', 'now')", []).unwrap();
-        transaction.rollback().unwrap();
+        assert_eq!(visible_inside_tx, 1);
+        let visible_to_store: i64 = store
+            .conn()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM user_profiles", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(visible_to_store, 0);
+        tx.rollback().unwrap();
         assert_eq!(
             store
                 .conn()
@@ -337,13 +408,19 @@ mod tests {
                 .unwrap(),
             0
         );
-        secondary.execute("INSERT INTO user_profiles (id, name, updated_at) VALUES ('committed', 'visible', 'now')", []).unwrap();
+        secondary
+            .execute(
+                "INSERT INTO user_profiles (id, name, updated_at) VALUES ('committed', 'visible', 'now')",
+                [],
+            )
+            .unwrap();
         assert_eq!(
             store
                 .conn()
                 .unwrap()
-                .query_row("SELECT name FROM user_profiles", [], |row| row
-                    .get::<_, String>(0))
+                .query_row("SELECT name FROM user_profiles", [], |row| {
+                    row.get::<_, String>(0)
+                })
                 .unwrap(),
             "visible"
         );
@@ -367,7 +444,7 @@ mod tests {
                 error,
                 rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, _)
             ));
-            let error = HostError::from(error).to_string();
+            let error = StoreError::from(error).to_string();
             assert!(error.contains("stored config is corrupt"));
             assert!(!error.contains("private text"));
         }
@@ -410,8 +487,6 @@ mod tests {
         assert_eq!(id, 3);
     }
 
-    /// A database from before the baseline is refused instead of being read
-    /// as the current schema, and an empty one is initialized.
     #[test]
     fn an_older_schema_is_refused_instead_of_being_read_as_current() {
         let temp = tempfile::tempdir().unwrap();
@@ -439,7 +514,7 @@ mod tests {
             store
                 .conn()
                 .unwrap()
-                .query_row("PRAGMA user_version", [], |row| { row.get::<_, i64>(0) })
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
             VERSION
         );

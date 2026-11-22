@@ -34,11 +34,17 @@ impl Plugin for MindPlugin {
 }
 
 pub(crate) fn list(store: &Store) -> Result<Vec<w::Companion>> {
-    Ok(store.companions()?.iter().map(wire::companion).collect())
+    Ok(store
+        .companion_repo()
+        .companions()?
+        .iter()
+        .map(wire::companion)
+        .collect())
 }
 
 pub(crate) fn get(store: &Store, id: &str) -> Result<w::Companion> {
     store
+        .companion_repo()
         .companion(id)?
         .map(|companion| wire::companion(&companion))
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))
@@ -55,7 +61,7 @@ pub(crate) fn create(
     request: w::CreateCompanionRequest,
 ) -> Result<w::Companion> {
     let store = world.resource::<Store>().clone();
-    if store.companions()?.len() >= 16 {
+    if store.companion_repo().companions()?.len() >= 16 {
         return Err(HostError::Exhausted(("too many companions").into()));
     }
     let profile = request
@@ -86,7 +92,7 @@ pub(crate) fn create(
         updated_at: now(),
     };
     companion.validate()?;
-    store.insert_companion(&companion)?;
+    store.companion_repo().insert_companion(&companion)?;
     agent::spawn_companion(world, &companion);
     agent::sync_companion(world, &companion.id)?;
     notify(world, &companion);
@@ -122,6 +128,7 @@ pub(crate) fn update(
 ) -> Result<w::Companion> {
     let store = world.resource::<Store>().clone();
     let mut companion = store
+        .companion_repo()
         .companion(&request.id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     if let Some(name) = request.name {
@@ -171,7 +178,9 @@ pub(crate) fn update(
     companion.revision += 1;
     companion.updated_at = now();
     companion.validate()?;
-    store.update_companion(&companion, request.revision)?;
+    store
+        .companion_repo()
+        .update_companion(&companion, request.revision)?;
     agent::sync_companion(world, &companion.id)?;
     notify(world, &companion);
     Ok(wire::companion(&companion))
@@ -179,7 +188,7 @@ pub(crate) fn update(
 
 pub(crate) fn delete(world: &mut World, id: &str) -> Result<()> {
     let store = world.resource::<Store>().clone();
-    if !store.delete_companion(id)? {
+    if !store.companion_repo().delete_companion(id)? {
         return Err(HostError::NotFound(("companion not found").into()));
     }
     if let Some(entity) = agent::agent_of(world, id) {
@@ -200,6 +209,7 @@ pub(crate) fn notify(world: &mut World, companion: &Companion) {
 
 pub(crate) fn mind_view(store: &Store, id: &str) -> Result<w::MindView> {
     let companion = store
+        .companion_repo()
         .companion(id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     Ok(w::MindView {
@@ -216,6 +226,7 @@ pub(crate) fn update_profile(
 ) -> Result<w::MindView> {
     let store = world.resource::<Store>().clone();
     store
+        .companion_repo()
         .companion(&request.companion_id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     let profile = request
@@ -223,7 +234,11 @@ pub(crate) fn update_profile(
         .as_option()
         .map(wire::profile_from)
         .unwrap_or_default();
-    store.update_mind_profile(&request.companion_id, request.expected_revision, &profile)?;
+    store.companion_repo().update_mind_profile(
+        &request.companion_id,
+        request.expected_revision,
+        &profile,
+    )?;
     notify_mind(world, &request.companion_id);
     mind_view(&store, &request.companion_id)
 }
@@ -243,6 +258,7 @@ pub(crate) fn control_memory(
         }
     };
     let memory = store
+        .memory_repo()
         .memory(&request.memory_id)?
         .ok_or_else(|| HostError::NotFound(("memory not found").into()))?;
     if !memory.visible_to(&request.companion_id) {
@@ -250,7 +266,10 @@ pub(crate) fn control_memory(
             ("this memory is outside the companion's scope").into(),
         ));
     }
-    let memory = store.control_memory(&request.memory_id, action, &request.companion_id)?;
+    let memory =
+        store
+            .memory_repo()
+            .control_memory(&request.memory_id, action, &request.companion_id)?;
     notify_mind(world, &request.companion_id);
     Ok(w::MemoryControlResult {
         memory_id: memory.id,
@@ -267,6 +286,7 @@ pub(crate) fn list_memories(
 ) -> Result<w::Memories> {
     let store = world.resource::<Store>().clone();
     store
+        .companion_repo()
         .companion(&request.companion_id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     let limit = request.limit.unwrap_or(50).clamp(1, 200) as usize;
@@ -274,7 +294,9 @@ pub(crate) fn list_memories(
         .cursor
         .as_deref()
         .and_then(|cursor| cursor.parse::<i64>().ok());
-    let (items, next) = store.list_memories(&request.companion_id, cursor, limit)?;
+    let (items, next) = store
+        .memory_repo()
+        .list_memories(&request.companion_id, cursor, limit)?;
     let _ = world;
     Ok(w::Memories {
         items: items.iter().map(wire::memory).collect(),
@@ -406,6 +428,7 @@ pub(crate) fn list_templates() -> w::CompanionTemplates {
 /// mind state, credentials, and host-local connection ids.
 pub(crate) fn export_template(store: &Store, id: &str) -> Result<w::CompanionTemplate> {
     let companion = store
+        .companion_repo()
         .companion(id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     let mut voice_binding =

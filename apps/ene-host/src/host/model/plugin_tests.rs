@@ -720,8 +720,9 @@ async fn a_plugin_model_binds_through_the_agent_path() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
     store
+        .settings_repo()
         .update_settings(
-            store.settings_revision().unwrap(),
+            store.settings_repo().settings_revision().unwrap(),
             &[(
                 Connection {
                     id: CONNECTION.to_owned(),
@@ -826,8 +827,9 @@ async fn a_plugin_shadowing_a_catalog_vendor_binds_through_ensure_model() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
     store
+        .settings_repo()
         .update_settings(
-            store.settings_revision().unwrap(),
+            store.settings_repo().settings_revision().unwrap(),
             &[(
                 Connection {
                     id: CONNECTION.to_owned(),

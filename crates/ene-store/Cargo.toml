@@ -1,0 +1,29 @@
+[package]
+name = "ene-store"
+description = "SQLite relational store, forward migrations, and domain repositories"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+croner.workspace = true
+ene-catalog.workspace = true
+ene-domain.workspace = true
+ene-mind.workspace = true
+ene-policy.workspace = true
+jiff.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json_canonicalizer.workspace = true
+tempfile.workspace = true

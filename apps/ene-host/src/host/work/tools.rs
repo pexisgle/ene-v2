@@ -84,12 +84,12 @@ fn companion(world: &World, agent: Entity) -> Result<String> {
 fn own_session(world: &World, work_id: &str, companion: &str) -> Result<WorkSession> {
     let store = world.resource::<Store>();
     let candidate = work_id.strip_prefix("work-").unwrap_or(work_id);
-    let session = match store.work_session(work_id)? {
+    let session = match store.work_repo().work_session(work_id)? {
         Some(session) => Some(session),
-        None => match store.work_session(candidate)? {
+        None => match store.work_repo().work_session(candidate)? {
             Some(session) => Some(session),
-            None => match store.run(candidate)? {
-                Some(run) => store.work_session(&run.work_id)?,
+            None => match store.work_repo().run(candidate)? {
+                Some(run) => store.work_repo().work_session(&run.work_id)?,
                 None => None,
             },
         },
@@ -131,7 +131,7 @@ fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
             return Err(HostError::Conflict(("work session is closed").into()));
         }
         let store = world.resource::<Store>().clone();
-        if store.active_run(&resolved_id)?.is_some() {
+        if store.work_repo().active_run(&resolved_id)?.is_some() {
             return Err(HostError::Conflict(
                 ("the work session is already running").into(),
             ));
@@ -201,7 +201,7 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
     let store = world.resource::<Store>().clone();
     // The active run is the source of truth, never the run captured when the
     // agent was spawned: a session agent serves several runs.
-    let Some(run) = store.active_run(&work.work_id)? else {
+    let Some(run) = store.work_repo().active_run(&work.work_id)? else {
         return Ok(
             json!({"accepted": false, "reason": "the session has no active run"}).to_string(),
         );
@@ -301,6 +301,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
         store
+            .work_repo()
             .insert_work_session(&WorkSession {
                 id: "w1".into(),
                 companion_id: "ene".into(),
@@ -312,6 +313,7 @@ mod tests {
             })
             .unwrap();
         store
+            .work_repo()
             .insert_run(&new_run("run-b".into(), "w1", "do it", RunState::Running))
             .unwrap();
         let mut world = World::new();
@@ -406,7 +408,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
         for id in ["ene", "kuro"] {
-            store.insert_companion(&companion(id)).unwrap();
+            store
+                .companion_repo()
+                .insert_companion(&companion(id))
+                .unwrap();
         }
         let mut world = work_world(store.clone());
         delegation::record(&mut world, "t1");
@@ -419,13 +424,13 @@ mod tests {
 
         let first = super::start(&mut world, ene, args()).unwrap();
         assert!(first.contains("\"work_id\""), "{first}");
-        assert_eq!(store.work_sessions("ene").unwrap().len(), 1);
+        assert_eq!(store.work_repo().work_sessions("ene").unwrap().len(), 1);
 
         // The peer gets an ordinary tool result, not an error, and no session.
         let second = super::start(&mut world, kuro, args()).unwrap();
         assert!(second.contains("\"claimed\":false"), "{second}");
         assert!(second.contains("another companion"), "{second}");
-        assert!(store.work_sessions("kuro").unwrap().is_empty());
+        assert!(store.work_repo().work_sessions("kuro").unwrap().is_empty());
     }
 
     #[test]

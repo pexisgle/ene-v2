@@ -1,5 +1,6 @@
 //! Companions and their mind: persistence and revision checks.
-use super::{Result, Store, json_column, now, require, to_json};
+
+use crate::{Store, error::Result, json_column, require, to_json, util::now};
 use ene_mind::{Companion, Profile};
 use rusqlite::{OptionalExtension, Row, TransactionBehavior, params};
 
@@ -26,29 +27,37 @@ fn row_to_companion(row: &Row<'_>) -> rusqlite::Result<Companion> {
     })
 }
 
-pub(crate) const COLUMNS: &str = "id, name, mind, profile, profile_revision, state, \
+pub const COLUMNS: &str = "id, name, mind, profile, profile_revision, state, \
      state_revision, body, voice, assignments, persona, voice_identifier, revision, \
      created_at, updated_at";
 
-impl Store {
-    pub(crate) fn companions(&self) -> Result<Vec<Companion>> {
-        self.fetch_all(
+/// Repository managing `companions` and bootstrap seed state.
+#[derive(Clone, Copy, Debug)]
+pub struct CompanionRepo<'a>(&'a Store);
+
+impl<'a> CompanionRepo<'a> {
+    pub(crate) fn new(store: &'a Store) -> Self {
+        Self(store)
+    }
+
+    pub fn companions(&self) -> Result<Vec<Companion>> {
+        self.0.fetch_all(
             &format!("SELECT {COLUMNS} FROM companions ORDER BY created_at, id"),
             [],
             row_to_companion,
         )
     }
 
-    pub(crate) fn companion(&self, id: &str) -> Result<Option<Companion>> {
-        self.fetch(
+    pub fn companion(&self, id: &str) -> Result<Option<Companion>> {
+        self.0.fetch(
             &format!("SELECT {COLUMNS} FROM companions WHERE id = ?1"),
             [id],
             row_to_companion,
         )
     }
 
-    pub(crate) fn insert_companion(&self, companion: &Companion) -> Result<()> {
-        let connection = self.conn()?;
+    pub fn insert_companion(&self, companion: &Companion) -> Result<()> {
+        let connection = self.0.conn()?;
         insert_companion_with(&connection, companion)
     }
 
@@ -56,8 +65,8 @@ impl Store {
     ///
     /// Recording a one-time marker in `bootstrap_state` ensures that user edits
     /// or deletions are preserved across restarts instead of resurrecting `ene`.
-    pub(crate) fn seed_initial_companion(&self) -> Result<bool> {
-        let mut connection = self.conn()?;
+    pub fn seed_initial_companion(&self) -> Result<bool> {
+        let mut connection = self.0.conn()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let stamp = now();
         let applied: Option<String> = transaction
@@ -97,14 +106,15 @@ impl Store {
     }
 
     /// Saves an edited companion with an optimistic revision check.
-    pub(crate) fn update_companion(&self, companion: &Companion, expected: u64) -> Result<()> {
+    pub fn update_companion(&self, companion: &Companion, expected: u64) -> Result<()> {
         let updated = self
+            .0
             .conn()?
             .prepare_cached(
                 "UPDATE companions SET name = ?2, mind = ?3, profile = ?4, profile_revision = ?5, \
-             state = ?6, state_revision = ?7, body = ?8, voice = ?9, assignments = ?10, \
-             persona = ?11, voice_identifier = ?12, revision = ?13, updated_at = ?14 \
-             WHERE id = ?1 AND revision = ?15",
+                 state = ?6, state_revision = ?7, body = ?8, voice = ?9, assignments = ?10, \
+                 persona = ?11, voice_identifier = ?12, revision = ?13, updated_at = ?14 \
+                 WHERE id = ?1 AND revision = ?15",
             )?
             .execute(params![
                 companion.id,
@@ -126,7 +136,7 @@ impl Store {
         require(updated, "companion changed since it was read")
     }
 
-    pub(crate) fn update_mind_profile(
+    pub fn update_mind_profile(
         &self,
         companion_id: &str,
         expected: u64,
@@ -134,10 +144,11 @@ impl Store {
     ) -> Result<u64> {
         let next = expected + 1;
         let updated = self
+            .0
             .conn()?
             .prepare_cached(
                 "UPDATE companions SET profile = ?2, profile_revision = ?3, updated_at = ?4 \
-             WHERE id = ?1 AND profile_revision = ?5",
+                 WHERE id = ?1 AND profile_revision = ?5",
             )?
             .execute(params![
                 companion_id,
@@ -150,8 +161,9 @@ impl Store {
         Ok(next)
     }
 
-    pub(crate) fn delete_companion(&self, id: &str) -> Result<bool> {
+    pub fn delete_companion(&self, id: &str) -> Result<bool> {
         let deleted = self
+            .0
             .conn()?
             .prepare_cached("DELETE FROM companions WHERE id = ?1")?
             .execute([id])?;
@@ -165,7 +177,6 @@ fn refresh_initial_ene_instructions(
     stamp: &str,
 ) -> Result<()> {
     let defaults = ene_mind::default_ene_companion(stamp);
-    // Profile and companion settings have independent edit histories.
     connection.execute(
         "UPDATE companions SET
             profile = CASE WHEN profile_revision = 1 THEN
@@ -191,9 +202,9 @@ fn insert_companion_with(connection: &rusqlite::Connection, companion: &Companio
     connection
         .prepare_cached(
             "INSERT INTO companions (id, name, mind, profile, profile_revision, state, \
-         state_revision, body, voice, assignments, persona, voice_identifier, revision, \
-         created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             state_revision, body, voice, assignments, persona, voice_identifier, revision, \
+             created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         )?
         .execute(params![
             companion.id,
@@ -223,9 +234,10 @@ mod tests {
     fn initial_ene_companion_seeds_once_and_respects_deletion() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("host.sqlite3")).unwrap();
+        let repo = store.companion_repo();
 
-        assert!(store.seed_initial_companion().unwrap());
-        let seeded = store
+        assert!(repo.seed_initial_companion().unwrap());
+        let seeded = repo
             .companion("ene")
             .unwrap()
             .expect("default ene companion must be seeded");
@@ -235,10 +247,10 @@ mod tests {
         assert!(!seeded.profile.facets.is_empty());
         assert!(!seeded.profile.examples.is_empty());
 
-        assert!(!store.seed_initial_companion().unwrap());
-        assert!(store.delete_companion("ene").unwrap());
-        assert!(!store.seed_initial_companion().unwrap());
-        assert!(store.companions().unwrap().is_empty());
+        assert!(!repo.seed_initial_companion().unwrap());
+        assert!(repo.delete_companion("ene").unwrap());
+        assert!(!repo.seed_initial_companion().unwrap());
+        assert!(repo.companions().unwrap().is_empty());
     }
 
     #[test]
@@ -253,6 +265,7 @@ mod tests {
         ] {
             let dir = tempfile::tempdir().unwrap();
             let store = Store::open(&dir.path().join("host.sqlite3")).unwrap();
+            let repo = store.companion_repo();
             store
                 .conn()
                 .unwrap()
@@ -279,10 +292,10 @@ mod tests {
             if !original {
                 before.created_at = "2026-02-01T00:00:00Z".into();
             }
-            store.insert_companion(&before).unwrap();
+            repo.insert_companion(&before).unwrap();
 
-            assert!(!store.seed_initial_companion().unwrap());
-            let after = store.companion("ene").unwrap().unwrap();
+            assert!(!repo.seed_initial_companion().unwrap());
+            let after = repo.companion("ene").unwrap().unwrap();
             let mut expected = before;
             if original && !edited_profile {
                 expected.profile.facets = defaults.profile.facets.clone();
@@ -298,8 +311,8 @@ mod tests {
                 expected.updated_at.clone_from(&after.updated_at);
             }
             assert_eq!(after, expected);
-            assert!(!store.seed_initial_companion().unwrap());
-            assert_eq!(store.companion("ene").unwrap().unwrap(), after);
+            assert!(!repo.seed_initial_companion().unwrap());
+            assert_eq!(repo.companion("ene").unwrap().unwrap(), after);
         }
     }
 }

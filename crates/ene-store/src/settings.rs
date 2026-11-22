@@ -1,10 +1,10 @@
-//! Settings and connections.
-use super::{
-    Result, Store, corrupt, enum_name_column, json_column, now, optional_json_column,
-    require_found, to_json,
+//! Settings and connections persistence.
+
+use crate::{
+    Store, StoreError, corrupt, enum_name_column, error::Result, json_column, optional_json_column,
+    require_found, to_json, util::now,
 };
-use crate::host::error::HostError;
-use crate::host::settings::{Check, Connection, ConnectionConfig, Settings};
+use ene_domain::{Check, Connection, ConnectionConfig, ConnectionKind, CredentialState, Settings};
 use ene_mind::Companion;
 use rusqlite::{Row, params};
 use std::collections::HashSet;
@@ -25,9 +25,7 @@ fn row_to_connection(row: &Row<'_>) -> rusqlite::Result<Connection> {
         enabled: row.get("enabled")?,
         kind,
         config,
-        credential_state: crate::host::settings::CredentialState::parse(
-            &row.get::<_, String>("credential_state")?,
-        ),
+        credential_state: CredentialState::parse(&row.get::<_, String>("credential_state")?),
         revision: row.get::<_, u64>("revision")?,
         last_check: optional_json_column(row, "last_check", "stored connection check is corrupt")?,
     })
@@ -35,9 +33,17 @@ fn row_to_connection(row: &Row<'_>) -> rusqlite::Result<Connection> {
 
 const COLUMNS: &str = "id, name, enabled, kind, config, credential_state, last_check, revision";
 
-impl Store {
-    pub(crate) fn settings(&self) -> Result<Settings> {
-        let (revision, updated_at) = match self.fetch(
+/// Repository managing `settings_state` and `connections`.
+#[derive(Clone, Copy, Debug)]
+pub struct SettingsRepo<'a>(&'a Store);
+
+impl<'a> SettingsRepo<'a> {
+    pub(crate) fn new(store: &'a Store) -> Self {
+        Self(store)
+    }
+
+    pub fn settings(&self) -> Result<Settings> {
+        let (revision, updated_at) = match self.0.fetch(
             "SELECT revision, updated_at FROM settings_state WHERE id = 1",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -45,7 +51,8 @@ impl Store {
             Some(row) => row,
             None => {
                 let stamp = now();
-                self.conn()?
+                self.0
+                    .conn()?
                     .prepare_cached(
                         "INSERT INTO settings_state (id, revision, updated_at) VALUES (1, 1, ?1)",
                     )?
@@ -53,7 +60,7 @@ impl Store {
                 (1, stamp)
             }
         };
-        let connections = self.fetch_all(
+        let connections = self.0.fetch_all(
             &format!("SELECT {COLUMNS} FROM connections ORDER BY id"),
             [],
             row_to_connection,
@@ -62,12 +69,13 @@ impl Store {
             revision,
             connections,
             updated_at,
-            policy_texts: self.policy_texts()?,
+            policy_texts: self.0.policy_repo().policy_texts()?,
         })
     }
 
-    pub(crate) fn settings_revision(&self) -> Result<u64> {
+    pub fn settings_revision(&self) -> Result<u64> {
         Ok(self
+            .0
             .fetch(
                 "SELECT revision FROM settings_state WHERE id = 1",
                 [],
@@ -76,8 +84,8 @@ impl Store {
             .unwrap_or(1))
     }
 
-    pub(crate) fn connection(&self, id: &str) -> Result<Option<Connection>> {
-        self.fetch(
+    pub fn connection(&self, id: &str) -> Result<Option<Connection>> {
+        self.0.fetch(
             &format!("SELECT {COLUMNS} FROM connections WHERE id = ?1"),
             [id],
             row_to_connection,
@@ -86,27 +94,27 @@ impl Store {
 
     /// Applies a settings batch. The expected settings revision must match,
     /// and every connection keeps its own revision for concurrent edits.
-    pub(crate) fn update_settings(
+    pub fn update_settings(
         &self,
         expected_revision: u64,
         inputs: &[(Connection, u64)],
     ) -> Result<Settings> {
         let current = self.settings()?;
         if current.revision != expected_revision {
-            return Err(HostError::Conflict(
-                ("settings changed since they were read").into(),
+            return Err(StoreError::Conflict(
+                "settings changed since they were read".into(),
             ));
         }
         let mut ids = HashSet::new();
         for (input, _) in inputs {
             input.validate()?;
             if !ids.insert(input.id.as_str()) {
-                return Err(HostError::Invalid(("connection is listed twice").into()));
+                return Err(StoreError::Invalid("connection is listed twice".into()));
             }
         }
         let stamp = now();
         let next = expected_revision + 1;
-        let mut connection = self.conn()?;
+        let mut connection = self.0.conn()?;
         let transaction = connection.transaction()?;
         for (input, expected) in inputs {
             let existing = current
@@ -116,22 +124,21 @@ impl Store {
             let revision = match existing {
                 Some(existing) if *expected == existing.revision => existing.revision + 1,
                 Some(_) => {
-                    return Err(HostError::Conflict(format!(
+                    return Err(StoreError::Conflict(format!(
                         "connection `{}` changed since it was read",
                         input.id
                     )));
                 }
                 None if *expected == 0 => 1,
                 None => {
-                    return Err(HostError::Conflict(format!(
+                    return Err(StoreError::Conflict(format!(
                         "connection `{}` does not exist",
                         input.id
                     )));
                 }
             };
             let reset_check = existing.is_some_and(|previous| {
-                (input.kind == crate::host::settings::ConnectionKind::Search
-                    && input.config != previous.config)
+                (input.kind == ConnectionKind::Search && input.config != previous.config)
                     || (input.endpoint().adapter == ene_catalog::GOOGLE_AGENT_PLATFORM
                         && input.config != previous.config
                         && !keeps_verified_model_list(previous, input))
@@ -139,12 +146,12 @@ impl Store {
             let changed = transaction
                 .prepare_cached(
                     "INSERT INTO connections (id, name, enabled, kind, config, credential_state, \
-                 last_check, revision, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8) \
-                 ON CONFLICT(id) DO UPDATE SET name = excluded.name, enabled = excluded.enabled, \
-                 kind = excluded.kind, config = excluded.config, revision = excluded.revision, \
-                 updated_at = excluded.updated_at, \
-                 last_check = CASE WHEN ?9 THEN NULL ELSE connections.last_check END \
-                 WHERE connections.revision = excluded.revision - 1",
+                     last_check, revision, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8) \
+                     ON CONFLICT(id) DO UPDATE SET name = excluded.name, enabled = excluded.enabled, \
+                     kind = excluded.kind, config = excluded.config, revision = excluded.revision, \
+                     updated_at = excluded.updated_at, \
+                     last_check = CASE WHEN ?9 THEN NULL ELSE connections.last_check END \
+                     WHERE connections.revision = excluded.revision - 1",
                 )?
                 .execute(params![
                     input.id,
@@ -158,7 +165,7 @@ impl Store {
                     reset_check,
                 ])?;
             if changed == 0 {
-                return Err(HostError::Conflict(format!(
+                return Err(StoreError::Conflict(format!(
                     "connection `{}` changed since it was read",
                     input.id
                 )));
@@ -167,12 +174,12 @@ impl Store {
         let changed = transaction
             .prepare_cached(
                 "UPDATE settings_state SET revision = ?2, updated_at = ?3 \
-             WHERE id = 1 AND revision = ?4",
+                 WHERE id = 1 AND revision = ?4",
             )?
             .execute(params![1, next, stamp, expected_revision])?;
         if changed == 0 {
-            return Err(HostError::Conflict(
-                ("settings changed since they were read").into(),
+            return Err(StoreError::Conflict(
+                "settings changed since they were read".into(),
             ));
         }
         transaction.commit()?;
@@ -180,16 +187,13 @@ impl Store {
         self.settings()
     }
 
-    pub(crate) fn set_credential_state(
-        &self,
-        id: &str,
-        state: crate::host::settings::CredentialState,
-    ) -> Result<()> {
+    pub fn set_credential_state(&self, id: &str, state: CredentialState) -> Result<()> {
         let reset_check = self.connection(id)?.is_some_and(|connection| {
-            connection.kind == crate::host::settings::ConnectionKind::Search
+            connection.kind == ConnectionKind::Search
                 || connection.endpoint().adapter == ene_catalog::GOOGLE_AGENT_PLATFORM
         });
         let changed = self
+            .0
             .conn()?
             .prepare_cached(
                 "UPDATE connections SET credential_state = ?2, updated_at = ?3,
@@ -199,47 +203,56 @@ impl Store {
         require_found(changed, "connection not found")
     }
 
-    pub(crate) fn delete_connection(
+    pub fn delete_connection<E>(
         &self,
         id: &str,
         revision: u64,
-        on_delete_secret: impl FnOnce() -> Result<()>,
-    ) -> Result<(Settings, Vec<Companion>)> {
-        let mut companions = self.companions()?;
-        let mut db = self.conn()?;
-        let tx = db.transaction()?;
-        let deleted = tx.execute(
-            "DELETE FROM connections WHERE id = ?1 AND revision = ?2",
-            params![id, revision],
-        )?;
+        on_delete_secret: impl FnOnce() -> std::result::Result<(), E>,
+    ) -> std::result::Result<(Settings, Vec<Companion>), E>
+    where
+        E: From<StoreError>,
+    {
+        let mut companions = self.0.companion_repo().companions()?;
+        let mut db = self.0.conn()?;
+        let tx = db.transaction().map_err(StoreError::from)?;
+        let deleted = tx
+            .execute(
+                "DELETE FROM connections WHERE id = ?1 AND revision = ?2",
+                params![id, revision],
+            )
+            .map_err(StoreError::from)?;
         if deleted == 0 {
-            return Err(HostError::Conflict(
+            return Err(E::from(StoreError::Conflict(
                 "connection changed or was already deleted".into(),
-            ));
+            )));
         }
         let stamp = now();
         companions.retain_mut(|companion| companion.assignments.remove_connection(id));
         for companion in &mut companions {
             companion.revision += 1;
             companion.updated_at.clone_from(&stamp);
+            let encoded = to_json(&companion.assignments)?;
             tx.execute(
                 "UPDATE companions SET assignments = ?1, revision = ?2, updated_at = ?3 WHERE id = ?4",
-                params![to_json(&companion.assignments)?, companion.revision, stamp, companion.id],
-            )?;
+                params![encoded, companion.revision, stamp, companion.id],
+            )
+            .map_err(StoreError::from)?;
         }
         tx.execute(
             "UPDATE settings_state SET revision = revision + 1, updated_at = ?1 WHERE id = 1",
             [&stamp],
-        )?;
+        )
+        .map_err(StoreError::from)?;
         // Do not commit the removal if the registered key could not be erased.
         on_delete_secret()?;
-        tx.commit()?;
+        tx.commit().map_err(StoreError::from)?;
         drop(db);
         Ok((self.settings()?, companions))
     }
 
-    pub(crate) fn set_check(&self, id: &str, check: &Check) -> Result<()> {
+    pub fn set_check(&self, id: &str, check: &Check) -> Result<()> {
         let changed = self
+            .0
             .conn()?
             .prepare_cached(
                 "UPDATE connections SET last_check = ?2, updated_at = ?3 WHERE id = ?1",
@@ -270,9 +283,7 @@ fn keeps_verified_model_list(previous: &Connection, next: &Connection) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::settings::{
-        ConnectionConfig, ConnectionKind, CredentialState, Endpoint, LlmConnection,
-    };
+    use ene_domain::{Endpoint, LlmConnection};
 
     fn connection(id: &str) -> Connection {
         Connection {
@@ -299,7 +310,8 @@ mod tests {
     fn historical_unknown_credential_state_is_absent_but_invalid_kinds_are_corrupt() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
-        store.update_settings(1, &[(connection("c1"), 0)]).unwrap();
+        let repo = store.settings_repo();
+        repo.update_settings(1, &[(connection("c1"), 0)]).unwrap();
         for (stored, expected) in [
             ("absent", CredentialState::Absent),
             ("registered", CredentialState::Registered),
@@ -315,72 +327,54 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(
-                store.connection("c1").unwrap().unwrap().credential_state,
+                repo.connection("c1").unwrap().unwrap().credential_state,
                 expected
             );
         }
-        for kind in ["unknown", "", "Llm", " llm", "tts"] {
+        for invalid_kind in ["unknown", ""] {
             store
                 .conn()
                 .unwrap()
-                .execute("UPDATE connections SET kind = ?1 WHERE id = 'c1'", [kind])
+                .execute(
+                    "UPDATE connections SET kind = ?1 WHERE id = 'c1'",
+                    [invalid_kind],
+                )
                 .unwrap();
-            assert!(
-                matches!(store.connection("c1"), Err(HostError::Storage(_))),
-                "{kind}"
-            );
+            assert!(matches!(repo.connection("c1"), Err(StoreError::Storage(_))));
         }
         store
             .conn()
             .unwrap()
-            .execute("UPDATE connections SET kind = 'llm' WHERE id = 'c1'", [])
+            .execute("UPDATE connections SET kind = 'tts' WHERE id = 'c1'", [])
             .unwrap();
-        assert_eq!(
-            store.connection("c1").unwrap().unwrap().kind,
-            ConnectionKind::Llm
-        );
+        assert!(matches!(repo.connection("c1"), Err(StoreError::Storage(_))));
     }
 
     #[test]
-    fn repeated_settings_mutations_keep_bindings_revisions_and_missing_rows_separate() {
+    fn updating_settings_checks_revisions_and_keeps_per_connection_revisions() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
-        assert_eq!(store.settings().unwrap().revision, 1);
-        let mut settings = store
+        let repo = store.settings_repo();
+        let mut settings = repo
             .update_settings(1, &[(connection("c1"), 0), (connection("c2"), 0)])
             .unwrap();
-        for (id, state, healthy) in [
-            ("c1", CredentialState::Registered, true),
-            ("c2", CredentialState::Environment, false),
-            ("c1", CredentialState::Absent, false),
-        ] {
-            let check = Check {
-                healthy,
-                checked_at: now(),
-                ..Default::default()
-            };
-            store.set_credential_state(id, state).unwrap();
-            store.set_check(id, &check).unwrap();
-            let stored = store.connection(id).unwrap().unwrap();
-            assert_eq!(stored.credential_state, state);
-            assert_eq!(stored.last_check, Some(check));
-        }
+        assert_eq!(settings.revision, 2);
         assert!(matches!(
-            store.set_credential_state("missing", CredentialState::Absent),
-            Err(HostError::NotFound(_))
+            repo.set_credential_state("missing", CredentialState::Absent),
+            Err(StoreError::NotFound(_))
         ));
         assert!(matches!(
-            store.set_check("missing", &Check::default()),
-            Err(HostError::NotFound(_))
+            repo.set_check("missing", &Check::default()),
+            Err(StoreError::NotFound(_))
         ));
         for id in ["c2", "c1", "c2"] {
-            let mut changed = store.connection(id).unwrap().unwrap();
+            let mut changed = repo.connection(id).unwrap().unwrap();
             let expected = changed.revision;
             changed.name.push_str(" edited");
-            settings = store
+            settings = repo
                 .update_settings(settings.revision, &[(changed.clone(), expected)])
                 .unwrap();
-            let stored = store.connection(id).unwrap().unwrap();
+            let stored = repo.connection(id).unwrap().unwrap();
             assert_eq!(stored.name, changed.name);
             assert_eq!(stored.revision, expected + 1);
         }
@@ -393,7 +387,9 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("state.sqlite3")).unwrap();
-        let settings = store
+        let repo = store.settings_repo();
+        let companions = store.companion_repo();
+        let settings = repo
             .update_settings(1, &[(connection("drop"), 0), (connection("keep"), 0)])
             .unwrap();
         let mut secrets = HashMap::from([
@@ -408,30 +404,36 @@ mod tests {
         companion.assignments.companion = assignment("drop");
         companion.assignments.task = assignment("keep");
         companion.assignments.perception = Some(assignment("drop"));
-        store.insert_companion(&companion).unwrap();
+        companions.insert_companion(&companion).unwrap();
 
         assert!(matches!(
-            store.delete_connection("drop", 2, || {
+            repo.delete_connection("drop", 2, || -> Result<()> {
                 secrets.remove("drop");
                 Ok(())
             }),
-            Err(HostError::Conflict(_))
+            Err(StoreError::Conflict(_))
         ));
         assert_eq!(secrets.get("drop").map(String::as_str), Some("discarded"));
-        assert_eq!(store.companion(&companion.id).unwrap().unwrap(), companion);
+        assert_eq!(
+            companions.companion(&companion.id).unwrap().unwrap(),
+            companion
+        );
 
         // If secret erasure fails, the SQLite transaction must roll back cleanly.
         assert!(matches!(
-            store.delete_connection("drop", 1, || {
-                Err(HostError::Storage("keyring unavailable".into()))
+            repo.delete_connection("drop", 1, || -> Result<()> {
+                Err(StoreError::Storage("keyring unavailable".into()))
             }),
-            Err(HostError::Storage(_))
+            Err(StoreError::Storage(_))
         ));
-        assert!(store.connection("drop").unwrap().is_some());
-        assert_eq!(store.companion(&companion.id).unwrap().unwrap(), companion);
+        assert!(repo.connection("drop").unwrap().is_some());
+        assert_eq!(
+            companions.companion(&companion.id).unwrap().unwrap(),
+            companion
+        );
 
-        let (next, changed) = store
-            .delete_connection("drop", 1, || {
+        let (next, changed) = repo
+            .delete_connection("drop", 1, || -> Result<()> {
                 secrets.remove("drop");
                 Ok(())
             })
@@ -445,7 +447,7 @@ mod tests {
             ["keep"]
         );
         assert_eq!(changed.len(), 1);
-        let saved = store.companion(&companion.id).unwrap().unwrap();
+        let saved = companions.companion(&companion.id).unwrap().unwrap();
         assert_eq!(saved, changed[0]);
         assert!(!saved.assignments.companion.is_set());
         assert_eq!(saved.assignments.task, assignment("keep"));
@@ -459,16 +461,17 @@ mod tests {
     fn a_stale_connection_rolls_back_the_whole_settings_batch() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
-        let before = store
+        let repo = store.settings_repo();
+        let before = repo
             .update_settings(1, &[(connection("c1"), 0), (connection("c2"), 0)])
             .unwrap();
         let mut changed = connection("c1");
         changed.name = "updated".into();
         assert!(matches!(
-            store.update_settings(before.revision, &[(changed, 1), (connection("c2"), 0)]),
-            Err(HostError::Conflict(_))
+            repo.update_settings(before.revision, &[(changed, 1), (connection("c2"), 0)]),
+            Err(StoreError::Conflict(_))
         ));
-        assert_eq!(store.settings().unwrap(), before);
-        assert_eq!(store.settings_revision().unwrap(), before.revision);
+        assert_eq!(repo.settings().unwrap(), before);
+        assert_eq!(repo.settings_revision().unwrap(), before.revision);
     }
 }

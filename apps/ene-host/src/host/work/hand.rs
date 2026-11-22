@@ -99,7 +99,7 @@ pub(crate) fn selected(
 ) -> Option<(String, Arc<Running>)> {
     let assignment = companion.model(crate::host::mind::Role::Task)?;
     let store = world.resource::<Store>();
-    let settings = store.settings().ok()?;
+    let settings = store.settings_repo().settings().ok()?;
     let connection = settings
         .connections
         .iter()
@@ -401,7 +401,7 @@ fn apply(world: &mut World, adapter: &str, event: ene_plugin::Event) {
         return;
     };
     let store = world.resource::<Store>().clone();
-    let Ok(active) = store.active_run(&work_id) else {
+    let Ok(active) = store.work_repo().active_run(&work_id) else {
         return;
     };
     match event {
@@ -616,7 +616,7 @@ fn request_permission(
     };
     let (normalized, hash) = permission::canonicalise(&tool_name, &arguments);
     let approval_id = uuid::Uuid::new_v4().to_string();
-    let client_id = match store.work_session(&run.work_id) {
+    let client_id = match store.work_repo().work_session(&run.work_id) {
         Ok(session) => session.and_then(|session| session.client_id),
         Err(error) => {
             if error.is_storage() {
@@ -770,7 +770,7 @@ fn finish_drivers(world: &mut World) {
         let Some(work_id) = work_id else {
             continue;
         };
-        let Ok(Some(run)) = store.active_run(&work_id) else {
+        let Ok(Some(run)) = store.work_repo().active_run(&work_id) else {
             continue;
         };
         if run.state.is_terminal() {
@@ -796,8 +796,8 @@ fn resume_approvals(world: &mut World) {
             .iter()
             .filter_map(|(adapter, hand)| {
                 let pending = hand.pending.as_ref()?;
-                store.active_run(&hand.work_id).ok().flatten()?;
-                let Ok(Some(approval)) = store.approval(&pending.approval) else {
+                store.work_repo().active_run(&hand.work_id).ok().flatten()?;
+                let Ok(Some(approval)) = store.approval_repo().approval(&pending.approval) else {
                     return None;
                 };
                 let outcome = match approval.status {
@@ -842,10 +842,16 @@ fn deliver_parked(world: &mut World) {
                 if hand.parked.is_empty() {
                     return None;
                 }
-                if store.active_run(&hand.work_id).ok().flatten().is_some() {
+                if store
+                    .work_repo()
+                    .active_run(&hand.work_id)
+                    .ok()
+                    .flatten()
+                    .is_some()
+                {
                     return None;
                 }
-                let Ok(Some(session)) = store.work_session(&hand.work_id) else {
+                let Ok(Some(session)) = store.work_repo().work_session(&hand.work_id) else {
                     return None;
                 };
                 if session.status == WorkStatus::Closed {
@@ -857,7 +863,7 @@ fn deliver_parked(world: &mut World) {
             .collect()
     };
     for (work_id, text) in due {
-        let Ok(Some(session)) = store.work_session(&work_id) else {
+        let Ok(Some(session)) = store.work_repo().work_session(&work_id) else {
             continue;
         };
         if let Err(error) = super::start_run(world, &session, &text) {

@@ -79,14 +79,19 @@ async fn a_slow_embedding_holds_the_model_call_without_blocking_the_host() {
         }),
     };
     store
-        .update_settings(store.settings_revision().unwrap(), &[(connection, 0)])
+        .settings_repo()
+        .update_settings(
+            store.settings_repo().settings_revision().unwrap(),
+            &[(connection, 0)],
+        )
         .unwrap();
-    let mut companion = store.companion(&id).unwrap().unwrap();
+    let mut companion = store.companion_repo().companion(&id).unwrap().unwrap();
     companion.assignments.embedding = Some(Assignment {
         connection_id: "embedding-test".into(),
         model_id: "test-embedding".into(),
     });
     store
+        .companion_repo()
         .update_companion(&companion, companion.revision)
         .unwrap();
     harness.accept("async-tail", "hello").unwrap();
@@ -142,6 +147,7 @@ async fn work_agent_recall_keeps_the_tail_without_polluting_companion_injections
         }
         let store = harness.store();
         store
+            .memory_repo()
             .insert_memory(MemoryRecord {
                 id: "m-head".into(),
                 scope: harness.companion.clone(),
@@ -152,6 +158,7 @@ async fn work_agent_recall_keeps_the_tail_without_polluting_companion_injections
             })
             .unwrap();
         store
+            .memory_repo()
             .insert_memory(MemoryRecord {
                 id: "m-work".into(),
                 scope: harness.companion.clone(),
@@ -184,12 +191,17 @@ async fn work_agent_recall_keeps_the_tail_without_polluting_companion_injections
 
         assert_eq!(
             store
+                .memory_repo()
                 .injected_between(&harness.companion, None, u64::MAX)
                 .unwrap(),
             vec!["m-head".to_owned()],
         );
 
-        let companion = store.companion(&harness.companion).unwrap().unwrap();
+        let companion = store
+            .companion_repo()
+            .companion(&harness.companion)
+            .unwrap()
+            .unwrap();
         let work_entity = agent::spawn_work_agent(
             harness.app.world_mut(),
             &companion,
@@ -228,6 +240,7 @@ async fn work_agent_recall_keeps_the_tail_without_polluting_companion_injections
         );
         assert_eq!(
             store
+                .memory_repo()
                 .injected_between(&harness.companion, None, u64::MAX)
                 .unwrap(),
             vec!["m-head".to_owned()],
@@ -254,6 +267,7 @@ async fn b13_turn_cause_uses_schedule_instruction_instead_of_stale_user_chat() {
         })));
     let store = harness.store();
     store
+        .memory_repo()
         .insert_memory(MemoryRecord {
             id: "m-tea".into(),
             scope: harness.companion.clone(),
@@ -264,6 +278,7 @@ async fn b13_turn_cause_uses_schedule_instruction_instead_of_stale_user_chat() {
         })
         .unwrap();
     store
+        .memory_repo()
         .insert_memory(MemoryRecord {
             id: "m-standup".into(),
             scope: harness.companion.clone(),
@@ -343,6 +358,7 @@ fn b14_context_builder_records_only_recalled_memories_that_fit_budget() {
     let first_content = format!("予算テスト記憶A {}", "あ".repeat(90));
     let second_content = format!("予算テスト記憶B {}", "い".repeat(300));
     store
+        .memory_repo()
         .insert_memory(MemoryRecord {
             id: "m-fit".into(),
             scope: harness.companion.clone(),
@@ -353,6 +369,7 @@ fn b14_context_builder_records_only_recalled_memories_that_fit_budget() {
         })
         .unwrap();
     store
+        .memory_repo()
         .insert_memory(MemoryRecord {
             id: "m-dropped".into(),
             scope: harness.companion.clone(),
@@ -399,6 +416,7 @@ fn b14_context_builder_records_only_recalled_memories_that_fit_budget() {
         "second recalled memory must be omitted when over budget"
     );
     let recorded = store
+        .memory_repo()
         .injected_between(&harness.companion, None, u64::MAX)
         .unwrap();
     assert_eq!(

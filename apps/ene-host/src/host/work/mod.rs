@@ -181,7 +181,7 @@ fn restore(world: &mut World) {
     };
     let mut kept: HashMap<String, Entity> = HashMap::new();
     for (entity, work_id, run_id) in &agents {
-        let active = match store.active_run(work_id) {
+        let active = match store.work_repo().active_run(work_id) {
             Ok(active) => active.map(|run| run.run_id),
             Err(error) => {
                 if error.is_storage() {
@@ -191,7 +191,7 @@ fn restore(world: &mut World) {
                 None
             }
         };
-        let open = match store.work_session(work_id) {
+        let open = match store.work_repo().work_session(work_id) {
             Ok(session) => session.is_some_and(|session| session.status != WorkStatus::Closed),
             Err(error) => {
                 if error.is_storage() {
@@ -210,7 +210,7 @@ fn restore(world: &mut World) {
             retire_entity(world, entity);
         }
     }
-    let companions = match store.companions() {
+    let companions = match store.companion_repo().companions() {
         Ok(companions) => companions,
         Err(error) => {
             if error.is_storage() {
@@ -221,7 +221,7 @@ fn restore(world: &mut World) {
     };
     for companion in companions {
         let plugin = hand::selected(world, &companion).is_some();
-        let sessions = match store.work_sessions(&companion.id) {
+        let sessions = match store.work_repo().work_sessions(&companion.id) {
             Ok(sessions) => sessions,
             Err(error) => {
                 if error.is_storage() {
@@ -232,7 +232,7 @@ fn restore(world: &mut World) {
             }
         };
         for session in sessions {
-            match store.active_run(&session.id) {
+            match store.work_repo().active_run(&session.id) {
                 Ok(Some(run)) => {
                     if plugin {
                         // A restart lost the harness guest's session state, so an
@@ -276,7 +276,7 @@ impl Plugin for WorkPlugin {
 pub(crate) fn list(store: &Store, companion: &str) -> Result<w::WorkViews> {
     require_companion(store, companion)?;
     let mut items = Vec::new();
-    for session in store.work_sessions(companion)? {
+    for session in store.work_repo().work_sessions(companion)? {
         items.push(view(store, &session.id)?);
     }
     Ok(w::WorkViews {
@@ -291,18 +291,20 @@ pub(crate) fn get(store: &Store, work_id: &str) -> Result<w::WorkView> {
 
 fn view(store: &Store, work_id: &str) -> Result<w::WorkView> {
     let session = require_session(store, work_id)?;
-    let runs = store.runs(work_id)?;
+    let runs = store.work_repo().runs(work_id)?;
     Ok(wire::work_view(&session, &runs))
 }
 
 fn require_companion(store: &Store, id: &str) -> Result<Companion> {
     store
+        .companion_repo()
         .companion(id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))
 }
 
 fn require_session(store: &Store, id: &str) -> Result<WorkSession> {
     store
+        .work_repo()
         .work_session(id)?
         .ok_or_else(|| HostError::NotFound(("work session not found").into()))
 }
@@ -327,9 +329,11 @@ pub(crate) fn start(world: &mut World, request: w::StartWorkRequest) -> Result<w
         created_at: String::new(),
         updated_at: String::new(),
     };
-    store.insert_work_session(&session)?;
+    store.work_repo().insert_work_session(&session)?;
     if let Err(error) = start_run(world, &session, &request.instruction) {
-        let _ = store.set_work_status(&session.id, WorkStatus::Closed);
+        let _ = store
+            .work_repo()
+            .set_work_status(&session.id, WorkStatus::Closed);
         retire(world, &session.id);
         return Err(error);
     }
@@ -349,7 +353,7 @@ pub(crate) fn start_run(
     if instruction.trim().is_empty() {
         return Err(HostError::Invalid(("an instruction is required").into()));
     }
-    if let Some(active) = store.active_run(&session.id)? {
+    if let Some(active) = store.work_repo().active_run(&session.id)? {
         return Err(HostError::Conflict(format!(
             "the work session is already running run {}",
             active.run_id
@@ -362,8 +366,10 @@ pub(crate) fn start_run(
         instruction,
         RunState::Running,
     );
-    store.insert_run(&run)?;
-    store.set_work_status(&session.id, WorkStatus::Active)?;
+    store.work_repo().insert_run(&run)?;
+    store
+        .work_repo()
+        .set_work_status(&session.id, WorkStatus::Active)?;
     // The backend pick: a task assignment onto an installed harness plugin
     // runs the session on the plugin hand; anything else keeps the rig agent.
     let failure = match hand::selected(world, &companion) {
@@ -387,10 +393,12 @@ pub(crate) fn start_run(
     };
     if let Some(error) = failure {
         let _ = fail_run(&store, &run, &error);
-        let _ = store.set_work_status(&session.id, WorkStatus::Idle);
-        if let Ok(Some(session)) = store.work_session(&session.id) {
+        let _ = store
+            .work_repo()
+            .set_work_status(&session.id, WorkStatus::Idle);
+        if let Ok(Some(session)) = store.work_repo().work_session(&session.id) {
             notify_status(world, &session);
-            if let Ok(Some(failed)) = store.run(&run.run_id) {
+            if let Ok(Some(failed)) = store.work_repo().run(&run.run_id) {
                 notify_finished(world, &session, &failed);
             }
         }
@@ -413,19 +421,20 @@ fn fail_run(store: &Store, run: &Run, error: &HostError) -> Result<()> {
     let mut failed = run.clone();
     failed.state = RunState::Failed;
     failed.failure = Some(Failure::new(error.code(), error.message()));
-    store.update_run(&failed)
+    Ok(store.work_repo().update_run(&failed)?)
 }
 
 /// The client a new work session is commissioned from: the one the request
 /// names, or the companion's active client when it names none. The session
 /// keeps that client even after the companion moves to another one.
 fn binding_for(store: &Store, request: &w::StartWorkRequest) -> Result<Option<String>> {
-    let activation = store.activation(&request.companion_id)?;
+    let activation = store.client_repo().activation(&request.companion_id)?;
     if request.client_id.is_empty() {
         return Ok(activation.and_then(|activation| activation.client_id));
     }
     super::util::validate_id(&request.client_id)?;
     store
+        .client_repo()
         .client(&request.client_id)?
         .ok_or_else(|| HostError::NotFound("client not found".into()))?;
     let Some(activation) = activation else {
@@ -464,7 +473,7 @@ pub(crate) fn send(world: &mut World, request: w::SendWorkRequest) -> Result<w::
         });
     }
     let request_id = uuid::Uuid::new_v4().to_string();
-    if let Some(run) = store.active_run(&request.work_id)? {
+    if let Some(run) = store.work_repo().active_run(&request.work_id)? {
         // A plugin hand parks mid-run input and delivers it as the next
         // prompt turn; the rig agent takes it inside its turn.
         if hand::owns(world, &request.work_id) {
@@ -509,7 +518,7 @@ fn accepted(
             &request_id,
         );
     }
-    if let Ok(Some(session)) = store.work_session(&request.work_id) {
+    if let Ok(Some(session)) = store.work_repo().work_session(&request.work_id) {
         notify_status(world, &session);
     }
     Ok(w::WorkAcceptance {
@@ -590,7 +599,7 @@ pub(crate) fn stop_with(world: &mut World, work_id: &str, reason: Option<&str>) 
     if require_session(&store, work_id)?.status == WorkStatus::Closed {
         return Ok(());
     }
-    let Some(run) = store.active_run(work_id)? else {
+    let Some(run) = store.work_repo().active_run(work_id)? else {
         return Ok(());
     };
     let reason = reason.unwrap_or("the user stopped the work");
@@ -612,8 +621,8 @@ pub(crate) fn close(world: &mut World, work_id: &str) -> Result<()> {
         return Ok(());
     }
     stop_with(world, work_id, Some("the work session is closing"))?;
-    store.close_work(work_id)?;
-    if let Ok(Some(session)) = store.work_session(work_id) {
+    store.work_repo().close_work(work_id)?;
+    if let Ok(Some(session)) = store.work_repo().work_session(work_id) {
         notify_status(world, &session);
     }
     hand::release(world, work_id);
@@ -623,7 +632,7 @@ pub(crate) fn close(world: &mut World, work_id: &str) -> Result<()> {
 
 pub(crate) fn settle_run(world: &mut World, run_id: String, outcome: TurnOutcome) {
     let store = world.resource::<Store>().clone();
-    let Ok(Some(run)) = store.run(&run_id) else {
+    let Ok(Some(run)) = store.work_repo().run(&run_id) else {
         return;
     };
     if run.state.is_terminal() {
@@ -652,7 +661,7 @@ pub(crate) fn settle_run(world: &mut World, run_id: String, outcome: TurnOutcome
 
 fn finish_run(world: &mut World, mut run: Run, state: RunState, text: Option<String>) {
     let store = world.resource::<Store>().clone();
-    let active = match store.active_run(&run.work_id) {
+    let active = match store.work_repo().active_run(&run.work_id) {
         Ok(active) => active,
         Err(error) => {
             if error.is_storage() {
@@ -671,12 +680,12 @@ fn finish_run(world: &mut World, mut run: Run, state: RunState, text: Option<Str
             text.clone().unwrap_or_else(|| "the run failed".to_owned()),
         ));
     }
-    if let Err(error) = store.update_run(&run) {
+    if let Err(error) = store.work_repo().update_run(&run) {
         super::fail(world, error.to_string());
         return;
     }
     super::client::computer::invalidate_run(world, &run_id);
-    let session = match store.work_session(&run.work_id) {
+    let session = match store.work_repo().work_session(&run.work_id) {
         Ok(session) => session,
         Err(error) => {
             if error.is_storage() {
@@ -687,9 +696,11 @@ fn finish_run(world: &mut World, mut run: Run, state: RunState, text: Option<Str
     };
     if was_active && let Some(session) = &session {
         if session.status != WorkStatus::Closed {
-            let _ = store.set_work_status(&session.id, WorkStatus::Idle);
+            let _ = store
+                .work_repo()
+                .set_work_status(&session.id, WorkStatus::Idle);
         }
-        if let Ok(Some(session)) = store.work_session(&session.id) {
+        if let Ok(Some(session)) = store.work_repo().work_session(&session.id) {
             notify_status(world, &session);
             notify_finished(world, &session, &run);
             if let Some(parent) = agent::agent_of(world, &session.companion_id) {
@@ -747,13 +758,13 @@ fn detect_stalls(world: &mut World) {
         .stalled(Instant::now(), STALL_TIMEOUT);
     for run_id in due {
         let store = world.resource::<Store>().clone();
-        let Ok(Some(run)) = store.run(&run_id) else {
+        let Ok(Some(run)) = store.work_repo().run(&run_id) else {
             continue;
         };
         if run.state != RunState::Running {
             continue;
         }
-        let Ok(Some(session)) = store.work_session(&run.work_id) else {
+        let Ok(Some(session)) = store.work_repo().work_session(&run.work_id) else {
             continue;
         };
         if session.status == WorkStatus::Closed {

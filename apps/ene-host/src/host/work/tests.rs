@@ -16,13 +16,13 @@ fn session(store: &Store) -> WorkSession {
         created_at: String::new(),
         updated_at: String::new(),
     };
-    store.insert_work_session(&session).unwrap();
+    store.work_repo().insert_work_session(&session).unwrap();
     session
 }
 
 fn run(store: &Store, run_id: &str, state: RunState) {
     let run = new_run(run_id.into(), "w1", "do it", state);
-    store.insert_run(&run).unwrap();
+    store.work_repo().insert_run(&run).unwrap();
 }
 
 fn world(store: Store) -> World {
@@ -46,7 +46,7 @@ fn agent(world: &mut World, run_id: &str) -> Entity {
 }
 
 fn state(store: &Store, run_id: &str) -> RunState {
-    store.run(run_id).unwrap().unwrap().state
+    store.work_repo().run(run_id).unwrap().unwrap().state
 }
 
 #[test]
@@ -64,19 +64,30 @@ fn a_session_keeps_one_agent_across_runs_and_retires_it_with_the_session() {
     settle_run(&mut world, "run-a".into(), TurnOutcome::Stopped(None));
     assert_eq!(state(&store, "run-a"), RunState::Cancelled);
     assert_eq!(
-        store.work_session("w1").unwrap().unwrap().status,
+        store
+            .work_repo()
+            .work_session("w1")
+            .unwrap()
+            .unwrap()
+            .status,
         WorkStatus::Idle
     );
     assert_eq!(agent_of(&mut world, "w1"), Some(kept));
 
     run(&store, "run-b", RunState::Running);
     let stale = agent(&mut world, "run-a");
-    store.set_work_status("w1", WorkStatus::Active).unwrap();
+    store
+        .work_repo()
+        .set_work_status("w1", WorkStatus::Active)
+        .unwrap();
     restore(&mut world);
     assert_eq!(agent_of(&mut world, "w1"), Some(kept));
     assert!(world.get::<WorkAgent>(stale).is_none());
 
-    store.set_work_status("w1", WorkStatus::Closed).unwrap();
+    store
+        .work_repo()
+        .set_work_status("w1", WorkStatus::Closed)
+        .unwrap();
     restore(&mut world);
     assert!(agent_of(&mut world, "w1").is_none());
 }
@@ -112,7 +123,12 @@ fn stop_then_close_settles_the_run_and_releases_the_agent() {
 
     close(&mut world, "w1").unwrap();
     assert_eq!(
-        store.work_session("w1").unwrap().unwrap().status,
+        store
+            .work_repo()
+            .work_session("w1")
+            .unwrap()
+            .unwrap()
+            .status,
         WorkStatus::Closed
     );
     assert!(agent_of(&mut world, "w1").is_none());

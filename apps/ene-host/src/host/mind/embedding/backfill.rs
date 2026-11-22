@@ -88,7 +88,7 @@ pub(super) fn backfill(mut commands: Commands, params: BackfillParams<'_>) {
         return;
     }
     state.last = Some(now);
-    let companions = match store.companions() {
+    let companions = match store.companion_repo().companions() {
         Ok(companions) => companions,
         Err(error) => {
             if error.is_storage() {
@@ -108,7 +108,10 @@ pub(super) fn backfill(mut commands: Commands, params: BackfillParams<'_>) {
         else {
             continue;
         };
-        match store.memories_missing_embedding(&companion.id, &target.space, 1) {
+        match store
+            .memory_repo()
+            .memories_missing_embedding(&companion.id, &target.space, 1)
+        {
             Ok(pending) if pending.is_empty() => continue,
             Ok(_) => {}
             Err(error) => {
@@ -149,7 +152,7 @@ pub(super) fn backfill(mut commands: Commands, params: BackfillParams<'_>) {
                     )
                     .await
                 }
-                Err(error) => Err(error),
+                Err(error) => Err(error.into()),
             };
             let _ = sender.send((companion_id, result));
         });
@@ -168,7 +171,7 @@ pub(super) async fn fill(
         let Some(target) = target(store, credentials, companion, embeddings)? else {
             break;
         };
-        let pending = Store::missing_embeddings_on(
+        let pending = crate::host::db::memories::missing_embeddings_on(
             &connection,
             &companion.id,
             &target.space,
@@ -190,7 +193,7 @@ pub(super) async fn fill(
                     ("embedding dimensions do not match the connection").into(),
                 ));
             }
-            if Store::write_embedding_on(
+            if crate::host::db::memories::write_embedding_on(
                 &connection,
                 &row.id,
                 row.content_revision,

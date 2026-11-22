@@ -632,7 +632,7 @@ fn p10_listed_providers_cover_installed_plugins_and_their_defaults() {
         Some("https://plugin.example")
     );
     assert_eq!(
-        empty.environment_variable(&providers).as_deref(),
+        settings::environment_variable(&empty, &providers).as_deref(),
         Some("ENE_P08_KEY")
     );
     let configured = connection(ConnectionKind::Llm, "https://operator.example/");

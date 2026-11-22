@@ -369,6 +369,7 @@ async fn an_mcp_tool_runs_through_the_gate() {
         }
         !world
             .resource::<Store>()
+            .approval_repo()
             .approvals(crate::host::permission::ApprovalStatus::Pending)
             .unwrap()
             .is_empty()
@@ -380,6 +381,7 @@ async fn an_mcp_tool_runs_through_the_gate() {
     );
     let pending_id = harness
         .store()
+        .approval_repo()
         .approvals(crate::host::permission::ApprovalStatus::Pending)
         .unwrap()[0]
         .request_id
@@ -503,7 +505,7 @@ async fn b17_mcp_backoff_prevents_tight_retry_and_recovers_on_reconnect_request(
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
     let mut harness = crate::host::tests::Harness::new([]);
-    let rev = harness.store().settings_revision().unwrap();
+    let rev = harness.store().settings_repo().settings_revision().unwrap();
     let conn = Connection {
         id: "mcp-backoff".into(),
         name: "notes".into(),
@@ -522,7 +524,11 @@ async fn b17_mcp_backoff_prevents_tight_retry_and_recovers_on_reconnect_request(
             ..Default::default()
         }),
     };
-    harness.store().update_settings(rev, &[(conn, 0)]).unwrap();
+    harness
+        .store()
+        .settings_repo()
+        .update_settings(rev, &[(conn, 0)])
+        .unwrap();
     let world = harness.app.world_mut();
     world.insert_resource(HostRuntime(tokio::runtime::Handle::current()));
     world.init_resource::<McpServers>();
@@ -612,7 +618,7 @@ async fn f24_http_mcp_sends_auth_header_and_custom_headers_and_recovers_after_cr
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
     let mut harness = crate::host::tests::Harness::new([]);
-    let rev = harness.store().settings_revision().unwrap();
+    let rev = harness.store().settings_repo().settings_revision().unwrap();
     let mut custom_headers = BTreeMap::new();
     custom_headers.insert("x-tenant".into(), "acme".into());
     let conn = Connection {
@@ -634,7 +640,11 @@ async fn f24_http_mcp_sends_auth_header_and_custom_headers_and_recovers_after_cr
             ..Default::default()
         }),
     };
-    harness.store().update_settings(rev, &[(conn, 0)]).unwrap();
+    harness
+        .store()
+        .settings_repo()
+        .update_settings(rev, &[(conn, 0)])
+        .unwrap();
     let world = harness.app.world_mut();
     world.insert_resource(HostRuntime(tokio::runtime::Handle::current()));
     world.init_resource::<McpServers>();

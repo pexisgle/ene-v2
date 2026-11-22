@@ -207,11 +207,11 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
         5,
     );
     assert_eq!(
-        exa_conn.environment_variable(&providers).as_deref(),
+        crate::host::settings::environment_variable(&exa_conn, &providers).as_deref(),
         Some("EXA_API_KEY")
     );
     assert_eq!(
-        tavily_conn.environment_variable(&providers).as_deref(),
+        crate::host::settings::environment_variable(&tavily_conn, &providers).as_deref(),
         Some("TAVILY_API_KEY")
     );
     let resolved_exa = resolve_connection(&exa_conn, Some(&creds), &providers).unwrap();
@@ -265,7 +265,7 @@ fn resolve_skips_unconfigured_enabled_search_when_another_is_ready() {
     creds.remember("search-exa", "exa-valid-key".into());
     let providers = Providers::none();
 
-    let rev = store.settings_revision().unwrap();
+    let rev = store.settings_repo().settings_revision().unwrap();
     // `a-unconfigured-tavily` sorts before `search-exa` by id, but has no key.
     let unconfigured = Connection {
         id: "a-unconfigured-tavily".into(),
@@ -302,6 +302,7 @@ fn resolve_skips_unconfigured_enabled_search_when_another_is_ready() {
         }),
     };
     store
+        .settings_repo()
         .update_settings(rev, &[(unconfigured, 0), (ready_exa, 0)])
         .unwrap();
 
@@ -481,6 +482,7 @@ async fn f13_b04_unconfigured_search_refuses_without_http_and_gates_on_configure
     assert!(
         harness
             .store()
+            .approval_repo()
             .approvals(crate::host::permission::ApprovalStatus::Pending)
             .unwrap()
             .is_empty(),
@@ -489,7 +491,7 @@ async fn f13_b04_unconfigured_search_refuses_without_http_and_gates_on_configure
     assert_eq!(hits.load(Ordering::SeqCst), 0);
 
     // Part 2: configuring Search connection + Allow policy for "web_search" executes against configured URL.
-    let rev = harness.store().settings_revision().unwrap();
+    let rev = harness.store().settings_repo().settings_revision().unwrap();
     let search_conn = Connection {
         revision: 0,
         ..search_test_connection(
@@ -503,10 +505,12 @@ async fn f13_b04_unconfigured_search_refuses_without_http_and_gates_on_configure
     };
     harness
         .store()
+        .settings_repo()
         .update_settings(rev, &[(search_conn, 0)])
         .unwrap();
     harness
         .store()
+        .policy_repo()
         .apply_policy_rules(
             &[crate::host::permission::PolicyRule {
                 id: "allow-search".into(),
@@ -566,6 +570,7 @@ fn configure_exa_tavily_harness() -> crate::host::tests::Harness {
     creds.remember("search-tavily", "tavily-live-key".into());
     harness
         .store()
+        .policy_repo()
         .apply_policy_rules(
             &[crate::host::permission::PolicyRule {
                 id: "allow-web-search".into(),
@@ -615,9 +620,10 @@ async fn exa_and_tavily_work_end_to_end_and_switch_cleanly_in_work_agent() {
             5,
         )
     };
-    let rev = harness.store().settings_revision().unwrap();
+    let rev = harness.store().settings_repo().settings_revision().unwrap();
     harness
         .store()
+        .settings_repo()
         .update_settings(rev, &[(exa_conn.clone(), 0), (tavily_conn.clone(), 0)])
         .unwrap();
     let probe_creds = harness.app.world().resource::<Credentials>().clone();
@@ -647,7 +653,7 @@ async fn exa_and_tavily_work_end_to_end_and_switch_cleanly_in_work_agent() {
     });
 
     // 2. Switch active search to Tavily and verify WorkAgent uses Tavily.
-    let settings = harness.store().settings().unwrap();
+    let settings = harness.store().settings_repo().settings().unwrap();
     let exa_off = Connection {
         enabled: false,
         ..exa_conn
@@ -658,6 +664,7 @@ async fn exa_and_tavily_work_end_to_end_and_switch_cleanly_in_work_agent() {
     };
     harness
         .store()
+        .settings_repo()
         .update_settings(settings.revision, &[(exa_off, 1), (tavily_on, 1)])
         .unwrap();
     crate::host::work::start(

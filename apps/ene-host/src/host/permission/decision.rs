@@ -214,7 +214,7 @@ pub(super) async fn run_decision(
 /// instruction for a hand, else the companion's newest user message.
 pub(super) fn request_context(world: &World, store: &Store, agent: Entity, run_id: &str) -> String {
     if !run_id.is_empty()
-        && let Ok(Some(run)) = store.run(run_id)
+        && let Ok(Some(run)) = store.work_repo().run(run_id)
     {
         return truncate(&run.instruction, DECISION_REQUEST_CHARS);
     }
@@ -261,7 +261,7 @@ pub(super) fn start_decision(
         push_card(world, &pending);
         return;
     }
-    let Ok(Some(companion)) = store.companion(&pending.companion) else {
+    let Ok(Some(companion)) = store.companion_repo().companion(&pending.companion) else {
         push_card(world, &pending);
         return;
     };
@@ -312,14 +312,14 @@ fn handle_decision_read_error(
 fn is_decision_approval_pending(world: &mut World, pending: &Pending) -> bool {
     let store = world.resource::<Store>().clone();
     let request = &pending.request;
-    let approval = match store.approval(request) {
+    let approval = match store.approval_repo().approval(request) {
         Ok(Some(approval)) => approval,
         Ok(None) => {
             tracing::debug!(%request, "a late decision dropped: no such approval");
             return false;
         }
         Err(error) => {
-            handle_decision_read_error(world, pending, &error);
+            handle_decision_read_error(world, pending, &error.into());
             return false;
         }
     };
@@ -404,7 +404,7 @@ fn require_approval_from_decision(
 /// The approval card and its notice, pushed only if still pending.
 pub(super) fn push_card(world: &mut World, pending: &Pending) {
     let store = world.resource::<Store>().clone();
-    let approval = match store.approval(&pending.request) {
+    let approval = match store.approval_repo().approval(&pending.request) {
         Ok(Some(approval)) => approval,
         Ok(None) => return,
         Err(error) => {

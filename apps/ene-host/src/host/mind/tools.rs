@@ -184,7 +184,7 @@ fn recall_result(
     semantic: &[String],
 ) -> Result<String> {
     let limit = args.limit.unwrap_or(8).clamp(1, 16) as usize;
-    let outcome = store.recall_hybrid(
+    let outcome = store.memory_repo().recall_hybrid(
         companion,
         &args.query,
         RecallMode::Explicit,
@@ -212,6 +212,7 @@ fn read(world: &mut World, agent: Entity, args: ReadArgs) -> Result<String> {
     let companion = companion_of_any(world, agent)?;
     let store = world.resource::<Store>().clone();
     let memory = store
+        .memory_repo()
         .memory(&args.id)?
         .ok_or_else(|| HostError::NotFound(("memory not found").into()))?;
     if !memory.visible_to(&companion) {
@@ -220,7 +221,9 @@ fn read(world: &mut World, agent: Entity, args: ReadArgs) -> Result<String> {
         ));
     }
     // Reading with the tool is an explicit use, so the recall recency moves.
-    store.cite_memory(&args.id, &format!("{companion}:{}", now()), false)?;
+    store
+        .memory_repo()
+        .cite_memory(&args.id, &format!("{companion}:{}", now()), false)?;
     if memory.scope != companion {
         // A shared memory exposes the facts only: its private origin, emotion
         // and relations stay with the companion that recorded it
@@ -234,7 +237,7 @@ fn read(world: &mut World, agent: Entity, args: ReadArgs) -> Result<String> {
         })
         .to_string());
     }
-    let relations = store.memory_edges(&args.id)?;
+    let relations = store.memory_repo().memory_edges(&args.id)?;
     Ok(detail(&memory, &relations).to_string())
 }
 
@@ -246,10 +249,11 @@ fn update(world: &mut World, agent: Entity, args: UpdateArgs) -> Result<String> 
         "memories": &args.memories,
         "state": &args.state,
     });
-    let hash = store.mind_hash(&request);
+    let hash = store.memory_repo().mind_hash(&request);
     let state = match &args.state {
         Some(patch) => {
             let current = store
+                .companion_repo()
                 .companion(&companion)?
                 .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
             let mut next = current.state.clone();
@@ -262,7 +266,7 @@ fn update(world: &mut World, agent: Entity, args: UpdateArgs) -> Result<String> 
         }
         None => None,
     };
-    let result = store.apply_mind_update(&MindUpdate {
+    let result = store.memory_repo().apply_mind_update(&MindUpdate {
         operation_id: args.operation_id,
         companion_id: companion.clone(),
         request_hash: hash,

@@ -94,6 +94,7 @@ pub(super) fn store_with_client() -> (tempfile::TempDir, Store) {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
     store
+        .client_repo()
         .register_client(&ClientDeclaration {
             id: "c1",
             name: "desk",
@@ -103,7 +104,7 @@ pub(super) fn store_with_client() -> (tempfile::TempDir, Store) {
             expected_revision: 0,
         })
         .unwrap();
-    store.activate("ene", Some("c1")).unwrap();
+    store.client_repo().activate("ene", Some("c1")).unwrap();
     (root, store)
 }
 
@@ -516,6 +517,7 @@ fn turn_end_releases_the_floor_and_relays_the_utterance() {
 fn input_binding_validates_first_metadata_and_allows_omitted_followups() {
     let (_root, store) = store_with_client();
     store
+        .client_repo()
         .register_client(&ClientDeclaration {
             id: "c2",
             name: "handheld",

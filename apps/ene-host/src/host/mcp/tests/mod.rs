@@ -287,7 +287,10 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
             revision: 0,
             last_check: None,
         };
-        store.update_settings(1, &[(row.clone(), 0)]).unwrap();
+        store
+            .settings_repo()
+            .update_settings(1, &[(row.clone(), 0)])
+            .unwrap();
         let mut world = World::new();
         world.insert_resource(store.clone());
         world.insert_resource(HostRuntime(tokio::runtime::Handle::current()));
@@ -305,11 +308,17 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
         match action {
             "disable" => {
                 row.enabled = false;
-                store.update_settings(2, &[(row.clone(), 1)]).unwrap();
+                store
+                    .settings_repo()
+                    .update_settings(2, &[(row.clone(), 1)])
+                    .unwrap();
             }
             "revision" => {
                 row.config = ConnectionConfig::Mcp(replacement.config());
-                store.update_settings(2, &[(row.clone(), 1)]).unwrap();
+                store
+                    .settings_repo()
+                    .update_settings(2, &[(row.clone(), 1)])
+                    .unwrap();
             }
             "shutdown" => world.resource_mut::<HostState>().closing = true,
             "failure" => world.resource_mut::<HostState>().failed = Some("test failure".into()),

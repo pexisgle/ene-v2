@@ -102,7 +102,7 @@ async fn a_stalled_owner_does_not_block_another() {
 fn voice_connection_prefers_enabled_connection_over_earlier_disabled_one() {
     use crate::host::settings::{Endpoint, SttConnection};
     let (_root, store) = store_with_client();
-    let rev = store.settings_revision().unwrap();
+    let rev = store.settings_repo().settings_revision().unwrap();
     let disabled = Connection {
         id: "stt-disabled".into(),
         name: "Disabled STT".into(),
@@ -140,6 +140,7 @@ fn voice_connection_prefers_enabled_connection_over_earlier_disabled_one() {
         last_check: None,
     };
     store
+        .settings_repo()
         .update_settings(rev, &[(disabled, 0), (enabled, 0)])
         .unwrap();
     let world = voice_world(&store);
@@ -432,10 +433,11 @@ fn b11_companion_voice_binding_selects_bound_tts_connection_without_silent_fallb
         last_check: None,
     };
     store
+        .settings_repo()
         .update_settings(1, &[(conn_a, 0), (conn_b, 0)])
         .unwrap();
     let mut comp = crate::host::mind::default_ene_companion("2026-01-01T00:00:00Z");
-    store.insert_companion(&comp).unwrap();
+    store.companion_repo().insert_companion(&comp).unwrap();
     comp.voice = crate::host::json::JsonDoc::new(
         "ene.voice.v1",
         serde_json::json!({"connection_id": "tts-b", "voice_id": "8"}),

@@ -1,6 +1,6 @@
 use super::super::{
     error::{HostError, Result},
-    json, net,
+    net,
     settings::Endpoint,
 };
 use bytes::Bytes;
@@ -42,67 +42,12 @@ const CHAT_MODELS: &[&str] = &[
     "gemini-3-flash-preview",
 ];
 
-fn valid_resource(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 63
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-}
-
 pub(crate) fn valid_model(id: &str) -> bool {
-    id.starts_with("gemini-")
-        && id.len() > "gemini-".len()
-        && id.bytes().all(|b| {
-            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'.' | b'_')
-        })
+    ene_domain::settings::is_valid_agent_platform_model(id)
 }
 
-fn publisher_endpoint(endpoint: &Endpoint) -> Result<String> {
-    let base = endpoint.endpoint.trim().trim_end_matches('/');
-    if !base.is_empty() && base != ENDPOINT {
-        return Err(HostError::Invalid(
-            "Agent Platform derives the endpoint from the Google Cloud location".into(),
-        ));
-    }
-    let options = json::parse_object(&endpoint.options)?;
-    let field = |name: &str| -> Result<&str> {
-        match options.get(name) {
-            None => Ok(""),
-            Some(value) => value.as_str().map(str::trim).ok_or_else(|| {
-                HostError::Invalid(format!("Agent Platform {name} must be a string"))
-            }),
-        }
-    };
-    let project = field("project_id")?;
-    let location = field("location")?;
-    if project.is_empty() {
-        if !location.is_empty() {
-            return Err(HostError::Invalid(
-                "Agent Platform requires a project ID when a location is set".into(),
-            ));
-        }
-        return Ok(format!("{ENDPOINT}/v1/publishers/google/models"));
-    }
-    let location = if location.is_empty() {
-        "global"
-    } else {
-        location
-    };
-    if !valid_resource(project) || !valid_resource(location) {
-        return Err(HostError::Invalid(
-            "Agent Platform project ID and location must use lowercase letters, digits or hyphens"
-                .into(),
-        ));
-    }
-    let host = match location {
-        "global" => ENDPOINT.into(),
-        "us" | "eu" => format!("https://aiplatform.{location}.rep.googleapis.com"),
-        _ => format!("https://{location}-aiplatform.googleapis.com"),
-    };
-    Ok(format!(
-        "{host}/v1/projects/{project}/locations/{location}/publishers/google/models"
-    ))
+fn publisher_endpoint(endpoint: &Endpoint) -> super::super::error::Result<String> {
+    ene_domain::settings::agent_platform_publisher_endpoint(endpoint).map_err(Into::into)
 }
 
 fn api_key(secret: Option<&str>) -> Result<HeaderValue> {
@@ -255,22 +200,12 @@ async fn count_tokens(
     Ok(true)
 }
 
-pub(crate) fn validate(endpoint: &Endpoint, model_ids: &[String]) -> Result<()> {
-    publisher_endpoint(endpoint)?;
-    if model_ids.iter().any(|id| !valid_model(id.trim())) {
-        return Err(HostError::Invalid(
-            "Agent Platform model IDs must be Gemini model names such as gemini-3.8-flash".into(),
-        ));
-    }
-    Ok(())
-}
-
 pub(super) fn model(
     endpoint: &Endpoint,
     secret: Option<String>,
     spec: Arc<ModelSpec>,
     catalog: &Catalog,
-) -> Result<DynModel<Completion>> {
+) -> super::super::error::Result<DynModel<Completion>> {
     let client = net::model_client().map_err(|error| HostError::Unavailable(error.to_string()))?;
     model_with_http(
         endpoint,
@@ -287,7 +222,7 @@ fn model_with_http(
     spec: Arc<ModelSpec>,
     catalog: &Catalog,
     http: impl HttpClientExt + Clone + 'static,
-) -> Result<DynModel<Completion>> {
+) -> super::super::error::Result<DynModel<Completion>> {
     let publisher = publisher_endpoint(endpoint)?;
     if !valid_model(&spec.id) {
         return Err(HostError::Invalid(

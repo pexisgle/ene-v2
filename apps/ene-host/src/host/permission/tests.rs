@@ -360,6 +360,7 @@ fn files_spec() -> CapabilitySpec {
 fn register_files_client(store: &Store) {
     let capability = "device.files".to_owned();
     store
+        .client_repo()
         .register_client_with_grants(
             &crate::host::db::clients::ClientDeclaration {
                 id: "c1",
@@ -372,7 +373,7 @@ fn register_files_client(store: &Store) {
             &["device.files".to_owned()],
         )
         .unwrap();
-    store.activate("ene", Some("c1")).unwrap();
+    store.client_repo().activate("ene", Some("c1")).unwrap();
 }
 
 /// A headless world around one gated `device_request`: the store, a
@@ -391,12 +392,13 @@ impl DecisionWorld {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
         store
+            .settings_repo()
             .update_settings(
-                store.settings_revision().unwrap(),
+                store.settings_repo().settings_revision().unwrap(),
                 &[(connection_row(provider), 0)],
             )
             .unwrap();
-        store.insert_companion(&owner).unwrap();
+        store.companion_repo().insert_companion(&owner).unwrap();
         register_files_client(&store);
         let credentials = Credentials::new(true);
         credentials.remember("c1", "test-key".into());
@@ -482,6 +484,7 @@ impl DecisionWorld {
     /// The one pending approval, once the gate has held the call.
     fn pending(&self) -> Approval {
         self.store()
+            .approval_repo()
             .approvals(ApprovalStatus::Pending)
             .unwrap()
             .pop()
@@ -552,7 +555,12 @@ fn a_safe_operation_the_model_allows_runs_without_a_card() {
     let events = world.events();
     assert!(cards(&events).is_empty(), "no card: {events:?}");
     assert_eq!(notices(&events, "approval_resolved"), 1);
-    let approval = world.store().approval(&request).unwrap().unwrap();
+    let approval = world
+        .store()
+        .approval_repo()
+        .approval(&request)
+        .unwrap()
+        .unwrap();
     assert_eq!(approval.status, ApprovalStatus::Approved);
     assert!(world.app.world().get::<Approved>(call).is_some());
     assert!(
@@ -567,6 +575,7 @@ fn a_safe_operation_the_model_allows_runs_without_a_card() {
     assert_eq!(
         world
             .store()
+            .approval_repo()
             .approvals(ApprovalStatus::Pending)
             .unwrap()
             .len(),
@@ -587,6 +596,7 @@ fn an_operation_that_breaks_a_free_text_policy_is_carded_once() {
     let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
     world
         .store()
+        .policy_repo()
         .apply_policy_texts(
             &[PolicyText {
                 id: "p1".into(),
@@ -604,7 +614,12 @@ fn an_operation_that_breaks_a_free_text_policy_is_carded_once() {
     let events = world.events();
     assert_eq!(cards(&events), vec![request.clone()], "exactly one card");
     assert_eq!(notices(&events, "approval_required"), 1);
-    let approval = world.store().approval(&request).unwrap().unwrap();
+    let approval = world
+        .store()
+        .approval_repo()
+        .approval(&request)
+        .unwrap()
+        .unwrap();
     assert_eq!(approval.status, ApprovalStatus::Pending);
     assert!(world.app.world().get::<Approved>(call).is_none());
     assert_eq!(
@@ -630,7 +645,16 @@ fn a_timeout_or_an_invalid_reply_fails_safe_to_the_card() {
     settle(&mut world.app, &runtime);
     let events = world.events();
     assert_eq!(cards(&events), vec![request.clone()], "the timeout cards");
-    assert!(world.store().approval(&request).unwrap().unwrap().status == ApprovalStatus::Pending);
+    assert!(
+        world
+            .store()
+            .approval_repo()
+            .approval(&request)
+            .unwrap()
+            .unwrap()
+            .status
+            == ApprovalStatus::Pending
+    );
     assert!(world.app.world().get::<Approved>(call).is_none());
     assert!(provider.bodies.lock().unwrap().len() <= 1);
     provider.task.abort();
@@ -648,7 +672,16 @@ fn a_timeout_or_an_invalid_reply_fails_safe_to_the_card() {
         vec![request.clone()],
         "the invalid reply cards"
     );
-    assert!(world.store().approval(&request).unwrap().unwrap().status == ApprovalStatus::Pending);
+    assert!(
+        world
+            .store()
+            .approval_repo()
+            .approval(&request)
+            .unwrap()
+            .unwrap()
+            .status
+            == ApprovalStatus::Pending
+    );
     assert!(world.app.world().get::<Approved>(call).is_none());
     provider.task.abort();
 }
@@ -663,6 +696,7 @@ fn the_prompt_the_model_received_carries_the_bounded_inputs() {
     let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
     world
         .store()
+        .policy_repo()
         .apply_policy_texts(
             &[PolicyText {
                 id: "p1".into(),
@@ -676,6 +710,7 @@ fn the_prompt_the_model_received_carries_the_bounded_inputs() {
     // deciding the call.
     world
         .store()
+        .policy_repo()
         .apply_policy_rules(
             &[PolicyRule {
                 id: "r1".into(),
@@ -731,12 +766,20 @@ fn a_late_decision_drops_when_the_user_answered_first() {
     let events = world.events();
     assert!(cards(&events).is_empty(), "a late allow shows no card");
     assert!(
-        world.store().approval(&request).unwrap().unwrap().status == ApprovalStatus::Denied,
+        world
+            .store()
+            .approval_repo()
+            .approval(&request)
+            .unwrap()
+            .unwrap()
+            .status
+            == ApprovalStatus::Denied,
         "the deny stands"
     );
     assert!(
         world
             .store()
+            .approval_repo()
             .resolve_approval(&request, ApprovalStatus::Approved)
             .is_err(),
         "the approval is resolved once"
@@ -764,7 +807,12 @@ fn the_decision_role_falls_back_to_the_task_model() {
         1,
         "the task model answered"
     );
-    let approval = world.store().approval(&request).unwrap().unwrap();
+    let approval = world
+        .store()
+        .approval_repo()
+        .approval(&request)
+        .unwrap()
+        .unwrap();
     assert_eq!(approval.status, ApprovalStatus::Approved);
     assert!(world.app.world().get::<Approved>(call).is_some());
     provider.task.abort();
@@ -790,7 +838,7 @@ fn always_approve_persists_allow_rule_and_skips_second_prompt() {
     assert_eq!(approved.status, ApprovalStatus::Approved);
     assert!(world.app.world().get::<Approved>(call1).is_some());
 
-    let rules = world.store().policy_rules().unwrap();
+    let rules = world.store().policy_repo().policy_rules().unwrap();
     assert_eq!(rules.len(), 1);
     assert_eq!(rules[0].effect, PolicyEffect::Allow);
 
@@ -811,6 +859,7 @@ fn always_approve_persists_allow_rule_and_skips_second_prompt() {
     assert!(
         world
             .store()
+            .approval_repo()
             .approvals(ApprovalStatus::Pending)
             .unwrap()
             .is_empty()
@@ -821,6 +870,7 @@ fn always_approve_persists_allow_rule_and_skips_second_prompt() {
     assert_eq!(
         world
             .store()
+            .approval_repo()
             .approvals(ApprovalStatus::Pending)
             .unwrap()
             .len(),
@@ -839,6 +889,7 @@ fn b20_confirm_rule_is_never_bypassed_by_decision_allow() {
     let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
     world
         .store()
+        .policy_repo()
         .apply_policy_rules(
             &[PolicyRule {
                 id: "confirm-x".into(),
@@ -878,14 +929,20 @@ fn b06_submit_keeps_hold_when_bound_client_loses_grant() {
     let call = world.gated_call("/tmp/a");
     world.app.update();
     let request = world.pending().request_id;
-    let mut client = world.store().client("c1").unwrap().unwrap();
+    let mut client = world.store().client_repo().client("c1").unwrap().unwrap();
     client.granted_capabilities.clear();
-    world.store().restore_client(&client).unwrap();
+    world.store().client_repo().restore_client(&client).unwrap();
 
     let err = submit(world.app.world_mut(), &request, ApprovalDecision::Approve).unwrap_err();
     assert!(matches!(err, HostError::Conflict(_)));
     assert_eq!(
-        world.store().approval(&request).unwrap().unwrap().status,
+        world
+            .store()
+            .approval_repo()
+            .approval(&request)
+            .unwrap()
+            .unwrap()
+            .status,
         ApprovalStatus::Pending
     );
     assert!(
@@ -922,7 +979,7 @@ fn b18_large_always_approve_persists_exact_digest_rule_and_skips_second_prompt()
     assert!(outcome.rule_saved, "{:?}", outcome.rule_error);
     assert!(world.app.world().get::<Approved>(call1).is_some());
 
-    let rules = world.store().policy_rules().unwrap();
+    let rules = world.store().policy_repo().policy_rules().unwrap();
     assert_eq!(rules.len(), 1);
     assert!(rules[0].pattern.starts_with("exact_sha256:"));
 
@@ -940,6 +997,7 @@ fn b18_large_always_approve_persists_exact_digest_rule_and_skips_second_prompt()
     assert!(
         world
             .store()
+            .approval_repo()
             .approvals(ApprovalStatus::Pending)
             .unwrap()
             .is_empty()

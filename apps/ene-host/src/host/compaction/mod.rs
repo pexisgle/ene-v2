@@ -374,7 +374,7 @@ fn summarize_at_turn_boundary(
             continue;
         }
         state.note_attempt(&agent.companion_id, newest);
-        let Ok(Some(companion)) = store.companion(&agent.companion_id) else {
+        let Ok(Some(companion)) = store.companion_repo().companion(&agent.companion_id) else {
             continue;
         };
         let Ok(bound) = model::connect(

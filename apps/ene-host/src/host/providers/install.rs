@@ -38,7 +38,7 @@ pub(crate) fn install_local_package(
     let _ = ene_plugin_runtime::Package::load(&dest).map_err(|error| {
         HostError::Storage(format!("installed plugin verification failed: {error}"))
     })?;
-    let entry = store.upsert_plugin_entry(
+    let entry = store.plugin_repo().upsert_plugin_entry(
         &manifest.id,
         &manifest.name,
         &manifest.version,
@@ -58,7 +58,10 @@ pub(crate) fn remove_local_package(
     if !ene_plugin_runtime::package::identifier(plugin_id) {
         return Err(HostError::Invalid("invalid plugin id".into()));
     }
-    let removed_row = store.remove_plugin_entry(plugin_id)?.is_some();
+    let removed_row = store
+        .plugin_repo()
+        .remove_plugin_entry(plugin_id)?
+        .is_some();
     let dest = plugins_dir(state_dir).join(plugin_id);
     let removed_dir = if dest.is_dir() {
         std::fs::remove_dir_all(&dest)
@@ -128,13 +131,18 @@ mod tests {
         assert_eq!(entry.plugin_id, "demo-tool");
         assert_eq!(parsed.version, "0.2.0");
         assert!(entry.enabled);
-        assert_eq!(store.plugin_entries().unwrap().len(), 1);
+        assert_eq!(store.plugin_repo().plugin_entries().unwrap().len(), 1);
 
-        assert!(store.set_plugin_enabled("demo-tool", false).unwrap());
-        assert!(!store.plugin_entries().unwrap()[0].enabled);
+        assert!(
+            store
+                .plugin_repo()
+                .set_plugin_enabled("demo-tool", false)
+                .unwrap()
+        );
+        assert!(!store.plugin_repo().plugin_entries().unwrap()[0].enabled);
 
         assert!(remove_local_package(&store, state.path(), "demo-tool").unwrap());
-        assert!(store.plugin_entries().unwrap().is_empty());
+        assert!(store.plugin_repo().plugin_entries().unwrap().is_empty());
         assert!(!plugins_dir(state.path()).join("demo-tool").exists());
     }
 }

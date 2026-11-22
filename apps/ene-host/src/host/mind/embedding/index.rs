@@ -84,7 +84,7 @@ impl CompactVectorIndex {
     /// revision still matches are reused, so an unchanged space reads no BLOB
     /// column.
     pub(crate) fn sync(&mut self, store: &Store, companion: &str, space: &str) -> Result<()> {
-        let rows = store.embedding_revisions(space, companion)?;
+        let rows = store.memory_repo().embedding_revisions(space, companion)?;
         let key = (companion.to_owned(), space.to_owned());
         if self
             .spaces
@@ -111,7 +111,7 @@ impl CompactVectorIndex {
                 next.push(id, *revision, vector);
                 continue;
             }
-            let Some((dimensions, bytes)) = store.embedding_blob(id, space)? else {
+            let Some((dimensions, bytes)) = store.memory_repo().embedding_blob(id, space)? else {
                 continue;
             };
             let vector = decode(&bytes)?;

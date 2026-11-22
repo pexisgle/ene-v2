@@ -623,7 +623,7 @@ fn render_tail_full(req: &TailRenderRequest<'_>) -> crate::host::db::Result<Stri
             builder.push_priority(&format!("- {note}\n"));
         }
     }
-    if let Some(state) = store.companion(companion)? {
+    if let Some(state) = store.companion_repo().companion(companion)? {
         builder.push_priority(&format!(
             "現在の心: 感情={} 関係={} 傾向={} 懸念={}\n",
             state.state.emotion.json,
@@ -631,7 +631,7 @@ fn render_tail_full(req: &TailRenderRequest<'_>) -> crate::host::db::Result<Stri
             state.state.tendencies.json,
             state.state.concerns.json
         ));
-        let pinned = store.pinned(companion)?;
+        let pinned = store.memory_repo().pinned(companion)?;
         if !pinned.is_empty() {
             builder.push_priority("常に覚えていること:\n");
             for memory in pinned {
@@ -639,7 +639,7 @@ fn render_tail_full(req: &TailRenderRequest<'_>) -> crate::host::db::Result<Stri
             }
         }
         if let Some(query) = query {
-            let recalled = store.recall_hybrid(
+            let recalled = store.memory_repo().recall_hybrid(
                 companion,
                 query,
                 super::memory::RecallMode::Auto,
@@ -656,7 +656,9 @@ fn render_tail_full(req: &TailRenderRequest<'_>) -> crate::host::db::Result<Stri
         // Persisted ONLY for recalled memories that actually survived budget
         // fitting, so the citation guard never trusts a truncated memory
         // (docs/design/mind.md §4.2, B14).
-        store.record_injections(companion, &turn.to_string(), &included_ids)?;
+        store
+            .memory_repo()
+            .record_injections(companion, &turn.to_string(), &included_ids)?;
     }
     Ok(tail)
 }

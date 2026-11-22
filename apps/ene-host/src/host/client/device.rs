@@ -71,11 +71,15 @@ pub(super) fn describe_device_request(
             continue;
         };
         let (target, work, connection) = match agents.get(agent.0) {
-            Ok((Some(companion), _, model)) => {
-                (store.target(&companion.companion_id, None), None, model)
-            }
+            Ok((Some(companion), _, model)) => (
+                store.client_repo().target(&companion.companion_id, None),
+                None,
+                model,
+            ),
             Ok((_, Some(work), model)) => (
-                store.target(&work.companion_id, Some(&work.work_id)),
+                store
+                    .client_repo()
+                    .target(&work.companion_id, Some(&work.work_id)),
                 Some(work),
                 model,
             ),
@@ -99,7 +103,7 @@ pub(super) fn describe_device_request(
             }
         };
         let client = match target_id {
-            Some(id) => match store.client(&id) {
+            Some(id) => match store.client_repo().client(&id) {
                 Ok(client) => client,
                 Err(error) => {
                     if error.is_storage() {
@@ -153,6 +157,7 @@ fn binding_spec(world: &World, call: Entity, capability: &str) -> Option<Option<
     let binding = world.get::<CallBinding>(call)?;
     let client = world
         .resource::<Store>()
+        .client_repo()
         .client(&binding.client_id)
         .ok()
         .flatten()?;
@@ -220,6 +225,7 @@ pub(crate) fn accept(
     let (companion_id, work_id) = agent_context(world, agent)
         .ok_or_else(|| HostError::Internal(("a device call without an agent").into()))?;
     let client = store
+        .client_repo()
         .client(&binding.client_id)?
         .ok_or_else(|| HostError::Conflict(("the bound client is no longer registered").into()))?;
     if !client
@@ -293,11 +299,13 @@ pub(crate) fn accept(
         created_at: now(),
         updated_at: now(),
     };
-    store.insert_operation(&operation)?;
+    store.client_repo().insert_operation(&operation)?;
     let status = dispatch(world, &operation, computer.as_ref(), Some(&companion_id))?;
     if let Some(computer) = computer {
         if status != DeviceStatus::Dispatched {
-            store.set_operation_status(&operation.id, DeviceStatus::Failed)?;
+            store
+                .client_repo()
+                .set_operation_status(&operation.id, DeviceStatus::Failed)?;
             return Err(HostError::Conflict(
                 ("the Computer Use device stream is unavailable").into(),
             ));
@@ -322,6 +330,7 @@ pub(crate) fn dispatch_direct(
 ) -> Result<String> {
     let store = world.resource::<Store>().clone();
     let client = store
+        .client_repo()
         .client(client_id)?
         .ok_or_else(|| HostError::NotFound("client not found".into()))?;
     if !client.is_granted(capability) {
@@ -342,7 +351,7 @@ pub(crate) fn dispatch_direct(
         created_at: now(),
         updated_at: now(),
     };
-    store.insert_operation(&operation)?;
+    store.client_repo().insert_operation(&operation)?;
     let _ = dispatch(world, &operation, None, Some(companion_id))?;
     Ok(operation_id)
 }
@@ -389,7 +398,9 @@ fn dispatch(
         ..Default::default()
     };
     if hub.send(&operation.client_id, event) {
-        store.set_operation_status(&operation.id, DeviceStatus::Dispatched)?;
+        store
+            .client_repo()
+            .set_operation_status(&operation.id, DeviceStatus::Dispatched)?;
         let mut notifier = world.resource_mut::<Notifier>();
         notifier.push(
             None,
@@ -404,11 +415,12 @@ fn dispatch(
 
 fn resolve_operation_companion(store: &Store, operation: &DeviceOperation) -> Result<String> {
     if let Some(work_id) = operation.work_id.as_deref()
-        && let Some(session) = store.work_session(work_id)?
+        && let Some(session) = store.work_repo().work_session(work_id)?
     {
         return Ok(session.companion_id);
     }
     Ok(store
+        .client_repo()
         .activation_for_client(&operation.client_id)?
         .unwrap_or_default())
 }
@@ -428,7 +440,7 @@ pub(crate) fn resend(world: &mut World, client: &str) {
 }
 
 fn read_resend_companion(world: &mut World, store: &Store, client: &str) -> Option<Option<String>> {
-    match store.activation_for_client(client) {
+    match store.client_repo().activation_for_client(client) {
         Ok(companion) => Some(companion),
         Err(error) => {
             if error.is_storage() {
@@ -446,7 +458,7 @@ fn read_resend_operations(
     store: &Store,
     client: &str,
 ) -> Option<Vec<DeviceOperation>> {
-    match store.outstanding_operations(client) {
+    match store.client_repo().outstanding_operations(client) {
         Ok(operations) => Some(operations),
         Err(error) => {
             if error.is_storage() {
@@ -488,7 +500,7 @@ fn replay_resend_operations(
 pub(crate) fn disconnected(world: &mut World, client: &str) {
     computer::invalidate_client(world, client, None);
     let store = world.resource::<Store>().clone();
-    let operations = match store.outstanding_operations(client) {
+    let operations = match store.client_repo().outstanding_operations(client) {
         Ok(operations) => operations,
         Err(error) => {
             if error.is_storage() {
@@ -503,7 +515,9 @@ pub(crate) fn disconnected(world: &mut World, client: &str) {
         if operation.status != DeviceStatus::Dispatched {
             continue;
         }
-        if let Err(error) = store.set_operation_status(&operation.id, DeviceStatus::Uncertain)
+        if let Err(error) = store
+            .client_repo()
+            .set_operation_status(&operation.id, DeviceStatus::Uncertain)
             && error.is_storage()
         {
             crate::host::fail(world, error.to_string());
@@ -519,7 +533,7 @@ pub(crate) fn complete(
     result: w::DeviceOperationResult,
 ) -> Result<w::DeviceOperationState> {
     let store = world.resource::<Store>().clone();
-    let Some(operation) = store.operation(&result.operation_id)? else {
+    let Some(operation) = store.client_repo().operation(&result.operation_id)? else {
         return Err(HostError::NotFound(("device operation not found").into()));
     };
     if operation.capability == w::COMPUTER_USE && operation.client_id != result.client_id {
@@ -540,6 +554,7 @@ pub(crate) fn complete(
         apply_computer_use_output(world, &operation, computer, base_success, validated);
     let (success, output, failure) = resolve_operation_outcome(base_success, validated, failure);
     let updated = store
+        .client_repo()
         .complete_operation(&operation.id, success, output.as_ref(), failure.as_ref())?
         .ok_or_else(|| HostError::Storage(("device operation update did not persist").into()))?;
     if let Some(waiter) = world
@@ -646,6 +661,7 @@ fn parse_and_validate_output(
     // A capability declared without a spec has no output contract; its
     // answer is accepted as the client sent it.
     let spec = store
+        .client_repo()
         .client(&operation.client_id)?
         .and_then(|client| client.spec(&operation.capability).cloned());
     let validated = output.map(|output| match spec {
@@ -783,6 +799,7 @@ fn read_image(capability: &str, output: Option<&Value>) -> Option<rig_core::mess
 pub(crate) fn get(world: &mut World, request: w::Id) -> Result<w::DeviceOperationState> {
     let store = world.resource::<Store>().clone();
     let mut operation = store
+        .client_repo()
         .operation(&request.id)?
         .ok_or_else(|| HostError::NotFound(("device operation not found").into()))?;
     if operation.capability == w::COMPUTER_USE
@@ -812,11 +829,13 @@ pub(super) fn uncertain(world: &mut World, operation_id: &str, reason: &str) {
         computer.operations.remove(operation_id);
     }
     let store = world.resource::<Store>().clone();
-    let Ok(Some(operation)) = store.operation(operation_id) else {
+    let Ok(Some(operation)) = store.client_repo().operation(operation_id) else {
         return;
     };
     if !operation.status.is_terminal() {
-        let _ = store.set_operation_status(operation_id, DeviceStatus::Uncertain);
+        let _ = store
+            .client_repo()
+            .set_operation_status(operation_id, DeviceStatus::Uncertain);
     }
     let waiter = world
         .resource_mut::<Waiting>()

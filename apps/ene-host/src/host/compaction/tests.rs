@@ -416,13 +416,14 @@ impl SummaryWorld {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
         store
+            .settings_repo()
             .update_settings(
-                store.settings_revision().unwrap(),
+                store.settings_repo().settings_revision().unwrap(),
                 &[(connection_row(base), 0)],
             )
             .unwrap();
         let companion = companion();
-        store.insert_companion(&companion).unwrap();
+        store.companion_repo().insert_companion(&companion).unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let credentials = Credentials::new(true);
         credentials.remember("c1", "test-key".into());
@@ -862,7 +863,7 @@ fn one_job_covers_the_same_range_for_the_summary_and_the_memories() {
     }
 
     let store = world.app.world().resource::<Store>();
-    let (memories, _) = store.list_memories("ene", None, 50).unwrap();
+    let (memories, _) = store.memory_repo().list_memories("ene", None, 50).unwrap();
     assert_eq!(memories.len(), 1, "the job committed its one fact");
     assert_eq!(memories[0].content, "A keeps the tea in the cupboard");
     assert_eq!(
@@ -906,7 +907,7 @@ fn a_failed_pass_leaves_the_summary_unwritten_and_the_range_pending() {
         "the extraction call is the one that failed"
     );
     let store = world.app.world().resource::<Store>();
-    let (memories, _) = store.list_memories("ene", None, 50).unwrap();
+    let (memories, _) = store.memory_repo().list_memories("ene", None, 50).unwrap();
     assert!(memories.is_empty(), "a failed pass commits nothing");
     provider.task.abort();
 }

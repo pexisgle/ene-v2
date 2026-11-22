@@ -106,6 +106,7 @@ fn assert_shared_body_motion_dispatch(harness: &mut Harness, other: &str) {
     harness.run_until(|world| {
         !world
             .resource::<Store>()
+            .client_repo()
             .outstanding_operations("c1")
             .unwrap()
             .is_empty()
@@ -114,6 +115,7 @@ fn assert_shared_body_motion_dispatch(harness: &mut Harness, other: &str) {
     assert!(
         harness
             .store()
+            .client_repo()
             .outstanding_operations("c2")
             .unwrap()
             .is_empty(),
@@ -133,17 +135,26 @@ fn assert_shared_body_motion_dispatch(harness: &mut Harness, other: &str) {
     harness.run_until(|world| {
         !world
             .resource::<Store>()
+            .client_repo()
             .outstanding_operations("c2")
             .unwrap()
             .is_empty()
     });
     harness.run_until(|world| said(world, "B done"));
-    let a_operations = harness.store().outstanding_operations("c1").unwrap();
+    let a_operations = harness
+        .store()
+        .client_repo()
+        .outstanding_operations("c1")
+        .unwrap();
     assert_eq!(a_operations.len(), 1);
     assert_eq!(a_operations[0].capability, "body.motion");
     assert_eq!(a_operations[0].client_id, "c1");
     assert_eq!(a_operations[0].input, serde_json::json!({"motion": "nod"}));
-    let b_operations = harness.store().outstanding_operations("c2").unwrap();
+    let b_operations = harness
+        .store()
+        .client_repo()
+        .outstanding_operations("c2")
+        .unwrap();
     assert_eq!(b_operations.len(), 1);
     assert_eq!(b_operations[0].capability, "body.motion");
     assert_eq!(b_operations[0].client_id, "c2");
@@ -153,6 +164,7 @@ fn assert_shared_body_motion_dispatch(harness: &mut Harness, other: &str) {
 fn assert_hand_never_sees_capability_tools(harness: &mut Harness) {
     let companion = harness
         .store()
+        .companion_repo()
         .companion(&harness.companion)
         .unwrap()
         .unwrap();
@@ -250,6 +262,7 @@ fn only_device_request_waits_for_the_client_result() {
     harness.run_until(|world| {
         world
             .resource::<Store>()
+            .client_repo()
             .outstanding_operations("c1")
             .unwrap()
             .len()
@@ -270,12 +283,17 @@ fn only_device_request_waits_for_the_client_result() {
     harness.run_until(|world| {
         world
             .resource::<Store>()
+            .client_repo()
             .outstanding_operations("c1")
             .unwrap()
             .len()
             == 2
     });
-    let operations = harness.store().outstanding_operations("c1").unwrap();
+    let operations = harness
+        .store()
+        .client_repo()
+        .outstanding_operations("c1")
+        .unwrap();
     let waiting = &harness.app.world().resource::<Waiting>().by_operation;
     assert_eq!(waiting.len(), 1);
     assert!(
@@ -343,6 +361,7 @@ fn computer_use_sends_a_request_only_image_and_never_replays_input() {
     let session = start_work(&mut harness);
     let run = harness
         .store()
+        .work_repo()
         .active_run(&session.id)
         .unwrap()
         .unwrap()
@@ -425,6 +444,7 @@ fn wait_for_desk_operation(harness: &mut Harness) {
     harness.run_until(|world| {
         world
             .resource::<Store>()
+            .client_repo()
             .outstanding_operations("desk")
             .unwrap()
             .len()
@@ -460,6 +480,7 @@ fn complete_screenshot_op(
     );
     let saved = harness
         .store()
+        .client_repo()
         .operation(&result.operation_id)
         .unwrap()
         .unwrap();
@@ -554,6 +575,7 @@ fn computer_use_respects_the_client_declaration_model_and_host_denial() {
         if denied {
             harness
                 .store()
+                .policy_repo()
                 .apply_policy_rules(
                     &[permission::PolicyRule {
                         id: "deny-computer".into(),
@@ -570,6 +592,7 @@ fn computer_use_respects_the_client_declaration_model_and_host_denial() {
         harness.run_until(|world| {
             world
                 .resource::<Store>()
+                .work_repo()
                 .active_run(&session.id)
                 .unwrap()
                 .is_none()
@@ -585,6 +608,7 @@ fn computer_use_respects_the_client_declaration_model_and_host_denial() {
         assert!(
             harness
                 .store()
+                .client_repo()
                 .outstanding_operations("desk")
                 .unwrap()
                 .is_empty()
@@ -600,6 +624,7 @@ fn a_work_run_reports_back_to_the_parent() {
     harness.run_until(|world| {
         world
             .resource::<Store>()
+            .work_repo()
             .runs(&session.id)
             .unwrap()
             .iter()
@@ -674,9 +699,10 @@ fn a_conflicting_activation_is_rolled_back_before_side_effects() {
         .is_err()
     );
     let store = harness.store();
-    assert!(store.activation(&second).unwrap().is_none());
+    assert!(store.client_repo().activation(&second).unwrap().is_none());
     assert_eq!(
         store
+            .client_repo()
             .activation(&harness.companion)
             .unwrap()
             .unwrap()
@@ -749,7 +775,13 @@ fn a_companion_survives_a_create_and_an_edit_without_a_bound_model() {
     crate::host::tick(&mut harness.app);
     // The row is the source of truth; the model component is not.
     let store = harness.store();
-    assert!(store.companion(&companion).unwrap().is_some());
+    assert!(
+        store
+            .companion_repo()
+            .companion(&companion)
+            .unwrap()
+            .is_some()
+    );
     let entity = agent::agent_of(harness.app.world_mut(), &companion).expect("an agent");
     assert!(
         harness
@@ -779,7 +811,10 @@ async fn a_stored_companion_without_a_model_does_not_block_startup() {
     let state = root.path();
     {
         let store = Store::open(&state.join("host.sqlite3")).unwrap();
-        store.insert_companion(&unassigned("mio")).unwrap();
+        store
+            .companion_repo()
+            .insert_companion(&unassigned("mio"))
+            .unwrap();
     }
     let runtime =
         crate::host::Runtime::start_with(state, crate::host::resources::Options::default())

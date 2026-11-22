@@ -135,6 +135,7 @@ pub(crate) async fn pass(
     }
     let companion = services
         .store
+        .companion_repo()
         .companion(companion_id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     let target = target(services, &companion)?;
@@ -151,12 +152,15 @@ pub(crate) async fn pass(
         &query,
     )
     .await;
-    let context =
-        services
-            .store
-            .consolidation_context(companion_id, &query, &semantic, MAX_CONTEXT)?;
+    let context = services.store.memory_repo().consolidation_context(
+        companion_id,
+        &query,
+        &semantic,
+        MAX_CONTEXT,
+    )?;
     let injected = services
         .store
+        .memory_repo()
         .injected_between(companion_id, after, through)?;
     let extraction = extract(
         &target,
@@ -169,7 +173,10 @@ pub(crate) async fn pass(
         context,
         injected,
     };
-    let commit = services.store.consolidate(&batch, &extraction.facts)?;
+    let commit = services
+        .store
+        .memory_repo()
+        .consolidate(&batch, &extraction.facts)?;
     reflect(services, &companion, through, extraction.state)?;
     Ok(commit)
 }
@@ -212,17 +219,21 @@ fn reflect(
         "memories": [],
         "state": &patch,
     });
-    let request_hash = services.store.mind_hash(&request);
-    let applied = services.store.apply_mind_update(&MindUpdate {
-        operation_id,
-        companion_id: companion.id.clone(),
-        request_hash,
-        memories: Vec::new(),
-        state: Some(MindStateChange {
-            expected_revision: companion.state_revision,
-            state,
-        }),
-    });
+    let request_hash = services.store.memory_repo().mind_hash(&request);
+    let applied = services
+        .store
+        .memory_repo()
+        .apply_mind_update(&MindUpdate {
+            operation_id,
+            companion_id: companion.id.clone(),
+            request_hash,
+            memories: Vec::new(),
+            state: Some(MindStateChange {
+                expected_revision: companion.state_revision,
+                state,
+            }),
+        })
+        .map_err(HostError::from);
     match applied {
         Ok(_) => Ok(()),
         // A mind edit that landed while the pass ran wins: the reflection of
@@ -462,7 +473,10 @@ mod tests {
     #[test]
     fn a_stale_memory_revision_aborts_the_whole_commit() {
         let store = store();
-        let memory = store.insert_memory(new_memory("m1", "tea")).unwrap();
+        let memory = store
+            .memory_repo()
+            .insert_memory(new_memory("m1", "tea"))
+            .unwrap();
         let batch = batch(9, vec![context(&memory)]);
         // A concurrent correction moves the revision the pass captured.
         store
@@ -480,10 +494,16 @@ mod tests {
             ..Fact::default()
         }];
         assert!(matches!(
-            store.consolidate(&batch, &facts),
+            store
+                .memory_repo()
+                .consolidate(&batch, &facts)
+                .map_err(HostError::from),
             Err(HostError::Conflict(_))
         ));
-        assert_eq!(store.memory("m1").unwrap().unwrap().content, "tea");
+        assert_eq!(
+            store.memory_repo().memory("m1").unwrap().unwrap().content,
+            "tea"
+        );
         let count: i64 = store
             .conn()
             .unwrap()
@@ -495,7 +515,10 @@ mod tests {
     #[test]
     fn a_pass_merges_cites_and_writes_the_edges() {
         let store = store();
-        let memory = store.insert_memory(new_memory("m2", "coffee")).unwrap();
+        let memory = store
+            .memory_repo()
+            .insert_memory(new_memory("m2", "coffee"))
+            .unwrap();
         let mut batch = batch(8, vec![context(&memory)]);
         batch.injected = vec!["m2".into()];
         let facts = vec![Fact {
@@ -505,13 +528,14 @@ mod tests {
             cited_memory_ids: vec!["m2".into(), "ghost".into()],
             ..Fact::default()
         }];
-        let commit = store.consolidate(&batch, &facts).unwrap();
+        let commit = store.memory_repo().consolidate(&batch, &facts).unwrap();
         assert_eq!((commit.inserted, commit.updated), (0, 1));
-        let updated = store.memory("m2").unwrap().unwrap();
+        let updated = store.memory_repo().memory("m2").unwrap().unwrap();
         assert_eq!(updated.content, "A prefers coffee");
         assert_eq!(updated.importance, 7);
         assert!(
             store
+                .memory_repo()
                 .memory_edges("m2")
                 .unwrap()
                 .iter()
@@ -570,8 +594,9 @@ mod tests {
             Connection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint, LlmConnection,
         };
         let store = store();
-        let revision = store.settings_revision().unwrap();
+        let revision = store.settings_repo().settings_revision().unwrap();
         store
+            .settings_repo()
             .update_settings(
                 revision,
                 &[(
@@ -597,7 +622,10 @@ mod tests {
                 )],
             )
             .unwrap();
-        store.insert_companion(&companion()).unwrap();
+        store
+            .companion_repo()
+            .insert_companion(&companion())
+            .unwrap();
         store
     }
 
@@ -717,6 +745,7 @@ mod tests {
         let setup = setup(&server.base);
         let existing = setup
             .store
+            .memory_repo()
             .insert_memory(new_memory("m1", "東京都の紅茶の店"))
             .unwrap();
         let mut conversation = CoreConversation::new();
@@ -731,7 +760,12 @@ mod tests {
         .await
         .unwrap();
         assert_eq!((commit.inserted, commit.updated), (0, 1));
-        let updated = setup.store.memory(&existing.id).unwrap().unwrap();
+        let updated = setup
+            .store
+            .memory_repo()
+            .memory(&existing.id)
+            .unwrap()
+            .unwrap();
         assert_eq!(updated.content, "紅茶の店は新宿にある");
         assert_eq!(updated.importance, 7);
         let count: i64 = setup
@@ -769,7 +803,12 @@ mod tests {
         .await
         .unwrap();
         assert_eq!((commit.inserted, commit.updated), (0, 0));
-        let after = setup.store.companion("ene").unwrap().unwrap();
+        let after = setup
+            .store
+            .companion_repo()
+            .companion("ene")
+            .unwrap()
+            .unwrap();
         assert_eq!(
             after.state.emotion.json,
             serde_json::json!({ "mood": "gentle" })
@@ -792,7 +831,12 @@ mod tests {
     #[test]
     fn a_concurrent_mind_edit_wins_over_the_reflection() {
         let setup = setup("http://127.0.0.1:9");
-        let stale = setup.store.companion("ene").unwrap().unwrap();
+        let stale = setup
+            .store
+            .companion_repo()
+            .companion("ene")
+            .unwrap()
+            .unwrap();
         setup
             .store
             .conn()
@@ -802,7 +846,12 @@ mod tests {
                 [],
             )
             .unwrap();
-        let moved = setup.store.companion("ene").unwrap().unwrap();
+        let moved = setup
+            .store
+            .companion_repo()
+            .companion("ene")
+            .unwrap()
+            .unwrap();
         assert_ne!(moved.state_revision, stale.state_revision);
         reflect(
             &services(&setup),
@@ -816,7 +865,12 @@ mod tests {
             }),
         )
         .unwrap();
-        let after = setup.store.companion("ene").unwrap().unwrap();
+        let after = setup
+            .store
+            .companion_repo()
+            .companion("ene")
+            .unwrap()
+            .unwrap();
         assert_eq!(
             after.state_revision, moved.state_revision,
             "the concurrent edit keeps its revision"

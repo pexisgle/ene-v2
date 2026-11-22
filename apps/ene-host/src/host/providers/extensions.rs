@@ -179,7 +179,11 @@ pub(crate) fn apply_character_actions(
         return;
     }
     let store = world.resource::<Store>().clone();
-    let bound_client = store.target(companion_id, None).ok().flatten();
+    let bound_client = store
+        .client_repo()
+        .target(companion_id, None)
+        .ok()
+        .flatten();
     for action in actions {
         match action {
             CharacterAction::Speak { text } => {
@@ -479,6 +483,7 @@ pub(crate) fn trigger_character_event(
     };
     let store = world.resource::<Store>().clone();
     let device_id = store
+        .client_repo()
         .target(companion_id, None)
         .ok()
         .flatten()
@@ -631,7 +636,10 @@ mod tests {
             CharacterAction::Expression { name, duration_ms: 1500 } if name == "happy"
         ));
         assert_eq!(
-            store.plugin_state_read("reference-ext", "visits").unwrap(),
+            store
+                .plugin_repo()
+                .plugin_state_read("reference-ext", "visits")
+                .unwrap(),
             Some(serde_json::json!(1))
         );
         // Second call reads persisted state from SQLite and increments cleanly.
@@ -644,12 +652,18 @@ mod tests {
         .await;
         assert_eq!(second.len(), 1);
         assert_eq!(
-            store.plugin_state_read("reference-ext", "visits").unwrap(),
+            store
+                .plugin_repo()
+                .plugin_state_read("reference-ext", "visits")
+                .unwrap(),
             Some(serde_json::json!(2))
         );
         // Isolation check: another plugin ID cannot read `reference-ext`'s state.
         assert_eq!(
-            store.plugin_state_read("other-plugin", "visits").unwrap(),
+            store
+                .plugin_repo()
+                .plugin_state_read("other-plugin", "visits")
+                .unwrap(),
             None
         );
 
@@ -680,6 +694,7 @@ mod tests {
         let providers = install_reference_extensions(temp.path());
 
         store
+            .plugin_repo()
             .set_plugin_config(
                 "reference-ext",
                 &serde_json::json!({ "inject_note": "フックからの追加コンテキスト" }),
@@ -765,12 +780,14 @@ mod tests {
         harness.run_until(|world| {
             !world
                 .resource::<Store>()
+                .approval_repo()
                 .approvals(crate::host::permission::ApprovalStatus::Pending)
                 .unwrap()
                 .is_empty()
         });
         let pending_id = harness
             .store()
+            .approval_repo()
             .approvals(crate::host::permission::ApprovalStatus::Pending)
             .unwrap()[0]
             .request_id
