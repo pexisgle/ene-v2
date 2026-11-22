@@ -1,90 +1,15 @@
 //! The domain of a declared client: capabilities, grants, the active client
 //! and device operations.
 
-use super::error::{Failure, HostError, Result};
+use super::error::{HostError, Result};
 use super::json;
-use serde::{Deserialize, Serialize};
 
+pub(crate) use ene_domain::{Client, DeviceOperation, DeviceStatus};
 #[cfg(test)]
 pub(crate) use ene_policy::{BUILTIN_TOOLS, approval_target};
 pub(crate) use ene_policy::{
     CapabilityApproval, CapabilitySpec, WORKSPACE_CAPABILITY_PREFIX, validate_declarations,
 };
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Client {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) platform: String,
-    pub(crate) capabilities: Vec<String>,
-    pub(crate) granted_capabilities: Vec<String>,
-    pub(crate) capability_specs: Vec<CapabilitySpec>,
-    pub(crate) revision: u64,
-    pub(crate) last_seen: String,
-}
-
-impl Client {
-    pub(crate) fn is_granted(&self, capability: &str) -> bool {
-        self.granted_capabilities
-            .iter()
-            .any(|name| name == capability)
-    }
-
-    pub(crate) fn spec(&self, capability: &str) -> Option<&CapabilitySpec> {
-        self.capability_specs
-            .iter()
-            .find(|spec| spec.name == capability)
-    }
-
-    /// The capabilities that give the parent a tool.
-    pub(crate) fn tool_specs(&self) -> impl Iterator<Item = &CapabilitySpec> {
-        self.capability_specs
-            .iter()
-            .filter(|spec| !spec.tool_name.is_empty() && self.is_granted(&spec.name))
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum DeviceStatus {
-    #[default]
-    Pending,
-    Dispatched,
-    Completed,
-    Failed,
-    Uncertain,
-}
-
-impl DeviceStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Dispatched => "dispatched",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Uncertain => "uncertain",
-        }
-    }
-
-    pub(crate) fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Uncertain)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct DeviceOperation {
-    pub(crate) id: String,
-    /// The client the host dispatched to, kept for the record.
-    pub(crate) client_id: String,
-    pub(crate) capability: String,
-    pub(crate) input: serde_json::Value,
-    pub(crate) work_id: Option<String>,
-    pub(crate) status: DeviceStatus,
-    pub(crate) output: Option<serde_json::Value>,
-    pub(crate) failure: Option<Failure>,
-    pub(crate) created_at: String,
-    pub(crate) updated_at: String,
-}
 
 /// Validates `input` against the declared schema of `spec`.
 pub(crate) fn validate_input(spec: &CapabilitySpec, input: &serde_json::Value) -> Result<()> {

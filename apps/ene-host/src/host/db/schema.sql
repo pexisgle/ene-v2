@@ -1,8 +1,9 @@
 -- The host's relational state. The conversation itself is not here: it lives
 -- in the rig session log (rig_memory::DirStore) and this file never mirrors it.
 --
--- Baseline schema. Unknown newer user_version values are rejected at startup;
--- there is no in-place migration of older development databases.
+-- Baseline schema (PRAGMA user_version = 6). Forward migrations are applied
+-- sequentially by `migrations.rs` and recorded in `schema_migrations`; pre-baseline
+-- databases and unknown newer user_version values are rejected at startup.
 
 -- Companions: the author's profile, the grown mind and the assigned models.
 CREATE TABLE IF NOT EXISTS companions (

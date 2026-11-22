@@ -1,7 +1,7 @@
 //! Approval requests: persistence, resolution and startup expiry.
 use super::{Result, Store, enum_name_column, now};
 use crate::host::error::HostError;
-use crate::host::permission::{Approval, ApprovalStatus};
+use ene_policy::{Approval, ApprovalStatus};
 use rusqlite::{Row, params};
 
 fn row_to_approval(row: &Row<'_>) -> rusqlite::Result<Approval> {
@@ -112,7 +112,6 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::permission::ApprovalStatus;
 
     fn approval(id: &str) -> Approval {
         Approval {

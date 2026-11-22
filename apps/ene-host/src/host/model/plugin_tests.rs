@@ -496,13 +496,10 @@ impl Harness {
             revision: 1,
             last_check: None,
         };
-        let grant = Grant::new(
-            self.running.provider(),
-            &connection,
-            Some(&credentials),
-            &self.providers,
-        )
-        .unwrap();
+        let secret =
+            crate::host::model::connection_secret(&connection, Some(&credentials), &self.providers)
+                .unwrap();
+        let grant = Grant::new(self.running.provider(), secret);
         let recording = Arc::new(Recording {
             inner: grant,
             seen: Arc::clone(&self.seen),

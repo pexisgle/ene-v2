@@ -74,21 +74,7 @@ impl HostError {
     }
 }
 
-/// A user-visible failure: a stable code and a short, non-secret message.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Failure {
-    pub(crate) code: String,
-    pub(crate) message: String,
-}
-
-impl Failure {
-    pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-        }
-    }
-}
+pub(crate) use ene_domain::Failure;
 
 impl From<rusqlite::Error> for HostError {
     fn from(error: rusqlite::Error) -> Self {

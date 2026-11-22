@@ -151,10 +151,11 @@ fn connect_with_ndims(params: ConnectParams<'_>) -> Result<DynModel<Embedding>> 
             .ok_or_else(|| {
                 HostError::Unavailable(format!("embedding plugin `{adapter}` is not running"))
             })?;
+        let secret = crate::host::model::connection_secret(connection, credentials, providers)?;
         let context = crate::host::providers::ProviderInvocationContext::from_connection(
             &running,
             connection,
-            credentials,
+            secret,
             providers,
             Some(EMBED_TIMEOUT),
         )?;

@@ -1,7 +1,7 @@
 //! Saved policy rules and free-text policies.
 use super::{Result, Store, enum_name_column};
 use crate::host::error::HostError;
-use crate::host::permission::{MAX_POLICY_TEXT_CHARS, PolicyRule, PolicyText};
+use ene_policy::{MAX_POLICY_TEXT_CHARS, PolicyRule, PolicyText};
 use rusqlite::{Row, params};
 use std::collections::HashSet;
 
@@ -162,7 +162,7 @@ mod tests {
             id: "r1".into(),
             tool_name: "device_request".into(),
             pattern: "/tmp/x".into(),
-            effect: crate::host::permission::PolicyEffect::Allow,
+            effect: ene_policy::PolicyEffect::Allow,
             created_at: String::new(),
         };
         let updated = store

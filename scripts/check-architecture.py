@@ -17,7 +17,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # Ratchet baselines (lowered as each refactoring phase lands).
 MAX_UI_RPC_REFS = 0
-MAX_DB_UPWARD_REFS = 7
+MAX_DB_UPWARD_REFS = 0
+MAX_PROVIDERS_MODEL_REFS = 0
 DEFAULT_MAX_IMPL_FILES = 3
 IMPL_SPREAD_ALLOWLIST: dict[tuple[str, str], int] = {
     ("apps/ene-host", "Store"): 11,
@@ -31,6 +32,7 @@ UI_RPC_W_RE = re.compile(r"\bw::")
 UI_RPC_PATH_RE = re.compile(r"\b(?:ene_rpc|buffa|connectrpc)::")
 UI_RPC_USE_RE = re.compile(r"\buse\s+(?:ene_rpc|buffa|connectrpc)\b")
 DB_UPWARD_RE = re.compile(r"crate::host::(client|model|permission|providers|work)\b")
+PROVIDERS_MODEL_RE = re.compile(r"\b(?:crate::host|super)::model\b")
 INHERENT_IMPL_RE = re.compile(
     r"^\s*impl\b(?:<[^>{]*>)?\s+([A-Z][A-Za-z0-9_]*)\b([^\n{]*)",
     re.MULTILINE,
@@ -42,6 +44,7 @@ PRINTLN_RE = re.compile(r"\b(?:e?println!)\s*\(")
 class Baselines:
     max_ui_rpc_refs: int = MAX_UI_RPC_REFS
     max_db_upward_refs: int = MAX_DB_UPWARD_REFS
+    max_providers_model_refs: int = MAX_PROVIDERS_MODEL_REFS
     default_max_impl_files: int = DEFAULT_MAX_IMPL_FILES
     impl_spread_allowlist: dict[tuple[str, str], int] | None = None
 
@@ -50,7 +53,10 @@ class Baselines:
 
 
 def is_test_or_example(rel_path: Path) -> bool:
-    if "tests" in rel_path.parts or "examples" in rel_path.parts:
+    if any(
+        part in ("tests", "examples") or part.endswith(("_tests", "_test"))
+        for part in rel_path.parts[:-1]
+    ):
         return True
     return rel_path.name == "tests.rs" or rel_path.name.endswith(("_tests.rs", "_test.rs"))
 
@@ -220,6 +226,29 @@ def check_db_upward_imports(root: Path, max_refs: int) -> tuple[int, list[str]]:
     return len(hits), errors
 
 
+def check_providers_no_model_import(root: Path, max_refs: int) -> tuple[int, list[str]]:
+    providers_dir = root / "apps/ene-host/src/host/providers"
+    if not providers_dir.is_dir():
+        return 0, []
+    hits: list[str] = []
+    for path in sorted(providers_dir.rglob("*.rs")):
+        rel = path.relative_to(root)
+        if is_test_or_example(rel):
+            continue
+        prod = strip_cfg_test(path.read_text(encoding="utf-8"))
+        for line_no, line in enumerate(prod.splitlines(), 1):
+            cleaned = strip_line_comment(line)
+            if PROVIDERS_MODEL_RE.search(cleaned):
+                hits.append(f"{rel.as_posix()}:{line_no}: {cleaned.strip()}")
+    errors: list[str] = []
+    if len(hits) > max_refs:
+        errors.append(
+            f"Rule 5 (providers_no_model_import): found {len(hits)} model import(s) in "
+            f"apps/ene-host/src/host/providers/ (baseline max {max_refs}): {hits}"
+        )
+    return len(hits), errors
+
+
 def check_impl_file_spread(
     root: Path,
     workspace_rs: list[Path],
@@ -298,16 +327,23 @@ def evaluate(root: Path, baselines: Baselines | None = None) -> tuple[dict[str, 
     workspace_rs = iter_workspace_rs(root)
     ui_count, ui_errors = check_ui_rpc_leak(root, cfg.max_ui_rpc_refs)
     db_count, db_errors = check_db_upward_imports(root, cfg.max_db_upward_refs)
+    providers_model_count, providers_model_errors = check_providers_no_model_import(
+        root, cfg.max_providers_model_refs
+    )
     impl_over_default, impl_errors = check_impl_file_spread(
         root, workspace_rs, cfg.default_max_impl_files, cfg.allowlist()
     )
     println_violations, println_errors = check_no_prod_println(root, workspace_rs)
-    errors = [*ui_errors, *db_errors, *impl_errors, *println_errors]
+    errors = [*ui_errors, *db_errors, *impl_errors, *println_errors, *providers_model_errors]
     report: dict[str, object] = {
         "status": "fail" if errors else "pass",
         "rules": {
             "ui_rpc_leak": {"count": ui_count, "max": cfg.max_ui_rpc_refs},
             "db_upward_imports": {"count": db_count, "max": cfg.max_db_upward_refs},
+            "providers_no_model_import": {
+                "count": providers_model_count,
+                "max": cfg.max_providers_model_refs,
+            },
             "impl_file_spread_over_default": impl_over_default,
             "no_prod_println": {"violations": len(println_violations)},
         },
@@ -344,6 +380,14 @@ def self_test() -> None:
             "#[cfg(test)]\n"
             "mod tests { use crate::host::permission::Approval; }\n"
         ),
+        "apps/ene-host/src/host/providers/grant.rs": (
+            "pub struct Grant;\n"
+            "#[cfg(test)]\n"
+            "mod tests { use crate::host::model::Credentials; }\n"
+        ),
+        "apps/ene-host/src/host/providers/safety_tests/mod.rs": (
+            "use crate::host::model::Credentials;\n"
+        ),
         "apps/ene-host/src/cli.rs": "pub fn run() { println!(\"cli\"); }\n",
         "apps/ene-host/build.rs": "fn main() { println!(\"cargo:rerun-if-changed=build.rs\"); }\n",
         "crates/demo/src/a.rs": "struct S;\nimpl S { fn a() {} }\ntrait T {}\nimpl T for S {}\n",
@@ -354,6 +398,7 @@ def self_test() -> None:
     baselines = Baselines(
         max_ui_rpc_refs=0,
         max_db_upward_refs=0,
+        max_providers_model_refs=0,
         default_max_impl_files=3,
         impl_spread_allowlist={("apps/ene-desktop", "SettingsStudio"): 4},
     )
@@ -441,6 +486,17 @@ def self_test() -> None:
         _, errors = evaluate(root, baselines)
         assert any("Rule 4" in e for e in errors), f"expected Rule 4 empty-reason error, got {errors}"
 
+        # Rule 5 violation (`providers -> model` in production code)
+        _write_fixture(
+            root,
+            {
+                **clean_files,
+                "apps/ene-host/src/host/providers/grant.rs": "use crate::host::model::Credentials;\n",
+            },
+        )
+        _, errors = evaluate(root, baselines)
+        assert any("Rule 5" in e for e in errors), f"expected Rule 5 error, got {errors}"
+
     # Verify strip_cfg_test keeps code after an inline test module and ignores braces in strings/comments.
     sample = (
         "fn before() {}\n"
@@ -454,7 +510,7 @@ def self_test() -> None:
     stripped = strip_cfg_test(sample)
     assert "fn before()" in stripped and "fn after()" in stripped and "mod tests" not in stripped
 
-    print("PASS all 4 architecture rules and self-test fixtures")
+    print("PASS all 5 architecture rules and self-test fixtures")
 
 
 def main() -> int:
@@ -475,11 +531,13 @@ def main() -> int:
         assert isinstance(rules, dict)
         ui = rules["ui_rpc_leak"]
         db = rules["db_upward_imports"]
+        pm = rules["providers_no_model_import"]
         println = rules["no_prod_println"]
         spread = rules["impl_file_spread_over_default"]
         print(
             f"architecture check: ui_rpc_leak={ui['count']}/{ui['max']}, "
             f"db_upward_imports={db['count']}/{db['max']}, "
+            f"providers_no_model_import={pm['count']}/{pm['max']}, "
             f"impl_over_default={spread}, "
             f"no_prod_println={println['violations']}"
         )

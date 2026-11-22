@@ -14,11 +14,13 @@
 //! happen to reference them.
 pub(crate) mod extensions;
 mod grant;
+mod install;
 #[cfg(test)]
 mod safety_tests;
 mod services;
 
 pub(crate) use grant::Grant;
+pub(crate) use install::{install_local_package, remove_local_package};
 #[cfg(test)]
 pub(crate) use services::construction_failure;
 #[cfg(test)]

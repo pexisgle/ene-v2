@@ -1,8 +1,9 @@
 //! Clients, their declared capabilities, the active client per companion and
 //! bound device operations.
 use super::{Result, Store, enum_name_column, json_column, now, optional_json_column, to_json};
-use crate::host::client::{CapabilitySpec, Client, DeviceOperation, DeviceStatus};
-use crate::host::error::{Failure, HostError};
+use crate::host::error::HostError;
+use ene_domain::{Client, DeviceOperation, DeviceStatus, Failure};
+use ene_policy::CapabilitySpec;
 use ene_rpc::Activation;
 use rusqlite::{OptionalExtension, Row, params};
 fn row_to_client(row: &Row<'_>) -> rusqlite::Result<Client> {

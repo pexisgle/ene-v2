@@ -5,6 +5,7 @@ use ene_rpc as w;
 pub const GOOGLE_AGENT_PLATFORM: &str = "google-agent-platform";
 pub const GOOGLE_AGENT_PLATFORM_ENDPOINT: &str = "https://aiplatform.googleapis.com";
 pub const GOOGLE_AGENT_PLATFORM_DEFAULT_MODEL: &str = "gemini-3.8-flash";
+pub const GOOGLE_AGENT_PLATFORM_VERIFIED_MODEL_LIST: &str = "verified_model_list";
 
 pub const SAKURA_AI_ENDPOINT: &str = "https://api.ai.sakura.ad.jp/v1";
 pub const SAKURA_AI_API_KEY_ENV: &str = "SAKURA_AI_API_KEY";

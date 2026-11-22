@@ -4083,6 +4083,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-domain"
+version = "0.1.8"
+dependencies = [
+ "ene-policy",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ene-host"
 version = "0.1.8"
 dependencies = [
@@ -4097,6 +4106,7 @@ dependencies = [
  "crossbeam-channel",
  "directories",
  "ene-catalog",
+ "ene-domain",
  "ene-mind",
  "ene-plugin",
  "ene-plugin-runtime",

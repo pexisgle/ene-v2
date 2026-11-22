@@ -171,7 +171,9 @@ impl w::SettingsService for Services {
         let credentials = self.runtime.credentials();
         let response = self.call(move |app| {
             let store = app.world().resource::<Store>().clone();
-            let (settings, companions) = store.delete_connection(&id, revision, &credentials)?;
+            let (settings, companions) = store.delete_connection(&id, revision, || {
+                crate::host::model::delete_secret(&credentials, &id)
+            })?;
             let view = wire::settings(&settings);
             notify_settings(app, view.clone());
             for companion in companions {
@@ -652,7 +654,7 @@ impl w::SettingsService for Services {
         let state_dir = self.runtime.state_dir().to_path_buf();
         self.call(move |app| {
             let store = app.world().resource::<Store>().clone();
-            let (entry, manifest) = crate::host::db::plugins::install_local_package(
+            let (entry, manifest) = crate::host::providers::install_local_package(
                 &store,
                 &state_dir,
                 std::path::Path::new(&source_path),
@@ -739,7 +741,7 @@ impl w::SettingsService for Services {
         let state_dir = self.runtime.state_dir().to_path_buf();
         self.call(move |app| {
             let store = app.world().resource::<Store>();
-            if !crate::host::db::plugins::remove_local_package(store, &state_dir, &plugin_id)? {
+            if !crate::host::providers::remove_local_package(store, &state_dir, &plugin_id)? {
                 return Err(HostError::NotFound(format!(
                     "plugin `{plugin_id}` not found"
                 )));

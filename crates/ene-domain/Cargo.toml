@@ -1,0 +1,15 @@
+[package]
+name = "ene-domain"
+description = "Shared pure domain types for clients, work sessions, runs, and failures"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ene-policy.workspace = true
+serde.workspace = true
+serde_json.workspace = true

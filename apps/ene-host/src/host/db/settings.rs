@@ -4,7 +4,6 @@ use super::{
     require_found, to_json,
 };
 use crate::host::error::HostError;
-use crate::host::model::{Credentials, agent_platform, delete_secret};
 use crate::host::settings::{Check, Connection, ConnectionConfig, Settings};
 use ene_mind::Companion;
 use rusqlite::{Row, params};
@@ -133,7 +132,7 @@ impl Store {
             let reset_check = existing.is_some_and(|previous| {
                 (input.kind == crate::host::settings::ConnectionKind::Search
                     && input.config != previous.config)
-                    || (input.endpoint().adapter == agent_platform::ADAPTER
+                    || (input.endpoint().adapter == ene_catalog::GOOGLE_AGENT_PLATFORM
                         && input.config != previous.config
                         && !keeps_verified_model_list(previous, input))
             });
@@ -188,7 +187,7 @@ impl Store {
     ) -> Result<()> {
         let reset_check = self.connection(id)?.is_some_and(|connection| {
             connection.kind == crate::host::settings::ConnectionKind::Search
-                || connection.endpoint().adapter == agent_platform::ADAPTER
+                || connection.endpoint().adapter == ene_catalog::GOOGLE_AGENT_PLATFORM
         });
         let changed = self
             .conn()?
@@ -204,7 +203,7 @@ impl Store {
         &self,
         id: &str,
         revision: u64,
-        credentials: &Credentials,
+        on_delete_secret: impl FnOnce() -> Result<()>,
     ) -> Result<(Settings, Vec<Companion>)> {
         let mut companions = self.companions()?;
         let mut db = self.conn()?;
@@ -233,7 +232,7 @@ impl Store {
             [&stamp],
         )?;
         // Do not commit the removal if the registered key could not be erased.
-        delete_secret(credentials, id)?;
+        on_delete_secret()?;
         tx.commit()?;
         drop(db);
         Ok((self.settings()?, companions))
@@ -260,7 +259,7 @@ fn keeps_verified_model_list(previous: &Connection, next: &Connection) -> bool {
                 && check
                     .capabilities
                     .iter()
-                    .any(|cap| cap == agent_platform::VERIFIED_MODEL_LIST)
+                    .any(|cap| cap == ene_catalog::GOOGLE_AGENT_PLATFORM_VERIFIED_MODEL_LIST)
                 && config
                     .model_ids
                     .iter()
@@ -390,15 +389,17 @@ mod tests {
     #[test]
     fn removing_a_connection_checks_revision_and_clears_only_its_bindings_and_secret() {
         use ene_mind::{Assignment, default_ene_companion};
+        use std::collections::HashMap;
 
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("state.sqlite3")).unwrap();
         let settings = store
             .update_settings(1, &[(connection("drop"), 0), (connection("keep"), 0)])
             .unwrap();
-        let credentials = Credentials::new(true);
-        credentials.remember("drop", "discarded".into());
-        credentials.remember("keep", "preserved".into());
+        let mut secrets = HashMap::from([
+            ("drop".to_owned(), "discarded".to_owned()),
+            ("keep".to_owned(), "preserved".to_owned()),
+        ]);
         let mut companion = default_ene_companion(&now());
         let assignment = |id: &str| Assignment {
             connection_id: id.into(),
@@ -410,15 +411,31 @@ mod tests {
         store.insert_companion(&companion).unwrap();
 
         assert!(matches!(
-            store.delete_connection("drop", 2, &credentials),
+            store.delete_connection("drop", 2, || {
+                secrets.remove("drop");
+                Ok(())
+            }),
             Err(HostError::Conflict(_))
         ));
-        assert_eq!(
-            credentials.secret("drop").unwrap().as_deref(),
-            Some("discarded")
-        );
+        assert_eq!(secrets.get("drop").map(String::as_str), Some("discarded"));
         assert_eq!(store.companion(&companion.id).unwrap().unwrap(), companion);
-        let (next, changed) = store.delete_connection("drop", 1, &credentials).unwrap();
+
+        // If secret erasure fails, the SQLite transaction must roll back cleanly.
+        assert!(matches!(
+            store.delete_connection("drop", 1, || {
+                Err(HostError::Storage("keyring unavailable".into()))
+            }),
+            Err(HostError::Storage(_))
+        ));
+        assert!(store.connection("drop").unwrap().is_some());
+        assert_eq!(store.companion(&companion.id).unwrap().unwrap(), companion);
+
+        let (next, changed) = store
+            .delete_connection("drop", 1, || {
+                secrets.remove("drop");
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(next.revision, settings.revision + 1);
         assert_eq!(
             next.connections
@@ -434,11 +451,8 @@ mod tests {
         assert_eq!(saved.assignments.task, assignment("keep"));
         assert!(saved.assignments.perception.is_none());
         assert_eq!(saved.revision, companion.revision + 1);
-        assert!(credentials.secret("drop").unwrap().is_none());
-        assert_eq!(
-            credentials.secret("keep").unwrap().as_deref(),
-            Some("preserved")
-        );
+        assert!(!secrets.contains_key("drop"));
+        assert_eq!(secrets.get("keep").map(String::as_str), Some("preserved"));
     }
 
     #[test]

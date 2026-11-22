@@ -310,10 +310,11 @@ pub(crate) fn connect_assignment(
     // A plugin that serves this connection's adapter answers instead of the
     // catalog, so a provider rig does not ship needs no host change.
     if let Some(running) = providers.running(&endpoint.adapter, ene_plugin::Extension::Llm) {
+        let secret = connection_secret(&connection, Some(credentials), providers)?;
         let context = super::providers::ProviderInvocationContext::from_connection(
             &running,
             &connection,
-            Some(credentials),
+            secret,
             providers,
             Some(super::net::MODEL_TIMEOUT),
         )?;
@@ -696,10 +697,12 @@ async fn list_models(
                 .start(adapter, ene_plugin::Extension::Llm)
                 .await
                 .map_err(|error| ModelProbeError::Failed(error.to_string()))?;
+            let secret = connection_secret(connection, Some(credentials), providers)
+                .map_err(|error| ModelProbeError::Failed(error.to_string()))?;
             let context = super::providers::ProviderInvocationContext::from_connection(
                 &running,
                 connection,
-                Some(credentials),
+                secret,
                 providers,
                 Some(super::net::MODEL_TIMEOUT),
             )

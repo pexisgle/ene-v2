@@ -25,7 +25,6 @@ use bevy_ecs::prelude::*;
 use ene_rpc as w;
 use rig_core::completion::Message;
 use rig_ecs::prelude::*;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     collections::HashMap,
@@ -34,80 +33,7 @@ use std::{
 
 const STALL_TIMEOUT: Duration = Duration::from_secs(90);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum WorkStatus {
-    Idle,
-    Active,
-    Closed,
-}
-
-impl WorkStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Active => "active",
-            Self::Closed => "closed",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum RunState {
-    Starting,
-    Running,
-    WaitingInput,
-    Completed,
-    /// A stop reached its final state. A stored row that still spells a state
-    /// this build no longer has decodes here.
-    #[serde(alias = "cancelling", alias = "cancellation_unconfirmed")]
-    Cancelled,
-    Failed,
-}
-
-impl RunState {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Starting => "starting",
-            Self::Running => "running",
-            Self::WaitingInput => "waiting_input",
-            Self::Completed => "completed",
-            Self::Cancelled => "cancelled",
-            Self::Failed => "failed",
-        }
-    }
-
-    pub(crate) fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Cancelled | Self::Failed)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct WorkSession {
-    pub(crate) id: String,
-    pub(crate) companion_id: String,
-    pub(crate) title: String,
-    pub(crate) status: WorkStatus,
-    /// The client the work was commissioned from. Empty when no client was
-    /// active at commissioning.
-    pub(crate) client_id: Option<String>,
-    pub(crate) created_at: String,
-    pub(crate) updated_at: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Run {
-    pub(crate) run_id: String,
-    pub(crate) work_id: String,
-    pub(crate) instruction: String,
-    pub(crate) state: RunState,
-    /// The approval the run is waiting on, while it is `WaitingInput`.
-    pub(crate) pending_request_id: Option<String>,
-    pub(crate) failure: Option<Failure>,
-    pub(crate) started_at: String,
-    pub(crate) updated_at: String,
-}
+pub(crate) use ene_domain::{Run, RunState, WorkSession, WorkStatus};
 
 fn new_run(run_id: String, work_id: &str, instruction: &str, state: RunState) -> Run {
     Run {

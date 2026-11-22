@@ -21,8 +21,8 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 pub(super) use ene_catalog::GOOGLE_AGENT_PLATFORM_DEFAULT_MODEL as DEFAULT_MODEL;
 pub(crate) use ene_catalog::{
     GOOGLE_AGENT_PLATFORM as ADAPTER, GOOGLE_AGENT_PLATFORM_ENDPOINT as ENDPOINT,
+    GOOGLE_AGENT_PLATFORM_VERIFIED_MODEL_LIST as VERIFIED_MODEL_LIST,
 };
-pub(crate) const VERIFIED_MODEL_LIST: &str = "verified_model_list";
 
 // Google Cloud's Gemini chat model IDs. Use the same candidates for both
 // connection modes and let Google decide what each key and location can use.

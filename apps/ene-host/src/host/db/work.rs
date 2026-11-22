@@ -2,8 +2,8 @@
 use super::{
     Result, Store, enum_name_column, now, optional_json_column, or_stamp, require_found, to_json,
 };
-use crate::host::error::{Failure, HostError};
-use crate::host::work::{Run, RunState, WorkSession, WorkStatus};
+use crate::host::error::HostError;
+use ene_domain::{Failure, Run, RunState, WorkSession, WorkStatus};
 use rusqlite::{Row, params};
 
 fn row_to_session(row: &Row<'_>) -> rusqlite::Result<WorkSession> {

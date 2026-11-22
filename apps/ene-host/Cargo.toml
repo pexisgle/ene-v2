@@ -23,6 +23,7 @@ crossbeam-channel = "0.5"
 directories = "6"
 ene-rpc.workspace = true
 ene-catalog.workspace = true
+ene-domain.workspace = true
 ene-mind.workspace = true
 ene-policy.workspace = true
 ene-plugin.workspace = true

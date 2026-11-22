@@ -3,6 +3,7 @@ pub(crate) mod approvals;
 pub(crate) mod clients;
 pub(crate) mod companions;
 pub(crate) mod memories;
+mod migrations;
 pub(crate) mod plugins;
 pub(crate) mod policies;
 pub(crate) mod schedules;
@@ -11,15 +12,13 @@ pub(crate) mod work;
 
 pub(crate) use super::error::{HostError, Result};
 pub(super) use super::util::{digest, epoch, now, or_stamp, truncate, validate_id};
+#[cfg(test)]
+pub(crate) use migrations::VERSION;
 use rusqlite::{Connection, OptionalExtension};
 use std::{
     path::Path,
     sync::{Arc, Mutex, MutexGuard},
 };
-
-/// A baseline schema version. Databases with another version are refused, as
-/// this alpha has no in-place migration path.
-pub(crate) const VERSION: i64 = 6;
 
 fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
     let connection = Connection::open(path)?;
@@ -42,35 +41,9 @@ impl Store {
                 .map_err(|error| HostError::Storage(format!("state directory: {error}")))?;
         }
         let mut connection = open_connection(path)?;
-        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version > VERSION {
-            return Err(HostError::Storage(format!(
-                "state database version {version} is newer than this host ({VERSION})"
-            )));
-        }
-        if version < VERSION {
-            // Only an empty database is initialized as this baseline. One with
-            // tables is from an older development schema, which this alpha
-            // does not migrate in place: refusing is honest, treating its
-            // tables as current would fail later with a corrupt-state error.
-            let tables: i64 = connection.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
-                [],
-                |row| row.get(0),
-            )?;
-            if tables > 0 {
-                return Err(HostError::Storage(format!(
-                    "state database version {version} predates this host's baseline; it is not migrated in place"
-                )));
-            }
-        }
+        migrations::validate_open_version(&connection)?;
         configure_connection(&connection)?;
-        // The tables and the version commit together, so a crash cannot leave
-        // a current schema that the next start refuses as an old one.
-        let transaction = connection.transaction()?;
-        transaction.execute_batch(include_str!("schema.sql"))?;
-        transaction.pragma_update(None, "user_version", VERSION)?;
-        transaction.commit()?;
+        migrations::apply_migrations(&mut connection)?;
         Ok(Self(Arc::new(Mutex::new(connection))))
     }
 
@@ -246,12 +219,9 @@ mod tests {
 
     #[test]
     fn serde_enum_columns_preserve_names_and_reject_unknown_values() {
-        use crate::host::{
-            client::DeviceStatus,
-            permission::{ApprovalStatus, PolicyEffect},
-            settings::ConnectionKind,
-            work::{RunState, WorkStatus},
-        };
+        use crate::host::settings::ConnectionKind;
+        use ene_domain::{DeviceStatus, RunState, WorkStatus};
+        use ene_policy::{ApprovalStatus, PolicyEffect};
         fn check<
             T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
         >(
@@ -321,7 +291,7 @@ mod tests {
     /// stop reaches now instead of failing the row.
     #[test]
     fn a_stop_state_this_host_no_longer_writes_decodes_as_cancelled() {
-        use crate::host::work::RunState;
+        use ene_domain::RunState;
 
         let connection = Connection::open_in_memory().unwrap();
         for name in ["cancelling", "cancellation_unconfirmed"] {

@@ -175,11 +175,11 @@ impl ProviderInvocationContext {
     pub(crate) fn from_connection(
         running: &super::Running,
         connection: &crate::host::settings::Connection,
-        credentials: Option<&crate::host::model::Credentials>,
+        secret: Option<String>,
         providers: &super::Providers,
         deadline: Option<std::time::Duration>,
     ) -> crate::host::error::Result<Self> {
-        let grant = super::Grant::new(running.provider(), connection, credentials, providers)?;
+        let grant = super::Grant::new(running.provider(), secret);
         let broker = match deadline {
             Some(deadline) => http_broker_with_deadline(Arc::new(grant), deadline),
             None => http_broker(Arc::new(grant)),

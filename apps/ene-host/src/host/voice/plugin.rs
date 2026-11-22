@@ -45,12 +45,10 @@ impl PluginSpeech {
         let Some(running) = providers.running(&adapter, extension) else {
             return Ok(None);
         };
+        let secret = crate::host::model::connection_secret(connection, credentials, providers)
+            .map_err(|error| SetupError::Broken(error.to_string()))?;
         let context = ProviderInvocationContext::from_connection(
-            &running,
-            connection,
-            credentials,
-            providers,
-            None,
+            &running, connection, secret, providers, None,
         )
         .map_err(|error| SetupError::Broken(error.to_string()))?;
         Ok(Some(Self { running, context }))
