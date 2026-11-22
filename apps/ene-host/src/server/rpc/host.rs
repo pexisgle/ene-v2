@@ -9,6 +9,15 @@ use futures_util::StreamExt;
 
 #[allow(refining_impl_trait)]
 impl w::HostService for Services {
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "get_snapshot",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+        )
+    )]
     async fn get_snapshot(
         &self,
         _: RequestContext,
@@ -17,6 +26,16 @@ impl w::HostService for Services {
         self.read(host::snapshot).await
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "subscribe",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+            client_id = %request.client_id,
+        )
+    )]
     async fn subscribe(
         &self,
         _: RequestContext,
@@ -89,6 +108,15 @@ impl w::HostService for Services {
         Response::stream_ok(stream)
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "get_perception_frame",
+            companion_id = tracing::field::Empty,
+            request_id = %request.id,
+        )
+    )]
     async fn get_perception_frame(
         &self,
         _: RequestContext,
@@ -99,6 +127,15 @@ impl w::HostService for Services {
             .await
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "list_companions",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+        )
+    )]
     async fn list_companions(
         &self,
         _: RequestContext,
@@ -128,6 +165,15 @@ impl w::HostService for Services {
     );
     discard_id!(delete_companion, w::Id, id, mind::delete);
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "list_companion_templates",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+        )
+    )]
     async fn list_companion_templates(
         &self,
         _: RequestContext,
@@ -148,6 +194,15 @@ impl w::HostService for Services {
         mind::import_template
     );
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "preview_companion",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+        )
+    )]
     async fn preview_companion(
         &self,
         _: RequestContext,

@@ -18,6 +18,15 @@ use rig_ecs::prelude::App;
 
 #[allow(refining_impl_trait)]
 impl w::SettingsService for Services {
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "get_settings",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+        )
+    )]
     async fn get_settings(
         &self,
         _: RequestContext,
@@ -27,6 +36,15 @@ impl w::SettingsService for Services {
             .await
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "update_settings",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+        )
+    )]
     async fn update_settings(
         &self,
         _: RequestContext,
@@ -105,6 +123,15 @@ impl w::SettingsService for Services {
         Ok(view)
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "list_pending_approvals",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+        )
+    )]
     async fn list_pending_approvals(
         &self,
         _: RequestContext,
@@ -124,6 +151,16 @@ impl w::SettingsService for Services {
         .await
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "delete_connection",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+            connection_id = %request.id,
+        )
+    )]
     async fn delete_connection(
         &self,
         _: RequestContext,
@@ -164,6 +201,15 @@ impl w::SettingsService for Services {
         Ok(response)
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "submit_approval",
+            companion_id = tracing::field::Empty,
+            request_id = %request.request_id,
+        )
+    )]
     async fn submit_approval(
         &self,
         _: RequestContext,
@@ -191,6 +237,15 @@ impl w::SettingsService for Services {
         .await
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "list_policy_rules",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+        )
+    )]
     async fn list_policy_rules(
         &self,
         _: RequestContext,
@@ -210,6 +265,15 @@ impl w::SettingsService for Services {
         .await
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "update_policy_rules",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+        )
+    )]
     async fn update_policy_rules(
         &self,
         _: RequestContext,
@@ -241,6 +305,15 @@ impl w::SettingsService for Services {
         .await
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "list_policy_texts",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+        )
+    )]
     async fn list_policy_texts(
         &self,
         _: RequestContext,
@@ -260,6 +333,15 @@ impl w::SettingsService for Services {
         .await
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "update_policy_texts",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+        )
+    )]
     async fn update_policy_texts(
         &self,
         _: RequestContext,
@@ -291,6 +373,15 @@ impl w::SettingsService for Services {
         .await
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "list_providers",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+        )
+    )]
     async fn list_providers(
         &self,
         _: RequestContext,
@@ -302,6 +393,16 @@ impl w::SettingsService for Services {
         })
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "list_models",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+            connection_id = %request.id,
+        )
+    )]
     async fn list_models(
         &self,
         _: RequestContext,
@@ -326,6 +427,16 @@ impl w::SettingsService for Services {
         .await
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "register_credentials",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+            connection_id = %request.id,
+        )
+    )]
     async fn register_credentials(
         &self,
         _: RequestContext,
@@ -354,6 +465,16 @@ impl w::SettingsService for Services {
         .await
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "revoke_credentials",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+            connection_id = %request.id,
+        )
+    )]
     async fn revoke_credentials(
         &self,
         _: RequestContext,
@@ -376,6 +497,16 @@ impl w::SettingsService for Services {
         .await
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "check_connection",
+            companion_id = tracing::field::Empty,
+            request_id = %request.request_key,
+            connection_id = %request.id,
+        )
+    )]
     async fn check_connection(
         &self,
         _: RequestContext,
@@ -434,6 +565,15 @@ impl w::SettingsService for Services {
         .await
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "list_plugins",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+        )
+    )]
     async fn list_plugins(
         &self,
         _: RequestContext,
@@ -494,6 +634,15 @@ impl w::SettingsService for Services {
         .await
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "install_plugin",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+        )
+    )]
     async fn install_plugin(
         &self,
         _: RequestContext,
@@ -529,6 +678,16 @@ impl w::SettingsService for Services {
         .await
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "set_plugin_enabled",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+            plugin_id = %request.plugin_id,
+        )
+    )]
     async fn set_plugin_enabled(
         &self,
         _: RequestContext,
@@ -561,6 +720,16 @@ impl w::SettingsService for Services {
         .await
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "remove_plugin",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+            plugin_id = %request.plugin_id,
+        )
+    )]
     async fn remove_plugin(
         &self,
         _: RequestContext,

@@ -171,6 +171,11 @@ pub(crate) fn work_prompt(companion: &Companion, instruction: &str) -> String {
 
 /// Spawns the agent of a companion if it does not exist yet, or adopts the
 /// one the kernel restored under the companion's stable id.
+#[tracing::instrument(
+    name = "agent.spawn_companion",
+    skip_all,
+    fields(companion_id = %companion.id)
+)]
 pub(crate) fn spawn_companion(world: &mut World, companion: &Companion) -> Entity {
     if let Some(entity) = agent_of(world, &companion.id) {
         return entity;
@@ -198,6 +203,11 @@ pub(crate) fn spawn_companion(world: &mut World, companion: &Companion) -> Entit
     entity
 }
 
+#[tracing::instrument(
+    name = "agent.spawn_work",
+    skip_all,
+    fields(companion_id = %companion.id, work_id = %work_id, run_id = %run_id)
+)]
 pub(crate) fn spawn_work_agent(
     world: &mut World,
     companion: &Companion,
@@ -231,6 +241,11 @@ pub(crate) fn spawn_work_agent(
 }
 
 /// Binds the agent's model when its assignment or the settings changed.
+#[tracing::instrument(
+    name = "agent.ensure_model",
+    skip_all,
+    fields(?entity, companion_id = tracing::field::Empty)
+)]
 pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
     world.init_resource::<Connections>();
     let (companion_id, role) = match world.get::<CompanionAgent>(entity) {
@@ -240,6 +255,7 @@ pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
             None => return Err(HostError::Internal(("an agent without a role").into())),
         },
     };
+    tracing::Span::current().record("companion_id", companion_id.as_str());
     let store = world.resource::<Store>().clone();
     let companion = store
         .companion(&companion_id)?
@@ -319,6 +335,7 @@ pub(crate) fn notice_model_unavailable(world: &mut World, companion_id: &str, er
 /// schedule loop deliver turns without going through `chat`, which is where a
 /// typed message asks for a model; without this a turn can run on the model the
 /// agent was bound to before its assignment or settings changed.
+#[tracing::instrument(name = "agent.deliver", skip_all, fields(companion_id = %companion_id, ?mode))]
 pub(crate) fn deliver(
     world: &mut World,
     entity: Entity,

@@ -103,6 +103,11 @@ impl Instance {
         Self::load_for_target(package, entrypoint, Target::Host, cancel).await
     }
 
+    #[tracing::instrument(
+        name = "wasm.load",
+        skip_all,
+        fields(plugin_id = %package.manifest.id, entrypoint = %entrypoint, ?expected_target)
+    )]
     pub async fn load_for_target(
         package: Package,
         entrypoint: String,
@@ -162,6 +167,11 @@ impl Instance {
         instance.initialize(cancel).await?;
         Ok(instance)
     }
+    #[tracing::instrument(
+        name = "wasm.call",
+        skip_all,
+        fields(plugin_id = %self.package.manifest.id, entrypoint = %self.entrypoint, function)
+    )]
     async fn call<T: DeserializeOwned + Send + 'static>(
         &mut self,
         function: &'static str,
@@ -221,6 +231,15 @@ impl Instance {
         }
         result
     }
+    #[tracing::instrument(
+        name = "wasm.invoke",
+        skip_all,
+        fields(
+            plugin_id = %self.package.manifest.id,
+            entrypoint = %self.entrypoint,
+            extension = ?operation.extension()
+        )
+    )]
     pub async fn invoke(
         &mut self,
         operation: Operation,

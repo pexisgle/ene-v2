@@ -30,7 +30,7 @@ tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "process", "io-util", "sync", "time"] }
 tokio-util.workspace = true
-tracing = "0.1"
+tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 cpal = "0.18"
 earshot = "1.2.2"

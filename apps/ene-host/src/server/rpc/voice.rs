@@ -20,6 +20,15 @@ use std::sync::Arc;
 
 #[allow(refining_impl_trait)]
 impl w::VoiceService for Services {
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "stream_audio_input",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+        )
+    )]
     async fn stream_audio_input(
         &self,
         _: RequestContext,
@@ -118,6 +127,16 @@ impl w::VoiceService for Services {
         Response::stream_ok(stream)
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "subscribe_audio_output",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+            client_id = %request.client_id,
+        )
+    )]
     async fn subscribe_audio_output(
         &self,
         _: RequestContext,
@@ -169,6 +188,16 @@ impl w::VoiceService for Services {
         Response::stream_ok(stream)
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "speak",
+            companion_id = request.companion_id.unwrap_or(""),
+            request_id = tracing::field::Empty,
+            client_id = %request.client_id,
+        )
+    )]
     async fn speak(
         &self,
         _: RequestContext,

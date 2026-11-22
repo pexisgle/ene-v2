@@ -47,7 +47,7 @@ fn main() {
     let path = discovery_path(local_host.is_some()).unwrap_or_else(|reason| {
         // Without a runtime directory there is no host to find, so the
         // window could only repeat this sentence.
-        eprintln!("ene-desktop: {reason}");
+        tracing::error!(%reason, "could not resolve host discovery path");
         std::process::exit(1);
     });
 
@@ -126,6 +126,7 @@ fn install_panic_hook() {
             .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
             .unwrap_or_else(|| "unknown location".to_owned());
         tracing::error!(location = %location, payload = %payload, "ene-desktop panicked");
+        // architecture:allow-stderr: panic fallback stderr output if the tracing subscriber is unavailable
         eprintln!("ene-desktop panic at {location}: {payload}");
         default_hook(info);
     }));
@@ -169,7 +170,7 @@ fn start_session_runtime(
         .enable_all()
         .build()
         .unwrap_or_else(|error| {
-            eprintln!("ene-desktop: the async runtime did not start: {error}");
+            tracing::error!(%error, "the async runtime did not start");
             std::process::exit(1);
         });
     let handle = runtime.handle().clone();
@@ -180,7 +181,7 @@ fn start_session_runtime(
             runtime.block_on(session.run());
         })
         .unwrap_or_else(|error| {
-            eprintln!("ene-desktop: the session thread did not start: {error}");
+            tracing::error!(%error, "the session thread did not start");
             std::process::exit(1);
         });
     SessionRuntime { handle, worker }

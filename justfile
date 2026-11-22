@@ -23,6 +23,14 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
+[windows]
+check-arch:
+    if (Get-Command uv -ErrorAction SilentlyContinue) { uv run python scripts/check-architecture.py } elseif (Get-Command py -ErrorAction SilentlyContinue) { py -3 scripts/check-architecture.py } else { python scripts/check-architecture.py }
+
+[unix]
+check-arch:
+    python3 scripts/check-architecture.py
+
 check:
     cargo check {{cargo_wrapper}} --workspace --all-targets --all-features --locked
 
@@ -48,7 +56,7 @@ fetch-assets asset="all":
     python3 scripts/fetch-assets.py "{{asset}}"
 
 # Re-run tests only when the behavior under test changes.
-verify: fmt-check clippy
+verify: fmt-check check-arch clippy
 
 build-test-plugins:
     cargo build {{cargo_wrapper}} --release --locked -p ene-reference-wasm -p ene-openrouter-wasm --target wasm32-unknown-unknown

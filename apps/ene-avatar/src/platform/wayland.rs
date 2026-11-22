@@ -279,7 +279,7 @@ fn run(mut app: App) -> AppExit {
         ReturnData::None
     });
     if let Err(error) = result {
-        eprintln!("Wayland: {error}");
+        bevy::log::error!(%error, "wayland loop failed");
         return AppExit::error();
     }
     exit_rx.try_recv().unwrap_or(AppExit::Success)

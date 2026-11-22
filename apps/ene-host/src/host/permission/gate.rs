@@ -189,6 +189,15 @@ fn count_reply_calls(world: &mut World) -> HashMap<EffectId, usize> {
     reply_calls
 }
 
+#[tracing::instrument(
+    name = "permission.gate",
+    skip_all,
+    fields(
+        tool = %item.tool_name,
+        call_id = %item.call_id,
+        companion_id = tracing::field::Empty,
+    )
+)]
 fn process_gate_call(
     world: &mut World,
     ctx: &mut GateContext,
@@ -211,6 +220,7 @@ fn process_gate_call(
     }
     let rules = load_gate_rules(world, ctx, item.entity)?;
     let (companion_id, work_id, run_id) = binding_of(world, item.agent);
+    tracing::Span::current().record("companion_id", companion_id.as_str());
     if let Some(reason) = run_pre_tool_hooks(
         world,
         &ctx.store,
@@ -568,6 +578,15 @@ fn issue_gate_hold(
     std::ops::ControlFlow::Continue((pending, arguments_view))
 }
 
+#[tracing::instrument(
+    name = "permission.issue_hold",
+    skip_all,
+    fields(
+        request_id = %approval.request_id,
+        companion_id = %approval.session_id,
+        tool = %approval.tool_name,
+    )
+)]
 pub(crate) fn issue_hold(
     world: &mut World,
     store: &Store,

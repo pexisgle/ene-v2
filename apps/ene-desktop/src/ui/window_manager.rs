@@ -299,7 +299,7 @@ pub fn open_pod_window(cx: &mut App, hub: Entity<Hub>) -> Option<WindowHandle<Co
             Some(window)
         }
         Err(error) => {
-            eprintln!("ene-desktop: the window did not open: {error:#}");
+            tracing::error!(error = ?error, "failed to open window");
             None
         }
     }

@@ -5,6 +5,7 @@
 /// the `App`, and the bare form writes to the world.
 macro_rules! request {
     (read_view $name:ident, $request:ty, $response:ty, $op:path) => {
+        #[tracing::instrument(name = "rpc", skip_all, fields(method = stringify!($name), companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
         async fn $name(
             &self,
             _: connectrpc::RequestContext,
@@ -16,6 +17,7 @@ macro_rules! request {
         }
     };
     (read $name:ident, $request:ty, $response:ty, $op:path) => {
+        #[tracing::instrument(name = "rpc", skip_all, fields(method = stringify!($name), companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
         async fn $name(
             &self,
             _: connectrpc::RequestContext,
@@ -26,6 +28,7 @@ macro_rules! request {
         }
     };
     (app $name:ident, $request:ty, $response:ty, $op:path) => {
+        #[tracing::instrument(name = "rpc", skip_all, fields(method = stringify!($name), companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
         async fn $name(
             &self,
             _: connectrpc::RequestContext,
@@ -36,6 +39,7 @@ macro_rules! request {
         }
     };
     ($name:ident, $request:ty, $response:ty, $op:path) => {
+        #[tracing::instrument(name = "rpc", skip_all, fields(method = stringify!($name), companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
         async fn $name(
             &self,
             _: connectrpc::RequestContext,
@@ -50,6 +54,7 @@ macro_rules! request {
 /// Declares a write method that answers `Empty` once the operation succeeded.
 macro_rules! discard {
     ($name:ident, $request:ty, $op:path) => {
+        #[tracing::instrument(name = "rpc", skip_all, fields(method = stringify!($name), companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
         async fn $name(
             &self,
             _: connectrpc::RequestContext,
@@ -69,6 +74,7 @@ macro_rules! discard {
 /// operation.
 macro_rules! read_id {
     ($name:ident, $response:ty, $op:path) => {
+        #[tracing::instrument(name = "rpc", skip_all, fields(method = stringify!($name), companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
         async fn $name(
             &self,
             _: connectrpc::RequestContext,
@@ -84,6 +90,7 @@ macro_rules! read_id {
 /// Declares a write method addressed by one id field that answers `Empty`.
 macro_rules! discard_id {
     ($name:ident, $request:ty, $field:ident, $op:path) => {
+        #[tracing::instrument(name = "rpc", skip_all, fields(method = stringify!($name), companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
         async fn $name(
             &self,
             _: connectrpc::RequestContext,

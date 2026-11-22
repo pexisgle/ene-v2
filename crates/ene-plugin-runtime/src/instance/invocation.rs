@@ -85,6 +85,7 @@ impl Invocation {
             }
         })
     }
+    #[tracing::instrument(name = "wasm.host_service", skip_all, fields(service = ?request.service()))]
     fn service(
         &self,
         request: ServiceRequest,
@@ -102,6 +103,7 @@ impl Invocation {
             Ok(result)
         })
     }
+    #[tracing::instrument(name = "wasm.host_emit", skip_all)]
     fn emit(&self, event: Event) -> crate::Result<()> {
         self.validator
             .lock()

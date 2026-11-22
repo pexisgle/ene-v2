@@ -16,6 +16,15 @@ impl w::ClientService for Services {
         client::register
     );
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "list",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+        )
+    )]
     async fn list(
         &self,
         _: RequestContext,
@@ -45,6 +54,16 @@ impl w::ClientService for Services {
         client::set_capabilities
     );
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "device_stream",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+            client_id = %request.id,
+        )
+    )]
     async fn device_stream(
         &self,
         _: RequestContext,

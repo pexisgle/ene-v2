@@ -6,6 +6,15 @@ use ene_rpc as w;
 
 #[allow(refining_impl_trait)]
 impl w::WorkService for Services {
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "list_works",
+            companion_id = %request.companion_id,
+            request_id = tracing::field::Empty,
+        )
+    )]
     async fn list_works(
         &self,
         _: RequestContext,
@@ -19,6 +28,16 @@ impl w::WorkService for Services {
         .await
     }
 
+    #[tracing::instrument(
+        name = "rpc",
+        skip_all,
+        fields(
+            method = "get_work",
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+            work_id = %request.work_id,
+        )
+    )]
     async fn get_work(
         &self,
         _: RequestContext,

@@ -47,25 +47,27 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let listener = TcpListener::bind(&bind).await?;
     let local = listener.local_addr()?;
     if !local.ip().is_loopback() {
-        eprintln!(
-            "ene-host: WARNING listening on {local}; Owner Bearer remains required. \
-             Do not expose this port without the external access control described in docs/design/host-access.md"
+        tracing::warn!(
+            %local,
+            "listening on non-loopback address; Owner Bearer remains required; \
+             do not expose this port without the external access control described in docs/design/host-access.md"
         );
     }
     access.publish(&format!("http://{local}/rpc"))?;
     let guard = auth::Guard::new(access.token.clone());
     if !guard.allowed().is_empty() {
-        eprintln!(
-            "ene-host: trusting Host/Origin authorities {} besides loopback; the Owner Bearer is still required",
-            guard
-                .allowed()
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(",")
+        let allowed = guard
+            .allowed()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        tracing::warn!(
+            %allowed,
+            "trusting Host/Origin authorities besides loopback; the Owner Bearer is still required"
         );
     }
-    eprintln!("ene-host: authenticated service ready on {local}");
+    tracing::info!(%local, "authenticated service ready");
     let shutdown = CancellationToken::new();
     let app = router(runtime.clone(), guard, shutdown.clone());
     let running = runtime.clone();

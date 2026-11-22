@@ -16,6 +16,11 @@ pub(crate) const MAX_INPUT_CHARS: usize = 32_000;
 
 /// Accepts a user message. The returned id is only produced after the message
 /// is in the session log; the same request key returns the same id.
+#[tracing::instrument(
+    name = "chat.accept",
+    skip_all,
+    fields(companion_id = %request.companion_id, request_id = tracing::field::Empty)
+)]
 pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w::Acceptance> {
     if request.text.trim().is_empty() {
         return Err(HostError::Invalid(("a message is required").into()));
@@ -48,6 +53,7 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
     if !request.request_key.is_empty()
         && let Some(request_id) = accepted(world, agent, &request.request_key, &hash)?
     {
+        tracing::Span::current().record("request_id", request_id.as_str());
         return Ok(w::Acceptance {
             request_id,
             ..Default::default()
@@ -55,6 +61,7 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
     }
 
     let request_id = uuid::Uuid::new_v4().to_string();
+    tracing::Span::current().record("request_id", request_id.as_str());
     // One frame carries the message: the receipt is in the conversation before
     // the frame saves it, and the input reaches the same conversation in the
     // frame. A crash between the two saves leaves an orphan receipt, which the
