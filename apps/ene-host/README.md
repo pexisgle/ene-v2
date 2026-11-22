@@ -71,10 +71,11 @@ RPC では LLM 接続の `adapter` に `google-agent-platform` を指定し、�
 | `src/host/compaction.rs` | アイドル要約（`ene.summary`）と、単一パスの要求フィット（`fit`） |
 | `src/host/autonomy.rs` | `noop`、スケジュール登録ツール、発火ループ（croner/run_at） |
 | `src/host/delegation.rs` | 音声`transcription_id`単位の作業委譲調停 |
-| `src/host/voice.rs` | TTS/STTプロバイダー境界（Wasmプラグイン）、文分割・世代管理・フロア制御 |
+| `src/host/voice/` | `ene-voice` の音声パイプライン・エンジン解決への薄い ECS/Wasm アダプタ |
 | `src/host/permission/` | `Stage::Gate`、承認保留と解決、ポリシー判定 |
 | `src/host/client/` | クライアント登録、能力ツールの公開、アクティブクライアント、知覚、`DeviceStream` と操作台帳 |
-| `src/host/work/` | WorkSession/Run、1セッション1エージェント、`start_work` などのツール、`report`、停止・途絶検知 |
+| `src/host/work/` | WorkSession/Run、1セッション1エージェント、ツール（`ene-work` の ACP/ハーネス補助と `ene-store` 永続化を利用） |
+| `src/host/mcp/` | `ene-work::mcp` を用いる MCP サーバー接続管理と ECS ツール投影 |
 | `src/host/model.rs` | 資格情報、LLM接続、モデル一覧、接続チェック |
 | `src/host/net.rs` | HTTPクライアントの共有、ループバック/SSRF検証、サイズ上限付きボディ読み取り |
 | `src/host/db.rs` | `ene-store` への薄い ECS リソースラッパー |
@@ -94,7 +95,7 @@ RPC では LLM 接続の `adapter` に `google-agent-platform` を指定し、�
 
 ## 実装状況と境界
 
-- **手順スキルとプラグイン**: 手順スキル（`skill_list` / `skill_read` / `skill_save`）は `skills` テーブルに永続化され、作業エージェントから再利用できます。Wasm プラグインはプロバイダーだけでなく `character` / `hook` / `tool` 拡張および `target = "client"`（デスクトップ側ツール実行）をサポートし、`ListPlugins` / `InstallPlugin` / `SetPluginEnabled` / `RemovePlugin` RPC でライフサイクルを管理します。外部 ACP プロセスとは `src/host/work/acp.rs` の stdio JSON-RPC 2.0 ブリッジで連携します。
+- **手順スキルとプラグイン**: 手順スキル（`skill_list` / `skill_read` / `skill_save`）は `skills` テーブルに永続化され、作業エージェントから再利用できます。Wasm プラグインはプロバイダーだけでなく `character` / `hook` / `tool` 拡張および `target = "client"`（デスクトップ側ツール実行）をサポートし、`ListPlugins` / `InstallPlugin` / `SetPluginEnabled` / `RemovePlugin` RPC でライフサイクルを管理します。外部 ACP プロセスとは `ene-work`（`acp` モジュール）の stdio JSON-RPC 2.0 ブリッジで連携します。
 - **スケジュール配送**: `schedule_occurrences` テーブルへ予定発生を実体化してから会話キューへ配送し、モデル未接続時にも一回限りの予定を失わず、復旧後に重複なく1回だけ届けます。
 - **音声と割込み**: VAD に加え Push-to-Talk（PTT）と再生エコー抑止付き自動 Barge-in（`AudioInputChunk.barge_in`）、および逐次 TTS/STT ストリーミングイベント（`Event::Audio` / `Event::Transcription`）に対応します。双方向低遅延の Realtime 音声セッション（WebRTC/WebSocket 単一セッション）は今後の拡張対象です。
 - **クライアント能力と検索**: クライアント能力ツールは `world.spawn_tool` で動的登録し、能力変更・有効化変更・切断に追随して入れ替えます（`body.motion` / `body.look_at` / `body.perch` / `eye.watch` / ワークスペース操作 / クライアントプラグイン）。組み込みの「手」は `report`、`device_request`、`mind_read`、`mind_recall`、`skill_list`、`skill_read`、`skill_save`、`web_search` と、接続済みの MCP ツールを使えます。`web_search` は権限パイプラインを通過し、利用者が有効な検索接続（`CONNECTION_KIND_SEARCH`）を設定している場合のみその接続先へ送信し、未設定・無効・拒否時は外部 HTTP 送信を行わず拒否します。

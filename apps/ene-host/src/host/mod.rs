@@ -170,7 +170,7 @@ impl Runtime {
             .recv()
             .map_err(|_| boxed("Rig kernel did not start"))?
             .map_err(boxed)?;
-        let voicevox = voice::voicevox::VoicevoxManager::default();
+        let voicevox = voice::voicevox::VoicevoxManager::with_auto_start(!cfg!(test));
         maybe_auto_start_voicevox(&store, &runtime_providers, &voicevox);
         Ok(Self {
             handle: Arc::new(Handle {

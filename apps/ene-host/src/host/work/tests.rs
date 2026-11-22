@@ -94,16 +94,22 @@ fn a_session_keeps_one_agent_across_runs_and_retires_it_with_the_session() {
 
 #[test]
 fn a_stall_is_warned_once_and_reset_by_activity() {
+    use std::time::Duration;
     let mut runs = Runs::default();
     runs.begin("run-a");
-    let now = Instant::now();
-    runs.0.get_mut("run-a").unwrap().last = now - STALL_TIMEOUT - Duration::from_secs(1);
-    assert_eq!(runs.stalled(now, STALL_TIMEOUT), vec!["run-a".to_owned()]);
-    assert!(runs.stalled(now, STALL_TIMEOUT).is_empty());
-    runs.touch("run-a");
-    assert!(runs.stalled(now, STALL_TIMEOUT).is_empty());
+    let first_due = Instant::now() + STALL_TIMEOUT + Duration::from_secs(1);
     assert_eq!(
-        runs.stalled(now + STALL_TIMEOUT + Duration::from_secs(1), STALL_TIMEOUT),
+        runs.stalled(first_due, STALL_TIMEOUT),
+        vec!["run-a".to_owned()]
+    );
+    assert!(runs.stalled(first_due, STALL_TIMEOUT).is_empty());
+    runs.touch("run-a");
+    assert!(runs.stalled(Instant::now(), STALL_TIMEOUT).is_empty());
+    assert_eq!(
+        runs.stalled(
+            Instant::now() + STALL_TIMEOUT + Duration::from_secs(1),
+            STALL_TIMEOUT
+        ),
         vec!["run-a".to_owned()],
         "activity resets the silence window"
     );

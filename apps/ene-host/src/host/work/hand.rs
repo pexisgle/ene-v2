@@ -31,14 +31,16 @@ use crate::host::{
 };
 use bevy_ecs::prelude::*;
 use ene_plugin::{
-    ContentBlock, Extension, HarnessEvent, HarnessInput, Operation, PermissionOption,
-    PermissionOptionKind, PlanEntryStatus, RequestPermissionOutcome, SelectedPermissionOutcome,
-    SessionUpdate, StopReason, ToolCallStatus, ToolCallUpdate, text_block,
+    Extension, HarnessEvent, HarnessInput, Operation, PermissionOption, RequestPermissionOutcome,
+    ToolCallUpdate,
 };
 use ene_plugin_runtime::instance::{DenyServices, Services};
+use ene_work::harness::{
+    HarnessBuffer, arguments_of, prompt_of, select_permission_outcome, stop_outcome,
+};
 use rig_core::message::{CallId, ToolCall as RequestedCall, ToolFunction, ToolName};
 use rig_ecs::prelude::*;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -68,14 +70,12 @@ struct Hand {
     /// dropping a receiver a driver still writes to cancels that call and
     /// kills the guest; a drained, closed channel leaves on its own.
     events: Vec<mpsc::Receiver<ene_plugin::Event>>,
-    /// The message a run of text chunks is accumulating, keyed by its id.
-    message: Option<(Option<String>, String)>,
+    /// Message chunk accumulator and tool-name lookup across updates.
+    buffer: HarnessBuffer,
     /// Input accepted while a run was active; it becomes the next prompt.
     parked: VecDeque<String>,
     /// The approval the turn is parked on, if any.
     pending: Option<Pending>,
-    /// Tool names by call id, so a permission card can name the tool.
-    names: HashMap<String, String>,
 }
 
 struct Pending {
@@ -155,10 +155,9 @@ pub(crate) fn start_run(
             running,
             driver: None,
             events: Vec::new(),
-            message: None,
+            buffer: HarnessBuffer::default(),
             parked: VecDeque::new(),
             pending: None,
-            names: HashMap::new(),
         },
     );
     super::note_activity(world, &run.run_id);
@@ -205,7 +204,7 @@ pub(crate) fn stop(world: &mut World, work_id: &str) {
             // without its guest. The next request reloads one whose session
             // state is empty, so the hand's claim on the adapter ends here.
             hand.driver = None;
-            hand.message = None;
+            hand.buffer.clear_message();
             hand.parked.clear();
         });
         drop_pending(world, &adapter);
@@ -217,7 +216,7 @@ pub(crate) fn stop(world: &mut World, work_id: &str) {
     // the guest its turn was cancelled, and let the approval row expire.
     if parked {
         edit_hand(world, work_id, |hand| {
-            hand.message = None;
+            hand.buffer.clear_message();
             hand.parked.clear();
         });
         drop_pending(world, &adapter);
@@ -314,12 +313,6 @@ fn edit_hand<R>(world: &mut World, work_id: &str, edit: impl FnOnce(&mut Hand) -
         .map(edit)
 }
 
-fn prompt_of(instruction: &str) -> Vec<ContentBlock> {
-    // The instruction is the whole prompt: skills are not implemented, so
-    // there is no lead-in to attach.
-    vec![text_block(instruction)]
-}
-
 fn cwd() -> String {
     std::env::current_dir()
         .map(|path| path.display().to_string())
@@ -408,24 +401,17 @@ fn apply(world: &mut World, adapter: &str, event: ene_plugin::Event) {
         HarnessEvent::Update { update } => {
             // A non-chunk update ends whatever message was accumulating, so
             // the head reads each report as one message, not fragments.
-            let (flushed, report) = {
+            let effects = {
                 let mut hands = world.resource_mut::<Hands>();
                 let Some(hand) = hands.by_adapter.get_mut(adapter) else {
                     return;
                 };
-                let chunk = matches!(update, SessionUpdate::AgentMessageChunk(_));
-                let flushed = if chunk {
-                    None
-                } else {
-                    hand.message.take().map(|(_, text)| text)
-                };
-                let report = progress(hand, &update);
-                (flushed, report)
+                hand.buffer.apply_update(&update)
             };
             let Some(run) = active else {
                 return;
             };
-            if let Some(text) = flushed {
+            if let Some(text) = effects.flushed {
                 super::inform(
                     world,
                     &companion_id,
@@ -434,7 +420,7 @@ fn apply(world: &mut World, adapter: &str, event: ene_plugin::Event) {
                     DeliveryMode::Inform,
                 );
             }
-            if let Some(text) = report {
+            if let Some(text) = effects.report {
                 super::note_activity(world, &run.run_id);
                 super::inform(
                     world,
@@ -470,7 +456,7 @@ fn apply(world: &mut World, adapter: &str, event: ene_plugin::Event) {
                 let Some(hand) = hands.by_adapter.get_mut(adapter) else {
                     return;
                 };
-                hand.message.take().map(|(_, text)| text)
+                hand.buffer.take_message()
             };
             let Some(run) = active else {
                 return;
@@ -479,97 +465,9 @@ fn apply(world: &mut World, adapter: &str, event: ene_plugin::Event) {
                 // A stop that raced the user's own stop settles nothing.
                 return;
             }
-            let (state, report) = match stop_reason {
-                StopReason::EndTurn => (RunState::Completed, text),
-                StopReason::Cancelled => (RunState::Cancelled, None),
-                StopReason::Refusal => (RunState::Failed, Some("作業を拒否しました".to_owned())),
-                _ => (
-                    RunState::Failed,
-                    Some("作業を続けられませんでした: ハーネスの上限に達しました".to_owned()),
-                ),
-            };
+            let (state, report) = stop_outcome(stop_reason, text);
             super::finish_run(world, run, state, report);
         }
-    }
-}
-
-/// The progress text one session update owes the head, and the tool name it
-/// may have taught the hand.
-fn progress(hand: &mut Hand, update: &SessionUpdate) -> Option<String> {
-    match update {
-        SessionUpdate::AgentMessageChunk(chunk) => {
-            let ene_plugin::ContentBlock::Text(text) = &chunk.content else {
-                return None;
-            };
-            let id = chunk.message_id.as_ref().map(|id| id.to_string());
-            let held = if hand
-                .message
-                .as_ref()
-                .is_some_and(|(previous, _)| previous.as_deref() != id.as_deref())
-            {
-                hand.message.take().map(|(_, text)| text)
-            } else {
-                None
-            };
-            let (_, accumulated) = hand.message.get_or_insert_with(|| (id, String::new()));
-            accumulated.push_str(&text.text);
-            held.map(|text| format!("[作業報告] {text}"))
-        }
-        SessionUpdate::ToolCall(call) => {
-            if let Some(name) = &call.name {
-                hand.names
-                    .insert(call.tool_call_id.to_string(), name.clone());
-            }
-            let name = call
-                .name
-                .clone()
-                .unwrap_or_else(|| call.tool_call_id.to_string());
-            Some(format!("[作業報告] ツール {name}: {}", call.title))
-        }
-        SessionUpdate::ToolCallUpdate(update) => {
-            if let Some(name) = &update.fields.name {
-                hand.names
-                    .insert(update.tool_call_id.to_string(), name.clone());
-            }
-            let name = update
-                .fields
-                .name
-                .clone()
-                .or_else(|| hand.names.get(&update.tool_call_id.to_string()).cloned())
-                .unwrap_or_else(|| update.tool_call_id.to_string());
-            let status = update
-                .fields
-                .status
-                .map(|status| match status {
-                    ToolCallStatus::Pending => "準備中",
-                    ToolCallStatus::InProgress => "実行中",
-                    ToolCallStatus::Completed => "完了",
-                    ToolCallStatus::Failed => "失敗",
-                    _ => "更新",
-                })
-                .unwrap_or("更新");
-            Some(format!("[作業報告] ツール {name}: {status}"))
-        }
-        SessionUpdate::Plan(plan) => {
-            let entries = plan
-                .entries
-                .iter()
-                .map(|entry| {
-                    let status = match entry.status {
-                        PlanEntryStatus::Pending => "未着手",
-                        PlanEntryStatus::InProgress => "進行中",
-                        PlanEntryStatus::Completed => "完了",
-                        _ => "保留",
-                    };
-                    format!("- {}（{status}）", entry.content)
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            Some(format!("[作業報告] 計画:\n{entries}"))
-        }
-        // The runtime rejects the other update kinds at the contract
-        // boundary, so they never reach the collector.
-        _ => None,
     }
 }
 
@@ -600,13 +498,8 @@ fn request_permission(
         let Some(hand) = hands.by_adapter.get_mut(adapter) else {
             return;
         };
-        hand.message = None;
-        let tool_name = tool_call
-            .fields
-            .name
-            .clone()
-            .or_else(|| hand.names.get(&tool_call.tool_call_id.to_string()).cloned())
-            .unwrap_or_else(|| tool_call.tool_call_id.to_string());
+        hand.buffer.clear_message();
+        let tool_name = hand.buffer.resolve_tool_name(&tool_call);
         (tool_name, arguments_of(&tool_call))
     };
     let store = world.resource::<Store>().clone();
@@ -665,66 +558,6 @@ fn request_permission(
         crate::host::util::truncate(&approval.normalized_arguments, 200)
     );
     permission::notify_approval_card(world, companion, &approval, &target);
-}
-
-/// The canonical document a permission card shows and the approval hash is
-/// taken over: the fields the plugin's tool-call update carries.
-fn arguments_of(update: &ToolCallUpdate) -> Value {
-    let mut object = serde_json::Map::new();
-    if let Some(title) = &update.fields.title {
-        object.insert("title".into(), json!(title));
-    }
-    if let Some(name) = &update.fields.name {
-        object.insert("name".into(), json!(name));
-    }
-    if let Some(content) = &update.fields.content {
-        let text = content
-            .iter()
-            .filter_map(|item| match item {
-                ene_plugin::ToolCallContent::Content(content) => match &content.content {
-                    ene_plugin::ContentBlock::Text(text) => Some(text.text.clone()),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        object.insert("content".into(), json!(text));
-    }
-    if let Some(locations) = &update.fields.locations {
-        let paths = locations
-            .iter()
-            .map(|location| location.path.display().to_string())
-            .collect::<Vec<_>>();
-        object.insert("locations".into(), json!(paths));
-    }
-    if let Some(raw) = &update.fields.raw_input {
-        object.insert("raw_input".into(), raw.clone());
-    }
-    if let Some(raw) = &update.fields.raw_output {
-        object.insert("raw_output".into(), raw.clone());
-    }
-    Value::Object(object)
-}
-
-/// The outcome that answers a permission request the user approved or denied:
-/// the option the plugin named `allow` or `deny`, else the first one-shot
-/// option of that kind. A request that offers neither is answered with a
-/// cancel, which keeps the guest's turn from dangling.
-fn outcome(options: &[PermissionOption], allow: bool) -> RequestPermissionOutcome {
-    let wanted = if allow { "allow" } else { "deny" };
-    let kind = if allow {
-        PermissionOptionKind::AllowOnce
-    } else {
-        PermissionOptionKind::RejectOnce
-    };
-    let selected = options
-        .iter()
-        .find(|option| option.option_id.to_string() == wanted)
-        .or_else(|| options.iter().find(|option| option.kind == kind));
-    selected.map_or(RequestPermissionOutcome::Cancelled, |option| {
-        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option.option_id.clone()))
-    })
 }
 
 /// Takes the driver that finished and settles the run it left open. The
@@ -801,8 +634,8 @@ fn resume_approvals(world: &mut World) {
                     return None;
                 };
                 let outcome = match approval.status {
-                    ApprovalStatus::Approved => outcome(&pending.options, true),
-                    ApprovalStatus::Denied => outcome(&pending.options, false),
+                    ApprovalStatus::Approved => select_permission_outcome(&pending.options, true),
+                    ApprovalStatus::Denied => select_permission_outcome(&pending.options, false),
                     // The hold was released without a decision (a stop took
                     // its call): answer so the guest's turn state does not
                     // dangle.

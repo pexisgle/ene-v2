@@ -1,41 +1,40 @@
 //! Native ACP (Agent Client Protocol) stdio JSON-RPC 2.0 subprocess bridge (`F23`).
 //!
-//! Launches an explicit executable (`Target::Acp` plugin entrypoint command or
-//! direct `AcpConnection` command) inside a `process-wrap` kill-on-drop group
+//! Launches an explicit executable inside a `process-wrap` kill-on-drop group
 //! (Windows Job Object / Unix Process Group), drives the ACP JSON-RPC 2.0
 //! lifecycle (`initialize` -> `session/new` -> `session/prompt`), streams
 //! `session/update` notifications as `ene_plugin::HarnessEvent`, and bridges
 //! `session/request_permission` round-trips cleanly.
-use crate::host::error::{HostError, Result};
+
+use crate::error::{Result, WorkError};
 use ene_plugin::{
     ContentBlock, HarnessEvent, PermissionOption, RequestPermissionOutcome, SessionUpdate,
     StopReason, ToolCallUpdate,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, fmt, path::Path};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 const MAX_LINE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct AcpLaunchSpec {
-    pub(crate) command: String,
-    pub(crate) args: Vec<String>,
-    pub(crate) cwd: Option<String>,
-    pub(crate) env: BTreeMap<String, String>,
+pub struct AcpLaunchSpec {
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub env: BTreeMap<String, String>,
 }
 
 /// Validates and spawns a managed ACP subprocess wrapped in `KillOnDrop` +
 /// OS process group / Job Object so child trees never leak on cancellation.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn spawn_acp_process(
+pub fn spawn_acp_process(
     spec: &AcpLaunchSpec,
 ) -> Result<Box<dyn process_wrap::tokio::ChildWrapper>> {
     let program = spec.command.trim();
     if program.is_empty() || program.chars().any(char::is_control) {
-        return Err(HostError::Invalid(
+        return Err(WorkError::Invalid(
             "ACP command executable must be non-empty without control characters".into(),
         ));
     }
@@ -57,7 +56,7 @@ pub(crate) fn spawn_acp_process(
     cmd.wrap(process_wrap::tokio::JobObject);
     cmd.wrap(process_wrap::tokio::KillOnDrop);
     cmd.spawn()
-        .map_err(|error| HostError::Unavailable(format!("ACP subprocess spawn failed: {error}")))
+        .map_err(|error| WorkError::Unavailable(format!("ACP subprocess spawn failed: {error}")))
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,25 +73,32 @@ struct JsonRpcIncoming {
     error: Option<Value>,
 }
 
-/// Callback deciding an incoming `session/request_permission` RPC from the ACP
-/// agent process.
-pub(crate) type PermissionResponder = Box<
+/// Callback deciding an incoming `session/request_permission` RPC from the ACP agent process.
+pub type PermissionResponder = Box<
     dyn FnMut(String, ToolCallUpdate, Vec<PermissionOption>) -> RequestPermissionOutcome + Send,
 >;
 
 /// Bidirectional JSON-RPC 2.0 ACP client over any async byte stream (child
 /// stdio in production, `tokio::io::duplex` in tests).
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) struct AcpBridge<R, W> {
+pub struct AcpBridge<R, W> {
     reader: BufReader<R>,
     writer: W,
     next_id: u64,
     session_id: Option<String>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+impl<R, W> fmt::Debug for AcpBridge<R, W> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AcpBridge")
+            .field("next_id", &self.next_id)
+            .field("session_id", &self.session_id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AcpBridge<R, W> {
-    pub(crate) fn new(reader: R, writer: W) -> Self {
+    pub fn new(reader: R, writer: W) -> Self {
         Self {
             reader: BufReader::new(reader),
             writer,
@@ -103,16 +109,16 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AcpBridge<R, W> {
 
     async fn send_json(&mut self, value: &Value) -> Result<()> {
         let mut line = serde_json::to_string(value)
-            .map_err(|e| HostError::Internal(format!("ACP JSON serialize: {e}")))?;
+            .map_err(|e| WorkError::Internal(format!("ACP JSON serialize: {e}")))?;
         line.push('\n');
         self.writer
             .write_all(line.as_bytes())
             .await
-            .map_err(|e| HostError::Unavailable(format!("ACP write failed: {e}")))?;
+            .map_err(|e| WorkError::Unavailable(format!("ACP write failed: {e}")))?;
         self.writer
             .flush()
             .await
-            .map_err(|e| HostError::Unavailable(format!("ACP flush failed: {e}")))
+            .map_err(|e| WorkError::Unavailable(format!("ACP flush failed: {e}")))
     }
 
     async fn read_message(&mut self) -> Result<Option<JsonRpcIncoming>> {
@@ -121,18 +127,18 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AcpBridge<R, W> {
             .reader
             .read_line(&mut line)
             .await
-            .map_err(|e| HostError::Unavailable(format!("ACP read failed: {e}")))?;
+            .map_err(|e| WorkError::Unavailable(format!("ACP read failed: {e}")))?;
         if n == 0 {
             return Ok(None);
         }
         if line.len() > MAX_LINE_BYTES {
-            return Err(HostError::Unavailable(
+            return Err(WorkError::Unavailable(
                 "ACP JSON-RPC message exceeded size limit".into(),
             ));
         }
         serde_json::from_str::<JsonRpcIncoming>(line.trim())
             .map(Some)
-            .map_err(|e| HostError::Unavailable(format!("invalid ACP JSON-RPC message: {e}")))
+            .map_err(|e| WorkError::Unavailable(format!("invalid ACP JSON-RPC message: {e}")))
     }
 
     async fn request(
@@ -192,7 +198,6 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AcpBridge<R, W> {
                         .await?;
                     }
                     _ => {
-                        // Ignore unknown notifications; return method-not-found for unknown requests.
                         if let Some(req_id) = msg.id {
                             self.send_json(&json!({
                                 "jsonrpc": "2.0",
@@ -207,19 +212,19 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AcpBridge<R, W> {
             }
             if msg.id.as_ref() == Some(&expected_id) {
                 if let Some(err) = msg.error {
-                    return Err(HostError::Unavailable(format!(
+                    return Err(WorkError::Unavailable(format!(
                         "ACP `{method}` returned error: {err}"
                     )));
                 }
                 return Ok(msg.result.unwrap_or(Value::Null));
             }
         }
-        Err(HostError::Unavailable(format!(
+        Err(WorkError::Unavailable(format!(
             "ACP subprocess closed before answering `{method}`"
         )))
     }
 
-    pub(crate) async fn initialize(&mut self) -> Result<Value> {
+    pub async fn initialize(&mut self) -> Result<Value> {
         self.request(
             "initialize",
             json!({
@@ -233,7 +238,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AcpBridge<R, W> {
         .await
     }
 
-    pub(crate) async fn new_session(&mut self, cwd: &str) -> Result<String> {
+    pub async fn new_session(&mut self, cwd: &str) -> Result<String> {
         let result = self
             .request(
                 "session/new",
@@ -246,13 +251,13 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AcpBridge<R, W> {
             .get("sessionId")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| HostError::Unavailable("ACP session/new returned no sessionId".into()))?
+            .ok_or_else(|| WorkError::Unavailable("ACP session/new returned no sessionId".into()))?
             .to_owned();
         self.session_id = Some(sid.clone());
         Ok(sid)
     }
 
-    pub(crate) async fn prompt(
+    pub async fn prompt(
         &mut self,
         prompt: Vec<ContentBlock>,
         events: &mpsc::Sender<HarnessEvent>,
@@ -261,7 +266,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AcpBridge<R, W> {
         let session_id = self
             .session_id
             .clone()
-            .ok_or_else(|| HostError::Conflict("ACP session has not been created".into()))?;
+            .ok_or_else(|| WorkError::Conflict("ACP session has not been created".into()))?;
         let result = self
             .request(
                 "session/prompt",
@@ -290,7 +295,6 @@ mod tests {
         mut agent_write: tokio::io::DuplexStream,
     ) {
         let mut lines = BufReader::new(agent_read).lines();
-        // 1. initialize
         let init_req: Value =
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(init_req["method"], "initialize");
@@ -304,7 +308,6 @@ mod tests {
             .await
             .unwrap();
 
-        // 2. session/new
         let new_req: Value =
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(new_req["method"], "session/new");
@@ -318,7 +321,6 @@ mod tests {
             .await
             .unwrap();
 
-        // 3. session/prompt -> emit session/update, request permission, finish EndTurn.
         let prompt_req: Value =
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(prompt_req["method"], "session/prompt");
@@ -418,7 +420,6 @@ mod tests {
         assert!(saw_chunk && saw_stop);
         agent.await.unwrap();
 
-        // Reject invalid command spec cleanly.
         assert!(
             spawn_acp_process(&AcpLaunchSpec {
                 command: String::new(),

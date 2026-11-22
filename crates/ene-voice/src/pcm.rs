@@ -1,11 +1,12 @@
 //! PCM wire-format helpers, WAV framing/downmix, and sample-rate conversion.
-use super::{HttpResult, VoiceHttpError};
 
-pub(crate) const SAMPLE_RATE: u32 = 24_000;
-pub(crate) const STT_SAMPLE_RATES: [u32; 2] = [24_000, 16_000];
-pub(super) type ResamplerCache = Option<(u32, u32, rubato::Fft<f32>)>;
+use crate::error::{HttpResult, VoiceHttpError};
 
-pub(super) fn wav_wrap(pcm: &[u8], sample_rate: u32) -> HttpResult<Vec<u8>> {
+pub const SAMPLE_RATE: u32 = 24_000;
+pub const STT_SAMPLE_RATES: [u32; 2] = [24_000, 16_000];
+pub type ResamplerCache = Option<(u32, u32, rubato::Fft<f32>)>;
+
+pub fn wav_wrap(pcm: &[u8], sample_rate: u32) -> HttpResult<Vec<u8>> {
     if !pcm.len().is_multiple_of(2) {
         return Err(VoiceHttpError::OddInputPcmBytes);
     }
@@ -35,7 +36,7 @@ pub(super) fn wav_wrap(pcm: &[u8], sample_rate: u32) -> HttpResult<Vec<u8>> {
     Ok(wav)
 }
 
-pub(super) fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
+pub fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(VoiceHttpError::InvalidWav);
     }
@@ -91,11 +92,7 @@ pub(super) fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
     Ok((pcm, sample_rate))
 }
 
-pub(super) fn wire_pcm(
-    pcm: Vec<u8>,
-    sample_rate: u32,
-    cache: &mut ResamplerCache,
-) -> HttpResult<Vec<u8>> {
+pub fn wire_pcm(pcm: Vec<u8>, sample_rate: u32, cache: &mut ResamplerCache) -> HttpResult<Vec<u8>> {
     if !pcm.len().is_multiple_of(2) {
         return Err(VoiceHttpError::OddOutputPcmBytes);
     }
@@ -108,7 +105,7 @@ pub(super) fn wire_pcm(
     resample_mono(&pcm, sample_rate, SAMPLE_RATE, cache)
 }
 
-pub(super) fn resample_mono(
+pub fn resample_mono(
     pcm: &[u8],
     from: u32,
     to: u32,
@@ -156,4 +153,66 @@ pub(super) fn resample_mono(
         pcm.extend_from_slice(&value.to_le_bytes());
     }
     Ok(pcm)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pcm_bytes(samples: impl IntoIterator<Item = i16>) -> Vec<u8> {
+        samples.into_iter().flat_map(i16::to_le_bytes).collect()
+    }
+
+    #[test]
+    fn finite_clips_keep_the_rounded_sample_count() {
+        for from in [16_000, 24_000, 32_000, 44_100, 48_000, 96_000] {
+            for len in [0, 1, 2, 7, 127, 1_023, 1_024, 1_025, 4_097, 24_001] {
+                let pcm = pcm_bytes((0..len).map(|index| (index * 997) as i16));
+                let converted = resample_mono(&pcm, from, SAMPLE_RATE, &mut None).unwrap();
+                let expected = (len as f64 * f64::from(SAMPLE_RATE) / f64::from(from)).round();
+                assert_eq!(converted.len(), expected as usize * 2, "{from}, {len}");
+                if from == SAMPLE_RATE {
+                    assert_eq!(converted, pcm);
+                }
+            }
+        }
+        assert!(
+            resample_mono(&[0, 0], 96_000, SAMPLE_RATE, &mut None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(wire_pcm(vec![0], SAMPLE_RATE, &mut None).is_err());
+        assert!(wire_pcm(Vec::new(), 0, &mut None).is_err());
+    }
+
+    #[test]
+    fn reused_resamplers_match_cold_bytes_without_leaking_between_clips() {
+        let mut cache = None;
+        for from in [44_100, 48_000, 96_000, 16_000, 44_100] {
+            for len in [0, 1, 2, 17, 127, 1_023, 1_024, 4_097, 24_001] {
+                let impulse =
+                    pcm_bytes((0..len).map(|index| if index == 0 { i16::MAX } else { 0 }));
+                let signal = pcm_bytes((0..len).map(|index| (index * 997) as i16));
+                let silence = vec![0; len * 2];
+                for pcm in [&impulse, &silence, &signal, &silence, &signal] {
+                    let cold = resample_mono(pcm, from, SAMPLE_RATE, &mut None).unwrap();
+                    let reused = resample_mono(pcm, from, SAMPLE_RATE, &mut cache).unwrap();
+                    assert_eq!(reused, cold, "{from}, {len}");
+                    if pcm == &silence {
+                        assert!(reused.iter().all(|byte| *byte == 0), "{from}, {len}");
+                    }
+                }
+                let identity = wire_pcm(signal.clone(), SAMPLE_RATE, &mut cache).unwrap();
+                assert_eq!(identity, signal);
+                assert!(wire_pcm(Vec::new(), from, &mut cache).unwrap().is_empty());
+            }
+        }
+        let pcm = pcm_bytes([i16::MIN, i16::MAX, 0, -123, 123]);
+        for (from, to) in [(48_000, 16_000), (48_000, 24_000), (48_000, 16_000)] {
+            assert_eq!(
+                resample_mono(&pcm, from, to, &mut cache).unwrap(),
+                resample_mono(&pcm, from, to, &mut None).unwrap(),
+            );
+        }
+    }
 }

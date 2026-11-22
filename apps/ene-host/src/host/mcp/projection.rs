@@ -72,7 +72,7 @@ pub(super) fn project(
         if !server.allowed.is_empty() && !server.allowed.iter().any(|name| name == raw) {
             continue;
         }
-        let Some(exposed) = exposed_name(&server.label, id, raw) else {
+        let Some(exposed) = ene_work::mcp::exposed_name(&server.label, id, raw) else {
             continue;
         };
         let Ok(name) = ToolName::new(exposed.clone()) else {
@@ -166,35 +166,4 @@ pub(super) fn retire_one(world: &mut World, id: &str) {
         let connection = server.connection;
         runtime.spawn(async move { connection.close().await });
     }
-}
-
-/// The model-facing name for one server's tool: `mcp_<server>_<tool>`. The
-/// server part keeps two servers that offer the same tool name apart. A part
-/// the provider grammar cannot carry is refused rather than rewritten onto
-/// another tool.
-fn exposed_name(label: &str, id: &str, tool: &str) -> Option<String> {
-    let mut name = String::from("mcp_");
-    if !push_allowed(&mut name, label) {
-        let short: String = id.chars().take(8).collect();
-        if !push_allowed(&mut name, &short) {
-            return None;
-        }
-    }
-    name.push('_');
-    if !push_allowed(&mut name, tool) || name.len() > 64 {
-        return None;
-    }
-    Some(name)
-}
-
-fn push_allowed(out: &mut String, text: &str) -> bool {
-    if text.is_empty()
-        || !text.chars().all(|character| {
-            character.is_ascii_alphanumeric() || character == '_' || character == '-'
-        })
-    {
-        return false;
-    }
-    out.push_str(text);
-    true
 }

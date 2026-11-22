@@ -35,12 +35,16 @@ ene-policy = { path = "crates/ene-policy" }
 ene-plugin = { path = "crates/ene-plugin" }
 ene-plugin-runtime = { path = "crates/ene-plugin-runtime" }
 ene-store = { path = "crates/ene-store" }
+ene-voice = { path = "crates/ene-voice" }
+ene-work = { path = "crates/ene-work" }
 # A Wasm guest cannot depend on the full ACP SDK, because the SDK pulls `uuid`
 # without a randomness source for `wasm32-unknown-unknown`. `crates/ene-plugin`
 # therefore depends on the types-only crate directly, with a caret requirement
 # so the pinned ACP version can move within 1.x without breaking resolution.
 agent-client-protocol-schema = { version = "1.15.1", default-features = false }
 process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+regex = "1"
 cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"
 tempfile = "3"

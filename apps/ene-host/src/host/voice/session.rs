@@ -1,7 +1,6 @@
-use super::{Voice, parse_binding, synthesize};
-use crate::host::voice::{
-    HttpResult, MAX_PROBE_CHARS, companion_tts_source, engine::TtsEngine, pcm::wire_pcm, speech,
-};
+//! ECS facade and plugin registration for [`super::Voice`].
+
+use super::{AudioSubscription, InputBinding, Voice, companion_tts_source, parse_binding, speech};
 use crate::host::{
     agent,
     db::{Result, Store},
@@ -14,19 +13,6 @@ use crate::host::{
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
 use rig_ecs::prelude::*;
-use std::sync::Arc;
-use tokio::sync::mpsc;
-
-#[derive(Clone, Debug)]
-pub(crate) struct InputBinding {
-    pub(crate) client_id: String,
-}
-
-impl InputBinding {
-    pub(crate) fn accepts(&self, client_id: &str) -> bool {
-        client_id.is_empty() || client_id == self.client_id
-    }
-}
 
 /// Binds an audio input stream to the client that opened it. Only the active
 /// client of a companion may capture: a client that is not active has nothing
@@ -68,12 +54,6 @@ pub(crate) fn is_still_active(world: &World, binding: &InputBinding) -> bool {
         .client_repo()
         .activation_for_client(&binding.client_id)
         .is_ok_and(|activation| activation.is_some())
-}
-
-pub(crate) struct AudioSubscription {
-    pub(crate) subscription_id: String,
-    pub(crate) receiver: mpsc::Receiver<w::AudioOutputEvent>,
-    pub(crate) control: mpsc::UnboundedReceiver<w::AudioOutputEvent>,
 }
 
 /// Binds an audio output stream to the client that opened it and makes it the
@@ -121,27 +101,6 @@ pub(crate) fn unsubscribe_audio(world: &World, client: &str, subscription: &str)
     }
 }
 
-/// Speaks `text` through `companion`'s audio client, outside any turn. The
-/// speech floor is not taken and no conversation is touched: this is the probe a
-/// settings screen uses to hear the TTS connection, so it must not disturb the
-/// turn the person is in the middle of.
-pub(crate) async fn synthesize_for_probe(
-    source: Arc<dyn TtsEngine>,
-    text: &str,
-    voice: String,
-) -> HttpResult<(Vec<u8>, u32)> {
-    let text = text.trim().to_owned();
-    if text.is_empty() {
-        return Err(crate::host::voice::VoiceHttpError::TextRequired);
-    }
-    if text.chars().count() > MAX_PROBE_CHARS {
-        return Err(crate::host::voice::VoiceHttpError::TextTooLong(
-            MAX_PROBE_CHARS,
-        ));
-    }
-    synthesize(&*source, text, voice).await
-}
-
 /// Hands already-synthesized audio to the subscribed client as one utterance.
 /// The speech floor is not taken, so a turn in flight keeps it.
 pub(crate) fn play_once(
@@ -150,7 +109,7 @@ pub(crate) fn play_once(
     pcm: Vec<u8>,
     rate: u32,
 ) -> std::result::Result<w::Empty, HostError> {
-    let pcm = wire_pcm(pcm, rate, &mut None)
+    let pcm = ene_voice::wire_pcm(pcm, rate, &mut None)
         .map_err(|error| HostError::Unavailable(error.to_string()))?;
     if pcm.is_empty() {
         return Err(HostError::Unavailable(
@@ -181,7 +140,6 @@ pub(crate) fn accept_transcription(
     {
         return Ok(false);
     }
-    // The delegation claim of `start_work` is keyed by this transcription id.
     delegation::record(world, transcription_id);
     let Some(store) = world.get_resource::<Store>().cloned() else {
         return Ok(false);
@@ -318,7 +276,7 @@ pub(crate) fn flush(world: &mut World, companion: &str, reason: w::FlushReason) 
             ("no client owns this companion's audio output").into(),
         ));
     };
-    voice.flush(companion, reason)
+    Ok(voice.flush(companion, reason)?)
 }
 
 pub(crate) fn on_client_moved(world: &mut World, companion: &str, client: &str) {
@@ -329,11 +287,7 @@ pub(crate) fn on_client_moved(world: &mut World, companion: &str, client: &str) 
 
 pub(crate) fn on_client_activated(world: &mut World, companion: &str, client: &str) {
     if let Some(voice) = world.get_resource::<Voice>().cloned() {
-        let mut state = voice.lock();
-        if state.streams.contains_key(client) {
-            let owner = state.owners.entry(companion.to_owned()).or_default();
-            owner.client_id = client.to_owned();
-        }
+        voice.activate_client_if_subscribed(companion, client);
     }
 }
 

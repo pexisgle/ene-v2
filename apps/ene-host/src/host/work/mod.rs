@@ -5,7 +5,6 @@
 //! assignment picks. A `Run` is one instruction turn that rebinds the rig
 //! agent to its run id. Only a closed session, a failed start, or a restart
 //! retires the agent, never an ordinary run end.
-pub(crate) mod acp;
 mod hand;
 #[cfg(test)]
 mod hand_tests;
@@ -26,91 +25,44 @@ use ene_rpc as w;
 use rig_core::completion::Message;
 use rig_ecs::prelude::*;
 use serde_json::json;
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
-
-const STALL_TIMEOUT: Duration = Duration::from_secs(90);
+use std::{collections::HashMap, time::Instant};
 
 pub(crate) use ene_domain::{Run, RunState, WorkSession, WorkStatus};
-
-fn new_run(run_id: String, work_id: &str, instruction: &str, state: RunState) -> Run {
-    Run {
-        run_id,
-        work_id: work_id.to_owned(),
-        instruction: instruction.to_owned(),
-        state,
-        pending_request_id: None,
-        failure: None,
-        started_at: String::new(),
-        updated_at: String::new(),
-    }
-}
+pub(crate) use ene_work::{STALL_TIMEOUT, new_run};
 
 #[derive(Resource, Default)]
-struct Runs(HashMap<String, Live>);
+struct Runs(ene_work::RunTracker);
 
-struct Live {
-    last: Instant,
-    warned: bool,
-}
+impl std::ops::Deref for Runs {
+    type Target = ene_work::RunTracker;
 
-impl Live {
-    fn new() -> Self {
-        Self {
-            last: Instant::now(),
-            warned: false,
-        }
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
-impl Runs {
-    fn begin(&mut self, run_id: &str) {
-        self.0.insert(run_id.to_owned(), Live::new());
-    }
-
-    fn touch(&mut self, run_id: &str) {
-        let Some(live) = self.0.get_mut(run_id) else {
-            return;
-        };
-        live.last = Instant::now();
-        live.warned = false;
-    }
-
-    fn forget(&mut self, run_id: &str) {
-        self.0.remove(run_id);
-    }
-
-    fn stalled(&mut self, now: Instant, threshold: Duration) -> Vec<String> {
-        self.0
-            .iter_mut()
-            .filter_map(|(run_id, live)| {
-                if live.warned || now.saturating_duration_since(live.last) < threshold {
-                    return None;
-                }
-                live.warned = true;
-                Some(run_id.clone())
-            })
-            .collect()
+impl std::ops::DerefMut for Runs {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
 /// `SendWork` receipts used while the session agent is not in the world; its
 /// log holds the canonical copy.
 #[derive(Resource, Default)]
-struct Receipts(HashMap<String, (Vec<u8>, String)>);
+struct Receipts(ene_work::WorkReceipts);
 
-impl Receipts {
-    fn get(&self, work_id: &str, request_key: &str) -> Option<(Vec<u8>, String)> {
-        self.0.get(&format!("{work_id}:{request_key}")).cloned()
+impl std::ops::Deref for Receipts {
+    type Target = ene_work::WorkReceipts;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
+}
 
-    fn put(&mut self, work_id: &str, request_key: &str, hash: &[u8], request_id: &str) {
-        self.0.insert(
-            format!("{work_id}:{request_key}"),
-            (hash.to_vec(), request_id.to_owned()),
-        );
+impl std::ops::DerefMut for Receipts {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 

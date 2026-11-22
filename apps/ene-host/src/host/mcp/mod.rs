@@ -12,15 +12,14 @@
 //!
 //! A server that is disabled, deleted, re-configured or disconnected loses its
 //! tools: the connection closes and the tool entities despawn.
-mod npx;
 mod projection;
 mod supervisor;
 
-pub(crate) use npx::is_npx_command;
+pub(crate) use ene_work::mcp::{CheckState, is_npx_command};
 #[cfg(test)]
 use projection::tool_names;
 pub(crate) use projection::tool_servers;
-pub(crate) use supervisor::{CheckState, McpServers, check_state, request_reconnect};
+pub(crate) use supervisor::{McpServers, check_state, request_reconnect};
 
 use bevy_ecs::prelude::*;
 use rig_ecs::prelude::*;

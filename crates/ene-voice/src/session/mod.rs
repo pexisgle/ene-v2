@@ -1,44 +1,37 @@
-//! Speech floor, sentence-level synthesis queueing, audio streams, and STT acceptance.
-mod facade;
-pub(crate) use facade::*;
+//! Speech floor, sentence-level synthesis queueing, audio streams, and STT deduplication.
 
-use super::{
-    BoxFuture, HttpResult,
-    engine::{TtsEngine, parse_binding},
-    pcm::{ResamplerCache, SAMPLE_RATE, wire_pcm},
+pub mod events;
+
+pub use events::{
+    AudioSubscription, Dispatch, EndedUtterance, InputBinding, MAX_PROBE_CHARS, MAX_SENTENCE_CHARS,
+    MAX_STT_BYTES, MIN_STT_BYTES, MIN_STT_RMS, STT_SILENCE_WINDOW, STT_TIMEOUT, VOICE_UNAVAILABLE,
+    audio_event, audio_events, finished_event, flush_event, flush_sentences, split_sentences,
+    synthesize, synthesize_for_probe,
 };
-use crate::host::{db::Result, error::HostError, lock};
-use bevy_ecs::prelude::*;
+
+use crate::{
+    engine::TtsEngine,
+    error::{BoxFuture, HttpResult, VoiceSessionError},
+    pcm::{ResamplerCache, wire_pcm},
+};
 use ene_rpc as w;
 use futures_util::{StreamExt, stream::FuturesOrdered};
 use std::{
     collections::{HashMap, VecDeque},
+    fmt,
     sync::{Arc, Mutex, MutexGuard},
-    time::Duration,
 };
 use tokio::sync::{Notify, mpsc};
 use tokio_util::task::AbortOnDropHandle;
 
 const MAX_SYNTHESIS_SENTENCES: usize = 3;
-const SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(20);
-pub(crate) const STT_TIMEOUT: Duration = Duration::from_secs(30);
-const AUDIO_CHUNK_BYTES: usize = 64 * 1024;
-pub(super) const MAX_SENTENCE_CHARS: usize = 240;
-/// The longest text a settings probe may ask the engine to speak.
-pub(crate) const MAX_PROBE_CHARS: usize = MAX_SENTENCE_CHARS;
-pub(crate) const STT_SILENCE_WINDOW: Duration = Duration::from_millis(700);
-/// Below this the recognizer is answering noise. Whisper-family models emit a
-/// stock phrase ("ご視聴ありがとうございました" and its English equivalents) on
-/// silence, so a buffer that is short or nearly flat never reaches the engine.
-pub(crate) const MIN_STT_BYTES: usize = 4_800 * 2;
-/// The normalized RMS floor of a short window worth sending to STT.
-pub(crate) const MIN_STT_RMS: f32 = 0.004;
-pub(crate) const MAX_STT_BYTES: usize = 48_000 * 20;
 const TRANSCRIPTION_MEMORY: usize = 128;
 const MAX_SENTENCES: u32 = 64;
 const AUDIO_QUEUE: usize = 32;
 
-pub(crate) const VOICE_UNAVAILABLE: &str = "voice requires a configured TTS/STT connection";
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
 
 #[derive(Clone)]
 struct Stream {
@@ -59,13 +52,13 @@ struct Utterance {
 }
 
 #[derive(Clone, Default)]
-pub(super) struct Owner {
-    pub(super) client_id: String,
-    pub(super) generation_id: u64,
+struct Owner {
+    client_id: String,
+    generation_id: u64,
     utterance: Option<Utterance>,
 }
 
-pub(super) struct Work {
+struct Work {
     companion: String,
     generation_id: u64,
     pending: VecDeque<Sentence>,
@@ -99,12 +92,12 @@ impl Work {
 }
 
 #[derive(Default)]
-pub(super) struct State {
-    pub(super) next_generation: u64,
-    pub(super) floor: Option<String>,
+struct State {
+    next_generation: u64,
+    floor: Option<String>,
     streams: HashMap<String, Stream>,
-    pub(super) owners: HashMap<String, Owner>,
-    pub(super) works: HashMap<String, Work>,
+    owners: HashMap<String, Owner>,
+    works: HashMap<String, Work>,
     transcriptions: VecDeque<String>,
 }
 
@@ -114,33 +107,50 @@ impl State {
     }
 }
 
-/// A finished utterance the host relays to the peers (voice-avatar.md §5.3).
-pub(super) struct EndedUtterance {
-    pub(super) client_id: String,
-    utterance_id: String,
-    generation_id: u64,
-    total_sentences: u32,
+struct Sentence {
+    sequence_no: u32,
+    text: String,
+    source: Arc<dyn TtsEngine>,
+    voice: String,
 }
 
-#[derive(Clone, Resource)]
-pub(crate) struct Voice {
+fn sentence(utterance: &Utterance, sequence_no: u32, text: String) -> Sentence {
+    Sentence {
+        sequence_no,
+        text,
+        source: Arc::clone(&utterance.source),
+        voice: utterance.voice.clone(),
+    }
+}
+
+/// Async speech floor, sentence synthesis scheduler, and audio output stream registry.
+#[derive(Clone)]
+pub struct VoicePipeline {
     inner: Arc<Mutex<State>>,
     runtime: tokio::runtime::Handle,
 }
 
-impl Voice {
-    pub(super) fn new(runtime: tokio::runtime::Handle) -> Self {
+impl fmt::Debug for VoicePipeline {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VoicePipeline")
+            .finish_non_exhaustive()
+    }
+}
+
+impl VoicePipeline {
+    pub fn new(runtime: tokio::runtime::Handle) -> Self {
         Self {
             inner: Arc::default(),
             runtime,
         }
     }
 
-    pub(super) fn lock(&self) -> MutexGuard<'_, State> {
+    fn lock(&self) -> MutexGuard<'_, State> {
         lock(&self.inner)
     }
 
-    pub(super) fn register(&self, client: &str) -> AudioSubscription {
+    pub fn register(&self, client: &str) -> AudioSubscription {
         let (audio, receiver) = mpsc::channel(AUDIO_QUEUE);
         let (control, control_receiver) = mpsc::unbounded_channel();
         let subscription_id = uuid::Uuid::new_v4().to_string();
@@ -157,7 +167,7 @@ impl Voice {
         }
     }
 
-    pub(super) fn unregister(&self, client: &str, subscription: &str) {
+    pub fn unregister(&self, client: &str, subscription: &str) {
         let mut state = self.lock();
         if state
             .streams
@@ -168,18 +178,27 @@ impl Voice {
         }
     }
 
-    /// The client that owns this companion's audio output.
-    pub(super) fn publish(&self, companion: &str, client: &str) {
+    /// Records the client that owns this companion's audio output.
+    pub fn publish(&self, companion: &str, client: &str) {
         let mut state = self.lock();
         let owner = state.owners.entry(companion.to_owned()).or_default();
         owner.client_id = client.to_owned();
     }
 
-    fn owns(&self, companion: &str) -> bool {
+    /// Binds `companion` output to `client` if that client currently holds an audio stream.
+    pub fn activate_client_if_subscribed(&self, companion: &str, client: &str) {
+        let mut state = self.lock();
+        if state.streams.contains_key(client) {
+            let owner = state.owners.entry(companion.to_owned()).or_default();
+            owner.client_id = client.to_owned();
+        }
+    }
+
+    pub fn owns(&self, companion: &str) -> bool {
         self.lock().owners.contains_key(companion)
     }
 
-    fn streaming(&self, companion: &str) -> bool {
+    pub fn streaming(&self, companion: &str) -> bool {
         self.lock().owners.get(companion).is_some_and(|owner| {
             owner
                 .utterance
@@ -188,11 +207,11 @@ impl Voice {
         })
     }
 
-    pub(super) fn floor_holder(&self) -> Option<String> {
+    pub fn floor_holder(&self) -> Option<String> {
         self.lock().floor.clone()
     }
 
-    pub(super) fn begin(&self, companion: &str, source: Arc<dyn TtsEngine>, voice: String) -> bool {
+    pub fn begin(&self, companion: &str, source: Arc<dyn TtsEngine>, voice: String) -> bool {
         let mut state = self.lock();
         if !state.owners.contains_key(companion) {
             return false;
@@ -228,15 +247,10 @@ impl Voice {
     }
 
     /// Plays one already-synthesized utterance without taking the speech floor.
-    /// A probe must not stop the turn in flight, so nothing is flushed and the
-    /// owner's utterance is left exactly as it was: the events go straight to
-    /// the client's stream with a generation the turn does not own.
-    pub(super) fn play(&self, companion: &str, pcm: &[u8]) -> Result<()> {
+    pub fn play(&self, companion: &str, pcm: &[u8]) -> Result<(), VoiceSessionError> {
         let mut state = self.lock();
         let Some(owner) = state.owners.get(companion) else {
-            return Err(HostError::FailedPrecondition(
-                ("no client is subscribed to this companion's audio").into(),
-            ));
+            return Err(VoiceSessionError::NoSubscriber);
         };
         let client_id = owner.client_id.clone();
         state.next_generation += 1;
@@ -244,24 +258,18 @@ impl Voice {
         let utterance_id = uuid::Uuid::new_v4().to_string();
         let events = audio_events(companion, &utterance_id, generation_id, 0, pcm);
         let Some(stream) = state.streams.get(&client_id) else {
-            return Err(HostError::FailedPrecondition(
-                ("the audio subscription is closed").into(),
-            ));
+            return Err(VoiceSessionError::StreamMissing);
         };
         for event in events {
             stream.audio.try_send(event).map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => {
-                    HostError::Unavailable(("the audio queue is full").into())
-                }
-                mpsc::error::TrySendError::Closed(_) => {
-                    HostError::Unavailable(("the audio subscription is closed").into())
-                }
+                mpsc::error::TrySendError::Full(_) => VoiceSessionError::AudioQueueFull,
+                mpsc::error::TrySendError::Closed(_) => VoiceSessionError::StreamClosed,
             })?;
         }
         Ok(())
     }
 
-    pub(super) fn speak(&self, companion: &str, text: &str) {
+    pub fn speak(&self, companion: &str, text: &str) {
         let mut state = self.lock();
         let mut jobs = Vec::new();
         let mut overflow = false;
@@ -297,10 +305,8 @@ impl Voice {
     }
 
     /// Ends the turn: the buffered tail becomes the last sentence and the floor
-    /// is released. `UtteranceFinished` waits for the audio still in flight, so
-    /// it stays the last audio event of the utterance. Returns the finished
-    /// utterance when the host may relay it to the peers.
-    pub(super) fn end_turn(&self, companion: &str) -> Option<EndedUtterance> {
+    /// is released.
+    pub fn end_turn(&self, companion: &str) -> Option<EndedUtterance> {
         let mut state = self.lock();
         if state.floor.as_deref() != Some(companion) {
             return None;
@@ -354,8 +360,6 @@ impl Voice {
             .owners
             .get(companion)
             .map(|owner| owner.client_id.clone())?;
-        // A turn whose sentences are all resolved already finishes here; the
-        // rest are announced by the completion that resolves the last one.
         self.announce(&mut state, &utterance_id);
         if total == 0 {
             finish(&mut state, companion, None);
@@ -370,9 +374,6 @@ impl Voice {
         })
     }
 
-    /// Emits `UtteranceFinished` when the turn has ended and every sentence
-    /// queued for the utterance has resolved. Nothing may follow it, so a
-    /// client reads it as "the host is done with this utterance".
     fn announce(&self, state: &mut State, utterance_id: &str) {
         let Some(work) = state.works.get_mut(utterance_id) else {
             return;
@@ -399,18 +400,16 @@ impl Voice {
         );
     }
 
-    pub(super) fn flush(&self, companion: &str, reason: w::FlushReason) -> Result<()> {
+    pub fn flush(&self, companion: &str, reason: w::FlushReason) -> Result<(), VoiceSessionError> {
         let mut state = self.lock();
         if !state.owners.contains_key(companion) {
-            return Err(HostError::NotFound(
-                ("no client owns this companion's audio output").into(),
-            ));
+            return Err(VoiceSessionError::NoOwner);
         }
         finish(&mut state, companion, Some(reason));
         Ok(())
     }
 
-    pub(super) fn client_moved(&self, companion: &str, client: &str) {
+    pub fn client_moved(&self, companion: &str, client: &str) {
         let mut state = self.lock();
         let owns = state
             .owners
@@ -482,8 +481,6 @@ impl Voice {
         };
         let companion = work.companion.clone();
         let generation_id = work.generation_id;
-        // A sentence that fails to synthesize contributes no audio and releases
-        // its hold on the utterance like any other resolution.
         let events = match outcome {
             Ok(pcm) => audio_events(&companion, utterance_id, generation_id, sequence_no, &pcm),
             Err(reason) => {
@@ -492,8 +489,6 @@ impl Voice {
             }
         };
         self.send(&mut state, &companion, generation_id, events, utterance_id);
-        // A stalled or stale delivery cancels the utterance; nothing is left to
-        // announce then.
         let Some(work) = state.works.get_mut(utterance_id) else {
             return;
         };
@@ -510,7 +505,7 @@ impl Voice {
         utterance_id: &str,
     ) {
         for event in events {
-            match deliver(state, companion, generation_id, event) {
+            match deliver_state(state, companion, generation_id, event) {
                 Dispatch::Sent => {}
                 Dispatch::Stale => {
                     state.cancel(utterance_id);
@@ -525,7 +520,7 @@ impl Voice {
         }
     }
 
-    pub(super) fn accept_transcription(&self, transcription_id: &str) -> bool {
+    pub fn accept_transcription(&self, transcription_id: &str) -> bool {
         if transcription_id.is_empty() {
             return true;
         }
@@ -542,6 +537,35 @@ impl Voice {
             state.transcriptions.pop_front();
         }
         true
+    }
+
+    /// Returns the active utterance generation id for `companion`, if subscribed.
+    pub fn generation_of(&self, companion: &str) -> Option<u64> {
+        self.lock()
+            .owners
+            .get(companion)
+            .map(|owner| owner.generation_id)
+    }
+
+    /// Attempts direct event delivery against `generation_id` without modifying pending work.
+    pub fn deliver_raw(
+        &self,
+        companion: &str,
+        generation_id: u64,
+        event: w::AudioOutputEvent,
+    ) -> Dispatch {
+        let mut state = self.lock();
+        deliver_state(&mut state, companion, generation_id, event)
+    }
+
+    /// Returns whether any synthesis work queue is currently active.
+    pub fn has_active_work(&self) -> bool {
+        !self.lock().works.is_empty()
+    }
+
+    /// Returns whether `companion` currently owns an active audio route.
+    pub fn has_owner(&self, companion: &str) -> bool {
+        self.lock().owners.contains_key(companion)
     }
 }
 
@@ -577,9 +601,6 @@ fn fail_owner(state: &mut State, companion: &str) {
     }
 }
 
-/// Forgets a finished utterance once its audio has drained. The utterance stays
-/// on the owner until then, so a straggling chunk still passes the generation
-/// gate; an utterance that drains mid-turn keeps its work for the next sentence.
 fn retire(state: &mut State, utterance_id: &str) {
     let Some(companion) = state
         .works
@@ -602,111 +623,7 @@ fn retire(state: &mut State, utterance_id: &str) {
     state.works.remove(utterance_id);
 }
 
-pub(super) fn split_sentences(buffer: &mut String) -> Vec<String> {
-    let mut sentences = Vec::new();
-    let mut start = 0usize;
-    for (index, character) in buffer.char_indices() {
-        if !matches!(character, '。' | '！' | '？' | '\n') {
-            continue;
-        }
-        let end = index + character.len_utf8();
-        let sentence = buffer[start..end].trim();
-        if !sentence.is_empty() {
-            sentences.push(sentence.to_owned());
-        }
-        start = end;
-    }
-    if start > 0 {
-        buffer.drain(..start);
-    }
-    while buffer.chars().count() > MAX_SENTENCE_CHARS {
-        let cut = buffer
-            .char_indices()
-            .nth(MAX_SENTENCE_CHARS)
-            .map(|(index, _)| index)
-            .unwrap_or(buffer.len());
-        let sentence = buffer[..cut].trim().to_owned();
-        buffer.drain(..cut);
-        if !sentence.is_empty() {
-            sentences.push(sentence);
-        }
-    }
-    sentences
-}
-
-pub(super) fn flush_sentences(buffer: &mut String) -> Option<String> {
-    let text = buffer.trim().to_owned();
-    buffer.clear();
-    (!text.is_empty()).then_some(text)
-}
-
-struct Sentence {
-    sequence_no: u32,
-    text: String,
-    source: Arc<dyn TtsEngine>,
-    voice: String,
-}
-
-fn sentence(utterance: &Utterance, sequence_no: u32, text: String) -> Sentence {
-    Sentence {
-        sequence_no,
-        text,
-        source: Arc::clone(&utterance.source),
-        voice: utterance.voice.clone(),
-    }
-}
-
-fn audio_events(
-    companion: &str,
-    utterance_id: &str,
-    generation_id: u64,
-    sequence_no: u32,
-    pcm: &[u8],
-) -> Vec<w::AudioOutputEvent> {
-    if pcm.is_empty() {
-        return Vec::new();
-    }
-    let total = pcm.len().div_ceil(AUDIO_CHUNK_BYTES);
-    pcm.chunks(AUDIO_CHUNK_BYTES)
-        .enumerate()
-        .map(|(index, chunk)| {
-            audio_event(w::AudioChunkEnvelope {
-                utterance_id: utterance_id.to_owned(),
-                generation_id,
-                sequence_no,
-                pcm_data: chunk.to_vec(),
-                sample_rate: SAMPLE_RATE,
-                is_final_chunk: index + 1 == total,
-                companion_id: companion.to_owned(),
-                ..Default::default()
-            })
-        })
-        .collect()
-}
-
-fn finished_event(
-    companion: &str,
-    utterance_id: &str,
-    generation_id: u64,
-    total_sentences: u32,
-) -> w::AudioOutputEvent {
-    audio_event(w::UtteranceFinished {
-        utterance_id: utterance_id.to_owned(),
-        generation_id,
-        total_sentences,
-        companion_id: companion.to_owned(),
-        ..Default::default()
-    })
-}
-
-pub(super) enum Dispatch {
-    Sent,
-    Stale,
-    Full,
-    Closed,
-}
-
-pub(super) fn deliver(
+fn deliver_state(
     state: &mut State,
     companion: &str,
     generation_id: u64,
@@ -732,35 +649,5 @@ pub(super) fn deliver(
     }
 }
 
-pub(super) async fn synthesize(
-    engine: &dyn TtsEngine,
-    text: String,
-    voice: String,
-) -> HttpResult<(Vec<u8>, u32)> {
-    match tokio::time::timeout(SYNTHESIS_TIMEOUT, engine.synthesize(text, voice)).await {
-        Err(_) => Err(crate::host::voice::VoiceHttpError::TtsTimeout),
-        Ok(outcome) => outcome,
-    }
-}
-
-pub(super) fn audio_event(message: impl Into<w::audio_output_event::Event>) -> w::AudioOutputEvent {
-    w::AudioOutputEvent {
-        event: Some(message.into()),
-        ..Default::default()
-    }
-}
-
-fn flush_event(
-    companion: &str,
-    utterance_id: &str,
-    flush_generation_id: u64,
-    reason: w::FlushReason,
-) -> w::AudioOutputEvent {
-    audio_event(w::FlushControl {
-        utterance_id: utterance_id.to_owned(),
-        flush_generation_id,
-        reason: reason.into(),
-        companion_id: companion.to_owned(),
-        ..Default::default()
-    })
-}
+#[cfg(test)]
+mod tests;

@@ -45,7 +45,6 @@ mod windows_tests {
         touch(&node_exe);
         touch(&cli_js);
 
-        // Works even when npx.cmd does not exist at all.
         let launch = resolve_launch(
             "npx",
             std::slice::from_ref(&node_dir),
@@ -63,7 +62,6 @@ mod windows_tests {
             }
         );
 
-        // Still prefers node.exe + npx-cli.js even when npx.cmd is present.
         touch(&node_dir.join("npx.cmd"));
         let launch = resolve_launch(
             "npx.cmd",
@@ -114,7 +112,6 @@ mod windows_tests {
             }
         );
 
-        // Node without bundled npm falls back to %APPDATA%\npm\node_modules\npm\bin\npx-cli.js.
         let bare_node_dir = root.path().join("bare-node");
         let bare_node = bare_node_dir.join("node.exe");
         touch(&bare_node);
@@ -182,7 +179,6 @@ mod windows_tests {
 
     #[tokio::test]
     async fn live_npx_runs_local_mcp_package_without_cmd_exe_or_npx_cmd() {
-        // Requires Node.js + npm on the test host; skip only if absent.
         let host_path = std::env::var_os("PATH").unwrap_or_default();
         let host_dirs: Vec<PathBuf> = std::env::split_paths(&host_path).collect();
         let Some(host_node) = find_file_in_dirs(&host_dirs, "node.exe") else {
@@ -196,8 +192,6 @@ mod windows_tests {
         }
 
         let temp = tempfile::tempdir().unwrap();
-        // Local package with a Node bin and a cmd-shim `.cmd` wrapper under
-        // `node_modules/.bin`, mimicking what `npm exec` / `npx` runs.
         let project = temp.path().join("project");
         let pkg_dir = project.join("node_modules").join("fake-mcp-server");
         let bin_dir = project.join("node_modules").join(".bin");
@@ -219,15 +213,12 @@ mod windows_tests {
             "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ args: process.argv.slice(2), marker: process.env.ENE_TEST_MARKER || '' }));\n",
         )
         .unwrap();
-        // Standard npm cmd-shim wrapper + POSIX shim in node_modules/.bin.
         fs::write(
             bin_dir.join("fake-mcp-server.cmd"),
             "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n@SET ENE_TEST_MARKER=from-shim\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\..\\fake-mcp-server\\cli.js\" %*\r\n",
         )
         .unwrap();
 
-        // Disable cmd.exe completely by pointing ComSpec at a non-existent
-        // executable and restricting PATH to only the node directory.
         let mut env = BTreeMap::new();
         env.insert("ComSpec".into(), r"C:\ene-blocked-cmd\cmd.exe".into());
         env.insert("COMSPEC".into(), r"C:\ene-blocked-cmd\cmd.exe".into());
@@ -312,7 +303,6 @@ mod windows_tests {
             r#"{"name":"mini-mcp","version":"1.0.0","bin":{"mini-mcp":"server.js"}}"#,
         )
         .unwrap();
-        // Minimal JSON-RPC 2.0 stdio MCP server responding to initialize and tools/list.
         fs::write(
             pkg_dir.join("server.js"),
             r#"#!/usr/bin/env node
@@ -374,7 +364,7 @@ result = {
         let registry = rig_agent::tool::server::ToolServer::new().run();
         let connection = tokio::time::timeout(
             Duration::from_secs(20),
-            crate::host::mcp::supervisor::open(&want, registry.clone()),
+            crate::mcp::transport::open(&want, registry.clone(), reqwest::Client::new()),
         )
         .await
         .expect("MCP open should complete within timeout")

@@ -10,6 +10,7 @@ pub mod plugins;
 pub mod policies;
 pub mod schedules;
 pub mod settings;
+pub mod skills;
 pub mod util;
 pub mod work;
 
@@ -25,6 +26,7 @@ pub use schedules::{
     Cron, NewSchedule, Schedule, ScheduleClock, ScheduleOccurrence, ScheduleRepo, next_occurrence,
 };
 pub use settings::SettingsRepo;
+pub use skills::{Skill, SkillRepo, validate_skill_name};
 pub use work::{WorkRepo, open_state};
 
 use rusqlite::{Connection, OptionalExtension};
@@ -130,6 +132,11 @@ impl Store {
     /// Repository for external connections and top-level settings revisions.
     pub fn settings_repo(&self) -> SettingsRepo<'_> {
         SettingsRepo::new(self)
+    }
+
+    /// Repository for companion-scoped procedural skills.
+    pub fn skill_repo(&self) -> SkillRepo<'_> {
+        SkillRepo::new(self)
     }
 
     /// Repository for commissioned work sessions and instruction runs.

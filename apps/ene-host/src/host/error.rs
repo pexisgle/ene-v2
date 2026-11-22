@@ -124,6 +124,31 @@ impl From<ene_store::StoreError> for HostError {
     }
 }
 
+impl From<ene_voice::VoiceSessionError> for HostError {
+    fn from(error: ene_voice::VoiceSessionError) -> Self {
+        match error {
+            ene_voice::VoiceSessionError::NoSubscriber
+            | ene_voice::VoiceSessionError::StreamMissing => {
+                Self::FailedPrecondition(error.to_string())
+            }
+            ene_voice::VoiceSessionError::AudioQueueFull
+            | ene_voice::VoiceSessionError::StreamClosed => Self::Unavailable(error.to_string()),
+            ene_voice::VoiceSessionError::NoOwner => Self::NotFound(error.to_string()),
+        }
+    }
+}
+
+impl From<ene_work::WorkError> for HostError {
+    fn from(error: ene_work::WorkError) -> Self {
+        match error {
+            ene_work::WorkError::Invalid(message) => Self::Invalid(message),
+            ene_work::WorkError::Conflict(message) => Self::Conflict(message),
+            ene_work::WorkError::Unavailable(message) => Self::Unavailable(message),
+            ene_work::WorkError::Internal(message) => Self::Internal(message),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

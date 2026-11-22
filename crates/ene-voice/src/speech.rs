@@ -5,6 +5,7 @@
 //! - [`for_speech`] produces natural spoken prose for TTS engines by reading
 //!   tables as label-value clauses and removing raw URLs, fenced code blocks
 //!   and emojis (`R11`).
+
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -32,7 +33,7 @@ fn motion_line(line: &str) -> bool {
 
 /// Removes only a leaked leading standalone JSON animation array while leaving
 /// Markdown, code blocks, URLs and emojis intact for display and transcripts.
-pub(crate) fn strip_motion_leak(raw: &str) -> String {
+pub fn strip_motion_leak(raw: &str) -> String {
     let trimmed = raw.trim();
     let first = trimmed.lines().next().unwrap_or("");
     if motion_line(first) {
@@ -43,7 +44,7 @@ pub(crate) fn strip_motion_leak(raw: &str) -> String {
 }
 
 /// Converts a companion reply into natural spoken text for TTS synthesis.
-pub(crate) fn for_speech(raw: &str) -> String {
+pub fn for_speech(raw: &str) -> String {
     use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
     let raw = strip_motion_leak(raw);
     let mut out = String::new();

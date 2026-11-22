@@ -2,6 +2,7 @@
 
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use std::{
+    fmt,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -20,7 +21,7 @@ struct ManagedProcess {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum VoicevoxError {
+pub enum VoicevoxError {
     #[error("VOICEVOX自動起動はテスト実行中はスキップされます")]
     SkippedInTests,
     #[error("リモートのVOICEVOX接続先は自動起動できません")]
@@ -38,20 +39,44 @@ pub(crate) enum VoicevoxError {
 }
 
 /// Owns at most one locally spawned VOICEVOX Engine child process.
-#[derive(Clone, Default)]
-pub(crate) struct VoicevoxManager {
+#[derive(Clone)]
+pub struct VoicevoxManager {
     inner: Arc<Mutex<ManagedProcess>>,
+    auto_start: bool,
+}
+
+impl Default for VoicevoxManager {
+    fn default() -> Self {
+        Self::with_auto_start(true)
+    }
+}
+
+impl fmt::Debug for VoicevoxManager {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VoicevoxManager")
+            .field("auto_start", &self.auto_start)
+            .finish_non_exhaustive()
+    }
 }
 
 impl VoicevoxManager {
+    /// Creates a manager with configurable local process auto-start behavior.
+    pub fn with_auto_start(auto_start: bool) -> Self {
+        Self {
+            inner: Arc::default(),
+            auto_start,
+        }
+    }
+
     /// Ensures a local VOICEVOX Engine at `base_url` is reachable, launching it if needed.
-    pub(crate) async fn ensure_running(
+    pub async fn ensure_running(
         &self,
         base_url: &str,
         options_json: &str,
     ) -> Result<(), VoicevoxError> {
         let base = normalized_voicevox_base(base_url);
-        if cfg!(test) && std::env::var_os("ENE_VOICEVOX_ENGINE").is_none() {
+        if (!self.auto_start || cfg!(test)) && std::env::var_os("ENE_VOICEVOX_ENGINE").is_none() {
             return Err(VoicevoxError::SkippedInTests);
         }
         let mut guard = self.inner.lock().await;
@@ -68,7 +93,7 @@ impl VoicevoxManager {
     }
 
     /// Stops any VOICEVOX Engine child process managed by this host.
-    pub(crate) async fn stop(&self) {
+    pub async fn stop(&self) {
         let mut guard = self.inner.lock().await;
         stop_inner(&mut guard).await;
     }
@@ -170,7 +195,7 @@ fn spawn_engine(exe: &Path, host: &str, port: u16) -> Result<Box<dyn ChildWrappe
         })
 }
 
-pub(crate) async fn is_reachable(base_url: &str, timeout: Duration) -> bool {
+pub async fn is_reachable(base_url: &str, timeout: Duration) -> bool {
     let Ok(client) = reqwest::Client::builder().timeout(timeout).build() else {
         return false;
     };
@@ -183,7 +208,7 @@ pub(crate) async fn is_reachable(base_url: &str, timeout: Duration) -> bool {
 }
 
 /// Parses a loopback HTTP URL for VOICEVOX (`http://127.0.0.1:50021`, `http://localhost:50021`, etc.).
-pub(crate) fn is_local_voicevox_url(base: &str) -> Option<(String, u16)> {
+pub fn is_local_voicevox_url(base: &str) -> Option<(String, u16)> {
     let parsed = url::Url::parse(base.trim()).ok()?;
     if parsed.scheme() != "http" {
         return None;
@@ -208,7 +233,25 @@ pub(crate) fn is_local_voicevox_url(base: &str) -> Option<(String, u16)> {
 }
 
 /// Resolves the VOICEVOX Engine binary across explicit options, env vars, and standard install locations.
-pub(crate) fn find_engine_binary(options_json: &str) -> Option<PathBuf> {
+pub fn find_engine_binary(options_json: &str) -> Option<PathBuf> {
+    if let Some(path) = find_explicit_or_env_binary(options_json) {
+        return Some(path);
+    }
+    #[cfg(windows)]
+    {
+        find_windows_binary()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        find_macos_binary()
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        find_linux_binary()
+    }
+}
+
+fn find_explicit_or_env_binary(options_json: &str) -> Option<PathBuf> {
     if !options_json.trim().is_empty()
         && let Ok(val) = serde_json::from_str::<serde_json::Value>(options_json)
         && let Some(raw) = val.get("engine_path").and_then(|v| v.as_str())
@@ -218,7 +261,6 @@ pub(crate) fn find_engine_binary(options_json: &str) -> Option<PathBuf> {
             return Some(path);
         }
     }
-
     for var in ["ENE_VOICEVOX_ENGINE", "VOICEVOX_ENGINE_PATH"] {
         if let Some(raw) = std::env::var_os(var) {
             let path = PathBuf::from(raw);
@@ -227,102 +269,94 @@ pub(crate) fn find_engine_binary(options_json: &str) -> Option<PathBuf> {
             }
         }
     }
+    None
+}
 
-    #[cfg(windows)]
-    {
-        let mut candidates = Vec::new();
-        if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
-            candidates.push(
-                local
-                    .join("Programs")
-                    .join("VOICEVOX")
-                    .join("vv-engine")
-                    .join("run.exe"),
-            );
-            candidates.push(local.join("VOICEVOX").join("vv-engine").join("run.exe"));
-
-            let winget_dir = local.join("Microsoft").join("WinGet").join("Packages");
-            if let Ok(entries) = std::fs::read_dir(&winget_dir) {
-                let mut packages: Vec<(bool, String, PathBuf)> = Vec::new();
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if name.starts_with("HiroshibaKazuyuki.VOICEVOX") {
-                        let exe = entry
-                            .path()
-                            .join("VOICEVOX")
-                            .join("vv-engine")
-                            .join("run.exe");
-                        if exe.is_file() {
-                            let is_cpu = name.contains(".CPU");
-                            packages.push((is_cpu, name, exe));
-                        }
+#[cfg(windows)]
+fn find_windows_binary() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        candidates.push(
+            local
+                .join("Programs")
+                .join("VOICEVOX")
+                .join("vv-engine")
+                .join("run.exe"),
+        );
+        candidates.push(local.join("VOICEVOX").join("vv-engine").join("run.exe"));
+        let winget_dir = local.join("Microsoft").join("WinGet").join("Packages");
+        if let Ok(entries) = std::fs::read_dir(&winget_dir) {
+            let mut packages: Vec<(bool, String, PathBuf)> = Vec::new();
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with("HiroshibaKazuyuki.VOICEVOX") {
+                    let exe = entry
+                        .path()
+                        .join("VOICEVOX")
+                        .join("vv-engine")
+                        .join("run.exe");
+                    if exe.is_file() {
+                        let is_cpu = name.contains(".CPU");
+                        packages.push((is_cpu, name, exe));
                     }
                 }
-                // Prefer CPU build on Windows so GPU-less/AMD/Intel machines start reliably without CUDA DLL failures.
-                packages.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-                for (_, _, exe) in packages {
-                    candidates.push(exe);
-                }
+            }
+            // Prefer CPU build on Windows so GPU-less/AMD/Intel machines start reliably without CUDA DLL failures.
+            packages.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+            for (_, _, exe) in packages {
+                candidates.push(exe);
             }
         }
-        if let Some(pf) = std::env::var_os("ProgramFiles").map(PathBuf::from) {
-            candidates.push(pf.join("VOICEVOX").join("vv-engine").join("run.exe"));
-        }
-        if let Some(found) = candidates.into_iter().find(|p| p.is_file()) {
-            return Some(found);
-        }
-        if let Some(found) = find_on_path("voicevox_engine.exe") {
-            return Some(found);
-        }
     }
-
-    #[cfg(target_os = "macos")]
-    {
-        let mut candidates = vec![PathBuf::from(
-            "/Applications/VOICEVOX.app/Contents/Resources/vv-engine/run",
-        )];
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-            candidates.push(
-                home.join("Applications")
-                    .join("VOICEVOX.app")
-                    .join("Contents")
-                    .join("Resources")
-                    .join("vv-engine")
-                    .join("run"),
-            );
-        }
-        if let Some(found) = candidates.into_iter().find(|p| p.is_file()) {
-            return Some(found);
-        }
-        if let Some(found) = find_on_path("voicevox_engine") {
-            return Some(found);
-        }
+    if let Some(pf) = std::env::var_os("ProgramFiles").map(PathBuf::from) {
+        candidates.push(pf.join("VOICEVOX").join("vv-engine").join("run.exe"));
     }
+    candidates
+        .into_iter()
+        .find(|p| p.is_file())
+        .or_else(|| find_on_path("voicevox_engine.exe"))
+}
 
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let mut candidates = vec![
-            PathBuf::from("/opt/voicevox/vv-engine/run"),
-            PathBuf::from("/usr/local/bin/voicevox_engine"),
-        ];
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-            candidates.push(
-                home.join(".local")
-                    .join("share")
-                    .join("voicevox")
-                    .join("vv-engine")
-                    .join("run"),
-            );
-        }
-        if let Some(found) = candidates.into_iter().find(|p| p.is_file()) {
-            return Some(found);
-        }
-        if let Some(found) = find_on_path("voicevox_engine") {
-            return Some(found);
-        }
+#[cfg(target_os = "macos")]
+fn find_macos_binary() -> Option<PathBuf> {
+    let mut candidates = vec![PathBuf::from(
+        "/Applications/VOICEVOX.app/Contents/Resources/vv-engine/run",
+    )];
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        candidates.push(
+            home.join("Applications")
+                .join("VOICEVOX.app")
+                .join("Contents")
+                .join("Resources")
+                .join("vv-engine")
+                .join("run"),
+        );
     }
+    candidates
+        .into_iter()
+        .find(|p| p.is_file())
+        .or_else(|| find_on_path("voicevox_engine"))
+}
 
-    None
+#[cfg(all(unix, not(target_os = "macos")))]
+fn find_linux_binary() -> Option<PathBuf> {
+    let mut candidates = vec![
+        PathBuf::from("/opt/voicevox/vv-engine/run"),
+        PathBuf::from("/usr/local/bin/voicevox_engine"),
+    ];
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        candidates.push(
+            home.join(".local")
+                .join("share")
+                .join("voicevox")
+                .join("vv-engine")
+                .join("run"),
+        );
+    }
+    candidates
+        .into_iter()
+        .find(|p| p.is_file())
+        .or_else(|| find_on_path("voicevox_engine"))
 }
 
 fn find_on_path(binary: &str) -> Option<PathBuf> {

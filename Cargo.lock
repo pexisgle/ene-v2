@@ -4108,7 +4108,6 @@ dependencies = [
  "bevy_time",
  "bytes",
  "connectrpc",
- "croner",
  "crossbeam-channel",
  "directories",
  "ene-catalog",
@@ -4119,6 +4118,8 @@ dependencies = [
  "ene-policy",
  "ene-rpc",
  "ene-store",
+ "ene-voice",
+ "ene-work",
  "futures-util",
  "getrandom 0.4.3",
  "hashlink",
@@ -4130,12 +4131,9 @@ dependencies = [
  "io-lifetimes 3.0.1",
  "itertools 0.15.0",
  "jiff",
- "jsonschema",
  "keyring",
  "private-fs",
  "process-wrap",
- "pulldown-cmark",
- "regex",
  "reqwest",
  "rig-agent",
  "rig-core",
@@ -4143,8 +4141,6 @@ dependencies = [
  "rig-memory",
  "rig-reqwest",
  "rig-rmcp",
- "rmcp",
- "rubato",
  "rusqlite",
  "rustix 1.1.6",
  "schemars 1.2.3",
@@ -4281,6 +4277,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-voice"
+version = "0.1.8"
+dependencies = [
+ "ene-catalog",
+ "ene-domain",
+ "ene-mind",
+ "ene-rpc",
+ "futures-util",
+ "process-wrap",
+ "pulldown-cmark",
+ "regex",
+ "reqwest",
+ "rubato",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "ene-vrm"
 version = "0.1.8"
 dependencies = [
@@ -4290,6 +4311,24 @@ dependencies = [
  "serde_json",
  "tempfile",
  "vrm-spec",
+]
+
+[[package]]
+name = "ene-work"
+version = "0.1.8"
+dependencies = [
+ "ene-domain",
+ "ene-plugin",
+ "process-wrap",
+ "reqwest",
+ "rig-agent",
+ "rig-rmcp",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
