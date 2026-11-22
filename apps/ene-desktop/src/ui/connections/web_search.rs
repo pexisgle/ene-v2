@@ -1,8 +1,8 @@
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{CircleButtonStyle, Tone, circle_icon_button, pill_button, status_pill};
-use crate::ui::{Hub, SettingsStudio, search_adapter_of, search_adapter_requires_key};
-use ene_rpc as w;
+use crate::ui::{Hub, SettingsStudio, search_adapter_requires_key};
+use ene_client_core::domain::{Connection, ConnectionCheck, ConnectionKind};
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 use std::collections::BTreeMap;
 
@@ -31,19 +31,19 @@ const SEARCH_PROVIDERS: [SearchProviderSpec; 2] = [
 impl SettingsStudio {
     pub(super) fn render_web_search_card(
         &mut self,
-        connections: &[w::Connection],
-        checks: &BTreeMap<String, w::ConnectionCheck>,
+        connections: &[Connection],
+        checks: &BTreeMap<String, ConnectionCheck>,
         live: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let search_conns: Vec<&w::Connection> = connections
+        let search_conns: Vec<&Connection> = connections
             .iter()
-            .filter(|c| c.kind == w::ConnectionKind::Search)
+            .filter(|c| c.kind == ConnectionKind::Search)
             .collect();
         let active_conn = search_conns.iter().copied().find(|c| {
             c.enabled
-                && (!search_adapter_of(c).is_some_and(search_adapter_requires_key)
+                && (!c.search_adapter().is_some_and(search_adapter_requires_key)
                     || matches!(c.credential_state.as_str(), "registered" | "environment"))
         });
         let active_fallback =
@@ -83,15 +83,15 @@ impl SettingsStudio {
     fn render_search_provider_row(
         &mut self,
         spec: &SearchProviderSpec,
-        search_conns: &[&w::Connection],
-        (checks, live): (&BTreeMap<String, w::ConnectionCheck>, bool),
+        search_conns: &[&Connection],
+        (checks, live): (&BTreeMap<String, ConnectionCheck>, bool),
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let existing = search_conns
-            .iter()
-            .copied()
-            .find(|c| search_adapter_of(c).is_some_and(|a| a.eq_ignore_ascii_case(spec.adapter)));
+        let existing = search_conns.iter().copied().find(|c| {
+            c.search_adapter()
+                .is_some_and(|a| a.eq_ignore_ascii_case(spec.adapter))
+        });
         let conn_id = existing.map(|c| c.id.clone());
         let has_cred = existing
             .is_some_and(|c| matches!(c.credential_state.as_str(), "registered" | "environment"));
@@ -99,7 +99,7 @@ impl SettingsStudio {
         let is_checking = conn_id
             .as_ref()
             .is_some_and(|id| self.hub.read(cx).checking_connections.contains(id));
-        let check = existing.and_then(|c| checks.get(&c.id).or_else(|| c.last_check.as_option()));
+        let check = existing.and_then(|c| checks.get(&c.id).or(c.last_check.as_ref()));
 
         let reveal_key = format!("search-card:{}", spec.adapter);
         let revealed =
@@ -114,7 +114,7 @@ impl SettingsStudio {
         let key_text = draft.read(cx).text().trim().to_owned();
         let err_msg = check
             .filter(|c| !c.healthy)
-            .and_then(|c| c.failure.as_option())
+            .and_then(|c| c.failure.as_ref())
             .map(|f| f.message.trim().to_owned())
             .filter(|m| !m.is_empty());
 
@@ -180,18 +180,18 @@ impl SettingsStudio {
 }
 
 struct ProviderRowMeta<'a> {
-    existing: Option<&'a w::Connection>,
+    existing: Option<&'a Connection>,
     conn_id: Option<String>,
     has_cred: bool,
     is_active: bool,
     is_checking: bool,
-    check: Option<&'a w::ConnectionCheck>,
+    check: Option<&'a ConnectionCheck>,
     live: bool,
 }
 
 fn render_search_card_header(
-    active_conn: Option<&w::Connection>,
-    active_fallback: Option<&w::Connection>,
+    active_conn: Option<&Connection>,
+    active_fallback: Option<&Connection>,
     theme: &Theme,
 ) -> gpui::Div {
     let (summary_label, summary_dot, summary_bg, summary_fg) = match active_conn {
@@ -402,8 +402,8 @@ fn render_provider_key_row(
 }
 
 fn render_search_switcher(
-    search_conns: &[&w::Connection],
-    active_fallback: Option<&w::Connection>,
+    search_conns: &[&Connection],
+    active_fallback: Option<&Connection>,
     live: bool,
     hub: &Entity<Hub>,
     theme: &Theme,

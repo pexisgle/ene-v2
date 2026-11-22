@@ -32,6 +32,13 @@ pub enum HostTarget {
 // See `HostTarget` above.
 #[allow(dead_code)]
 impl HostTarget {
+    /// Validates a remote HTTPS `/rpc` ingress URL.
+    pub fn validate_remote_endpoint(endpoint: &str) -> Result<(), Connect> {
+        ene_rpc::validate_remote_endpoint(endpoint)
+            .map(|_| ())
+            .map_err(|error| Connect::Invalid(error.to_string()))
+    }
+
     /// Reads a persisted remote target (`remote_host.json`), returning `Ok(None)`
     /// when not configured.
     pub fn read_remote(path: &Path) -> Result<Option<Self>, Connect> {

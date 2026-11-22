@@ -8,7 +8,7 @@ use super::SettingsStudio;
 use super::icons::Icon;
 use super::theme::Theme;
 use super::widgets::{ButtonStyle, Tone, companion_badge, pill_button, status_pill};
-use ene_rpc as w;
+use ene_client_core::domain::{Companion, CompanionTemplate, ConnectionKind, MindView};
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 use std::collections::BTreeMap;
 
@@ -21,14 +21,14 @@ struct RowStatus {
 
 struct CompanionsSnapshot {
     live: bool,
-    companions: Vec<w::Companion>,
+    companions: Vec<Companion>,
     active_id: Option<String>,
     resident_ids: Vec<String>,
     has_models: bool,
     tts_voices: Vec<(String, String, String, String)>,
     tts_conn_ids: Vec<String>,
-    minds: BTreeMap<String, w::MindView>,
-    templates: Vec<w::CompanionTemplate>,
+    minds: BTreeMap<String, MindView>,
+    templates: Vec<CompanionTemplate>,
     exported_template: Option<(String, String)>,
     preview_reply: Option<Result<String, ene_client_core::state::PreviewError>>,
 }
@@ -41,7 +41,7 @@ impl CompanionsSnapshot {
             .map(|s| {
                 s.connections
                     .iter()
-                    .filter(|c| c.kind == w::ConnectionKind::Tts && c.enabled)
+                    .filter(|c| c.kind == ConnectionKind::Tts && c.enabled)
                     .map(|c| c.id.clone())
                     .collect()
             })
@@ -105,7 +105,7 @@ impl SettingsStudio {
 
     fn render_companion_row(
         &mut self,
-        comp: &w::Companion,
+        comp: &Companion,
         snap: &CompanionsSnapshot,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -161,7 +161,7 @@ impl SettingsStudio {
 
     fn render_companion_row_header(
         &self,
-        comp: &w::Companion,
+        comp: &Companion,
         status: RowStatus,
         theme: &Theme,
         cx: &mut Context<Self>,

@@ -1,36 +1,38 @@
 use crate::{
+    domain::{
+        Activation, ApprovalRequest, ApprovalStatus, Companion, HostNotification, Message,
+        MessageDelta, MessageRole, MindUpdated, NotificationEvent, PolicyText, RunStatus, Settings,
+        Snapshot, TurnEvent, TurnStatus, WorkEvent, WorkEventDetail,
+    },
     reducer::is_user_facing_message,
     state::{Link, Model, Sending},
     update::Update,
 };
-use ene_rpc as w;
 use std::time::Duration;
 
 fn model() -> Model {
     Model::new("connection.json".into())
 }
 
-fn snapshot() -> w::Snapshot {
-    w::Snapshot {
+fn snapshot() -> Snapshot {
+    Snapshot {
         server_version: "1".into(),
-        pending_approvals: Vec::new(),
         ..Default::default()
     }
 }
 
-fn notification(event: w::notification::Event) -> w::Notification {
-    w::Notification {
+fn notification(event: NotificationEvent) -> HostNotification {
+    HostNotification {
         kind: "test".into(),
         event: Some(event),
-        ..Default::default()
     }
 }
 
-fn message(id: &str, sequence: u64, role: w::MessageRole, text: &str) -> w::Message {
-    w::Message {
+fn message(id: &str, sequence: u64, role: MessageRole, text: &str) -> Message {
+    Message {
         id: id.into(),
         companion_id: "ene".into(),
-        role: role.into(),
+        role,
         text: text.into(),
         sequence,
         ..Default::default()
@@ -47,24 +49,22 @@ fn with_chat() -> Model {
 fn a_delta_is_a_preview_until_the_host_records_the_message() {
     let mut model = with_chat();
     model.apply(Update::Notification(Box::new(notification(
-        w::notification::Event::MessageDelta(Box::new(w::MessageDelta {
+        NotificationEvent::MessageDelta(MessageDelta {
             companion_id: "ene".into(),
             stream_id: "stream".into(),
             delta: "こん".into(),
-            ..Default::default()
-        })),
+        }),
     ))));
     assert!(
         model.companions.chat.messages.is_empty(),
         "a delta is not a message"
     );
     model.apply(Update::Notification(Box::new(notification(
-        w::notification::Event::MessageDelta(Box::new(w::MessageDelta {
+        NotificationEvent::MessageDelta(MessageDelta {
             companion_id: "ene".into(),
             stream_id: "stream".into(),
             delta: "にちは".into(),
-            ..Default::default()
-        })),
+        }),
     ))));
     assert_eq!(
         model
@@ -75,10 +75,12 @@ fn a_delta_is_a_preview_until_the_host_records_the_message() {
         Some("こんにちは")
     );
     model.apply(Update::Notification(Box::new(notification(
-        w::notification::Event::MessageCreated(Box::new(w::MessageCreated {
-            message: Some(message("a", 9, w::MessageRole::Assistant, "こんにちは")).into(),
-            ..Default::default()
-        })),
+        NotificationEvent::MessageCreated(Box::new(message(
+            "a",
+            9,
+            MessageRole::Assistant,
+            "こんにちは",
+        ))),
     ))));
     assert_eq!(model.companions.chat.messages.len(), 1);
     assert!(
@@ -91,12 +93,9 @@ fn a_delta_is_a_preview_until_the_host_records_the_message() {
 fn the_same_message_twice_is_one_message_in_sequence_order() {
     let mut model = with_chat();
     let created = |id: &str, sequence: u64| {
-        Update::Notification(Box::new(notification(
-            w::notification::Event::MessageCreated(Box::new(w::MessageCreated {
-                message: Some(message(id, sequence, w::MessageRole::User, id)).into(),
-                ..Default::default()
-            })),
-        )))
+        Update::Notification(Box::new(notification(NotificationEvent::MessageCreated(
+            Box::new(message(id, sequence, MessageRole::User, id)),
+        ))))
     };
     model.apply(created("b", 7));
     model.apply(created("a", 5));
@@ -119,10 +118,10 @@ fn the_same_message_twice_is_one_message_in_sequence_order() {
 fn a_turn_event_for_another_companion_does_not_touch_the_shown_chat() {
     let mut model = with_chat();
     model.apply(Update::Notification(Box::new(notification(
-        w::notification::Event::TurnEvent(Box::new(w::TurnEvent {
+        NotificationEvent::TurnEvent(Box::new(TurnEvent {
             companion_id: "other".into(),
             turn_id: "1".into(),
-            status: w::TurnStatus::Failed.into(),
+            status: TurnStatus::Failed,
             ..Default::default()
         })),
     ))));
@@ -137,10 +136,10 @@ fn a_terminal_turn_drops_the_preview() {
         .streaming
         .insert(("ene".into(), "stream".into()), "半分".into());
     model.apply(Update::Notification(Box::new(notification(
-        w::notification::Event::TurnEvent(Box::new(w::TurnEvent {
+        NotificationEvent::TurnEvent(Box::new(TurnEvent {
             companion_id: "ene".into(),
             turn_id: "1".into(),
-            status: w::TurnStatus::Stopped.into(),
+            status: TurnStatus::Stopped,
             ..Default::default()
         })),
     ))));
@@ -154,16 +153,13 @@ fn a_terminal_turn_drops_the_preview() {
 fn a_resolved_approval_leaves_the_pending_list() {
     let mut model = model();
     model.snapshot = Some(snapshot());
-    let pending = |status: w::ApprovalStatus| w::ApprovalRequest {
+    let pending = |status: ApprovalStatus| ApprovalRequest {
         request_id: "r1".into(),
-        status: status.into(),
+        status,
         ..Default::default()
     };
     model.apply(Update::Notification(Box::new(notification(
-        w::notification::Event::ApprovalRequested(Box::new(w::ApprovalRequested {
-            request: Some(pending(w::ApprovalStatus::Pending)).into(),
-            ..Default::default()
-        })),
+        NotificationEvent::ApprovalRequested(Some(Box::new(pending(ApprovalStatus::Pending)))),
     ))));
     assert_eq!(model.approvals().len(), 1);
     model.apply(Update::Resolved {
@@ -191,16 +187,13 @@ fn a_resolved_approval_leaves_the_pending_list() {
 fn f16_policy_texts_updated_notification_updates_settings() {
     let mut model = model();
     model.snapshot = Some(snapshot());
-    let entry = w::PolicyText {
+    let entry = PolicyText {
         id: "pt-1".into(),
         text: "外部送信は毎回確認".into(),
         ..Default::default()
     };
     model.apply(Update::Notification(Box::new(notification(
-        w::notification::Event::PolicyTextsUpdated(Box::new(w::PolicyTextsUpdated {
-            texts: vec![entry],
-            ..Default::default()
-        })),
+        NotificationEvent::PolicyTextsUpdated(vec![entry]),
     ))));
     assert_eq!(model.policy_texts().len(), 1);
     assert_eq!(model.policy_texts()[0].text, "外部送信は毎回確認");
@@ -210,14 +203,14 @@ fn f16_policy_texts_updated_notification_updates_settings() {
 fn an_older_companion_revision_never_replaces_a_newer_one() {
     let mut model = model();
     model.snapshot = Some(snapshot());
-    let companion = |revision: u64, name: &str| w::Companion {
+    let companion = |revision: u64, name: &str| Companion {
         id: "ene".into(),
         name: name.into(),
         revision,
         ..Default::default()
     };
     let update = |revision: u64, name: &str| {
-        Update::Notification(Box::new(notification(w::notification::Event::Companion(
+        Update::Notification(Box::new(notification(NotificationEvent::Companion(
             Box::new(companion(revision, name)),
         ))))
     };
@@ -231,17 +224,14 @@ fn an_older_companion_revision_never_replaces_a_newer_one() {
 fn older_settings_are_ignored_so_a_replay_cannot_roll_the_window_back() {
     let mut model = model();
     model.snapshot = Some(snapshot());
-    let settings = |revision: u64| w::Settings {
+    let settings = |revision: u64| Settings {
         revision,
         ..Default::default()
     };
     let update = |revision: u64| {
-        Update::Notification(Box::new(notification(
-            w::notification::Event::SettingsUpdated(Box::new(w::SettingsUpdated {
-                settings: Some(settings(revision)).into(),
-                ..Default::default()
-            })),
-        )))
+        Update::Notification(Box::new(notification(NotificationEvent::SettingsUpdated(
+            Some(Box::new(settings(revision))),
+        ))))
     };
     model.apply(update(4));
     model.apply(update(3));
@@ -300,7 +290,7 @@ fn a_recorded_user_message_closes_its_pending_row() {
     });
     model.apply(Update::History {
         companion_id: "ene".into(),
-        messages: vec![message("a", 1, w::MessageRole::User, "こんにちは")],
+        messages: vec![message("a", 1, MessageRole::User, "こんにちは")],
     });
     assert!(
         model.companions.chat.sending.is_empty(),
@@ -356,18 +346,18 @@ fn audio_levels_and_transcription_reset_when_link_drops() {
 fn mind_updated_requests_refresh_only_for_active_companion() {
     let mut model = with_chat();
     let other = model.apply(Update::Notification(Box::new(notification(
-        w::notification::Event::MindUpdated(Box::new(w::MindUpdated {
+        NotificationEvent::MindUpdated(MindUpdated {
             companion_id: "other".into(),
             ..Default::default()
-        })),
+        }),
     ))));
     assert!(!other.mind);
 
     let mine = model.apply(Update::Notification(Box::new(notification(
-        w::notification::Event::MindUpdated(Box::new(w::MindUpdated {
+        NotificationEvent::MindUpdated(MindUpdated {
             companion_id: "ene".into(),
             ..Default::default()
-        })),
+        }),
     ))));
     assert!(mine.mind);
 }
@@ -375,11 +365,11 @@ fn mind_updated_requests_refresh_only_for_active_companion() {
 #[test]
 fn internal_work_messages_are_hidden_and_work_event_tracks_active_status() {
     let mut model = with_chat();
-    let internal = w::Message {
+    let internal = Message {
         id: "w1".into(),
         companion_id: "ene".into(),
         work_id: "work-1".into(),
-        role: w::MessageRole::Agent.into(),
+        role: MessageRole::Agent,
         text: "[作業報告 (work_id: work-1)] ...".into(),
         sequence: 1,
         ..Default::default()
@@ -387,41 +377,38 @@ fn internal_work_messages_are_hidden_and_work_event_tracks_active_status() {
     assert!(!is_user_facing_message(&internal));
     model.apply(Update::History {
         companion_id: "ene".into(),
-        messages: vec![internal, message("u1", 2, w::MessageRole::User, "調べて")],
+        messages: vec![internal, message("u1", 2, MessageRole::User, "調べて")],
     });
     assert_eq!(model.companions.chat.messages.len(), 1);
     assert_eq!(model.companions.chat.messages[0].text, "調べて");
 
     model.apply(Update::Notification(Box::new(notification(
-        w::notification::Event::WorkEvent(Box::new(w::WorkEvent {
+        NotificationEvent::WorkEvent(WorkEvent {
             work_id: "work-1".into(),
             run_id: "run-1".into(),
-            kind: w::WorkEventKind::RunStarted.into(),
-            detail: Some(w::work_event::Detail::RunStarted(Box::default())),
-            ..Default::default()
-        })),
+            detail: Some(WorkEventDetail::RunStarted),
+        }),
     ))));
     assert!(model.companions.work_active);
 
     model.apply(Update::Notification(Box::new(notification(
-        w::notification::Event::WorkEvent(Box::new(w::WorkEvent {
+        NotificationEvent::WorkEvent(WorkEvent {
             work_id: "work-1".into(),
             run_id: "run-1".into(),
-            kind: w::WorkEventKind::RunFinished.into(),
-            detail: Some(w::work_event::Detail::RunFinished(Box::new(
-                w::WorkRunFinished {
-                    state: w::RunStatus::Completed.into(),
-                    ..Default::default()
-                },
-            ))),
-            ..Default::default()
-        })),
+            detail: Some(WorkEventDetail::RunFinished {
+                state: RunStatus::Completed,
+                failure: None,
+                pending_request_id: None,
+            }),
+        }),
     ))));
     assert!(!model.companions.work_active);
 }
 
 #[test]
 fn q04_stale_epoch_scoped_updates_are_discarded_after_reconnect() {
+    use crate::domain::ModelInfo;
+
     let mut model = model();
     model.apply(Update::Link(Box::new(Link::Live {
         version: "1".into(),
@@ -429,7 +416,7 @@ fn q04_stale_epoch_scoped_updates_are_discarded_after_reconnect() {
     let first_epoch = model.connections.link_epoch;
     model.apply(Update::Models {
         connection_id: "c1".into(),
-        models: vec![w::Model {
+        models: vec![ModelInfo {
             id: "m-fresh".into(),
             ..Default::default()
         }],
@@ -449,7 +436,7 @@ fn q04_stale_epoch_scoped_updates_are_discarded_after_reconnect() {
         seq: 1,
         inner: Box::new(Update::Models {
             connection_id: "c1".into(),
-            models: vec![w::Model {
+            models: vec![ModelInfo {
                 id: "m-stale".into(),
                 ..Default::default()
             }],
@@ -467,20 +454,17 @@ fn f01_r03_resident_companions_queries_multiple_activations_on_one_client() {
     let mut model = model();
     let mut snap = snapshot();
     snap.activations = vec![
-        w::Activation {
+        Activation {
             companion_id: "ene".into(),
             client_id: Some("desk-a".into()),
-            ..Default::default()
         },
-        w::Activation {
+        Activation {
             companion_id: "miku".into(),
             client_id: Some("desk-a".into()),
-            ..Default::default()
         },
-        w::Activation {
+        Activation {
             companion_id: "kai".into(),
             client_id: Some("desk-b".into()),
-            ..Default::default()
         },
     ];
     model.snapshot = Some(snap);

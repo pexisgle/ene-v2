@@ -11,14 +11,14 @@ use crate::{
         widgets::{Tone, pill_button},
     },
 };
-use ene_rpc as w;
+use ene_client_core::domain::CompanionTemplate;
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 
 impl SettingsStudio {
     pub(super) fn render_import_panel(
         &mut self,
         live: bool,
-        templates: &[w::CompanionTemplate],
+        templates: &[CompanionTemplate],
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -292,7 +292,7 @@ impl SettingsStudio {
 }
 
 fn create_template_chips(
-    templates: &[w::CompanionTemplate],
+    templates: &[CompanionTemplate],
     name_d: &Entity<Draft>,
     mind_d: &Entity<Draft>,
     persona_d: &Entity<Draft>,

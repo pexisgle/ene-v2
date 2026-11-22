@@ -1,7 +1,10 @@
 //! Client domain state models organized by responsibility.
 
+use crate::domain::{
+    Activation, ApprovalRequest, Companion, CompanionTemplate, ConnectionCheck, LlmProvider,
+    Message, MindView, ModelInfo, PluginInfo, PolicyText, Settings, Snapshot, TurnEvent,
+};
 use crate::update::CaptureMode;
-use ene_rpc as w;
 use std::{collections::BTreeMap, time::Duration};
 
 /// The link to the host, in the states the window must tell apart.
@@ -85,13 +88,13 @@ pub struct Chat {
     /// The companion these messages belong to.
     pub companion_id: String,
     /// What the host recorded, oldest first.
-    pub messages: Vec<w::Message>,
+    pub messages: Vec<Message>,
     pub loading: bool,
     pub error: Option<String>,
     pub sending: Vec<Sending>,
     pub unsent: Vec<Unsent>,
     /// The most recent turn for this companion.
-    pub turn: Option<w::TurnEvent>,
+    pub turn: Option<TurnEvent>,
     /// A stop the host accepted but has not finished.
     pub stop_requested: bool,
 }
@@ -132,11 +135,11 @@ pub struct Effects {
 pub struct ConnectionViewState {
     pub link: Link,
     pub link_epoch: u64,
-    pub providers: Option<Vec<w::LlmProvider>>,
-    pub models: BTreeMap<String, Vec<w::Model>>,
-    pub checks: BTreeMap<String, w::ConnectionCheck>,
+    pub providers: Option<Vec<LlmProvider>>,
+    pub models: BTreeMap<String, Vec<ModelInfo>>,
+    pub checks: BTreeMap<String, ConnectionCheck>,
     pub devices: Devices,
-    pub plugins: Vec<w::PluginInfo>,
+    pub plugins: Vec<PluginInfo>,
 }
 
 impl ConnectionViewState {
@@ -166,9 +169,9 @@ pub struct CompanionState {
     pub selected: Option<String>,
     pub chat: Chat,
     pub streaming: BTreeMap<(String, String), String>,
-    pub minds: BTreeMap<String, w::MindView>,
+    pub minds: BTreeMap<String, MindView>,
     pub work_active: bool,
-    pub templates: Vec<w::CompanionTemplate>,
+    pub templates: Vec<CompanionTemplate>,
     pub exported_template: Option<(String, String)>,
     pub preview_reply: Option<Result<String, PreviewError>>,
 }
@@ -239,7 +242,7 @@ pub struct ApprovalState {
 /// Everything the window draws, organized by domain sub-state.
 #[derive(Debug)]
 pub struct Model {
-    pub snapshot: Option<w::Snapshot>,
+    pub snapshot: Option<Snapshot>,
     pub notices: Vec<Notice>,
     pub connections: ConnectionViewState,
     pub companions: CompanionState,
@@ -262,7 +265,7 @@ impl Model {
     }
 
     /// The snapshot, when one has arrived.
-    pub fn snapshot(&self) -> Option<&w::Snapshot> {
+    pub fn snapshot(&self) -> Option<&Snapshot> {
         self.snapshot.as_ref()
     }
 
@@ -282,7 +285,7 @@ impl Model {
     }
 
     /// The companion record for the shown id.
-    pub fn companion(&self) -> Option<&w::Companion> {
+    pub fn companion(&self) -> Option<&Companion> {
         let id = self.companion_id()?;
         self.snapshot
             .as_ref()?
@@ -292,7 +295,7 @@ impl Model {
     }
 
     /// The activation the host holds for the shown companion.
-    pub fn activation(&self) -> Option<&w::Activation> {
+    pub fn activation(&self) -> Option<&Activation> {
         let id = self.companion_id()?;
         self.snapshot
             .as_ref()?
@@ -331,17 +334,17 @@ impl Model {
     }
 
     /// The settings the window shows.
-    pub fn settings(&self) -> Option<&w::Settings> {
-        self.snapshot.as_ref()?.settings.as_option()
+    pub fn settings(&self) -> Option<&Settings> {
+        self.snapshot.as_ref()?.settings.as_ref()
     }
 
-    pub fn policy_texts(&self) -> &[w::PolicyText] {
+    pub fn policy_texts(&self) -> &[PolicyText] {
         self.settings()
             .map_or(&[], |settings| settings.policy_texts.as_slice())
     }
 
     /// The pending approvals, oldest first.
-    pub fn approvals(&self) -> &[w::ApprovalRequest] {
+    pub fn approvals(&self) -> &[ApprovalRequest] {
         self.snapshot
             .as_ref()
             .map_or(&[], |snapshot| snapshot.pending_approvals.as_slice())

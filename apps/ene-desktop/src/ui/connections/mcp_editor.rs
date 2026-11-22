@@ -1,11 +1,13 @@
-use super::edits::{format_kv_lines, kind_of, parse_kv_lines, split_comma, toggle_comma_item};
 use crate::input::Draft;
 use crate::ui::SettingsStudio;
 use crate::ui::icons::Icon;
 use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button};
-use ene_rpc as w;
+use ene_client_core::{
+    connections::{format_kv_lines, parse_kv_lines, split_comma, toggle_comma_item},
+    domain::{Connection, ConnectionCheck, ConnectionConfig, ConnectionKind},
+};
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 
 pub(super) struct McpDraftGroup {
@@ -27,20 +29,17 @@ pub(super) type ParsedMcpExtra = (
 impl SettingsStudio {
     pub(super) fn process_command_draft(
         &mut self,
-        conn: &w::Connection,
-        cfg: Option<&w::connection_config::Config>,
+        conn: &Connection,
+        cfg: Option<&ConnectionConfig>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<Entity<Draft>> {
-        if !matches!(
-            kind_of(conn),
-            w::ConnectionKind::Mcp | w::ConnectionKind::Acp
-        ) {
+        if !matches!(conn.kind, ConnectionKind::Mcp | ConnectionKind::Acp) {
             return None;
         }
         let cmd_init = match cfg {
-            Some(w::connection_config::Config::Mcp(m)) => m.command.as_str(),
-            Some(w::connection_config::Config::Acp(a)) => a.command.as_str(),
+            Some(ConnectionConfig::Mcp(m)) => m.command.as_str(),
+            Some(ConnectionConfig::Acp(a)) => a.command.as_str(),
             _ => "",
         };
         Some(self.draft(
@@ -56,11 +55,11 @@ impl SettingsStudio {
         &mut self,
         id: &str,
         rev: u64,
-        cfg: Option<&w::connection_config::Config>,
+        cfg: Option<&ConnectionConfig>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<Entity<Draft>> {
-        let Some(w::connection_config::Config::Mcp(mcp)) = cfg else {
+        let Some(ConnectionConfig::Mcp(mcp)) = cfg else {
             return None;
         };
         let initial = serde_json::json!(mcp.args).to_string();
@@ -77,11 +76,11 @@ impl SettingsStudio {
         &mut self,
         id: &str,
         rev: u64,
-        cfg: Option<&w::connection_config::Config>,
+        cfg: Option<&ConnectionConfig>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<McpDraftGroup> {
-        let Some(w::connection_config::Config::Mcp(mcp)) = cfg else {
+        let Some(ConnectionConfig::Mcp(mcp)) = cfg else {
             return None;
         };
         let env_init = format_kv_lines(&mcp.env, '=');
@@ -127,13 +126,13 @@ impl SettingsStudio {
 
     pub(super) fn render_mcp_tools_strip(
         &mut self,
-        conn: &w::Connection,
-        check: Option<&w::ConnectionCheck>,
+        conn: &Connection,
+        check: Option<&ConnectionCheck>,
         list_d: &Entity<Draft>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui::Div> {
-        if kind_of(conn) != w::ConnectionKind::Mcp {
+        if conn.kind != ConnectionKind::Mcp {
             return None;
         }
         let caps = check.map(|c| &c.resources).filter(|c| !c.is_empty())?;

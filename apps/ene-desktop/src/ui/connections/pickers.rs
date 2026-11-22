@@ -1,4 +1,3 @@
-use super::edits::{kind_of, split_comma};
 use super::row_editor::is_voicevox_tts;
 use crate::input::Draft;
 use crate::ui::icons::Icon;
@@ -6,14 +5,17 @@ use crate::ui::theme::Theme;
 use crate::ui::widgets::{
     DropdownOption, DropdownSpec, Tone, dropdown_select, kind_pill, pill_button,
 };
-use crate::ui::{Hub, SettingsStudio, default_embedding_dimensions, is_sakura_conn};
-use ene_rpc as w;
+use crate::ui::{Hub, SettingsStudio, default_embedding_dimensions};
+use ene_client_core::{
+    connections::split_comma,
+    domain::{Connection, ConnectionEndpoint, ConnectionKind},
+};
 use gpui::{Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 use std::rc::Rc;
 
 pub(super) struct PickerInput<'a> {
-    pub(super) conn: &'a w::Connection,
-    pub(super) endpoint: Option<&'a w::ConnectionEndpoint>,
+    pub(super) conn: &'a Connection,
+    pub(super) endpoint: Option<&'a ConnectionEndpoint>,
     pub(super) list_d: &'a Entity<Draft>,
     pub(super) dim_d: Option<&'a Entity<Draft>>,
     pub(super) live: bool,
@@ -47,8 +49,8 @@ impl SettingsStudio {
     ) -> Option<gpui::Div> {
         let id = input.conn.id.clone();
         let is_checking = self.hub.read(cx).checking_connections.contains(&id);
-        let kind = kind_of(input.conn);
-        if kind == w::ConnectionKind::Llm {
+        let kind = input.conn.kind;
+        if kind == ConnectionKind::Llm {
             return Some(self.build_llm_picker(
                 &id,
                 input.list_d,
@@ -65,7 +67,7 @@ impl SettingsStudio {
                 cx,
             ));
         }
-        if kind == w::ConnectionKind::Tts && is_sakura_conn(input.conn) {
+        if kind == ConnectionKind::Tts && input.conn.is_sakura() {
             return Some(self.build_sakura_tts_picker(
                 &id,
                 input.list_d,
@@ -74,7 +76,7 @@ impl SettingsStudio {
                 cx,
             ));
         }
-        if kind == w::ConnectionKind::Stt {
+        if kind == ConnectionKind::Stt {
             return Some(self.build_stt_picker(
                 &id,
                 input.endpoint,
@@ -83,7 +85,7 @@ impl SettingsStudio {
                 cx,
             ));
         }
-        if kind == w::ConnectionKind::Embedding {
+        if kind == ConnectionKind::Embedding {
             return Some(self.build_embedding_picker(
                 &id,
                 (input.list_d, input.dim_d),
@@ -160,7 +162,7 @@ impl SettingsStudio {
 
     fn build_voicevox_picker(
         &mut self,
-        (id, endpoint, list_d): (&str, Option<&w::ConnectionEndpoint>, &Entity<Draft>),
+        (id, endpoint, list_d): (&str, Option<&ConnectionEndpoint>, &Entity<Draft>),
         (is_checking, live): (bool, bool),
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -299,7 +301,7 @@ impl SettingsStudio {
     fn build_stt_picker(
         &mut self,
         id: &str,
-        endpoint: Option<&w::ConnectionEndpoint>,
+        endpoint: Option<&ConnectionEndpoint>,
         (is_checking, live): (bool, bool),
         theme: &Theme,
         cx: &mut Context<Self>,

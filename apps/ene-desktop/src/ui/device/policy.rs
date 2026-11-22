@@ -11,7 +11,7 @@ use crate::ui::{
     theme::Theme,
     widgets::{ButtonStyle, Tone, disclosure_row, pill_button, status_pill},
 };
-use ene_rpc as w;
+use ene_client_core::domain::{PolicyEffect, PolicyRule, PolicyText};
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
 impl SettingsStudio {
@@ -96,23 +96,23 @@ impl SettingsStudio {
 
     fn render_policy_rule_row(
         &self,
-        rule: &w::PolicyRule,
+        rule: &PolicyRule,
         live: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (eff_text, dot, bg, fg) = match rule.effect.as_known() {
-            Some(w::PolicyEffect::Allow) => ("許可", theme.mint, theme.mint_soft, theme.mint_fg),
-            Some(w::PolicyEffect::Deny) => {
-                ("拒否", theme.danger, theme.danger_soft, theme.danger_fg)
-            }
-            Some(w::PolicyEffect::AskLlm) => (
+        let (eff_text, dot, bg, fg) = match rule.effect {
+            PolicyEffect::Allow => ("許可", theme.mint, theme.mint_soft, theme.mint_fg),
+            PolicyEffect::Deny => ("拒否", theme.danger, theme.danger_soft, theme.danger_fg),
+            PolicyEffect::AskLlm => (
                 "AI判定",
                 theme.accent,
                 theme.accent_soft,
                 theme.accent_soft_fg,
             ),
-            _ => ("確認", theme.amber, theme.amber_soft, theme.amber_fg),
+            PolicyEffect::Confirm | PolicyEffect::Unspecified => {
+                ("確認", theme.amber, theme.amber_soft, theme.amber_fg)
+            }
         };
         let armed = self.device_form.delete_armed_policy.as_deref() == Some(rule.id.as_str());
         let studio_arm = cx.entity();
@@ -384,7 +384,7 @@ impl SettingsStudio {
         let pattern_val = pattern_d.read(cx).text().trim().to_owned();
         let eff_choice = self.device_form.new_policy_effect;
 
-        let eff_chip = |eff: w::PolicyEffect, label: &'static str| {
+        let eff_chip = |eff: PolicyEffect, label: &'static str| {
             let selected = eff_choice == eff;
             let studio = cx.entity();
             pill_button(
@@ -445,10 +445,10 @@ impl SettingsStudio {
                             .flex_row()
                             .flex_wrap()
                             .gap(px(6.))
-                            .child(eff_chip(w::PolicyEffect::Allow, "許可"))
-                            .child(eff_chip(w::PolicyEffect::AskLlm, "AI判定"))
-                            .child(eff_chip(w::PolicyEffect::Confirm, "確認"))
-                            .child(eff_chip(w::PolicyEffect::Deny, "拒否")),
+                            .child(eff_chip(PolicyEffect::Allow, "許可"))
+                            .child(eff_chip(PolicyEffect::AskLlm, "AI判定"))
+                            .child(eff_chip(PolicyEffect::Confirm, "確認"))
+                            .child(eff_chip(PolicyEffect::Deny, "拒否")),
                     )
                     .child(pill_button(
                         "dev-pol-submit",
@@ -553,7 +553,7 @@ impl SettingsStudio {
     fn render_policy_text_editor(
         &mut self,
         index: usize,
-        item: &w::PolicyText,
+        item: &PolicyText,
         live: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -641,7 +641,7 @@ impl SettingsStudio {
     fn render_policy_text_row(
         &self,
         index: usize,
-        item: &w::PolicyText,
+        item: &PolicyText,
         live: bool,
         theme: &Theme,
         cx: &mut Context<Self>,

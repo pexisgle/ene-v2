@@ -1,13 +1,17 @@
 //! Pure view-model choice derivation and default model auto-assignment logic.
 
+use crate::connections::{
+    active_stt_in_connections, active_tts_in_connections, tts_voice_of_connection,
+};
+use crate::domain::{
+    AutoAssignModelPatch, Connection, ConnectionConfig, ConnectionKind, ModelAssignment,
+    ModelAssignments, ModelInfo,
+};
 use crate::state::Model;
 use ene_catalog::{
     GOOGLE_AGENT_PLATFORM, OPENAI_TTS_VOICES, SAKURA_EMBEDDING_MODELS, SAKURA_STT_MODELS,
-    SAKURA_TTS_VOICES, active_stt_in_connections, active_tts_in_connections, can_start_chat,
-    default_models_for_adapter, is_sakura_conn, needs_key, parse_voice_resource,
-    tts_voice_of_connection,
+    SAKURA_TTS_VOICES, default_models_for_adapter, parse_voice_resource,
 };
-use ene_rpc as w;
 use std::collections::{BTreeMap, HashSet};
 
 /// Internal host model role slots, exposed only inside progressive disclosure.
@@ -55,15 +59,15 @@ impl ModelRoleSlot {
         }
     }
 
-    pub fn current(self, assignments: &w::ModelAssignments) -> Option<w::ModelAssignment> {
+    pub fn current(self, assignments: &ModelAssignments) -> Option<ModelAssignment> {
         let picked = match self {
-            Self::Companion => assignments.companion.as_option(),
-            Self::Task => assignments.task.as_option(),
-            Self::Perception => assignments.perception.as_option(),
-            Self::Compaction => assignments.compaction.as_option(),
-            Self::Consolidation => assignments.consolidation.as_option(),
-            Self::Decision => assignments.decision.as_option(),
-            Self::Embedding => assignments.embedding.as_option(),
+            Self::Companion => assignments.companion.as_ref(),
+            Self::Task => assignments.task.as_ref(),
+            Self::Perception => assignments.perception.as_ref(),
+            Self::Compaction => assignments.compaction.as_ref(),
+            Self::Consolidation => assignments.consolidation.as_ref(),
+            Self::Decision => assignments.decision.as_ref(),
+            Self::Embedding => assignments.embedding.as_ref(),
         }?;
         (!picked.connection_id.is_empty() && !picked.model_id.is_empty()).then(|| picked.clone())
     }
@@ -105,16 +109,12 @@ fn push_unique_model(list: &mut Vec<(String, String)>, id: &str, name: Option<&s
     }
 }
 
-fn llm_config_parts(connection: &w::Connection) -> (Vec<String>, &str) {
-    match connection
-        .config
-        .as_option()
-        .and_then(|config| config.config.as_ref())
-    {
-        Some(w::connection_config::Config::Llm(llm)) => (
+fn llm_config_parts(connection: &Connection) -> (Vec<String>, &str) {
+    match connection.config.as_ref() {
+        Some(ConnectionConfig::Llm(llm)) => (
             llm.model_ids.clone(),
             llm.endpoint
-                .as_option()
+                .as_ref()
                 .map(|ep| ep.adapter.as_str())
                 .unwrap_or_default(),
         ),
@@ -123,10 +123,10 @@ fn llm_config_parts(connection: &w::Connection) -> (Vec<String>, &str) {
 }
 
 fn verified_google_platform_models(
-    connection: &w::Connection,
-    fetched: &[w::Model],
+    connection: &Connection,
+    fetched: &[ModelInfo],
 ) -> Option<Vec<(String, String)>> {
-    let check = connection.last_check.as_option()?;
+    let check = connection.last_check.as_ref()?;
     if !check
         .capabilities
         .iter()
@@ -159,7 +159,7 @@ impl Model {
         };
         let mut voices = Vec::new();
         for conn in &settings.connections {
-            if conn.kind != w::ConnectionKind::Tts || !conn.enabled {
+            if conn.kind != ConnectionKind::Tts || !conn.enabled {
                 continue;
             }
             for (vid, label) in self.voice_choices_for_connection(&conn.id) {
@@ -182,23 +182,21 @@ impl Model {
             .connections
             .checks
             .get(&conn.id)
-            .or_else(|| conn.last_check.as_option())
+            .or(conn.last_check.as_ref())
         {
             for res in &check.resources {
                 push_voice_unique(&mut voices, res);
             }
         }
-        let sakura = is_sakura_conn(conn);
-        if let Some(w::connection_config::Config::Tts(tts)) =
-            conn.config.as_option().and_then(|c| c.config.as_ref())
-        {
+        let sakura = conn.is_sakura();
+        if let Some(ConnectionConfig::Tts(tts)) = conn.config.as_ref() {
             for id in &tts.voice_ids {
                 push_voice_unique(&mut voices, id);
             }
             if !sakura
                 && tts
                     .endpoint
-                    .as_option()
+                    .as_ref()
                     .is_some_and(|ep| ep.adapter.trim().eq_ignore_ascii_case("openai"))
             {
                 for voice in OPENAI_TTS_VOICES {
@@ -226,20 +224,19 @@ impl Model {
             return Vec::new();
         };
         let mut models = Vec::new();
-        if let Some(w::connection_config::Config::Stt(stt)) =
-            conn.config.as_option().and_then(|c| c.config.as_ref())
-            && let Some(ep) = stt.endpoint.as_option()
+        if let Some(ConnectionConfig::Stt(stt)) = conn.config.as_ref()
+            && let Some(ep) = stt.endpoint.as_ref()
             && let Ok(serde_json::Value::Object(opts)) = serde_json::from_str(&ep.options)
             && let Some(model) = opts.get("model").and_then(|v| v.as_str())
         {
             push_str_unique(&mut models, model);
         }
-        let sakura = is_sakura_conn(conn);
+        let sakura = conn.is_sakura();
         if let Some(check) = self
             .connections
             .checks
             .get(&conn.id)
-            .or_else(|| conn.last_check.as_option())
+            .or(conn.last_check.as_ref())
         {
             for res in &check.resources {
                 let lower = res.to_ascii_lowercase();
@@ -267,16 +264,14 @@ impl Model {
             return Vec::new();
         };
         let mut models = Vec::new();
-        if let Some(w::connection_config::Config::Embedding(emb)) =
-            conn.config.as_option().and_then(|c| c.config.as_ref())
-        {
+        if let Some(ConnectionConfig::Embedding(emb)) = conn.config.as_ref() {
             push_str_unique(&mut models, &emb.model_id);
         }
         if let Some(check) = self
             .connections
             .checks
             .get(&conn.id)
-            .or_else(|| conn.last_check.as_option())
+            .or(conn.last_check.as_ref())
         {
             for res in &check.resources {
                 let lower = res.to_ascii_lowercase();
@@ -285,7 +280,7 @@ impl Model {
                 }
             }
         }
-        let defaults = if is_sakura_conn(conn) {
+        let defaults = if conn.is_sakura() {
             SAKURA_EMBEDDING_MODELS
         } else {
             &["text-embedding-3-small", "text-embedding-3-large"]
@@ -305,16 +300,15 @@ impl Model {
             return Vec::new();
         };
         let (configured, adapter) = llm_config_parts(connection);
-        let fetched =
-            if adapter == GOOGLE_AGENT_PLATFORM && connection.last_check.as_option().is_none() {
-                Vec::new()
-            } else {
-                self.connections
-                    .models
-                    .get(&connection.id)
-                    .cloned()
-                    .unwrap_or_default()
-            };
+        let fetched = if adapter == GOOGLE_AGENT_PLATFORM && connection.last_check.is_none() {
+            Vec::new()
+        } else {
+            self.connections
+                .models
+                .get(&connection.id)
+                .cloned()
+                .unwrap_or_default()
+        };
         if adapter == GOOGLE_AGENT_PLATFORM
             && let Some(verified) = verified_google_platform_models(connection, &fetched)
         {
@@ -323,14 +317,14 @@ impl Model {
         let checked = if adapter == GOOGLE_AGENT_PLATFORM {
             connection
                 .last_check
-                .as_option()
+                .as_ref()
                 .map(|check| check.resources.clone())
                 .unwrap_or_default()
         } else {
             self.connections
                 .checks
                 .get(&connection.id)
-                .or_else(|| connection.last_check.as_option())
+                .or(connection.last_check.as_ref())
                 .map(|check| check.resources.clone())
                 .unwrap_or_default()
         };
@@ -363,7 +357,7 @@ impl Model {
         };
         let mut choices = Vec::new();
         for connection in &settings.connections {
-            if connection.kind != w::ConnectionKind::Llm || !connection.enabled {
+            if connection.kind != ConnectionKind::Llm || !connection.enabled {
                 continue;
             }
             for (model_id, label) in self.available_models_for_connection(&connection.id) {
@@ -379,7 +373,7 @@ impl Model {
 
     pub fn collect_connection_choices<F>(
         &self,
-        kind: w::ConnectionKind,
+        kind: ConnectionKind,
         choices_for: F,
     ) -> Vec<(String, String, String)>
     where
@@ -405,24 +399,18 @@ impl Model {
     }
 
     pub fn all_llm_models(&self) -> Vec<(String, String, String)> {
-        self.collect_connection_choices(
-            w::ConnectionKind::Llm,
-            Self::available_models_for_connection,
-        )
+        self.collect_connection_choices(ConnectionKind::Llm, Self::available_models_for_connection)
     }
 
     pub fn all_embedding_models(&self) -> Vec<(String, String, String)> {
         self.collect_connection_choices(
-            w::ConnectionKind::Embedding,
+            ConnectionKind::Embedding,
             Self::embedding_model_choices_for_connection,
         )
     }
 
     pub fn all_stt_models(&self) -> Vec<(String, String, String)> {
-        self.collect_connection_choices(
-            w::ConnectionKind::Stt,
-            Self::stt_model_choices_for_connection,
-        )
+        self.collect_connection_choices(ConnectionKind::Stt, Self::stt_model_choices_for_connection)
     }
 
     pub fn active_stt_selection(&self) -> Option<(String, String)> {
@@ -430,18 +418,18 @@ impl Model {
     }
 
     pub fn all_tts_voices(&self) -> Vec<(String, String, String)> {
-        self.collect_connection_choices(w::ConnectionKind::Tts, Self::voice_choices_for_connection)
+        self.collect_connection_choices(ConnectionKind::Tts, Self::voice_choices_for_connection)
     }
 
     pub fn active_tts_selection(&self) -> Option<(String, String)> {
         active_tts_in_connections(&self.settings()?.connections)
     }
 
-    /// Computes a default companion/task model auto-assignment request if needed.
+    /// Computes a default companion/task model auto-assignment patch if needed.
     pub fn auto_assign_default_model_request(
         &self,
         auto_assigned_revisions: &BTreeMap<String, u64>,
-    ) -> Option<(String, u64, w::UpdateCompanionRequest)> {
+    ) -> Option<AutoAssignModelPatch> {
         if !self.connections.link.is_live() {
             return None;
         }
@@ -457,14 +445,14 @@ impl Model {
         let enabled_llm_ids: HashSet<&str> = settings
             .connections
             .iter()
-            .filter(|c| can_start_chat(c, providers))
+            .filter(|c| c.can_start_chat(providers))
             .map(|c| c.id.as_str())
             .collect();
         let (conn_id, model_id, _) = self
             .model_choices()
             .into_iter()
             .find(|(id, _, _)| enabled_llm_ids.contains(id.as_str()))?;
-        let assignments = companion.assignments.as_option();
+        let assignments = companion.assignments.as_ref();
         let is_valid = |slot: ModelRoleSlot| -> bool {
             assignments
                 .and_then(|a| slot.current(a))
@@ -474,37 +462,25 @@ impl Model {
                         && settings.connections.iter().any(|c| {
                             c.id == assigned.connection_id
                                 && c.enabled
-                                && c.kind == w::ConnectionKind::Llm
-                                && !needs_key(c, providers)
+                                && c.kind == ConnectionKind::Llm
+                                && !c.needs_key(providers)
                         })
                 })
         };
-        let needs_companion = !is_valid(ModelRoleSlot::Companion);
-        let needs_task = !is_valid(ModelRoleSlot::Task);
-        if !needs_companion && !needs_task {
+        let assign_companion = !is_valid(ModelRoleSlot::Companion);
+        let assign_task = !is_valid(ModelRoleSlot::Task);
+        if !assign_companion && !assign_task {
             return None;
         }
-        let patch = w::AssignmentPatch {
-            change: Some(w::assignment_patch::Change::Set(Box::new(
-                w::ModelAssignment {
-                    connection_id: conn_id,
-                    model_id,
-                    ..Default::default()
-                },
-            ))),
-            ..Default::default()
-        };
-        let mut request = w::UpdateCompanionRequest {
-            id: companion.id.clone(),
+        Some(AutoAssignModelPatch {
+            companion_id: companion.id.clone(),
             revision: companion.revision,
-            ..Default::default()
-        };
-        if needs_companion {
-            request.companion_assignment = Some(patch.clone()).into();
-        }
-        if needs_task {
-            request.task_assignment = Some(patch).into();
-        }
-        Some((companion.id.clone(), companion.revision, request))
+            assign_companion,
+            assign_task,
+            assignment: ModelAssignment {
+                connection_id: conn_id,
+                model_id,
+            },
+        })
     }
 }

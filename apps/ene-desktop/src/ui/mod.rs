@@ -19,7 +19,6 @@ pub mod theme;
 mod voice;
 mod widgets;
 mod window_manager;
-mod workflows;
 
 pub use icons::EmbeddedAssets;
 pub use pod::{
@@ -28,24 +27,19 @@ pub use pod::{
 pub use studio::SettingsStudio;
 pub use window_manager::open_pod_window;
 
-pub(crate) use ene_client_core::ModelRoleSlot;
-pub(crate) use hub_companions::CompanionProfilePatch;
-pub(crate) use hub_presets::SearchPresetSpec;
+pub(crate) use ene_client_core::domain::{CompanionProfilePatch, NewCompanionSpec};
+pub(crate) use ene_client_core::presets::SearchPresetSpec;
+pub(crate) use ene_client_core::{
+    GOOGLE_AGENT_PLATFORM, ModelRoleSlot, default_embedding_dimensions, search_adapter_requires_key,
+};
 
 use crate::{
+    rpc::RpcDispatcher,
     session::{Connection, Options},
     state::Model,
     tray::{TrayAction, TrayHandle},
     update::{Command, Update},
 };
-pub(crate) use ene_catalog::{
-    GOOGLE_AGENT_PLATFORM, SAKURA_AI_ENDPOINT as SAKURA_ENDPOINT, SearchConnectionSpec,
-    apply_stt_model_to_config, apply_tts_voice_to_config, build_stt_assignment_inputs,
-    build_tts_assignment_inputs, can_start_chat, default_embedding_dimensions,
-    is_local_voicevox_conn, is_sakura_conn, is_sakura_endpoint, llm_endpoint, llm_provider_input,
-    needs_key, search_adapter_of, search_adapter_requires_key, search_connection_input,
-};
-use ene_rpc as w;
 use gpui::{AppContext as _, Context, Pixels, Size, Task, WeakEntity, WindowHandle, px, size};
 use std::collections::{BTreeMap, HashSet};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -57,14 +51,6 @@ pub struct HistoryReset {
 }
 
 impl gpui::Global for HistoryReset {}
-
-/// Inputs collected from the simplified companion creation form.
-pub(crate) struct NewCompanionSpec {
-    pub name: String,
-    pub persona: String,
-    pub mind: String,
-    pub voice_identifier: Option<String>,
-}
 
 /// Display mode of the frameless floating companion pod.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -161,10 +147,8 @@ pub struct HubInit {
 pub struct Hub {
     pub model: Model,
     pub options: Options,
-    connection: Connection,
+    pub(super) rpc: RpcDispatcher,
     pub(super) commands: UnboundedSender<Command>,
-    pub(super) updates: UnboundedSender<Update>,
-    pub(super) runtime: tokio::runtime::Handle,
     pub pod_mode: PodMode,
     pub settings_section: SettingsSection,
     pub settings_window: Option<WindowHandle<SettingsStudio>>,
@@ -181,7 +165,6 @@ pub struct Hub {
     pub pending_setup_models: Vec<String>,
     pub checking_connections: HashSet<String>,
     pub(super) auto_assigned_revisions: BTreeMap<String, u64>,
-    pub(super) request_seq: std::sync::atomic::AtomicU64,
     pub(super) tray: Option<TrayHandle>,
     _tray_pump: Option<Task<()>>,
     _pump: Task<()>,
@@ -223,10 +206,8 @@ impl Hub {
         Self {
             model: Model::new(init.discovery),
             options: init.options,
-            connection: init.connection,
+            rpc: RpcDispatcher::new(init.connection, init.runtime, init.updates_tx),
             commands: init.commands,
-            updates: init.updates_tx,
-            runtime: init.runtime,
             pod_mode: PodMode::MiniVoice,
             settings_section: SettingsSection::Companions,
             settings_window: None,
@@ -243,7 +224,6 @@ impl Hub {
             pending_setup_models: Vec::new(),
             checking_connections: HashSet::new(),
             auto_assigned_revisions: BTreeMap::new(),
-            request_seq: std::sync::atomic::AtomicU64::new(1),
             tray: init.tray,
             _tray_pump: tray_pump,
             _pump: pump,
@@ -254,59 +234,17 @@ impl Hub {
         theme::Theme::strawberry_milk()
     }
 
-    pub(crate) fn host(&self) -> Option<crate::host::Host> {
-        self.connection.read().ok()?.clone()
-    }
-
-    pub(crate) fn has_audio_connection(&self, kind: w::ConnectionKind) -> bool {
+    pub(crate) fn has_audio_connection(
+        &self,
+        kind: ene_client_core::domain::ConnectionKind,
+    ) -> bool {
         self.model
             .settings()
             .is_some_and(|s| s.connections.iter().any(|c| c.enabled && c.kind == kind))
     }
 
     pub(crate) fn live(&self) -> bool {
-        self.model.connections.link.is_live() && self.host().is_some()
-    }
-
-    pub(crate) fn request<T, D>(
-        &self,
-        context: &'static str,
-        future: impl Future<Output = Result<T, connectrpc::ConnectError>> + Send + 'static,
-        done: D,
-    ) where
-        T: Send + 'static,
-        D: FnOnce(T) -> Update + Send + 'static,
-    {
-        self.request_with(context, future, done, failure);
-    }
-
-    pub(crate) fn request_with<T, D, E>(
-        &self,
-        context: &'static str,
-        future: impl Future<Output = Result<T, connectrpc::ConnectError>> + Send + 'static,
-        done: D,
-        error: E,
-    ) where
-        T: Send + 'static,
-        D: FnOnce(T) -> Update + Send + 'static,
-        E: FnOnce(&'static str, connectrpc::ConnectError) -> Update + Send + 'static,
-    {
-        let updates = self.updates.clone();
-        let epoch = self.model.connections.link_epoch;
-        let seq = self
-            .request_seq
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.runtime.spawn(async move {
-            let inner = match future.await {
-                Ok(value) => done(value),
-                Err(failed) => error(context, failed),
-            };
-            let _ = updates.send(Update::Scoped {
-                epoch,
-                seq,
-                inner: Box::new(inner),
-            });
-        });
+        self.model.connections.link.is_live() && self.rpc.host().is_some()
     }
 
     fn apply(&mut self, mut update: Update, cx: &mut Context<Self>) {
@@ -327,50 +265,6 @@ impl Hub {
         let effects = self.model.apply(update);
         self.dispatch_apply_effects(flags, effects, had_companion, had_approvals, cx);
     }
-}
-
-pub(crate) fn decode(error: buffa::DecodeError) -> connectrpc::ConnectError {
-    connectrpc::ConnectError::internal(error.to_string())
-}
-
-pub(crate) fn failure(context: &'static str, error: connectrpc::ConnectError) -> Update {
-    match error.code {
-        connectrpc::ErrorCode::Aborted => Update::Conflict {
-            context,
-            message: error.to_string(),
-        },
-        connectrpc::ErrorCode::Unauthenticated | connectrpc::ErrorCode::PermissionDenied => {
-            Update::Denied {
-                context,
-                message: error.to_string(),
-            }
-        }
-        _ => Update::Failed {
-            context,
-            message: error.to_string(),
-        },
-    }
-}
-
-pub(crate) fn settings_update(settings: w::Settings) -> Update {
-    Update::Notification(Box::new(w::Notification {
-        kind: "settings".into(),
-        event: Some(w::notification::Event::SettingsUpdated(Box::new(
-            w::SettingsUpdated {
-                settings: Some(settings).into(),
-                ..Default::default()
-            },
-        ))),
-        ..Default::default()
-    }))
-}
-
-pub(crate) fn companion_update(companion: w::Companion) -> Update {
-    Update::Notification(Box::new(w::Notification {
-        kind: "companion".into(),
-        event: Some(w::notification::Event::Companion(Box::new(companion))),
-        ..Default::default()
-    }))
 }
 
 /// Configuration for fetching or initializing a draft input in [`window_draft`].

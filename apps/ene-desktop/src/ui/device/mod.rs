@@ -11,38 +11,19 @@ use super::theme::Theme;
 use super::widgets::{Tone, pill_button, status_pill};
 use crate::WORKSPACE_FILE_CAPABILITIES;
 use crate::state::{Device, Link};
-use ene_rpc as w;
+use ene_client_core::domain::{
+    COMPUTER_USE, ConnectionKind, PluginInfo, PolicyRule, PolicyRulesUpdate, PolicyText,
+    SKIP_TOOL_CONFIRMATION_ID, is_file_confirmation_rule as domain_is_file_confirmation,
+    tool_confirmation_update,
+};
 use gpui::{AnyElement, Context, FontWeight, div, prelude::*, px};
 
-pub(super) const SKIP_FILE_CONFIRMATION_PREFIX: &str = "desktop.skip-file-confirmation:";
-pub(super) const SKIP_TOOL_CONFIRMATION_ID: &str = "desktop.skip-tool-confirmation";
-
-pub(super) fn is_file_confirmation_rule(rule: &w::PolicyRule) -> bool {
-    rule.id
-        .strip_prefix(SKIP_FILE_CONFIRMATION_PREFIX)
-        .is_some_and(|capability| WORKSPACE_FILE_CAPABILITIES.contains(&capability))
+pub(super) fn is_file_confirmation_rule(rule: &PolicyRule) -> bool {
+    domain_is_file_confirmation(rule, WORKSPACE_FILE_CAPABILITIES)
 }
 
-pub(super) fn tool_confirmation_request(skip: bool) -> w::UpdatePolicyRulesRequest {
-    let mut request = w::UpdatePolicyRulesRequest {
-        remove_ids: WORKSPACE_FILE_CAPABILITIES
-            .iter()
-            .map(|capability| format!("{SKIP_FILE_CONFIRMATION_PREFIX}{capability}"))
-            .collect(),
-        ..Default::default()
-    };
-    if skip {
-        request.add_or_update.push(w::PolicyRule {
-            id: SKIP_TOOL_CONFIRMATION_ID.into(),
-            tool_name: "*".into(),
-            pattern: "*".into(),
-            effect: w::PolicyEffect::Allow.into(),
-            ..Default::default()
-        });
-    } else {
-        request.remove_ids.push(SKIP_TOOL_CONFIRMATION_ID.into());
-    }
-    request
+pub(super) fn tool_confirmation_request(skip: bool) -> PolicyRulesUpdate {
+    tool_confirmation_update(skip, WORKSPACE_FILE_CAPABILITIES)
 }
 
 pub(super) struct DeviceSnapshot {
@@ -58,10 +39,10 @@ pub(super) struct DeviceSnapshot {
     pub(super) eyes_enabled: bool,
     pub(super) eyes_status: Option<String>,
     pub(super) avatar_scale: f32,
-    pub(super) rules: Vec<w::PolicyRule>,
-    pub(super) policy_texts: Vec<w::PolicyText>,
+    pub(super) rules: Vec<PolicyRule>,
+    pub(super) policy_texts: Vec<PolicyText>,
     pub(super) client_caps: Vec<String>,
-    pub(super) plugins: Vec<w::PluginInfo>,
+    pub(super) plugins: Vec<PluginInfo>,
     pub(super) tray_resident: bool,
     pub(super) pod_visible: bool,
     #[cfg(windows)]
@@ -81,7 +62,7 @@ impl DeviceSnapshot {
         let computer_granted = client.is_some_and(|c| {
             c.granted_capabilities
                 .iter()
-                .any(|name| name == w::COMPUTER_USE)
+                .any(|name| name == COMPUTER_USE)
         });
         Self {
             live: hub.live(),
@@ -91,8 +72,8 @@ impl DeviceSnapshot {
             devices: hub.model.connections.devices.clone(),
             mic_muted: hub.model.audio.mic_muted,
             output_muted: hub.model.audio.output_muted,
-            mic_configured: hub.has_audio_connection(w::ConnectionKind::Stt),
-            output_configured: hub.has_audio_connection(w::ConnectionKind::Tts),
+            mic_configured: hub.has_audio_connection(ConnectionKind::Stt),
+            output_configured: hub.has_audio_connection(ConnectionKind::Tts),
             eyes_enabled: hub.model.perception.eyes_enabled,
             eyes_status: hub.model.perception.eyes_status.clone(),
             avatar_scale: hub.model.perception.avatar_scale,
@@ -295,6 +276,7 @@ pub(super) fn device_pill(device: &Device, active_flag: bool, theme: &Theme) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ene_client_core::domain::PolicyEffect;
 
     #[test]
     fn tool_confirmation_updates_only_managed_rules() {
@@ -307,13 +289,13 @@ mod tests {
         assert_eq!(rule.id, SKIP_TOOL_CONFIRMATION_ID);
         assert_eq!(rule.tool_name, "*");
         assert_eq!(rule.pattern, "*");
-        assert_eq!(rule.effect.as_known(), Some(w::PolicyEffect::Allow));
+        assert_eq!(rule.effect, PolicyEffect::Allow);
         assert_eq!(enabled.remove_ids.len(), WORKSPACE_FILE_CAPABILITIES.len());
         assert!(
             enabled
                 .remove_ids
                 .iter()
-                .all(|id| is_file_confirmation_rule(&w::PolicyRule {
+                .all(|id| is_file_confirmation_rule(&PolicyRule {
                     id: id.clone(),
                     ..Default::default()
                 }))
@@ -326,7 +308,7 @@ mod tests {
             disabled.remove_ids.last().unwrap(),
             SKIP_TOOL_CONFIRMATION_ID
         );
-        assert!(!is_file_confirmation_rule(&w::PolicyRule {
+        assert!(!is_file_confirmation_rule(&PolicyRule {
             id: "manual-write-rule".into(),
             tool_name: "work.write".into(),
             ..Default::default()

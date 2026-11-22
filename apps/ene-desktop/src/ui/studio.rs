@@ -6,7 +6,7 @@ use super::theme::{Theme, resolve_ui_font_family, ui_font_fallbacks};
 use super::widgets::{CircleButtonStyle, Tone, circle_icon_button, pill_button, window_drag_area};
 use super::{DraftSpec, Hub, SettingsSection, window_draft};
 use crate::{input::Draft, state::NoticeKind};
-use ene_rpc as w;
+use ene_client_core::domain::{ConnectionKind, PolicyEffect};
 use gpui::{
     AnyElement, Context, Entity, MouseButton, MouseDownEvent, SharedString, Subscription, Window,
     div, prelude::*, px,
@@ -29,7 +29,7 @@ pub(crate) struct CompanionFormState {
 pub(crate) struct ConnectionFormState {
     pub(crate) adding_connection: bool,
     pub(crate) custom_connection_open: bool,
-    pub(crate) custom_kind: w::ConnectionKind,
+    pub(crate) custom_kind: ConnectionKind,
     pub(crate) mcp_add_mode: super::mcp_add::Mode,
     pub(crate) mcp_add_advanced_open: bool,
     pub(crate) pending_mcp: Option<String>,
@@ -46,7 +46,7 @@ impl Default for ConnectionFormState {
         Self {
             adding_connection: false,
             custom_connection_open: false,
-            custom_kind: w::ConnectionKind::Llm,
+            custom_kind: ConnectionKind::Llm,
             mcp_add_mode: super::mcp_add::Mode::Npx,
             mcp_add_advanced_open: false,
             pending_mcp: None,
@@ -64,7 +64,7 @@ impl Default for ConnectionFormState {
 pub(crate) struct DeviceFormState {
     pub(crate) delete_armed_policy: Option<String>,
     pub(crate) adding_policy_open: bool,
-    pub(crate) new_policy_effect: w::PolicyEffect,
+    pub(crate) new_policy_effect: PolicyEffect,
     pub(crate) delete_armed_policy_text: Option<String>,
     pub(crate) editing_policy_text_id: Option<String>,
     pub(crate) adding_policy_text_open: bool,
@@ -78,7 +78,7 @@ impl Default for DeviceFormState {
         Self {
             delete_armed_policy: None,
             adding_policy_open: false,
-            new_policy_effect: w::PolicyEffect::Allow,
+            new_policy_effect: PolicyEffect::Allow,
             delete_armed_policy_text: None,
             editing_policy_text_id: None,
             adding_policy_text_open: false,
@@ -228,7 +228,7 @@ impl SettingsStudio {
                 s.connections
                     .iter()
                     .find(|c| c.id == conn_id)
-                    .and_then(super::search_adapter_of)
+                    .and_then(|c| c.search_adapter())
                     .map(|a| a.to_ascii_lowercase())
             });
             let mut keys = vec![format!("conn:secret:{conn_id}")];

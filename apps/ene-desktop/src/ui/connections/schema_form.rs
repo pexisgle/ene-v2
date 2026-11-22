@@ -3,7 +3,7 @@ use crate::ui::icons::Icon;
 use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button, toggle_switch};
-use ene_rpc as w;
+use ene_client_core::domain::ConnectionEndpoint;
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
 impl SettingsStudio {
@@ -11,7 +11,7 @@ impl SettingsStudio {
         &mut self,
         id: &str,
         rev: u64,
-        endpoint: Option<&w::ConnectionEndpoint>,
+        endpoint: Option<&ConnectionEndpoint>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> (Vec<AnyElement>, Option<String>) {
@@ -53,7 +53,7 @@ impl SettingsStudio {
         &mut self,
         id: &str,
         rev: u64,
-        endpoint: Option<&w::ConnectionEndpoint>,
+        endpoint: Option<&ConnectionEndpoint>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> (Vec<AnyElement>, Option<String>) {

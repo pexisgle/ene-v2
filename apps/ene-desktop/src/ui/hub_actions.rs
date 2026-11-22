@@ -1,12 +1,15 @@
 //! Chat, audio, device, approval, policy, plugin, and remote-host actions on [`Hub`].
 
-use super::{Hub, decode, failure};
+use super::Hub;
 use crate::{
+    rpc,
     state::{Chat, Effects, NoticeKind},
     update::{Command, Update},
 };
-use buffa::view::MessageView;
-use ene_rpc as w;
+use ene_client_core::domain::{
+    ApprovalDecision, ConnectionKind, NotificationEvent, PolicyEffect, PolicyRule,
+    PolicyRulesUpdate, PolicyText, PolicyTextsUpdate,
+};
 use gpui::Context;
 
 #[derive(Debug, thiserror::Error)]
@@ -37,14 +40,14 @@ impl ApplyFlags {
             history_arrived: matches!(update, Update::History { .. }),
             settings_changed: matches!(
                 notification_event,
-                Some(w::notification::Event::SettingsUpdated(_))
+                Some(NotificationEvent::SettingsUpdated(_))
             ),
             companion_or_snapshot: matches!(
                 notification_event,
                 Some(
-                    w::notification::Event::InitialState(_)
-                        | w::notification::Event::Companion(_)
-                        | w::notification::Event::SettingsUpdated(_)
+                    NotificationEvent::InitialState(_)
+                        | NotificationEvent::Companion(_)
+                        | NotificationEvent::SettingsUpdated(_)
                 )
             ),
             models_or_check: matches!(
@@ -53,10 +56,7 @@ impl ApplyFlags {
             ),
             message_arrived: matches!(
                 notification_event,
-                Some(
-                    w::notification::Event::MessageCreated(_)
-                        | w::notification::Event::MessageDelta(_)
-                )
+                Some(NotificationEvent::MessageCreated(_) | NotificationEvent::MessageDelta(_))
             ),
         }
     }
@@ -108,7 +108,7 @@ impl Hub {
                     && self.model.settings().is_some_and(|s| {
                         s.connections
                             .iter()
-                            .any(|c| &c.id == id && c.kind == w::ConnectionKind::Llm)
+                            .any(|c| &c.id == id && c.kind == ConnectionKind::Llm)
                     })
                 {
                     self.setup_error = None;
@@ -200,23 +200,21 @@ impl Hub {
         if !self.live() || self.setup_pending || self.pending_setup_connection_id.is_some() {
             return;
         }
-        let Some((companion_id, revision, request)) = self
+        let Some(patch) = self
             .model
             .auto_assign_default_model_request(&self.auto_assigned_revisions)
         else {
             return;
         };
-        let Some(host) = self.host() else {
+        if self.rpc.host().is_none() {
             return;
-        };
-        self.auto_assigned_revisions.insert(companion_id, revision);
-        self.request(
-            "既定モデルの自動設定",
-            async move {
-                let response = host.host.update_companion(request).await?;
-                response.view().to_owned_message().map_err(decode)
-            },
-            super::companion_update,
+        }
+        self.auto_assigned_revisions
+            .insert(patch.companion_id.clone(), patch.revision);
+        rpc::companions::auto_assign_default_model(
+            &self.rpc,
+            self.model.connections.link_epoch,
+            patch,
         );
     }
 
@@ -231,23 +229,7 @@ impl Hub {
     }
 
     pub(crate) fn resnapshot(&self) {
-        let Some(host) = self.host() else {
-            return;
-        };
-        self.request(
-            "ホスト状態の取得",
-            async move {
-                let response = host.host.get_snapshot(w::Empty::default()).await?;
-                response.view().to_owned_message().map_err(decode)
-            },
-            |snapshot| {
-                Update::Notification(Box::new(w::Notification {
-                    kind: "initial_state".into(),
-                    event: Some(w::notification::Event::InitialState(Box::new(snapshot))),
-                    ..Default::default()
-                }))
-            },
-        );
+        rpc::chat::resnapshot(&self.rpc, self.model.connections.link_epoch);
     }
 
     pub(crate) fn select_companion(&mut self, companion_id: &str, cx: &mut Context<Self>) {
@@ -277,42 +259,22 @@ impl Hub {
             self.model.companions.chat.loading = false;
             return;
         }
-        let Some(host) = self.host() else {
+        if !rpc::chat::load_history(
+            &self.rpc,
+            self.model.connections.link_epoch,
+            companion_id.clone(),
+        ) {
             return;
-        };
+        }
         if self.model.companions.chat.companion_id != companion_id {
             self.model.companions.chat = Chat {
-                companion_id: companion_id.clone(),
+                companion_id,
                 loading: true,
                 ..Default::default()
             };
         } else {
             self.model.companions.chat.loading = true;
         }
-        let target = companion_id.clone();
-        let failed_target = companion_id.clone();
-        self.request_with(
-            "会話履歴の取得",
-            async move {
-                let response = host
-                    .chat
-                    .get_history(w::HistoryRequest {
-                        companion_id,
-                        limit: Some(100),
-                        ..Default::default()
-                    })
-                    .await?;
-                response.view().to_owned_message().map_err(decode)
-            },
-            move |history| Update::History {
-                companion_id: target,
-                messages: history.items,
-            },
-            move |_, error| Update::HistoryFailed {
-                companion_id: failed_target,
-                message: error.to_string(),
-            },
-        );
     }
 
     pub(crate) fn send(&mut self, text: String, cx: &mut Context<Self>) -> bool {
@@ -348,9 +310,9 @@ impl Hub {
             cx.notify();
             return false;
         };
-        let Some(host) = self.host() else {
+        if self.rpc.host().is_none() {
             return false;
-        };
+        }
         self.model
             .companions
             .chat
@@ -365,47 +327,13 @@ impl Hub {
             chars = text.chars().count(),
             "message sent"
         );
-        let updates = self.updates.clone();
-        let epoch = self.model.connections.link_epoch;
-        let seq = self
-            .request_seq
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.runtime.spawn(async move {
-            let outcome = match host
-                .chat
-                .send_message(w::SendMessageRequest {
-                    companion_id: companion,
-                    request_key: request_key.clone(),
-                    text: text.clone(),
-                    client_id: String::new(),
-                    ..Default::default()
-                })
-                .await
-            {
-                Ok(response) => response
-                    .view()
-                    .to_owned_message()
-                    .map(|acceptance| acceptance.request_id)
-                    .map_err(|error| error.to_string()),
-                Err(error) => Err(error.to_string()),
-            };
-            let update = match outcome {
-                Ok(request_id) => Update::Accepted {
-                    request_key,
-                    request_id,
-                },
-                Err(reason) => Update::SendFailed {
-                    request_key,
-                    text,
-                    reason,
-                },
-            };
-            let _ = updates.send(Update::Scoped {
-                epoch,
-                seq,
-                inner: Box::new(update),
-            });
-        });
+        let _ = rpc::chat::send_message(
+            &self.rpc,
+            self.model.connections.link_epoch,
+            companion,
+            request_key,
+            text,
+        );
         self.pod_scroll_ping = self.pod_scroll_ping.saturating_add(1);
         cx.notify();
         true
@@ -431,29 +359,9 @@ impl Hub {
 
     pub(crate) fn stop(&mut self, cx: &mut Context<Self>) {
         let _ = self.commands.send(Command::StopPlayback);
-        let Some(companion) = self.model.companion_id().map(str::to_owned) else {
-            cx.notify();
-            return;
-        };
-        let Some(host) = self.host() else {
-            cx.notify();
-            return;
-        };
-        let stopping = companion.clone();
-        self.request(
-            "発話・生成の停止",
-            async move {
-                host.chat
-                    .stop(w::StopRequest {
-                        companion_id: companion,
-                        ..Default::default()
-                    })
-                    .await
-            },
-            move |_| Update::StopRequested {
-                companion_id: stopping,
-            },
-        );
+        if let Some(companion) = self.model.companion_id().map(str::to_owned) {
+            rpc::chat::stop(&self.rpc, self.model.connections.link_epoch, companion);
+        }
         cx.notify();
     }
 
@@ -574,97 +482,45 @@ impl Hub {
     }
 
     pub(crate) fn load_approvals(&mut self, _cx: &mut Context<Self>) {
-        let Some(host) = self.host() else {
-            return;
-        };
-        self.request(
-            "承認一覧の取得",
-            async move {
-                let response = host
-                    .settings
-                    .list_pending_approvals(w::Empty::default())
-                    .await?;
-                response.view().to_owned_message().map_err(decode)
-            },
-            |approvals| Update::Approvals(approvals.items),
-        );
+        rpc::policy::load_approvals(&self.rpc, self.model.connections.link_epoch);
     }
 
     pub(crate) fn resolve_approval(
         &mut self,
         request_id: &str,
-        decision: w::ApprovalDecision,
+        decision: ApprovalDecision,
         cx: &mut Context<Self>,
     ) {
-        let Some(host) = self.host() else {
-            return;
-        };
-        let request = request_id.to_owned();
-        let resolved = request_id.to_owned();
-        let stale = request_id.to_owned();
-        let always_approve = decision == w::ApprovalDecision::AlwaysApprove;
-        self.request_with(
-            "承認の送信",
-            async move {
-                let response = host
-                    .settings
-                    .submit_approval(w::SubmitApprovalRequest {
-                        request_id: request,
-                        decision: decision.into(),
-                        ..Default::default()
-                    })
-                    .await?;
-                response.view().to_owned_message().map_err(decode)
-            },
-            move |reply| Update::Resolved {
-                request_id: resolved,
-                rule_warning: (always_approve && !reply.rule_saved).then(|| {
-                    reply
-                        .rule_error
-                        .unwrap_or_else(|| "常に許可ルールを保存できませんでした。".into())
-                }),
-            },
-            move |context, error| match error.code {
-                connectrpc::ErrorCode::Aborted => Update::ApprovalStale {
-                    message: format!("操作確認 {stale} は期限切れか別端末で処理されました。"),
-                },
-                _ => failure(context, error),
-            },
+        rpc::policy::resolve_approval(
+            &self.rpc,
+            self.model.connections.link_epoch,
+            request_id.to_owned(),
+            decision,
         );
         cx.notify();
     }
 
     pub(crate) fn load_policy_rules(&mut self, _cx: &mut Context<Self>) {
-        let Some(host) = self.host() else {
-            return;
-        };
-        self.request(
-            "許可ルールの取得",
-            async move {
-                let response = host.settings.list_policy_rules(w::Empty::default()).await?;
-                response.view().to_owned_message().map_err(decode)
-            },
-            |rules| Update::PolicyRules(rules.items),
-        );
+        rpc::policy::load_policy_rules(&self.rpc, self.model.connections.link_epoch);
     }
 
     pub(crate) fn add_policy_rule(
         &mut self,
         tool_name: String,
         pattern: String,
-        effect: w::PolicyEffect,
+        effect: PolicyEffect,
         cx: &mut Context<Self>,
     ) {
-        let rule = w::PolicyRule {
+        let rule = PolicyRule {
             id: uuid::Uuid::new_v4().to_string(),
             tool_name,
             pattern,
-            effect: effect.into(),
+            effect,
             ..Default::default()
         };
         self.update_policy_rules(
             "許可ルールの追加",
-            w::UpdatePolicyRulesRequest {
+            PolicyRulesUpdate {
                 add_or_update: vec![rule],
                 ..Default::default()
             },
@@ -675,7 +531,7 @@ impl Hub {
     pub(crate) fn remove_policy_rule(&mut self, id: String, cx: &mut Context<Self>) {
         self.update_policy_rules(
             "許可ルールの削除",
-            w::UpdatePolicyRulesRequest {
+            PolicyRulesUpdate {
                 remove_ids: vec![id],
                 ..Default::default()
             },
@@ -686,35 +542,20 @@ impl Hub {
     pub(crate) fn update_policy_rules(
         &mut self,
         context: &'static str,
-        request: w::UpdatePolicyRulesRequest,
+        update: PolicyRulesUpdate,
         cx: &mut Context<Self>,
     ) {
-        let Some(host) = self.host() else {
-            return;
-        };
-        self.request(
+        rpc::policy::update_policy_rules(
+            &self.rpc,
+            self.model.connections.link_epoch,
             context,
-            async move {
-                let response = host.settings.update_policy_rules(request).await?;
-                response.view().to_owned_message().map_err(decode)
-            },
-            |rules| Update::PolicyRules(rules.items),
+            update,
         );
         cx.notify();
     }
 
     pub(crate) fn load_policy_texts(&mut self, _cx: &mut Context<Self>) {
-        let Some(host) = self.host() else {
-            return;
-        };
-        self.request(
-            "自由文ポリシーの取得",
-            async move {
-                let response = host.settings.list_policy_texts(w::Empty::default()).await?;
-                response.view().to_owned_message().map_err(decode)
-            },
-            |texts| Update::PolicyTexts(texts.items),
-        );
+        rpc::policy::load_policy_texts(&self.rpc, self.model.connections.link_epoch);
     }
 
     pub(crate) fn upsert_policy_text(
@@ -723,14 +564,14 @@ impl Hub {
         text: String,
         cx: &mut Context<Self>,
     ) {
-        let entry = w::PolicyText {
+        let entry = PolicyText {
             id: id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             text,
             ..Default::default()
         };
         self.update_policy_texts(
             "自由文ポリシーの保存",
-            w::UpdatePolicyTextsRequest {
+            PolicyTextsUpdate {
                 add_or_update: vec![entry],
                 ..Default::default()
             },
@@ -741,7 +582,7 @@ impl Hub {
     pub(crate) fn remove_policy_text(&mut self, id: String, cx: &mut Context<Self>) {
         self.update_policy_texts(
             "自由文ポリシーの削除",
-            w::UpdatePolicyTextsRequest {
+            PolicyTextsUpdate {
                 remove_ids: vec![id],
                 ..Default::default()
             },
@@ -752,35 +593,20 @@ impl Hub {
     fn update_policy_texts(
         &mut self,
         context: &'static str,
-        request: w::UpdatePolicyTextsRequest,
+        update: PolicyTextsUpdate,
         cx: &mut Context<Self>,
     ) {
-        let Some(host) = self.host() else {
-            return;
-        };
-        self.request(
+        rpc::policy::update_policy_texts(
+            &self.rpc,
+            self.model.connections.link_epoch,
             context,
-            async move {
-                let response = host.settings.update_policy_texts(request).await?;
-                response.view().to_owned_message().map_err(decode)
-            },
-            |texts| Update::PolicyTexts(texts.items),
+            update,
         );
         cx.notify();
     }
 
     pub(crate) fn load_plugins(&mut self, _cx: &mut Context<Self>) {
-        let Some(host) = self.host() else {
-            return;
-        };
-        self.request(
-            "プラグイン一覧の取得",
-            async move {
-                let response = host.settings.list_plugins(w::Empty::default()).await?;
-                response.view().to_owned_message().map_err(decode)
-            },
-            |list| Update::Plugins(list.plugins),
-        );
+        rpc::policy::load_plugins(&self.rpc, self.model.connections.link_epoch);
     }
 
     pub(crate) fn install_plugin(&mut self, source_path: String, cx: &mut Context<Self>) {
@@ -788,24 +614,7 @@ impl Hub {
         if trimmed.is_empty() {
             return;
         }
-        let Some(host) = self.host() else {
-            return;
-        };
-        self.request(
-            "プラグインの導入",
-            async move {
-                let _ = host
-                    .settings
-                    .install_plugin(w::InstallPluginRequest {
-                        source_path: trimmed,
-                        ..Default::default()
-                    })
-                    .await?;
-                let list = host.settings.list_plugins(w::Empty::default()).await?;
-                list.view().to_owned_message().map_err(decode)
-            },
-            |list| Update::Plugins(list.plugins),
-        );
+        rpc::policy::install_plugin(&self.rpc, self.model.connections.link_epoch, trimmed);
         cx.notify();
     }
 
@@ -815,47 +624,17 @@ impl Hub {
         enabled: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(host) = self.host() else {
-            return;
-        };
-        self.request(
-            "プラグイン状態の更新",
-            async move {
-                let _ = host
-                    .settings
-                    .set_plugin_enabled(w::SetPluginEnabledRequest {
-                        plugin_id,
-                        enabled,
-                        ..Default::default()
-                    })
-                    .await?;
-                let list = host.settings.list_plugins(w::Empty::default()).await?;
-                list.view().to_owned_message().map_err(decode)
-            },
-            |list| Update::Plugins(list.plugins),
+        rpc::policy::set_plugin_enabled(
+            &self.rpc,
+            self.model.connections.link_epoch,
+            plugin_id,
+            enabled,
         );
         cx.notify();
     }
 
     pub(crate) fn remove_plugin(&mut self, plugin_id: String, cx: &mut Context<Self>) {
-        let Some(host) = self.host() else {
-            return;
-        };
-        self.request(
-            "プラグインの削除",
-            async move {
-                let _ = host
-                    .settings
-                    .remove_plugin(w::RemovePluginRequest {
-                        plugin_id,
-                        ..Default::default()
-                    })
-                    .await?;
-                let list = host.settings.list_plugins(w::Empty::default()).await?;
-                list.view().to_owned_message().map_err(decode)
-            },
-            |list| Update::Plugins(list.plugins),
-        );
+        rpc::policy::remove_plugin(&self.rpc, self.model.connections.link_epoch, plugin_id);
         cx.notify();
     }
 

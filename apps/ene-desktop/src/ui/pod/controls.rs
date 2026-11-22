@@ -4,7 +4,7 @@ use crate::ui::icons::{Icon, icon};
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{ButtonStyle, Tone, companion_badge, floating_orb_button, pill_button};
 use crate::ui::{Hub, PodMode, SettingsSection};
-use ene_rpc as w;
+use ene_client_core::domain::{Companion, ConnectionKind};
 use gpui::{
     AnyElement, Context, Entity, MouseButton, MouseDownEvent, SharedString, Window, div,
     prelude::*, px,
@@ -155,9 +155,9 @@ impl CompanionPod {
     fn render_controls(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let hub = self.hub.read(cx);
         let mic_ready = matches!(hub.model.connections.devices.input, Device::Ready(_))
-            && hub.has_audio_connection(w::ConnectionKind::Stt);
+            && hub.has_audio_connection(ConnectionKind::Stt);
         let speaker_ready = matches!(hub.model.connections.devices.output, Device::Ready(_))
-            && hub.has_audio_connection(w::ConnectionKind::Tts);
+            && hub.has_audio_connection(ConnectionKind::Tts);
         let mic_on = mic_ready && !hub.model.audio.mic_muted;
         let is_ptt = hub.model.audio.capture_mode == crate::audio::CaptureMode::Ptt;
         let ptt_active = hub.model.audio.ptt_active;
@@ -586,7 +586,7 @@ fn render_nav_controls(expanded: bool, theme: &Theme, cx: &Context<CompanionPod>
 }
 
 fn render_roster_row(
-    comp: w::Companion,
+    comp: Companion,
     active: bool,
     resident: bool,
     hub: &Entity<Hub>,

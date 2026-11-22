@@ -256,7 +256,7 @@ impl SettingsStudio {
         let tok_val = remote_tok_d.read(cx).text().trim().to_owned();
         let ep_validation = (!ep_val.is_empty())
             .then(|| {
-                ene_rpc::validate_remote_endpoint(&ep_val)
+                crate::host::HostTarget::validate_remote_endpoint(&ep_val)
                     .err()
                     .map(|e| e.to_string())
             })
@@ -324,7 +324,7 @@ impl SettingsStudio {
 
 fn render_plugins_card(
     hub: &gpui::Entity<Hub>,
-    plugins: &[ene_rpc::PluginInfo],
+    plugins: &[ene_client_core::domain::PluginInfo],
     live: bool,
     theme: &Theme,
 ) -> AnyElement {

@@ -1,39 +1,34 @@
 use crate::{
+    GOOGLE_AGENT_PLATFORM,
     choices::ModelRoleSlot,
+    domain::{
+        Companion, Connection, ConnectionCheck, ConnectionConfig, ConnectionEndpoint,
+        ConnectionKind, EmbeddingConnection, LlmConnection, ModelAssignments, ModelInfo, Settings,
+        Snapshot, SttConnection, TtsConnection,
+    },
     state::{Link, Model},
 };
-use ene_catalog::GOOGLE_AGENT_PLATFORM;
-use ene_rpc as w;
 use std::collections::BTreeMap;
 
-fn llm_conn(id: &str, adapter: &str, model_ids: Vec<&str>, healthy: bool) -> w::Connection {
-    w::Connection {
+fn llm_conn(id: &str, adapter: &str, model_ids: Vec<&str>, healthy: bool) -> Connection {
+    Connection {
         id: id.into(),
         name: id.into(),
         enabled: true,
-        kind: w::ConnectionKind::Llm.into(),
+        kind: ConnectionKind::Llm,
         credential_state: "registered".into(),
-        last_check: Some(w::ConnectionCheck {
+        last_check: Some(ConnectionCheck {
             healthy,
             ..Default::default()
-        })
-        .into(),
-        config: Some(w::ConnectionConfig {
-            config: Some(w::connection_config::Config::Llm(Box::new(
-                w::LlmConnection {
-                    endpoint: Some(w::ConnectionEndpoint {
-                        adapter: adapter.into(),
-                        endpoint: "https://example.invalid/v1".into(),
-                        ..Default::default()
-                    })
-                    .into(),
-                    model_ids: model_ids.into_iter().map(str::to_owned).collect(),
-                    ..Default::default()
-                },
-            ))),
-            ..Default::default()
-        })
-        .into(),
+        }),
+        config: Some(ConnectionConfig::Llm(LlmConnection {
+            endpoint: Some(ConnectionEndpoint {
+                adapter: adapter.into(),
+                endpoint: "https://example.invalid/v1".into(),
+                ..Default::default()
+            }),
+            model_ids: model_ids.into_iter().map(str::to_owned).collect(),
+        })),
         ..Default::default()
     }
 }
@@ -41,51 +36,41 @@ fn llm_conn(id: &str, adapter: &str, model_ids: Vec<&str>, healthy: bool) -> w::
 #[test]
 fn available_models_merges_configured_fetched_and_checked_with_fallback() {
     let mut model = Model::new("conn.json".into());
-    model.snapshot = Some(w::Snapshot {
-        settings: Some(w::Settings {
+    model.snapshot = Some(Snapshot {
+        settings: Some(Settings {
             connections: vec![
                 llm_conn("c-openai", "openai", vec!["gpt-5.4"], true),
                 llm_conn("c-empty", "anthropic", vec![], true),
-                w::Connection {
+                Connection {
                     id: "c-gap".into(),
                     name: "gap".into(),
                     enabled: true,
-                    kind: w::ConnectionKind::Llm.into(),
-                    last_check: Some(w::ConnectionCheck {
+                    kind: ConnectionKind::Llm,
+                    last_check: Some(ConnectionCheck {
                         healthy: true,
                         capabilities: vec!["verified_model_list".into()],
                         resources: vec!["gemini-3.8-flash".into()],
                         ..Default::default()
-                    })
-                    .into(),
-                    config: Some(w::ConnectionConfig {
-                        config: Some(w::connection_config::Config::Llm(Box::new(
-                            w::LlmConnection {
-                                endpoint: Some(w::ConnectionEndpoint {
-                                    adapter: GOOGLE_AGENT_PLATFORM.into(),
-                                    ..Default::default()
-                                })
-                                .into(),
-                                ..Default::default()
-                            },
-                        ))),
+                    }),
+                    config: Some(ConnectionConfig::Llm(LlmConnection {
+                        endpoint: Some(ConnectionEndpoint {
+                            adapter: GOOGLE_AGENT_PLATFORM.into(),
+                            ..Default::default()
+                        }),
                         ..Default::default()
-                    })
-                    .into(),
+                    })),
                     ..Default::default()
                 },
             ],
             ..Default::default()
-        })
-        .into(),
+        }),
         ..Default::default()
     });
     model.connections.models.insert(
         "c-openai".into(),
-        vec![w::Model {
+        vec![ModelInfo {
             id: "gpt-5.4".into(),
             name: "GPT 5.4".into(),
-            ..Default::default()
         }],
     );
 
@@ -106,73 +91,52 @@ fn available_models_merges_configured_fetched_and_checked_with_fallback() {
 #[test]
 fn voice_stt_and_embedding_choices_merge_checks_and_vendor_defaults() {
     let mut model = Model::new("conn.json".into());
-    model.snapshot = Some(w::Snapshot {
-        settings: Some(w::Settings {
+    model.snapshot = Some(Snapshot {
+        settings: Some(Settings {
             connections: vec![
-                w::Connection {
+                Connection {
                     id: "tts-oa".into(),
                     name: "OpenAI TTS".into(),
                     enabled: true,
-                    kind: w::ConnectionKind::Tts.into(),
-                    config: Some(w::ConnectionConfig {
-                        config: Some(w::connection_config::Config::Tts(Box::new(
-                            w::TtsConnection {
-                                endpoint: Some(w::ConnectionEndpoint {
-                                    adapter: "openai".into(),
-                                    ..Default::default()
-                                })
-                                .into(),
-                                ..Default::default()
-                            },
-                        ))),
+                    kind: ConnectionKind::Tts,
+                    config: Some(ConnectionConfig::Tts(TtsConnection {
+                        endpoint: Some(ConnectionEndpoint {
+                            adapter: "openai".into(),
+                            ..Default::default()
+                        }),
                         ..Default::default()
-                    })
-                    .into(),
+                    })),
                     ..Default::default()
                 },
-                w::Connection {
+                Connection {
                     id: "stt-oa".into(),
                     name: "OpenAI STT".into(),
                     enabled: true,
-                    kind: w::ConnectionKind::Stt.into(),
-                    config: Some(w::ConnectionConfig {
-                        config: Some(w::connection_config::Config::Stt(Box::new(
-                            w::SttConnection {
-                                endpoint: Some(w::ConnectionEndpoint {
-                                    adapter: "openai".into(),
-                                    options: r#"{"model":"custom-stt"}"#.into(),
-                                    ..Default::default()
-                                })
-                                .into(),
-                                ..Default::default()
-                            },
-                        ))),
+                    kind: ConnectionKind::Stt,
+                    config: Some(ConnectionConfig::Stt(SttConnection {
+                        endpoint: Some(ConnectionEndpoint {
+                            adapter: "openai".into(),
+                            options: r#"{"model":"custom-stt"}"#.into(),
+                            ..Default::default()
+                        }),
                         ..Default::default()
-                    })
-                    .into(),
+                    })),
                     ..Default::default()
                 },
-                w::Connection {
+                Connection {
                     id: "emb-oa".into(),
                     name: "OpenAI Emb".into(),
                     enabled: true,
-                    kind: w::ConnectionKind::Embedding.into(),
-                    config: Some(w::ConnectionConfig {
-                        config: Some(w::connection_config::Config::Embedding(Box::new(
-                            w::EmbeddingConnection {
-                                model_id: "text-embedding-custom".into(),
-                                ..Default::default()
-                            },
-                        ))),
+                    kind: ConnectionKind::Embedding,
+                    config: Some(ConnectionConfig::Embedding(EmbeddingConnection {
+                        model_id: "text-embedding-custom".into(),
                         ..Default::default()
-                    })
-                    .into(),
+                    })),
                     ..Default::default()
                 },
             ],
             ..Default::default()
-        })
-        .into(),
+        }),
         ..Default::default()
     });
 
@@ -203,29 +167,30 @@ fn auto_assign_default_model_fills_missing_companion_and_task_slots_once() {
         version: "1".into(),
     };
     model.connections.providers = Some(Vec::new());
-    model.snapshot = Some(w::Snapshot {
+    model.snapshot = Some(Snapshot {
         active_companion_id: Some("ene".into()),
-        companions: vec![w::Companion {
+        companions: vec![Companion {
             id: "ene".into(),
             name: "ene".into(),
             revision: 3,
             ..Default::default()
         }],
-        settings: Some(w::Settings {
+        settings: Some(Settings {
             connections: vec![llm_conn("c1", "openai", vec!["gpt-5.4-mini"], true)],
             ..Default::default()
-        })
-        .into(),
+        }),
         ..Default::default()
     });
 
     let mut seen = BTreeMap::new();
-    let (id, rev, req) = model
+    let patch = model
         .auto_assign_default_model_request(&seen)
         .expect("missing companion/task roles produce patch");
-    assert_eq!((id.as_str(), rev), ("ene", 3));
-    assert!(req.companion_assignment.as_option().is_some());
-    assert!(req.task_assignment.as_option().is_some());
+    assert_eq!((patch.companion_id.as_str(), patch.revision), ("ene", 3));
+    assert!(patch.assign_companion);
+    assert!(patch.assign_task);
+    assert_eq!(patch.assignment.connection_id, "c1");
+    assert_eq!(patch.assignment.model_id, "gpt-5.4-mini");
 
     seen.insert("ene".into(), 3);
     assert!(model.auto_assign_default_model_request(&seen).is_none());
@@ -237,44 +202,35 @@ fn enabled_and_all_choice_collectors_distinguish_enabled_connections() {
     let mut llm_off = llm_conn("llm-off", "anthropic", vec!["claude-sonnet-4-6"], true);
     llm_off.enabled = false;
     let mut model = Model::new("conn.json".into());
-    model.snapshot = Some(w::Snapshot {
-        settings: Some(w::Settings {
+    model.snapshot = Some(Snapshot {
+        settings: Some(Settings {
             connections: vec![
                 llm_conn("llm-on", "openai", vec!["gpt-5.4"], true),
                 llm_off,
-                w::Connection {
+                Connection {
                     id: "tts-sakura".into(),
                     name: "Sakura TTS".into(),
                     enabled: true,
-                    kind: w::ConnectionKind::Tts.into(),
-                    config: Some(w::ConnectionConfig {
-                        config: Some(w::connection_config::Config::Tts(Box::new(
-                            w::TtsConnection {
-                                endpoint: Some(w::ConnectionEndpoint {
-                                    adapter: "sakura".into(),
-                                    ..Default::default()
-                                })
-                                .into(),
-                                voice_ids: vec!["zundamon/normal".into()],
-                                ..Default::default()
-                            },
-                        ))),
-                        ..Default::default()
-                    })
-                    .into(),
+                    kind: ConnectionKind::Tts,
+                    config: Some(ConnectionConfig::Tts(TtsConnection {
+                        endpoint: Some(ConnectionEndpoint {
+                            adapter: "sakura".into(),
+                            ..Default::default()
+                        }),
+                        voice_ids: vec!["zundamon/normal".into()],
+                    })),
                     ..Default::default()
                 },
-                w::Connection {
+                Connection {
                     id: "stt-off".into(),
                     name: "Disabled STT".into(),
                     enabled: false,
-                    kind: w::ConnectionKind::Stt.into(),
+                    kind: ConnectionKind::Stt,
                     ..Default::default()
                 },
             ],
             ..Default::default()
-        })
-        .into(),
+        }),
         ..Default::default()
     });
 
@@ -308,6 +264,6 @@ fn enabled_and_all_choice_collectors_distinguish_enabled_connections() {
     for slot in ModelRoleSlot::ALL {
         assert!(!slot.label().is_empty());
         assert!(!slot.fallback_hint().is_empty());
-        assert!(slot.current(&w::ModelAssignments::default()).is_none());
+        assert!(slot.current(&ModelAssignments::default()).is_none());
     }
 }

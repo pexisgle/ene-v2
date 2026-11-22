@@ -1,22 +1,20 @@
-use super::edits::{
-    ConnectionEditSpec, apply_connection_edits, apply_mcp_extra_edits, extract_endpoint,
-    extract_kind_list_init, kind_label, kind_of,
-};
 use super::mcp_editor::{McpDraftGroup, ParsedMcpExtra, append_mcp_extra_fields, read_mcp_extra};
 use super::pickers::PickerInput;
 use crate::input::Draft;
 use crate::ui::icons::Icon;
-use crate::ui::mcp_add::parse_process_args;
 use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{
     CircleButtonStyle, Tone, circle_icon_button, kind_pill, pill_button, status_pill, toggle_switch,
 };
-use crate::ui::{
-    GOOGLE_AGENT_PLATFORM, Hub, SettingsStudio, default_embedding_dimensions, is_sakura_conn,
-    llm_endpoint, needs_key,
+use crate::ui::{GOOGLE_AGENT_PLATFORM, Hub, SettingsStudio, default_embedding_dimensions};
+use ene_client_core::{
+    connections::{
+        ConnectionEditSpec, apply_connection_edits, apply_mcp_extra_edits, extract_kind_list_init,
+        parse_process_args,
+    },
+    domain::{Connection, ConnectionCheck, ConnectionConfig, ConnectionEndpoint, ConnectionKind},
 };
-use ene_rpc as w;
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 
 struct RowBadge {
@@ -58,16 +56,15 @@ struct EditorSavePayload {
 impl SettingsStudio {
     pub(super) fn render_connection_row(
         &mut self,
-        conn: &w::Connection,
-        check: Option<&w::ConnectionCheck>,
+        conn: &Connection,
+        check: Option<&ConnectionCheck>,
         live: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = conn.id.clone();
         let expanded = self.connection_form.expanded_connection_id.as_deref() == Some(id.as_str());
-        let needs_key_flag = needs_key(
-            conn,
+        let needs_key_flag = conn.needs_key(
             self.hub
                 .read(cx)
                 .model
@@ -106,26 +103,23 @@ impl SettingsStudio {
 
     fn render_connection_editor(
         &mut self,
-        conn: &w::Connection,
-        check: Option<&w::ConnectionCheck>,
+        conn: &Connection,
+        check: Option<&ConnectionCheck>,
         live: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = conn.id.clone();
-        let cfg = conn.config.as_option().and_then(|c| c.config.as_ref());
-        let endpoint = extract_endpoint(cfg);
-        let agent_platform = kind_of(conn) == w::ConnectionKind::Llm
-            && endpoint
-                .as_ref()
-                .is_some_and(|ep| ep.adapter == GOOGLE_AGENT_PLATFORM);
+        let endpoint = conn.endpoint();
+        let agent_platform = conn.kind == ConnectionKind::Llm
+            && endpoint.is_some_and(|ep| ep.adapter == GOOGLE_AGENT_PLATFORM);
 
-        let drafts = self.collect_editor_drafts(conn, endpoint.as_ref(), theme, cx);
+        let drafts = self.collect_editor_drafts(conn, endpoint, theme, cx);
         let mcp_tools_strip = self.render_mcp_tools_strip(conn, check, &drafts.list_d, theme, cx);
         let dropdown_picker = self.render_kind_dropdown_picker(
             PickerInput {
                 conn,
-                endpoint: endpoint.as_ref(),
+                endpoint,
                 list_d: &drafts.list_d,
                 dim_d: drafts.dim_d.as_ref(),
                 live,
@@ -134,9 +128,9 @@ impl SettingsStudio {
             cx,
         );
         let (schema_controls, next_options_json) = if agent_platform {
-            self.render_agent_platform_options(&id, conn.revision, endpoint.as_ref(), theme, cx)
+            self.render_agent_platform_options(&id, conn.revision, endpoint, theme, cx)
         } else {
-            self.render_options_schema(&id, conn.revision, endpoint.as_ref(), theme, cx)
+            self.render_options_schema(&id, conn.revision, endpoint, theme, cx)
         };
 
         let payload = build_editor_save_payload(&drafts, next_options_json, live, cx);
@@ -152,12 +146,9 @@ impl SettingsStudio {
                     .copied()
             });
         let show_list_field = agent_platform
-            || (!is_voicevox_tts(conn, endpoint.as_ref())
-                && !(kind_of(conn) == w::ConnectionKind::Tts && is_sakura_conn(conn))
-                && !matches!(
-                    kind_of(conn),
-                    w::ConnectionKind::Llm | w::ConnectionKind::Embedding
-                ));
+            || (!is_voicevox_tts(conn, endpoint)
+                && !(conn.kind == ConnectionKind::Tts && conn.is_sakura())
+                && !matches!(conn.kind, ConnectionKind::Llm | ConnectionKind::Embedding));
 
         let cred_strip = self.render_credentials_strip(conn, live, theme, cx);
         let actions = render_editor_actions(conn, payload, &self.hub, theme);
@@ -192,7 +183,7 @@ impl SettingsStudio {
             })
             .when(show_list_field, |this| {
                 this.child(labeled_field(
-                    list_field_label(kind_of(conn)),
+                    conn.kind.list_field_label(),
                     drafts.list_d,
                     theme,
                 ))
@@ -207,14 +198,14 @@ impl SettingsStudio {
 
     fn collect_editor_drafts(
         &mut self,
-        conn: &w::Connection,
-        endpoint: Option<&w::ConnectionEndpoint>,
+        conn: &Connection,
+        endpoint: Option<&ConnectionEndpoint>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> EditorDraftSet {
         let id = &conn.id;
         let rev = conn.revision;
-        let cfg = conn.config.as_option().and_then(|c| c.config.as_ref());
+        let cfg = conn.config.as_ref();
         let list_init = extract_kind_list_init(cfg);
         EditorDraftSet {
             name_d: self.draft(
@@ -247,17 +238,17 @@ impl SettingsStudio {
 
     fn embedding_dim_draft(
         &mut self,
-        conn: &w::Connection,
-        cfg: Option<&w::connection_config::Config>,
+        conn: &Connection,
+        cfg: Option<&ConnectionConfig>,
         list_init: &str,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<Entity<Draft>> {
-        if kind_of(conn) != w::ConnectionKind::Embedding {
+        if conn.kind != ConnectionKind::Embedding {
             return None;
         }
         let init = match cfg {
-            Some(w::connection_config::Config::Embedding(emb)) if emb.dimensions > 0 => {
+            Some(ConnectionConfig::Embedding(emb)) if emb.dimensions > 0 => {
                 emb.dimensions.to_string()
             }
             _ => default_embedding_dimensions(list_init).to_string(),
@@ -273,7 +264,7 @@ impl SettingsStudio {
 
     fn render_credentials_strip(
         &mut self,
-        conn: &w::Connection,
+        conn: &Connection,
         live: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -331,12 +322,9 @@ impl SettingsStudio {
     }
 }
 
-pub(super) fn is_voicevox_tts(
-    conn: &w::Connection,
-    endpoint: Option<&w::ConnectionEndpoint>,
-) -> bool {
-    kind_of(conn) == w::ConnectionKind::Tts
-        && !is_sakura_conn(conn)
+pub(super) fn is_voicevox_tts(conn: &Connection, endpoint: Option<&ConnectionEndpoint>) -> bool {
+    conn.kind == ConnectionKind::Tts
+        && !conn.is_sakura()
         && endpoint.is_some_and(|ep| ep.adapter.eq_ignore_ascii_case("voicevox"))
 }
 
@@ -523,17 +511,13 @@ fn render_cred_secret_row(
 }
 
 fn compute_connection_badge(
-    conn: &w::Connection,
-    check: Option<&w::ConnectionCheck>,
+    conn: &Connection,
+    check: Option<&ConnectionCheck>,
     needs_key_flag: bool,
     theme: &Theme,
 ) -> RowBadge {
-    let is_unsupported_check = check.is_some_and(|c| {
-        !c.healthy
-            && c.failure
-                .as_option()
-                .is_some_and(|f| f.code == "unsupported")
-    });
+    let is_unsupported_check = check
+        .is_some_and(|c| !c.healthy && c.failure.as_ref().is_some_and(|f| f.code == "unsupported"));
     if !conn.enabled {
         return RowBadge {
             label: "無効",
@@ -581,17 +565,19 @@ fn compute_connection_badge(
 }
 
 fn should_auto_probe_connection(
-    conn: &w::Connection,
-    check: Option<&w::ConnectionCheck>,
+    conn: &Connection,
+    check: Option<&ConnectionCheck>,
     needs_key_flag: bool,
 ) -> bool {
-    let kind = kind_of(conn);
-    let ep = extract_endpoint(conn.config.as_option().and_then(|c| c.config.as_ref()));
-    let is_voicevox = is_voicevox_tts(conn, ep.as_ref());
-    let agent_platform = llm_endpoint(conn).is_some_and(|e| e.adapter == GOOGLE_AGENT_PLATFORM);
+    let kind = conn.kind;
+    let ep = conn.endpoint();
+    let is_voicevox = is_voicevox_tts(conn, ep);
+    let agent_platform = conn
+        .llm_endpoint()
+        .is_some_and(|e| e.adapter == GOOGLE_AGENT_PLATFORM);
     conn.enabled
         && !needs_key_flag
-        && (kind == w::ConnectionKind::Llm || is_voicevox)
+        && (kind == ConnectionKind::Llm || is_voicevox)
         && check.is_none_or(|c| {
             c.resources.is_empty()
                 || (agent_platform
@@ -603,7 +589,7 @@ fn should_auto_probe_connection(
 }
 
 fn render_row_header(
-    conn: &w::Connection,
+    conn: &Connection,
     badge: &RowBadge,
     flags: RowHeaderFlags,
     theme: &Theme,
@@ -615,7 +601,7 @@ fn render_row_header(
         live,
     } = flags;
     let id = &conn.id;
-    let kind = kind_of(conn);
+    let kind = conn.kind;
     let is_checking = cx
         .entity()
         .read(cx)
@@ -623,8 +609,8 @@ fn render_row_header(
         .read(cx)
         .checking_connections
         .contains(id);
-    let ep = extract_endpoint(conn.config.as_option().and_then(|c| c.config.as_ref()));
-    let is_voicevox = is_voicevox_tts(conn, ep.as_ref());
+    let ep = conn.endpoint();
+    let is_voicevox = is_voicevox_tts(conn, ep);
     let hub_check = cx.entity().read(cx).hub.clone();
     let hub_expand_probe = hub_check.clone();
     let check_id = id.clone();
@@ -656,7 +642,7 @@ fn render_row_header(
                         .truncate()
                         .child(conn.name.clone()),
                 )
-                .child(kind_pill(kind_label(kind), theme))
+                .child(kind_pill(kind.label(), theme))
                 .child(status_pill(
                     badge.label,
                     Some(badge.dot),
@@ -730,8 +716,8 @@ fn render_row_header(
         )
 }
 
-fn collect_sakura_conn_ids(conn: &w::Connection, hub: &Hub) -> Vec<String> {
-    if !is_sakura_conn(conn) {
+fn collect_sakura_conn_ids(conn: &Connection, hub: &Hub) -> Vec<String> {
+    if !conn.is_sakura() {
         return Vec::new();
     }
     hub.model
@@ -739,7 +725,7 @@ fn collect_sakura_conn_ids(conn: &w::Connection, hub: &Hub) -> Vec<String> {
         .map(|s| {
             s.connections
                 .iter()
-                .filter(|c| is_sakura_conn(c))
+                .filter(|c| c.is_sakura())
                 .map(|c| c.id.clone())
                 .collect()
         })
@@ -804,25 +790,7 @@ fn render_revoke_controls(
     }
 }
 
-fn list_field_label(kind: w::ConnectionKind) -> &'static str {
-    match kind {
-        w::ConnectionKind::Llm => "使用するモデルID（カンマ区切り・空欄で自動）",
-        w::ConnectionKind::Tts => "話者IDリスト（カンマ区切り）",
-        w::ConnectionKind::Stt => "言語ヒント（例: ja, en）",
-        w::ConnectionKind::Embedding => "埋め込みモデルID",
-        w::ConnectionKind::Mcp => "許可ツール（カンマ区切り・空欄で全件）",
-        w::ConnectionKind::Acp => "起動引数（スペース区切り）",
-        w::ConnectionKind::Search => "最大検索結果数 (1–20)",
-        w::ConnectionKind::Unspecified => "オプション",
-    }
-}
-
-fn render_enable_row(
-    conn: &w::Connection,
-    live: bool,
-    hub: &Entity<Hub>,
-    theme: &Theme,
-) -> gpui::Div {
+fn render_enable_row(conn: &Connection, live: bool, hub: &Entity<Hub>, theme: &Theme) -> gpui::Div {
     let conn_toggle = conn.clone();
     let hub_toggle = hub.clone();
     div()
@@ -850,10 +818,10 @@ fn render_enable_row(
         ))
 }
 
-fn error_banner(check: Option<&w::ConnectionCheck>, theme: &Theme) -> Option<gpui::Div> {
+fn error_banner(check: Option<&ConnectionCheck>, theme: &Theme) -> Option<gpui::Div> {
     check
         .filter(|c| !c.healthy)
-        .and_then(|c| c.failure.as_option())
+        .and_then(|c| c.failure.as_ref())
         .filter(|f| f.code != "unsupported" && !f.message.trim().is_empty())
         .map(|f| {
             div()
@@ -868,7 +836,7 @@ fn error_banner(check: Option<&w::ConnectionCheck>, theme: &Theme) -> Option<gpu
 }
 
 fn render_editor_actions(
-    conn: &w::Connection,
+    conn: &Connection,
     payload: EditorSavePayload,
     hub: &Entity<Hub>,
     theme: &Theme,

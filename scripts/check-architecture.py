@@ -16,7 +16,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parent.parent
 
 # Ratchet baselines (lowered as each refactoring phase lands).
-MAX_UI_RPC_REFS = 464
+MAX_UI_RPC_REFS = 0
 MAX_DB_UPWARD_REFS = 7
 DEFAULT_MAX_IMPL_FILES = 3
 IMPL_SPREAD_ALLOWLIST: dict[tuple[str, str], int] = {
@@ -32,7 +32,8 @@ ALLOW_STDERR_MARKER = "architecture:allow-stderr:"
 CFG_TEST_RE = re.compile(r"^\s*#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
 ATTR_LINE_RE = re.compile(r"^\s*#")
 UI_RPC_W_RE = re.compile(r"\bw::")
-UI_RPC_USE_RE = re.compile(r"\buse\s+ene_rpc\b")
+UI_RPC_PATH_RE = re.compile(r"\b(?:ene_rpc|buffa|connectrpc)::")
+UI_RPC_USE_RE = re.compile(r"\buse\s+(?:ene_rpc|buffa|connectrpc)\b")
 DB_UPWARD_RE = re.compile(r"crate::host::(client|model|permission|providers|work)\b")
 INHERENT_IMPL_RE = re.compile(
     r"^\s*impl\b(?:<[^>{]*>)?\s+([A-Z][A-Za-z0-9_]*)\b([^\n{]*)",
@@ -189,12 +190,13 @@ def check_ui_rpc_leak(root: Path, max_refs: int) -> tuple[int, list[str]]:
         text = path.read_text(encoding="utf-8")
         cleaned = "\n".join(strip_line_comment(line) for line in text.splitlines())
         total += len(UI_RPC_W_RE.findall(cleaned))
+        total += len(UI_RPC_PATH_RE.findall(cleaned))
         total += len(UI_RPC_USE_RE.findall(cleaned))
     errors: list[str] = []
     if total > max_refs:
         errors.append(
-            f"Rule 1 (ui_rpc_leak): found {total} `w::`/`use ene_rpc` refs under "
-            f"apps/ene-desktop/src/ui/ (baseline max {max_refs})."
+            f"Rule 1 (ui_rpc_leak): found {total} wire/RPC (`w::`/`ene_rpc`/`buffa`/`connectrpc`) "
+            f"refs under apps/ene-desktop/src/ui/ (baseline max {max_refs})."
         )
     return total, errors
 
@@ -366,7 +368,7 @@ def self_test() -> None:
         _, errors = evaluate(root, baselines)
         assert not errors, f"expected clean fixture to pass, got {errors}"
 
-        # Rule 1 violation
+        # Rule 1 violation (`w::` / `use ene_rpc`)
         _write_fixture(
             root,
             {
@@ -376,6 +378,20 @@ def self_test() -> None:
         )
         _, errors = evaluate(root, baselines)
         assert any("Rule 1" in e for e in errors), f"expected Rule 1 error, got {errors}"
+
+        # Rule 1 violation (`ene_rpc::` path and `use connectrpc`)
+        _write_fixture(
+            root,
+            {
+                **clean_files,
+                "apps/ene-desktop/src/ui/mod.rs": (
+                    "use connectrpc::ConnectError;\n"
+                    "fn check(u: &str) -> Result<(), ene_rpc::RemoteEndpointError> { let _ = u; Ok(()) }\n"
+                ),
+            },
+        )
+        _, errors = evaluate(root, baselines)
+        assert any("Rule 1" in e for e in errors), f"expected Rule 1 error for ene_rpc::/connectrpc, got {errors}"
 
         # Rule 2 violation
         _write_fixture(

@@ -4,8 +4,8 @@ use crate::ui::theme::Theme;
 use crate::ui::widgets::{
     ButtonStyle, DropdownOption, DropdownSpec, Tone, dropdown_select, pill_button,
 };
-use crate::ui::{GOOGLE_AGENT_PLATFORM, Hub, NewCompanionSpec, SettingsSection, can_start_chat};
-use ene_rpc as w;
+use crate::ui::{GOOGLE_AGENT_PLATFORM, Hub, NewCompanionSpec, SettingsSection};
+use ene_client_core::domain::{Connection, ConnectionConfig, ConnectionKind, LlmProvider};
 use gpui::{AnyElement, App, Context, Entity, SharedString, div, prelude::*, px};
 
 struct SetupChoices {
@@ -176,7 +176,7 @@ impl CompanionPod {
                 settings
                     .connections
                     .iter()
-                    .find(|c| can_start_chat(c, providers))
+                    .find(|c| c.can_start_chat(providers))
                     .map(|c| c.id.clone())
             })
         });
@@ -413,8 +413,8 @@ fn render_providers_loading(hub: &Entity<Hub>, theme: &Theme) -> AnyElement {
 }
 
 fn build_provider_chips(
-    providers: &[w::LlmProvider],
-    picked: Option<&w::LlmProvider>,
+    providers: &[LlmProvider],
+    picked: Option<&LlmProvider>,
     theme: &Theme,
     cx: &Context<CompanionPod>,
 ) -> Vec<AnyElement> {
@@ -544,7 +544,7 @@ fn render_keys_link_row(url: &'static str, name: &str, enabled: bool, theme: &Th
 }
 
 struct ConnectSubmitSpec<'a> {
-    picked: Option<w::LlmProvider>,
+    picked: Option<LlmProvider>,
     name: &'a str,
     secret: String,
     can_connect: bool,
@@ -586,15 +586,15 @@ fn render_connect_submit_row(
     ))
 }
 
-fn is_voicevox_connection(c: &w::Connection) -> bool {
-    c.kind == w::ConnectionKind::Tts
+fn is_voicevox_connection(c: &Connection) -> bool {
+    c.kind == ConnectionKind::Tts
         && (c.id == "voicevox"
             || matches!(
-                c.config.as_option().and_then(|cfg| cfg.config.as_ref()),
-                Some(w::connection_config::Config::Tts(tts))
+                c.config.as_ref(),
+                Some(ConnectionConfig::Tts(tts))
                     if tts
                         .endpoint
-                        .as_option()
+                        .as_ref()
                         .is_some_and(|ep| ep.adapter == "voicevox")
             ))
 }

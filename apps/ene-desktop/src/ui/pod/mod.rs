@@ -9,8 +9,8 @@ mod win32;
 
 use crate::input::{self, Draft};
 use crate::ui::theme::{resolve_ui_font_family, ui_font_fallbacks};
-use crate::ui::{Hub, PodMode, can_start_chat};
-use ene_rpc as w;
+use crate::ui::{Hub, PodMode};
+use ene_client_core::domain::TurnStatus;
 use gpui::{
     App, Bounds, Context, Entity, KeyBinding, Pixels, ScrollHandle, Size, Subscription, Window,
     actions, div, point, prelude::*, px,
@@ -129,7 +129,7 @@ impl CompanionPod {
                             !settings
                                 .connections
                                 .iter()
-                                .any(|c| can_start_chat(c, providers))
+                                .any(|c| c.can_start_chat(providers))
                         })
             })
     }
@@ -309,8 +309,7 @@ fn mini_bubble_size(model: &crate::state::Model) -> Size<Pixels> {
         .chat
         .turn
         .as_ref()
-        .and_then(|t| t.status.as_known())
-        == Some(w::TurnStatus::Failed);
+        .is_some_and(|t| t.status == TurnStatus::Failed);
     if model.audio.companion_speaking
         || !model.companions.streaming.is_empty()
         || model.companions.chat.stop_requested

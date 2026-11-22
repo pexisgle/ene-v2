@@ -4,7 +4,7 @@ use crate::ui::icons::{Icon, icon};
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button, status_pill, window_drag_area};
 use crate::ui::{Hub, PodMode, SettingsSection};
-use ene_rpc as w;
+use ene_client_core::domain::{ApprovalDecision, ApprovalRequest, MessageRole, TurnStatus};
 use gpui::{
     AnyElement, Context, Entity, MouseButton, MouseDownEvent, SharedString, div, prelude::*, px,
 };
@@ -126,7 +126,7 @@ impl CompanionPod {
 
     fn render_approval_body(
         &self,
-        approval: &w::ApprovalRequest,
+        approval: &ApprovalRequest,
         total_pending: usize,
         theme: &Theme,
     ) -> AnyElement {
@@ -192,8 +192,8 @@ impl CompanionPod {
         let can_send_greet = hub
             .model
             .companion()
-            .and_then(|c| c.assignments.as_option())
-            .and_then(|a| a.companion.as_option())
+            .and_then(|c| c.assignments.as_ref())
+            .and_then(|a| a.companion.as_ref())
             .is_some();
         let transcription = hub.model.audio.transcription.clone();
 
@@ -337,7 +337,7 @@ fn compute_status_word(
             .chat
             .turn
             .as_ref()
-            .is_some_and(|t| t.status == w::TurnStatus::Streaming);
+            .is_some_and(|t| t.status == TurnStatus::Streaming);
     match &model.connections.link {
         Link::Connecting { .. } => "接続中",
         Link::Lost { .. } | Link::Unset { .. } | Link::Unusable { .. } => "未接続",
@@ -537,7 +537,7 @@ fn render_approval_actions(request_id: &str, hub: &Entity<Hub>, theme: &Theme) -
             theme,
             move |_, cx| {
                 hub_a.update(cx, |hub, cx| {
-                    hub.resolve_approval(&req_id_a, w::ApprovalDecision::Approve, cx);
+                    hub.resolve_approval(&req_id_a, ApprovalDecision::Approve, cx);
                 });
             },
         ))
@@ -548,7 +548,7 @@ fn render_approval_actions(request_id: &str, hub: &Entity<Hub>, theme: &Theme) -
             theme,
             move |_, cx| {
                 hub_b.update(cx, |hub, cx| {
-                    hub.resolve_approval(&req_id_b, w::ApprovalDecision::AlwaysApprove, cx);
+                    hub.resolve_approval(&req_id_b, ApprovalDecision::AlwaysApprove, cx);
                 });
             },
         ))
@@ -559,7 +559,7 @@ fn render_approval_actions(request_id: &str, hub: &Entity<Hub>, theme: &Theme) -
             theme,
             move |_, cx| {
                 hub_c.update(cx, |hub, cx| {
-                    hub.resolve_approval(&req_id_c, w::ApprovalDecision::Deny, cx);
+                    hub.resolve_approval(&req_id_c, ApprovalDecision::Deny, cx);
                 });
             },
         ))
@@ -571,10 +571,10 @@ fn failed_turn_message(model: &Model) -> Option<String> {
         .chat
         .turn
         .as_ref()
-        .filter(|turn| turn.status.as_known() == Some(w::TurnStatus::Failed))
+        .filter(|turn| turn.status == TurnStatus::Failed)
         .map(|turn| {
             turn.failure
-                .as_option()
+                .as_ref()
                 .map(|f| f.message.clone())
                 .filter(|msg| !msg.trim().is_empty())
                 .unwrap_or_else(|| "応答の生成に失敗しました".to_owned())
@@ -608,7 +608,7 @@ fn collect_timeline_rows(model: &Model, streaming_preview: &str, theme: &Theme) 
         );
     }
     for (msg_idx, msg) in model.companions.chat.messages.iter().enumerate() {
-        let is_user = msg.role == w::MessageRole::User;
+        let is_user = msg.role == MessageRole::User;
         let url_pills = (!is_user)
             .then(|| render_url_pills(&msg.text, &format!("exp-{msg_idx}"), theme))
             .flatten();
@@ -756,7 +756,7 @@ pub(super) fn active_mini_speech_text(model: &Model) -> String {
             .chat
             .turn
             .as_ref()
-            .is_some_and(|t| t.status == w::TurnStatus::Streaming)
+            .is_some_and(|t| t.status == TurnStatus::Streaming)
     {
         return "返答を考えています…".to_owned();
     }
@@ -766,7 +766,7 @@ pub(super) fn active_mini_speech_text(model: &Model) -> String {
         .messages
         .iter()
         .rev()
-        .find(|m| m.role != w::MessageRole::User)
+        .find(|m| m.role != MessageRole::User)
         .map(|m| m.text.clone())
         .unwrap_or_else(|| "こんにちは。まずはひとこと送ってみてください。".to_owned())
 }

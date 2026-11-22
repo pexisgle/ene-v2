@@ -1,9 +1,11 @@
-use super::edits::{decode_model_choice, encode_model_choice, kind_of};
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{DropdownOption, DropdownSpec, Tone, dropdown_select, pill_button};
 use crate::ui::{Hub, ModelRoleSlot, SettingsStudio};
-use ene_rpc as w;
+use ene_client_core::{
+    connections::{decode_model_choice, encode_model_choice},
+    domain::{Companion, ConnectionConfig, ConnectionKind, ModelAssignments},
+};
 use gpui::{AnyElement, Context, Entity, FontWeight, div, prelude::*, px};
 use std::collections::BTreeMap;
 
@@ -44,7 +46,7 @@ pub(super) struct ModelRoleChoices<'a> {
 impl SettingsStudio {
     pub(super) fn render_advanced_roles_panel(
         &mut self,
-        companion: Option<&w::Companion>,
+        companion: Option<&Companion>,
         choices: ModelRoleChoices<'_>,
         live: bool,
         theme: &Theme,
@@ -53,7 +55,7 @@ impl SettingsStudio {
         let Some(comp) = companion else {
             return render_no_companion_roles_hint(theme);
         };
-        let assignments = comp.assignments.as_option().cloned().unwrap_or_default();
+        let assignments = comp.assignments.clone().unwrap_or_default();
         let roles_ctx = collect_roles_context(self.hub.read(cx));
 
         let mut rows: Vec<AnyElement> = ModelRoleSlot::ALL
@@ -115,7 +117,7 @@ impl SettingsStudio {
 struct ModelRoleRowCtx<'a> {
     idx: usize,
     slot: ModelRoleSlot,
-    assignments: &'a w::ModelAssignments,
+    assignments: &'a ModelAssignments,
     slot_models: &'a [(String, String, String)],
     live: bool,
 }
@@ -384,11 +386,11 @@ fn collect_roles_context(hub: &Hub) -> RolesContext {
                 .filter(|c| {
                     c.enabled
                         && matches!(
-                            kind_of(c),
-                            w::ConnectionKind::Llm
-                                | w::ConnectionKind::Embedding
-                                | w::ConnectionKind::Stt
-                                | w::ConnectionKind::Tts
+                            c.kind,
+                            ConnectionKind::Llm
+                                | ConnectionKind::Embedding
+                                | ConnectionKind::Stt
+                                | ConnectionKind::Tts
                         )
                 })
                 .map(|c| c.id.clone())
@@ -407,14 +409,14 @@ fn collect_roles_context(hub: &Hub) -> RolesContext {
         .map(|s| {
             s.connections
                 .iter()
-                .filter(|c| c.kind == w::ConnectionKind::Search)
+                .filter(|c| c.kind == ConnectionKind::Search)
                 .map(|c| {
                     let adapter = c
                         .config
-                        .as_option()
-                        .and_then(|cfg| match cfg.config.as_ref()? {
-                            w::connection_config::Config::Search(sc) => {
-                                sc.endpoint.as_option().map(|e| e.adapter.clone())
+                        .as_ref()
+                        .and_then(|cfg| match cfg {
+                            ConnectionConfig::Search(sc) => {
+                                sc.endpoint.as_ref().map(|e| e.adapter.clone())
                             }
                             _ => None,
                         })
@@ -427,7 +429,7 @@ fn collect_roles_context(hub: &Hub) -> RolesContext {
     let active_search_id = settings.and_then(|s| {
         s.connections
             .iter()
-            .find(|c| c.kind == w::ConnectionKind::Search && c.enabled)
+            .find(|c| c.kind == ConnectionKind::Search && c.enabled)
             .map(|c| c.id.clone())
     });
     RolesContext {

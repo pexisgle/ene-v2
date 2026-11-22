@@ -1,8 +1,11 @@
 //! The two messages across the one boundary the client needs: the session
 //! reports to the window, and the window asks the session to act.
 
+use crate::domain::{
+    ApprovalRequest, CompanionTemplate, ConnectionCheck, HostNotification, LlmProvider, Message,
+    MindView, ModelInfo, PluginInfo, PolicyRule, PolicyText,
+};
 use crate::state::{Devices, Link};
-use ene_rpc as w;
 
 /// Microphone capture mode (`F07`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -19,8 +22,8 @@ pub enum CaptureMode {
 pub enum Update {
     /// The link state changed.
     Link(Box<Link>),
-    /// One host notification, verbatim, for the window to merge.
-    Notification(Box<w::Notification>),
+    /// One host notification, translated to domain types, for the window to merge.
+    Notification(Box<HostNotification>),
     /// The host ended the subscription and the session is resubscribing.
     Resync,
     /// A local device changed state.
@@ -64,14 +67,14 @@ pub enum Update {
     /// The conversation the window asked for.
     History {
         companion_id: String,
-        messages: Vec<w::Message>,
+        messages: Vec<Message>,
     },
     HistoryFailed {
         companion_id: String,
         message: String,
     },
     /// The provider catalog.
-    Providers(Vec<w::LlmProvider>),
+    Providers(Vec<LlmProvider>),
     SetupFinished {
         ok: bool,
         connection_id: Option<String>,
@@ -81,15 +84,15 @@ pub enum Update {
     /// The declared models of one connection.
     Models {
         connection_id: String,
-        models: Vec<w::Model>,
+        models: Vec<ModelInfo>,
     },
     /// The result of a connection probe.
     Checked {
         connection_id: String,
-        check: w::ConnectionCheck,
+        check: ConnectionCheck,
     },
     /// The host's pending approvals, as refetched.
-    Approvals(Vec<w::ApprovalRequest>),
+    Approvals(Vec<ApprovalRequest>),
     /// An approval is no longer pending.
     ApprovalStale {
         message: String,
@@ -141,12 +144,12 @@ pub enum Update {
     /// A companion's `MindView` loaded from `HostService.GetMind`.
     MindLoaded {
         companion_id: String,
-        view: Box<w::MindView>,
+        view: Box<MindView>,
     },
     /// The host's permission policy rules, refetched or updated.
-    PolicyRules(Vec<w::PolicyRule>),
+    PolicyRules(Vec<PolicyRule>),
     /// The host's free-text permission policies, refetched or updated.
-    PolicyTexts(Vec<w::PolicyText>),
+    PolicyTexts(Vec<PolicyText>),
     /// Avatar scale confirmed by the renderer session.
     AvatarScaleChanged(f32),
     /// Epoch- and sequence-tagged RPC response so stale replies after reconnect drop.
@@ -156,7 +159,7 @@ pub enum Update {
         inner: Box<Update>,
     },
     /// Built-in starter companion templates from the host.
-    CompanionTemplates(Vec<w::CompanionTemplate>),
+    CompanionTemplates(Vec<CompanionTemplate>),
     /// Sanitized JSON template exported for one companion.
     CompanionExported {
         companion_id: String,
@@ -173,7 +176,7 @@ pub enum Update {
         ptt_active: bool,
     },
     /// Installed host plugins from `SettingsService.ListPlugins` (`F12`).
-    Plugins(Vec<w::PluginInfo>),
+    Plugins(Vec<PluginInfo>),
 }
 
 /// What the window asks the session to do, because the session owns it.

@@ -4035,8 +4035,11 @@ version = "0.1.8"
 dependencies = [
  "ene-catalog",
  "ene-rpc",
+ "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -4051,7 +4054,6 @@ dependencies = [
  "directories",
  "earshot",
  "ene-avatar-ipc",
- "ene-catalog",
  "ene-client-core",
  "ene-plugin",
  "ene-plugin-runtime",
@@ -4072,7 +4074,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-segmentation",
- "url",
  "uuid",
  "wayland-client",
  "wayland-protocols 0.32.13",

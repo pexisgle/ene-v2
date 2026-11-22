@@ -3,7 +3,13 @@ use super::icons::Icon;
 use super::studio::labeled_field;
 use super::theme::Theme;
 use super::widgets::{Tone, disclosure_row, pill_button};
-use ene_rpc as w;
+use ene_client_core::{
+    connections::{
+        McpExtraConfig, McpTargetResult, build_mcp_connection_input, mcp_http_target,
+        mcp_local_target, mcp_npx_target, parse_mcp_kv,
+    },
+    domain::{ConnectionInput, ConnectionKind},
+};
 use gpui::{AnyElement, Context, FontWeight, div, prelude::*, px};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -12,14 +18,6 @@ pub(crate) enum Mode {
     Http,
     Local,
 }
-
-type ExtraMcpCfg = (
-    String,
-    String,
-    String,
-    Vec<(String, String)>,
-    Vec<(String, String)>,
-);
 
 impl SettingsStudio {
     pub(super) fn render_mcp_add(
@@ -82,7 +80,7 @@ impl SettingsStudio {
         mode: Mode,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> (AnyElement, Option<&'static str>, Target) {
+    ) -> (AnyElement, Option<&'static str>, McpTargetResult) {
         match mode {
             Mode::Npx => {
                 let draft = self.description_draft(
@@ -92,7 +90,7 @@ impl SettingsStudio {
                     None,
                     theme,
                 );
-                let target = npx_target(draft.read(cx).text().trim());
+                let target = mcp_npx_target(draft.read(cx).text().trim());
                 let el = labeled_field(
                     "パッケージ名・npx コマンド・JSON",
                     div()
@@ -118,7 +116,7 @@ impl SettingsStudio {
                     None,
                     theme,
                 );
-                let target = http_target(draft.read(cx).text().trim());
+                let target = mcp_http_target(draft.read(cx).text().trim());
                 (labeled_field("サーバー URL", draft, theme), None, target)
             }
             Mode::Local => {
@@ -130,7 +128,8 @@ impl SettingsStudio {
                     None,
                     theme,
                 );
-                let target = local_target(cmd.read(cx).text().trim(), args.read(cx).text().trim());
+                let target =
+                    mcp_local_target(cmd.read(cx).text().trim(), args.read(cx).text().trim());
                 let el = div()
                     .flex()
                     .flex_col()
@@ -160,7 +159,7 @@ impl SettingsStudio {
         mode: Mode,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> (String, AnyElement, Option<&'static str>, ExtraMcpCfg) {
+    ) -> (String, AnyElement, Option<&'static str>, McpExtraConfig) {
         if mode == Mode::Http {
             return self.render_mcp_http_advanced(theme, cx);
         }
@@ -171,7 +170,7 @@ impl SettingsStudio {
         &mut self,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> (String, AnyElement, Option<&'static str>, ExtraMcpCfg) {
+    ) -> (String, AnyElement, Option<&'static str>, McpExtraConfig) {
         let auth_hdr_d = self.draft(
             cx,
             "add:mcp:auth-header",
@@ -221,13 +220,11 @@ impl SettingsStudio {
             secret,
             panel,
             adv_err,
-            (
-                String::new(),
-                String::new(),
-                auth_hdr,
-                Vec::new(),
-                headers_parsed.unwrap_or_default(),
-            ),
+            McpExtraConfig {
+                auth_header: auth_hdr,
+                headers: headers_parsed.unwrap_or_default(),
+                ..Default::default()
+            },
         )
     }
 
@@ -235,7 +232,7 @@ impl SettingsStudio {
         &mut self,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> (String, AnyElement, Option<&'static str>, ExtraMcpCfg) {
+    ) -> (String, AnyElement, Option<&'static str>, McpExtraConfig) {
         let cwd_d = self.draft(cx, "add:mcp:cwd", "例: C:/work/project", None, theme);
         let secret_env_d = self.draft(
             cx,
@@ -295,13 +292,12 @@ impl SettingsStudio {
             secret,
             panel,
             adv_err,
-            (
+            McpExtraConfig {
                 cwd,
-                secret_env,
-                String::new(),
-                env_parsed.unwrap_or_default(),
-                Vec::new(),
-            ),
+                secret_env_var: secret_env,
+                env: env_parsed.unwrap_or_default(),
+                ..Default::default()
+            },
         )
     }
 }
@@ -327,7 +323,7 @@ fn render_mcp_add_header(theme: &Theme, cx: &Context<SettingsStudio>) -> gpui::D
             theme,
             move |_, cx| {
                 studio.update(cx, |this, cx| {
-                    this.connection_form.custom_kind = w::ConnectionKind::Llm;
+                    this.connection_form.custom_kind = ConnectionKind::Llm;
                     cx.notify();
                 });
             },
@@ -390,7 +386,7 @@ fn render_mcp_adv_toggle(
 }
 
 fn render_mcp_submit(
-    connection: Option<w::ConnectionInput>,
+    connection: Option<ConnectionInput>,
     mcp_secret: String,
     enabled: bool,
     hub: &gpui::Entity<crate::ui::Hub>,
@@ -427,372 +423,4 @@ fn render_mcp_submit(
             });
         },
     ))
-}
-
-fn build_mcp_connection_input(
-    target: Target,
-    extra_cfg: ExtraMcpCfg,
-    chosen_name: &str,
-) -> Option<w::ConnectionInput> {
-    target.ok().flatten().map(|(mut config, suggested_name)| {
-        let (cwd, secret_env_var, auth_header, env, headers) = extra_cfg;
-        config.cwd = cwd;
-        config.secret_env_var = secret_env_var;
-        config.auth_header = auth_header;
-        config.env = env.into_iter().collect();
-        config.headers = headers.into_iter().collect();
-        let name = if chosen_name.is_empty() {
-            suggested_name
-        } else {
-            chosen_name.to_owned()
-        };
-        w::ConnectionInput {
-            name,
-            enabled: true,
-            kind: w::ConnectionKind::Mcp.into(),
-            config: Some(w::ConnectionConfig {
-                config: Some(w::connection_config::Config::Mcp(Box::new(config))),
-                ..Default::default()
-            })
-            .into(),
-            ..Default::default()
-        }
-    })
-}
-
-fn parse_mcp_kv(raw: &str, sep: char) -> Result<Vec<(String, String)>, &'static str> {
-    let mut out = Vec::new();
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Some((k, v)) = trimmed.split_once(sep) else {
-            return Err(if sep == ':' {
-                "追加ヘッダーは 1 行ごとに「Header: Value」形式で入力してください。"
-            } else {
-                "追加環境変数は 1 行ごとに「KEY=VALUE」形式で入力してください。"
-            });
-        };
-        let key = k.trim();
-        if key.is_empty() {
-            return Err("キー名が空の行があります。");
-        }
-        out.push((key.to_owned(), v.trim().to_owned()));
-    }
-    Ok(out)
-}
-
-type Target = Result<Option<(w::McpConnection, String)>, &'static str>;
-
-fn endpoint(url: String) -> w::ConnectionEndpoint {
-    w::ConnectionEndpoint {
-        adapter: "mcp".into(),
-        endpoint: url,
-        options: "{}".into(),
-        ..Default::default()
-    }
-}
-
-fn process_target(command: &str, args: Vec<String>, name: &str) -> (w::McpConnection, String) {
-    (
-        w::McpConnection {
-            command: command.to_owned(),
-            args,
-            endpoint: Some(endpoint(String::new())).into(),
-            ..Default::default()
-        },
-        name.chars().take(128).collect(),
-    )
-}
-
-fn http_target(input: &str) -> Target {
-    if input.is_empty() {
-        return Ok(None);
-    }
-    let url = url::Url::parse(input)
-        .map_err(|_| "http:// または https:// で始まる URL を入力してください。")?;
-    let name = url
-        .host_str()
-        .filter(|_| matches!(url.scheme(), "http" | "https"))
-        .ok_or("http:// または https:// で始まる URL を入力してください。")?;
-    Ok(Some((
-        w::McpConnection {
-            endpoint: Some(endpoint(url.to_string())).into(),
-            ..Default::default()
-        },
-        name.chars().take(128).collect(),
-    )))
-}
-
-fn local_target(command: &str, input: &str) -> Target {
-    if command.is_empty() {
-        return Ok(None);
-    }
-    let args = parse_process_args(input)?;
-    let command = command.trim_matches('"');
-    if command.is_empty() {
-        return Err("実行ファイルを入力してください。");
-    }
-    let name = command.rsplit(['/', '\\']).next().unwrap_or(command);
-    Ok(Some(process_target(command, args, name)))
-}
-
-pub(super) fn parse_process_args(input: &str) -> Result<Vec<String>, &'static str> {
-    let input = input.trim();
-    if input.starts_with('[') {
-        serde_json::from_str(input).map_err(|_| "引数を文字列の JSON 配列で入力してください。")
-    } else {
-        split_args(input)
-    }
-}
-
-fn npx_target(input: &str) -> Target {
-    if input.is_empty() {
-        return Ok(None);
-    }
-    let (name, mut args) = if input.starts_with('{') {
-        npx_from_json(input)?
-    } else {
-        let args = split_args(input)?;
-        let args = match args.as_slice() {
-            [command, tail @ ..] if is_npx(command) || is_cmd(command) => {
-                npx_args(command, tail)?.to_vec()
-            }
-            _ => args,
-        };
-        (None, args)
-    };
-    let package = args
-        .iter()
-        .find(|arg| !arg.is_empty() && !arg.starts_with('-'))
-        .ok_or("起動する npm パッケージを指定してください。")?;
-    if package.starts_with("http://") || package.starts_with("https://") {
-        return Err("サーバー URL を登録する場合は「URL」を選んでください。");
-    }
-    let name = name
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| {
-            if package.contains(char::is_whitespace) {
-                "npx MCP".into()
-            } else {
-                package.clone()
-            }
-        });
-    if !args
-        .iter()
-        .take_while(|arg| arg.as_str() != "--")
-        .any(|arg| matches!(arg.as_str(), "-y" | "--yes" | "--yes=true"))
-    {
-        args.insert(0, "-y".into());
-    }
-    Ok(Some(process_target("npx", args, &name)))
-}
-
-fn is_npx(command: &str) -> bool {
-    ["npx", "npx.cmd", "npx.exe", "npx.ps1"]
-        .iter()
-        .any(|program| command.eq_ignore_ascii_case(program))
-}
-
-fn is_cmd(command: &str) -> bool {
-    command.eq_ignore_ascii_case("cmd") || command.eq_ignore_ascii_case("cmd.exe")
-}
-
-fn npx_args<'a>(command: &str, args: &'a [String]) -> Result<&'a [String], &'static str> {
-    if is_npx(command) {
-        return Ok(args);
-    }
-    // Accept the documented Windows wrapper, then launch npx directly on the host.
-    if is_cmd(command) {
-        let flags = args
-            .iter()
-            .take_while(|arg| arg.eq_ignore_ascii_case("/d") || arg.eq_ignore_ascii_case("/s"))
-            .count();
-        if let [run, launcher, tail @ ..] = &args[flags..]
-            && run.eq_ignore_ascii_case("/c")
-            && is_npx(launcher)
-        {
-            return Ok(tail);
-        }
-    }
-    Err("npx、または Windows 向けの cmd /c npx を指定してください。")
-}
-
-fn npx_from_json(input: &str) -> Result<(Option<String>, Vec<String>), &'static str> {
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Config {
-        command: String,
-        #[serde(default)]
-        args: Vec<String>,
-        #[serde(default)]
-        env: std::collections::BTreeMap<String, String>,
-        cwd: Option<String>,
-        #[serde(rename = "type")]
-        transport: Option<String>,
-    }
-    let value: serde_json::Value =
-        serde_json::from_str(input).map_err(|_| "MCP の JSON 設定を確認してください。")?;
-    let (name, config) =
-        if let Some(servers) = value.get("mcpServers").or_else(|| value.get("servers")) {
-            let servers = servers
-                .as_object()
-                .filter(|servers| servers.len() == 1)
-                .ok_or("JSON にはサーバーを1つだけ指定してください。")?;
-            let Some((name, config)) = servers.iter().next() else {
-                return Err("JSON にはサーバーを1つだけ指定してください。");
-            };
-            (Some(name.clone()), config.clone())
-        } else {
-            (None, value)
-        };
-    let config: Config = serde_json::from_value(config)
-        .map_err(|_| "JSON の command と args を確認してください。")?;
-    if config
-        .transport
-        .as_deref()
-        .is_some_and(|transport| transport != "stdio")
-    {
-        return Err("この欄では stdio 接続の JSON を使えます。");
-    }
-    if !config.env.is_empty() || config.cwd.is_some() {
-        return Err(
-            "env や cwd を指定するサーバーは、ホストの実行環境を設定してからコマンドを登録してください。",
-        );
-    }
-    Ok((name, npx_args(&config.command, &config.args)?.to_vec()))
-}
-
-/// Splits arguments without a shell. Backslashes stay literal for Windows paths.
-fn split_args(input: &str) -> Result<Vec<String>, &'static str> {
-    let mut args = Vec::new();
-    let mut arg = String::new();
-    let mut quote = None;
-    let mut started = false;
-    for ch in input.chars() {
-        match quote {
-            Some(end) if ch == end => quote = None,
-            Some(_) => arg.push(ch),
-            None if matches!(ch, '\'' | '"') => {
-                quote = Some(ch);
-                started = true;
-            }
-            None if ch.is_whitespace() => {
-                if started {
-                    args.push(std::mem::take(&mut arg));
-                    started = false;
-                }
-            }
-            None => {
-                arg.push(ch);
-                started = true;
-            }
-        }
-    }
-    if quote.is_some() {
-        return Err("引数を囲む引用符を閉じてください。");
-    }
-    if started {
-        args.push(arg);
-    }
-    Ok(args)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn npx_accepts_packages_commands_and_json_without_losing_windows_arguments() {
-        let (config, name) = npx_target("@scope/server").unwrap().unwrap();
-        assert_eq!(config.command, "npx");
-        assert_eq!(config.args, ["-y", "@scope/server"]);
-        assert_eq!(name, "@scope/server");
-
-        let (config, _) = npx_target(r#"npx.cmd -y package "C:\My Tools\folder" C:\bare "" "#)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            config.args,
-            ["-y", "package", r"C:\My Tools\folder", r"C:\bare", ""]
-        );
-
-        let (config, name) = npx_target(
-            r#"{"mcpServers":{"Fixture":{"command":"npx","args":["pkg","--flag","a b"]}}}"#,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(config.args, ["-y", "pkg", "--flag", "a b"]);
-        assert_eq!(name, "Fixture");
-        assert!(npx_target("npx -y").is_err());
-        assert!(npx_target(r#"npx pkg "open"#).is_err());
-        assert!(npx_target(r#"{"command":"npx","args":["pkg"],"env":{"A":"B"}}"#).is_err());
-        assert!(npx_target(r#"{"command":"npx","args":["pkg"],"disabled":true}"#).is_err());
-    }
-
-    #[test]
-    fn remote_and_local_are_independent_connection_modes() {
-        let (remote, name) = http_target("https://example.com/mcp").unwrap().unwrap();
-        assert_eq!(remote.endpoint.endpoint, "https://example.com/mcp");
-        assert_eq!(name, "example.com");
-        assert!(remote.command.is_empty());
-        assert!(http_target("file:///tmp/mcp").is_err());
-        let (local, _) = local_target("node", r#"["C:/My Tools/mcp.js","--stdio"]"#)
-            .unwrap()
-            .unwrap();
-        assert_eq!(local.command, "node");
-        assert_eq!(local.args, ["C:/My Tools/mcp.js", "--stdio"]);
-        assert!(local_target("node", "[").is_err());
-    }
-
-    #[test]
-    fn npx_normalizes_windows_command_wrappers_without_using_a_shell() {
-        let (config, name) = npx_target(
-            r#"{"mcpServers":{"filesystem":{"command":"cmd","args":["/c","npx","-y","@modelcontextprotocol/server-filesystem","C:\\My Tools\\日本語 & space"]}}}"#,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(name, "filesystem");
-        assert_eq!(config.command, "npx");
-        assert_eq!(
-            config.args,
-            [
-                "-y",
-                "@modelcontextprotocol/server-filesystem",
-                r"C:\My Tools\日本語 & space"
-            ]
-        );
-
-        let (config, _) = npx_target(r#"cmd.exe /D /S /C npx.cmd pkg "a b""#)
-            .unwrap()
-            .unwrap();
-        assert_eq!(config.args, ["-y", "pkg", "a b"]);
-        let (config, name) = npx_target(
-            r#"{"servers":{"fixture":{"type":"stdio","command":"cmd.exe","args":["/c","npx","pkg"]}}}"#,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(name, "fixture");
-        assert_eq!(config.args, ["-y", "pkg"]);
-        assert!(npx_target("cmd /c echo hello").is_err());
-        assert!(npx_target("cmd /k npx pkg").is_err());
-    }
-
-    #[test]
-    fn parse_mcp_kv_accepts_headers_and_env_and_rejects_malformed_lines() {
-        let env = parse_mcp_kv("FOO=bar\n  # comment=ok\nEMPTY=\n\n", '=').unwrap();
-        assert_eq!(env.len(), 3);
-        assert_eq!(env[0], ("FOO".into(), "bar".into()));
-        let headers = parse_mcp_kv("X-Tenant: acme\nX-Mode: strict", ':').unwrap();
-        assert_eq!(
-            headers,
-            vec![
-                ("X-Tenant".into(), "acme".into()),
-                ("X-Mode".into(), "strict".into()),
-            ]
-        );
-        assert!(parse_mcp_kv("INVALID_LINE_WITHOUT_SEP", '=').is_err());
-        assert!(parse_mcp_kv(": missing-key", ':').is_err());
-    }
 }

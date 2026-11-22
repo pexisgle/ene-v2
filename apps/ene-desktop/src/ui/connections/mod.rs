@@ -3,7 +3,6 @@
 //! and bottom collapsed disclosure for model-role & voice slot overrides.
 
 mod add_panel;
-mod edits;
 mod mcp_editor;
 mod pickers;
 mod roles_panel;
@@ -11,12 +10,12 @@ mod row_editor;
 mod schema_form;
 mod web_search;
 
+use crate::ui::GOOGLE_AGENT_PLATFORM;
 use crate::ui::SettingsStudio;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, disclosure_row, pill_button};
-use crate::ui::{GOOGLE_AGENT_PLATFORM, llm_endpoint};
-use ene_rpc as w;
+use ene_client_core::domain::{Connection, ConnectionCheck, ConnectionKind};
 use gpui::{AnyElement, Context, FontWeight, div, prelude::*, px};
 use std::collections::BTreeMap;
 
@@ -85,7 +84,7 @@ impl SettingsStudio {
             .into_any_element()
     }
 
-    fn consume_pending_mcp_probe(&mut self, connections: &[w::Connection], cx: &mut Context<Self>) {
+    fn consume_pending_mcp_probe(&mut self, connections: &[Connection], cx: &mut Context<Self>) {
         if self
             .connection_form
             .pending_mcp
@@ -101,8 +100,8 @@ impl SettingsStudio {
 
     fn build_connection_rows(
         &mut self,
-        connections: &[w::Connection],
-        (checks, live, adding): (&BTreeMap<String, w::ConnectionCheck>, bool, bool),
+        connections: &[Connection],
+        (checks, live, adding): (&BTreeMap<String, ConnectionCheck>, bool, bool),
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
@@ -121,13 +120,16 @@ impl SettingsStudio {
 }
 
 fn effective_check<'a>(
-    conn: &'a w::Connection,
-    checks: &'a BTreeMap<String, w::ConnectionCheck>,
-) -> Option<&'a w::ConnectionCheck> {
-    if llm_endpoint(conn).is_some_and(|ep| ep.adapter == GOOGLE_AGENT_PLATFORM) {
-        conn.last_check.as_option()
+    conn: &'a Connection,
+    checks: &'a BTreeMap<String, ConnectionCheck>,
+) -> Option<&'a ConnectionCheck> {
+    if conn
+        .llm_endpoint()
+        .is_some_and(|ep| ep.adapter == GOOGLE_AGENT_PLATFORM)
+    {
+        conn.last_check.as_ref()
     } else {
-        checks.get(&conn.id).or_else(|| conn.last_check.as_option())
+        checks.get(&conn.id).or(conn.last_check.as_ref())
     }
 }
 
@@ -165,7 +167,7 @@ fn render_connections_header(
                         studio_mcp.update(cx, |this, cx| {
                             this.connection_form.adding_connection = true;
                             this.connection_form.custom_connection_open = true;
-                            this.connection_form.custom_kind = w::ConnectionKind::Mcp;
+                            this.connection_form.custom_kind = ConnectionKind::Mcp;
                             this.connection_form.mcp_add_mode = crate::ui::mcp_add::Mode::Npx;
                             cx.notify();
                         });
@@ -186,9 +188,9 @@ fn render_connections_header(
                             this.connection_form.adding_connection =
                                 !this.connection_form.adding_connection;
                             if this.connection_form.adding_connection
-                                && this.connection_form.custom_kind == w::ConnectionKind::Mcp
+                                && this.connection_form.custom_kind == ConnectionKind::Mcp
                             {
-                                this.connection_form.custom_kind = w::ConnectionKind::Llm;
+                                this.connection_form.custom_kind = ConnectionKind::Llm;
                             }
                             cx.notify();
                         });

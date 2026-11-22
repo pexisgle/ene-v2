@@ -1,13 +1,17 @@
 //! Pure state reducer folding [`Update`] messages and host notifications into [`Model`].
 
 use crate::{
+    domain::{
+        Activation, ApprovalRequest, ApprovalStatus, ConnectionKind, HostEvent, HostNotification,
+        Message, MessageRole, NotificationEvent, RunStatus, TurnEvent, TurnStatus, WorkEvent,
+        WorkEventDetail, WorkStatus,
+    },
     state::{
         AudioState, Chat, Effects, Link, LiveTranscription, Model, NoticeKind, PerceptionState,
         SpeechReport, Unsent,
     },
     update::Update,
 };
-use ene_rpc as w;
 
 impl Model {
     /// Folds one update into the view and reports what must be refetched.
@@ -185,7 +189,7 @@ fn apply_companion_update(model: &mut Model, update: Update) {
     }
 }
 
-fn apply_history(chat: &mut Chat, companion_id: &str, messages: Vec<w::Message>) {
+fn apply_history(chat: &mut Chat, companion_id: &str, messages: Vec<Message>) {
     if chat.companion_id != companion_id {
         return;
     }
@@ -199,7 +203,7 @@ fn apply_history(chat: &mut Chat, companion_id: &str, messages: Vec<w::Message>)
         !chat
             .messages
             .iter()
-            .any(|message| message.role == w::MessageRole::User && message.text == sending.text)
+            .any(|message| message.role == MessageRole::User && message.text == sending.text)
     });
 }
 
@@ -253,9 +257,8 @@ fn apply_approval_update(model: &mut Model, update: Update, effects: &mut Effect
         }
         Update::PolicyTexts(texts) => {
             if let Some(snapshot) = model.snapshot.as_mut() {
-                let mut settings = snapshot.settings.take().unwrap_or_default();
+                let settings = snapshot.settings.get_or_insert_with(Default::default);
                 settings.policy_texts = texts;
-                snapshot.settings = Some(settings).into();
             }
         }
         _ => {}
@@ -353,14 +356,11 @@ fn apply_perception_update(perception: &mut PerceptionState, update: Update) {
 }
 
 /// Whether a host message should be visible in user-facing chat bubbles.
-pub fn is_user_facing_message(message: &w::Message) -> bool {
+pub fn is_user_facing_message(message: &Message) -> bool {
     if !message.work_id.trim().is_empty() {
         return false;
     }
-    if matches!(
-        message.role.as_known(),
-        Some(w::MessageRole::Agent | w::MessageRole::Context)
-    ) {
+    if matches!(message.role, MessageRole::Agent | MessageRole::Context) {
         return false;
     }
     let trimmed = message.text.trim();
@@ -371,62 +371,57 @@ pub fn is_user_facing_message(message: &w::Message) -> bool {
         || trimmed.starts_with("The hand finished"))
 }
 
-fn merge_notification(model: &mut Model, notification: w::Notification, effects: &mut Effects) {
+fn merge_notification(model: &mut Model, notification: HostNotification, effects: &mut Effects) {
     match notification.event {
         Some(
-            event @ (w::notification::Event::InitialState(_)
-            | w::notification::Event::Health(_)
-            | w::notification::Event::Companion(_)
-            | w::notification::Event::SettingsUpdated(_)
-            | w::notification::Event::ClientUpdated(_)
-            | w::notification::Event::ActivationUpdated(_)),
+            event @ (NotificationEvent::InitialState(_)
+            | NotificationEvent::Health(_)
+            | NotificationEvent::Companion(_)
+            | NotificationEvent::SettingsUpdated(_)
+            | NotificationEvent::ClientUpdated(_)
+            | NotificationEvent::ActivationUpdated(_)),
         ) => merge_snapshot_event(model, event, effects),
         Some(
-            event @ (w::notification::Event::MessageCreated(_)
-            | w::notification::Event::MessageDelta(_)
-            | w::notification::Event::TurnEvent(_)
-            | w::notification::Event::ResyncRequired(_)),
+            event @ (NotificationEvent::MessageCreated(_)
+            | NotificationEvent::MessageDelta(_)
+            | NotificationEvent::TurnEvent(_)
+            | NotificationEvent::ResyncRequired { .. }),
         ) => merge_chat_event(model, event),
         Some(
-            event @ (w::notification::Event::ApprovalRequested(_)
-            | w::notification::Event::PolicyRulesUpdated(_)
-            | w::notification::Event::PolicyTextsUpdated(_)),
+            event @ (NotificationEvent::ApprovalRequested(_)
+            | NotificationEvent::PolicyRulesUpdated(_)
+            | NotificationEvent::PolicyTextsUpdated(_)),
         ) => merge_approval_event(model, event, effects),
-        Some(w::notification::Event::WorkEvent(work)) => merge_work_event(model, &work),
-        Some(w::notification::Event::Generic(event)) => merge_generic_notice(model, &event),
-        Some(w::notification::Event::MindUpdated(updated)) => {
+        Some(NotificationEvent::WorkEvent(work)) => merge_work_event(model, &work),
+        Some(NotificationEvent::Generic(event)) => merge_generic_notice(model, &event),
+        Some(NotificationEvent::MindUpdated(updated)) => {
             effects.mind |= model.companion_id() == Some(updated.companion_id.as_str())
                 || (!updated.companion_id.is_empty()
                     && model.companions.chat.companion_id == updated.companion_id);
         }
-        Some(
-            w::notification::Event::DeviceOperation(_)
-            | w::notification::Event::DeviceOperationResult(_),
-        )
-        | None => {}
+        Some(NotificationEvent::Other) | None => {}
     }
 }
 
-fn merge_snapshot_event(model: &mut Model, event: w::notification::Event, effects: &mut Effects) {
+fn merge_snapshot_event(model: &mut Model, event: NotificationEvent, effects: &mut Effects) {
     match event {
-        w::notification::Event::InitialState(snapshot) => {
-            let mut snapshot = *snapshot;
+        NotificationEvent::InitialState(mut snapshot) => {
             snapshot
                 .companions
                 .sort_by(|left, right| left.name.cmp(&right.name));
             model.companions.work_active = snapshot
                 .work_sessions
                 .iter()
-                .any(|session| matches!(session.status.as_known(), Some(w::WorkStatus::Active)));
-            model.snapshot = Some(snapshot);
+                .any(|session| session.status == WorkStatus::Active);
+            model.snapshot = Some(*snapshot);
             effects.approvals = false;
         }
-        w::notification::Event::Health(health) => {
+        NotificationEvent::Health(health) => {
             if let Some(snapshot) = model.snapshot.as_mut() {
-                snapshot.health = Some(*health).into();
+                snapshot.health = Some(health);
             }
         }
-        w::notification::Event::Companion(companion) => {
+        NotificationEvent::Companion(companion) => {
             if let Some(snapshot) = model.snapshot.as_mut() {
                 upsert_by_revision(
                     &mut snapshot.companions,
@@ -439,83 +434,79 @@ fn merge_snapshot_event(model: &mut Model, event: w::notification::Event, effect
                     .sort_by(|left, right| left.name.cmp(&right.name));
             }
         }
-        w::notification::Event::SettingsUpdated(updated) => {
-            if let Some(settings) = updated.settings.into_option()
-                && let Some(snapshot) = model.snapshot.as_mut()
+        NotificationEvent::SettingsUpdated(Some(settings)) => {
+            if let Some(snapshot) = model.snapshot.as_mut()
                 && snapshot
                     .settings
-                    .as_option()
+                    .as_ref()
                     .is_none_or(|current| current.revision <= settings.revision)
             {
-                snapshot.settings = Some(settings).into();
+                snapshot.settings = Some(*settings);
             }
         }
-        w::notification::Event::ClientUpdated(updated) => {
-            if let Some(client) = updated.client.into_option()
-                && let Some(snapshot) = model.snapshot.as_mut()
-            {
+        NotificationEvent::ClientUpdated(Some(client)) => {
+            if let Some(snapshot) = model.snapshot.as_mut() {
                 upsert_by_revision(
                     &mut snapshot.clients,
-                    client,
+                    *client,
                     |item| item.id.clone(),
                     |item| item.revision,
                 );
             }
         }
-        w::notification::Event::ActivationUpdated(activation) => {
+        NotificationEvent::ActivationUpdated(activation) => {
             if let Some(snapshot) = model.snapshot.as_mut() {
-                upsert_activation(&mut snapshot.activations, *activation);
+                upsert_activation(&mut snapshot.activations, activation);
             }
         }
         _ => {}
     }
 }
 
-fn merge_chat_event(model: &mut Model, event: w::notification::Event) {
+fn merge_chat_event(model: &mut Model, event: NotificationEvent) {
     let companions = &mut model.companions;
     match event {
-        w::notification::Event::MessageCreated(created) => {
-            if let Some(message) = created.message.into_option()
-                && message.companion_id == companions.chat.companion_id
+        NotificationEvent::MessageCreated(message) => {
+            if message.companion_id == companions.chat.companion_id
                 && is_user_facing_message(&message)
             {
                 companions
                     .streaming
                     .retain(|(companion, _), _| companion != &message.companion_id);
-                merge_message(&mut companions.chat.messages, message);
+                merge_message(&mut companions.chat.messages, *message);
             }
         }
-        w::notification::Event::MessageDelta(delta) => {
+        NotificationEvent::MessageDelta(delta) => {
             if delta.companion_id == companions.chat.companion_id {
                 let text = companions
                     .streaming
-                    .entry((delta.companion_id.clone(), delta.stream_id.clone()))
+                    .entry((delta.companion_id, delta.stream_id))
                     .or_default();
                 text.push_str(&delta.delta);
             }
         }
-        w::notification::Event::TurnEvent(turn) => merge_turn_event(model, *turn),
-        w::notification::Event::ResyncRequired(_) => companions.streaming.clear(),
+        NotificationEvent::TurnEvent(turn) => merge_turn_event(model, *turn),
+        NotificationEvent::ResyncRequired { .. } => companions.streaming.clear(),
         _ => {}
     }
 }
 
-fn merge_turn_event(model: &mut Model, turn: w::TurnEvent) {
+fn merge_turn_event(model: &mut Model, turn: TurnEvent) {
     let companions = &mut model.companions;
     if turn.companion_id != companions.chat.companion_id {
         return;
     }
     let terminal = matches!(
-        turn.status.as_known(),
-        Some(w::TurnStatus::Answered | w::TurnStatus::Stopped | w::TurnStatus::Failed)
+        turn.status,
+        TurnStatus::Answered | TurnStatus::Stopped | TurnStatus::Failed
     );
     if terminal {
         companions.streaming.clear();
         companions.chat.stop_requested = false;
     }
-    let failed_message = if turn.status.as_known() == Some(w::TurnStatus::Failed) {
+    let failed_message = if turn.status == TurnStatus::Failed {
         turn.failure
-            .as_option()
+            .as_ref()
             .map(|failure| failure.message.clone())
             .filter(|message| !message.trim().is_empty())
     } else {
@@ -527,52 +518,49 @@ fn merge_turn_event(model: &mut Model, turn: w::TurnEvent) {
     }
 }
 
-fn merge_approval_event(model: &mut Model, event: w::notification::Event, effects: &mut Effects) {
+fn merge_approval_event(model: &mut Model, event: NotificationEvent, effects: &mut Effects) {
     match event {
-        w::notification::Event::ApprovalRequested(requested) => {
-            if let Some(request) = requested.request.into_option()
+        NotificationEvent::ApprovalRequested(requested) => {
+            if let Some(request) = requested
                 && let Some(snapshot) = model.snapshot.as_mut()
             {
-                upsert_approval(&mut snapshot.pending_approvals, request);
+                upsert_approval(&mut snapshot.pending_approvals, *request);
             } else {
                 effects.approvals = true;
             }
         }
-        w::notification::Event::PolicyRulesUpdated(updated) => {
+        NotificationEvent::PolicyRulesUpdated(rules) => {
             if let Some(snapshot) = model.snapshot.as_mut() {
-                snapshot.policy_rules = updated.rules;
+                snapshot.policy_rules = rules;
             }
         }
-        w::notification::Event::PolicyTextsUpdated(updated) => {
+        NotificationEvent::PolicyTextsUpdated(texts) => {
             if let Some(snapshot) = model.snapshot.as_mut() {
-                let mut settings = snapshot.settings.take().unwrap_or_default();
-                settings.policy_texts = updated.texts;
-                snapshot.settings = Some(settings).into();
+                let settings = snapshot.settings.get_or_insert_with(Default::default);
+                settings.policy_texts = texts;
             }
         }
         _ => {}
     }
 }
 
-fn merge_work_event(model: &mut Model, work: &w::WorkEvent) {
+fn merge_work_event(model: &mut Model, work: &WorkEvent) {
     model.companions.work_active = match &work.detail {
-        Some(w::work_event::Detail::RunStarted(_)) => true,
-        Some(w::work_event::Detail::StatusChanged(changed)) => {
-            matches!(changed.status.as_known(), Some(w::WorkStatus::Active))
-        }
-        Some(w::work_event::Detail::RunFinished(finished)) => matches!(
-            finished.state.as_known(),
-            Some(w::RunStatus::Starting | w::RunStatus::Running | w::RunStatus::WaitingInput)
+        Some(WorkEventDetail::RunStarted) => true,
+        Some(WorkEventDetail::StatusChanged(status)) => *status == WorkStatus::Active,
+        Some(WorkEventDetail::RunFinished { state, .. }) => matches!(
+            state,
+            RunStatus::Starting | RunStatus::Running | RunStatus::WaitingInput
         ),
         None => false,
     };
 }
 
-fn merge_generic_notice(model: &mut Model, event: &w::HostEvent) {
+fn merge_generic_notice(model: &mut Model, event: &HostEvent) {
     if event.kind != "notice" {
         return;
     }
-    let Some(document) = event.payload.as_option() else {
+    let Some(document) = event.payload.as_ref() else {
         return;
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&document.json) else {
@@ -602,7 +590,7 @@ fn merge_generic_notice(model: &mut Model, event: &w::HostEvent) {
                 settings
                     .connections
                     .iter()
-                    .any(|c| c.kind == w::ConnectionKind::Llm && c.enabled)
+                    .any(|c| c.kind == ConnectionKind::Llm && c.enabled)
             });
             if has_enabled_llm {
                 model.notice(NoticeKind::Failed, "ホストからの通知", message.to_owned());
@@ -615,7 +603,7 @@ fn merge_generic_notice(model: &mut Model, event: &w::HostEvent) {
 }
 
 /// Inserts or replaces one message, keeping the log ordered by the host's sequence.
-pub fn merge_message(messages: &mut Vec<w::Message>, message: w::Message) {
+pub fn merge_message(messages: &mut Vec<Message>, message: Message) {
     if let Some(existing) = messages
         .iter_mut()
         .find(|existing| existing.id == message.id)
@@ -628,11 +616,11 @@ pub fn merge_message(messages: &mut Vec<w::Message>, message: w::Message) {
 }
 
 /// Keeps a pending approval current, and drops it once it is no longer pending.
-pub fn upsert_approval(approvals: &mut Vec<w::ApprovalRequest>, request: w::ApprovalRequest) {
+pub fn upsert_approval(approvals: &mut Vec<ApprovalRequest>, request: ApprovalRequest) {
     let present = approvals
         .iter()
         .position(|approval| approval.request_id == request.request_id);
-    if request.status == w::ApprovalStatus::Pending {
+    if request.status == ApprovalStatus::Pending {
         match present {
             Some(index) => approvals[index] = request,
             None => approvals.push(request),
@@ -656,7 +644,7 @@ fn upsert_by_revision<T>(
     }
 }
 
-fn upsert_activation(activations: &mut Vec<w::Activation>, activation: w::Activation) {
+fn upsert_activation(activations: &mut Vec<Activation>, activation: Activation) {
     match activations
         .iter()
         .position(|current| current.companion_id == activation.companion_id)

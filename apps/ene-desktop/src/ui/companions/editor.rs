@@ -13,12 +13,12 @@ use crate::{
         },
     },
 };
-use ene_rpc as w;
+use ene_client_core::domain::{BodyBinding, Companion, MindProfile, MindView, VoiceBinding};
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 
 pub(super) struct EditorContext<'a> {
-    pub(super) comp: &'a w::Companion,
-    pub(super) mind_view: Option<&'a w::MindView>,
+    pub(super) comp: &'a Companion,
+    pub(super) mind_view: Option<&'a MindView>,
     pub(super) tts_voices: &'a [(String, String, String, String)],
     pub(super) tts_conn_ids: &'a [String],
     pub(super) exported_json: Option<&'a str>,
@@ -48,8 +48,8 @@ impl SettingsStudio {
         let current_body = ctx
             .comp
             .body
-            .as_option()
-            .and_then(|doc| serde_json::from_str::<w::BodyBinding>(&doc.json).ok())
+            .as_ref()
+            .and_then(|doc| serde_json::from_str::<BodyBinding>(&doc.json).ok())
             .unwrap_or_default();
         let drafts = self.init_companion_editor_drafts(ctx.comp, &current_body, theme, cx);
 
@@ -63,7 +63,7 @@ impl SettingsStudio {
             parse_voice_selection(&voice_key_val, &voice_manual_val);
         let mut next_body = current_body;
         next_body.model = (!body_model_val.is_empty()).then_some(body_model_val);
-        let next_voice = w::VoiceBinding {
+        let next_voice = VoiceBinding {
             connection_id: picked_conn_id.clone(),
             voice_id: picked_voice_id.clone(),
             speed: parse_finite_f32(&drafts.voice_speed_d, cx),
@@ -123,8 +123,8 @@ impl SettingsStudio {
 
     fn init_companion_editor_drafts(
         &mut self,
-        comp: &w::Companion,
-        current_body: &w::BodyBinding,
+        comp: &Companion,
+        current_body: &BodyBinding,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> CompanionEditorDrafts {
@@ -132,8 +132,8 @@ impl SettingsStudio {
         let rev = comp.revision;
         let mut current_voice = comp
             .voice
-            .as_option()
-            .and_then(|doc| serde_json::from_str::<w::VoiceBinding>(&doc.json).ok())
+            .as_ref()
+            .and_then(|doc| serde_json::from_str::<VoiceBinding>(&doc.json).ok())
             .unwrap_or_default();
         if current_voice
             .voice_id
@@ -371,7 +371,7 @@ impl SettingsStudio {
 
         let profile = ctx
             .mind_view
-            .and_then(|v| v.profile.as_option())
+            .and_then(|v| v.profile.as_ref())
             .cloned()
             .unwrap_or_default();
         let prev = profile.revision;
@@ -409,7 +409,7 @@ impl SettingsStudio {
             theme,
         );
 
-        let next_profile = w::MindProfile {
+        let next_profile = MindProfile {
             core: if mind_val.is_empty() {
                 profile.core
             } else {
@@ -420,7 +420,6 @@ impl SettingsStudio {
             examples: split_pipe(examples_d.read(cx).text()),
             background: split_pipe(bg_d.read(cx).text()),
             expression: split_pipe(expr_d.read(cx).text()),
-            ..Default::default()
         };
         let comp_id_save = id.to_owned();
         let hub_mind = self.hub.clone();

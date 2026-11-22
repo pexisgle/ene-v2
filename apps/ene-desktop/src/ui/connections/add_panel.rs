@@ -1,22 +1,24 @@
-use super::edits::{build_custom_connection_input, kind_label};
 use crate::ui::icons::Icon;
 use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, disclosure_row, pill_button};
 use crate::ui::{Hub, SearchPresetSpec, SettingsStudio};
-use ene_rpc as w;
+use ene_client_core::{
+    connections::build_custom_connection_input,
+    domain::{ConnectionKind, LlmProvider},
+};
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 
 impl SettingsStudio {
     pub(super) fn render_add_connection_panel(
         &mut self,
         live: bool,
-        providers: &[w::LlmProvider],
+        providers: &[LlmProvider],
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.connection_form.custom_connection_open
-            && self.connection_form.custom_kind == w::ConnectionKind::Mcp
+            && self.connection_form.custom_kind == ConnectionKind::Mcp
         {
             return self.render_mcp_add(live, theme, cx);
         }
@@ -181,7 +183,7 @@ fn render_chip_section(title: &'static str, chips: Vec<AnyElement>, theme: &Them
 }
 
 fn build_llm_provider_chips(
-    providers: &[w::LlmProvider],
+    providers: &[LlmProvider],
     live: bool,
     hub: &Entity<Hub>,
     theme: &Theme,
@@ -427,50 +429,42 @@ fn build_search_preset_chips(
 }
 
 fn build_custom_kind_chips(
-    custom_kind: w::ConnectionKind,
+    custom_kind: ConnectionKind,
     theme: &Theme,
     cx: &Context<SettingsStudio>,
 ) -> Vec<AnyElement> {
-    [
-        w::ConnectionKind::Llm,
-        w::ConnectionKind::Tts,
-        w::ConnectionKind::Stt,
-        w::ConnectionKind::Embedding,
-        w::ConnectionKind::Mcp,
-        w::ConnectionKind::Acp,
-        w::ConnectionKind::Search,
-    ]
-    .into_iter()
-    .map(|kind| {
-        let selected = custom_kind == kind;
-        let studio = cx.entity();
-        pill_button(
-            SharedString::from(format!("add-custom-kind-{kind:?}")),
-            kind_label(kind),
-            if selected { Tone::Primary } else { Tone::Ghost },
-            theme,
-            move |_, cx| {
-                studio.update(cx, |this, cx| {
-                    this.connection_form.custom_kind = kind;
-                    cx.notify();
-                });
-            },
-        )
-    })
-    .collect()
+    ConnectionKind::ALL_CUSTOM
+        .into_iter()
+        .map(|kind| {
+            let selected = custom_kind == kind;
+            let studio = cx.entity();
+            pill_button(
+                SharedString::from(format!("add-custom-kind-{kind:?}")),
+                kind.label(),
+                if selected { Tone::Primary } else { Tone::Ghost },
+                theme,
+                move |_, cx| {
+                    studio.update(cx, |this, cx| {
+                        this.connection_form.custom_kind = kind;
+                        cx.notify();
+                    });
+                },
+            )
+        })
+        .collect()
 }
 
 fn custom_kind_placeholders(
-    kind: w::ConnectionKind,
+    kind: ConnectionKind,
 ) -> (&'static str, &'static str, &'static str, &'static str) {
     match kind {
-        w::ConnectionKind::Search => (
+        ConnectionKind::Search => (
             "検索アダプタ",
             "例: exa / tavily / brave / mwmbl / searxng",
             "検索 API URL",
             "例: https://api.exa.ai/search",
         ),
-        w::ConnectionKind::Acp | w::ConnectionKind::Mcp => (
+        ConnectionKind::Acp | ConnectionKind::Mcp => (
             "実行コマンド",
             "例: npx / python / my-agent",
             "引数（スペース区切り）",

@@ -16,6 +16,7 @@ mod host;
 mod input;
 mod perception;
 mod plugins;
+mod rpc;
 mod session;
 mod tray;
 mod ui;

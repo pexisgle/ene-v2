@@ -9,7 +9,7 @@ use super::widgets::{Tone, pill_button, status_pill};
 use super::{Hub, SettingsSection, SettingsStudio};
 use crate::audio::CaptureMode;
 use crate::state::{AudioState, Device, Devices};
-use ene_rpc as w;
+use ene_client_core::domain::ConnectionKind;
 use gpui::{AnyElement, Context, Entity, FontWeight, div, prelude::*, px};
 
 fn meter(level: f32, theme: &Theme) -> AnyElement {
@@ -79,8 +79,8 @@ impl SettingsStudio {
                 live: hub.live(),
                 audio: hub.model.audio.clone(),
                 devices: hub.model.connections.devices.clone(),
-                has_stt: hub.has_audio_connection(w::ConnectionKind::Stt),
-                has_tts: hub.has_audio_connection(w::ConnectionKind::Tts),
+                has_stt: hub.has_audio_connection(ConnectionKind::Stt),
+                has_tts: hub.has_audio_connection(ConnectionKind::Tts),
             }
         };
 

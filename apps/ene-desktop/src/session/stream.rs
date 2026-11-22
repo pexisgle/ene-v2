@@ -562,7 +562,7 @@ impl Session {
         }
         let _ = self
             .updates
-            .send(Update::Notification(Box::new(notification)));
+            .send(Update::Notification(Box::new(notification.into())));
         if restart {
             Step::Restart
         } else {
