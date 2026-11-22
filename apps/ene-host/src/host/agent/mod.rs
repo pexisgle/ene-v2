@@ -83,8 +83,8 @@ fn restored_agent(world: &mut World, id: &str) -> Option<Entity> {
 /// The kernel's saved component that says which entries were published, set
 /// to the restored conversation's last entry so a restart does not republish
 /// the transcript as new messages.
-fn published_through(world: &World, entity: Entity) -> LastProjectedEntry {
-    LastProjectedEntry(world.get::<Conversation>(entity).and_then(|conversation| {
+fn published_through(conversation: Option<&Conversation>) -> LastProjectedEntry {
+    LastProjectedEntry(conversation.and_then(|conversation| {
         conversation
             .entries()
             .next_back()
@@ -191,7 +191,7 @@ pub(crate) fn spawn_companion(world: &mut World, companion: &Companion) -> Entit
             ))
             .id(),
     };
-    let published = published_through(world, entity);
+    let published = published_through(world.get::<Conversation>(entity));
     world.entity_mut(entity).insert((
         CompanionAgent {
             companion_id: companion.id.clone(),
@@ -225,7 +225,7 @@ pub(crate) fn spawn_work_agent(
             .spawn((Name::new(format!("work:{run_id}")), Agent, AgentId(id)))
             .id(),
     };
-    let published = published_through(world, entity);
+    let published = published_through(world.get::<Conversation>(entity));
     let access = crate::host::tools::sync::hand_tool_access(world);
     world.entity_mut(entity).insert((
         WorkAgent {
@@ -323,8 +323,11 @@ pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
 }
 
 /// Tells the clients that a saved companion has no usable model yet.
-pub(crate) fn notice_model_unavailable(world: &mut World, companion_id: &str, error: &HostError) {
-    let mut notifier = world.resource_mut::<Notifier>();
+pub(crate) fn notice_model_unavailable(
+    notifier: &mut Notifier,
+    companion_id: &str,
+    error: &HostError,
+) {
     notifier.notice(
         Some(companion_id),
         "model_unavailable",
@@ -346,7 +349,7 @@ pub(crate) fn deliver(
     author: Author,
 ) -> bool {
     if let Err(error) = ensure_model(world, entity) {
-        notice_model_unavailable(world, companion_id, &error);
+        notice_model_unavailable(&mut world.resource_mut::<Notifier>(), companion_id, &error);
         return false;
     }
     world.trigger(Deliver::new(entity, text, mode).with_author(author));
@@ -372,7 +375,11 @@ pub(crate) fn sync_companion(world: &mut World, companion_id: &str) -> Result<()
                 Ok(()) => Ok(()),
                 Err(error) if error.is_storage() => Err(error),
                 Err(error) => {
-                    notice_model_unavailable(world, companion_id, &error);
+                    notice_model_unavailable(
+                        &mut world.resource_mut::<Notifier>(),
+                        companion_id,
+                        &error,
+                    );
                     Ok(())
                 }
             }
@@ -447,7 +454,7 @@ pub(crate) fn reconcile(world: &mut World) -> Result<()> {
     };
     for (entity, companion) in agents {
         if let Err(error) = ensure_model(world, entity) {
-            notice_model_unavailable(world, &companion, &error);
+            notice_model_unavailable(&mut world.resource_mut::<Notifier>(), &companion, &error);
         }
     }
     let mut notifier = world.resource_mut::<Notifier>();
@@ -547,7 +554,13 @@ fn publish_messages(
                     // Without this the host never sends `UtteranceFinished`, the
                     // window never reports playback, and the speech floor stays
                     // held until the next turn flushes it as cancelled.
-                    super::voice::on_turn_end(world, &voice_companion);
+                    let voice = world.get_resource::<super::voice::Voice>().cloned();
+                    let mut notifier = world.get_resource_mut::<Notifier>();
+                    super::voice::on_turn_end(
+                        voice.as_ref(),
+                        notifier.as_deref_mut(),
+                        &voice_companion,
+                    );
                     super::providers::extensions::trigger_character_event(
                         world,
                         &voice_companion,
@@ -690,9 +703,15 @@ fn turn_settled(
         let answered = matches!(outcome, TurnOutcome::Answered(_));
         commands.queue(move |world: &mut World| {
             if answered {
-                super::voice::on_turn_end(world, &companion_id);
+                let voice = world.get_resource::<super::voice::Voice>().cloned();
+                let mut notifier = world.get_resource_mut::<Notifier>();
+                super::voice::on_turn_end(voice.as_ref(), notifier.as_deref_mut(), &companion_id);
             } else {
-                let _ = super::voice::flush(world, &companion_id, w::FlushReason::Cancelled);
+                let _ = super::voice::flush(
+                    world.get_resource::<super::voice::Voice>(),
+                    &companion_id,
+                    w::FlushReason::Cancelled,
+                );
             }
         });
     }

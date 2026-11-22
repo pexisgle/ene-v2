@@ -74,15 +74,13 @@ pub(crate) fn register(app: &mut App) {
     );
 }
 
-fn companion(world: &World, agent: Entity) -> Result<String> {
-    world
-        .get::<CompanionAgent>(agent)
+fn companion(agent: Option<&CompanionAgent>) -> Result<String> {
+    agent
         .map(|agent| agent.companion_id.clone())
         .ok_or_else(|| HostError::Internal(("this tool belongs to a companion").into()))
 }
 
-fn own_session(world: &World, work_id: &str, companion: &str) -> Result<WorkSession> {
-    let store = world.resource::<Store>();
+fn own_session(store: &Store, work_id: &str, companion: &str) -> Result<WorkSession> {
     let candidate = work_id.strip_prefix("work-").unwrap_or(work_id);
     let session = match store.work_repo().work_session(work_id)? {
         Some(session) => Some(session),
@@ -104,7 +102,7 @@ fn own_session(world: &World, work_id: &str, companion: &str) -> Result<WorkSess
 }
 
 fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
-    let companion = companion(world, agent)?;
+    let companion = companion(world.get::<CompanionAgent>(agent))?;
     if args.instruction.trim().is_empty() {
         return Err(HostError::Invalid(("an instruction is required").into()));
     }
@@ -113,7 +111,7 @@ fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
     // so only the first companion starts irreversible work (voice-avatar.md
     // §5.2). A manual chat message has no recorded transcription id and is
     // never claimed.
-    if let Some(transcription_id) = transcription_id(world, agent)
+    if let Some(transcription_id) = transcription_id(world.get::<Conversation>(agent))
         && !delegation::try_claim(world, &transcription_id, &companion)
     {
         // A peer already took the task: this is a normal result, not an error,
@@ -125,12 +123,12 @@ fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
         .to_string());
     }
     if let Some(work_id) = args.work_id.as_deref().filter(|id| !id.is_empty()) {
-        let session = own_session(world, work_id, &companion)?;
+        let store = world.resource::<Store>().clone();
+        let session = own_session(&store, work_id, &companion)?;
         let resolved_id = session.id.clone();
         if session.status == WorkStatus::Closed {
             return Err(HostError::Conflict(("work session is closed").into()));
         }
-        let store = world.resource::<Store>().clone();
         if store.work_repo().active_run(&resolved_id)?.is_some() {
             return Err(HostError::Conflict(
                 ("the work session is already running").into(),
@@ -154,9 +152,8 @@ fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
 /// voice pipeline put on the latest user entry. A chat message carries a
 /// request id there too, but only a transcription recorded by the voice
 /// pipeline can be claimed, so manual chat is never treated as a delegation.
-fn transcription_id(world: &World, agent: Entity) -> Option<String> {
-    let conversation = world.get::<Conversation>(agent)?;
-    conversation
+fn transcription_id(conversation: Option<&Conversation>) -> Option<String> {
+    conversation?
         .entries()
         .rev()
         .find(|entry| entry.is_users_own())?
@@ -168,8 +165,8 @@ fn transcription_id(world: &World, agent: Entity) -> Option<String> {
 }
 
 fn send(world: &mut World, agent: Entity, args: SendArgs) -> Result<String> {
-    let companion = companion(world, agent)?;
-    let session = own_session(world, &args.work_id, &companion)?;
+    let companion = companion(world.get::<CompanionAgent>(agent))?;
+    let session = own_session(world.resource::<Store>(), &args.work_id, &companion)?;
     let acceptance = super::send(
         world,
         w::SendWorkRequest {
@@ -183,8 +180,8 @@ fn send(world: &mut World, agent: Entity, args: SendArgs) -> Result<String> {
 }
 
 fn stop(world: &mut World, agent: Entity, args: StopArgs) -> Result<String> {
-    let companion = companion(world, agent)?;
-    let session = own_session(world, &args.work_id, &companion)?;
+    let companion = companion(world.get::<CompanionAgent>(agent))?;
+    let session = own_session(world.resource::<Store>(), &args.work_id, &companion)?;
     if session.status == WorkStatus::Closed {
         return Ok(json!({"work_id": session.id, "status": "closed"}).to_string());
     }
@@ -218,7 +215,7 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
     let work_id = &work.work_id;
     match args.kind.as_str() {
         "activity" => {
-            super::note_activity(world, &run_id);
+            super::note_activity(&mut world.resource_mut(), &run_id);
             super::inform(
                 world,
                 &work.companion_id,
@@ -229,7 +226,7 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
             Ok(json!({"accepted": true}).to_string())
         }
         "message" => {
-            super::note_activity(world, &run_id);
+            super::note_activity(&mut world.resource_mut(), &run_id);
             super::inform(
                 world,
                 &work.companion_id,
@@ -240,7 +237,7 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
             Ok(json!({"accepted": true}).to_string())
         }
         "question" => {
-            super::note_activity(world, &run_id);
+            super::note_activity(&mut world.resource_mut(), &run_id);
             world.resource_mut::<WorkReports>().completed.insert(
                 run_id,
                 format!("[作業質問 (work_id: {work_id})] {}", args.content),
@@ -252,7 +249,7 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
             Ok(json!({"accepted": true, "status": "waiting_for_answer"}).to_string())
         }
         "completed" => {
-            super::note_activity(world, &run_id);
+            super::note_activity(&mut world.resource_mut(), &run_id);
             world.resource_mut::<WorkReports>().completed.insert(
                 run_id,
                 format!("[作業完了 (work_id: {work_id})] {}", args.content),
@@ -439,13 +436,13 @@ mod tests {
         let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
         let mut world = work_world(store);
         let manual = companion_turn(&mut world, "ene", None);
-        assert_eq!(transcription_id(&world, manual), None);
+        assert_eq!(transcription_id(world.get::<Conversation>(manual)), None);
 
         // A chat acceptance request id is present in the conversation, but the
         // voice pipeline never recorded it, so it is not arbitrated.
         let chat = companion_turn(&mut world, "ene", Some("chat-request"));
         assert_eq!(
-            transcription_id(&world, chat).as_deref(),
+            transcription_id(world.get::<Conversation>(chat)).as_deref(),
             Some("chat-request")
         );
         assert!(delegation::try_claim(&mut world, "chat-request", "kuro"));

@@ -122,6 +122,9 @@ struct GateContext {
     store: Store,
     mcp_tools: HashMap<String, String>,
     plugin_tools: HashMap<String, String>,
+    providers: Option<crate::host::providers::Providers>,
+    credentials: Option<crate::host::model::Credentials>,
+    runtime: Option<tokio::runtime::Handle>,
     cached_rules: Option<Vec<PolicyRule>>,
     reply_calls: HashMap<EffectId, usize>,
 }
@@ -144,6 +147,15 @@ fn gate(world: &mut World) {
         store: world.resource::<Store>().clone(),
         mcp_tools: crate::host::mcp::tool_servers(world),
         plugin_tools: crate::host::providers::extensions::tool_owners(world),
+        providers: world
+            .get_resource::<crate::host::providers::Providers>()
+            .cloned(),
+        credentials: world
+            .get_resource::<crate::host::model::Credentials>()
+            .cloned(),
+        runtime: world
+            .get_resource::<crate::host::resources::HostRuntime>()
+            .map(|r| r.0.clone()),
         cached_rules: None,
         reply_calls: count_reply_calls(world),
     };
@@ -218,22 +230,51 @@ fn process_gate_call(
     if is_host_tool(&item.tool_name) {
         return std::ops::ControlFlow::Continue(());
     }
-    let rules = load_gate_rules(world, ctx, item.entity)?;
+    let rules = match load_gate_rules(ctx) {
+        Ok(rules) => rules,
+        Err(error) => {
+            if error.is_storage() {
+                crate::host::fail(world, error.to_string());
+            } else {
+                refuse(
+                    world,
+                    item.entity,
+                    "policy rules could not be read; failing closed",
+                );
+            }
+            return std::ops::ControlFlow::Break(());
+        }
+    };
     let (companion_id, work_id, run_id) = binding_of(world, item.agent);
     tracing::Span::current().record("companion_id", companion_id.as_str());
-    if let Some(reason) = run_pre_tool_hooks(
-        world,
-        &ctx.store,
-        &companion_id,
-        &item.tool_name,
-        &item.arguments,
-    ) {
+    if let Some(reason) = run_pre_tool_hooks(ctx, &companion_id, &item.tool_name, &item.arguments) {
         refuse(world, item.entity, &reason);
         return std::ops::ControlFlow::Continue(());
     }
-    let Some((action, bound_client_id, bound_capability)) =
-        build_candidate_action(world, ctx, &companion_id, work_id.as_deref(), &item)?
-    else {
+    let candidate = match build_candidate_action(ctx, &item) {
+        CandidateOutcome::Resolved(candidate) => Some(*candidate),
+        CandidateOutcome::NeedsDeviceClient => {
+            let agent_ctx = AgentCapabilityContext {
+                is_work_agent: world.get::<WorkAgent>(item.agent).is_some(),
+                computer_model_supported: crate::host::client::computer::model_supported(
+                    world.get::<rig_ecs::model::Connection>(item.agent),
+                ),
+            };
+            resolve_device_candidate(
+                world,
+                &ctx.store,
+                &companion_id,
+                work_id.as_deref(),
+                agent_ctx,
+                &item,
+            )
+        }
+        CandidateOutcome::Refuse(reason) => {
+            refuse(world, item.entity, &reason);
+            None
+        }
+    };
+    let Some((action, bound_client_id, bound_capability)) = candidate else {
         return std::ops::ControlFlow::Continue(());
     };
     let verdict = decide_action(&rules, &action);
@@ -257,53 +298,31 @@ fn process_gate_call(
 }
 
 fn load_gate_rules(
-    world: &mut World,
     ctx: &mut GateContext,
-    call: Entity,
-) -> std::ops::ControlFlow<(), Vec<PolicyRule>> {
+) -> std::result::Result<Vec<PolicyRule>, ene_store::StoreError> {
     if let Some(rules) = &ctx.cached_rules {
-        return std::ops::ControlFlow::Continue(rules.clone());
+        return Ok(rules.clone());
     }
-    match ctx.store.policy_repo().policy_rules() {
-        Ok(rules) => {
-            ctx.cached_rules = Some(rules.clone());
-            std::ops::ControlFlow::Continue(rules)
-        }
-        Err(error) => {
-            if error.is_storage() {
-                crate::host::fail(world, error.to_string());
-                return std::ops::ControlFlow::Break(());
-            }
-            refuse(
-                world,
-                call,
-                "policy rules could not be read; failing closed",
-            );
-            std::ops::ControlFlow::Break(())
-        }
-    }
+    let rules = ctx.store.policy_repo().policy_rules()?;
+    ctx.cached_rules = Some(rules.clone());
+    Ok(rules)
 }
 
 fn run_pre_tool_hooks(
-    world: &mut World,
-    store: &Store,
+    ctx: &GateContext,
     companion_id: &str,
     tool_name: &str,
     arguments: &Value,
 ) -> Option<String> {
-    let providers = world
-        .get_resource::<crate::host::providers::Providers>()
-        .cloned()?;
+    let providers = ctx.providers.as_ref()?;
     if providers
         .with_extension(ene_plugin::Extension::Hook)
         .is_empty()
     {
         return None;
     }
-    let runtime = world
-        .get_resource::<crate::host::resources::HostRuntime>()
-        .map(|r| r.0.clone())?;
-    let hook_store = store.clone();
+    let runtime = ctx.runtime.as_ref()?;
+    let hook_store = ctx.store.clone();
     let hook_event = ene_plugin::HookEvent::PreTool {
         companion_id: companion_id.to_owned(),
         tool_name: tool_name.to_owned(),
@@ -311,7 +330,7 @@ fn run_pre_tool_hooks(
     };
     let outcome = tokio::task::block_in_place(|| {
         runtime.block_on(crate::host::providers::extensions::run_hooks(
-            &providers,
+            providers,
             &hook_store,
             hook_event,
         ))
@@ -321,15 +340,15 @@ fn run_pre_tool_hooks(
 
 type CandidateResolution = (CandidateAction, Option<String>, Option<String>);
 
-fn build_candidate_action(
-    world: &mut World,
-    ctx: &GateContext,
-    companion_id: &str,
-    work_id: Option<&str>,
-    item: &GateCall,
-) -> std::ops::ControlFlow<(), Option<CandidateResolution>> {
+enum CandidateOutcome {
+    Resolved(Box<CandidateResolution>),
+    NeedsDeviceClient,
+    Refuse(String),
+}
+
+fn build_candidate_action(ctx: &GateContext, item: &GateCall) -> CandidateOutcome {
     if let Some(server_id) = ctx.mcp_tools.get(&item.tool_name) {
-        return std::ops::ControlFlow::Continue(Some((
+        return CandidateOutcome::Resolved(Box::new((
             CandidateAction::McpTool {
                 server_id: server_id.clone(),
                 tool_name: item.tool_name.clone(),
@@ -340,7 +359,7 @@ fn build_candidate_action(
         )));
     }
     if let Some(plugin_id) = ctx.plugin_tools.get(&item.tool_name) {
-        return std::ops::ControlFlow::Continue(Some((
+        return CandidateOutcome::Resolved(Box::new((
             CandidateAction::PluginTool {
                 plugin_id: plugin_id.clone(),
                 tool_name: item.tool_name.clone(),
@@ -351,20 +370,14 @@ fn build_candidate_action(
         )));
     }
     if item.tool_name == crate::host::web_search::NAME {
-        let providers = world
-            .get_resource::<crate::host::providers::Providers>()
-            .cloned()
-            .unwrap_or_default();
+        let providers = ctx.providers.clone().unwrap_or_default();
         let resolved = match crate::host::web_search::resolve(
             &ctx.store,
-            world.get_resource::<crate::host::model::Credentials>(),
+            ctx.credentials.as_ref(),
             &providers,
         ) {
             Ok(resolved) => resolved,
-            Err(reason) => {
-                refuse(world, item.entity, &reason.to_string());
-                return std::ops::ControlFlow::Continue(None);
-            }
+            Err(reason) => return CandidateOutcome::Refuse(reason.to_string()),
         };
         let query = item
             .arguments
@@ -372,7 +385,7 @@ fn build_candidate_action(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
-        return std::ops::ControlFlow::Continue(Some((
+        return CandidateOutcome::Resolved(Box::new((
             CandidateAction::WebSearch {
                 endpoint: resolved.endpoint,
                 query,
@@ -382,7 +395,7 @@ fn build_candidate_action(
             None,
         )));
     }
-    resolve_device_candidate(world, &ctx.store, companion_id, work_id, item)
+    CandidateOutcome::NeedsDeviceClient
 }
 
 fn resolve_device_candidate(
@@ -390,8 +403,9 @@ fn resolve_device_candidate(
     store: &Store,
     companion_id: &str,
     work_id: Option<&str>,
+    agent_ctx: AgentCapabilityContext,
     item: &GateCall,
-) -> std::ops::ControlFlow<(), Option<CandidateResolution>> {
+) -> Option<CandidateResolution> {
     let client_id = match store.client_repo().target(companion_id, work_id) {
         Ok(Some(client_id)) => client_id,
         Ok(None) => {
@@ -400,47 +414,71 @@ fn resolve_device_candidate(
                 item.entity,
                 "no_active_client: no client is bound to this agent",
             );
-            return std::ops::ControlFlow::Continue(None);
+            return None;
         }
         Err(error) => {
-            return handle_gate_store_error(
-                world,
-                item.entity,
-                &error,
-                "client binding could not be read; failing closed",
-            );
+            if error.is_storage() {
+                crate::host::fail(world, error.to_string());
+            } else {
+                refuse(
+                    world,
+                    item.entity,
+                    "client binding could not be read; failing closed",
+                );
+            }
+            return None;
         }
     };
     let client = match store.client_repo().client(&client_id) {
         Ok(Some(client)) => client,
         Ok(None) => {
             refuse(world, item.entity, "the bound client is not registered");
-            return std::ops::ControlFlow::Continue(None);
+            return None;
         }
         Err(error) => {
-            return handle_gate_store_error(
-                world,
-                item.entity,
-                &error,
-                "client record could not be read; failing closed",
-            );
+            if error.is_storage() {
+                crate::host::fail(world, error.to_string());
+            } else {
+                refuse(
+                    world,
+                    item.entity,
+                    "client record could not be read; failing closed",
+                );
+            }
+            return None;
         }
     };
-    let resolved =
-        match resolve_capability(world, item.agent, &client, &item.tool_name, &item.arguments) {
-            Ok(resolved) => resolved,
+    let dynamic_spec = if item.tool_name != "device_request" && !agent_ctx.is_work_agent {
+        match crate::host::client::dynamic::tool_spec_for(world, &client, &item.tool_name) {
+            Ok(spec) => spec,
             Err(error) => {
                 refuse(world, item.entity, error.message());
-                return std::ops::ControlFlow::Continue(None);
+                return None;
             }
-        };
+        }
+    } else {
+        None
+    };
+    let resolved = match resolve_capability(
+        agent_ctx,
+        dynamic_spec,
+        &client,
+        &item.tool_name,
+        &item.arguments,
+    ) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            refuse(world, item.entity, error.message());
+            return None;
+        }
+    };
     let Some((capability, spec)) = resolved else {
         refuse(
             world,
             item.entity,
             &format!("unknown device tool `{}`", item.tool_name),
         );
-        return std::ops::ControlFlow::Continue(None);
+        return None;
     };
     if !client.is_granted(&capability) {
         refuse(
@@ -448,7 +486,7 @@ fn resolve_device_candidate(
             item.entity,
             &format!("capability `{capability}` is not granted"),
         );
-        return std::ops::ControlFlow::Continue(None);
+        return None;
     }
     let empty = serde_json::json!({});
     let input = if item.tool_name == "device_request" {
@@ -462,9 +500,9 @@ fn resolve_device_candidate(
         && let Err(error) = crate::host::client::validate_input(spec, &input)
     {
         refuse(world, item.entity, error.message());
-        return std::ops::ControlFlow::Continue(None);
+        return None;
     }
-    std::ops::ControlFlow::Continue(Some((
+    Some((
         CandidateAction::DeviceCapability {
             capability: capability.clone(),
             spec: spec.map(Box::new),
@@ -474,21 +512,7 @@ fn resolve_device_candidate(
         },
         Some(client_id),
         Some(capability),
-    )))
-}
-
-fn handle_gate_store_error<T>(
-    world: &mut World,
-    call: Entity,
-    error: &ene_store::StoreError,
-    fallback: &str,
-) -> std::ops::ControlFlow<(), Option<T>> {
-    if error.is_storage() {
-        crate::host::fail(world, error.to_string());
-        return std::ops::ControlFlow::Break(());
-    }
-    refuse(world, call, fallback);
-    std::ops::ControlFlow::Continue(None)
+    ))
 }
 
 fn apply_gate_verdict(
@@ -503,7 +527,10 @@ fn apply_gate_verdict(
         Verdict::Deny { reason } => refuse(world, binding.call.entity, &reason),
         Verdict::HumanRequired { target } => {
             let (pending, _) = issue_gate_hold(world, store, &binding, target)?;
-            push_card(world, &pending);
+            if let Some(fatal) = push_card(store, &mut world.resource_mut::<Notifier>(), &pending) {
+                crate::host::fail(world, fatal);
+                return std::ops::ControlFlow::Break(());
+            }
         }
         Verdict::NeedsDecision { target } => {
             let agent = binding.call.agent;
@@ -517,7 +544,12 @@ fn apply_gate_verdict(
                         crate::host::fail(world, error.to_string());
                         return std::ops::ControlFlow::Break(());
                     }
-                    push_card(world, &pending);
+                    if let Some(fatal) =
+                        push_card(store, &mut world.resource_mut::<Notifier>(), &pending)
+                    {
+                        crate::host::fail(world, fatal);
+                        return std::ops::ControlFlow::Break(());
+                    }
                     return std::ops::ControlFlow::Continue(());
                 }
             };
@@ -525,7 +557,7 @@ fn apply_gate_verdict(
                 tool_name,
                 target: pending.target.clone(),
                 arguments: arguments_view,
-                request: request_context(world, store, agent, &run_id),
+                request: request_context(store, world.get::<Conversation>(agent), &run_id),
                 policies,
                 rules: rules.to_vec(),
             };
@@ -605,12 +637,11 @@ pub(crate) fn issue_hold(
 }
 
 pub(crate) fn notify_approval_card(
-    world: &mut World,
+    notifier: &mut Notifier,
     companion: &str,
     approval: &Approval,
     target: &str,
 ) {
-    let mut notifier = world.resource_mut::<Notifier>();
     notifier.push(
         Some(companion),
         None,
@@ -642,10 +673,15 @@ fn binding_of(world: &World, agent: Entity) -> (String, Option<String>, String) 
     }
 }
 
+struct AgentCapabilityContext {
+    is_work_agent: bool,
+    computer_model_supported: bool,
+}
+
 /// The capability a device tool call names, with its declaration.
 fn resolve_capability(
-    world: &mut World,
-    agent: Entity,
+    agent_ctx: AgentCapabilityContext,
+    dynamic_spec: Option<CapabilitySpec>,
     client: &Client,
     tool_name: &str,
     arguments: &Value,
@@ -662,17 +698,14 @@ fn resolve_capability(
             )));
         }
         if capability.starts_with(crate::host::client::WORKSPACE_CAPABILITY_PREFIX)
-            && world.get::<WorkAgent>(agent).is_none()
+            && !agent_ctx.is_work_agent
         {
             return Err(HostError::Permission(
                 ("workspace capabilities require a work session").into(),
             ));
         }
         if capability == w::COMPUTER_USE
-            && (world.get::<WorkAgent>(agent).is_none()
-                || !crate::host::client::computer::model_supported(
-                    world.get::<rig_ecs::model::Connection>(agent),
-                ))
+            && (!agent_ctx.is_work_agent || !agent_ctx.computer_model_supported)
         {
             return Err(HostError::Permission(
                 ("Computer Use requires an internal work agent with an image and tool capable task model").into(),
@@ -683,12 +716,12 @@ fn resolve_capability(
             client.spec(capability).cloned(),
         )));
     }
-    if world.get::<WorkAgent>(agent).is_some() {
+    if agent_ctx.is_work_agent {
         return Err(HostError::Permission(
             ("capability tools are offered to the parent only").into(),
         ));
     }
-    let Some(spec) = crate::host::client::dynamic::tool_spec_for(world, client, tool_name)? else {
+    let Some(spec) = dynamic_spec else {
         return Ok(None);
     };
     Ok(Some((spec.name.clone(), Some(spec))))

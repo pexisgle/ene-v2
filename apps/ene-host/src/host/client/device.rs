@@ -31,7 +31,9 @@ pub(crate) fn on_device_request(called: On<ToolCalled<DeviceRequestArgs>>, mut c
     let called = called.event();
     let (call, agent, args) = (called.call, called.agent, called.args.clone());
     commands.queue(move |world: &mut World| {
-        let Some(spec) = binding_spec(world, call, &args.capability) else {
+        let store = world.resource::<Store>().clone();
+        let binding = world.get::<CallBinding>(call).cloned();
+        let Some(spec) = binding_spec(&store, binding.as_ref(), &args.capability) else {
             permission::refuse(
                 world,
                 call,
@@ -39,8 +41,17 @@ pub(crate) fn on_device_request(called: On<ToolCalled<DeviceRequestArgs>>, mut c
             );
             return;
         };
-        if let Err(error) = execute(world, call, agent, spec.as_ref(), args.input.clone(), true) {
-            refuse_error(world, call, error);
+        match accept(world, call, agent, spec.as_ref(), args.input.clone()) {
+            Ok((operation_id, _)) => {
+                let target_deadline = deadline(world.resource::<DeviceTimeout>());
+                wait(
+                    &mut world.resource_mut::<Waiting>(),
+                    call,
+                    &operation_id,
+                    target_deadline,
+                );
+            }
+            Err(error) => refuse_error(world, call, error),
         }
     });
 }
@@ -153,10 +164,13 @@ pub(super) fn describe_device_request(
 }
 
 /// The declaration the bound client currently carries for `capability`.
-fn binding_spec(world: &World, call: Entity, capability: &str) -> Option<Option<CapabilitySpec>> {
-    let binding = world.get::<CallBinding>(call)?;
-    let client = world
-        .resource::<Store>()
+fn binding_spec(
+    store: &Store,
+    binding: Option<&CallBinding>,
+    capability: &str,
+) -> Option<Option<CapabilitySpec>> {
+    let binding = binding?;
+    let client = store
         .client_repo()
         .client(&binding.client_id)
         .ok()
@@ -177,31 +191,6 @@ fn refuse_error(world: &mut World, call: Entity, error: HostError) {
         }
         other => permission::refuse(world, call, &other.to_string()),
     }
-}
-
-/// Accepts one capability operation against the client the call is bound to.
-///
-/// `wait_for_result` is the documented split (`docs/api.md` §クライアント能力):
-/// `device_request` passes `true` and the call stays open — a [`Waiting`]
-/// entry, bounded by [`DeviceTimeout`], is answered by [`complete`] or
-/// [`expire`]. A named capability tool passes `false` and answers immediately
-/// with the operation id and the dispatch status; its failure or non-delivery
-/// is observed through `GetOperation` or the device notification.
-pub(crate) fn execute(
-    world: &mut World,
-    call: Entity,
-    agent: Entity,
-    spec: Option<&CapabilitySpec>,
-    input: Value,
-    wait_for_result: bool,
-) -> Result<()> {
-    let (operation_id, answer) = accept(world, call, agent, spec, input)?;
-    if wait_for_result {
-        wait(world, call, &operation_id, deadline(world));
-    } else {
-        permission::answer(world, call, &answer);
-    }
-    Ok(())
 }
 
 /// Writes and dispatches one operation, returning its id and the immediate
@@ -300,7 +289,16 @@ pub(crate) fn accept(
         updated_at: now(),
     };
     store.client_repo().insert_operation(&operation)?;
-    let status = dispatch(world, &operation, computer.as_ref(), Some(&companion_id))?;
+    let status = {
+        let hub = world.resource::<DeviceHub>().clone();
+        let mut notifier = world.resource_mut::<Notifier>();
+        let mut ctx = DeviceDispatchContext {
+            store: &store,
+            hub: &hub,
+            notifier: &mut notifier,
+        };
+        dispatch(&mut ctx, &operation, computer.as_ref(), Some(&companion_id))?
+    };
     if let Some(computer) = computer {
         if status != DeviceStatus::Dispatched {
             store
@@ -352,7 +350,14 @@ pub(crate) fn dispatch_direct(
         updated_at: now(),
     };
     store.client_repo().insert_operation(&operation)?;
-    let _ = dispatch(world, &operation, None, Some(companion_id))?;
+    let hub = world.resource::<DeviceHub>().clone();
+    let mut notifier = world.resource_mut::<Notifier>();
+    let mut ctx = DeviceDispatchContext {
+        store: &store,
+        hub: &hub,
+        notifier: &mut notifier,
+    };
+    let _ = dispatch(&mut ctx, &operation, None, Some(companion_id))?;
     Ok(operation_id)
 }
 
@@ -366,18 +371,22 @@ fn agent_context(world: &World, agent: Entity) -> Option<(String, Option<String>
         .map(|work| (work.companion_id.clone(), Some(work.work_id.clone())))
 }
 
+struct DeviceDispatchContext<'a> {
+    store: &'a Store,
+    hub: &'a DeviceHub,
+    notifier: &'a mut Notifier,
+}
+
 /// Writes the operation to the client's live stream. A missing stream leaves
 /// the operation pending for the reconnect and is reported as such; a sent
 /// operation is `dispatched`.
 fn dispatch(
-    world: &mut World,
+    ctx: &mut DeviceDispatchContext<'_>,
     operation: &DeviceOperation,
     computer: Option<&computer::Pending>,
     companion_id: Option<&str>,
 ) -> Result<DeviceStatus> {
-    let hub = world.resource::<DeviceHub>().clone();
-    let store = world.resource::<Store>().clone();
-    let Some(subscription) = hub.subscription(&operation.client_id) else {
+    let Some(subscription) = ctx.hub.subscription(&operation.client_id) else {
         tracing::debug!(operation = %operation.id, "no device stream; the operation waits");
         return Ok(DeviceStatus::Pending);
     };
@@ -386,7 +395,7 @@ fn dispatch(
     }
     let resolved_companion = match companion_id {
         Some(id) if !id.is_empty() => id.to_owned(),
-        _ => resolve_operation_companion(&store, operation)?,
+        _ => resolve_operation_companion(ctx.store, operation)?,
     };
     let mut wire_operation = wire::device_operation(operation, &subscription);
     wire_operation.run_id = computer.map(|pending| pending.run.clone());
@@ -397,12 +406,11 @@ fn dispatch(
         ))),
         ..Default::default()
     };
-    if hub.send(&operation.client_id, event) {
-        store
+    if ctx.hub.send(&operation.client_id, event) {
+        ctx.store
             .client_repo()
             .set_operation_status(&operation.id, DeviceStatus::Dispatched)?;
-        let mut notifier = world.resource_mut::<Notifier>();
-        notifier.push(
+        ctx.notifier.push(
             None,
             Some(&operation.client_id),
             w::notification::Event::DeviceOperation(Box::new(wire_operation)),
@@ -425,64 +433,63 @@ fn resolve_operation_companion(store: &Store, operation: &DeviceOperation) -> Re
         .unwrap_or_default())
 }
 
+struct ResendPlan {
+    active_companion: Option<String>,
+    operations: Vec<DeviceOperation>,
+}
+
+fn load_resend_plan(
+    store: &Store,
+    client: &str,
+) -> std::result::Result<ResendPlan, Option<String>> {
+    let active_companion = match store.client_repo().activation_for_client(client) {
+        Ok(companion) => companion,
+        Err(error) => {
+            if error.is_storage() {
+                return Err(Some(error.to_string()));
+            }
+            tracing::warn!(client, %error, "failed to check client activation on resend");
+            return Err(None);
+        }
+    };
+    let operations = match store.client_repo().outstanding_operations(client) {
+        Ok(operations) => operations,
+        Err(error) => {
+            if error.is_storage() {
+                return Err(Some(error.to_string()));
+            }
+            tracing::warn!(client, %error, "failed to read outstanding operations on resend");
+            return Err(None);
+        }
+    };
+    let operations = operations
+        .into_iter()
+        .filter(|op| {
+            op.status == DeviceStatus::Pending
+                && (op.work_id.is_some() || active_companion.is_some())
+        })
+        .collect();
+    Ok(ResendPlan {
+        active_companion,
+        operations,
+    })
+}
+
 /// Replays operations that were never delivered after a client reconnects.
 pub(crate) fn resend(world: &mut World, client: &str) {
     let subscription = world.resource::<DeviceHub>().subscription(client);
     computer::invalidate_client(world, client, subscription.as_deref());
     let store = world.resource::<Store>().clone();
-    let Some(active_companion) = read_resend_companion(world, &store, client) else {
-        return;
+    let plan = match load_resend_plan(&store, client) {
+        Ok(plan) => plan,
+        Err(Some(fatal)) => {
+            crate::host::fail(world, fatal);
+            return;
+        }
+        Err(None) => return,
     };
-    let Some(operations) = read_resend_operations(world, &store, client) else {
-        return;
-    };
-    replay_resend_operations(world, &operations, active_companion.as_deref());
-}
-
-fn read_resend_companion(world: &mut World, store: &Store, client: &str) -> Option<Option<String>> {
-    match store.client_repo().activation_for_client(client) {
-        Ok(companion) => Some(companion),
-        Err(error) => {
-            if error.is_storage() {
-                crate::host::fail(world, error.to_string());
-            } else {
-                tracing::warn!(client, %error, "failed to check client activation on resend");
-            }
-            None
-        }
-    }
-}
-
-fn read_resend_operations(
-    world: &mut World,
-    store: &Store,
-    client: &str,
-) -> Option<Vec<DeviceOperation>> {
-    match store.client_repo().outstanding_operations(client) {
-        Ok(operations) => Some(operations),
-        Err(error) => {
-            if error.is_storage() {
-                crate::host::fail(world, error.to_string());
-            } else {
-                tracing::warn!(client, %error, "failed to read outstanding operations on resend");
-            }
-            None
-        }
-    }
-}
-
-fn replay_resend_operations(
-    world: &mut World,
-    operations: &[DeviceOperation],
-    active_companion: Option<&str>,
-) {
-    for operation in operations {
-        if operation.status != DeviceStatus::Pending {
-            continue;
-        }
-        if operation.work_id.is_none() && active_companion.is_none() {
-            continue;
-        }
+    let hub = world.resource::<DeviceHub>().clone();
+    for operation in plan.operations {
         if operation.capability == w::COMPUTER_USE {
             uncertain(
                 world,
@@ -490,7 +497,13 @@ fn replay_resend_operations(
                 "Computer Use operations are never replayed",
             );
         } else {
-            let _ = dispatch(world, operation, None, active_companion);
+            let mut notifier = world.resource_mut::<Notifier>();
+            let mut ctx = DeviceDispatchContext {
+                store: &store,
+                hub: &hub,
+                notifier: &mut notifier,
+            };
+            let _ = dispatch(&mut ctx, &operation, None, plan.active_companion.as_deref());
         }
     }
 }
@@ -544,14 +557,39 @@ pub(crate) fn complete(
     if operation.status.is_terminal() {
         return Ok(wire::device_state(&operation));
     }
-    let computer = match prepare_computer_use(world, &store, &operation, &result) {
-        std::ops::ControlFlow::Continue(pending) => pending,
-        std::ops::ControlFlow::Break(early) => return early,
+    let computer = match prepare_computer_use(
+        world.get_resource::<ComputerUse>(),
+        &store,
+        world.get_resource::<DeviceHub>(),
+        &operation,
+        &result,
+    ) {
+        ComputerUseCheck::Skip => None,
+        ComputerUseCheck::Ready(pending) => Some(pending),
+        ComputerUseCheck::MarkUncertain => {
+            uncertain(
+                world,
+                &operation.id,
+                "the Computer Use operation's result is unknown; do not retry it",
+            );
+            return get(
+                world,
+                w::Id {
+                    id: operation.id.clone(),
+                    ..Default::default()
+                },
+            );
+        }
     };
     let (base_success, failure, validated) =
         parse_and_validate_output(&store, &operation, &result)?;
-    let (validated, frame) =
-        apply_computer_use_output(world, &operation, computer, base_success, validated);
+    let (validated, frame) = apply_computer_use_output(
+        world.get_resource_mut::<ComputerUse>().as_deref_mut(),
+        &operation,
+        computer,
+        base_success,
+        validated,
+    );
     let (success, output, failure) = resolve_operation_outcome(base_success, validated, failure);
     let updated = store
         .client_repo()
@@ -566,7 +604,8 @@ pub(crate) fn complete(
             if let Some(frame) = frame {
                 computer::save_frame(world, frame);
             }
-            answer_successful_waiter(world, waiter.call, &operation, output.as_ref());
+            let outcome = build_waiter_outcome(&operation, output.as_ref());
+            permission::decide(world, waiter.call, outcome);
         } else {
             let reason = failure
                 .as_ref()
@@ -583,42 +622,37 @@ pub(crate) fn complete(
     Ok(wire::device_state(&updated))
 }
 
+enum ComputerUseCheck {
+    Skip,
+    Ready(computer::Pending),
+    MarkUncertain,
+}
+
 fn prepare_computer_use(
-    world: &mut World,
+    computer_use: Option<&ComputerUse>,
     store: &Store,
+    hub: Option<&DeviceHub>,
     operation: &DeviceOperation,
     result: &w::DeviceOperationResult,
-) -> std::ops::ControlFlow<Result<w::DeviceOperationState>, Option<computer::Pending>> {
+) -> ComputerUseCheck {
     if operation.capability != w::COMPUTER_USE {
-        return std::ops::ControlFlow::Continue(None);
+        return ComputerUseCheck::Skip;
     }
-    let pending = world
-        .resource::<ComputerUse>()
-        .operations
-        .get(&operation.id)
-        .cloned();
+    let pending = computer_use.and_then(|state| state.operations.get(&operation.id).cloned());
     if !pending
         .as_ref()
-        .is_some_and(|pending| computer::active(store, world.resource::<DeviceHub>(), pending))
+        .is_some_and(|pending| hub.is_some_and(|hub| computer::active(store, hub, pending)))
         || result
             .failure
             .as_option()
             .is_some_and(|failure| failure.code == "operation_uncertain")
     {
-        uncertain(
-            world,
-            &operation.id,
-            "the Computer Use operation's result is unknown; do not retry it",
-        );
-        return std::ops::ControlFlow::Break(get(
-            world,
-            w::Id {
-                id: operation.id.clone(),
-                ..Default::default()
-            },
-        ));
+        return ComputerUseCheck::MarkUncertain;
     }
-    std::ops::ControlFlow::Continue(pending)
+    match pending {
+        Some(pending) => ComputerUseCheck::Ready(pending),
+        None => ComputerUseCheck::MarkUncertain,
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -674,7 +708,7 @@ fn parse_and_validate_output(
 }
 
 fn apply_computer_use_output(
-    world: &mut World,
+    computer_use: Option<&mut ComputerUse>,
     operation: &DeviceOperation,
     computer: Option<computer::Pending>,
     success: bool,
@@ -686,10 +720,9 @@ fn apply_computer_use_output(
     let Some(pending) = computer else {
         return (validated, None);
     };
-    world
-        .resource_mut::<ComputerUse>()
-        .operations
-        .remove(&operation.id);
+    if let Some(computer_use) = computer_use {
+        computer_use.operations.remove(&operation.id);
+    }
     let mut frame = None;
     let validated = match (success, validated) {
         (true, Some(Ok(output))) => Some(
@@ -734,12 +767,7 @@ fn resolve_operation_outcome(
     }
 }
 
-fn answer_successful_waiter(
-    world: &mut World,
-    call: Entity,
-    operation: &DeviceOperation,
-    output: Option<&Value>,
-) {
+fn build_waiter_outcome(operation: &DeviceOperation, output: Option<&Value>) -> Outcome {
     if let Some(image) = read_image(&operation.capability, output) {
         use rig_core::{
             message::ToolResultContent,
@@ -756,19 +784,15 @@ fn answer_successful_waiter(
             ToolResultContent::Image(image),
         ];
         match ToolOutput::content(blocks) {
-            Ok(tool_output) => {
-                permission::decide(world, call, Outcome::from(ToolResult::success(tool_output)));
-            }
-            Err(error) => {
-                permission::refuse(world, call, &error.to_string());
-            }
+            Ok(tool_output) => Outcome::from(ToolResult::success(tool_output)),
+            Err(error) => Outcome::refused(error.to_string()),
         }
     } else {
-        permission::answer(
-            world,
-            call,
-            &json!({"operation_id": operation.id, "output": output}).to_string(),
-        );
+        Outcome::from(rig_core::tool::ToolResult::success(
+            json!({"operation_id": operation.id, "output": output})
+                .to_string()
+                .into(),
+        ))
     }
 }
 
@@ -795,24 +819,38 @@ fn read_image(capability: &str, output: Option<&Value>) -> Option<rig_core::mess
     })
 }
 
-/// Reads the current state of one operation.
-pub(crate) fn get(world: &mut World, request: w::Id) -> Result<w::DeviceOperationState> {
-    let store = world.resource::<Store>().clone();
+fn get_state(
+    store: &Store,
+    computer_use: Option<&ComputerUse>,
+    hub: Option<&DeviceHub>,
+    id: &str,
+) -> Result<w::DeviceOperationState> {
     let mut operation = store
         .client_repo()
-        .operation(&request.id)?
+        .operation(id)?
         .ok_or_else(|| HostError::NotFound(("device operation not found").into()))?;
     if operation.capability == w::COMPUTER_USE
         && !operation.status.is_terminal()
-        && !world.get_resource::<ComputerUse>().is_some_and(|state| {
-            state.operations.get(&operation.id).is_some_and(|pending| {
-                computer::active(&store, world.resource::<DeviceHub>(), pending)
-            })
+        && !computer_use.is_some_and(|state| {
+            state
+                .operations
+                .get(&operation.id)
+                .is_some_and(|pending| hub.is_some_and(|hub| computer::active(store, hub, pending)))
         })
     {
         operation.status = DeviceStatus::Uncertain;
     }
     Ok(wire::device_state(&operation))
+}
+
+/// Reads the current state of one operation.
+pub(crate) fn get(world: &mut World, request: w::Id) -> Result<w::DeviceOperationState> {
+    get_state(
+        world.resource::<Store>(),
+        world.get_resource::<ComputerUse>(),
+        world.get_resource::<DeviceHub>(),
+        &request.id,
+    )
 }
 
 /// The waiting deadline expired: the operation is uncertain, never a success.
@@ -847,14 +885,13 @@ pub(super) fn uncertain(world: &mut World, operation_id: &str, reason: &str) {
 }
 
 /// Registers a waiting tool call for an operation.
-pub(crate) fn wait(world: &mut World, call: Entity, operation: &str, deadline: Instant) {
-    world
-        .resource_mut::<Waiting>()
+fn wait(waiting: &mut Waiting, call: Entity, operation: &str, deadline: Instant) {
+    waiting
         .by_operation
         .insert(operation.to_owned(), WaitingOperation { call, deadline });
 }
 
 /// The default deadline for a device operation.
-pub(crate) fn deadline(world: &World) -> Instant {
-    Instant::now() + world.resource::<DeviceTimeout>().0
+fn deadline(timeout: &DeviceTimeout) -> Instant {
+    Instant::now() + timeout.0
 }

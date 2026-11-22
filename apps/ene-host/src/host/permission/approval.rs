@@ -86,11 +86,20 @@ pub(crate) fn submit(
     submit_with_outcome(world, request_id, decision).map(|outcome| outcome.approval)
 }
 
-fn load_verified_hold(
-    world: &mut World,
+enum HoldVerification {
+    Valid {
+        hold: Hold,
+        snapshot: Option<(String, Value)>,
+    },
+    Mismatch(Hold),
+}
+
+fn verify_hold_snapshot(
     store: &Store,
     request_id: &str,
-) -> Result<(Hold, Option<(String, Value)>)> {
+    hold: Option<Hold>,
+    request_snapshot: Option<(String, Value)>,
+) -> Result<HoldVerification> {
     let approval = store
         .approval_repo()
         .approval(request_id)?
@@ -100,12 +109,7 @@ fn load_verified_hold(
             ("approval is no longer pending").into(),
         ));
     }
-    let Some(hold) = world
-        .resource::<Approvals>()
-        .by_request
-        .get(request_id)
-        .copied()
-    else {
+    let Some(hold) = hold else {
         store
             .approval_repo()
             .resolve_approval(request_id, ApprovalStatus::Expired)?;
@@ -113,12 +117,6 @@ fn load_verified_hold(
             ("approval is not attached to a live tool call").into(),
         ));
     };
-    let request_snapshot = world.get::<ToolRequest>(hold.call).map(|request| {
-        (
-            request.call.function.name.as_str().to_owned(),
-            Value::Object(request.call.function.arguments.clone()),
-        )
-    });
     let changed = request_snapshot
         .as_ref()
         .map(|(name, args)| canonicalise(name, args).1)
@@ -127,28 +125,27 @@ fn load_verified_hold(
         store
             .approval_repo()
             .resolve_approval(request_id, ApprovalStatus::Expired)?;
-        release(world, request_id);
-        refuse(
-            world,
-            hold.call,
-            "the operation arguments changed after the approval was requested",
-        );
-        return Err(HostError::Conflict(
-            ("approval no longer matches the call arguments").into(),
-        ));
+        return Ok(HoldVerification::Mismatch(hold));
     }
-    Ok((hold, request_snapshot))
+    Ok(HoldVerification::Valid {
+        hold,
+        snapshot: request_snapshot,
+    })
+}
+
+enum BoundClientCheck {
+    Allowed(Option<String>),
+    Denied(String),
 }
 
 fn validate_bound_approval_client(
-    world: &mut World,
     store: &Store,
     request_id: &str,
-    hold: Hold,
+    binding: Option<&CallBinding>,
     request_snapshot: Option<&(String, Value)>,
-) -> Result<Option<String>> {
-    let Some(binding) = world.get::<CallBinding>(hold.call).cloned() else {
-        return Ok(None);
+) -> Result<BoundClientCheck> {
+    let Some(binding) = binding else {
+        return Ok(BoundClientCheck::Allowed(None));
     };
     let approval = store
         .approval_repo()
@@ -184,9 +181,7 @@ fn validate_bound_approval_client(
             store
                 .approval_repo()
                 .resolve_approval(request_id, ApprovalStatus::Denied)?;
-            release(world, request_id);
-            refuse(world, hold.call, &reason);
-            return Err(HostError::Permission(reason));
+            return Ok(BoundClientCheck::Denied(reason));
         }
         if approval.client_id.as_deref() != Some(target_id.as_str()) {
             let rules = store.policy_repo().policy_rules()?;
@@ -194,20 +189,24 @@ fn validate_bound_approval_client(
                 store
                     .approval_repo()
                     .resolve_approval(request_id, ApprovalStatus::Denied)?;
-                release(world, request_id);
-                refuse(world, hold.call, &reason);
-                return Err(HostError::Permission(reason));
+                return Ok(BoundClientCheck::Denied(reason));
             }
         }
     }
-    Ok(Some(target_id))
+    Ok(BoundClientCheck::Allowed(Some(target_id)))
+}
+
+struct PersistRuleOutcome {
+    saved: bool,
+    error: Option<String>,
+    fatal_storage: Option<String>,
 }
 
 fn persist_always_allow_rule(
-    world: &mut World,
     store: &Store,
+    notifier: &mut Notifier,
     approval: &Approval,
-) -> (bool, Option<String>) {
+) -> PersistRuleOutcome {
     let pattern = if approval.normalized_arguments.trim().is_empty() {
         "*".to_owned()
     } else if approval.normalized_arguments.chars().count() <= 4_000 {
@@ -225,7 +224,7 @@ fn persist_always_allow_rule(
     match store.policy_repo().apply_policy_rules(&[rule], &[]) {
         Ok(rules) => {
             let wire_rules = rules.iter().map(crate::host::wire::policy_rule).collect();
-            world.resource_mut::<Notifier>().push(
+            notifier.push(
                 None,
                 None,
                 w::notification::Event::PolicyRulesUpdated(Box::new(w::PolicyRulesUpdated {
@@ -233,20 +232,26 @@ fn persist_always_allow_rule(
                     ..Default::default()
                 })),
             );
-            (true, None)
+            PersistRuleOutcome {
+                saved: true,
+                error: None,
+                fatal_storage: None,
+            }
         }
         Err(error) => {
-            if error.is_storage() {
-                crate::host::fail(world, error.to_string());
-            }
+            let fatal_storage = error.is_storage().then(|| error.to_string());
             let msg = error.to_string();
             tracing::warn!(%error, "failed to persist AlwaysApprove policy rule");
-            world.resource_mut::<Notifier>().notice(
+            notifier.notice(
                 Some(&approval.session_id),
                 "policy_rule_save_failed",
                 &format!("承認は実行されましたが、常時許可ルールの保存に失敗しました: {msg}"),
             );
-            (false, Some(msg))
+            PersistRuleOutcome {
+                saved: false,
+                error: Some(msg),
+                fatal_storage,
+            }
         }
     }
 }
@@ -257,16 +262,50 @@ pub(crate) fn submit_with_outcome(
     decision: ApprovalDecision,
 ) -> Result<SubmitOutcome> {
     let store = world.resource::<Store>().clone();
-    let (hold, request_snapshot) = load_verified_hold(world, &store, request_id)?;
+    let hold_entry = world
+        .resource::<Approvals>()
+        .by_request
+        .get(request_id)
+        .copied();
+    let request_snapshot = hold_entry.and_then(|hold| {
+        world.get::<ToolRequest>(hold.call).map(|request| {
+            (
+                request.call.function.name.as_str().to_owned(),
+                Value::Object(request.call.function.arguments.clone()),
+            )
+        })
+    });
+    let (hold, request_snapshot) =
+        match verify_hold_snapshot(&store, request_id, hold_entry, request_snapshot)? {
+            HoldVerification::Valid { hold, snapshot } => (hold, snapshot),
+            HoldVerification::Mismatch(hold) => {
+                release(world, request_id);
+                refuse(
+                    world,
+                    hold.call,
+                    "the operation arguments changed after the approval was requested",
+                );
+                return Err(HostError::Conflict(
+                    ("approval no longer matches the call arguments").into(),
+                ));
+            }
+        };
     match decision {
         ApprovalDecision::Approve | ApprovalDecision::AlwaysApprove => {
-            let rebound_client = validate_bound_approval_client(
-                world,
+            let binding = world.get::<CallBinding>(hold.call).cloned();
+            let rebound_client = match validate_bound_approval_client(
                 &store,
                 request_id,
-                hold,
+                binding.as_ref(),
                 request_snapshot.as_ref(),
-            )?;
+            )? {
+                BoundClientCheck::Allowed(rebound_client) => rebound_client,
+                BoundClientCheck::Denied(reason) => {
+                    release(world, request_id);
+                    refuse(world, hold.call, &reason);
+                    return Err(HostError::Permission(reason));
+                }
+            };
             let approval = store.approval_repo().resolve_approval_with_client(
                 request_id,
                 ApprovalStatus::Approved,
@@ -279,16 +318,23 @@ pub(crate) fn submit_with_outcome(
                 binding.client_id = target_id;
             }
             world.entity_mut(hold.call).insert(Approved);
-            let (rule_saved, rule_error) = if matches!(decision, ApprovalDecision::AlwaysApprove) {
-                persist_always_allow_rule(world, &store, &approval)
+            let rule_outcome = if matches!(decision, ApprovalDecision::AlwaysApprove) {
+                persist_always_allow_rule(&store, &mut world.resource_mut::<Notifier>(), &approval)
             } else {
-                (false, None)
+                PersistRuleOutcome {
+                    saved: false,
+                    error: None,
+                    fatal_storage: None,
+                }
             };
-            notify_resolved(world, &approval);
+            if let Some(fatal) = rule_outcome.fatal_storage {
+                crate::host::fail(world, fatal);
+            }
+            notify_resolved(&mut world.resource_mut::<Notifier>(), &approval);
             Ok(SubmitOutcome {
                 approval,
-                rule_saved,
-                rule_error,
+                rule_saved: rule_outcome.saved,
+                rule_error: rule_outcome.error,
             })
         }
         ApprovalDecision::Deny | ApprovalDecision::Unspecified => {
@@ -297,7 +343,7 @@ pub(crate) fn submit_with_outcome(
                 .resolve_approval(request_id, ApprovalStatus::Denied)?;
             release(world, request_id);
             refuse(world, hold.call, "the user denied this operation");
-            notify_resolved(world, &approval);
+            notify_resolved(&mut world.resource_mut::<Notifier>(), &approval);
             Ok(SubmitOutcome {
                 approval,
                 rule_saved: false,
@@ -307,8 +353,7 @@ pub(crate) fn submit_with_outcome(
     }
 }
 
-fn notify_resolved(world: &mut World, approval: &Approval) {
-    let mut notifier = world.resource_mut::<Notifier>();
+fn notify_resolved(notifier: &mut Notifier, approval: &Approval) {
     notifier.notice(
         Some(&approval.session_id),
         "approval_resolved",

@@ -94,11 +94,11 @@ struct Pending {
 /// connection onto an installed harness plugin. Anything else keeps the
 /// in-process rig agent.
 pub(crate) fn selected(
-    world: &World,
+    store: &Store,
+    providers: Option<&Providers>,
     companion: &crate::host::mind::Companion,
 ) -> Option<(String, Arc<Running>)> {
     let assignment = companion.model(crate::host::mind::Role::Task)?;
-    let store = world.resource::<Store>();
     let settings = store.settings_repo().settings().ok()?;
     let connection = settings
         .connections
@@ -108,9 +108,7 @@ pub(crate) fn selected(
         return None;
     }
     let adapter = connection.endpoint().adapter.clone();
-    let running = world
-        .get_resource::<Providers>()?
-        .running(&adapter, Extension::Harness)?;
+    let running = providers?.running(&adapter, Extension::Harness)?;
     Some((adapter, running))
 }
 
@@ -160,21 +158,29 @@ pub(crate) fn start_run(
             pending: None,
         },
     );
-    super::note_activity(world, &run.run_id);
-    dispatch(world, &adapter, input);
+    super::note_activity(&mut world.resource_mut(), &run.run_id);
+    let runtime = world.resource::<HostRuntime>().0.clone();
+    let wake = world.get_resource::<rig_ecs::tasks::Wake>().cloned();
+    dispatch_to_hand(
+        &mut world.resource_mut::<Hands>(),
+        &runtime,
+        wake.as_ref(),
+        &adapter,
+        input,
+    );
     Ok(())
 }
 
 /// Whether a work session runs on the plugin hand.
-pub(crate) fn owns(world: &World, work_id: &str) -> bool {
-    adapter_of(world, work_id).is_some()
+pub(crate) fn owns(hands: &Hands, work_id: &str) -> bool {
+    adapter_of(hands, work_id).is_some()
 }
 
 /// `send_work` while the hand's run is active: the guest is inside its turn
 /// and cannot take a second prompt mid-invocation, so the input is parked
 /// and becomes the next prompt turn once the run settles.
-pub(crate) fn steer(world: &mut World, work_id: &str, text: &str) {
-    edit_hand(world, work_id, |hand| {
+pub(crate) fn steer(hands: &mut Hands, work_id: &str, text: &str) {
+    edit_hand(hands, work_id, |hand| {
         hand.parked.push_back(text.to_owned());
     });
 }
@@ -183,7 +189,7 @@ pub(crate) fn steer(world: &mut World, work_id: &str, text: &str) {
 /// ends the session (the next request reloads a fresh guest); a run parked on
 /// a permission request is told `Cancel` and keeps its session.
 pub(crate) fn stop(world: &mut World, work_id: &str) {
-    let Some(adapter) = adapter_of(world, work_id) else {
+    let Some(adapter) = adapter_of(world.resource::<Hands>(), work_id) else {
         return;
     };
     let (running, in_flight, parked) = {
@@ -199,7 +205,7 @@ pub(crate) fn stop(world: &mut World, work_id: &str) {
         )
     };
     if in_flight {
-        edit_hand(world, work_id, |hand| {
+        edit_hand(&mut world.resource_mut::<Hands>(), work_id, |hand| {
             // Dropping the driver aborts the call, which leaves the instance
             // without its guest. The next request reloads one whose session
             // state is empty, so the hand's claim on the adapter ends here.
@@ -215,12 +221,20 @@ pub(crate) fn stop(world: &mut World, work_id: &str) {
     // The turn is parked on a permission request (or already drained): tell
     // the guest its turn was cancelled, and let the approval row expire.
     if parked {
-        edit_hand(world, work_id, |hand| {
+        edit_hand(&mut world.resource_mut::<Hands>(), work_id, |hand| {
             hand.buffer.clear_message();
             hand.parked.clear();
         });
         drop_pending(world, &adapter);
-        dispatch(world, &adapter, HarnessInput::Cancel);
+        let runtime = world.resource::<HostRuntime>().0.clone();
+        let wake = world.get_resource::<rig_ecs::tasks::Wake>().cloned();
+        dispatch_to_hand(
+            &mut world.resource_mut::<Hands>(),
+            &runtime,
+            wake.as_ref(),
+            &adapter,
+            HarnessInput::Cancel,
+        );
     }
 }
 
@@ -229,7 +243,7 @@ pub(crate) fn stop(world: &mut World, work_id: &str) {
 /// documents. An invocation still in flight dies with the hand, so the next
 /// request reloads a fresh guest.
 pub(crate) fn release(world: &mut World, work_id: &str) {
-    let Some(adapter) = adapter_of(world, work_id) else {
+    let Some(adapter) = adapter_of(world.resource::<Hands>(), work_id) else {
         return;
     };
     // A parked approval, if any, is a hold on a call of the session being
@@ -251,7 +265,9 @@ pub(crate) fn release(world: &mut World, work_id: &str) {
         // reload one: abort the driver here and note the cancellation, the
         // same way a stop does. Leaving it to the drop would strand the
         // adapter on an unusable instance.
-        edit_hand(world, work_id, |hand| hand.driver = None);
+        edit_hand(&mut world.resource_mut::<Hands>(), work_id, |hand| {
+            hand.driver = None;
+        });
     }
     if let Some(hand) = world.resource_mut::<Hands>().by_adapter.remove(&adapter)
         && in_flight
@@ -292,20 +308,16 @@ fn drop_pending(world: &mut World, adapter: &str) {
     }
 }
 
-fn adapter_of(world: &World, work_id: &str) -> Option<String> {
-    world
-        .resource::<Hands>()
+fn adapter_of(hands: &Hands, work_id: &str) -> Option<String> {
+    hands
         .by_adapter
         .iter()
         .find(|(_, hand)| hand.work_id == work_id)
         .map(|(adapter, _)| adapter.clone())
 }
 
-/// Runs `edit` on the hand that serves `work_id`, if one exists. The guard
-/// the resource hands out cannot leave this function, so the edit happens
-/// here instead of returning a reference.
-fn edit_hand<R>(world: &mut World, work_id: &str, edit: impl FnOnce(&mut Hand) -> R) -> Option<R> {
-    let mut hands = world.resource_mut::<Hands>();
+/// Runs `edit` on the hand that serves `work_id`, if one exists.
+fn edit_hand<R>(hands: &mut Hands, work_id: &str, edit: impl FnOnce(&mut Hand) -> R) -> Option<R> {
     hands
         .by_adapter
         .values_mut()
@@ -319,22 +331,26 @@ fn cwd() -> String {
         .unwrap_or_default()
 }
 
-fn dispatch(world: &mut World, adapter: &str, input: HarnessInput) {
-    let running = Arc::clone(&world.resource::<Hands>().by_adapter[adapter].running);
+fn dispatch_to_hand(
+    hands: &mut Hands,
+    runtime: &tokio::runtime::Handle,
+    wake: Option<&rig_ecs::tasks::Wake>,
+    adapter: &str,
+    input: HarnessInput,
+) {
+    let Some(hand) = hands.by_adapter.get_mut(adapter) else {
+        return;
+    };
+    let running = Arc::clone(&hand.running);
     let services: Arc<dyn Services> = Arc::new(DenyServices);
     let (sender, events) = mpsc::channel(16);
-    let runtime = world.resource::<HostRuntime>().0.clone();
-    let wake = world.get_resource::<rig_ecs::tasks::Wake>().cloned();
-    let driver = background::spawn(&runtime, wake.as_ref(), async move {
+    let driver = background::spawn(runtime, wake, async move {
         running
             .invoke_streaming(Operation::Harness { input }, services, sender)
             .await
     });
-    let mut hands = world.resource_mut::<Hands>();
-    if let Some(hand) = hands.by_adapter.get_mut(adapter) {
-        hand.driver = Some(driver);
-        hand.events.push(events);
-    }
+    hand.driver = Some(driver);
+    hand.events.push(events);
 }
 
 // === The app-thread collector ==============================================
@@ -343,19 +359,50 @@ fn dispatch(world: &mut World, adapter: &str, input: HarnessInput) {
 /// invocation, the outcome of a finished driver, the reply to a resolved
 /// approval, and the input a finished run parked.
 pub(crate) fn collect(world: &mut World) {
-    let batches = take_events(world);
+    let batches = take_events(&mut world.resource_mut::<Hands>());
     for (adapter, events) in batches {
         for event in events {
             apply(world, &adapter, event);
         }
     }
-    finish_drivers(world);
-    resume_approvals(world);
-    deliver_parked(world);
+    let store = world.resource::<Store>().clone();
+    let driver_failures = take_driver_failures(&mut world.resource_mut::<Hands>(), &store);
+    for (run, why) in driver_failures {
+        super::finish_run(
+            world,
+            run,
+            RunState::Failed,
+            Some(format!("作業を続けられませんでした: {why}")),
+        );
+    }
+    let approvals = take_resolved_approvals(&mut world.resource_mut::<Hands>(), &store);
+    if !approvals.is_empty() {
+        let runtime = world.resource::<HostRuntime>().0.clone();
+        let wake = world.get_resource::<rig_ecs::tasks::Wake>().cloned();
+        let mut hands = world.resource_mut::<Hands>();
+        for (adapter, request, reply) in approvals {
+            dispatch_to_hand(
+                &mut hands,
+                &runtime,
+                wake.as_ref(),
+                &adapter,
+                HarnessInput::Respond {
+                    request_id: request,
+                    outcome: reply,
+                },
+            );
+        }
+    }
+    let parked = take_parked_sessions(&mut world.resource_mut::<Hands>(), &store);
+    for (session, text) in parked {
+        let work_id = session.id.clone();
+        if let Err(error) = super::start_run(world, &session, &text) {
+            tracing::warn!(work = %work_id, "parked input could not start a run: {error}");
+        }
+    }
 }
 
-fn take_events(world: &mut World) -> Vec<(String, Vec<ene_plugin::Event>)> {
-    let mut hands = world.resource_mut::<Hands>();
+fn take_events(hands: &mut Hands) -> Vec<(String, Vec<ene_plugin::Event>)> {
     let adapters: Vec<String> = hands.by_adapter.keys().cloned().collect();
     let mut batches = Vec::new();
     for adapter in adapters {
@@ -421,7 +468,7 @@ fn apply(world: &mut World, adapter: &str, event: ene_plugin::Event) {
                 );
             }
             if let Some(text) = effects.report {
-                super::note_activity(world, &run.run_id);
+                super::note_activity(&mut world.resource_mut(), &run.run_id);
                 super::inform(
                     world,
                     &companion_id,
@@ -557,150 +604,110 @@ fn request_permission(
         "{tool_name} {}",
         crate::host::util::truncate(&approval.normalized_arguments, 200)
     );
-    permission::notify_approval_card(world, companion, &approval, &target);
+    permission::notify_approval_card(
+        &mut world.resource_mut::<crate::host::notify::Notifier>(),
+        companion,
+        &approval,
+        &target,
+    );
 }
 
-/// Takes the driver that finished and settles the run it left open. The
-/// events arrive before this runs, so an orderly driver has already settled
-/// its run; one that failed without a `Stop` settles it failed.
-fn finish_drivers(world: &mut World) {
-    let store = world.resource::<Store>().clone();
-    let failures: Vec<(String, String)> = {
-        let mut hands = world.resource_mut::<Hands>();
-        let adapters: Vec<String> = hands.by_adapter.keys().cloned().collect();
-        let mut failures = Vec::new();
-        for adapter in &adapters {
-            let Some(hand) = hands.by_adapter.get_mut(adapter) else {
-                continue;
-            };
-            if !hand
-                .driver
-                .as_ref()
-                .is_some_and(|driver| driver.is_finished())
-            {
-                continue;
-            }
-            let Some(driver) = hand.driver.take() else {
-                continue;
-            };
-            let failure = match background::take(driver) {
-                Some(Ok(_)) => None,
-                Some(Err(error)) => Some(error.to_string()),
-                None => Some("the harness call ended without a result".to_owned()),
-            };
-            if let Some(why) = failure {
-                failures.push((adapter.clone(), why));
-            }
-        }
-        failures
-    };
-    for (adapter, why) in failures {
-        let work_id = world
-            .resource::<Hands>()
-            .by_adapter
-            .get(&adapter)
-            .map(|hand| hand.work_id.clone());
-        let Some(work_id) = work_id else {
+/// Collects finished drivers whose failure should settle the open run.
+fn take_driver_failures(hands: &mut Hands, store: &Store) -> Vec<(Run, String)> {
+    let adapters: Vec<String> = hands.by_adapter.keys().cloned().collect();
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let Some(hand) = hands.by_adapter.get_mut(adapter) else {
             continue;
         };
-        let Ok(Some(run)) = store.work_repo().active_run(&work_id) else {
-            continue;
-        };
-        if run.state.is_terminal() {
+        if !hand
+            .driver
+            .as_ref()
+            .is_some_and(|driver| driver.is_finished())
+        {
             continue;
         }
-        super::finish_run(
-            world,
-            run,
-            RunState::Failed,
-            Some(format!("作業を続けられませんでした: {why}")),
-        );
+        let Some(driver) = hand.driver.take() else {
+            continue;
+        };
+        let failure = match background::take(driver) {
+            Some(Ok(_)) => None,
+            Some(Err(error)) => Some(error.to_string()),
+            None => Some("the harness call ended without a result".to_owned()),
+        };
+        let Some(why) = failure else {
+            continue;
+        };
+        let Ok(Some(run)) = store.work_repo().active_run(&hand.work_id) else {
+            continue;
+        };
+        if !run.state.is_terminal() {
+            failures.push((run, why));
+        }
     }
+    failures
 }
 
-/// Answers a permission request whose approval the user, the head or the card
-/// resolved, by resuming the parked turn with the selected outcome.
-fn resume_approvals(world: &mut World) {
-    let store = world.resource::<Store>().clone();
-    let resolved: Vec<(String, String, RequestPermissionOutcome)> = {
-        let hands = world.resource::<Hands>();
-        hands
-            .by_adapter
-            .iter()
-            .filter_map(|(adapter, hand)| {
-                let pending = hand.pending.as_ref()?;
-                store.work_repo().active_run(&hand.work_id).ok().flatten()?;
-                let Ok(Some(approval)) = store.approval_repo().approval(&pending.approval) else {
-                    return None;
-                };
-                let outcome = match approval.status {
-                    ApprovalStatus::Approved => select_permission_outcome(&pending.options, true),
-                    ApprovalStatus::Denied => select_permission_outcome(&pending.options, false),
-                    // The hold was released without a decision (a stop took
-                    // its call): answer so the guest's turn state does not
-                    // dangle.
-                    ApprovalStatus::Expired => RequestPermissionOutcome::Cancelled,
-                    ApprovalStatus::Pending => return None,
-                };
-                Some((adapter.clone(), pending.request.clone(), outcome))
-            })
-            .collect()
-    };
-    for (adapter, request, reply) in resolved {
-        if let Some(hand) = world.resource_mut::<Hands>().by_adapter.get_mut(&adapter) {
+/// Answers permission requests whose approval row the user, head, or card resolved.
+fn take_resolved_approvals(
+    hands: &mut Hands,
+    store: &Store,
+) -> Vec<(String, String, RequestPermissionOutcome)> {
+    let resolved: Vec<(String, String, RequestPermissionOutcome)> = hands
+        .by_adapter
+        .iter()
+        .filter_map(|(adapter, hand)| {
+            let pending = hand.pending.as_ref()?;
+            store.work_repo().active_run(&hand.work_id).ok().flatten()?;
+            let Ok(Some(approval)) = store.approval_repo().approval(&pending.approval) else {
+                return None;
+            };
+            let outcome = match approval.status {
+                ApprovalStatus::Approved => select_permission_outcome(&pending.options, true),
+                ApprovalStatus::Denied => select_permission_outcome(&pending.options, false),
+                // The hold was released without a decision (a stop took
+                // its call): answer so the guest's turn state does not
+                // dangle.
+                ApprovalStatus::Expired => RequestPermissionOutcome::Cancelled,
+                ApprovalStatus::Pending => return None,
+            };
+            Some((adapter.clone(), pending.request.clone(), outcome))
+        })
+        .collect();
+    for (adapter, _, _) in &resolved {
+        if let Some(hand) = hands.by_adapter.get_mut(adapter) {
             hand.pending = None;
         }
-        dispatch(
-            world,
-            &adapter,
-            HarnessInput::Respond {
-                request_id: request,
-                outcome: reply,
-            },
-        );
     }
+    resolved
 }
 
-/// Starts the prompt turn the parked input waited for, once the session is
-/// idle and open again. The rig hand answers mid-run input inside its turn;
-/// a harness guest cannot, so the queue lands as the next turn instead.
-fn deliver_parked(world: &mut World) {
-    let store = world.resource::<Store>().clone();
-    let due: Vec<(String, String)> = {
-        let mut hands = world.resource_mut::<Hands>();
-        hands
-            .by_adapter
-            .iter_mut()
-            .filter_map(|(_, hand)| {
-                if hand.parked.is_empty() {
-                    return None;
-                }
-                if store
-                    .work_repo()
-                    .active_run(&hand.work_id)
-                    .ok()
-                    .flatten()
-                    .is_some()
-                {
-                    return None;
-                }
-                let Ok(Some(session)) = store.work_repo().work_session(&hand.work_id) else {
-                    return None;
-                };
-                if session.status == WorkStatus::Closed {
-                    return None;
-                }
-                let text = hand.parked.drain(..).collect::<Vec<_>>().join("\n\n");
-                Some((hand.work_id.clone(), text))
-            })
-            .collect()
-    };
-    for (work_id, text) in due {
-        let Ok(Some(session)) = store.work_repo().work_session(&work_id) else {
-            continue;
-        };
-        if let Err(error) = super::start_run(world, &session, &text) {
-            tracing::warn!(work = %work_id, "parked input could not start a run: {error}");
-        }
-    }
+/// Drains parked inputs for idle open sessions so `collect` can start their next turn.
+fn take_parked_sessions(hands: &mut Hands, store: &Store) -> Vec<(WorkSession, String)> {
+    hands
+        .by_adapter
+        .iter_mut()
+        .filter_map(|(_, hand)| {
+            if hand.parked.is_empty() {
+                return None;
+            }
+            if store
+                .work_repo()
+                .active_run(&hand.work_id)
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                return None;
+            }
+            let Ok(Some(session)) = store.work_repo().work_session(&hand.work_id) else {
+                return None;
+            };
+            if session.status == WorkStatus::Closed {
+                return None;
+            }
+            let text = hand.parked.drain(..).collect::<Vec<_>>().join("\n\n");
+            Some((session, text))
+        })
+        .collect()
 }

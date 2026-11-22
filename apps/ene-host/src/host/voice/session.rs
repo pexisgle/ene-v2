@@ -17,14 +17,14 @@ use rig_ecs::prelude::*;
 /// Binds an audio input stream to the client that opened it. Only the active
 /// client of a companion may capture: a client that is not active has nothing
 /// the head may answer.
-pub(crate) fn bind_input(world: &World, client_id: &str) -> Result<InputBinding> {
+pub(crate) fn bind_input(store: Option<&Store>, client_id: &str) -> Result<InputBinding> {
     if client_id.is_empty() {
         return Err(HostError::Invalid(
             ("client_id is required for audio input").into(),
         ));
     }
     util::validate_id(client_id)?;
-    let Some(store) = world.get_resource::<Store>() else {
+    let Some(store) = store else {
         return Err(HostError::Unavailable(
             "the host state is not available".into(),
         ));
@@ -46,8 +46,8 @@ pub(crate) fn bind_input(world: &World, client_id: &str) -> Result<InputBinding>
     })
 }
 
-pub(crate) fn is_still_active(world: &World, binding: &InputBinding) -> bool {
-    let Some(store) = world.get_resource::<Store>() else {
+pub(crate) fn is_still_active(store: Option<&Store>, binding: &InputBinding) -> bool {
+    let Some(store) = store else {
         return false;
     };
     store
@@ -58,12 +58,16 @@ pub(crate) fn is_still_active(world: &World, binding: &InputBinding) -> bool {
 
 /// Binds an audio output stream to the client that opened it and makes it the
 /// owner of every companion it is the active client of.
-pub(crate) fn subscribe_audio(world: &mut World, client_id: &str) -> Result<AudioSubscription> {
+pub(crate) fn subscribe_audio(
+    store: Option<&Store>,
+    voice: Option<&Voice>,
+    client_id: &str,
+) -> Result<AudioSubscription> {
     if client_id.is_empty() {
         return Err(HostError::Invalid(("client_id is required").into()));
     }
     util::validate_id(client_id)?;
-    let Some(store) = world.get_resource::<Store>().cloned() else {
+    let Some(store) = store else {
         return Err(HostError::Unavailable(
             "the host state is not available".into(),
         ));
@@ -83,7 +87,7 @@ pub(crate) fn subscribe_audio(world: &mut World, client_id: &str) -> Result<Audi
             ("the client is not the active client of any companion").into(),
         ));
     }
-    let Some(voice) = world.get_resource::<Voice>().cloned() else {
+    let Some(voice) = voice else {
         return Err(HostError::Internal(
             ("the voice plugin is not installed").into(),
         ));
@@ -95,8 +99,8 @@ pub(crate) fn subscribe_audio(world: &mut World, client_id: &str) -> Result<Audi
     Ok(subscription)
 }
 
-pub(crate) fn unsubscribe_audio(world: &World, client: &str, subscription: &str) {
-    if let Some(voice) = world.get_resource::<Voice>() {
+pub(crate) fn unsubscribe_audio(voice: Option<&Voice>, client: &str, subscription: &str) {
+    if let Some(voice) = voice {
         voice.unregister(client, subscription);
     }
 }
@@ -104,7 +108,7 @@ pub(crate) fn unsubscribe_audio(world: &World, client: &str, subscription: &str)
 /// Hands already-synthesized audio to the subscribed client as one utterance.
 /// The speech floor is not taken, so a turn in flight keeps it.
 pub(crate) fn play_once(
-    world: &World,
+    voice: Option<&Voice>,
     companion: &str,
     pcm: Vec<u8>,
     rate: u32,
@@ -116,7 +120,7 @@ pub(crate) fn play_once(
             ("the TTS engine returned no audio").into(),
         ));
     }
-    let Some(voice) = world.get_resource::<Voice>() else {
+    let Some(voice) = voice else {
         return Err(HostError::Unavailable(
             ("the voice plugin is not installed").into(),
         ));
@@ -132,7 +136,7 @@ pub(crate) fn accept_transcription(
     binding: &InputBinding,
 ) -> Result<bool> {
     let text = text.trim();
-    if text.is_empty() || !is_still_active(world, binding) {
+    if text.is_empty() || !is_still_active(world.get_resource::<Store>(), binding) {
         return Ok(false);
     }
     if let Some(voice) = world.get_resource::<Voice>()
@@ -205,7 +209,16 @@ fn try_begin_utterance(world: &mut World, voice: &Voice, companion: &str) -> boo
         tracing::debug!(companion, "speech skipped: no TTS engine is configured");
         return false;
     };
-    if preempt_by_peer_floor(world, voice, companion) {
+    if voice
+        .floor_holder()
+        .is_some_and(|holder| holder != companion)
+    {
+        if let Some(agent) = agent::agent_of(world, companion) {
+            world.trigger(StopTurn {
+                entity: agent,
+                reason: Some("speech floor was taken by a peer".to_owned()),
+            });
+        }
         return false;
     }
     let voice_name = companion_record
@@ -219,26 +232,10 @@ fn try_begin_utterance(world: &mut World, voice: &Voice, companion: &str) -> boo
     opened
 }
 
-fn preempt_by_peer_floor(world: &mut World, voice: &Voice, companion: &str) -> bool {
-    let Some(holder) = voice.floor_holder() else {
-        return false;
-    };
-    if holder == companion {
-        return false;
-    }
-    if let Some(agent) = agent::agent_of(world, companion) {
-        world.trigger(StopTurn {
-            entity: agent,
-            reason: Some("speech floor was taken by a peer".to_owned()),
-        });
-    }
-    true
-}
-
 /// Ends the speaking turn and announces it, so a peer can pick up the
 /// conversation without a new user input (voice-avatar.md §5.3).
-pub(crate) fn on_turn_end(world: &mut World, companion: &str) {
-    let Some(voice) = world.get_resource::<Voice>().cloned() else {
+pub(crate) fn on_turn_end(voice: Option<&Voice>, notifier: Option<&mut Notifier>, companion: &str) {
+    let Some(voice) = voice else {
         return;
     };
     let Some(ended) = voice.end_turn(companion) else {
@@ -256,7 +253,7 @@ pub(crate) fn on_turn_end(world: &mut World, companion: &str) {
         .to_string(),
         ..Default::default()
     };
-    let Some(mut notifier) = world.get_resource_mut::<Notifier>() else {
+    let Some(notifier) = notifier else {
         return;
     };
     notifier.push(
@@ -270,8 +267,8 @@ pub(crate) fn on_turn_end(world: &mut World, companion: &str) {
     );
 }
 
-pub(crate) fn flush(world: &mut World, companion: &str, reason: w::FlushReason) -> Result<()> {
-    let Some(voice) = world.get_resource::<Voice>().cloned() else {
+pub(crate) fn flush(voice: Option<&Voice>, companion: &str, reason: w::FlushReason) -> Result<()> {
+    let Some(voice) = voice else {
         return Err(HostError::NotFound(
             ("no client owns this companion's audio output").into(),
         ));
@@ -279,14 +276,14 @@ pub(crate) fn flush(world: &mut World, companion: &str, reason: w::FlushReason) 
     Ok(voice.flush(companion, reason)?)
 }
 
-pub(crate) fn on_client_moved(world: &mut World, companion: &str, client: &str) {
-    if let Some(voice) = world.get_resource::<Voice>().cloned() {
+pub(crate) fn on_client_moved(voice: Option<&Voice>, companion: &str, client: &str) {
+    if let Some(voice) = voice {
         voice.client_moved(companion, client);
     }
 }
 
-pub(crate) fn on_client_activated(world: &mut World, companion: &str, client: &str) {
-    if let Some(voice) = world.get_resource::<Voice>().cloned() {
+pub(crate) fn on_client_activated(voice: Option<&Voice>, companion: &str, client: &str) {
+    if let Some(voice) = voice {
         voice.activate_client_if_subscribed(companion, client);
     }
 }
@@ -302,7 +299,9 @@ fn observe_speak_character_text(
         let spoken = speech::for_speech(&text);
         if !spoken.is_empty() {
             on_stream_text(world, &companion_id, &spoken);
-            on_turn_end(world, &companion_id);
+            let voice = world.get_resource::<Voice>().cloned();
+            let mut notifier = world.get_resource_mut::<Notifier>();
+            on_turn_end(voice.as_ref(), notifier.as_deref_mut(), &companion_id);
         }
     });
 }

@@ -17,6 +17,7 @@ use super::{
     error::{Failure, HostError},
     mind::Companion,
     notify::Notifier,
+    providers::Providers,
     util::now,
     wire,
 };
@@ -31,7 +32,7 @@ pub(crate) use ene_domain::{Run, RunState, WorkSession, WorkStatus};
 pub(crate) use ene_work::{STALL_TIMEOUT, new_run};
 
 #[derive(Resource, Default)]
-struct Runs(ene_work::RunTracker);
+pub(super) struct Runs(ene_work::RunTracker);
 
 impl std::ops::Deref for Runs {
     type Target = ene_work::RunTracker;
@@ -75,8 +76,8 @@ fn agent_of(world: &mut World, work_id: &str) -> Option<Entity> {
 }
 
 /// Rebinding keeps `report`, settlement and permissions on the active run.
-fn bind(world: &mut World, entity: Entity, run_id: &str) {
-    if let Some(mut work) = world.get_mut::<WorkAgent>(entity) {
+fn bind_work_agent(work: Option<Mut<WorkAgent>>, run_id: &str) {
+    if let Some(mut work) = work {
         work.run_id = run_id.to_owned();
     }
 }
@@ -90,7 +91,7 @@ fn ensure(
 ) -> Entity {
     match agent_of(world, work_id) {
         Some(entity) => {
-            bind(world, entity, run_id);
+            bind_work_agent(world.get_mut::<WorkAgent>(entity), run_id);
             entity
         }
         None => agent::spawn_work_agent(world, companion, work_id, run_id, instruction),
@@ -172,7 +173,8 @@ fn restore(world: &mut World) {
         }
     };
     for companion in companions {
-        let plugin = hand::selected(world, &companion).is_some();
+        let plugin =
+            hand::selected(&store, world.get_resource::<Providers>(), &companion).is_some();
         let sessions = match store.work_repo().work_sessions(&companion.id) {
             Ok(sessions) => sessions,
             Err(error) => {
@@ -324,7 +326,7 @@ pub(crate) fn start_run(
         .set_work_status(&session.id, WorkStatus::Active)?;
     // The backend pick: a task assignment onto an installed harness plugin
     // runs the session on the plugin hand; anything else keeps the rig agent.
-    let failure = match hand::selected(world, &companion) {
+    let failure = match hand::selected(&store, world.get_resource::<Providers>(), &companion) {
         Some((adapter, running)) => {
             hand::start_run(world, session, &run, instruction, adapter, running).err()
         }
@@ -349,23 +351,27 @@ pub(crate) fn start_run(
             .work_repo()
             .set_work_status(&session.id, WorkStatus::Idle);
         if let Ok(Some(session)) = store.work_repo().work_session(&session.id) {
-            notify_status(world, &session);
+            let mut notifier = world.resource_mut::<Notifier>();
+            notify_status(&mut notifier, &session);
             if let Ok(Some(failed)) = store.work_repo().run(&run.run_id) {
-                notify_finished(world, &session, &failed);
+                notify_finished(&mut notifier, &session, &failed);
             }
         }
         return Err(error);
     }
     world.resource_mut::<Runs>().begin(&run.run_id);
     let session = require_session(&store, &session.id)?;
-    notify_status(world, &session);
-    notify_run(
-        world,
-        &session,
-        &run,
-        w::WorkEventKind::RunStarted,
-        w::work_event::Detail::RunStarted(Box::default()),
-    );
+    {
+        let mut notifier = world.resource_mut::<Notifier>();
+        notify_status(&mut notifier, &session);
+        notify_run(
+            &mut notifier,
+            &session,
+            &run,
+            w::WorkEventKind::RunStarted,
+            w::work_event::Detail::RunStarted(Box::default()),
+        );
+    }
     Ok(run)
 }
 
@@ -411,8 +417,12 @@ pub(crate) fn send(world: &mut World, request: w::SendWorkRequest) -> Result<w::
     let hash = super::util::digest(format!("{}:{}", request.work_id, request.text).as_bytes());
     let agent = agent_of(world, &request.work_id);
     if !request.request_key.is_empty()
-        && let Some((stored, request_id)) =
-            receipt(world, agent, &request.work_id, &request.request_key)
+        && let Some((stored, request_id)) = receipt(
+            agent.and_then(|entity| world.get::<Conversation>(entity)),
+            world.get_resource::<Receipts>(),
+            &request.work_id,
+            &request.request_key,
+        )
     {
         if stored != hash {
             return Err(HostError::AlreadyExists(
@@ -428,8 +438,12 @@ pub(crate) fn send(world: &mut World, request: w::SendWorkRequest) -> Result<w::
     if let Some(run) = store.work_repo().active_run(&request.work_id)? {
         // A plugin hand parks mid-run input and delivers it as the next
         // prompt turn; the rig agent takes it inside its turn.
-        if hand::owns(world, &request.work_id) {
-            hand::steer(world, &request.work_id, &request.text);
+        if hand::owns(world.resource::<hand::Hands>(), &request.work_id) {
+            hand::steer(
+                &mut world.resource_mut::<hand::Hands>(),
+                &request.work_id,
+                &request.text,
+            );
             world.resource_mut::<Runs>().touch(&run.run_id);
             return accepted(world, &store, request, &hash, request_id);
         }
@@ -438,7 +452,7 @@ pub(crate) fn send(world: &mut World, request: w::SendWorkRequest) -> Result<w::
                 ("the work agent is not running").into(),
             ));
         };
-        bind(world, agent, &run.run_id);
+        bind_work_agent(world.get_mut::<WorkAgent>(agent), &run.run_id);
         world.trigger(Deliver::new(
             agent,
             request.text.clone(),
@@ -461,9 +475,13 @@ fn accepted(
 ) -> Result<w::WorkAcceptance> {
     if !request.request_key.is_empty() {
         let agent = agent_of(world, &request.work_id);
-        record_receipt(
-            world,
-            agent,
+        record_conversation_receipt(
+            agent.and_then(|entity| world.get_mut::<Conversation>(entity)),
+            &request.request_key,
+            hash,
+            &request_id,
+        );
+        world.resource_mut::<Receipts>().put(
             &request.work_id,
             &request.request_key,
             hash,
@@ -471,7 +489,7 @@ fn accepted(
         );
     }
     if let Ok(Some(session)) = store.work_repo().work_session(&request.work_id) {
-        notify_status(world, &session);
+        notify_status(&mut world.resource_mut::<Notifier>(), &session);
     }
     Ok(w::WorkAcceptance {
         request_id,
@@ -480,14 +498,12 @@ fn accepted(
 }
 
 fn receipt(
-    world: &World,
-    agent: Option<Entity>,
+    conversation: Option<&Conversation>,
+    receipts: Option<&Receipts>,
     work_id: &str,
     request_key: &str,
 ) -> Option<(Vec<u8>, String)> {
-    if let Some(agent) = agent
-        && let Some(conversation) = world.get::<Conversation>(agent)
-    {
+    if let Some(conversation) = conversation {
         for (_, aside) in conversation
             .asides()
             .filter(|(_, aside)| aside.kind == "ene.work_accepted")
@@ -507,22 +523,16 @@ fn receipt(
             return Some((hash, request_id.to_owned()));
         }
     }
-    world
-        .get_resource::<Receipts>()
-        .and_then(|receipts| receipts.get(work_id, request_key))
+    receipts.and_then(|receipts| receipts.get(work_id, request_key))
 }
 
-fn record_receipt(
-    world: &mut World,
-    agent: Option<Entity>,
-    work_id: &str,
+fn record_conversation_receipt(
+    conversation: Option<Mut<Conversation>>,
     request_key: &str,
     hash: &[u8],
     request_id: &str,
 ) {
-    if let Some(agent) = agent
-        && let Some(mut conversation) = world.get_mut::<Conversation>(agent)
-    {
+    if let Some(mut conversation) = conversation {
         conversation.add_aside(rig_core::conversation::Aside::new(
             "ene.work_accepted",
             rig_core::conversation::Author::plugin("ene-host"),
@@ -534,9 +544,6 @@ fn record_receipt(
             }),
         ));
     }
-    world
-        .resource_mut::<Receipts>()
-        .put(work_id, request_key, hash, request_id);
 }
 
 /// Stops the open run of a session. The stop is final at once: the work agent
@@ -555,7 +562,7 @@ pub(crate) fn stop_with(world: &mut World, work_id: &str, reason: Option<&str>) 
         return Ok(());
     };
     let reason = reason.unwrap_or("the user stopped the work");
-    if hand::owns(world, work_id) {
+    if hand::owns(world.resource::<hand::Hands>(), work_id) {
         hand::stop(world, work_id);
     } else if let Some(agent) = agent_of(world, work_id) {
         world.trigger(StopTurn {
@@ -575,11 +582,32 @@ pub(crate) fn close(world: &mut World, work_id: &str) -> Result<()> {
     stop_with(world, work_id, Some("the work session is closing"))?;
     store.work_repo().close_work(work_id)?;
     if let Ok(Some(session)) = store.work_repo().work_session(work_id) {
-        notify_status(world, &session);
+        notify_status(&mut world.resource_mut::<Notifier>(), &session);
     }
     hand::release(world, work_id);
     retire(world, work_id);
     Ok(())
+}
+
+fn resolve_settle_outcome(
+    reports: &WorkReports,
+    run_id: &str,
+    outcome: &TurnOutcome,
+) -> (RunState, Option<String>) {
+    let reported_failure = reports.failed.get(run_id).cloned();
+    let reported_completed = reports.completed.get(run_id).cloned();
+    match (reported_failure, reported_completed, outcome) {
+        (Some(reason), _, _) => (RunState::Failed, Some(reason)),
+        (None, Some(report), _) => (RunState::Completed, Some(report)),
+        (None, None, TurnOutcome::Answered(message)) => {
+            (RunState::Completed, message_text(message))
+        }
+        (None, None, TurnOutcome::Stopped(_)) => (RunState::Cancelled, None),
+        (None, None, TurnOutcome::Failed(why)) => (
+            RunState::Failed,
+            Some(format!("作業を続けられませんでした: {why}")),
+        ),
+    }
 }
 
 pub(crate) fn settle_run(world: &mut World, run_id: String, outcome: TurnOutcome) {
@@ -590,24 +618,7 @@ pub(crate) fn settle_run(world: &mut World, run_id: String, outcome: TurnOutcome
     if run.state.is_terminal() {
         return;
     }
-    let reported_failure = world.resource::<WorkReports>().failed.get(&run_id).cloned();
-    let reported_completed = world
-        .resource::<WorkReports>()
-        .completed
-        .get(&run_id)
-        .cloned();
-    let (state, text) = match (&reported_failure, &reported_completed, &outcome) {
-        (Some(reason), _, _) => (RunState::Failed, Some(reason.clone())),
-        (None, Some(report), _) => (RunState::Completed, Some(report.clone())),
-        (None, None, TurnOutcome::Answered(message)) => {
-            (RunState::Completed, message_text(message))
-        }
-        (None, None, TurnOutcome::Stopped(_)) => (RunState::Cancelled, None),
-        (None, None, TurnOutcome::Failed(why)) => (
-            RunState::Failed,
-            Some(format!("作業を続けられませんでした: {why}")),
-        ),
-    };
+    let (state, text) = resolve_settle_outcome(world.resource::<WorkReports>(), &run_id, &outcome);
     finish_run(world, run, state, text);
 }
 
@@ -653,8 +664,11 @@ fn finish_run(world: &mut World, mut run: Run, state: RunState, text: Option<Str
                 .set_work_status(&session.id, WorkStatus::Idle);
         }
         if let Ok(Some(session)) = store.work_repo().work_session(&session.id) {
-            notify_status(world, &session);
-            notify_finished(world, &session, &run);
+            {
+                let mut notifier = world.resource_mut::<Notifier>();
+                notify_status(&mut notifier, &session);
+                notify_finished(&mut notifier, &session, &run);
+            }
             if let Some(parent) = agent::agent_of(world, &session.companion_id) {
                 let raw_report = text.unwrap_or_else(|| {
                     match state {
@@ -677,7 +691,7 @@ fn finish_run(world: &mut World, mut run: Run, state: RunState, text: Option<Str
             }
         }
     } else if let Some(session) = &session {
-        notify_finished(world, session, &run);
+        notify_finished(&mut world.resource_mut::<Notifier>(), session, &run);
     }
     if session
         .as_ref()
@@ -691,8 +705,8 @@ fn finish_run(world: &mut World, mut run: Run, state: RunState, text: Option<Str
     reports.failed.remove(&run.run_id);
 }
 
-fn note_activity(world: &mut World, run_id: &str) {
-    world.resource_mut::<Runs>().touch(run_id);
+pub(super) fn note_activity(runs: &mut Runs, run_id: &str) {
+    runs.touch(run_id);
 }
 
 /// Hands one report from a work run to its parent, as the run's own words.
@@ -753,9 +767,9 @@ fn message_text(message: &Message) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
 }
 
-fn notify_finished(world: &mut World, session: &WorkSession, run: &Run) {
+fn notify_finished(notifier: &mut Notifier, session: &WorkSession, run: &Run) {
     notify_run(
-        world,
+        notifier,
         session,
         run,
         w::WorkEventKind::RunFinished,
@@ -763,9 +777,9 @@ fn notify_finished(world: &mut World, session: &WorkSession, run: &Run) {
     );
 }
 
-fn notify_status(world: &mut World, session: &WorkSession) {
+fn notify_status(notifier: &mut Notifier, session: &WorkSession) {
     notify_event(
-        world,
+        notifier,
         session,
         w::WorkEventKind::StatusChanged,
         w::work_event::Detail::StatusChanged(Box::new(w::WorkStatusChanged {
@@ -776,17 +790,17 @@ fn notify_status(world: &mut World, session: &WorkSession) {
 }
 
 fn notify_event(
-    world: &mut World,
+    notifier: &mut Notifier,
     session: &WorkSession,
     kind: w::WorkEventKind,
     detail: w::work_event::Detail,
 ) {
     let event = wire::work_event(session, kind, detail);
-    push_event(world, &session.companion_id, event);
+    push_event(notifier, &session.companion_id, event);
 }
 
 fn notify_run(
-    world: &mut World,
+    notifier: &mut Notifier,
     session: &WorkSession,
     run: &Run,
     kind: w::WorkEventKind,
@@ -794,11 +808,11 @@ fn notify_run(
 ) {
     let mut event = wire::work_event(session, kind, detail);
     event.run_id = run.run_id.clone();
-    push_event(world, &session.companion_id, event);
+    push_event(notifier, &session.companion_id, event);
 }
 
-fn push_event(world: &mut World, companion: &str, event: w::WorkEvent) {
-    world.resource_mut::<Notifier>().push(
+fn push_event(notifier: &mut Notifier, companion: &str, event: w::WorkEvent) {
+    notifier.push(
         Some(companion),
         None,
         w::notification::Event::WorkEvent(Box::new(event)),

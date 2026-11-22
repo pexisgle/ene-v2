@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MAX_UI_RPC_REFS = 0
 MAX_DB_UPWARD_REFS = 0
 MAX_PROVIDERS_MODEL_REFS = 0
+MAX_HOST_WORLD_REFS = 171
 DEFAULT_MAX_IMPL_FILES = 3
 IMPL_SPREAD_ALLOWLIST: dict[tuple[str, str], int] = {
     ("crates/ene-plugin-runtime", "Events"): 4,
@@ -32,6 +33,7 @@ UI_RPC_PATH_RE = re.compile(r"\b(?:ene_rpc|buffa|connectrpc)::")
 UI_RPC_USE_RE = re.compile(r"\buse\s+(?:ene_rpc|buffa|connectrpc)\b")
 DB_UPWARD_RE = re.compile(r"crate::host::(client|model|permission|providers|work)\b")
 PROVIDERS_MODEL_RE = re.compile(r"\b(?:crate::host|super)::model\b")
+HOST_WORLD_REF_RE = re.compile(r"&\s*(?:mut\s+)?World\b")
 INHERENT_IMPL_RE = re.compile(
     r"^\s*impl\b(?:<[^>{]*>)?\s+([A-Z][A-Za-z0-9_]*)\b([^\n{]*)",
     re.MULTILINE,
@@ -44,6 +46,7 @@ class Baselines:
     max_ui_rpc_refs: int = MAX_UI_RPC_REFS
     max_db_upward_refs: int = MAX_DB_UPWARD_REFS
     max_providers_model_refs: int = MAX_PROVIDERS_MODEL_REFS
+    max_host_world_refs: int = MAX_HOST_WORLD_REFS
     default_max_impl_files: int = DEFAULT_MAX_IMPL_FILES
     impl_spread_allowlist: dict[tuple[str, str], int] | None = None
 
@@ -248,6 +251,41 @@ def check_providers_no_model_import(root: Path, max_refs: int) -> tuple[int, lis
     return len(hits), errors
 
 
+def check_host_world_refs(root: Path, max_refs: int) -> tuple[dict[str, object], list[str]]:
+    host_dir = root / "apps/ene-host/src/host"
+    if not host_dir.is_dir():
+        return {"count": 0, "max": max_refs, "file_count": 0, "files": {}}, []
+    per_file: dict[str, int] = {}
+    total = 0
+    for path in sorted(host_dir.rglob("*.rs")):
+        rel = path.relative_to(root)
+        if is_test_or_example(rel):
+            continue
+        prod = strip_cfg_test(path.read_text(encoding="utf-8"))
+        count = sum(
+            len(HOST_WORLD_REF_RE.findall(strip_line_comment(line)))
+            for line in prod.splitlines()
+        )
+        if count > 0:
+            per_file[rel.as_posix()] = count
+            total += count
+    sorted_files = dict(sorted(per_file.items(), key=lambda item: (-item[1], item[0])))
+    errors: list[str] = []
+    if total > max_refs:
+        top = list(sorted_files.items())[:8]
+        errors.append(
+            f"Rule 6 (host_world_refs): found {total} production World refs in "
+            f"apps/ene-host/src/host/ (baseline max {max_refs}) across {len(per_file)} files; "
+            f"top={top}"
+        )
+    return {
+        "count": total,
+        "max": max_refs,
+        "file_count": len(per_file),
+        "files": sorted_files,
+    }, errors
+
+
 def check_impl_file_spread(
     root: Path,
     workspace_rs: list[Path],
@@ -329,11 +367,21 @@ def evaluate(root: Path, baselines: Baselines | None = None) -> tuple[dict[str, 
     providers_model_count, providers_model_errors = check_providers_no_model_import(
         root, cfg.max_providers_model_refs
     )
+    host_world_report, host_world_errors = check_host_world_refs(
+        root, cfg.max_host_world_refs
+    )
     impl_over_default, impl_errors = check_impl_file_spread(
         root, workspace_rs, cfg.default_max_impl_files, cfg.allowlist()
     )
     println_violations, println_errors = check_no_prod_println(root, workspace_rs)
-    errors = [*ui_errors, *db_errors, *impl_errors, *println_errors, *providers_model_errors]
+    errors = [
+        *ui_errors,
+        *db_errors,
+        *impl_errors,
+        *println_errors,
+        *providers_model_errors,
+        *host_world_errors,
+    ]
     report: dict[str, object] = {
         "status": "fail" if errors else "pass",
         "rules": {
@@ -343,6 +391,7 @@ def evaluate(root: Path, baselines: Baselines | None = None) -> tuple[dict[str, 
                 "count": providers_model_count,
                 "max": cfg.max_providers_model_refs,
             },
+            "host_world_refs": host_world_report,
             "impl_file_spread_over_default": impl_over_default,
             "no_prod_println": {"violations": len(println_violations)},
         },
@@ -387,6 +436,13 @@ def self_test() -> None:
         "apps/ene-host/src/host/providers/safety_tests/mod.rs": (
             "use crate::host::model::Credentials;\n"
         ),
+        "apps/ene-host/src/host/entry.rs": (
+            "// comment mentioning &World should be ignored\n"
+            "pub fn run(world: &mut World) { let _ = world; }\n"
+            "#[cfg(test)]\n"
+            "mod tests { fn helper(_: &World) {} }\n"
+        ),
+        "apps/ene-host/src/host/entry_tests.rs": "fn test_helper(_: &mut World) {}\n",
         "apps/ene-host/src/cli.rs": "pub fn run() { println!(\"cli\"); }\n",
         "apps/ene-host/build.rs": "fn main() { println!(\"cargo:rerun-if-changed=build.rs\"); }\n",
         "crates/demo/src/a.rs": "struct S;\nimpl S { fn a() {} }\ntrait T {}\nimpl T for S {}\n",
@@ -398,6 +454,7 @@ def self_test() -> None:
         max_ui_rpc_refs=0,
         max_db_upward_refs=0,
         max_providers_model_refs=0,
+        max_host_world_refs=1,
         default_max_impl_files=3,
         impl_spread_allowlist={("apps/ene-desktop", "SettingsStudio"): 4},
     )
@@ -496,6 +553,20 @@ def self_test() -> None:
         _, errors = evaluate(root, baselines)
         assert any("Rule 5" in e for e in errors), f"expected Rule 5 error, got {errors}"
 
+        # Rule 6 violation (`&World` / `&mut World` exceeding baseline in apps/ene-host/src/host/)
+        _write_fixture(
+            root,
+            {
+                **clean_files,
+                "apps/ene-host/src/host/entry.rs": (
+                    "pub fn first(_: &World) {}\n"
+                    "pub fn second(_: &mut World) {}\n"
+                ),
+            },
+        )
+        _, errors = evaluate(root, baselines)
+        assert any("Rule 6" in e for e in errors), f"expected Rule 6 error, got {errors}"
+
     # Verify strip_cfg_test keeps code after an inline test module and ignores braces in strings/comments.
     sample = (
         "fn before() {}\n"
@@ -509,7 +580,7 @@ def self_test() -> None:
     stripped = strip_cfg_test(sample)
     assert "fn before()" in stripped and "fn after()" in stripped and "mod tests" not in stripped
 
-    print("PASS all 5 architecture rules and self-test fixtures")
+    print("PASS all 6 architecture rules and self-test fixtures")
 
 
 def main() -> int:
@@ -531,12 +602,14 @@ def main() -> int:
         ui = rules["ui_rpc_leak"]
         db = rules["db_upward_imports"]
         pm = rules["providers_no_model_import"]
+        hw = rules["host_world_refs"]
         println = rules["no_prod_println"]
         spread = rules["impl_file_spread_over_default"]
         print(
             f"architecture check: ui_rpc_leak={ui['count']}/{ui['max']}, "
             f"db_upward_imports={db['count']}/{db['max']}, "
             f"providers_no_model_import={pm['count']}/{pm['max']}, "
+            f"host_world_refs={hw['count']}/{hw['max']}, "
             f"impl_over_default={spread}, "
             f"no_prod_println={println['violations']}"
         )

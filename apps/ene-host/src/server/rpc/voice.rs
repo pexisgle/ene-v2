@@ -162,7 +162,12 @@ impl w::VoiceService for Services {
             .runtime
             .read(move |app| {
                 let request = request.reborrow();
-                let subscription = voice::subscribe_audio(app.world_mut(), request.client_id)?;
+                let world = app.world();
+                let subscription = voice::subscribe_audio(
+                    world.get_resource::<Store>(),
+                    world.get_resource::<voice::Voice>(),
+                    request.client_id,
+                )?;
                 Ok((subscription, request.client_id.to_owned()))
             })
             .await
@@ -266,7 +271,14 @@ impl w::VoiceService for Services {
             .await
             .map_err(|error| ConnectError::unavailable(error.to_string()))?;
         self.runtime
-            .read(move |app| voice::play_once(app.world(), &companion, pcm, rate))
+            .read(move |app| {
+                voice::play_once(
+                    app.world().get_resource::<voice::Voice>(),
+                    &companion,
+                    pcm,
+                    rate,
+                )
+            })
             .await
             .map_err(ConnectError::from)
             .map(Response::ok)?
@@ -342,7 +354,12 @@ impl Recognition {
         let active = runtime
             .read({
                 let binding = binding.clone();
-                move |app| Ok(voice::is_still_active(app.world(), &binding))
+                move |app| {
+                    Ok(voice::is_still_active(
+                        app.world().get_resource::<Store>(),
+                        &binding,
+                    ))
+                }
             })
             .await
             .map_err(ConnectError::from)?;
@@ -393,7 +410,12 @@ async fn bind_recognition_client(
     client_id: String,
 ) -> std::result::Result<InputBinding, ConnectError> {
     runtime
-        .read(move |app| Ok(voice::bind_input(app.world(), &client_id)))
+        .read(move |app| {
+            Ok(voice::bind_input(
+                app.world().get_resource::<Store>(),
+                &client_id,
+            ))
+        })
         .await
         .map_err(ConnectError::from)?
         .map_err(ConnectError::from)
@@ -408,8 +430,9 @@ async fn flush_barge_in(runtime: &Runtime, client_id: String) {
                 .client_repo()
                 .active_companions_for_client(&client_id)
                 .unwrap_or_default();
+            let voice = app.world().get_resource::<voice::Voice>();
             for companion_id in companions {
-                let _ = voice::flush(app.world_mut(), &companion_id, w::FlushReason::BargeIn);
+                let _ = voice::flush(voice, &companion_id, w::FlushReason::BargeIn);
             }
             Ok(())
         })
@@ -462,7 +485,11 @@ impl Drop for StreamGuard {
         let client_id = self.client_id.clone();
         let subscription = self.subscription.clone();
         drop(self.runtime.read(move |app| {
-            voice::unsubscribe_audio(app.world(), &client_id, &subscription);
+            voice::unsubscribe_audio(
+                app.world().get_resource::<voice::Voice>(),
+                &client_id,
+                &subscription,
+            );
             Ok(())
         }));
     }
@@ -642,7 +669,14 @@ mod tests {
         };
         let first = request();
         let old = runtime
-            .read(move |app| voice::subscribe_audio(app.world_mut(), &first.client_id))
+            .read(move |app| {
+                let world = app.world();
+                voice::subscribe_audio(
+                    world.get_resource::<Store>(),
+                    world.get_resource::<voice::Voice>(),
+                    &first.client_id,
+                )
+            })
             .await
             .unwrap();
         let old_guard = StreamGuard {
@@ -652,7 +686,14 @@ mod tests {
         };
         let second = request();
         let mut current = runtime
-            .read(move |app| voice::subscribe_audio(app.world_mut(), &second.client_id))
+            .read(move |app| {
+                let world = app.world();
+                voice::subscribe_audio(
+                    world.get_resource::<Store>(),
+                    world.get_resource::<voice::Voice>(),
+                    &second.client_id,
+                )
+            })
             .await
             .unwrap();
         let current_guard = StreamGuard {

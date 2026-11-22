@@ -219,7 +219,10 @@ fn an_acp_assignment_drives_the_plugin_hand_end_to_end() {
     let mut world = HandWorld::start();
     let session = world.start_work();
     assert!(
-        hand::owns(world.harness.app.world(), &session.id),
+        hand::owns(
+            world.harness.app.world().resource::<hand::Hands>(),
+            &session.id
+        ),
         "the session runs on the plugin hand"
     );
 
@@ -391,7 +394,10 @@ fn stop_work_cancels_a_parked_plugin_hand_run() {
     work::close(world.harness.app.world_mut(), &session.id).unwrap();
     let second = world.start_work();
     assert!(
-        hand::owns(world.harness.app.world(), &second.id),
+        hand::owns(
+            world.harness.app.world().resource::<hand::Hands>(),
+            &second.id
+        ),
         "a closed session releases the harness"
     );
     world.harness.run_until(|frame| {
@@ -463,7 +469,10 @@ fn the_rig_hand_stays_the_default_without_an_acp_assignment() {
     )
     .unwrap();
     assert!(
-        !hand::owns(world.harness.app.world(), &session.id),
+        !hand::owns(
+            world.harness.app.world().resource::<hand::Hands>(),
+            &session.id
+        ),
         "an LLM task connection keeps the rig backend"
     );
     let work_agent = {

@@ -42,19 +42,28 @@ pub(crate) fn register(app: &mut App) {
         "skill_list",
         "List saved procedural skills for this companion.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, _| list_tool(world, agent)),
+        run_tool(|world, agent, _, _| {
+            let companion_id = owner_companion(world, agent)?;
+            list_skills_json(world.resource::<Store>(), &companion_id)
+        }),
     )
     .add_open_tool::<SkillReadArgs, _>(
         "skill_read",
         "Read the full instructions of one saved procedural skill.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, args| read_tool(world, agent, args)),
+        run_tool(|world, agent, _, args: SkillReadArgs| {
+            let companion_id = owner_companion(world, agent)?;
+            read_skill_json(world.resource::<Store>(), &companion_id, &args.name)
+        }),
     )
     .add_open_tool::<SkillSaveArgs, _>(
         "skill_save",
         "Save or update a reusable procedural skill for this companion.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, args| save_tool(world, agent, args)),
+        run_tool(|world, agent, _, args| {
+            let companion_id = owner_companion(world, agent)?;
+            save_skill_json(world.resource::<Store>(), &companion_id, &args)
+        }),
     );
 }
 
@@ -70,12 +79,10 @@ fn owner_companion(world: &World, agent: Entity) -> Result<String> {
     ))
 }
 
-fn list_tool(world: &mut World, agent: Entity) -> Result<String> {
-    let companion_id = owner_companion(world, agent)?;
-    let store = world.resource::<Store>().clone();
+fn list_skills_json(store: &Store, companion_id: &str) -> Result<String> {
     let items: Vec<serde_json::Value> = store
         .skill_repo()
-        .list_skills(&companion_id)?
+        .list_skills(companion_id)?
         .into_iter()
         .map(|s| {
             json!({
@@ -88,21 +95,17 @@ fn list_tool(world: &mut World, agent: Entity) -> Result<String> {
     Ok(json!({ "skills": items }).to_string())
 }
 
-fn read_tool(world: &mut World, agent: Entity, args: SkillReadArgs) -> Result<String> {
-    let companion_id = owner_companion(world, agent)?;
-    let store = world.resource::<Store>().clone();
+fn read_skill_json(store: &Store, companion_id: &str, name: &str) -> Result<String> {
     let skill = store
         .skill_repo()
-        .read_skill(&companion_id, &args.name)?
-        .ok_or_else(|| HostError::NotFound(format!("skill `{}` not found", args.name)))?;
+        .read_skill(companion_id, name)?
+        .ok_or_else(|| HostError::NotFound(format!("skill `{name}` not found")))?;
     Ok(json!(skill).to_string())
 }
 
-fn save_tool(world: &mut World, agent: Entity, args: SkillSaveArgs) -> Result<String> {
-    let companion_id = owner_companion(world, agent)?;
-    let store = world.resource::<Store>().clone();
+fn save_skill_json(store: &Store, companion_id: &str, args: &SkillSaveArgs) -> Result<String> {
     let saved = store.skill_repo().save_skill(
-        &companion_id,
+        companion_id,
         &args.name,
         &args.description,
         &args.instructions,

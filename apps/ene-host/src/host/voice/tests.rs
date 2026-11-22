@@ -104,7 +104,12 @@ async fn a_flush_invalidates_the_older_generation() {
     let first = world.resource::<Voice>().generation_of("ene").unwrap();
     assert_eq!(first, 1);
 
-    flush(&mut world, "ene", w::FlushReason::BargeIn).unwrap();
+    flush(
+        world.get_resource::<Voice>(),
+        "ene",
+        w::FlushReason::BargeIn,
+    )
+    .unwrap();
     match events.try_recv().expect("a flush reaches the client").event {
         Some(w::audio_output_event::Event::Flush(flush)) => {
             assert_eq!(flush.flush_generation_id, first);
@@ -145,7 +150,9 @@ fn turn_end_releases_the_floor_and_relays_the_utterance() {
     world.resource::<Voice>().publish("ene", "c1");
     let mut events = world.resource::<Notifier>().subscribe();
     on_stream_text(&mut world, "ene", "こんにちは。");
-    on_turn_end(&mut world, "ene");
+    let voice = world.get_resource::<Voice>().cloned();
+    let mut notifier = world.get_resource_mut::<Notifier>();
+    on_turn_end(voice.as_ref(), notifier.as_deref_mut(), "ene");
     assert!(world.resource::<Voice>().floor_holder().is_none());
     world.resource_mut::<Notifier>().flush();
     let notification = events.try_recv().expect("speech_completed is broadcast");
@@ -188,16 +195,20 @@ fn input_binding_validates_first_metadata_and_allows_omitted_followups() {
         })
         .unwrap();
     let world = voice_world(&store);
-    assert!(matches!(bind_input(&world, ""), Err(HostError::Invalid(_))));
+    let store_res = world.get_resource::<Store>();
     assert!(matches!(
-        bind_input(&world, "missing"),
+        bind_input(store_res, ""),
+        Err(HostError::Invalid(_))
+    ));
+    assert!(matches!(
+        bind_input(store_res, "missing"),
         Err(HostError::NotFound(_))
     ));
     assert!(matches!(
-        bind_input(&world, "c2"),
+        bind_input(store_res, "c2"),
         Err(HostError::Conflict(_))
     ));
-    let binding = bind_input(&world, "c1").unwrap();
+    let binding = bind_input(store_res, "c1").unwrap();
     assert!(binding.accepts("c1"));
     assert!(binding.accepts(""));
     assert!(!binding.accepts("c2"));
@@ -249,7 +260,7 @@ fn voice_connection_prefers_enabled_connection_over_earlier_disabled_one() {
         .update_settings(rev, &[(disabled, 0), (enabled, 0)])
         .unwrap();
     let world = voice_world(&store);
-    let selected = voice_connection(&world, ConnectionKind::Stt).unwrap();
+    let selected = voice_connection(world.get_resource::<Store>(), ConnectionKind::Stt).unwrap();
     assert_eq!(selected.id, "stt-enabled");
 }
 

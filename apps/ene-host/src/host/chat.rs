@@ -187,7 +187,11 @@ pub(crate) fn stop(world: &mut World, request: w::StopRequest) -> Result<()> {
         });
     }
     // Stop means stop speaking too; stale playback reports are discarded.
-    let _ = super::voice::flush(world, &request.companion_id, w::FlushReason::Cancelled);
+    let _ = super::voice::flush(
+        world.get_resource::<super::voice::Voice>(),
+        &request.companion_id,
+        w::FlushReason::Cancelled,
+    );
     Ok(())
 }
 

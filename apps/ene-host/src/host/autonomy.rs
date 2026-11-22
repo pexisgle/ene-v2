@@ -51,25 +51,31 @@ pub(crate) struct CancelArgs {
     pub(crate) schedule_id: String,
 }
 
+fn is_eyes_silent_turn(turn: Option<&Turn>, conversation: Option<&Conversation>) -> bool {
+    let (Some(turn), Some(conversation)) = (turn, conversation) else {
+        return false;
+    };
+    !conversation
+        .entries()
+        .skip(conversation.start_of(turn.start))
+        .any(|entry| entry.is_users_own())
+        && conversation
+            .asked(turn.start)
+            .filter(|entry| entry.is_request())
+            .last()
+            .is_some_and(|entry| entry.author.is_some_and(super::eyes::is_eyes))
+}
+
 pub(crate) fn register(app: &mut App) {
     app.add_open_tool::<NoopArgs, _>(
         "noop",
         "Do nothing this turn: stay silent and keep watching.",
         ToolOptions::default(),
-        run_tool(|world: &mut World, entity: Entity, _: &str, _: NoopArgs| {
-            if let Some(active) = world.get::<ActiveTurn>(entity)
-                && let Some(turn) = world.get::<Turn>(active.turn())
-                && let Some(conversation) = world.get::<Conversation>(entity)
-                && !conversation
-                    .entries()
-                    .skip(conversation.start_of(turn.start))
-                    .any(|entry| entry.is_users_own())
-                && conversation
-                    .asked(turn.start)
-                    .filter(|entry| entry.is_request())
-                    .last()
-                    .is_some_and(|entry| entry.author.is_some_and(super::eyes::is_eyes))
-            {
+        run_tool(|world, entity, _: &str, _: NoopArgs| {
+            let turn = world
+                .get::<ActiveTurn>(entity)
+                .and_then(|active| world.get::<Turn>(active.turn()));
+            if is_eyes_silent_turn(turn, world.get::<Conversation>(entity)) {
                 world.trigger(StopTurn {
                     entity,
                     reason: Some(super::eyes::WATCHED.into()),
@@ -82,42 +88,57 @@ pub(crate) fn register(app: &mut App) {
         "schedule_create",
         "Register a reminder or repeating schedule.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, args| create(world, agent, args)),
+        run_tool(|world, agent, _, args| {
+            let companion = companion_id(world.get::<CompanionAgent>(agent))?.to_owned();
+            create_schedule(
+                world.resource::<Store>(),
+                world.resource::<ScheduleClock>(),
+                &companion,
+                args,
+            )
+        }),
     )
     .add_open_tool::<ListArgs, _>(
         "schedule_list",
         "List your active schedules.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, args| list(world, agent, args)),
+        run_tool(|world, agent, _, _args: ListArgs| {
+            let companion = companion_id(world.get::<CompanionAgent>(agent))?.to_owned();
+            list_schedules(world.resource::<Store>(), &companion)
+        }),
     )
     .add_open_tool::<CancelArgs, _>(
         "schedule_cancel",
         "Remove one of your schedules.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, args| cancel(world, agent, args)),
+        run_tool(|world, agent, _, args: CancelArgs| {
+            let companion = companion_id(world.get::<CompanionAgent>(agent))?.to_owned();
+            cancel_schedule(world.resource::<Store>(), &companion, &args.schedule_id)
+        }),
     );
 }
 
-fn companion(world: &World, agent: Entity) -> Result<String> {
-    world
-        .get::<CompanionAgent>(agent)
-        .map(|agent| agent.companion_id.clone())
+fn companion_id(agent: Option<&CompanionAgent>) -> Result<&str> {
+    agent
+        .map(|agent| agent.companion_id.as_str())
         .ok_or_else(|| HostError::Internal(("this tool belongs to a companion").into()))
 }
 
-fn create(world: &mut World, agent: Entity, args: CreateArgs) -> Result<String> {
-    let companion = companion(world, agent)?;
-    let store = world.resource::<Store>().clone();
-    let clock = world.resource::<ScheduleClock>().clone();
+fn create_schedule(
+    store: &Store,
+    clock: &ScheduleClock,
+    companion: &str,
+    args: CreateArgs,
+) -> Result<String> {
     let schedule = store.schedule_repo().insert_schedule(
         super::db::schedules::NewSchedule {
-            companion: &companion,
+            companion,
             title: &args.title,
             instruction: &args.instruction,
             run_at: args.run_at.as_deref(),
             cron_expr: args.cron_expr.as_deref(),
         },
-        &clock,
+        clock,
     )?;
     Ok(json!({
         "schedule_id": schedule.id,
@@ -127,12 +148,10 @@ fn create(world: &mut World, agent: Entity, args: CreateArgs) -> Result<String> 
     .to_string())
 }
 
-fn list(world: &mut World, agent: Entity, _args: ListArgs) -> Result<String> {
-    let companion = companion(world, agent)?;
-    let store = world.resource::<Store>().clone();
+fn list_schedules(store: &Store, companion: &str) -> Result<String> {
     let schedules: Vec<serde_json::Value> = store
         .schedule_repo()
-        .schedules(&companion)?
+        .schedules(companion)?
         .into_iter()
         .map(|schedule| {
             json!({
@@ -147,13 +166,11 @@ fn list(world: &mut World, agent: Entity, _args: ListArgs) -> Result<String> {
     Ok(json!({"schedules": schedules}).to_string())
 }
 
-fn cancel(world: &mut World, agent: Entity, args: CancelArgs) -> Result<String> {
-    let companion = companion(world, agent)?;
-    let store = world.resource::<Store>().clone();
+fn cancel_schedule(store: &Store, companion: &str, schedule_id: &str) -> Result<String> {
     let removed = store
         .schedule_repo()
-        .cancel_schedule(&companion, &args.schedule_id)?;
-    Ok(json!({"schedule_id": args.schedule_id, "removed": removed}).to_string())
+        .cancel_schedule(companion, schedule_id)?;
+    Ok(json!({"schedule_id": schedule_id, "removed": removed}).to_string())
 }
 
 fn schedule_author(occurrence_key: &str) -> Author {
@@ -162,8 +179,8 @@ fn schedule_author(occurrence_key: &str) -> Author {
     author
 }
 
-fn conversation_has_occurrence(world: &World, agent: Entity, occurrence_key: &str) -> bool {
-    world.get::<Conversation>(agent).is_some_and(|conv| {
+fn conversation_has_occurrence(conversation: Option<&Conversation>, occurrence_key: &str) -> bool {
+    conversation.is_some_and(|conv| {
         conv.entries().any(|entry| {
             entry
                 .author
@@ -173,16 +190,19 @@ fn conversation_has_occurrence(world: &World, agent: Entity, occurrence_key: &st
     })
 }
 
-fn inbox_has_occurrence(world: &mut World, agent: Entity, occurrence_key: &str) -> bool {
-    let mut query = world.query::<(&ForAgent, &Incoming)>();
-    query.iter(world).any(|(of, incoming)| {
-        of.0 == agent
-            && incoming
-                .author
-                .request
-                .as_ref()
-                .is_some_and(|req| req.0 == occurrence_key)
-    })
+fn mark_delivered_if_present(
+    store: &Store,
+    conversation: Option<&Conversation>,
+    occurrence_key: &str,
+    now: Timestamp,
+) -> Result<bool> {
+    if !conversation_has_occurrence(conversation, occurrence_key) {
+        return Ok(false);
+    }
+    store
+        .schedule_repo()
+        .mark_occurrence_delivered(occurrence_key, now)?;
+    Ok(true)
 }
 
 /// Confirms any pending schedule occurrences that have already landed in their
@@ -212,11 +232,12 @@ fn confirm_delivered_schedules(world: &mut World) {
         let Some(agent) = agent::agent_of(world, &occ.companion_id) else {
             continue;
         };
-        if conversation_has_occurrence(world, agent, &occ.occurrence_key)
-            && let Err(error) = store
-                .schedule_repo()
-                .mark_occurrence_delivered(&occ.occurrence_key, now)
-            && error.is_storage()
+        if let Err(error) = mark_delivered_if_present(
+            &store,
+            world.get::<Conversation>(agent),
+            &occ.occurrence_key,
+            now,
+        ) && error.is_storage()
         {
             super::fail(world, error.to_string());
             return;
@@ -269,9 +290,22 @@ pub(crate) fn poll_schedules(world: &mut World, now: Timestamp) -> usize {
                 return 0;
             }
         };
+    let mut queued_inbox: HashSet<(Entity, String)> = {
+        let mut query = world.query::<(&ForAgent, &Incoming)>();
+        query
+            .iter(world)
+            .filter_map(|(of, incoming)| {
+                incoming
+                    .author
+                    .request
+                    .as_ref()
+                    .map(|req| (of.0, req.0.clone()))
+            })
+            .collect()
+    };
     let mut fired = 0;
     for occ in occurrences {
-        match dispatch_due_occurrence(world, &store, &occ, now) {
+        match dispatch_due_occurrence(world, &store, &mut queued_inbox, &occ, now) {
             OccurrenceOutcome::Delivered => fired += 1,
             OccurrenceOutcome::Skipped => {}
             OccurrenceOutcome::FatalStorage => return fired,
@@ -283,26 +317,31 @@ pub(crate) fn poll_schedules(world: &mut World, now: Timestamp) -> usize {
 fn dispatch_due_occurrence(
     world: &mut World,
     store: &Store,
+    queued_inbox: &mut HashSet<(Entity, String)>,
     occ: &super::db::schedules::ScheduleOccurrence,
     now: Timestamp,
 ) -> OccurrenceOutcome {
     let Some(agent) = agent::agent_of(world, &occ.companion_id) else {
         return OccurrenceOutcome::Skipped;
     };
-    if conversation_has_occurrence(world, agent, &occ.occurrence_key) {
-        if let Err(error) = store
-            .schedule_repo()
-            .mark_occurrence_delivered(&occ.occurrence_key, now)
-        {
+    match mark_delivered_if_present(
+        store,
+        world.get::<Conversation>(agent),
+        &occ.occurrence_key,
+        now,
+    ) {
+        Ok(true) => return OccurrenceOutcome::Skipped,
+        Ok(false) => {}
+        Err(error) => {
             if error.is_storage() {
                 super::fail(world, error.to_string());
                 return OccurrenceOutcome::FatalStorage;
             }
             tracing::warn!(%error, key = %occ.occurrence_key, "delivered schedule occurrence was not recorded");
+            return OccurrenceOutcome::Skipped;
         }
-        return OccurrenceOutcome::Skipped;
     }
-    if inbox_has_occurrence(world, agent, &occ.occurrence_key) {
+    if queued_inbox.contains(&(agent, occ.occurrence_key.clone())) {
         return OccurrenceOutcome::Skipped;
     }
     // The head decides what to do; the reason is the only extra context it
@@ -319,6 +358,7 @@ fn dispatch_due_occurrence(
         // Flush the deferred `Deliver` spawn so a back-to-back poll in the
         // same frame sees the queued `Incoming` entity and stays idempotent.
         world.flush();
+        queued_inbox.insert((agent, occ.occurrence_key.clone()));
         return OccurrenceOutcome::Delivered;
     }
     if let Err(error) = store

@@ -57,7 +57,7 @@ fn a_session_keeps_one_agent_across_runs_and_retires_it_with_the_session() {
     let mut world = world(store.clone());
     let kept = agent(&mut world, "run-a");
 
-    bind(&mut world, kept, "run-b");
+    bind_work_agent(world.get_mut::<WorkAgent>(kept), "run-b");
     assert_eq!(agent_of(&mut world, "w1"), Some(kept));
     assert_eq!(world.get::<WorkAgent>(kept).unwrap().run_id, "run-b");
 

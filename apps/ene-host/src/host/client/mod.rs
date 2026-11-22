@@ -401,7 +401,11 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
         && let Some(old_client) = previous.client_id
         && client != Some(old_client.as_str())
     {
-        super::voice::on_client_moved(world, &request.companion_id, &old_client);
+        super::voice::on_client_moved(
+            world.get_resource::<super::voice::Voice>(),
+            &request.companion_id,
+            &old_client,
+        );
         world
             .resource_mut::<Perception>()
             .events
@@ -415,7 +419,11 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
         }
     }
     if !request.release {
-        super::voice::on_client_activated(world, &request.companion_id, &request.client_id);
+        super::voice::on_client_activated(
+            world.get_resource::<super::voice::Voice>(),
+            &request.companion_id,
+            &request.client_id,
+        );
     }
     world.resource_mut::<Notifier>().push(
         Some(&request.companion_id),

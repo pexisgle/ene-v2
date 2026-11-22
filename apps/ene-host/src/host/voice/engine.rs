@@ -49,16 +49,30 @@ fn resolve_base(connection: &Connection, providers: Option<&Providers>) -> Strin
     })
 }
 
+struct VoiceEngineContext<'a> {
+    store: Option<&'a Store>,
+    credentials: Option<&'a Credentials>,
+    providers: Option<&'a Providers>,
+}
+
+impl<'a> VoiceEngineContext<'a> {
+    fn from_world(world: &'a World) -> Self {
+        Self {
+            store: world.get_resource::<Store>(),
+            credentials: world.get_resource::<Credentials>(),
+            providers: world.get_resource::<Providers>(),
+        }
+    }
+}
+
 fn http_engine(
-    world: &World,
+    ctx: &VoiceEngineContext<'_>,
     connection: Connection,
     kind: ConnectionKind,
     binding: Option<&w::VoiceBinding>,
 ) -> std::result::Result<HttpEngine, SetupError> {
-    let credentials = world.get_resource::<Credentials>();
-    let providers = world.get_resource::<Providers>();
-    let resolved_base = resolve_base(&connection, providers);
-    let secret = load_connection_secret(&connection, credentials, providers)?;
+    let resolved_base = resolve_base(&connection, ctx.providers);
+    let secret = load_connection_secret(&connection, ctx.credentials, ctx.providers)?;
     let client = net::client().map_err(|error| SetupError::Broken(error.to_string()))?;
     let engine = HttpEngine::new(connection, resolved_base, secret, kind, client)?;
     Ok(match binding {
@@ -81,6 +95,7 @@ pub(crate) fn companion_tts_source(
     {
         return Ok(Arc::clone(engine));
     }
+    let ctx = VoiceEngineContext::from_world(world);
     let binding = companion.map(parse_binding).unwrap_or_default();
     let connection = match binding
         .connection_id
@@ -88,17 +103,19 @@ pub(crate) fn companion_tts_source(
         .map(str::trim)
         .filter(|id| !id.is_empty())
     {
-        Some(connection_id) => voice_connection_by_id(world, ConnectionKind::Tts, connection_id)?,
-        None => voice_connection(world, ConnectionKind::Tts)?,
+        Some(connection_id) => {
+            voice_connection_by_id(ctx.store, ConnectionKind::Tts, connection_id)?
+        }
+        None => voice_connection(ctx.store, ConnectionKind::Tts)?,
     };
-    if let Some(engine) = plugin_engine(world, &connection, ConnectionKind::Tts)? {
+    if let Some(engine) = plugin_engine(&ctx, &connection, ConnectionKind::Tts)? {
         return Ok(Arc::new(engine));
     }
     if matches!(
         connection.endpoint().adapter.as_str(),
         "voicevox" | "openai" | "sakura"
     ) {
-        let engine = http_engine(world, connection, ConnectionKind::Tts, Some(&binding))?;
+        let engine = http_engine(&ctx, connection, ConnectionKind::Tts, Some(&binding))?;
         return Ok(Arc::new(engine));
     }
     Err(SetupError::Unsupported(format!(
@@ -114,12 +131,13 @@ pub(crate) fn stt_source(world: &World) -> std::result::Result<Arc<dyn SttEngine
     {
         return Ok(Arc::clone(engine));
     }
-    let connection = voice_connection(world, ConnectionKind::Stt)?;
-    if let Some(engine) = plugin_engine(world, &connection, ConnectionKind::Stt)? {
+    let ctx = VoiceEngineContext::from_world(world);
+    let connection = voice_connection(ctx.store, ConnectionKind::Stt)?;
+    if let Some(engine) = plugin_engine(&ctx, &connection, ConnectionKind::Stt)? {
         return Ok(Arc::new(engine));
     }
     if matches!(connection.endpoint().adapter.as_str(), "openai" | "sakura") {
-        let engine = http_engine(world, connection, ConnectionKind::Stt, None)?;
+        let engine = http_engine(&ctx, connection, ConnectionKind::Stt, None)?;
         return Ok(Arc::new(engine));
     }
     Err(SetupError::Unsupported(format!(
@@ -129,27 +147,22 @@ pub(crate) fn stt_source(world: &World) -> std::result::Result<Arc<dyn SttEngine
 }
 
 fn plugin_engine(
-    world: &World,
+    ctx: &VoiceEngineContext<'_>,
     connection: &Connection,
     kind: ConnectionKind,
 ) -> std::result::Result<Option<plugin::PluginSpeech>, SetupError> {
-    let Some(providers) = world.get_resource::<Providers>() else {
+    let Some(providers) = ctx.providers else {
         return Ok(None);
     };
-    plugin::PluginSpeech::new(
-        providers,
-        connection,
-        world.get_resource::<Credentials>(),
-        kind,
-    )
+    plugin::PluginSpeech::new(providers, connection, ctx.credentials, kind)
 }
 
 fn voice_connection_by_id(
-    world: &World,
+    store: Option<&Store>,
     kind: ConnectionKind,
     id: &str,
 ) -> std::result::Result<Connection, SetupError> {
-    let Some(store) = world.get_resource::<Store>() else {
+    let Some(store) = store else {
         return Err(SetupError::Broken("the host state is not available".into()));
     };
     let settings = store
@@ -160,10 +173,10 @@ fn voice_connection_by_id(
 }
 
 pub(super) fn voice_connection(
-    world: &World,
+    store: Option<&Store>,
     kind: ConnectionKind,
 ) -> std::result::Result<Connection, SetupError> {
-    let Some(store) = world.get_resource::<Store>() else {
+    let Some(store) = store else {
         return Err(SetupError::Broken("the host state is not available".into()));
     };
     let settings = store
