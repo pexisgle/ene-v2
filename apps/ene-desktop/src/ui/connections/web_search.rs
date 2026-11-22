@@ -1,7 +1,8 @@
+use super::ConnectionsPane;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{CircleButtonStyle, Tone, circle_icon_button, pill_button, status_pill};
-use crate::ui::{Hub, SettingsStudio, search_adapter_requires_key};
+use crate::ui::{Hub, search_adapter_requires_key};
 use ene_client_core::domain::{Connection, ConnectionCheck, ConnectionKind};
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 use std::collections::BTreeMap;
@@ -28,155 +29,150 @@ const SEARCH_PROVIDERS: [SearchProviderSpec; 2] = [
     },
 ];
 
-impl SettingsStudio {
-    pub(super) fn render_web_search_card(
-        &mut self,
-        connections: &[Connection],
-        checks: &BTreeMap<String, ConnectionCheck>,
-        live: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let search_conns: Vec<&Connection> = connections
-            .iter()
-            .filter(|c| c.kind == ConnectionKind::Search)
-            .collect();
-        let active_conn = search_conns.iter().copied().find(|c| {
-            c.enabled
-                && (!c.search_adapter().is_some_and(search_adapter_requires_key)
-                    || matches!(c.credential_state.as_str(), "registered" | "environment"))
-        });
-        let active_fallback =
-            active_conn.or_else(|| search_conns.iter().copied().find(|c| c.enabled));
+pub(super) fn render_web_search_card(
+    pane: &mut ConnectionsPane,
+    connections: &[Connection],
+    checks: &BTreeMap<String, ConnectionCheck>,
+    live: bool,
+    theme: &Theme,
+    cx: &mut Context<ConnectionsPane>,
+) -> AnyElement {
+    let search_conns: Vec<&Connection> = connections
+        .iter()
+        .filter(|c| c.kind == ConnectionKind::Search)
+        .collect();
+    let active_conn = search_conns.iter().copied().find(|c| {
+        c.enabled
+            && (!c.search_adapter().is_some_and(search_adapter_requires_key)
+                || matches!(c.credential_state.as_str(), "registered" | "environment"))
+    });
+    let active_fallback = active_conn.or_else(|| search_conns.iter().copied().find(|c| c.enabled));
 
-        let provider_rows: Vec<AnyElement> = SEARCH_PROVIDERS
-            .iter()
-            .map(|spec| {
-                self.render_search_provider_row(spec, &search_conns, (checks, live), theme, cx)
-            })
-            .collect();
-        let switcher =
-            render_search_switcher(&search_conns, active_fallback, live, &self.hub, theme);
+    let provider_rows: Vec<AnyElement> = SEARCH_PROVIDERS
+        .iter()
+        .map(|spec| {
+            render_search_provider_row(pane, spec, &search_conns, (checks, live), theme, cx)
+        })
+        .collect();
+    let switcher = render_search_switcher(&search_conns, active_fallback, live, &pane.hub, theme);
 
-        div()
-            .w_full()
-            .bg(theme.bg_surface)
-            .border_1()
-            .border_color(theme.border)
-            .rounded(px(14.))
-            .p(px(16.))
-            .flex()
-            .flex_col()
-            .gap(px(10.))
-            .child(render_search_card_header(active_conn, active_fallback, theme))
-            .child(
+    div()
+        .w_full()
+        .bg(theme.bg_surface)
+        .border_1()
+        .border_color(theme.border)
+        .rounded(px(14.))
+        .p(px(16.))
+        .flex()
+        .flex_col()
+        .gap(px(10.))
+        .child(render_search_card_header(active_conn, active_fallback, theme))
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.ink_muted)
+                .child("Exa や Tavily の API キーを登録して使用する検索サービスを選べます（Mwmbl・SearXNG・Brave は「接続を追加」からも設定できます）。"),
+        )
+        .when_some(switcher, |this, sw| this.child(sw))
+        .children(provider_rows)
+        .into_any_element()
+}
+
+fn render_search_provider_row(
+    pane: &mut ConnectionsPane,
+    spec: &SearchProviderSpec,
+    search_conns: &[&Connection],
+    (checks, live): (&BTreeMap<String, ConnectionCheck>, bool),
+    theme: &Theme,
+    cx: &mut Context<ConnectionsPane>,
+) -> AnyElement {
+    let existing = search_conns.iter().copied().find(|c| {
+        c.search_adapter()
+            .is_some_and(|a| a.eq_ignore_ascii_case(spec.adapter))
+    });
+    let conn_id = existing.map(|c| c.id.clone());
+    let has_cred = existing
+        .is_some_and(|c| matches!(c.credential_state.as_str(), "registered" | "environment"));
+    let is_active = existing.is_some_and(|c| c.enabled);
+    let is_checking = conn_id
+        .as_ref()
+        .is_some_and(|id| pane.hub.read(cx).setup.checking_connections.contains(id));
+    let check = existing.and_then(|c| checks.get(&c.id).or(c.last_check.as_ref()));
+
+    let reveal_key = format!("search-card:{}", spec.adapter);
+    let revealed = pane.form.revealed_secret_for.as_deref() == Some(reveal_key.as_str());
+    let draft = pane.drafts.masked_draft(
+        cx,
+        format!("search-card:secret:{}", spec.adapter),
+        spec.placeholder,
+        !revealed,
+        theme,
+    );
+    let key_text = draft.read(cx).text().trim().to_owned();
+    let err_msg = check
+        .filter(|c| !c.healthy)
+        .and_then(|c| c.failure.as_ref())
+        .map(|f| f.message.trim().to_owned())
+        .filter(|m| !m.is_empty());
+
+    let header = render_provider_header(
+        spec,
+        ProviderRowMeta {
+            existing,
+            conn_id,
+            has_cred,
+            is_active,
+            is_checking,
+            check,
+            live,
+        },
+        &pane.hub,
+        theme,
+    );
+    let input_row = render_provider_key_row(
+        spec.adapter,
+        ProviderKeyInput {
+            draft,
+            reveal_key,
+            revealed,
+            has_cred,
+            key_text,
+            live,
+        },
+        &pane.hub,
+        theme,
+        cx,
+    );
+
+    div()
+        .w_full()
+        .rounded(px(10.))
+        .bg(theme.bg_blush)
+        .p(px(12.))
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(header)
+        .child(input_row)
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.ink_muted)
+                .child(format!("環境変数 {} でも設定できます", spec.env_hint)),
+        )
+        .when_some(err_msg, |this, msg| {
+            this.child(
                 div()
+                    .rounded(px(8.))
+                    .bg(theme.danger_soft)
+                    .px(px(10.))
+                    .py(px(6.))
                     .text_xs()
-                    .text_color(theme.ink_muted)
-                    .child("Exa や Tavily の API キーを登録して使用する検索サービスを選べます（Mwmbl・SearXNG・Brave は「接続を追加」からも設定できます）。"),
+                    .text_color(theme.danger_fg)
+                    .child(msg),
             )
-            .when_some(switcher, |this, sw| this.child(sw))
-            .children(provider_rows)
-            .into_any_element()
-    }
-
-    fn render_search_provider_row(
-        &mut self,
-        spec: &SearchProviderSpec,
-        search_conns: &[&Connection],
-        (checks, live): (&BTreeMap<String, ConnectionCheck>, bool),
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let existing = search_conns.iter().copied().find(|c| {
-            c.search_adapter()
-                .is_some_and(|a| a.eq_ignore_ascii_case(spec.adapter))
-        });
-        let conn_id = existing.map(|c| c.id.clone());
-        let has_cred = existing
-            .is_some_and(|c| matches!(c.credential_state.as_str(), "registered" | "environment"));
-        let is_active = existing.is_some_and(|c| c.enabled);
-        let is_checking = conn_id
-            .as_ref()
-            .is_some_and(|id| self.hub.read(cx).checking_connections.contains(id));
-        let check = existing.and_then(|c| checks.get(&c.id).or(c.last_check.as_ref()));
-
-        let reveal_key = format!("search-card:{}", spec.adapter);
-        let revealed =
-            self.connection_form.revealed_secret_for.as_deref() == Some(reveal_key.as_str());
-        let draft = self.masked_draft(
-            cx,
-            format!("search-card:secret:{}", spec.adapter),
-            spec.placeholder,
-            !revealed,
-            theme,
-        );
-        let key_text = draft.read(cx).text().trim().to_owned();
-        let err_msg = check
-            .filter(|c| !c.healthy)
-            .and_then(|c| c.failure.as_ref())
-            .map(|f| f.message.trim().to_owned())
-            .filter(|m| !m.is_empty());
-
-        let header = render_provider_header(
-            spec,
-            ProviderRowMeta {
-                existing,
-                conn_id,
-                has_cred,
-                is_active,
-                is_checking,
-                check,
-                live,
-            },
-            &self.hub,
-            theme,
-        );
-        let input_row = render_provider_key_row(
-            spec.adapter,
-            ProviderKeyInput {
-                draft,
-                reveal_key,
-                revealed,
-                has_cred,
-                key_text,
-                live,
-            },
-            &self.hub,
-            theme,
-            cx,
-        );
-
-        div()
-            .w_full()
-            .rounded(px(10.))
-            .bg(theme.bg_blush)
-            .p(px(12.))
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(header)
-            .child(input_row)
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.ink_muted)
-                    .child(format!("環境変数 {} でも設定できます", spec.env_hint)),
-            )
-            .when_some(err_msg, |this, msg| {
-                this.child(
-                    div()
-                        .rounded(px(8.))
-                        .bg(theme.danger_soft)
-                        .px(px(10.))
-                        .py(px(6.))
-                        .text_xs()
-                        .text_color(theme.danger_fg)
-                        .child(msg),
-                )
-            })
-            .into_any_element()
-    }
+        })
+        .into_any_element()
 }
 
 struct ProviderRowMeta<'a> {
@@ -355,9 +351,9 @@ fn render_provider_key_row(
     input: ProviderKeyInput,
     hub: &Entity<Hub>,
     theme: &Theme,
-    cx: &Context<SettingsStudio>,
+    cx: &Context<ConnectionsPane>,
 ) -> gpui::Div {
-    let studio_eye = cx.entity();
+    let pane_eye = cx.entity();
     let hub_save = hub.clone();
     let revealed = input.revealed;
     let reveal_key = input.reveal_key;
@@ -374,8 +370,8 @@ fn render_provider_key_row(
             CircleButtonStyle::new(if revealed { Icon::EyeOff } else { Icon::Eye }, 30., 14.),
             theme,
             move |_, cx| {
-                studio_eye.update(cx, |this, cx| {
-                    this.connection_form.revealed_secret_for = if revealed {
+                pane_eye.update(cx, |this, cx| {
+                    this.form.revealed_secret_for = if revealed {
                         None
                     } else {
                         Some(reveal_key.clone())

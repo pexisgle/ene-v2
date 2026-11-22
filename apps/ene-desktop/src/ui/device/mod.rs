@@ -5,18 +5,61 @@ mod hardware;
 mod plugins;
 mod policy;
 
-use super::SettingsStudio;
 use super::icons::Icon;
 use super::theme::Theme;
 use super::widgets::{Tone, pill_button, status_pill};
+use super::{DraftStore, Hub};
 use crate::WORKSPACE_FILE_CAPABILITIES;
 use crate::state::{Device, Link};
 use ene_client_core::domain::{
-    COMPUTER_USE, ConnectionKind, PluginInfo, PolicyRule, PolicyRulesUpdate, PolicyText,
-    SKIP_TOOL_CONFIRMATION_ID, is_file_confirmation_rule as domain_is_file_confirmation,
-    tool_confirmation_update,
+    COMPUTER_USE, ConnectionKind, PluginInfo, PolicyEffect, PolicyRule, PolicyRulesUpdate,
+    PolicyText, SKIP_TOOL_CONFIRMATION_ID,
+    is_file_confirmation_rule as domain_is_file_confirmation, tool_confirmation_update,
 };
-use gpui::{AnyElement, Context, FontWeight, div, prelude::*, px};
+use gpui::{AnyElement, Context, Entity, FontWeight, Subscription, Window, div, prelude::*, px};
+
+/// Form and arming state owned by [`DevicePane`].
+pub(super) struct DeviceFormState {
+    pub(super) delete_armed_policy: Option<String>,
+    pub(super) adding_policy_open: bool,
+    pub(super) new_policy_effect: PolicyEffect,
+    pub(super) delete_armed_policy_text: Option<String>,
+    pub(super) editing_policy_text_id: Option<String>,
+    pub(super) adding_policy_text_open: bool,
+    pub(super) adding_plugin_open: bool,
+    pub(super) remote_host_open: bool,
+    pub(super) skip_confirm_armed: bool,
+}
+
+impl Default for DeviceFormState {
+    fn default() -> Self {
+        Self {
+            delete_armed_policy: None,
+            adding_policy_open: false,
+            new_policy_effect: PolicyEffect::Allow,
+            delete_armed_policy_text: None,
+            editing_policy_text_id: None,
+            adding_policy_text_open: false,
+            adding_plugin_open: false,
+            remote_host_open: false,
+            skip_confirm_armed: false,
+        }
+    }
+}
+
+/// Device, plugin, remote-host, and policy chapter rendered as an independent GPUI pane entity.
+pub(crate) struct DevicePane {
+    pub(crate) hub: Entity<Hub>,
+    pub(super) drafts: DraftStore,
+    pub(super) form: DeviceFormState,
+    _observe: Subscription,
+}
+
+impl std::fmt::Debug for DevicePane {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DevicePane").finish_non_exhaustive()
+    }
+}
 
 pub(super) fn is_file_confirmation_rule(rule: &PolicyRule) -> bool {
     domain_is_file_confirmation(rule, WORKSPACE_FILE_CAPABILITIES)
@@ -52,7 +95,7 @@ pub(super) struct DeviceSnapshot {
 }
 
 impl DeviceSnapshot {
-    fn capture(hub: &crate::ui::Hub) -> Self {
+    fn capture(hub: &Hub) -> Self {
         let our_id = &hub.options.id;
         let client = hub
             .model
@@ -95,19 +138,38 @@ impl DeviceSnapshot {
     }
 }
 
-impl SettingsStudio {
-    pub(crate) fn render_device(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let snap = DeviceSnapshot::capture(self.hub.read(cx));
-        let header = render_device_header(snap.tray_resident, theme);
-        let device_card = self.render_device_status_card(&snap, theme, cx);
+impl DevicePane {
+    pub(crate) fn new(hub: Entity<Hub>, cx: &mut Context<Self>) -> Self {
+        let _observe = cx.observe(&hub, |_, _, cx| cx.notify());
+        Self {
+            hub,
+            drafts: DraftStore::default(),
+            form: DeviceFormState::default(),
+            _observe,
+        }
+    }
+
+    pub(crate) fn on_leave(&mut self) {
+        self.form.skip_confirm_armed = false;
+    }
+}
+
+impl gpui::Render for DevicePane {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (theme, snap) = {
+            let hub = self.hub.read(cx);
+            (hub.theme(), DeviceSnapshot::capture(hub))
+        };
+        let header = render_device_header(snap.tray_resident, &theme);
+        let device_card = hardware::render_device_status_card(self, &snap, &theme);
         let (policy_heading, policy_card, add_toggle, add_panel) =
-            self.render_policy_rules_section(&snap, theme, cx);
+            policy::render_policy_rules_section(self, &snap, &theme, cx);
         let (policy_text_heading, policy_text_card, add_txt_toggle, add_txt_panel) =
-            self.render_policy_texts_section(&snap, theme, cx);
+            policy::render_policy_texts_section(self, &snap, &theme, cx);
         let (plugins_heading, add_plugin_panel, plugins_card) =
-            self.render_plugins_section(&snap, theme, cx);
-        let (remote_heading, remote_card) = self.render_remote_host_section(theme, cx);
-        let reset_history = render_history_reset_card(snap.live, theme, cx);
+            plugins::render_plugins_section(self, &snap, &theme, cx);
+        let (remote_heading, remote_card) = plugins::render_remote_host_section(self, &theme, cx);
+        let reset_history = render_history_reset_card(snap.live, &theme, cx);
 
         div()
             .w_full()
@@ -130,7 +192,6 @@ impl SettingsStudio {
             .child(remote_heading)
             .child(remote_card)
             .when_some(reset_history, |this, card| this.child(card))
-            .into_any_element()
     }
 }
 
@@ -163,7 +224,7 @@ fn render_device_header(tray_resident: bool, theme: &Theme) -> AnyElement {
 fn render_history_reset_card(
     live: bool,
     theme: &Theme,
-    cx: &mut Context<SettingsStudio>,
+    cx: &mut Context<DevicePane>,
 ) -> Option<AnyElement> {
     cx.try_global::<super::HistoryReset>().cloned().map(|reset| {
         div()

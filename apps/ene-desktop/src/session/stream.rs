@@ -55,25 +55,25 @@ struct StreamLoopState {
 impl Session {
     /// Serves the device stream, audio, the microphone and the subscription.
     pub(super) async fn serve(&mut self, host: Host) -> Outcome {
-        self.subscription.clear();
+        self.transport.subscription.clear();
         #[cfg(windows)]
         {
-            self.computer_frame = None;
+            self.devices.computer_frame = None;
         }
         let _ = self.updates.send(Update::EyesStatus(None));
-        if self.options.renderer.is_some() && self.avatar.is_none() {
+        if self.transport.options.renderer.is_some() && self.devices.avatar.is_none() {
             self.open_avatar().await;
         }
         let device = match host
             .client
             .device_stream(w::Id {
-                id: self.options.id.clone(),
+                id: self.transport.options.id.clone(),
                 ..Default::default()
             })
             .await
         {
             Ok(stream) => stream,
-            Err(error) => return self.classify(error),
+            Err(error) => return self.transport.classify(error),
         };
         let subscription = match self.subscribe(&host).await {
             Ok(stream) => stream,
@@ -93,7 +93,7 @@ impl Session {
                 let parsed = frame.map(|opt| opt.map(|m| m.to_owned_message()));
                 self.handle_device_frame(host, parsed).await
             }
-            Some(result) = self.work.join_next(), if !self.work.is_empty() => {
+            Some(result) = self.devices.work.join_next(), if !self.devices.work.is_empty() => {
                 self.finish_workspace_operation(host, result).await;
                 None
             }
@@ -132,11 +132,15 @@ impl Session {
         match tick {
             PeriodicTick::Capture => self.handle_capture_tick(state).await,
             PeriodicTick::Lip => {
-                self.drain_renderer().await;
-                self.pump_lip();
+                if let Some(err_state) = self.devices.drain_renderer(&self.transport).await {
+                    self.set_avatar(err_state).await;
+                }
+                self.audio
+                    .pump_lip(&self.transport, self.devices.avatar.as_mut(), &self.updates);
             }
             PeriodicTick::Sample => {
-                self.sample(
+                self.devices.sample(
+                    &self.transport,
                     host,
                     &mut state.screen_at,
                     &mut state.eyes_open,
@@ -186,19 +190,19 @@ impl Session {
     }
 
     async fn open_audio_output_stream(&mut self, host: &Host) -> Option<AudioOutStream> {
-        if self.bindings.is_empty() {
+        if self.transport.bindings.is_empty() {
             return None;
         }
         match host
             .voice
             .subscribe_audio_output(w::SubscribeAudioRequest {
-                client_id: self.options.id.clone(),
+                client_id: self.transport.options.id.clone(),
                 ..Default::default()
             })
             .await
         {
             Ok(stream) => {
-                if let Some(player) = self.player.as_mut() {
+                if let Some(player) = self.audio.player.as_mut() {
                     player.reset_stream();
                 }
                 Some(stream)
@@ -215,7 +219,7 @@ impl Session {
         &mut self,
         host: &Host,
     ) -> (Option<MicSendHalf>, Option<MicRecvHalf>) {
-        if self.bindings.is_empty() {
+        if self.transport.bindings.is_empty() {
             return (None, None);
         }
         self.open_microphone().await;
@@ -249,7 +253,7 @@ impl Session {
                 }
             }
             Ok(None) => Some(Outcome::Dropped("the host closed the device stream".into())),
-            Err(error) => Some(self.classify(error)),
+            Err(error) => Some(self.transport.classify(error)),
         }
     }
 
@@ -260,7 +264,7 @@ impl Session {
     ) -> Option<Outcome> {
         match frame {
             Some(Ok(event)) => {
-                self.play(event).await;
+                self.audio.play(event);
                 None
             }
             Some(Err(error)) => {
@@ -273,7 +277,7 @@ impl Session {
                     state.output = None;
                     None
                 } else {
-                    Some(self.classify(error))
+                    Some(self.transport.classify(error))
                 }
             }
             None => {
@@ -315,7 +319,7 @@ impl Session {
                             message: error.to_string(),
                         });
                     }
-                    if !self.bindings.is_empty() && self.microphone.is_some() {
+                    if !self.transport.bindings.is_empty() && self.audio.microphone.is_some() {
                         state.mic_retry_at =
                             Some(tokio::time::Instant::now() + Duration::from_secs(5));
                     }
@@ -329,7 +333,7 @@ impl Session {
                     is_final: true,
                     is_speaking: false,
                 });
-                if !self.bindings.is_empty() && self.microphone.is_some() {
+                if !self.transport.bindings.is_empty() && self.audio.microphone.is_some() {
                     state.mic_retry_at = Some(tokio::time::Instant::now() + Duration::from_secs(5));
                 }
                 state.mic_recv = None;
@@ -340,7 +344,7 @@ impl Session {
 
     async fn handle_mic_retry(&mut self, host: &Host, state: &mut StreamLoopState) {
         state.mic_retry_at = None;
-        if self.bindings.is_empty() || state.mic_recv.is_some() {
+        if self.transport.bindings.is_empty() || state.mic_recv.is_some() {
             return;
         }
         match host.voice.stream_audio_input().await {
@@ -361,24 +365,25 @@ impl Session {
 
     async fn handle_capture_tick(&mut self, state: &mut StreamLoopState) {
         let speaking = self
+            .audio
             .player
             .as_ref()
             .is_some_and(|player| player.playing() && !player.is_muted());
-        let far_end_level = self.player.as_ref().map_or(0., Player::level);
+        let far_end_level = self.audio.player.as_ref().map_or(0., Player::level);
         let CaptureTick {
             chunks,
             state: capture_state,
             barge_in,
         } = capture_tick(
-            &mut self.microphone,
-            !self.bindings.is_empty(),
-            &self.options.id,
+            &mut self.audio.microphone,
+            !self.transport.bindings.is_empty(),
+            &self.transport.options.id,
             speaking,
             far_end_level,
         );
-        if barge_in && let Some(player) = self.player.as_mut() {
+        if barge_in && let Some(player) = self.audio.player.as_mut() {
             player.stop_current();
-            self.speaking_companion = None;
+            self.audio.speaking_companion = None;
         }
         let mut sent = 0;
         if let Some(stream) = state.mic_send.as_mut() {
@@ -410,7 +415,7 @@ impl Session {
                 Step::Stop => Some(Outcome::Closed),
             },
             Ok(None) => Some(Outcome::Resync("the host closed the subscription".into())),
-            Err(error) => Some(self.classify(error)),
+            Err(error) => Some(self.transport.classify(error)),
         }
     }
 
@@ -423,7 +428,9 @@ impl Session {
         if matches!(command, Command::SetEyesEnabled(false)) {
             state.timers.observations.abort_all();
             if state.eyes_open {
-                let event = self.perception_event(w::perception_event::Event::Enabled(false));
+                let event = self
+                    .transport
+                    .perception_event(w::perception_event::Event::Enabled(false));
                 let _ = tokio::time::timeout(
                     Duration::from_secs(1),
                     host.client.report_perception(event),
@@ -443,14 +450,14 @@ impl Session {
         match host
             .host
             .subscribe(w::SubscribeRequest {
-                client_id: self.options.id.clone(),
-                cursor: self.cursor.clone().into(),
+                client_id: self.transport.options.id.clone(),
+                cursor: self.transport.cursor.clone().into(),
                 ..Default::default()
             })
             .await
         {
             Ok(stream) => Ok(stream),
-            Err(error) => Err(self.classify(error)),
+            Err(error) => Err(self.transport.classify(error)),
         }
     }
 
@@ -458,7 +465,7 @@ impl Session {
     async fn device_event(&mut self, host: &Host, event: w::device_event::Event) -> Step {
         match event {
             w::device_event::Event::Ready(ready) => {
-                self.subscription = ready.subscription_id;
+                self.transport.subscription = ready.subscription_id;
                 Step::Continue
             }
             w::device_event::Event::Operation(operation) => {
@@ -476,13 +483,13 @@ impl Session {
                 Some(reason) => Err(reason.into()),
                 None => Box::pin(self.computer_operation(host, &operation)).await,
             };
-            let result = Self::operation_result(&self.options.id, &operation, outcome);
+            let result = Self::operation_result(&self.transport.options.id, &operation, outcome);
             Self::report_operation(host, result).await;
             return;
         }
         if operation.capability.starts_with(work_tools::PREFIX) {
-            let workspace = self.workspace.clone();
-            let active_work = self.work.len();
+            let workspace = self.devices.workspace.clone();
+            let active_work = self.devices.work.len();
             let request: Result<_, OperationError> = (|| {
                 if let Some(reason) = refusal {
                     return Err(reason.into());
@@ -500,8 +507,8 @@ impl Session {
             })();
             match request {
                 Ok((workspace, input)) => {
-                    let client_id = self.options.id.clone();
-                    self.work.spawn(async move {
+                    let client_id = self.transport.options.id.clone();
+                    self.devices.work.spawn(async move {
                         let output =
                             Box::pin(workspace.execute(&operation.capability, input)).await;
                         Self::operation_result(
@@ -512,7 +519,8 @@ impl Session {
                     });
                 }
                 Err(reason) => {
-                    let result = Self::operation_result(&self.options.id, &operation, Err(reason));
+                    let result =
+                        Self::operation_result(&self.transport.options.id, &operation, Err(reason));
                     Self::report_operation(host, result).await;
                 }
             }
@@ -521,7 +529,7 @@ impl Session {
                 Some(reason) => Err(reason.into()),
                 None => Box::pin(self.execute(&operation)).await,
             };
-            let result = Self::operation_result(&self.options.id, &operation, outcome);
+            let result = Self::operation_result(&self.transport.options.id, &operation, outcome);
             Self::report_operation(host, result).await;
         }
     }
@@ -529,7 +537,7 @@ impl Session {
     /// Handles one host notification: forwards it, and tracks the cursor and the
     /// activation this client holds.
     async fn notification(&mut self, notification: w::Notification) -> Step {
-        self.cursor = notification.cursor.as_option().cloned();
+        self.transport.cursor = notification.cursor.as_option().cloned();
         let mut restart = false;
         match notification.event.as_ref() {
             Some(w::notification::Event::ResyncRequired(_)) => {
@@ -539,20 +547,22 @@ impl Session {
                 restart = self.handle_activation_update(activation).await;
             }
             Some(w::notification::Event::Companion(companion)) => {
-                self.companions
+                self.transport
+                    .companions
                     .insert(companion.id.clone(), (**companion).clone());
-                if self.bindings.contains_key(&companion.id) {
+                if self.transport.bindings.contains_key(&companion.id) {
                     self.sync_avatars().await;
                 }
-                if self.pending.as_deref() == Some(companion.id.as_str()) {
+                if self.transport.pending.as_deref() == Some(companion.id.as_str()) {
                     restart = true;
                 }
             }
             Some(w::notification::Event::Generic(event)) if event.kind == "perception_status" => {
-                if self.eyes_enabled
+                if self.devices.eyes_enabled
                     && let Some(payload) = event.payload.as_option()
                     && let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload.json)
-                    && value["subscription_id"].as_str() == Some(self.subscription.as_str())
+                    && value["subscription_id"].as_str()
+                        == Some(self.transport.subscription.as_str())
                 {
                     let status = value["status"].as_str().map(str::to_owned);
                     let _ = self.updates.send(Update::EyesStatus(status));
@@ -571,32 +581,38 @@ impl Session {
     }
 
     async fn handle_activation_update(&mut self, activation: &w::Activation) -> bool {
-        let ours = activation.client_id.as_deref() == Some(self.options.id.as_str());
+        let ours = activation.client_id.as_deref() == Some(self.transport.options.id.as_str());
         if ours {
-            if !self.bindings.contains_key(&activation.companion_id) {
-                self.bindings.insert(
+            if !self
+                .transport
+                .bindings
+                .contains_key(&activation.companion_id)
+            {
+                self.transport.bindings.insert(
                     activation.companion_id.clone(),
                     Binding {
                         companion_id: activation.companion_id.clone(),
                     },
                 );
-                if self.focused.is_none() {
-                    self.focused = Some(activation.companion_id.clone());
+                if self.transport.focused.is_none() {
+                    self.transport.focused = Some(activation.companion_id.clone());
                 }
                 self.sync_avatars().await;
-                return self.bindings.len() == 1;
+                return self.transport.bindings.len() == 1;
             }
-        } else if self.bindings.remove(&activation.companion_id).is_some() {
-            if self.speaking_companion.as_deref() == Some(activation.companion_id.as_str()) {
-                self.stop_playback();
-                self.speaking_companion = None;
-            }
-            if self.focused.as_deref() == Some(activation.companion_id.as_str()) {
-                self.focused = self.bindings.keys().next().cloned();
+        } else if self
+            .transport
+            .bindings
+            .remove(&activation.companion_id)
+            .is_some()
+        {
+            self.audio.clear_speaking_if(&activation.companion_id);
+            if self.transport.focused.as_deref() == Some(activation.companion_id.as_str()) {
+                self.transport.focused = self.transport.bindings.keys().next().cloned();
             }
             self.sync_avatars().await;
-            if self.bindings.is_empty() {
-                self.sensor = Sensor::default();
+            if self.transport.bindings.is_empty() {
+                self.devices.sensor = Sensor::default();
                 return true;
             }
         }

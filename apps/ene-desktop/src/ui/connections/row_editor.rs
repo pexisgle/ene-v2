@@ -1,5 +1,10 @@
-use super::mcp_editor::{McpDraftGroup, ParsedMcpExtra, append_mcp_extra_fields, read_mcp_extra};
-use super::pickers::PickerInput;
+use super::ConnectionsPane;
+use super::mcp_editor::{
+    McpDraftGroup, ParsedMcpExtra, append_mcp_extra_fields, mcp_args_draft, mcp_extra_drafts,
+    process_command_draft, read_mcp_extra, render_mcp_tools_strip,
+};
+use super::pickers::{PickerInput, render_kind_dropdown_picker};
+use super::schema_form::{render_agent_platform_options, render_options_schema};
 use crate::input::Draft;
 use crate::ui::icons::Icon;
 use crate::ui::studio::labeled_field;
@@ -7,7 +12,7 @@ use crate::ui::theme::Theme;
 use crate::ui::widgets::{
     CircleButtonStyle, Tone, circle_icon_button, kind_pill, pill_button, status_pill, toggle_switch,
 };
-use crate::ui::{GOOGLE_AGENT_PLATFORM, Hub, SettingsStudio, default_embedding_dimensions};
+use crate::ui::{GOOGLE_AGENT_PLATFORM, Hub, default_embedding_dimensions};
 use ene_client_core::{
     connections::{
         ConnectionEditSpec, apply_connection_edits, apply_mcp_extra_edits, extract_kind_list_init,
@@ -53,273 +58,269 @@ struct EditorSavePayload {
     next_mcp_extra: Option<ParsedMcpExtra>,
 }
 
-impl SettingsStudio {
-    pub(super) fn render_connection_row(
-        &mut self,
-        conn: &Connection,
-        check: Option<&ConnectionCheck>,
-        live: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let id = conn.id.clone();
-        let expanded = self.connection_form.expanded_connection_id.as_deref() == Some(id.as_str());
-        let needs_key_flag = conn.needs_key(
-            self.hub
-                .read(cx)
-                .model
-                .connections
-                .providers
-                .as_deref()
-                .unwrap_or_default(),
-        );
-        let badge = compute_connection_badge(conn, check, needs_key_flag, theme);
-        let should_auto_probe = should_auto_probe_connection(conn, check, needs_key_flag);
-        let header = render_row_header(
+pub(super) fn render_connection_row(
+    pane: &mut ConnectionsPane,
+    conn: &Connection,
+    check: Option<&ConnectionCheck>,
+    live: bool,
+    theme: &Theme,
+    cx: &mut Context<ConnectionsPane>,
+) -> AnyElement {
+    let id = conn.id.clone();
+    let expanded = pane.form.expanded_connection_id.as_deref() == Some(id.as_str());
+    let needs_key_flag = conn.needs_key(
+        pane.hub
+            .read(cx)
+            .model
+            .connections
+            .providers
+            .as_deref()
+            .unwrap_or_default(),
+    );
+    let badge = compute_connection_badge(conn, check, needs_key_flag, theme);
+    let should_auto_probe = should_auto_probe_connection(conn, check, needs_key_flag);
+    let header = render_row_header(
+        conn,
+        &badge,
+        RowHeaderFlags {
+            expanded,
+            should_auto_probe,
+            live,
+        },
+        theme,
+        cx,
+    );
+    let detail = expanded.then(|| render_connection_editor(pane, conn, check, live, theme, cx));
+
+    div()
+        .w_full()
+        .bg(theme.bg_surface)
+        .border_1()
+        .border_color(theme.border)
+        .rounded(px(14.))
+        .flex()
+        .flex_col()
+        .child(header)
+        .when_some(detail, |this, d| this.child(d))
+        .into_any_element()
+}
+
+fn render_connection_editor(
+    pane: &mut ConnectionsPane,
+    conn: &Connection,
+    check: Option<&ConnectionCheck>,
+    live: bool,
+    theme: &Theme,
+    cx: &mut Context<ConnectionsPane>,
+) -> AnyElement {
+    let id = conn.id.clone();
+    let endpoint = conn.endpoint();
+    let agent_platform = conn.kind == ConnectionKind::Llm
+        && endpoint.is_some_and(|ep| ep.adapter == GOOGLE_AGENT_PLATFORM);
+
+    let drafts = collect_editor_drafts(pane, conn, endpoint, theme, cx);
+    let mcp_tools_strip = render_mcp_tools_strip(pane, conn, check, &drafts.list_d, theme, cx);
+    let dropdown_picker = render_kind_dropdown_picker(
+        pane,
+        PickerInput {
             conn,
-            &badge,
-            RowHeaderFlags {
-                expanded,
-                should_auto_probe,
+            endpoint,
+            list_d: &drafts.list_d,
+            dim_d: drafts.dim_d.as_ref(),
+            live,
+        },
+        theme,
+        cx,
+    );
+    let (schema_controls, next_options_json) = if agent_platform {
+        render_agent_platform_options(pane, &id, conn.revision, endpoint, theme, cx)
+    } else {
+        render_options_schema(pane, &id, conn.revision, endpoint, theme, cx)
+    };
+
+    let payload = build_editor_save_payload(&drafts, next_options_json, live, cx);
+    let args_error = payload.next_args.as_ref().err().copied();
+    let mcp_kv_error = payload
+        .next_mcp_extra
+        .as_ref()
+        .and_then(|(_, _, _, env_r, hdr_r)| {
+            env_r
+                .as_ref()
+                .err()
+                .or_else(|| hdr_r.as_ref().err())
+                .copied()
+        });
+    let show_list_field = agent_platform
+        || (!is_voicevox_tts(conn, endpoint)
+            && !(conn.kind == ConnectionKind::Tts && conn.is_sakura())
+            && !matches!(conn.kind, ConnectionKind::Llm | ConnectionKind::Embedding));
+
+    let cred_strip = render_credentials_strip(pane, conn, live, theme, cx);
+    let actions = render_editor_actions(conn, payload, &pane.hub, theme);
+
+    div()
+        .border_t_1()
+        .border_color(theme.border)
+        .px(px(16.))
+        .py(px(16.))
+        .flex()
+        .flex_col()
+        .gap(px(12.))
+        .child(render_enable_row(conn, live, &pane.hub, theme))
+        .when_some(error_banner(check, theme), |this, strip| this.child(strip))
+        .child(cred_strip)
+        .child(labeled_field("表示名", drafts.name_d, theme))
+        .when_some(drafts.cmd_d, |this, cd| {
+            this.child(labeled_field("コマンド", cd, theme))
+        })
+        .when_some(drafts.mcp_args_d, |this, draft| {
+            append_mcp_args_field(this, &id, draft, args_error, theme)
+        })
+        .when_some(drafts.mcp_extra_d, |this, group| {
+            append_mcp_extra_fields(this, &id, group, mcp_kv_error, theme)
+        })
+        .when(!agent_platform, |this| {
+            this.child(labeled_field("エンドポイント URL", drafts.ep_d, theme))
+        })
+        .when_some(dropdown_picker, |this, picker| this.child(picker))
+        .when_some(drafts.dim_d, |this, dd| {
+            this.child(labeled_field("次元数 (dimensions)", dd, theme))
+        })
+        .when(show_list_field, |this| {
+            this.child(labeled_field(
+                conn.kind.list_field_label(),
+                drafts.list_d,
+                theme,
+            ))
+        })
+        .when_some(mcp_tools_strip, |this, strip| this.child(strip))
+        .when(!schema_controls.is_empty(), |this| {
+            this.child(render_schema_box(schema_controls, theme))
+        })
+        .child(actions)
+        .into_any_element()
+}
+
+fn collect_editor_drafts(
+    pane: &mut ConnectionsPane,
+    conn: &Connection,
+    endpoint: Option<&ConnectionEndpoint>,
+    theme: &Theme,
+    cx: &mut Context<ConnectionsPane>,
+) -> EditorDraftSet {
+    let id = &conn.id;
+    let rev = conn.revision;
+    let cfg = conn.config.as_ref();
+    let list_init = extract_kind_list_init(cfg);
+    EditorDraftSet {
+        name_d: pane.drafts.draft(
+            cx,
+            format!("conn:{id}:r{rev}:name"),
+            "接続名",
+            Some(&conn.name),
+            theme,
+        ),
+        ep_d: pane.drafts.draft(
+            cx,
+            format!("conn:{id}:r{rev}:ep"),
+            "https://...",
+            endpoint.map(|e| e.endpoint.as_str()),
+            theme,
+        ),
+        list_d: pane.drafts.draft(
+            cx,
+            format!("conn:{id}:r{rev}:list"),
+            "",
+            Some(&list_init),
+            theme,
+        ),
+        cmd_d: process_command_draft(pane, conn, cfg, theme, cx),
+        mcp_args_d: mcp_args_draft(pane, id, rev, cfg, theme, cx),
+        mcp_extra_d: mcp_extra_drafts(pane, id, rev, cfg, theme, cx),
+        dim_d: embedding_dim_draft(pane, conn, cfg, &list_init, theme, cx),
+    }
+}
+
+fn embedding_dim_draft(
+    pane: &mut ConnectionsPane,
+    conn: &Connection,
+    cfg: Option<&ConnectionConfig>,
+    list_init: &str,
+    theme: &Theme,
+    cx: &mut Context<ConnectionsPane>,
+) -> Option<Entity<Draft>> {
+    if conn.kind != ConnectionKind::Embedding {
+        return None;
+    }
+    let init = match cfg {
+        Some(ConnectionConfig::Embedding(emb)) if emb.dimensions > 0 => emb.dimensions.to_string(),
+        _ => default_embedding_dimensions(list_init).to_string(),
+    };
+    Some(pane.drafts.draft(
+        cx,
+        format!("conn:{}:r{}:dims", conn.id, conn.revision),
+        "例: 1024",
+        Some(&init),
+        theme,
+    ))
+}
+
+fn render_credentials_strip(
+    pane: &mut ConnectionsPane,
+    conn: &Connection,
+    live: bool,
+    theme: &Theme,
+    cx: &mut Context<ConnectionsPane>,
+) -> gpui::Div {
+    let id = conn.id.clone();
+    let revealed = pane.form.revealed_secret_for.as_deref() == Some(id.as_str());
+    let secret_d = pane.drafts.masked_draft(
+        cx,
+        format!("conn:secret:{id}"),
+        "新しいAPIキー / トークン",
+        !revealed,
+        theme,
+    );
+    let secret_val = secret_d.read(cx).text().trim().to_owned();
+    let has_cred = conn.credential_state == "registered" || conn.credential_state == "environment";
+    let cred_label = match conn.credential_state.as_str() {
+        "registered" => "登録済み",
+        "environment" => "環境変数",
+        _ => "未登録",
+    };
+    let sakura_ids = collect_sakura_conn_ids(conn, pane.hub.read(cx));
+    let revoke_armed = pane.form.revoke_armed_for.as_deref() == Some(id.as_str());
+
+    div()
+        .rounded(px(10.))
+        .bg(theme.bg_blush)
+        .p(px(12.))
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(render_cred_strip_header(cred_label, has_cred, theme))
+        .child(render_cred_secret_row(
+            CredSecretInput {
+                id: &id,
+                secret_d,
+                secret_val,
+                revealed,
                 live,
             },
+            (&sakura_ids, &pane.hub),
             theme,
             cx,
-        );
-        let detail = expanded.then(|| self.render_connection_editor(conn, check, live, theme, cx));
-
-        div()
-            .w_full()
-            .bg(theme.bg_surface)
-            .border_1()
-            .border_color(theme.border)
-            .rounded(px(14.))
-            .flex()
-            .flex_col()
-            .child(header)
-            .when_some(detail, |this, d| this.child(d))
-            .into_any_element()
-    }
-
-    fn render_connection_editor(
-        &mut self,
-        conn: &Connection,
-        check: Option<&ConnectionCheck>,
-        live: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let id = conn.id.clone();
-        let endpoint = conn.endpoint();
-        let agent_platform = conn.kind == ConnectionKind::Llm
-            && endpoint.is_some_and(|ep| ep.adapter == GOOGLE_AGENT_PLATFORM);
-
-        let drafts = self.collect_editor_drafts(conn, endpoint, theme, cx);
-        let mcp_tools_strip = self.render_mcp_tools_strip(conn, check, &drafts.list_d, theme, cx);
-        let dropdown_picker = self.render_kind_dropdown_picker(
-            PickerInput {
-                conn,
-                endpoint,
-                list_d: &drafts.list_d,
-                dim_d: drafts.dim_d.as_ref(),
-                live,
-            },
-            theme,
-            cx,
-        );
-        let (schema_controls, next_options_json) = if agent_platform {
-            self.render_agent_platform_options(&id, conn.revision, endpoint, theme, cx)
-        } else {
-            self.render_options_schema(&id, conn.revision, endpoint, theme, cx)
-        };
-
-        let payload = build_editor_save_payload(&drafts, next_options_json, live, cx);
-        let args_error = payload.next_args.as_ref().err().copied();
-        let mcp_kv_error = payload
-            .next_mcp_extra
-            .as_ref()
-            .and_then(|(_, _, _, env_r, hdr_r)| {
-                env_r
-                    .as_ref()
-                    .err()
-                    .or_else(|| hdr_r.as_ref().err())
-                    .copied()
-            });
-        let show_list_field = agent_platform
-            || (!is_voicevox_tts(conn, endpoint)
-                && !(conn.kind == ConnectionKind::Tts && conn.is_sakura())
-                && !matches!(conn.kind, ConnectionKind::Llm | ConnectionKind::Embedding));
-
-        let cred_strip = self.render_credentials_strip(conn, live, theme, cx);
-        let actions = render_editor_actions(conn, payload, &self.hub, theme);
-
-        div()
-            .border_t_1()
-            .border_color(theme.border)
-            .px(px(16.))
-            .py(px(16.))
-            .flex()
-            .flex_col()
-            .gap(px(12.))
-            .child(render_enable_row(conn, live, &self.hub, theme))
-            .when_some(error_banner(check, theme), |this, strip| this.child(strip))
-            .child(cred_strip)
-            .child(labeled_field("表示名", drafts.name_d, theme))
-            .when_some(drafts.cmd_d, |this, cd| {
-                this.child(labeled_field("コマンド", cd, theme))
-            })
-            .when_some(drafts.mcp_args_d, |this, draft| {
-                append_mcp_args_field(this, &id, draft, args_error, theme)
-            })
-            .when_some(drafts.mcp_extra_d, |this, group| {
-                append_mcp_extra_fields(this, &id, group, mcp_kv_error, theme)
-            })
-            .when(!agent_platform, |this| {
-                this.child(labeled_field("エンドポイント URL", drafts.ep_d, theme))
-            })
-            .when_some(dropdown_picker, |this, picker| this.child(picker))
-            .when_some(drafts.dim_d, |this, dd| {
-                this.child(labeled_field("次元数 (dimensions)", dd, theme))
-            })
-            .when(show_list_field, |this| {
-                this.child(labeled_field(
-                    conn.kind.list_field_label(),
-                    drafts.list_d,
-                    theme,
-                ))
-            })
-            .when_some(mcp_tools_strip, |this, strip| this.child(strip))
-            .when(!schema_controls.is_empty(), |this| {
-                this.child(render_schema_box(schema_controls, theme))
-            })
-            .child(actions)
-            .into_any_element()
-    }
-
-    fn collect_editor_drafts(
-        &mut self,
-        conn: &Connection,
-        endpoint: Option<&ConnectionEndpoint>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> EditorDraftSet {
-        let id = &conn.id;
-        let rev = conn.revision;
-        let cfg = conn.config.as_ref();
-        let list_init = extract_kind_list_init(cfg);
-        EditorDraftSet {
-            name_d: self.draft(
-                cx,
-                format!("conn:{id}:r{rev}:name"),
-                "接続名",
-                Some(&conn.name),
-                theme,
-            ),
-            ep_d: self.draft(
-                cx,
-                format!("conn:{id}:r{rev}:ep"),
-                "https://...",
-                endpoint.map(|e| e.endpoint.as_str()),
-                theme,
-            ),
-            list_d: self.draft(
-                cx,
-                format!("conn:{id}:r{rev}:list"),
-                "",
-                Some(&list_init),
-                theme,
-            ),
-            cmd_d: self.process_command_draft(conn, cfg, theme, cx),
-            mcp_args_d: self.mcp_args_draft(id, rev, cfg, theme, cx),
-            mcp_extra_d: self.mcp_extra_drafts(id, rev, cfg, theme, cx),
-            dim_d: self.embedding_dim_draft(conn, cfg, &list_init, theme, cx),
-        }
-    }
-
-    fn embedding_dim_draft(
-        &mut self,
-        conn: &Connection,
-        cfg: Option<&ConnectionConfig>,
-        list_init: &str,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<Draft>> {
-        if conn.kind != ConnectionKind::Embedding {
-            return None;
-        }
-        let init = match cfg {
-            Some(ConnectionConfig::Embedding(emb)) if emb.dimensions > 0 => {
-                emb.dimensions.to_string()
-            }
-            _ => default_embedding_dimensions(list_init).to_string(),
-        };
-        Some(self.draft(
-            cx,
-            format!("conn:{}:r{}:dims", conn.id, conn.revision),
-            "例: 1024",
-            Some(&init),
-            theme,
         ))
-    }
-
-    fn render_credentials_strip(
-        &mut self,
-        conn: &Connection,
-        live: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let id = conn.id.clone();
-        let revealed = self.connection_form.revealed_secret_for.as_deref() == Some(id.as_str());
-        let secret_d = self.masked_draft(
-            cx,
-            format!("conn:secret:{id}"),
-            "新しいAPIキー / トークン",
-            !revealed,
-            theme,
-        );
-        let secret_val = secret_d.read(cx).text().trim().to_owned();
-        let has_cred =
-            conn.credential_state == "registered" || conn.credential_state == "environment";
-        let cred_label = match conn.credential_state.as_str() {
-            "registered" => "登録済み",
-            "environment" => "環境変数",
-            _ => "未登録",
-        };
-        let sakura_ids = collect_sakura_conn_ids(conn, self.hub.read(cx));
-        let revoke_armed = self.connection_form.revoke_armed_for.as_deref() == Some(id.as_str());
-
-        div()
-            .rounded(px(10.))
-            .bg(theme.bg_blush)
-            .p(px(12.))
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(render_cred_strip_header(cred_label, has_cred, theme))
-            .child(render_cred_secret_row(
-                CredSecretInput {
-                    id: &id,
-                    secret_d,
-                    secret_val,
-                    revealed,
-                    live,
-                },
-                (&sakura_ids, &self.hub),
+        .when(conn.credential_state == "registered", |this| {
+            this.child(render_revoke_controls(
+                &id,
+                revoke_armed,
+                live,
+                &pane.hub,
                 theme,
                 cx,
             ))
-            .when(conn.credential_state == "registered", |this| {
-                this.child(render_revoke_controls(
-                    &id,
-                    revoke_armed,
-                    live,
-                    &self.hub,
-                    theme,
-                    cx,
-                ))
-            })
-    }
+        })
 }
 
 pub(super) fn is_voicevox_tts(conn: &Connection, endpoint: Option<&ConnectionEndpoint>) -> bool {
@@ -444,7 +445,7 @@ fn render_cred_secret_row(
     input: CredSecretInput<'_>,
     (sakura_ids, hub): (&[String], &Entity<Hub>),
     theme: &Theme,
-    cx: &Context<SettingsStudio>,
+    cx: &Context<ConnectionsPane>,
 ) -> gpui::Div {
     let CredSecretInput {
         id,
@@ -453,7 +454,7 @@ fn render_cred_secret_row(
         revealed,
         live,
     } = input;
-    let studio_eye = cx.entity();
+    let pane_eye = cx.entity();
     let eye_id = id.to_owned();
     let hub_reg = hub.clone();
     let reg_id = id.to_owned();
@@ -472,8 +473,8 @@ fn render_cred_secret_row(
             CircleButtonStyle::new(if revealed { Icon::EyeOff } else { Icon::Eye }, 30., 14.),
             theme,
             move |_, cx| {
-                studio_eye.update(cx, |this, cx| {
-                    this.connection_form.revealed_secret_for =
+                pane_eye.update(cx, |this, cx| {
+                    this.form.revealed_secret_for =
                         if revealed { None } else { Some(eye_id.clone()) };
                     cx.notify();
                 });
@@ -593,7 +594,7 @@ fn render_row_header(
     badge: &RowBadge,
     flags: RowHeaderFlags,
     theme: &Theme,
-    cx: &Context<SettingsStudio>,
+    cx: &Context<ConnectionsPane>,
 ) -> gpui::Div {
     let RowHeaderFlags {
         expanded,
@@ -607,6 +608,7 @@ fn render_row_header(
         .read(cx)
         .hub
         .read(cx)
+        .setup
         .checking_connections
         .contains(id);
     let ep = conn.endpoint();
@@ -615,7 +617,7 @@ fn render_row_header(
     let hub_expand_probe = hub_check.clone();
     let check_id = id.clone();
     let expand_id = id.clone();
-    let studio_expand = cx.entity();
+    let pane_expand = cx.entity();
 
     div()
         .h(px(62.))
@@ -687,25 +689,21 @@ fn render_row_header(
                     theme,
                     move |_, cx| {
                         let mut probe_id = None;
-                        studio_expand.update(cx, |this, cx| {
-                            if this.connection_form.expanded_connection_id.as_deref()
+                        pane_expand.update(cx, |this, cx| {
+                            if this.form.expanded_connection_id.as_deref()
                                 == Some(expand_id.as_str())
                             {
-                                this.connection_form.expanded_connection_id = None;
+                                this.form.expanded_connection_id = None;
                             } else {
-                                this.connection_form.expanded_connection_id =
-                                    Some(expand_id.clone());
+                                this.form.expanded_connection_id = Some(expand_id.clone());
                                 if should_auto_probe
-                                    && this
-                                        .connection_form
-                                        .auto_probed_connections
-                                        .insert(expand_id.clone())
+                                    && this.form.auto_probed_connections.insert(expand_id.clone())
                                 {
                                     probe_id = Some(expand_id.clone());
                                 }
                             }
                             this.open_dropdown = None;
-                            this.connection_form.revoke_armed_for = None;
+                            this.form.revoke_armed_for = None;
                             cx.notify();
                         });
                         if let Some(pid) = probe_id {
@@ -738,14 +736,14 @@ fn render_revoke_controls(
     live: bool,
     hub: &Entity<Hub>,
     theme: &Theme,
-    cx: &Context<SettingsStudio>,
+    cx: &Context<ConnectionsPane>,
 ) -> gpui::Div {
-    let studio = cx.entity();
+    let pane = cx.entity();
     let hub_rev = hub.clone();
     let own_id = id.to_owned();
     let row = div().flex().flex_row().justify_end().gap(px(6.));
     if revoke_armed {
-        let cancel_studio = studio.clone();
+        let cancel_pane = pane.clone();
         row.child(
             div()
                 .flex()
@@ -758,8 +756,8 @@ fn render_revoke_controls(
                     Tone::Ghost,
                     theme,
                     move |_, cx| {
-                        cancel_studio.update(cx, |this, cx| {
-                            this.connection_form.revoke_armed_for = None;
+                        cancel_pane.update(cx, |this, cx| {
+                            this.form.revoke_armed_for = None;
                             cx.notify();
                         });
                     },
@@ -781,8 +779,8 @@ fn render_revoke_controls(
             Tone::Danger.icon(Icon::Trash).enabled(live),
             theme,
             move |_, cx| {
-                studio.update(cx, |this, cx| {
-                    this.connection_form.revoke_armed_for = Some(own_id.clone());
+                pane.update(cx, |this, cx| {
+                    this.form.revoke_armed_for = Some(own_id.clone());
                     cx.notify();
                 });
             },

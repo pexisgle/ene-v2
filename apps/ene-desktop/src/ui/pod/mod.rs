@@ -118,8 +118,8 @@ impl CompanionPod {
         let hub = self.hub.read(cx);
         hub.live()
             && hub.model.settings().is_some_and(|settings| {
-                hub.setup_pending
-                    || hub.setup_error.is_some()
+                hub.setup.pending
+                    || hub.setup.error.is_some()
                     || hub
                         .model
                         .connections
@@ -143,7 +143,7 @@ impl CompanionPod {
             .model
             .snapshot()
             .is_none_or(|snap| snap.companions.is_empty());
-        hub.pending_setup_connection_id.is_some() || companions_empty
+        hub.setup.pending_connection_id.is_some() || companions_empty
     }
 
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
@@ -176,7 +176,7 @@ impl CompanionPod {
     }
 
     pub(super) fn toggle_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let next = self.hub.read(cx).pod_mode.toggle();
+        let next = self.hub.read(cx).windows.pod_mode.toggle();
         self.hub.update(cx, |hub, cx| hub.set_pod_mode(next, cx));
         let desired = self.desired_size(cx);
         self.apply_size(desired, window, cx);
@@ -189,7 +189,7 @@ impl CompanionPod {
         if needs_conn || self.in_model_setup(cx) {
             return self.onboarding_size(hub, needs_conn);
         }
-        if hub.pod_mode == PodMode::ExpandedChat {
+        if hub.windows.pod_mode == PodMode::ExpandedChat {
             return PodMode::ExpandedChat.size();
         }
         if !hub.model.approvals().is_empty() || self.roster_open {
@@ -200,7 +200,7 @@ impl CompanionPod {
 
     fn onboarding_size(&self, hub: &Hub, needs_conn: bool) -> Size<Pixels> {
         let base = if needs_conn {
-            if hub.setup_error_detail.is_some() {
+            if hub.setup.error_detail.is_some() {
                 520.
             } else {
                 496.
@@ -274,7 +274,7 @@ impl CompanionPod {
         }
         let hub = self.hub.read(cx);
         let busy = hub.model.audio.companion_speaking || !hub.model.companions.streaming.is_empty();
-        let expanded = hub.pod_mode == PodMode::ExpandedChat;
+        let expanded = hub.windows.pod_mode == PodMode::ExpandedChat;
         if busy {
             self.hub.update(cx, |hub, cx| hub.stop(cx));
         } else if expanded {
@@ -341,7 +341,11 @@ impl Render for CompanionPod {
         let desired = self.desired_size(cx);
         let (scroll_ping, pod_visible, theme) = {
             let hub = self.hub.read(cx);
-            (hub.pod_scroll_ping, hub.is_pod_visible(), hub.theme())
+            (
+                hub.windows.pod_scroll_ping,
+                hub.is_pod_visible(),
+                hub.theme(),
+            )
         };
         self.apply_size(desired, window, cx);
         if pod_visible {
@@ -371,10 +375,10 @@ impl Render for CompanionPod {
             .gap(px(10.))
             .child(self.render_bubble_stage(cx))
             .when(!in_onboarding, |root| {
-                root.child(self.render_capsule_dock(cx))
+                root.child(controls::render_capsule_dock(self, cx))
             })
             .when(roster_open, |this| {
-                this.child(self.render_roster_popover(&theme, cx))
+                this.child(controls::render_roster_popover(self, &theme, cx))
             })
     }
 }

@@ -19,24 +19,23 @@
 //!   operator made is their decision to repeat, so it moves to the window's
 //!   "unsent" list with its `request_key` intact.
 
+mod audio_pipeline;
 mod bridge;
 mod commands;
 mod stream;
+mod transport;
 
+use self::{audio_pipeline::AudioPipeline, bridge::DeviceBridge, transport::SessionTransport};
 use crate::{
-    audio::{self, Microphone, Player},
-    avatar::{self, Avatar},
-    capabilities,
+    avatar, capabilities,
     host::{Connect, Discovery, Host},
-    perception::{self, Sensor},
-    state::Link,
+    perception::Sensor,
+    state::{Device, Devices, Link},
     update::{Command, Update},
-    work_tools::Workspace,
 };
 use buffa::view::MessageView;
 use ene_rpc as w;
 use std::{
-    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time::Duration,
@@ -147,68 +146,19 @@ pub(super) enum Step {
 }
 
 pub struct Session {
-    pub(super) path: PathBuf,
-    pub(super) options: Options,
-    pub(super) connection: Connection,
-    pub(super) updates: UnboundedSender<Update>,
-    pub(super) commands: UnboundedReceiver<Command>,
-    /// Companions currently resident (activated) on this client, keyed by companion ID.
-    pub(super) bindings: BTreeMap<String, Binding>,
-    /// Companion currently focused by the pod / interactive controls.
-    pub(super) focused: Option<String>,
-    /// Latest companion records from the host, used to resolve body/model per resident companion.
-    pub(super) companions: BTreeMap<String, w::Companion>,
-    /// Companion currently owning active TTS playback for lip-sync attribution.
-    pub(super) speaking_companion: Option<String>,
-    /// Whether the next attempt may move the activation. It is set on the first
-    /// connect and when the operator picks a companion, so a reconnect never
-    /// steals the companion back from another device.
-    pub(super) may_activate: bool,
-    /// The surface of the current device stream, from `DeviceReady`.
-    pub(super) subscription: String,
-    /// The last notification cursor, for a resuming subscription.
-    pub(super) cursor: Option<w::Cursor>,
-    pub(super) avatar: Option<Avatar>,
-    pub(super) player: Option<Player>,
-    pub(super) microphone: Option<Microphone>,
-    pub(super) sensor: Sensor,
-    pub(super) eyes_enabled: bool,
-    #[cfg(windows)]
-    pub(super) computer_enabled: bool,
-    #[cfg(windows)]
-    pub(super) computer_frame: Option<crate::computer::Frame>,
-    /// The companion the operator asked to serve while a request was in flight.
-    pub(super) pending: Option<String>,
-    /// Capabilities this machine can honour, declared at registration.
-    pub(super) specs: Vec<w::ClientCapabilitySpec>,
-    pub(super) workspace: Option<Arc<Workspace>>,
-    /// Verified client-side Wasm plugins (`F11`).
-    pub(super) client_plugins: Arc<crate::plugins::ClientPlugins>,
-    /// Long-lived workspace operations so settings updates/resyncs never abort them.
-    pub(super) work: tokio::task::JoinSet<w::DeviceOperationResult>,
-    /// Last amplitude sent per character, so silence sends nothing new.
-    pub(super) last_lip: HashMap<String, f32>,
-    /// Per-character debounce timestamp for avatar click/interaction perception (`F21`).
-    pub(super) last_avatar_interaction: HashMap<String, std::time::Instant>,
-    /// Software mute for the microphone.
-    pub(super) mic_muted: bool,
-    /// Active capture mode (VAD or Push-to-Talk) (`F07`).
-    pub(super) capture_mode: audio::CaptureMode,
-    pub(super) ptt_active: bool,
-    /// Software mute for speaker output.
-    pub(super) output_muted: bool,
-    /// Current avatar display scale percentage.
-    pub(super) avatar_scale: f32,
-    /// Last audio state forwarded to the UI, to avoid spamming idle frames.
-    pub(super) last_ui_audio: (f32, f32, bool),
+    transport: SessionTransport,
+    audio: AudioPipeline,
+    devices: DeviceBridge,
+    updates: UnboundedSender<Update>,
+    commands: UnboundedReceiver<Command>,
 }
 
 impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session")
-            .field("path", &self.path)
-            .field("focused", &self.focused)
-            .field("subscription", &self.subscription)
+            .field("path", &self.transport.path)
+            .field("focused", &self.transport.focused)
+            .field("subscription", &self.transport.subscription)
             .finish_non_exhaustive()
     }
 }
@@ -273,105 +223,32 @@ impl Session {
         updates: UnboundedSender<Update>,
         commands: UnboundedReceiver<Command>,
     ) -> Self {
-        let mut specs =
-            capabilities::Declaration::probe(options.renderer.as_deref(), options.model.as_deref())
-                .specs();
-        let workspace = Workspace::probe().map(Arc::new);
-        if let Some(workspace) = &workspace {
-            specs.extend(workspace.specs());
-        }
-        let client_plugins = Arc::new(crate::plugins::ClientPlugins::probe_default());
-        specs.extend(client_plugins.specs().iter().cloned());
-        Self {
+        let devices = DeviceBridge::new();
+        let transport = SessionTransport::new(
             path,
             options,
             connection,
+            devices.workspace.as_ref(),
+            &devices.client_plugins,
+        );
+        Self {
+            transport,
+            audio: AudioPipeline::new(),
+            devices,
             updates,
             commands,
-            bindings: BTreeMap::new(),
-            focused: None,
-            companions: BTreeMap::new(),
-            speaking_companion: None,
-            may_activate: true,
-            subscription: String::new(),
-            cursor: None,
-            avatar: None,
-            player: None,
-            microphone: None,
-            sensor: Sensor::default(),
-            eyes_enabled: perception::enabled(),
-            #[cfg(windows)]
-            computer_enabled: perception::preference_enabled(crate::computer::PREFERENCE),
-            #[cfg(windows)]
-            computer_frame: None,
-            last_lip: HashMap::new(),
-            last_avatar_interaction: HashMap::new(),
-            mic_muted: false,
-            capture_mode: audio::CaptureMode::Vad,
-            ptt_active: false,
-            output_muted: false,
-            avatar_scale: 100.,
-            last_ui_audio: (0., 0., false),
-            pending: None,
-            specs,
-            workspace,
-            client_plugins,
-            work: tokio::task::JoinSet::new(),
-        }
-    }
-
-    pub(super) fn focused_companion_id(&self) -> Option<&str> {
-        self.focused
-            .as_deref()
-            .filter(|id| self.bindings.contains_key(*id))
-            .or_else(|| self.bindings.keys().next().map(String::as_str))
-    }
-
-    pub(super) fn focused_binding(&self) -> Option<&Binding> {
-        self.focused_companion_id()
-            .and_then(|id| self.bindings.get(id))
-    }
-
-    pub(super) fn body_binding_for(&self, companion_id: &str) -> w::BodyBinding {
-        self.companions
-            .get(companion_id)
-            .and_then(|companion| companion.body.as_option())
-            .and_then(|doc| serde_json::from_str::<w::BodyBinding>(&doc.json).ok())
-            .unwrap_or_default()
-    }
-
-    pub(super) fn model_for(&self, companion_id: &str) -> Option<PathBuf> {
-        let body = self.body_binding_for(companion_id);
-        avatar::resolve_model_path(body.model.as_deref(), self.options.model.as_deref())
-    }
-
-    fn rebuild_specs(&mut self) {
-        let mut specs = capabilities::Declaration::probe(
-            self.options.renderer.as_deref(),
-            self.options.model.as_deref(),
-        )
-        .specs();
-        if let Some(workspace) = &self.workspace {
-            specs.extend(workspace.specs());
-        }
-        specs.extend(self.client_plugins.specs().iter().cloned());
-        self.specs = specs;
-    }
-
-    pub(super) async fn sync_capabilities(&mut self, host: &Host) {
-        self.rebuild_specs();
-        if let Err(error) = self.register(host).await {
-            tracing::warn!("failed to sync client capabilities in place: {error}");
         }
     }
 
     /// Serves until the window closes or the session is asked to quit.
     pub async fn run(mut self) {
-        let _ = self.updates.send(Update::EyesEnabled(self.eyes_enabled));
+        let _ = self
+            .updates
+            .send(Update::EyesEnabled(self.devices.eyes_enabled));
         #[cfg(windows)]
         let _ = self
             .updates
-            .send(Update::ComputerUseEnabled(self.computer_enabled));
+            .send(Update::ComputerUseEnabled(self.devices.computer_enabled));
         let mut retry = FIRST_RETRY;
         loop {
             let outcome = Box::pin(self.attempt()).await;
@@ -379,7 +256,7 @@ impl Session {
                 break;
             }
         }
-        self.shutdown();
+        self.devices.shutdown();
     }
 
     async fn handle_attempt_outcome(&mut self, outcome: Outcome, retry: &mut Duration) -> bool {
@@ -388,7 +265,7 @@ impl Session {
             Outcome::Resync(reason) => {
                 // A subscription the host ended is not a dead link: the
                 // cursor is dropped so the next attempt resnapshots.
-                self.cursor = None;
+                self.transport.cursor = None;
                 tracing::info!("resubscribing: {reason}");
                 *retry = FIRST_RETRY;
                 tokio::time::sleep(Duration::from_millis(250)).await;
@@ -410,12 +287,12 @@ impl Session {
             () = tokio::time::sleep(retry_in) => true,
             command = self.commands.recv() => match command {
                 Some(Command::SetEyesEnabled(enabled)) => {
-                    self.set_eyes_enabled(enabled);
+                    self.devices.set_eyes_enabled(enabled, &self.updates);
                     true
                 }
                 #[cfg(windows)]
                 Some(Command::SetComputerUseEnabled(enabled)) => {
-                    self.set_computer_use_enabled(enabled);
+                    self.devices.set_computer_use_enabled(enabled, &self.updates);
                     true
                 }
                 Some(Command::Quit) | None => false,
@@ -426,11 +303,8 @@ impl Session {
 
     /// One connection attempt: read discovery, register, bind, serve.
     async fn attempt(&mut self) -> Outcome {
-        *self
-            .connection
-            .write()
-            .unwrap_or_else(|poison| poison.into_inner()) = None;
-        let discovery = match Discovery::read(&self.path) {
+        self.transport.set_connection(None);
+        let discovery = match Discovery::read(&self.transport.path) {
             Ok(discovery) => discovery,
             Err(Connect::Missing(path)) => {
                 self.report(Link::Unset {
@@ -459,35 +333,32 @@ impl Session {
                 return Outcome::Dropped(error.to_string());
             }
         };
-        *self
-            .connection
-            .write()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some(host.clone());
+        self.transport.set_connection(Some(host.clone()));
         self.report(Link::Connecting {
             endpoint: discovery.endpoint.clone(),
             attempt: 1,
         })
         .await;
 
-        let _record = match self.register(&host).await {
+        let _record = match self.transport.register(&host, &self.devices).await {
             Ok(record) => record,
-            Err(error) => return self.classify(error),
+            Err(error) => return self.transport.classify(error),
         };
-        self.devices().await;
+        self.report_devices().await;
 
         let snapshot = match host.host.get_snapshot(w::Empty::default()).await {
             Ok(response) => match response.view().to_owned_message() {
                 Ok(snapshot) => snapshot,
                 Err(error) => return Outcome::Dropped(error.to_string()),
             },
-            Err(error) => return self.classify(error),
+            Err(error) => return self.transport.classify(error),
         };
-        let previous = self.bindings.clone();
-        if let Err(outcome) = self.bind(&host, &snapshot).await {
-            return outcome;
-        }
-        if previous != self.bindings {
-            self.sensor = Sensor::default();
+        let changed = match self.transport.bind(&host, &snapshot).await {
+            Ok(changed) => changed,
+            Err(outcome) => return outcome,
+        };
+        if changed {
+            self.devices.sensor = Sensor::default();
         }
         self.report(Link::Live {
             version: snapshot.server_version.clone(),
@@ -498,225 +369,76 @@ impl Session {
         Box::pin(self.serve(host)).await
     }
 
-    /// Registers this client, keeping the host's grants across restarts.
-    async fn register(&self, host: &Host) -> Result<w::Client, connectrpc::ConnectError> {
-        // A declaration is an optimistic update, so a restart must send the
-        // revision the host already stored or it conflicts with itself.
-        let expected_revision = host
-            .client
-            .list(w::Empty::default())
-            .await?
-            .view()
-            .to_owned_message()
-            .ok()
-            .and_then(|clients| {
-                clients
-                    .items
-                    .iter()
-                    .find(|client| client.id == self.options.id)
-                    .map(|client| client.revision)
-            })
-            .unwrap_or(0);
-        let computer_spec = {
-            #[cfg(windows)]
-            {
-                self.computer_enabled.then(crate::computer::spec)
-            }
-            #[cfg(not(windows))]
-            {
-                None
-            }
-        };
-        let specs: Vec<_> = self
-            .specs
-            .iter()
-            .filter(|spec| self.eyes_enabled || spec.name != "eye.watch")
-            .cloned()
-            .chain(computer_spec)
-            .collect();
-        host.client
-            .register_client(w::RegisterClientRequest {
-                id: self.options.id.clone(),
-                name: self.options.name.clone(),
-                platform: self.options.platform.clone(),
-                capabilities: capabilities::names(&specs),
-                capability_specs: specs,
-                expected_revision,
-                ..Default::default()
-            })
-            .await?
-            .view()
-            .to_owned_message()
-            .map_err(|error| connectrpc::ConnectError::internal(error.to_string()))
-    }
-
-    /// Binds this client to its resident companions from `snapshot` without
-    /// stealing companions already held by other devices.
-    async fn bind(&mut self, host: &Host, snapshot: &w::Snapshot) -> Result<(), Outcome> {
-        self.companions = snapshot
-            .companions
-            .iter()
-            .map(|companion| (companion.id.clone(), companion.clone()))
-            .collect();
-        self.bindings = snapshot
-            .activations
-            .iter()
-            .filter(|activation| activation.client_id.as_deref() == Some(self.options.id.as_str()))
-            .map(|activation| {
-                (
-                    activation.companion_id.clone(),
-                    Binding {
-                        companion_id: activation.companion_id.clone(),
-                    },
-                )
-            })
-            .collect();
-
-        if !self.bindings.is_empty() {
-            // Re-attaching to an existing host activation must consume initial
-            // activation intent so a future move away never auto-steals back (B16).
-            self.may_activate = false;
-            return self.rebind_existing(host, snapshot).await;
-        }
-
-        let wanted = self
-            .pending
-            .clone()
-            .or_else(|| snapshot.active_companion_id.clone())
-            .or_else(|| {
-                snapshot
-                    .companions
-                    .first()
-                    .map(|companion| companion.id.clone())
-            });
-        let Some(wanted) = wanted else {
-            self.bindings.clear();
-            self.focused = None;
-            return Ok(());
-        };
-        if !self.may_activate {
-            // Another device holds this companion. Serving nothing is the
-            // honest state: no audio, no perception, no device results.
-            self.bindings.clear();
-            self.focused = None;
-            self.pending = None;
-            tracing::info!("another client is the active device for {wanted}");
-            return Ok(());
-        }
-        match self.activate_one(host, &wanted).await {
-            Ok(binding) => {
-                self.bindings.insert(wanted.clone(), binding);
-                self.focused = Some(wanted);
-                self.may_activate = false;
-                self.pending = None;
-                Ok(())
-            }
-            Err(error) => Err(self.classify(error)),
-        }
-    }
-
-    async fn rebind_existing(
-        &mut self,
-        host: &Host,
-        snapshot: &w::Snapshot,
-    ) -> Result<(), Outcome> {
-        if let Some(target) = self.pending.take() {
-            if !self.bindings.contains_key(&target) && self.companions.contains_key(&target) {
-                match self.activate_one(host, &target).await {
-                    Ok(binding) => {
-                        self.bindings.insert(target.clone(), binding);
-                    }
-                    Err(error) => return Err(self.classify(error)),
-                }
-            }
-            if self.bindings.contains_key(&target) {
-                self.focused = Some(target);
-            }
-        }
-        if self
-            .focused
-            .as_deref()
-            .is_none_or(|id| !self.bindings.contains_key(id))
-        {
-            self.focused = snapshot
-                .active_companion_id
-                .as_deref()
-                .filter(|id| self.bindings.contains_key(*id))
-                .map(str::to_owned)
-                .or_else(|| self.bindings.keys().next().cloned());
-        }
-        Ok(())
-    }
-
-    /// Activates `companion_id` onto this client without releasing other
-    /// companions already resident here.
-    pub(super) async fn activate_one(
-        &self,
-        host: &Host,
-        companion_id: &str,
-    ) -> Result<Binding, connectrpc::ConnectError> {
-        let activation = host
-            .client
-            .activate(w::ActivationRequest {
-                companion_id: companion_id.to_owned(),
-                client_id: self.options.id.clone(),
-                release: false,
-                ..Default::default()
-            })
-            .await?
-            .view()
-            .to_owned_message()
-            .map_err(|error| connectrpc::ConnectError::internal(error.to_string()))?;
-        tracing::info!(
-            companion = %activation.companion_id,
-            "the client is an active device"
-        );
-        Ok(Binding {
-            companion_id: activation.companion_id,
-        })
-    }
-
-    /// Releases `companion_id` from this client.
-    pub(super) async fn release_one(
-        &self,
-        host: &Host,
-        companion_id: &str,
-    ) -> Result<(), connectrpc::ConnectError> {
-        host.client
-            .activate(w::ActivationRequest {
-                companion_id: companion_id.to_owned(),
-                client_id: String::new(),
-                release: true,
-                ..Default::default()
-            })
-            .await?;
-        Ok(())
-    }
-
     /// Reports the link state.
     async fn report(&self, link: Link) {
         let _ = self.updates.send(Update::Link(Box::new(link)));
     }
 
-    /// Turns an RPC error into what the window must show.
-    pub(super) fn classify(&self, error: connectrpc::ConnectError) -> Outcome {
-        match error.code {
-            // The endpoint or token is stale: the next attempt re-reads the file.
-            connectrpc::ErrorCode::Unauthenticated | connectrpc::ErrorCode::PermissionDenied => {
-                Outcome::Dropped(format!(
-                    "認証が拒否されました。ホストの接続情報を読み直します: {error}"
-                ))
-            }
-            _ => Outcome::Dropped(error.to_string()),
+    pub(super) async fn open_devices(&mut self) {
+        if let Err(state) = self.audio.open_output() {
+            self.set_out(state).await;
+            return;
+        }
+        self.report_devices().await;
+    }
+
+    pub(super) async fn open_microphone(&mut self) {
+        if let Err(state) = self.audio.open_microphone() {
+            self.set_in(state).await;
+            return;
+        }
+        self.report_devices().await;
+    }
+
+    pub(super) async fn open_avatar(&mut self) {
+        match self.devices.open_avatar(&self.transport).await {
+            Ok(true) => self.report_devices().await,
+            Ok(false) => {}
+            Err(state) => self.set_avatar(state).await,
         }
     }
 
-    /// Stops the renderer. Dropping the child kills it, so this is the whole of
-    /// the client's process ownership.
-    fn shutdown(&mut self) {
-        if let Some(avatar) = self.avatar.take() {
-            avatar.shutdown();
+    pub(super) async fn sync_avatars(&mut self) {
+        if self.devices.avatar.is_none() {
+            return;
         }
+        self.devices.sync_avatars(&self.transport).await;
+        self.report_devices().await;
+    }
+
+    /// Replaces the output device in the footer.
+    pub(super) async fn set_out(&mut self, state: Device) {
+        let _ = self.updates.send(Update::Devices(Box::new(Devices {
+            avatar: self.devices.avatar_state(&self.transport),
+            output: state,
+            input: self.audio.input_state(),
+        })));
+    }
+
+    pub(super) async fn set_in(&mut self, state: Device) {
+        let _ = self.updates.send(Update::Devices(Box::new(Devices {
+            avatar: self.devices.avatar_state(&self.transport),
+            output: self.audio.output_state(),
+            input: state,
+        })));
+    }
+
+    pub(super) async fn set_avatar(&mut self, state: Device) {
+        let _ = self.updates.send(Update::Devices(Box::new(Devices {
+            avatar: state,
+            output: self.audio.output_state(),
+            input: self.audio.input_state(),
+        })));
+    }
+
+    /// Sends the current device states.
+    pub(super) async fn report_devices(&mut self) {
+        let devices = Devices {
+            avatar: self.devices.avatar_state(&self.transport),
+            output: self.audio.output_state(),
+            input: self.audio.input_state(),
+        };
+        let _ = self.updates.send(Update::Devices(Box::new(devices)));
     }
 }
 

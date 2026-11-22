@@ -22,373 +22,374 @@ struct SetupChoices {
     selected_voice_label: Option<String>,
 }
 
-impl CompanionPod {
-    pub(super) fn render_onboarding_body(
-        &self,
-        needs_connection: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        if needs_connection {
-            return self.render_connection_onboarding(theme, cx);
-        }
-        self.render_model_voice_onboarding(theme, cx)
+pub(super) fn render_onboarding_body(
+    pod: &CompanionPod,
+    needs_connection: bool,
+    theme: &Theme,
+    cx: &mut Context<CompanionPod>,
+) -> AnyElement {
+    if needs_connection {
+        return render_connection_onboarding(pod, theme, cx);
     }
+    render_model_voice_onboarding(pod, theme, cx)
+}
 
-    fn render_connection_onboarding(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let providers = self
-            .hub
-            .read(cx)
-            .model
-            .connections
-            .providers
-            .clone()
-            .unwrap_or_default();
-        if providers.is_empty() {
-            return render_providers_loading(&self.hub, theme);
-        }
-        let picked = self
-            .selected_provider_id
-            .as_deref()
-            .and_then(|id| providers.iter().find(|p| p.id == id))
-            .or_else(|| providers.iter().find(|p| p.id == "openrouter"))
-            .or_else(|| providers.first())
-            .cloned();
-        let provider_chips = build_provider_chips(&providers, picked.as_ref(), theme, cx);
+fn render_connection_onboarding(
+    pod: &CompanionPod,
+    theme: &Theme,
+    cx: &mut Context<CompanionPod>,
+) -> AnyElement {
+    let providers = pod
+        .hub
+        .read(cx)
+        .model
+        .connections
+        .providers
+        .clone()
+        .unwrap_or_default();
+    if providers.is_empty() {
+        return render_providers_loading(&pod.hub, theme);
+    }
+    let picked = pod
+        .selected_provider_id
+        .as_deref()
+        .and_then(|id| providers.iter().find(|p| p.id == id))
+        .or_else(|| providers.iter().find(|p| p.id == "openrouter"))
+        .or_else(|| providers.first())
+        .cloned();
+    let provider_chips = build_provider_chips(&providers, picked.as_ref(), theme, cx);
 
-        let look = theme.field_look(false, false);
-        self.onboard_key.update(cx, |d, _| d.apply_look(look));
-        let secret = self.onboard_key.read(cx).text().trim().to_owned();
-        let needs_key = picked.as_ref().is_some_and(|p| p.requires_credentials);
-        let can_connect = picked.is_some() && (!needs_key || !secret.is_empty());
+    let look = theme.field_look(false, false);
+    pod.onboard_key.update(cx, |d, _| d.apply_look(look));
+    let secret = pod.onboard_key.read(cx).text().trim().to_owned();
+    let needs_key = picked.as_ref().is_some_and(|p| p.requires_credentials);
+    let can_connect = picked.is_some() && (!needs_key || !secret.is_empty());
 
-        let hub = self.hub.read(cx);
-        let pending = hub.setup_pending;
-        let err = hub.setup_error;
-        let err_detail = hub.setup_error_detail.clone();
-        let name = picked
-            .as_ref()
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| "AIサービス".to_owned());
-        let is_agent_platform = picked
-            .as_ref()
-            .is_some_and(|p| p.adapter == GOOGLE_AGENT_PLATFORM);
-        let keys_url = picked.as_ref().and_then(|p| provider_keys_url(&p.id));
-        let subtitle = onboarding_subtitle(is_agent_platform, needs_key, &name);
+    let hub = pod.hub.read(cx);
+    let pending = hub.setup.pending;
+    let err = hub.setup.error;
+    let err_detail = hub.setup.error_detail.clone();
+    let name = picked
+        .as_ref()
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "AIサービス".to_owned());
+    let is_agent_platform = picked
+        .as_ref()
+        .is_some_and(|p| p.adapter == GOOGLE_AGENT_PLATFORM);
+    let keys_url = picked.as_ref().and_then(|p| provider_keys_url(&p.id));
+    let subtitle = onboarding_subtitle(is_agent_platform, needs_key, &name);
 
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(render_connection_header(&pod.hub, !pending, theme))
+        .child(div().text_sm().child(subtitle))
+        .child(render_provider_chip_row(
+            provider_chips,
+            &pod.hub,
+            !pending,
+            theme,
+        ))
+        .when_some(keys_url, |this, url| {
+            this.child(render_keys_link_row(url, &name, !pending, theme))
+        })
+        .child(pod.onboard_key.clone())
+        .when_some(err, |row, msg| {
+            row.child(div().text_xs().text_color(theme.danger_fg).child(msg))
+        })
+        .when_some(err_detail, |row, detail| {
+            row.child(div().text_xs().text_color(theme.danger_fg).child(detail))
+        })
+        .child(render_connect_submit_row(
+            ConnectSubmitSpec {
+                picked,
+                name: &name,
+                secret,
+                can_connect,
+                pending,
+            },
+            &pod.hub,
+            theme,
+            cx,
+        ))
+        .into_any_element()
+}
+
+fn render_model_voice_onboarding(
+    pod: &CompanionPod,
+    theme: &Theme,
+    cx: &mut Context<CompanionPod>,
+) -> AnyElement {
+    let look = theme.field_look(false, false);
+    pod.onboard_name.update(cx, |d, _| d.apply_look(look));
+    pod.setup_model_filter.update(cx, |d, _| d.apply_look(look));
+    pod.setup_voice_filter.update(cx, |d, _| d.apply_look(look));
+    let companions_empty = pod
+        .hub
+        .read(cx)
+        .model
+        .snapshot()
+        .is_none_or(|snap| snap.companions.is_empty());
+    let choices = collect_setup_choices(pod, cx);
+
+    let name = pod.onboard_name.read(cx).text().trim().to_owned();
+    let can_finish = (!companions_empty || !name.is_empty())
+        && ((choices.target_conn_id.is_some() && choices.selected_model.is_some())
+            || (companions_empty && choices.selected_model.is_none() && !choices.checking_models));
+
+    let mut body = div().flex().flex_col().gap(px(8.)).child(
         div()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(render_connection_header(&self.hub, !pending, theme))
-            .child(div().text_sm().child(subtitle))
-            .child(render_provider_chip_row(
-                provider_chips,
-                &self.hub,
-                !pending,
-                theme,
-            ))
-            .when_some(keys_url, |this, url| {
-                this.child(render_keys_link_row(url, &name, !pending, theme))
-            })
-            .child(self.onboard_key.clone())
-            .when_some(err, |row, msg| {
-                row.child(div().text_xs().text_color(theme.danger_fg).child(msg))
-            })
-            .when_some(err_detail, |row, detail| {
-                row.child(div().text_xs().text_color(theme.danger_fg).child(detail))
-            })
-            .child(render_connect_submit_row(
-                ConnectSubmitSpec {
-                    picked,
-                    name: &name,
-                    secret,
-                    can_connect,
-                    pending,
-                },
-                &self.hub,
-                theme,
-                cx,
-            ))
-            .into_any_element()
+            .font_weight(gpui::FontWeight::BOLD)
+            .child("使うモデルと音声を選択"),
+    );
+
+    if let Some(refresh_cid) = choices.target_conn_id.clone() {
+        body = append_setup_model_section(pod, body, &refresh_cid, &choices, theme, cx);
+    }
+    body = append_setup_voice_section(pod, body, &choices, theme, cx);
+    if companions_empty {
+        body = body
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.ink_muted)
+                    .child("コンパニオンの名前"),
+            )
+            .child(pod.onboard_name.clone());
     }
 
-    fn render_model_voice_onboarding(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let look = theme.field_look(false, false);
-        self.onboard_name.update(cx, |d, _| d.apply_look(look));
-        self.setup_model_filter
-            .update(cx, |d, _| d.apply_look(look));
-        self.setup_voice_filter
-            .update(cx, |d, _| d.apply_look(look));
-        let companions_empty = self
-            .hub
-            .read(cx)
-            .model
-            .snapshot()
-            .is_none_or(|snap| snap.companions.is_empty());
-        let choices = self.collect_setup_choices(cx);
+    let finish_ctx = SetupFinishParams {
+        companions_empty,
+        name,
+        conn_id: choices.target_conn_id,
+        model_id: choices.selected_model,
+        voice_id: choices.selected_voice,
+        can_finish,
+    };
+    body.child(render_setup_finish_button(finish_ctx, &pod.hub, theme))
+        .into_any_element()
+}
 
-        let name = self.onboard_name.read(cx).text().trim().to_owned();
-        let can_finish = (!companions_empty || !name.is_empty())
-            && ((choices.target_conn_id.is_some() && choices.selected_model.is_some())
-                || (companions_empty
-                    && choices.selected_model.is_none()
-                    && !choices.checking_models));
-
-        let mut body = div().flex().flex_col().gap(px(8.)).child(
-            div()
-                .font_weight(gpui::FontWeight::BOLD)
-                .child("使うモデルと音声を選択"),
-        );
-
-        if let Some(refresh_cid) = choices.target_conn_id.clone() {
-            body = self.append_setup_model_section(body, &refresh_cid, &choices, theme, cx);
-        }
-        body = self.append_setup_voice_section(body, &choices, theme, cx);
-        if companions_empty {
-            body = body
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.ink_muted)
-                        .child("コンパニオンの名前"),
-                )
-                .child(self.onboard_name.clone());
-        }
-
-        let finish_ctx = SetupFinishParams {
-            companions_empty,
-            name,
-            conn_id: choices.target_conn_id,
-            model_id: choices.selected_model,
-            voice_id: choices.selected_voice,
-            can_finish,
-        };
-        body.child(render_setup_finish_button(finish_ctx, &self.hub, theme))
-            .into_any_element()
-    }
-
-    fn collect_setup_choices(&self, cx: &App) -> SetupChoices {
-        let hub = self.hub.read(cx);
-        let target_conn_id = hub.pending_setup_connection_id.clone().or_else(|| {
-            let providers = hub.model.connections.providers.as_deref()?;
-            hub.model.settings().and_then(|settings| {
-                settings
-                    .connections
-                    .iter()
-                    .find(|c| c.can_start_chat(providers))
-                    .map(|c| c.id.clone())
-            })
-        });
-        let model_options = build_model_options(hub, target_conn_id.as_deref());
-        let selected_model =
-            resolve_selected_option(self.setup_model_id.as_deref(), &model_options);
-        let selected_model_label = find_option_label(&model_options, selected_model.as_deref());
-        let checking_models = target_conn_id
-            .as_deref()
-            .is_some_and(|cid| hub.checking_connections.contains(cid));
-
-        let voicevox_conn = hub.model.settings().and_then(|settings| {
+fn collect_setup_choices(pod: &CompanionPod, cx: &App) -> SetupChoices {
+    let hub = pod.hub.read(cx);
+    let target_conn_id = hub.setup.pending_connection_id.clone().or_else(|| {
+        let providers = hub.model.connections.providers.as_deref()?;
+        hub.model.settings().and_then(|settings| {
             settings
                 .connections
                 .iter()
-                .find(|c| is_voicevox_connection(c))
-        });
-        let voicevox_conn_id = voicevox_conn.map(|c| c.id.clone());
-        let voicevox_enabled = voicevox_conn.is_some_and(|c| c.enabled);
-        let voicevox_checking = voicevox_conn_id
-            .as_deref()
-            .is_some_and(|cid| hub.checking_connections.contains(cid))
-            || hub.checking_connections.contains("voicevox");
-        let voice_options = build_voice_options(hub, voicevox_conn_id.as_deref());
-        let selected_voice =
-            resolve_selected_option(self.setup_voice_speaker_id.as_deref(), &voice_options);
-        let selected_voice_label = find_option_label(&voice_options, selected_voice.as_deref());
+                .find(|c| c.can_start_chat(providers))
+                .map(|c| c.id.clone())
+        })
+    });
+    let model_options = build_model_options(hub, target_conn_id.as_deref());
+    let selected_model = resolve_selected_option(pod.setup_model_id.as_deref(), &model_options);
+    let selected_model_label = find_option_label(&model_options, selected_model.as_deref());
+    let checking_models = target_conn_id
+        .as_deref()
+        .is_some_and(|cid| hub.setup.checking_connections.contains(cid));
 
-        SetupChoices {
-            target_conn_id,
-            model_options,
-            selected_model,
-            selected_model_label,
-            checking_models,
-            voicevox_conn_id,
-            voicevox_enabled,
-            voicevox_checking,
-            voice_options,
-            selected_voice,
-            selected_voice_label,
-        }
+    let voicevox_conn = hub.model.settings().and_then(|settings| {
+        settings
+            .connections
+            .iter()
+            .find(|c| is_voicevox_connection(c))
+    });
+    let voicevox_conn_id = voicevox_conn.map(|c| c.id.clone());
+    let voicevox_enabled = voicevox_conn.is_some_and(|c| c.enabled);
+    let voicevox_checking = voicevox_conn_id
+        .as_deref()
+        .is_some_and(|cid| hub.setup.checking_connections.contains(cid))
+        || hub.setup.checking_connections.contains("voicevox");
+    let voice_options = build_voice_options(hub, voicevox_conn_id.as_deref());
+    let selected_voice =
+        resolve_selected_option(pod.setup_voice_speaker_id.as_deref(), &voice_options);
+    let selected_voice_label = find_option_label(&voice_options, selected_voice.as_deref());
+
+    SetupChoices {
+        target_conn_id,
+        model_options,
+        selected_model,
+        selected_model_label,
+        checking_models,
+        voicevox_conn_id,
+        voicevox_enabled,
+        voicevox_checking,
+        voice_options,
+        selected_voice,
+        selected_voice_label,
+    }
+}
+
+fn append_setup_model_section(
+    pod: &CompanionPod,
+    body: gpui::Div,
+    refresh_cid: &str,
+    choices: &SetupChoices,
+    theme: &Theme,
+    cx: &Context<CompanionPod>,
+) -> gpui::Div {
+    let model_filter_text = pod.setup_model_filter.read(cx).text().to_owned();
+    let pod_model_toggle = cx.entity();
+    let pod_model_select = cx.entity();
+    let hub_refresh_models = pod.hub.clone();
+    let refresh_id = refresh_cid.to_owned();
+    let checking = choices.checking_models;
+
+    body.child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.ink_muted)
+                    .child("使用モデル"),
+            )
+            .child(pill_button(
+                "onboard-refresh-models",
+                if checking {
+                    "取得中…".to_owned()
+                } else {
+                    "再取得".to_owned()
+                },
+                Tone::Ghost.enabled(!checking),
+                theme,
+                move |_, cx| {
+                    hub_refresh_models
+                        .update(cx, |hub, cx| hub.check_connection(refresh_id.clone(), cx));
+                },
+            )),
+    )
+    .child(dropdown_select(
+        DropdownSpec {
+            id: "onboard-model-dropdown".to_owned(),
+            selected_value: choices.selected_model.as_deref(),
+            selected_label: choices.selected_model_label.as_deref(),
+            placeholder: if checking {
+                "モデル一覧を取得中…"
+            } else {
+                "モデルを選択…"
+            },
+            options: &choices.model_options,
+            open: pod.setup_model_dropdown_open,
+            enabled: !checking,
+            max_list_height: 168.,
+            filter_draft: Some(pod.setup_model_filter.clone()),
+            filter_text: &model_filter_text,
+            empty_label: "取得済みのモデルがありません（「再取得」で確認）",
+        },
+        theme,
+        move |_, cx| {
+            pod_model_toggle.update(cx, |this, cx| {
+                this.setup_model_dropdown_open = !this.setup_model_dropdown_open;
+                if this.setup_model_dropdown_open {
+                    this.setup_voice_dropdown_open = false;
+                }
+                cx.notify();
+            });
+        },
+        move |val, _, cx| {
+            pod_model_select.update(cx, |this, cx| {
+                this.setup_model_id = Some(val.clone());
+                this.setup_model_dropdown_open = false;
+                this.setup_model_filter.update(cx, |d, cx| d.clear(cx));
+                cx.notify();
+            });
+        },
+    ))
+}
+
+fn append_setup_voice_section(
+    pod: &CompanionPod,
+    body: gpui::Div,
+    choices: &SetupChoices,
+    theme: &Theme,
+    cx: &Context<CompanionPod>,
+) -> gpui::Div {
+    if !(choices.voicevox_enabled && !choices.voice_options.is_empty()) {
+        return body.child(render_launch_voicevox_row(
+            choices.voicevox_conn_id.clone(),
+            choices.voicevox_enabled,
+            choices.voicevox_checking,
+            &pod.hub,
+            theme,
+        ));
     }
 
-    fn append_setup_model_section(
-        &self,
-        body: gpui::Div,
-        refresh_cid: &str,
-        choices: &SetupChoices,
-        theme: &Theme,
-        cx: &Context<Self>,
-    ) -> gpui::Div {
-        let model_filter_text = self.setup_model_filter.read(cx).text().to_owned();
-        let pod_model_toggle = cx.entity();
-        let pod_model_select = cx.entity();
-        let hub_refresh_models = self.hub.clone();
-        let refresh_id = refresh_cid.to_owned();
-        let checking = choices.checking_models;
+    let voice_filter_text = pod.setup_voice_filter.read(cx).text().to_owned();
+    let pod_voice_toggle = cx.entity();
+    let pod_voice_select = cx.entity();
+    let vv_refresh = pod.hub.clone();
+    let vv_cid = choices.voicevox_conn_id.clone();
+    let checking = choices.voicevox_checking;
 
-        body.child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.ink_muted)
-                        .child("使用モデル"),
-                )
-                .child(pill_button(
-                    "onboard-refresh-models",
+    body.child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.ink_muted)
+                    .child("VOICEVOXの話者"),
+            )
+            .when_some(vv_cid, |row, cid| {
+                row.child(pill_button(
+                    "onboard-refresh-voicevox",
                     if checking {
-                        "取得中…".to_owned()
+                        "起動・取得中…".to_owned()
                     } else {
                         "再取得".to_owned()
                     },
                     Tone::Ghost.enabled(!checking),
                     theme,
                     move |_, cx| {
-                        hub_refresh_models
-                            .update(cx, |hub, cx| hub.check_connection(refresh_id.clone(), cx));
+                        vv_refresh.update(cx, |hub, cx| hub.check_connection(cid.clone(), cx));
                     },
-                )),
-        )
-        .child(dropdown_select(
-            DropdownSpec {
-                id: "onboard-model-dropdown".to_owned(),
-                selected_value: choices.selected_model.as_deref(),
-                selected_label: choices.selected_model_label.as_deref(),
-                placeholder: if checking {
-                    "モデル一覧を取得中…"
-                } else {
-                    "モデルを選択…"
-                },
-                options: &choices.model_options,
-                open: self.setup_model_dropdown_open,
-                enabled: !checking,
-                max_list_height: 168.,
-                filter_draft: Some(self.setup_model_filter.clone()),
-                filter_text: &model_filter_text,
-                empty_label: "取得済みのモデルがありません（「再取得」で確認）",
-            },
-            theme,
-            move |_, cx| {
-                pod_model_toggle.update(cx, |this, cx| {
-                    this.setup_model_dropdown_open = !this.setup_model_dropdown_open;
-                    if this.setup_model_dropdown_open {
-                        this.setup_voice_dropdown_open = false;
-                    }
-                    cx.notify();
-                });
-            },
-            move |val, _, cx| {
-                pod_model_select.update(cx, |this, cx| {
-                    this.setup_model_id = Some(val.clone());
+                ))
+            }),
+    )
+    .child(dropdown_select(
+        DropdownSpec {
+            id: "onboard-voice-dropdown".to_owned(),
+            selected_value: choices.selected_voice.as_deref(),
+            selected_label: choices.selected_voice_label.as_deref(),
+            placeholder: "話者を選択…",
+            options: &choices.voice_options,
+            open: pod.setup_voice_dropdown_open,
+            enabled: !checking,
+            max_list_height: 148.,
+            filter_draft: Some(pod.setup_voice_filter.clone()),
+            filter_text: &voice_filter_text,
+            empty_label: "話者が見つかりません",
+        },
+        theme,
+        move |_, cx| {
+            pod_voice_toggle.update(cx, |this, cx| {
+                this.setup_voice_dropdown_open = !this.setup_voice_dropdown_open;
+                if this.setup_voice_dropdown_open {
                     this.setup_model_dropdown_open = false;
-                    this.setup_model_filter.update(cx, |d, cx| d.clear(cx));
-                    cx.notify();
-                });
-            },
-        ))
-    }
-
-    fn append_setup_voice_section(
-        &self,
-        body: gpui::Div,
-        choices: &SetupChoices,
-        theme: &Theme,
-        cx: &Context<Self>,
-    ) -> gpui::Div {
-        if !(choices.voicevox_enabled && !choices.voice_options.is_empty()) {
-            return body.child(render_launch_voicevox_row(
-                choices.voicevox_conn_id.clone(),
-                choices.voicevox_enabled,
-                choices.voicevox_checking,
-                &self.hub,
-                theme,
-            ));
-        }
-
-        let voice_filter_text = self.setup_voice_filter.read(cx).text().to_owned();
-        let pod_voice_toggle = cx.entity();
-        let pod_voice_select = cx.entity();
-        let vv_refresh = self.hub.clone();
-        let vv_cid = choices.voicevox_conn_id.clone();
-        let checking = choices.voicevox_checking;
-
-        body.child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.ink_muted)
-                        .child("VOICEVOXの話者"),
-                )
-                .when_some(vv_cid, |row, cid| {
-                    row.child(pill_button(
-                        "onboard-refresh-voicevox",
-                        if checking {
-                            "起動・取得中…".to_owned()
-                        } else {
-                            "再取得".to_owned()
-                        },
-                        Tone::Ghost.enabled(!checking),
-                        theme,
-                        move |_, cx| {
-                            vv_refresh.update(cx, |hub, cx| hub.check_connection(cid.clone(), cx));
-                        },
-                    ))
-                }),
-        )
-        .child(dropdown_select(
-            DropdownSpec {
-                id: "onboard-voice-dropdown".to_owned(),
-                selected_value: choices.selected_voice.as_deref(),
-                selected_label: choices.selected_voice_label.as_deref(),
-                placeholder: "話者を選択…",
-                options: &choices.voice_options,
-                open: self.setup_voice_dropdown_open,
-                enabled: !checking,
-                max_list_height: 148.,
-                filter_draft: Some(self.setup_voice_filter.clone()),
-                filter_text: &voice_filter_text,
-                empty_label: "話者が見つかりません",
-            },
-            theme,
-            move |_, cx| {
-                pod_voice_toggle.update(cx, |this, cx| {
-                    this.setup_voice_dropdown_open = !this.setup_voice_dropdown_open;
-                    if this.setup_voice_dropdown_open {
-                        this.setup_model_dropdown_open = false;
-                    }
-                    cx.notify();
-                });
-            },
-            move |val, _, cx| {
-                pod_voice_select.update(cx, |this, cx| {
-                    this.setup_voice_speaker_id = Some(val.clone());
-                    this.setup_voice_dropdown_open = false;
-                    this.setup_voice_filter.update(cx, |d, cx| d.clear(cx));
-                    cx.notify();
-                });
-            },
-        ))
-    }
+                }
+                cx.notify();
+            });
+        },
+        move |val, _, cx| {
+            pod_voice_select.update(cx, |this, cx| {
+                this.setup_voice_speaker_id = Some(val.clone());
+                this.setup_voice_dropdown_open = false;
+                this.setup_voice_filter.update(cx, |d, cx| d.clear(cx));
+                cx.notify();
+            });
+        },
+    ))
 }
 
 fn render_providers_loading(hub: &Entity<Hub>, theme: &Theme) -> AnyElement {
@@ -603,7 +604,7 @@ fn build_model_options(hub: &Hub, target_conn_id: Option<&str>) -> Vec<DropdownO
     let mut pairs = target_conn_id
         .map(|cid| hub.available_models_for_connection(cid))
         .unwrap_or_default();
-    for model_id in &hub.pending_setup_models {
+    for model_id in &hub.setup.pending_models {
         if !pairs.iter().any(|(id, _)| id == model_id) {
             pairs.push((model_id.clone(), model_id.clone()));
         }

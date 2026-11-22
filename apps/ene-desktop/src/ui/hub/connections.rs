@@ -1,6 +1,6 @@
-//! Connection CRUD, model/voice selection, probing, and credential management on [`Hub`].
+//! Connection CRUD, model/voice selection, probing, credentials, and preset entrypoints on [`Hub`].
 
-use super::Hub;
+use super::{Hub, presets};
 use crate::rpc;
 use ene_client_core::{
     ModelRoleSlot,
@@ -9,7 +9,8 @@ use ene_client_core::{
         build_connection_model_input, build_embedding_model_input, build_stt_assignment_inputs,
         build_tts_assignment_inputs,
     },
-    domain::{Connection, ConnectionInput, ConnectionKind},
+    domain::{Connection, ConnectionInput, ConnectionKind, LlmProvider},
+    presets::SearchPresetSpec,
 };
 use gpui::Context;
 
@@ -84,7 +85,7 @@ impl Hub {
         if self.rpc.host().is_none() {
             return;
         }
-        self.checking_connections.insert(conn_id.clone());
+        self.setup.checking_connections.insert(conn_id.clone());
         rpc::connections::update_settings_and_probe(
             &self.rpc,
             self.model.connections.link_epoch,
@@ -97,10 +98,12 @@ impl Hub {
     }
 
     pub(crate) fn check_connection(&mut self, connection_id: String, cx: &mut Context<Self>) {
-        if self.rpc.host().is_none() || self.checking_connections.contains(&connection_id) {
+        if self.rpc.host().is_none() || self.setup.checking_connections.contains(&connection_id) {
             return;
         }
-        self.checking_connections.insert(connection_id.clone());
+        self.setup
+            .checking_connections
+            .insert(connection_id.clone());
         rpc::connections::probe_connection(
             &self.rpc,
             self.model.connections.link_epoch,
@@ -275,7 +278,7 @@ impl Hub {
         });
         let epoch = self.model.connections.link_epoch;
         if let Some(check_id) = probe_voicevox_id {
-            self.checking_connections.insert(check_id.clone());
+            self.setup.checking_connections.insert(check_id.clone());
             rpc::connections::update_settings_and_probe(
                 &self.rpc,
                 epoch,
@@ -370,7 +373,9 @@ impl Hub {
                 .any(|c| c.id == connection_id && c.kind == ConnectionKind::Search)
         });
         if is_search {
-            self.checking_connections.insert(connection_id.clone());
+            self.setup
+                .checking_connections
+                .insert(connection_id.clone());
         }
         rpc::connections::register_secret(
             &self.rpc,
@@ -408,5 +413,113 @@ impl Hub {
             connection_id,
         );
         cx.notify();
+    }
+
+    pub(crate) fn assign_search_connection(
+        &mut self,
+        connection_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        presets::assign_search_connection(self, connection_id, cx);
+    }
+
+    pub(crate) fn add_search_preset(
+        &mut self,
+        spec: SearchPresetSpec<'_>,
+        cx: &mut Context<Self>,
+    ) -> String {
+        presets::add_search_preset(self, spec, cx)
+    }
+
+    pub(crate) fn save_search_provider_key(
+        &mut self,
+        adapter: &'static str,
+        secret: String,
+        activate: bool,
+        cx: &mut Context<Self>,
+    ) {
+        presets::save_search_provider_key(self, adapter, secret, activate, cx);
+    }
+
+    pub(crate) fn add_llm_from_provider(
+        &mut self,
+        provider: LlmProvider,
+        model_ids: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        presets::add_llm_from_provider(self, provider, model_ids, cx);
+    }
+
+    pub(crate) fn quick_connect_llm(
+        &mut self,
+        provider: LlmProvider,
+        secret: String,
+        cx: &mut Context<Self>,
+    ) {
+        presets::quick_connect_llm(self, provider, secret, cx);
+    }
+
+    pub(crate) fn complete_setup_selection(
+        &mut self,
+        connection_id: String,
+        model_id: String,
+        companion_name: Option<String>,
+        voice_identifier: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        presets::complete_setup_selection(
+            self,
+            connection_id,
+            model_id,
+            companion_name,
+            voice_identifier,
+            cx,
+        );
+    }
+
+    pub(crate) fn add_voicevox_preset(
+        &mut self,
+        speaker: u32,
+        speed: Option<f32>,
+        cx: &mut Context<Self>,
+    ) {
+        presets::add_voicevox_preset(self, speaker, speed, cx);
+    }
+
+    pub(crate) fn add_openai_tts_preset(
+        &mut self,
+        endpoint: String,
+        model: String,
+        voice: String,
+        cx: &mut Context<Self>,
+    ) {
+        presets::add_openai_tts_preset(self, endpoint, model, voice, cx);
+    }
+
+    pub(crate) fn add_stt_preset(
+        &mut self,
+        name: String,
+        endpoint: String,
+        model: String,
+        language: String,
+        cx: &mut Context<Self>,
+    ) {
+        presets::add_stt_preset(self, name, endpoint, model, language, cx);
+    }
+
+    pub(crate) fn add_sakura_tts_preset(&mut self, cx: &mut Context<Self>) {
+        presets::add_sakura_tts_preset(self, cx);
+    }
+
+    pub(crate) fn add_sakura_stt_preset(&mut self, cx: &mut Context<Self>) {
+        presets::add_sakura_stt_preset(self, cx);
+    }
+
+    pub(crate) fn add_sakura_embedding_preset(&mut self, cx: &mut Context<Self>) {
+        presets::add_sakura_embedding_preset(self, cx);
+    }
+
+    pub(crate) fn add_openai_embedding_preset(&mut self, cx: &mut Context<Self>) {
+        presets::add_openai_embedding_preset(self, cx);
     }
 }

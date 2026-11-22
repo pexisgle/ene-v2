@@ -1,10 +1,10 @@
 //! Per-companion profile, VRM model, voice binding, and mind profile editor.
 
-use super::{parse_voice_selection, split_pipe};
+use super::{CompanionsPane, parse_voice_selection, split_pipe};
 use crate::{
     input::Draft,
     ui::{
-        CompanionProfilePatch, SettingsStudio,
+        CompanionProfilePatch,
         icons::Icon,
         studio::labeled_field,
         theme::Theme,
@@ -37,540 +37,534 @@ struct CompanionEditorDrafts {
     voice_style_d: Entity<Draft>,
 }
 
-impl SettingsStudio {
-    pub(super) fn render_companion_editor(
-        &mut self,
-        ctx: EditorContext<'_>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let id = ctx.comp.id.clone();
-        let current_body = ctx
-            .comp
-            .body
-            .as_ref()
-            .and_then(|doc| serde_json::from_str::<BodyBinding>(&doc.json).ok())
-            .unwrap_or_default();
-        let drafts = self.init_companion_editor_drafts(ctx.comp, &current_body, theme, cx);
+pub(super) fn render_companion_editor(
+    pane: &mut CompanionsPane,
+    ctx: EditorContext<'_>,
+    theme: &Theme,
+    cx: &mut Context<CompanionsPane>,
+) -> AnyElement {
+    let id = ctx.comp.id.clone();
+    let current_body = ctx
+        .comp
+        .body
+        .as_ref()
+        .and_then(|doc| serde_json::from_str::<BodyBinding>(&doc.json).ok())
+        .unwrap_or_default();
+    let drafts = init_companion_editor_drafts(pane, ctx.comp, &current_body, theme, cx);
 
-        let name_val = drafts.name_d.read(cx).text().trim().to_owned();
-        let mind_val = drafts.mind_d.read(cx).text().trim().to_owned();
-        let persona_val = drafts.persona_d.read(cx).text().trim().to_owned();
-        let body_model_val = drafts.body_model_d.read(cx).text().trim().to_owned();
-        let voice_key_val = drafts.voice_key_d.read(cx).text().to_owned();
-        let voice_manual_val = drafts.voice_d.read(cx).text().trim().to_owned();
-        let (picked_conn_id, picked_voice_id) =
-            parse_voice_selection(&voice_key_val, &voice_manual_val);
-        let mut next_body = current_body;
-        next_body.model = (!body_model_val.is_empty()).then_some(body_model_val);
-        let next_voice = VoiceBinding {
-            connection_id: picked_conn_id.clone(),
-            voice_id: picked_voice_id.clone(),
-            speed: parse_finite_f32(&drafts.voice_speed_d, cx),
-            pitch: parse_finite_f32(&drafts.voice_pitch_d, cx),
-            style: non_empty_trimmed(&drafts.voice_style_d, cx),
-        };
+    let name_val = drafts.name_d.read(cx).text().trim().to_owned();
+    let mind_val = drafts.mind_d.read(cx).text().trim().to_owned();
+    let persona_val = drafts.persona_d.read(cx).text().trim().to_owned();
+    let body_model_val = drafts.body_model_d.read(cx).text().trim().to_owned();
+    let voice_key_val = drafts.voice_key_d.read(cx).text().to_owned();
+    let voice_manual_val = drafts.voice_d.read(cx).text().trim().to_owned();
+    let (picked_conn_id, picked_voice_id) =
+        parse_voice_selection(&voice_key_val, &voice_manual_val);
+    let mut next_body = current_body;
+    next_body.model = (!body_model_val.is_empty()).then_some(body_model_val);
+    let next_voice = VoiceBinding {
+        connection_id: picked_conn_id.clone(),
+        voice_id: picked_voice_id.clone(),
+        speed: parse_finite_f32(&drafts.voice_speed_d, cx),
+        pitch: parse_finite_f32(&drafts.voice_pitch_d, cx),
+        style: non_empty_trimmed(&drafts.voice_style_d, cx),
+    };
 
-        let model_field = render_body_model_field(&id, drafts.body_model_d.clone(), theme);
-        let voice_selector = self.render_voice_selector(
-            &ctx,
-            &drafts,
-            (
-                &voice_key_val,
-                picked_conn_id.as_deref(),
-                picked_voice_id.as_deref(),
-            ),
-            theme,
+    let model_field = render_body_model_field(&id, drafts.body_model_d.clone(), theme);
+    let voice_selector = render_voice_selector(
+        pane,
+        &ctx,
+        &drafts,
+        (
+            &voice_key_val,
+            picked_conn_id.as_deref(),
+            picked_voice_id.as_deref(),
+        ),
+        theme,
+        cx,
+    );
+    let (disclosure, mind_strip) = render_mind_section(pane, &ctx, &mind_val, theme, cx);
+    let footer = render_companion_footer(
+        pane,
+        &id,
+        ctx.live,
+        CompanionProfilePatch {
+            companion_id: id.clone(),
+            name: name_val,
+            persona: persona_val,
+            mind: mind_val,
+            body: next_body,
+            voice: next_voice,
+        },
+        theme,
+        cx,
+    );
+
+    div()
+        .border_t_1()
+        .border_color(theme.border)
+        .px(px(16.))
+        .py(px(16.))
+        .flex()
+        .flex_col()
+        .gap(px(12.))
+        .child(labeled_field("名前", drafts.name_d, theme))
+        .child(labeled_field("人格の核", drafts.mind_d, theme))
+        .child(labeled_field("話し方", drafts.persona_d, theme))
+        .child(model_field)
+        .child(voice_selector)
+        .child(disclosure)
+        .when_some(mind_strip, |this, strip| this.child(strip))
+        .when_some(ctx.exported_json, |this, json| {
+            this.child(render_exported_template_box(&id, json, theme))
+        })
+        .child(footer)
+        .into_any_element()
+}
+
+fn init_companion_editor_drafts(
+    pane: &mut CompanionsPane,
+    comp: &Companion,
+    current_body: &BodyBinding,
+    theme: &Theme,
+    cx: &mut Context<CompanionsPane>,
+) -> CompanionEditorDrafts {
+    let id = &comp.id;
+    let rev = comp.revision;
+    let mut current_voice = comp
+        .voice
+        .as_ref()
+        .and_then(|doc| serde_json::from_str::<VoiceBinding>(&doc.json).ok())
+        .unwrap_or_default();
+    if current_voice
+        .voice_id
+        .as_deref()
+        .is_none_or(|v| v.trim().is_empty())
+    {
+        current_voice.voice_id = comp.voice_identifier.clone();
+    }
+    let initial_voice_key = match (
+        current_voice
+            .connection_id
+            .as_deref()
+            .filter(|s| !s.is_empty()),
+        current_voice.voice_id.as_deref().filter(|s| !s.is_empty()),
+    ) {
+        (Some(cid), Some(vid)) => format!("{cid}\0{vid}"),
+        (None, Some(vid)) => format!("\0{vid}"),
+        _ => String::new(),
+    };
+    let initial_speed = current_voice.speed.map(|v| format!("{v:.2}"));
+    let initial_pitch = current_voice.pitch.map(|v| format!("{v:.2}"));
+
+    CompanionEditorDrafts {
+        name_d: pane.drafts.draft(
             cx,
-        );
-        let (disclosure, mind_strip) = self.render_mind_section(&ctx, &mind_val, theme, cx);
-        let footer = self.render_companion_footer(
-            &id,
-            ctx.live,
-            CompanionProfilePatch {
-                companion_id: id.clone(),
-                name: name_val,
-                persona: persona_val,
-                mind: mind_val,
-                body: next_body,
-                voice: next_voice,
+            format!("comp:{id}:r{rev}:name"),
+            "名前",
+            Some(&comp.name),
+            theme,
+        ),
+        mind_d: pane.drafts.description_draft(
+            cx,
+            format!("comp:{id}:r{rev}:mind"),
+            "人格の核",
+            Some(&comp.mind),
+            theme,
+        ),
+        persona_d: pane.drafts.description_draft(
+            cx,
+            format!("comp:{id}:r{rev}:persona"),
+            "話し方",
+            comp.persona.as_deref(),
+            theme,
+        ),
+        body_model_d: pane.drafts.draft(
+            cx,
+            format!("comp:{id}:r{rev}:body-model"),
+            "VRM モデル（例: ENE.vrm / Seed-san.vrm / .vrm パス）",
+            current_body.model.as_deref(),
+            theme,
+        ),
+        voice_key_d: pane.drafts.draft(
+            cx,
+            format!("comp:{id}:r{rev}:voice-key"),
+            "",
+            Some(&initial_voice_key),
+            theme,
+        ),
+        voice_d: pane.drafts.draft(
+            cx,
+            format!("comp:{id}:r{rev}:voice"),
+            "話者ID（任意）",
+            current_voice.voice_id.as_deref(),
+            theme,
+        ),
+        voice_speed_d: pane.drafts.draft(
+            cx,
+            format!("comp:{id}:r{rev}:voice-speed"),
+            "速度（例: 1.0）",
+            initial_speed.as_deref(),
+            theme,
+        ),
+        voice_pitch_d: pane.drafts.draft(
+            cx,
+            format!("comp:{id}:r{rev}:voice-pitch"),
+            "音高（例: 0.0）",
+            initial_pitch.as_deref(),
+            theme,
+        ),
+        voice_style_d: pane.drafts.draft(
+            cx,
+            format!("comp:{id}:r{rev}:voice-style"),
+            "例: 丁寧・元気（任意）",
+            current_voice.style.as_deref(),
+            theme,
+        ),
+    }
+}
+
+fn render_voice_selector(
+    pane: &mut CompanionsPane,
+    ctx: &EditorContext<'_>,
+    drafts: &CompanionEditorDrafts,
+    voice_selection: (&str, Option<&str>, Option<&str>),
+    theme: &Theme,
+    cx: &mut Context<CompanionsPane>,
+) -> AnyElement {
+    let id = &ctx.comp.id;
+    let (voice_key_val, picked_conn_id, picked_voice_id) = voice_selection;
+    let voice_dd_key = format!("comp-voice:{id}");
+    let voice_dd_open = pane.open_dropdown.as_deref() == Some(voice_dd_key.as_str());
+    let voice_filter_d = pane.drafts.draft(
+        cx,
+        format!("comp:{id}:voice-filter"),
+        "話者名・IDで絞り込み…",
+        None,
+        theme,
+    );
+    let voice_filter_txt = voice_filter_d.read(cx).text().to_owned();
+    let voice_options = build_voice_options(ctx.tts_voices);
+    let selected_voice_label =
+        format_selected_voice_label(ctx.tts_voices, picked_conn_id, picked_voice_id);
+    let selected_dropdown_val = if !voice_key_val.is_empty() {
+        Some(voice_key_val)
+    } else {
+        Some("")
+    };
+
+    let pane_voice_toggle = cx.entity();
+    let pane_voice_pick = cx.entity();
+    let toggle_key = voice_dd_key.clone();
+    let voice_key_d_pick = drafts.voice_key_d.clone();
+    let voice_d_pick = drafts.voice_d.clone();
+    let voice_checking = {
+        let hub = pane.hub.read(cx);
+        ctx.tts_conn_ids
+            .iter()
+            .any(|cid| hub.setup.checking_connections.contains(cid))
+    };
+
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(render_voice_header_row(
+            id,
+            voice_checking,
+            ctx,
+            &pane.hub,
+            theme,
+        ))
+        .child(dropdown_select(
+            DropdownSpec {
+                id: voice_dd_key,
+                selected_value: selected_dropdown_val,
+                selected_label: selected_voice_label.as_deref(),
+                placeholder: "接続の既定を使用",
+                options: &voice_options,
+                open: voice_dd_open,
+                enabled: true,
+                max_list_height: 210.,
+                filter_draft: Some(voice_filter_d),
+                filter_text: &voice_filter_txt,
+                empty_label: "有効なTTS接続から話者を取得できませんでした",
             },
             theme,
-            cx,
-        );
-
-        div()
-            .border_t_1()
-            .border_color(theme.border)
-            .px(px(16.))
-            .py(px(16.))
-            .flex()
-            .flex_col()
-            .gap(px(12.))
-            .child(labeled_field("名前", drafts.name_d, theme))
-            .child(labeled_field("人格の核", drafts.mind_d, theme))
-            .child(labeled_field("話し方", drafts.persona_d, theme))
-            .child(model_field)
-            .child(voice_selector)
-            .child(disclosure)
-            .when_some(mind_strip, |this, strip| this.child(strip))
-            .when_some(ctx.exported_json, |this, json| {
-                this.child(render_exported_template_box(&id, json, theme))
-            })
-            .child(footer)
-            .into_any_element()
-    }
-
-    fn init_companion_editor_drafts(
-        &mut self,
-        comp: &Companion,
-        current_body: &BodyBinding,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> CompanionEditorDrafts {
-        let id = &comp.id;
-        let rev = comp.revision;
-        let mut current_voice = comp
-            .voice
-            .as_ref()
-            .and_then(|doc| serde_json::from_str::<VoiceBinding>(&doc.json).ok())
-            .unwrap_or_default();
-        if current_voice
-            .voice_id
-            .as_deref()
-            .is_none_or(|v| v.trim().is_empty())
-        {
-            current_voice.voice_id = comp.voice_identifier.clone();
-        }
-        let initial_voice_key = match (
-            current_voice
-                .connection_id
-                .as_deref()
-                .filter(|s| !s.is_empty()),
-            current_voice.voice_id.as_deref().filter(|s| !s.is_empty()),
-        ) {
-            (Some(cid), Some(vid)) => format!("{cid}\0{vid}"),
-            (None, Some(vid)) => format!("\0{vid}"),
-            _ => String::new(),
-        };
-        let initial_speed = current_voice.speed.map(|v| format!("{v:.2}"));
-        let initial_pitch = current_voice.pitch.map(|v| format!("{v:.2}"));
-
-        CompanionEditorDrafts {
-            name_d: self.draft(
-                cx,
-                format!("comp:{id}:r{rev}:name"),
-                "名前",
-                Some(&comp.name),
-                theme,
-            ),
-            mind_d: self.description_draft(
-                cx,
-                format!("comp:{id}:r{rev}:mind"),
-                "人格の核",
-                Some(&comp.mind),
-                theme,
-            ),
-            persona_d: self.description_draft(
-                cx,
-                format!("comp:{id}:r{rev}:persona"),
-                "話し方",
-                comp.persona.as_deref(),
-                theme,
-            ),
-            body_model_d: self.draft(
-                cx,
-                format!("comp:{id}:r{rev}:body-model"),
-                "VRM モデル（例: ENE.vrm / Seed-san.vrm / .vrm パス）",
-                current_body.model.as_deref(),
-                theme,
-            ),
-            voice_key_d: self.draft(
-                cx,
-                format!("comp:{id}:r{rev}:voice-key"),
-                "",
-                Some(&initial_voice_key),
-                theme,
-            ),
-            voice_d: self.draft(
-                cx,
-                format!("comp:{id}:r{rev}:voice"),
-                "話者ID（任意）",
-                current_voice.voice_id.as_deref(),
-                theme,
-            ),
-            voice_speed_d: self.draft(
-                cx,
-                format!("comp:{id}:r{rev}:voice-speed"),
-                "速度（例: 1.0）",
-                initial_speed.as_deref(),
-                theme,
-            ),
-            voice_pitch_d: self.draft(
-                cx,
-                format!("comp:{id}:r{rev}:voice-pitch"),
-                "音高（例: 0.0）",
-                initial_pitch.as_deref(),
-                theme,
-            ),
-            voice_style_d: self.draft(
-                cx,
-                format!("comp:{id}:r{rev}:voice-style"),
-                "例: 丁寧・元気（任意）",
-                current_voice.style.as_deref(),
-                theme,
-            ),
-        }
-    }
-
-    fn render_voice_selector(
-        &mut self,
-        ctx: &EditorContext<'_>,
-        drafts: &CompanionEditorDrafts,
-        voice_selection: (&str, Option<&str>, Option<&str>),
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let id = &ctx.comp.id;
-        let (voice_key_val, picked_conn_id, picked_voice_id) = voice_selection;
-        let voice_dd_key = format!("comp-voice:{id}");
-        let voice_dd_open = self.open_dropdown.as_deref() == Some(voice_dd_key.as_str());
-        let voice_filter_d = self.draft(
-            cx,
-            format!("comp:{id}:voice-filter"),
-            "話者名・IDで絞り込み…",
-            None,
-            theme,
-        );
-        let voice_filter_txt = voice_filter_d.read(cx).text().to_owned();
-        let voice_options = build_voice_options(ctx.tts_voices);
-        let selected_voice_label =
-            format_selected_voice_label(ctx.tts_voices, picked_conn_id, picked_voice_id);
-        let selected_dropdown_val = if !voice_key_val.is_empty() {
-            Some(voice_key_val)
-        } else {
-            Some("")
-        };
-
-        let studio_voice_toggle = cx.entity();
-        let studio_voice_pick = cx.entity();
-        let toggle_key = voice_dd_key.clone();
-        let voice_key_d_pick = drafts.voice_key_d.clone();
-        let voice_d_pick = drafts.voice_d.clone();
-        let voice_checking = {
-            let hub = self.hub.read(cx);
-            ctx.tts_conn_ids
-                .iter()
-                .any(|cid| hub.checking_connections.contains(cid))
-        };
-
-        div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .child(render_voice_header_row(
-                id,
-                voice_checking,
-                ctx,
-                &self.hub,
-                theme,
-            ))
-            .child(dropdown_select(
-                DropdownSpec {
-                    id: voice_dd_key,
-                    selected_value: selected_dropdown_val,
-                    selected_label: selected_voice_label.as_deref(),
-                    placeholder: "接続の既定を使用",
-                    options: &voice_options,
-                    open: voice_dd_open,
-                    enabled: true,
-                    max_list_height: 210.,
-                    filter_draft: Some(voice_filter_d),
-                    filter_text: &voice_filter_txt,
-                    empty_label: "有効なTTS接続から話者を取得できませんでした",
-                },
-                theme,
-                move |_, cx| {
-                    studio_voice_toggle.update(cx, |this, cx| {
-                        this.open_dropdown =
-                            if this.open_dropdown.as_deref() == Some(toggle_key.as_str()) {
-                                None
-                            } else {
-                                Some(toggle_key.clone())
-                            };
-                        cx.notify();
-                    });
-                },
-                move |picked, _, cx| {
-                    let raw_vid = picked
-                        .split_once('\0')
-                        .map_or_else(|| picked.clone(), |(_, v)| v.to_owned());
-                    voice_key_d_pick.update(cx, |d, cx| d.set(picked, cx));
-                    voice_d_pick.update(cx, |d, cx| d.set(raw_vid, cx));
-                    studio_voice_pick.update(cx, |this, cx| {
-                        this.open_dropdown = None;
-                        cx.notify();
-                    });
-                },
-            ))
-            .when(ctx.tts_voices.is_empty(), |this| {
-                this.child(drafts.voice_d.clone())
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(8.))
-                    .child(div().flex_1().child(labeled_field(
-                        "話速",
-                        drafts.voice_speed_d.clone(),
-                        theme,
-                    )))
-                    .child(div().flex_1().child(labeled_field(
-                        "音高",
-                        drafts.voice_pitch_d.clone(),
-                        theme,
-                    )))
-                    .child(div().flex_1().child(labeled_field(
-                        "調子",
-                        drafts.voice_style_d.clone(),
-                        theme,
-                    ))),
-            )
-            .into_any_element()
-    }
-
-    fn render_mind_section(
-        &mut self,
-        ctx: &EditorContext<'_>,
-        mind_val: &str,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> (AnyElement, Option<AnyElement>) {
-        let id = &ctx.comp.id;
-        let studio_disc = cx.entity();
-        let mind_open = self.companion_form.mind_disclosure_open;
-        let disclosure = disclosure_row(
-            SharedString::from(format!("comp-mind-disc-{id}")),
-            "詳細設定（性格の側面・セリフ例・背景・表現のクセ）",
-            mind_open,
-            theme,
             move |_, cx| {
-                studio_disc.update(cx, |this, cx| {
-                    this.companion_form.mind_disclosure_open =
-                        !this.companion_form.mind_disclosure_open;
+                pane_voice_toggle.update(cx, |this, cx| {
+                    this.open_dropdown =
+                        if this.open_dropdown.as_deref() == Some(toggle_key.as_str()) {
+                            None
+                        } else {
+                            Some(toggle_key.clone())
+                        };
                     cx.notify();
                 });
             },
-        );
-        if !mind_open {
-            return (disclosure, None);
-        }
-
-        let profile = ctx
-            .mind_view
-            .and_then(|v| v.profile.as_ref())
-            .cloned()
-            .unwrap_or_default();
-        let prev = profile.revision;
-        let facets_init = profile.facets.join(" | ");
-        let examples_init = profile.examples.join(" | ");
-        let bg_init = profile.background.join(" | ");
-        let expr_init = profile.expression.join(" | ");
-
-        let facets_d = self.description_draft(
-            cx,
-            format!("mind:{id}:r{prev}:facets"),
-            "「|」区切り",
-            Some(&facets_init),
-            theme,
-        );
-        let examples_d = self.description_draft(
-            cx,
-            format!("mind:{id}:r{prev}:examples"),
-            "「|」区切り",
-            Some(&examples_init),
-            theme,
-        );
-        let bg_d = self.description_draft(
-            cx,
-            format!("mind:{id}:r{prev}:bg"),
-            "「|」区切り",
-            Some(&bg_init),
-            theme,
-        );
-        let expr_d = self.description_draft(
-            cx,
-            format!("mind:{id}:r{prev}:expr"),
-            "「|」区切り",
-            Some(&expr_init),
-            theme,
-        );
-
-        let next_profile = MindProfile {
-            core: if mind_val.is_empty() {
-                profile.core
-            } else {
-                mind_val.to_owned()
+            move |picked, _, cx| {
+                let raw_vid = picked
+                    .split_once('\0')
+                    .map_or_else(|| picked.clone(), |(_, v)| v.to_owned());
+                voice_key_d_pick.update(cx, |d, cx| d.set(picked, cx));
+                voice_d_pick.update(cx, |d, cx| d.set(raw_vid, cx));
+                pane_voice_pick.update(cx, |this, cx| {
+                    this.open_dropdown = None;
+                    cx.notify();
+                });
             },
-            revision: prev,
-            facets: split_pipe(facets_d.read(cx).text()),
-            examples: split_pipe(examples_d.read(cx).text()),
-            background: split_pipe(bg_d.read(cx).text()),
-            expression: split_pipe(expr_d.read(cx).text()),
-        };
-        let comp_id_save = id.to_owned();
-        let hub_mind = self.hub.clone();
-        let strip = div()
-            .rounded(px(10.))
-            .bg(theme.bg_blush)
-            .p(px(12.))
-            .flex()
-            .flex_col()
-            .gap(px(10.))
-            .child(labeled_field("性格の側面", facets_d, theme))
-            .child(labeled_field("セリフ例", examples_d, theme))
-            .child(labeled_field("背景・設定", bg_d, theme))
-            .child(labeled_field("表現のクセ", expr_d, theme))
-            .child(div().flex().flex_row().justify_end().child(pill_button(
-                SharedString::from(format!("comp-save-mind-{id}")),
-                "詳細を保存",
-                Tone::Soft.icon(Icon::Check).enabled(ctx.live),
-                theme,
-                move |_, cx| {
-                    hub_mind.update(cx, |hub, cx| {
-                        hub.update_mind_profile(
-                            comp_id_save.clone(),
-                            prev,
-                            next_profile.clone(),
-                            cx,
-                        );
-                    });
-                },
-            )))
-            .into_any_element();
+        ))
+        .when(ctx.tts_voices.is_empty(), |this| {
+            this.child(drafts.voice_d.clone())
+        })
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(8.))
+                .child(div().flex_1().child(labeled_field(
+                    "話速",
+                    drafts.voice_speed_d.clone(),
+                    theme,
+                )))
+                .child(div().flex_1().child(labeled_field(
+                    "音高",
+                    drafts.voice_pitch_d.clone(),
+                    theme,
+                )))
+                .child(div().flex_1().child(labeled_field(
+                    "調子",
+                    drafts.voice_style_d.clone(),
+                    theme,
+                ))),
+        )
+        .into_any_element()
+}
 
-        (disclosure, Some(strip))
+fn render_mind_section(
+    pane: &mut CompanionsPane,
+    ctx: &EditorContext<'_>,
+    mind_val: &str,
+    theme: &Theme,
+    cx: &mut Context<CompanionsPane>,
+) -> (AnyElement, Option<AnyElement>) {
+    let id = &ctx.comp.id;
+    let pane_disc = cx.entity();
+    let mind_open = pane.form.mind_disclosure_open;
+    let disclosure = disclosure_row(
+        SharedString::from(format!("comp-mind-disc-{id}")),
+        "詳細設定（性格の側面・セリフ例・背景・表現のクセ）",
+        mind_open,
+        theme,
+        move |_, cx| {
+            pane_disc.update(cx, |this, cx| {
+                this.form.mind_disclosure_open = !this.form.mind_disclosure_open;
+                cx.notify();
+            });
+        },
+    );
+    if !mind_open {
+        return (disclosure, None);
     }
 
-    fn render_companion_footer(
-        &self,
-        id: &str,
-        live: bool,
-        patch: CompanionProfilePatch,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let armed = self.companion_form.delete_armed_companion.as_deref() == Some(id);
-        let studio_arm = cx.entity();
-        let studio_disarm = cx.entity();
-        let hub_del = self.hub.clone();
-        let hub_save = self.hub.clone();
-        let hub_export = self.hub.clone();
-        let arm_id = id.to_owned();
-        let del_id = id.to_owned();
-        let export_id = id.to_owned();
-        let can_save = live && !patch.name.is_empty();
+    let profile = ctx
+        .mind_view
+        .and_then(|v| v.profile.as_ref())
+        .cloned()
+        .unwrap_or_default();
+    let prev = profile.revision;
+    let facets_init = profile.facets.join(" | ");
+    let examples_init = profile.examples.join(" | ");
+    let bg_init = profile.background.join(" | ");
+    let expr_init = profile.expression.join(" | ");
 
-        let delete_controls = if armed {
+    let facets_d = pane.drafts.description_draft(
+        cx,
+        format!("mind:{id}:r{prev}:facets"),
+        "「|」区切り",
+        Some(&facets_init),
+        theme,
+    );
+    let examples_d = pane.drafts.description_draft(
+        cx,
+        format!("mind:{id}:r{prev}:examples"),
+        "「|」区切り",
+        Some(&examples_init),
+        theme,
+    );
+    let bg_d = pane.drafts.description_draft(
+        cx,
+        format!("mind:{id}:r{prev}:bg"),
+        "「|」区切り",
+        Some(&bg_init),
+        theme,
+    );
+    let expr_d = pane.drafts.description_draft(
+        cx,
+        format!("mind:{id}:r{prev}:expr"),
+        "「|」区切り",
+        Some(&expr_init),
+        theme,
+    );
+
+    let next_profile = MindProfile {
+        core: if mind_val.is_empty() {
+            profile.core
+        } else {
+            mind_val.to_owned()
+        },
+        revision: prev,
+        facets: split_pipe(facets_d.read(cx).text()),
+        examples: split_pipe(examples_d.read(cx).text()),
+        background: split_pipe(bg_d.read(cx).text()),
+        expression: split_pipe(expr_d.read(cx).text()),
+    };
+    let comp_id_save = id.to_owned();
+    let hub_mind = pane.hub.clone();
+    let strip = div()
+        .rounded(px(10.))
+        .bg(theme.bg_blush)
+        .p(px(12.))
+        .flex()
+        .flex_col()
+        .gap(px(10.))
+        .child(labeled_field("性格の側面", facets_d, theme))
+        .child(labeled_field("セリフ例", examples_d, theme))
+        .child(labeled_field("背景・設定", bg_d, theme))
+        .child(labeled_field("表現のクセ", expr_d, theme))
+        .child(div().flex().flex_row().justify_end().child(pill_button(
+            SharedString::from(format!("comp-save-mind-{id}")),
+            "詳細を保存",
+            Tone::Soft.icon(Icon::Check).enabled(ctx.live),
+            theme,
+            move |_, cx| {
+                hub_mind.update(cx, |hub, cx| {
+                    hub.update_mind_profile(comp_id_save.clone(), prev, next_profile.clone(), cx);
+                });
+            },
+        )))
+        .into_any_element();
+
+    (disclosure, Some(strip))
+}
+
+fn render_companion_footer(
+    pane: &CompanionsPane,
+    id: &str,
+    live: bool,
+    patch: CompanionProfilePatch,
+    theme: &Theme,
+    cx: &mut Context<CompanionsPane>,
+) -> AnyElement {
+    let armed = pane.form.delete_armed_companion.as_deref() == Some(id);
+    let pane_arm = cx.entity();
+    let pane_disarm = cx.entity();
+    let hub_del = pane.hub.clone();
+    let hub_save = pane.hub.clone();
+    let hub_export = pane.hub.clone();
+    let arm_id = id.to_owned();
+    let del_id = id.to_owned();
+    let export_id = id.to_owned();
+    let can_save = live && !patch.name.is_empty();
+
+    let delete_controls = if armed {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.danger_fg)
+                    .child("本当に削除しますか？"),
+            )
+            .child(pill_button(
+                SharedString::from(format!("comp-del-cancel-{id}")),
+                "キャンセル",
+                Tone::Ghost,
+                theme,
+                move |_, cx| {
+                    pane_disarm.update(cx, |this, cx| {
+                        this.form.delete_armed_companion = None;
+                        cx.notify();
+                    });
+                },
+            ))
+            .child(pill_button(
+                SharedString::from(format!("comp-del-exec-{id}")),
+                "削除を実行",
+                Tone::Danger.icon(Icon::Trash).enabled(live),
+                theme,
+                move |_, cx| {
+                    hub_del.update(cx, |hub, cx| hub.delete_companion(del_id.clone(), cx));
+                },
+            ))
+    } else {
+        div().child(pill_button(
+            SharedString::from(format!("comp-del-arm-{id}")),
+            "削除",
+            Tone::Danger.icon(Icon::Trash).enabled(live),
+            theme,
+            move |_, cx| {
+                pane_arm.update(cx, |this, cx| {
+                    this.form.delete_armed_companion = Some(arm_id.clone());
+                    cx.notify();
+                });
+            },
+        ))
+    };
+
+    div()
+        .pt(px(4.))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(10.))
+        .child(delete_controls)
+        .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.danger_fg)
-                        .child("本当に削除しますか？"),
-                )
+                .gap(px(8.))
                 .child(pill_button(
-                    SharedString::from(format!("comp-del-cancel-{id}")),
-                    "キャンセル",
-                    Tone::Ghost,
+                    SharedString::from(format!("comp-export-{id}")),
+                    "テンプレート出力",
+                    Tone::Ghost.enabled(live),
                     theme,
                     move |_, cx| {
-                        studio_disarm.update(cx, |this, cx| {
-                            this.companion_form.delete_armed_companion = None;
-                            cx.notify();
+                        hub_export.update(cx, |hub, cx| {
+                            hub.export_companion(export_id.clone(), cx);
                         });
                     },
                 ))
                 .child(pill_button(
-                    SharedString::from(format!("comp-del-exec-{id}")),
-                    "削除を実行",
-                    Tone::Danger.icon(Icon::Trash).enabled(live),
+                    SharedString::from(format!("comp-save-{id}")),
+                    "保存",
+                    Tone::Primary.icon(Icon::Check).enabled(can_save),
                     theme,
                     move |_, cx| {
-                        hub_del.update(cx, |hub, cx| hub.delete_companion(del_id.clone(), cx));
+                        hub_save.update(cx, |hub, cx| {
+                            hub.update_companion_profile(
+                                CompanionProfilePatch {
+                                    companion_id: patch.companion_id.clone(),
+                                    name: patch.name.clone(),
+                                    persona: patch.persona.clone(),
+                                    mind: patch.mind.clone(),
+                                    body: patch.body.clone(),
+                                    voice: patch.voice.clone(),
+                                },
+                                cx,
+                            );
+                        });
                     },
-                ))
-        } else {
-            div().child(pill_button(
-                SharedString::from(format!("comp-del-arm-{id}")),
-                "削除",
-                Tone::Danger.icon(Icon::Trash).enabled(live),
-                theme,
-                move |_, cx| {
-                    studio_arm.update(cx, |this, cx| {
-                        this.companion_form.delete_armed_companion = Some(arm_id.clone());
-                        cx.notify();
-                    });
-                },
-            ))
-        };
-
-        div()
-            .pt(px(4.))
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap(px(10.))
-            .child(delete_controls)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(pill_button(
-                        SharedString::from(format!("comp-export-{id}")),
-                        "テンプレート出力",
-                        Tone::Ghost.enabled(live),
-                        theme,
-                        move |_, cx| {
-                            hub_export.update(cx, |hub, cx| {
-                                hub.export_companion(export_id.clone(), cx);
-                            });
-                        },
-                    ))
-                    .child(pill_button(
-                        SharedString::from(format!("comp-save-{id}")),
-                        "保存",
-                        Tone::Primary.icon(Icon::Check).enabled(can_save),
-                        theme,
-                        move |_, cx| {
-                            hub_save.update(cx, |hub, cx| {
-                                hub.update_companion_profile(
-                                    CompanionProfilePatch {
-                                        companion_id: patch.companion_id.clone(),
-                                        name: patch.name.clone(),
-                                        persona: patch.persona.clone(),
-                                        mind: patch.mind.clone(),
-                                        body: patch.body.clone(),
-                                        voice: patch.voice.clone(),
-                                    },
-                                    cx,
-                                );
-                            });
-                        },
-                    )),
-            )
-            .into_any_element()
-    }
+                )),
+        )
+        .into_any_element()
 }
 
 fn render_body_model_field(id: &str, body_model_d: Entity<Draft>, theme: &Theme) -> AnyElement {

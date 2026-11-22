@@ -2,15 +2,15 @@
 //! real TTS connection, and shows a spoken phrase travelling from the
 //! microphone through the voice gate to the host and back as text.
 
-use super::icons::Icon;
-use super::studio::labeled_field;
-use super::theme::Theme;
-use super::widgets::{Tone, pill_button, status_pill};
-use super::{Hub, SettingsSection, SettingsStudio};
 use crate::audio::CaptureMode;
 use crate::state::{AudioState, Device, Devices};
+use crate::ui::icons::Icon;
+use crate::ui::studio::labeled_field;
+use crate::ui::theme::Theme;
+use crate::ui::widgets::{Tone, pill_button, status_pill};
+use crate::ui::{DraftStore, Hub, SettingsSection};
 use ene_client_core::domain::ConnectionKind;
-use gpui::{AnyElement, Context, Entity, FontWeight, div, prelude::*, px};
+use gpui::{AnyElement, Context, Entity, FontWeight, Subscription, div, prelude::*, px};
 
 fn meter(level: f32, theme: &Theme) -> AnyElement {
     let filled = (level.clamp(0., 1.) * 100.).round();
@@ -71,25 +71,52 @@ struct VoiceSnapshot {
     has_tts: bool,
 }
 
-impl SettingsStudio {
-    pub(crate) fn render_voice(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let snap = {
+/// Voice diagnostics and loopback chapter rendered as an independent GPUI pane entity.
+pub(crate) struct VoicePane {
+    hub: Entity<Hub>,
+    drafts: DraftStore,
+    _observe: Subscription,
+}
+
+impl std::fmt::Debug for VoicePane {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VoicePane").finish_non_exhaustive()
+    }
+}
+
+impl VoicePane {
+    pub(crate) fn new(hub: Entity<Hub>, cx: &mut Context<Self>) -> Self {
+        let _observe = cx.observe(&hub, |_, _, cx| cx.notify());
+        Self {
+            hub,
+            drafts: DraftStore::default(),
+            _observe,
+        }
+    }
+}
+
+impl gpui::Render for VoicePane {
+    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (theme, snap) = {
             let hub = self.hub.read(cx);
-            VoiceSnapshot {
-                live: hub.live(),
-                audio: hub.model.audio.clone(),
-                devices: hub.model.connections.devices.clone(),
-                has_stt: hub.has_audio_connection(ConnectionKind::Stt),
-                has_tts: hub.has_audio_connection(ConnectionKind::Tts),
-            }
+            (
+                hub.theme(),
+                VoiceSnapshot {
+                    live: hub.live(),
+                    audio: hub.model.audio.clone(),
+                    devices: hub.model.connections.devices.clone(),
+                    has_stt: hub.has_audio_connection(ConnectionKind::Stt),
+                    has_tts: hub.has_audio_connection(ConnectionKind::Tts),
+                },
+            )
         };
 
-        let tts_draft = self.draft(
+        let tts_draft = self.drafts.draft(
             cx,
             "voice:tts",
             "読み上げる文（例: こんにちは、テスト中です）",
             Some("こんにちは、テスト中です。"),
-            theme,
+            &theme,
         );
         let tts_text = tts_draft.read(cx).text().trim().to_owned();
 
@@ -98,14 +125,13 @@ impl SettingsStudio {
             .flex()
             .flex_col()
             .gap(px(16.))
-            .child(render_voice_header(theme))
-            .child(render_section_heading("声を聞き取る（STT）", theme))
-            .child(render_stt_card(&snap, &self.hub, theme))
-            .child(render_section_heading("声で読み上げる（TTS）", theme))
+            .child(render_voice_header(&theme))
+            .child(render_section_heading("声を聞き取る（STT）", &theme))
+            .child(render_stt_card(&snap, &self.hub, &theme))
+            .child(render_section_heading("声で読み上げる（TTS）", &theme))
             .child(render_tts_card(
-                &snap, tts_draft, tts_text, &self.hub, theme,
+                &snap, tts_draft, tts_text, &self.hub, &theme,
             ))
-            .into_any_element()
     }
 }
 

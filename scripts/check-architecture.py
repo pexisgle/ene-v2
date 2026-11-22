@@ -20,11 +20,7 @@ MAX_UI_RPC_REFS = 0
 MAX_DB_UPWARD_REFS = 7
 DEFAULT_MAX_IMPL_FILES = 3
 IMPL_SPREAD_ALLOWLIST: dict[tuple[str, str], int] = {
-    ("apps/ene-desktop", "SettingsStudio"): 18,
     ("apps/ene-host", "Store"): 11,
-    ("apps/ene-desktop", "Hub"): 6,
-    ("apps/ene-desktop", "CompanionPod"): 4,
-    ("apps/ene-desktop", "Session"): 4,
     ("crates/ene-plugin-runtime", "Events"): 4,
 }
 

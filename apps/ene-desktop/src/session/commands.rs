@@ -5,7 +5,7 @@ use super::{MotionPlan, MotionPlanError, Session, Step};
 #[cfg(windows)]
 use crate::avatar::Avatar;
 use crate::{
-    audio, avatar,
+    avatar,
     host::Host,
     perception::{Sensor, Watch, WatchParseError},
     update::{Command, Update},
@@ -106,7 +106,7 @@ impl Session {
         host: &Host,
         operation: &w::DeviceOperation,
     ) -> Result<serde_json::Value, OperationError> {
-        if !self.computer_enabled || self.subscription.is_empty() {
+        if !self.devices.computer_enabled || self.transport.subscription.is_empty() {
             return Err(OperationError::ComputerUseUnavailable);
         }
         let work_id = operation
@@ -139,8 +139,8 @@ impl Session {
             .session
             .as_option()
             .ok_or(OperationError::WorkSessionUnavailable)?;
-        if session.client_id != self.options.id
-            || !self.bindings.contains_key(session.companion_id)
+        if session.client_id != self.transport.options.id
+            || !self.transport.bindings.contains_key(session.companion_id)
             || !work
                 .runs
                 .iter()
@@ -151,10 +151,10 @@ impl Session {
         }
         let input = Self::operation_input(operation)?;
         Ok(crate::computer::execute(
-            &mut self.computer_frame,
+            &mut self.devices.computer_frame,
             run_id,
             input,
-            self.avatar.as_ref().map(Avatar::pid),
+            self.devices.avatar.as_ref().map(Avatar::pid),
         )
         .await?)
     }
@@ -224,11 +224,17 @@ impl Session {
             work_id: operation.work_id.as_deref(),
         };
         let binding = if !operation.companion_id.is_empty() {
-            self.bindings.get(&operation.companion_id)
+            self.transport.bindings.get(&operation.companion_id)
         } else {
-            self.focused_binding()
+            self.transport.focused_binding()
         };
-        admits(&self.options.id, &self.subscription, binding, &claim).err()
+        admits(
+            &self.transport.options.id,
+            &self.transport.subscription,
+            binding,
+            &claim,
+        )
+        .err()
     }
 
     pub(super) fn operation_input(
@@ -248,7 +254,8 @@ impl Session {
         if !operation.companion_id.is_empty() {
             Ok(operation.companion_id.clone())
         } else {
-            self.focused_companion_id()
+            self.transport
+                .focused_companion_id()
                 .ok_or(OperationError::NoCompanionServed)
                 .map(str::to_owned)
         }
@@ -275,7 +282,7 @@ impl Session {
             }
             "eye.watch" => self.watch(&input),
             other if other.starts_with("plugin.") => {
-                Ok(self.client_plugins.execute(other, input).await?)
+                Ok(self.devices.client_plugins.execute(other, input).await?)
             }
             other => Err(OperationError::UnimplementedCapability(other.to_owned())),
         }
@@ -309,6 +316,7 @@ impl Session {
             (Some(yaw), Some(pitch))
         };
         let avatar = self
+            .devices
             .avatar
             .as_mut()
             .ok_or(OperationError::NoRendererForLookAt)?;
@@ -346,8 +354,9 @@ impl Session {
             .get("posture")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
-        let model = self.model_for(companion_id);
+        let model = self.transport.model_for(companion_id);
         let avatar = self
+            .devices
             .avatar
             .as_mut()
             .ok_or(OperationError::NoRendererForPerch)?;
@@ -379,9 +388,11 @@ impl Session {
     ) -> Result<serde_json::Value, OperationError> {
         let plan = MotionPlan::parse(input)?;
         let model = self
+            .transport
             .model_for(companion_id)
             .ok_or(OperationError::NoModelForMotion)?;
         let avatar = self
+            .devices
             .avatar
             .as_mut()
             .ok_or(OperationError::NoRendererForMotion)?;
@@ -408,12 +419,14 @@ impl Session {
 
     /// Applies or clears a watch rule.
     fn watch(&mut self, input: &serde_json::Value) -> Result<serde_json::Value, OperationError> {
-        if !self.eyes_enabled {
+        if !self.devices.eyes_enabled {
             return Err(OperationError::EyesDisabled);
         }
         let watch = Watch::parse(input)?;
         let enabled = watch.enabled;
-        self.sensor.apply(if enabled { Some(watch) } else { None });
+        self.devices
+            .sensor
+            .apply(if enabled { Some(watch) } else { None });
         Ok(serde_json::json!({"applied": true, "enabled": enabled}))
     }
 
@@ -428,38 +441,39 @@ impl Session {
                 self.cmd_release_companion(host, companion_id).await
             }
             Command::StopPlayback => {
-                self.stop_playback();
+                self.audio.stop_playback();
                 Step::Continue
             }
             Command::Refresh => {
-                self.sync_capabilities(host).await;
+                self.transport.sync_capabilities(host, &self.devices).await;
                 Step::Continue
             }
             Command::SetEyesEnabled(enabled) => {
-                self.set_eyes_enabled(enabled);
-                self.sync_capabilities(host).await;
+                self.devices.set_eyes_enabled(enabled, &self.updates);
+                self.transport.sync_capabilities(host, &self.devices).await;
                 Step::Continue
             }
             #[cfg(windows)]
             Command::SetComputerUseEnabled(enabled) => {
-                self.set_computer_use_enabled(enabled);
-                self.sync_capabilities(host).await;
+                self.devices
+                    .set_computer_use_enabled(enabled, &self.updates);
+                self.transport.sync_capabilities(host, &self.devices).await;
                 Step::Continue
             }
             Command::SetMicMuted(muted) => {
-                self.cmd_set_mic_muted(muted);
+                self.audio.set_mic_muted(muted, &self.updates);
                 Step::Continue
             }
             Command::SetCaptureMode(mode) => {
-                self.cmd_set_capture_mode(mode);
+                self.audio.set_capture_mode(mode, &self.updates);
                 Step::Continue
             }
             Command::PttStart | Command::PttCommit | Command::PttCancel => {
-                self.cmd_ptt(command);
+                self.audio.handle_ptt(command, &self.updates);
                 Step::Continue
             }
             Command::SetOutputMuted(muted) => {
-                self.cmd_set_output_muted(muted);
+                self.audio.set_output_muted(muted, &self.updates);
                 Step::Continue
             }
             Command::SetAvatarScale(scale) => self.cmd_set_avatar_scale(scale).await,
@@ -476,13 +490,13 @@ impl Session {
     }
 
     async fn cmd_serve(&mut self, host: &Host, companion_id: String) -> Step {
-        let was_empty = self.bindings.is_empty();
-        self.focused = Some(companion_id.clone());
-        if !self.bindings.contains_key(&companion_id) {
-            match self.activate_one(host, &companion_id).await {
+        let was_empty = self.transport.bindings.is_empty();
+        self.transport.focused = Some(companion_id.clone());
+        if !self.transport.bindings.contains_key(&companion_id) {
+            match self.transport.activate_one(host, &companion_id).await {
                 Ok(binding) => {
-                    self.bindings.insert(companion_id, binding);
-                    self.may_activate = false;
+                    self.transport.bindings.insert(companion_id, binding);
+                    self.transport.may_activate = false;
                     self.sync_avatars().await;
                     if was_empty {
                         return Step::Restart;
@@ -500,15 +514,17 @@ impl Session {
     }
 
     async fn cmd_activate_companion(&mut self, host: &Host, companion_id: String) -> Step {
-        let was_empty = self.bindings.is_empty();
-        if !self.bindings.contains_key(&companion_id) {
-            match self.activate_one(host, &companion_id).await {
+        let was_empty = self.transport.bindings.is_empty();
+        if !self.transport.bindings.contains_key(&companion_id) {
+            match self.transport.activate_one(host, &companion_id).await {
                 Ok(binding) => {
-                    self.bindings.insert(companion_id.clone(), binding);
-                    if self.focused.is_none() {
-                        self.focused = Some(companion_id);
+                    self.transport
+                        .bindings
+                        .insert(companion_id.clone(), binding);
+                    if self.transport.focused.is_none() {
+                        self.transport.focused = Some(companion_id);
                     }
-                    self.may_activate = false;
+                    self.transport.may_activate = false;
                     self.sync_avatars().await;
                     if was_empty {
                         return Step::Restart;
@@ -526,105 +542,36 @@ impl Session {
     }
 
     async fn cmd_release_companion(&mut self, host: &Host, companion_id: String) -> Step {
-        if let Err(error) = self.release_one(host, &companion_id).await {
+        if let Err(error) = self.transport.release_one(host, &companion_id).await {
             let _ = self.updates.send(Update::Failed {
                 context: "コンパニオンの常駐解除",
                 message: error.to_string(),
             });
             return Step::Continue;
         }
-        self.bindings.remove(&companion_id);
-        if self.speaking_companion.as_deref() == Some(companion_id.as_str()) {
-            self.stop_playback();
-            self.speaking_companion = None;
-        }
-        if self.focused.as_deref() == Some(companion_id.as_str()) {
-            self.focused = self.bindings.keys().next().cloned();
+        self.transport.bindings.remove(&companion_id);
+        self.audio.clear_speaking_if(&companion_id);
+        if self.transport.focused.as_deref() == Some(companion_id.as_str()) {
+            self.transport.focused = self.transport.bindings.keys().next().cloned();
         }
         self.sync_avatars().await;
-        if self.bindings.is_empty() {
-            self.sensor = Sensor::default();
+        if self.transport.bindings.is_empty() {
+            self.devices.sensor = Sensor::default();
             Step::Restart
         } else {
             Step::Continue
         }
     }
 
-    fn cmd_set_mic_muted(&mut self, muted: bool) {
-        self.mic_muted = muted;
-        if let Some(microphone) = self.microphone.as_ref() {
-            microphone.set_muted(muted);
-        }
-        let _ = self.updates.send(Update::AudioMute {
-            mic_muted: self.mic_muted,
-            output_muted: self.output_muted,
-        });
-    }
-
-    fn cmd_set_capture_mode(&mut self, mode: audio::CaptureMode) {
-        self.capture_mode = mode;
-        self.ptt_active = false;
-        if let Some(microphone) = self.microphone.as_mut() {
-            microphone.set_capture_mode(mode);
-        }
-        let _ = self.updates.send(Update::CaptureModeChanged {
-            mode: self.capture_mode,
-            ptt_active: self.ptt_active,
-        });
-    }
-
-    fn cmd_ptt(&mut self, command: Command) {
-        let changed = match command {
-            Command::PttStart if self.capture_mode == audio::CaptureMode::Ptt => {
-                self.ptt_active = true;
-                if let Some(microphone) = self.microphone.as_mut() {
-                    microphone.ptt_start();
-                }
-                true
-            }
-            Command::PttCommit if self.ptt_active => {
-                self.ptt_active = false;
-                if let Some(microphone) = self.microphone.as_mut() {
-                    microphone.ptt_commit();
-                }
-                true
-            }
-            Command::PttCancel if self.ptt_active => {
-                self.ptt_active = false;
-                if let Some(microphone) = self.microphone.as_mut() {
-                    microphone.ptt_cancel();
-                }
-                true
-            }
-            _ => false,
-        };
-        if changed {
-            let _ = self.updates.send(Update::CaptureModeChanged {
-                mode: self.capture_mode,
-                ptt_active: self.ptt_active,
-            });
-        }
-    }
-
-    fn cmd_set_output_muted(&mut self, muted: bool) {
-        self.output_muted = muted;
-        if let Some(player) = self.player.as_ref() {
-            player.set_muted(muted);
-        }
-        let _ = self.updates.send(Update::AudioMute {
-            mic_muted: self.mic_muted,
-            output_muted: self.output_muted,
-        });
-    }
-
     async fn cmd_set_avatar_scale(&mut self, scale: f32) -> Step {
         let scale = scale.clamp(50., 200.);
-        self.avatar_scale = scale;
+        self.devices.avatar_scale = scale;
         let target_ids: Vec<String> = self
+            .transport
             .focused_companion_id()
             .map(|id| vec![id.to_owned()])
-            .unwrap_or_else(|| self.bindings.keys().cloned().collect());
-        if target_ids.is_empty() || self.avatar.is_none() {
+            .unwrap_or_else(|| self.transport.bindings.keys().cloned().collect());
+        if target_ids.is_empty() || self.devices.avatar.is_none() {
             let _ = self.updates.send(Update::Failed {
                 context: "アバターのサイズ変更",
                 message: "アバター描画プロセスまたはコンパニオンが設定されていません".into(),
@@ -634,13 +581,13 @@ impl Session {
         let models: Vec<(String, Option<PathBuf>)> = target_ids
             .into_iter()
             .map(|id| {
-                let model = self.model_for(&id);
+                let model = self.transport.model_for(&id);
                 (id, model)
             })
             .collect();
         let mut updated = false;
         let mut last_err = None;
-        if let Some(avatar) = self.avatar.as_mut() {
+        if let Some(avatar) = self.devices.avatar.as_mut() {
             for (id, model) in models {
                 if let Some(model) = model {
                     match avatar.set_scale(&id, &model, scale).await {
@@ -659,7 +606,7 @@ impl Session {
             });
         } else if updated {
             let _ = self.updates.send(Update::AvatarScaleChanged(scale));
-            self.devices().await;
+            self.report_devices().await;
         }
         Step::Continue
     }
@@ -667,7 +614,7 @@ impl Session {
     fn cmd_speak(&self, host: &Host, companion_id: Option<String>, text: String) {
         let host = host.clone();
         let updates = self.updates.clone();
-        let client_id = self.options.id.clone();
+        let client_id = self.transport.options.id.clone();
         // Synthesis is a network call; awaiting it here would stall the
         // microphone and the playback this loop owns.
         tokio::spawn(async move {
@@ -691,8 +638,8 @@ impl Session {
     }
 
     async fn cmd_center_avatar(&mut self) {
-        let target = self.focused_companion_id().map(str::to_owned);
-        if let (Some(avatar), Some(target)) = (self.avatar.as_mut(), target) {
+        let target = self.transport.focused_companion_id().map(str::to_owned);
+        if let (Some(avatar), Some(target)) = (self.devices.avatar.as_mut(), target) {
             if let Err(error) = avatar.center(&target).await {
                 let _ = self.updates.send(Update::Failed {
                     context: "アバターの中央移動",

@@ -23,283 +23,296 @@ enum ChatControl {
     Close,
 }
 
-impl CompanionPod {
-    pub(super) fn render_capsule_dock(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let (theme, live, has_companion, unsent) = {
-            let hub = self.hub.read(cx);
-            (
-                hub.theme(),
-                hub.live(),
-                hub.model.companion().is_some(),
-                hub.model.companions.chat.unsent.clone(),
-            )
-        };
+pub(super) fn render_capsule_dock(
+    pod: &mut CompanionPod,
+    cx: &mut Context<CompanionPod>,
+) -> AnyElement {
+    let (theme, live, has_companion, unsent) = {
+        let hub = pod.hub.read(cx);
+        (
+            hub.theme(),
+            hub.live(),
+            hub.model.companion().is_some(),
+            hub.model.companions.chat.unsent.clone(),
+        )
+    };
 
-        let look = theme.field_look(true, true);
-        self.chat_input
-            .update(cx, |draft, _| draft.apply_look(look));
+    let look = theme.field_look(true, true);
+    pod.chat_input.update(cx, |draft, _| draft.apply_look(look));
 
-        let draft_text = self.chat_input.read(cx).text().to_owned();
-        let too_long = draft_text.chars().count() > MAX_INPUT;
-        let can_send = live && has_companion && !draft_text.trim().is_empty() && !too_long;
-        let unsent_rows = render_unsent_rows(unsent, live, &self.hub, &theme);
-        let controls_open = self.controls_open;
-        let pod = cx.entity();
-        let trigger = floating_orb_button(
-            "pod-controls-toggle",
-            Icon::More,
-            controls_open,
-            &theme,
-            move |_, cx| {
-                pod.update(cx, |this, cx| {
-                    // Outside-click dismissal runs earlier in the same event.
-                    this.controls_open = !controls_open;
-                    this.roster_open = false;
-                    cx.notify();
-                });
-            },
-        );
-
-        div()
-            .w_full()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .children(unsent_rows)
-            .when(too_long, |this| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.danger_fg)
-                        .px(px(8.))
-                        .child(format!("入力文字数が上限（{MAX_INPUT}文字）を超えています")),
-                )
-            })
-            .child(
-                div()
-                    .relative()
-                    .w_full()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(self.render_input_capsule(can_send, &theme, cx))
-                    .child(trigger)
-                    .when(controls_open, |this| {
-                        this.child(self.render_controls(&theme, cx))
-                    }),
-            )
-            .into_any_element()
-    }
-
-    fn render_input_capsule(&self, can_send: bool, theme: &Theme, cx: &Context<Self>) -> gpui::Div {
-        div()
-            .flex_1()
-            .min_w_0()
-            .h(px(44.))
-            .rounded_full()
-            .bg(theme.bg_surface)
-            .border_2()
-            .border_color(theme.border_float)
-            .shadow(theme.float_shadow())
-            .px(px(6.))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .pl(px(4.))
-                    .child(self.chat_input.clone()),
-            )
-            .child(
-                div()
-                    .id("pod-send-btn")
-                    .flex_none()
-                    .w(px(30.))
-                    .h(px(30.))
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(if can_send {
-                        theme.accent
-                    } else {
-                        theme.bg_blush
-                    })
-                    .when(can_send, |this| {
-                        this.cursor_pointer()
-                            .hover(|this| this.bg(theme.accent_hover))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                                    this.submit(cx);
-                                }),
-                            )
-                    })
-                    .child(icon(
-                        Icon::Send,
-                        14.,
-                        if can_send {
-                            theme.accent_fg
-                        } else {
-                            theme.ink_placeholder
-                        },
-                    )),
-            )
-    }
-
-    fn render_controls(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
-        let hub = self.hub.read(cx);
-        let mic_ready = matches!(hub.model.connections.devices.input, Device::Ready(_))
-            && hub.has_audio_connection(ConnectionKind::Stt);
-        let speaker_ready = matches!(hub.model.connections.devices.output, Device::Ready(_))
-            && hub.has_audio_connection(ConnectionKind::Tts);
-        let mic_on = mic_ready && !hub.model.audio.mic_muted;
-        let is_ptt = hub.model.audio.capture_mode == crate::audio::CaptureMode::Ptt;
-        let ptt_active = hub.model.audio.ptt_active;
-        let speaker_on = hub.live() && speaker_ready && !hub.model.audio.output_muted;
-        let expanded = hub.pod_mode == PodMode::ExpandedChat;
-
-        div()
-            .id("pod-controls")
-            .absolute()
-            .bottom(px(52.))
-            .left(px(0.))
-            .right(px(0.))
-            .occlude()
-            .rounded(px(18.))
-            .border_2()
-            .border_color(theme.border_float)
-            .bg(theme.bg_surface)
-            .shadow(theme.float_shadow())
-            .p(px(10.))
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                this.controls_open = false;
+    let draft_text = pod.chat_input.read(cx).text().to_owned();
+    let too_long = draft_text.chars().count() > MAX_INPUT;
+    let can_send = live && has_companion && !draft_text.trim().is_empty() && !too_long;
+    let unsent_rows = render_unsent_rows(unsent, live, &pod.hub, &theme);
+    let controls_open = pod.controls_open;
+    let pod_entity = cx.entity();
+    let trigger = floating_orb_button(
+        "pod-controls-toggle",
+        Icon::More,
+        controls_open,
+        &theme,
+        move |_, cx| {
+            pod_entity.update(cx, |this, cx| {
+                // Outside-click dismissal runs earlier in the same event.
+                this.controls_open = !controls_open;
+                this.roster_open = false;
                 cx.notify();
-            }))
-            .child(render_media_controls(
-                mic_ready,
-                mic_on,
-                speaker_ready,
-                speaker_on,
-                theme,
-                cx,
-            ))
-            .child(render_capture_controls(
-                is_ptt, mic_on, ptt_active, theme, cx,
-            ))
-            .child(render_nav_controls(expanded, theme, cx))
-            .into_any_element()
-    }
+            });
+        },
+    );
 
-    fn use_control(&mut self, action: ChatControl, window: &mut Window, cx: &mut Context<Self>) {
-        let keep_open = matches!(action, ChatControl::CaptureMode)
-            || (matches!(action, ChatControl::PttToggle)
-                && !self.hub.read(cx).model.audio.ptt_active);
-        if !keep_open {
-            self.controls_open = false;
-        }
-        cx.notify();
-        match action {
-            ChatControl::Companions => self.roster_open = true,
-            ChatControl::History => self.toggle_mode(window, cx),
-            ChatControl::Settings => self.hub.update(cx, |hub, cx| {
-                hub.open_settings(SettingsSection::Companions, cx)
-            }),
-            ChatControl::Microphone { ready } => self.hub.update(cx, |hub, cx| {
-                if ready {
-                    hub.toggle_mic_mute(cx)
+    div()
+        .w_full()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .children(unsent_rows)
+        .when(too_long, |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.danger_fg)
+                    .px(px(8.))
+                    .child(format!("入力文字数が上限（{MAX_INPUT}文字）を超えています")),
+            )
+        })
+        .child(
+            div()
+                .relative()
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .child(render_input_capsule(pod, can_send, &theme, cx))
+                .child(trigger)
+                .when(controls_open, |this| {
+                    this.child(render_controls(pod, &theme, cx))
+                }),
+        )
+        .into_any_element()
+}
+
+fn render_input_capsule(
+    pod: &CompanionPod,
+    can_send: bool,
+    theme: &Theme,
+    cx: &Context<CompanionPod>,
+) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .h(px(44.))
+        .rounded_full()
+        .bg(theme.bg_surface)
+        .border_2()
+        .border_color(theme.border_float)
+        .shadow(theme.float_shadow())
+        .px(px(6.))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .pl(px(4.))
+                .child(pod.chat_input.clone()),
+        )
+        .child(
+            div()
+                .id("pod-send-btn")
+                .flex_none()
+                .w(px(30.))
+                .h(px(30.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(if can_send {
+                    theme.accent
                 } else {
-                    hub.open_settings(SettingsSection::Device, cx)
-                }
-            }),
-            ChatControl::CaptureMode => self.hub.update(cx, |hub, cx| hub.toggle_capture_mode(cx)),
-            ChatControl::PttToggle => self.hub.update(cx, |hub, cx| hub.ptt_toggle(cx)),
-            ChatControl::PttCancel => self.hub.update(cx, |hub, cx| hub.ptt_cancel(cx)),
-            ChatControl::Speaker { ready } => self.hub.update(cx, |hub, cx| {
-                if ready {
-                    hub.toggle_output_mute(cx)
-                } else {
-                    hub.open_settings(SettingsSection::Device, cx)
-                }
-            }),
-            ChatControl::Close => {
-                let hub = self.hub.read(cx);
-                if hub.is_tray_resident() || hub.settings_window.is_some() {
-                    self.hub.update(cx, |hub, cx| hub.hide_pod(cx));
-                } else {
-                    cx.quit();
-                }
+                    theme.bg_blush
+                })
+                .when(can_send, |this| {
+                    this.cursor_pointer()
+                        .hover(|this| this.bg(theme.accent_hover))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                                this.submit(cx);
+                            }),
+                        )
+                })
+                .child(icon(
+                    Icon::Send,
+                    14.,
+                    if can_send {
+                        theme.accent_fg
+                    } else {
+                        theme.ink_placeholder
+                    },
+                )),
+        )
+}
+
+fn render_controls(pod: &CompanionPod, theme: &Theme, cx: &Context<CompanionPod>) -> AnyElement {
+    let hub = pod.hub.read(cx);
+    let mic_ready = matches!(hub.model.connections.devices.input, Device::Ready(_))
+        && hub.has_audio_connection(ConnectionKind::Stt);
+    let speaker_ready = matches!(hub.model.connections.devices.output, Device::Ready(_))
+        && hub.has_audio_connection(ConnectionKind::Tts);
+    let mic_on = mic_ready && !hub.model.audio.mic_muted;
+    let is_ptt = hub.model.audio.capture_mode == crate::audio::CaptureMode::Ptt;
+    let ptt_active = hub.model.audio.ptt_active;
+    let speaker_on = hub.live() && speaker_ready && !hub.model.audio.output_muted;
+    let expanded = hub.windows.pod_mode == PodMode::ExpandedChat;
+
+    div()
+        .id("pod-controls")
+        .absolute()
+        .bottom(px(52.))
+        .left(px(0.))
+        .right(px(0.))
+        .occlude()
+        .rounded(px(18.))
+        .border_2()
+        .border_color(theme.border_float)
+        .bg(theme.bg_surface)
+        .shadow(theme.float_shadow())
+        .p(px(10.))
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+            this.controls_open = false;
+            cx.notify();
+        }))
+        .child(render_media_controls(
+            mic_ready,
+            mic_on,
+            speaker_ready,
+            speaker_on,
+            theme,
+            cx,
+        ))
+        .child(render_capture_controls(
+            is_ptt, mic_on, ptt_active, theme, cx,
+        ))
+        .child(render_nav_controls(expanded, theme, cx))
+        .into_any_element()
+}
+
+fn use_control(
+    pod: &mut CompanionPod,
+    action: ChatControl,
+    window: &mut Window,
+    cx: &mut Context<CompanionPod>,
+) {
+    let keep_open = matches!(action, ChatControl::CaptureMode)
+        || (matches!(action, ChatControl::PttToggle) && !pod.hub.read(cx).model.audio.ptt_active);
+    if !keep_open {
+        pod.controls_open = false;
+    }
+    cx.notify();
+    match action {
+        ChatControl::Companions => pod.roster_open = true,
+        ChatControl::History => pod.toggle_mode(window, cx),
+        ChatControl::Settings => pod.hub.update(cx, |hub, cx| {
+            hub.open_settings(SettingsSection::Companions, cx)
+        }),
+        ChatControl::Microphone { ready } => pod.hub.update(cx, |hub, cx| {
+            if ready {
+                hub.toggle_mic_mute(cx)
+            } else {
+                hub.open_settings(SettingsSection::Device, cx)
+            }
+        }),
+        ChatControl::CaptureMode => pod.hub.update(cx, |hub, cx| hub.toggle_capture_mode(cx)),
+        ChatControl::PttToggle => pod.hub.update(cx, |hub, cx| hub.ptt_toggle(cx)),
+        ChatControl::PttCancel => pod.hub.update(cx, |hub, cx| hub.ptt_cancel(cx)),
+        ChatControl::Speaker { ready } => pod.hub.update(cx, |hub, cx| {
+            if ready {
+                hub.toggle_output_mute(cx)
+            } else {
+                hub.open_settings(SettingsSection::Device, cx)
+            }
+        }),
+        ChatControl::Close => {
+            let hub = pod.hub.read(cx);
+            if hub.is_tray_resident() || hub.windows.settings_window.is_some() {
+                pod.hub.update(cx, |hub, cx| hub.hide_pod(cx));
+            } else {
+                cx.quit();
             }
         }
     }
+}
 
-    pub(super) fn render_roster_popover(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
-        let hub = self.hub.read(cx);
-        let companions = hub
-            .model
-            .snapshot()
-            .map(|s| s.companions.clone())
-            .unwrap_or_default();
-        let active_id = hub.model.companion_id().map(str::to_owned);
-        let client_id = hub.options.id.clone();
+pub(super) fn render_roster_popover(
+    pod: &CompanionPod,
+    theme: &Theme,
+    cx: &Context<CompanionPod>,
+) -> AnyElement {
+    let hub = pod.hub.read(cx);
+    let companions = hub
+        .model
+        .snapshot()
+        .map(|s| s.companions.clone())
+        .unwrap_or_default();
+    let active_id = hub.model.companion_id().map(str::to_owned);
+    let client_id = hub.options.id.clone();
 
-        let mut rows: Vec<AnyElement> = companions
-            .into_iter()
-            .map(|comp| {
-                let active = active_id.as_deref() == Some(comp.id.as_str());
-                let resident = hub.model.is_resident(&comp.id, &client_id);
-                render_roster_row(comp, active, resident, &self.hub, theme, cx)
-            })
-            .collect();
+    let mut rows: Vec<AnyElement> = companions
+        .into_iter()
+        .map(|comp| {
+            let active = active_id.as_deref() == Some(comp.id.as_str());
+            let resident = hub.model.is_resident(&comp.id, &client_id);
+            render_roster_row(comp, active, resident, &pod.hub, theme, cx)
+        })
+        .collect();
 
-        if rows.is_empty() {
-            rows.push(
-                div()
-                    .px(px(10.))
-                    .py(px(10.))
-                    .text_xs()
-                    .text_color(theme.ink_muted)
-                    .child("コンパニオンがいません")
-                    .into_any_element(),
-            );
-        }
-
-        div()
-            .id("pod-roster-popover")
-            .absolute()
-            .bottom(px(68.))
-            .right(px(14.))
-            .w(px(264.))
-            .bg(theme.bg_surface)
-            .border_2()
-            .border_color(theme.border_float)
-            .shadow(theme.float_shadow())
-            .rounded(px(18.))
-            .p(px(8.))
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .child(
-                div()
-                    .id("pod-roster-scroll")
-                    .max_h(px(230.))
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .children(rows),
-            )
-            .child(render_roster_footer(&self.hub, theme, cx))
-            .into_any_element()
+    if rows.is_empty() {
+        rows.push(
+            div()
+                .px(px(10.))
+                .py(px(10.))
+                .text_xs()
+                .text_color(theme.ink_muted)
+                .child("コンパニオンがいません")
+                .into_any_element(),
+        );
     }
+
+    div()
+        .id("pod-roster-popover")
+        .absolute()
+        .bottom(px(68.))
+        .right(px(14.))
+        .w(px(264.))
+        .bg(theme.bg_surface)
+        .border_2()
+        .border_color(theme.border_float)
+        .shadow(theme.float_shadow())
+        .rounded(px(18.))
+        .p(px(8.))
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(
+            div()
+                .id("pod-roster-scroll")
+                .max_h(px(230.))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .children(rows),
+        )
+        .child(render_roster_footer(&pod.hub, theme, cx))
+        .into_any_element()
 }
 
 fn render_unsent_rows(
@@ -397,7 +410,7 @@ fn control_button(
         ButtonStyle::new(spec.tone).icon(spec.icon),
         theme,
         move |window, cx| {
-            pod.update(cx, |this, cx| this.use_control(action, window, cx));
+            pod.update(cx, |this, cx| use_control(this, action, window, cx));
         },
     )
 }

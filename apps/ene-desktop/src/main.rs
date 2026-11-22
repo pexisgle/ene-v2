@@ -246,7 +246,7 @@ fn run_gpui_app(init: DesktopAppInit) {
             });
             let (open_chat, open_section) = env_open_options();
             if open_chat {
-                hub.update(cx, |hub, _cx| hub.pod_mode = PodMode::ExpandedChat);
+                hub.update(cx, |hub, _cx| hub.windows.pod_mode = PodMode::ExpandedChat);
             }
             bind_actions(cx, hub.clone());
             if open_pod_window(cx, hub.clone()).is_none() {

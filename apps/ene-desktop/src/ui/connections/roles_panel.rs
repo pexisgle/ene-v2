@@ -1,7 +1,8 @@
+use super::ConnectionsPane;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{DropdownOption, DropdownSpec, Tone, dropdown_select, pill_button};
-use crate::ui::{Hub, ModelRoleSlot, SettingsStudio};
+use crate::ui::{Hub, ModelRoleSlot};
 use ene_client_core::{
     connections::{decode_model_choice, encode_model_choice},
     domain::{Companion, ConnectionConfig, ConnectionKind, ModelAssignments},
@@ -43,75 +44,82 @@ pub(super) struct ModelRoleChoices<'a> {
     pub(super) embedding_models: &'a [(String, String, String)],
 }
 
-impl SettingsStudio {
-    pub(super) fn render_advanced_roles_panel(
-        &mut self,
-        companion: Option<&Companion>,
-        choices: ModelRoleChoices<'_>,
-        live: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(comp) = companion else {
-            return render_no_companion_roles_hint(theme);
-        };
-        let assignments = comp.assignments.clone().unwrap_or_default();
-        let roles_ctx = collect_roles_context(self.hub.read(cx));
+pub(super) fn render_advanced_roles_panel(
+    pane: &mut ConnectionsPane,
+    companion: Option<&Companion>,
+    choices: ModelRoleChoices<'_>,
+    live: bool,
+    theme: &Theme,
+    cx: &mut Context<ConnectionsPane>,
+) -> AnyElement {
+    let Some(comp) = companion else {
+        return render_no_companion_roles_hint(theme);
+    };
+    let assignments = comp.assignments.clone().unwrap_or_default();
+    let roles_ctx = collect_roles_context(pane.hub.read(cx));
 
-        let mut rows: Vec<AnyElement> = ModelRoleSlot::ALL
-            .into_iter()
-            .enumerate()
-            .map(|(idx, slot)| {
-                let slot_models = if slot == ModelRoleSlot::Embedding {
-                    choices.embedding_models
-                } else {
-                    choices.all_models
-                };
-                self.render_model_role_row(
-                    ModelRoleRowCtx {
-                        idx,
-                        slot,
-                        assignments: &assignments,
-                        slot_models,
-                        live,
-                    },
-                    theme,
-                    cx,
-                )
-            })
-            .collect();
+    let mut rows: Vec<AnyElement> = ModelRoleSlot::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(idx, slot)| {
+            let slot_models = if slot == ModelRoleSlot::Embedding {
+                choices.embedding_models
+            } else {
+                choices.all_models
+            };
+            render_model_role_row(
+                pane,
+                ModelRoleRowCtx {
+                    idx,
+                    slot,
+                    assignments: &assignments,
+                    slot_models,
+                    live,
+                },
+                theme,
+                cx,
+            )
+        })
+        .collect();
 
-        for spec in voice_role_specs(&roles_ctx) {
-            rows.push(self.render_voice_role_row(spec, &roles_ctx.conn_names, live, theme, cx));
-        }
-        rows.push(self.render_search_role_row(
-            &roles_ctx.search_conns,
-            roles_ctx.active_search_id.as_ref(),
+    for spec in voice_role_specs(&roles_ctx) {
+        rows.push(render_voice_role_row(
+            pane,
+            spec,
+            &roles_ctx.conn_names,
             live,
             theme,
             cx,
         ));
-
-        div()
-            .w_full()
-            .bg(theme.bg_surface)
-            .border_1()
-            .border_color(theme.border)
-            .rounded(px(14.))
-            .p(px(16.))
-            .flex()
-            .flex_col()
-            .gap(px(12.))
-            .child(render_roles_refresh_bar(
-                &roles_ctx.refresh_ids,
-                roles_ctx.checking_any,
-                live,
-                &self.hub,
-                theme,
-            ))
-            .children(rows)
-            .into_any_element()
     }
+    rows.push(render_search_role_row(
+        pane,
+        &roles_ctx.search_conns,
+        roles_ctx.active_search_id.as_ref(),
+        live,
+        theme,
+        cx,
+    ));
+
+    div()
+        .w_full()
+        .bg(theme.bg_surface)
+        .border_1()
+        .border_color(theme.border)
+        .rounded(px(14.))
+        .p(px(16.))
+        .flex()
+        .flex_col()
+        .gap(px(12.))
+        .child(render_roles_refresh_bar(
+            &roles_ctx.refresh_ids,
+            roles_ctx.checking_any,
+            live,
+            &pane.hub,
+            theme,
+        ))
+        .children(rows)
+        .into_any_element()
 }
 
 struct ModelRoleRowCtx<'a> {
@@ -122,245 +130,242 @@ struct ModelRoleRowCtx<'a> {
     live: bool,
 }
 
-impl SettingsStudio {
-    fn render_model_role_row(
-        &mut self,
-        row: ModelRoleRowCtx<'_>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let ModelRoleRowCtx {
-            idx,
-            slot,
-            assignments,
-            slot_models,
-            live,
-        } = row;
-        let current = slot.current(assignments);
-        let current_text = current
-            .as_ref()
-            .map(|m| {
-                slot_models
-                    .iter()
-                    .find(|(cid, mid, _)| cid == &m.connection_id && mid == &m.model_id)
-                    .map(|(_, _, label)| label.clone())
-                    .unwrap_or_else(|| format!("{} / {}", m.connection_id, m.model_id))
-            })
-            .unwrap_or_else(|| slot.fallback_hint().to_owned());
+fn render_model_role_row(
+    pane: &mut ConnectionsPane,
+    row: ModelRoleRowCtx<'_>,
+    theme: &Theme,
+    cx: &mut Context<ConnectionsPane>,
+) -> AnyElement {
+    let ModelRoleRowCtx {
+        idx,
+        slot,
+        assignments,
+        slot_models,
+        live,
+    } = row;
+    let current = slot.current(assignments);
+    let current_text = current
+        .as_ref()
+        .map(|m| {
+            slot_models
+                .iter()
+                .find(|(cid, mid, _)| cid == &m.connection_id && mid == &m.model_id)
+                .map(|(_, _, label)| label.clone())
+                .unwrap_or_else(|| format!("{} / {}", m.connection_id, m.model_id))
+        })
+        .unwrap_or_else(|| slot.fallback_hint().to_owned());
 
-        let dd_key = format!("adv-role:{slot:?}");
-        let dd_open = self.open_dropdown.as_deref() == Some(dd_key.as_str());
-        let filter_d = self.draft(
-            cx,
-            format!("adv-role:{slot:?}:filter"),
-            "モデル名で絞り込み…",
-            None,
-            theme,
-        );
-        let filter_txt = filter_d.read(cx).text().to_owned();
-        let options = build_slot_model_options(slot, slot_models);
-        let current_value = current
-            .as_ref()
-            .map(|m| encode_model_choice(&m.connection_id, &m.model_id))
-            .or_else(|| {
-                (!matches!(slot, ModelRoleSlot::Companion | ModelRoleSlot::Task))
-                    .then(|| "__auto__".to_owned())
-            });
-        let studio_toggle = cx.entity();
-        let studio_pick = cx.entity();
-        let hub_assign = self.hub.clone();
-        let toggle_key = dd_key.clone();
-
-        div()
-            .when(idx > 0, |this| {
-                this.border_t_1().border_color(theme.border).pt(px(12.))
-            })
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .child(render_role_row_header(slot.label(), &current_text, theme))
-            .child(dropdown_select(
-                DropdownSpec {
-                    id: dd_key,
-                    selected_value: current_value.as_deref(),
-                    selected_label: Some(current_text.as_str()),
-                    placeholder: "モデルを選択…",
-                    options: &options,
-                    open: dd_open,
-                    enabled: live,
-                    max_list_height: 200.,
-                    filter_draft: Some(filter_d),
-                    filter_text: &filter_txt,
-                    empty_label: "利用可能なモデルがありません（接続を追加・確認してください）",
-                },
-                theme,
-                move |_, cx| toggle_studio_dropdown(&studio_toggle, &toggle_key, cx),
-                move |picked, _, cx| {
-                    if picked == "__auto__" {
-                        hub_assign.update(cx, |hub, cx| hub.assign_model(slot, None, cx));
-                    } else if let Some((cid, mid)) = decode_model_choice(&picked) {
-                        hub_assign
-                            .update(cx, |hub, cx| hub.assign_model(slot, Some((cid, mid)), cx));
-                    }
-                    close_studio_dropdown(&studio_pick, cx);
-                },
-            ))
-            .into_any_element()
-    }
-
-    fn render_voice_role_row(
-        &mut self,
-        spec: VoiceRoleSpec,
-        conn_names: &BTreeMap<String, String>,
-        live: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let current_text = resolve_voice_label(&spec, conn_names);
-        let dd_open = self.open_dropdown.as_deref() == Some(spec.dd_key);
-        let filter_d = self.draft(
-            cx,
-            spec.filter_key.to_owned(),
-            spec.filter_placeholder,
-            None,
-            theme,
-        );
-        let filter_txt = filter_d.read(cx).text().to_owned();
-        let options = build_voice_role_options(&spec);
-        let current_value = spec
-            .active
-            .as_ref()
-            .map(|(cid, vid)| encode_model_choice(cid, vid))
-            .unwrap_or_else(|| "__off__".to_owned());
-        let no_choices = spec.choices.is_empty();
-        let assign_fn = spec.assign;
-        let studio_toggle = cx.entity();
-        let studio_pick = cx.entity();
-        let hub_assign = self.hub.clone();
-        let toggle_key = spec.dd_key.to_owned();
-
-        div()
-            .border_t_1()
-            .border_color(theme.border)
-            .pt(px(12.))
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .child(render_role_row_header(spec.title, &current_text, theme))
-            .child(dropdown_select(
-                DropdownSpec {
-                    id: spec.dd_key.to_owned(),
-                    selected_value: Some(current_value.as_str()),
-                    selected_label: Some(current_text.as_str()),
-                    placeholder: spec.pick_placeholder,
-                    options: &options,
-                    open: dd_open,
-                    enabled: live,
-                    max_list_height: 200.,
-                    filter_draft: Some(filter_d),
-                    filter_text: &filter_txt,
-                    empty_label: spec.empty_dropdown_label,
-                },
-                theme,
-                move |_, cx| toggle_studio_dropdown(&studio_toggle, &toggle_key, cx),
-                move |picked, _, cx| {
-                    if picked == "__off__" {
-                        hub_assign.update(cx, |hub, cx| assign_fn(hub, None, cx));
-                    } else if let Some((cid, vid)) = decode_model_choice(&picked) {
-                        hub_assign.update(cx, |hub, cx| assign_fn(hub, Some((cid, vid)), cx));
-                    }
-                    close_studio_dropdown(&studio_pick, cx);
-                },
-            ))
-            .when(no_choices, |this| {
-                this.child(render_missing_role_hint(
-                    spec.empty_hint,
-                    spec.add_btn_id,
-                    theme,
-                    cx,
-                ))
-            })
-            .into_any_element()
-    }
-
-    fn render_search_role_row(
-        &self,
-        search_conns: &[(String, String, String)],
-        active_search_id: Option<&String>,
-        live: bool,
-        theme: &Theme,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let dd_key = "adv-role:search";
-        let dd_open = self.open_dropdown.as_deref() == Some(dd_key);
-        let mut options = Vec::with_capacity(search_conns.len() + 1);
-        options.push(DropdownOption {
-            value: "__off__".to_owned(),
-            label: "無効（Web 検索オフ）".to_owned(),
-            detail: None,
+    let dd_key = format!("adv-role:{slot:?}");
+    let dd_open = pane.open_dropdown.as_deref() == Some(dd_key.as_str());
+    let filter_d = pane.drafts.draft(
+        cx,
+        format!("adv-role:{slot:?}:filter"),
+        "モデル名で絞り込み…",
+        None,
+        theme,
+    );
+    let filter_txt = filter_d.read(cx).text().to_owned();
+    let options = build_slot_model_options(slot, slot_models);
+    let current_value = current
+        .as_ref()
+        .map(|m| encode_model_choice(&m.connection_id, &m.model_id))
+        .or_else(|| {
+            (!matches!(slot, ModelRoleSlot::Companion | ModelRoleSlot::Task))
+                .then(|| "__auto__".to_owned())
         });
-        for (cid, name, adapter) in search_conns {
-            options.push(DropdownOption {
-                value: cid.clone(),
-                label: name.clone(),
-                detail: Some(adapter.clone()),
-            });
-        }
-        let current_value = active_search_id
-            .cloned()
-            .unwrap_or_else(|| "__off__".to_owned());
-        let current_text = active_search_id
-            .and_then(|aid| {
-                search_conns
-                    .iter()
-                    .find(|(cid, _, _)| cid == aid)
-                    .map(|(_, name, adapter)| format!("{name} ({adapter})"))
-            })
-            .unwrap_or_else(|| "無効（Web 検索オフ）".to_owned());
-        let studio_toggle = cx.entity();
-        let studio_pick = cx.entity();
-        let hub_assign = self.hub.clone();
+    let pane_toggle = cx.entity();
+    let pane_pick = cx.entity();
+    let hub_assign = pane.hub.clone();
+    let toggle_key = dd_key.clone();
 
-        div()
-            .border_t_1()
-            .border_color(theme.border)
-            .pt(px(12.))
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .child(render_role_row_header("Web 検索", &current_text, theme))
-            .child(dropdown_select(
-                DropdownSpec {
-                    id: dd_key.to_owned(),
-                    selected_value: Some(current_value.as_str()),
-                    selected_label: Some(current_text.as_str()),
-                    placeholder: "検索プロバイダを選択…",
-                    options: &options,
-                    open: dd_open,
-                    enabled: live,
-                    max_list_height: 180.,
-                    filter_draft: None,
-                    filter_text: "",
-                    empty_label: "Web 検索接続がありません（「接続を追加」から追加してください）",
-                },
+    div()
+        .when(idx > 0, |this| {
+            this.border_t_1().border_color(theme.border).pt(px(12.))
+        })
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(render_role_row_header(slot.label(), &current_text, theme))
+        .child(dropdown_select(
+            DropdownSpec {
+                id: dd_key,
+                selected_value: current_value.as_deref(),
+                selected_label: Some(current_text.as_str()),
+                placeholder: "モデルを選択…",
+                options: &options,
+                open: dd_open,
+                enabled: live,
+                max_list_height: 200.,
+                filter_draft: Some(filter_d),
+                filter_text: &filter_txt,
+                empty_label: "利用可能なモデルがありません（接続を追加・確認してください）",
+            },
+            theme,
+            move |_, cx| toggle_pane_dropdown(&pane_toggle, &toggle_key, cx),
+            move |picked, _, cx| {
+                if picked == "__auto__" {
+                    hub_assign.update(cx, |hub, cx| hub.assign_model(slot, None, cx));
+                } else if let Some((cid, mid)) = decode_model_choice(&picked) {
+                    hub_assign.update(cx, |hub, cx| hub.assign_model(slot, Some((cid, mid)), cx));
+                }
+                close_pane_dropdown(&pane_pick, cx);
+            },
+        ))
+        .into_any_element()
+}
+
+fn render_voice_role_row(
+    pane: &mut ConnectionsPane,
+    spec: VoiceRoleSpec,
+    conn_names: &BTreeMap<String, String>,
+    live: bool,
+    theme: &Theme,
+    cx: &mut Context<ConnectionsPane>,
+) -> AnyElement {
+    let current_text = resolve_voice_label(&spec, conn_names);
+    let dd_open = pane.open_dropdown.as_deref() == Some(spec.dd_key);
+    let filter_d = pane.drafts.draft(
+        cx,
+        spec.filter_key.to_owned(),
+        spec.filter_placeholder,
+        None,
+        theme,
+    );
+    let filter_txt = filter_d.read(cx).text().to_owned();
+    let options = build_voice_role_options(&spec);
+    let current_value = spec
+        .active
+        .as_ref()
+        .map(|(cid, vid)| encode_model_choice(cid, vid))
+        .unwrap_or_else(|| "__off__".to_owned());
+    let no_choices = spec.choices.is_empty();
+    let assign_fn = spec.assign;
+    let pane_toggle = cx.entity();
+    let pane_pick = cx.entity();
+    let hub_assign = pane.hub.clone();
+    let toggle_key = spec.dd_key.to_owned();
+
+    div()
+        .border_t_1()
+        .border_color(theme.border)
+        .pt(px(12.))
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(render_role_row_header(spec.title, &current_text, theme))
+        .child(dropdown_select(
+            DropdownSpec {
+                id: spec.dd_key.to_owned(),
+                selected_value: Some(current_value.as_str()),
+                selected_label: Some(current_text.as_str()),
+                placeholder: spec.pick_placeholder,
+                options: &options,
+                open: dd_open,
+                enabled: live,
+                max_list_height: 200.,
+                filter_draft: Some(filter_d),
+                filter_text: &filter_txt,
+                empty_label: spec.empty_dropdown_label,
+            },
+            theme,
+            move |_, cx| toggle_pane_dropdown(&pane_toggle, &toggle_key, cx),
+            move |picked, _, cx| {
+                if picked == "__off__" {
+                    hub_assign.update(cx, |hub, cx| assign_fn(hub, None, cx));
+                } else if let Some((cid, vid)) = decode_model_choice(&picked) {
+                    hub_assign.update(cx, |hub, cx| assign_fn(hub, Some((cid, vid)), cx));
+                }
+                close_pane_dropdown(&pane_pick, cx);
+            },
+        ))
+        .when(no_choices, |this| {
+            this.child(render_missing_role_hint(
+                spec.empty_hint,
+                spec.add_btn_id,
                 theme,
-                move |_, cx| toggle_studio_dropdown(&studio_toggle, dd_key, cx),
-                move |picked, _, cx| {
-                    let target = (picked != "__off__").then_some(picked);
-                    hub_assign.update(cx, |hub, cx| hub.assign_search_connection(target, cx));
-                    close_studio_dropdown(&studio_pick, cx);
-                },
+                cx,
             ))
-            .when(search_conns.is_empty(), |this| {
-                this.child(render_missing_role_hint(
-                    "Web 検索接続がありません。未設定の間は外部検索を行いません。",
-                    "adv-role-search-add",
-                    theme,
-                    cx,
-                ))
-            })
-            .into_any_element()
+        })
+        .into_any_element()
+}
+
+fn render_search_role_row(
+    pane: &ConnectionsPane,
+    search_conns: &[(String, String, String)],
+    active_search_id: Option<&String>,
+    live: bool,
+    theme: &Theme,
+    cx: &Context<ConnectionsPane>,
+) -> AnyElement {
+    let dd_key = "adv-role:search";
+    let dd_open = pane.open_dropdown.as_deref() == Some(dd_key);
+    let mut options = Vec::with_capacity(search_conns.len() + 1);
+    options.push(DropdownOption {
+        value: "__off__".to_owned(),
+        label: "無効（Web 検索オフ）".to_owned(),
+        detail: None,
+    });
+    for (cid, name, adapter) in search_conns {
+        options.push(DropdownOption {
+            value: cid.clone(),
+            label: name.clone(),
+            detail: Some(adapter.clone()),
+        });
     }
+    let current_value = active_search_id
+        .cloned()
+        .unwrap_or_else(|| "__off__".to_owned());
+    let current_text = active_search_id
+        .and_then(|aid| {
+            search_conns
+                .iter()
+                .find(|(cid, _, _)| cid == aid)
+                .map(|(_, name, adapter)| format!("{name} ({adapter})"))
+        })
+        .unwrap_or_else(|| "無効（Web 検索オフ）".to_owned());
+    let pane_toggle = cx.entity();
+    let pane_pick = cx.entity();
+    let hub_assign = pane.hub.clone();
+
+    div()
+        .border_t_1()
+        .border_color(theme.border)
+        .pt(px(12.))
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(render_role_row_header("Web 検索", &current_text, theme))
+        .child(dropdown_select(
+            DropdownSpec {
+                id: dd_key.to_owned(),
+                selected_value: Some(current_value.as_str()),
+                selected_label: Some(current_text.as_str()),
+                placeholder: "検索プロバイダを選択…",
+                options: &options,
+                open: dd_open,
+                enabled: live,
+                max_list_height: 180.,
+                filter_draft: None,
+                filter_text: "",
+                empty_label: "Web 検索接続がありません（「接続を追加」から追加してください）",
+            },
+            theme,
+            move |_, cx| toggle_pane_dropdown(&pane_toggle, dd_key, cx),
+            move |picked, _, cx| {
+                let target = (picked != "__off__").then_some(picked);
+                hub_assign.update(cx, |hub, cx| hub.assign_search_connection(target, cx));
+                close_pane_dropdown(&pane_pick, cx);
+            },
+        ))
+        .when(search_conns.is_empty(), |this| {
+            this.child(render_missing_role_hint(
+                "Web 検索接続がありません。未設定の間は外部検索を行いません。",
+                "adv-role-search-add",
+                theme,
+                cx,
+            ))
+        })
+        .into_any_element()
 }
 
 fn render_no_companion_roles_hint(theme: &Theme) -> AnyElement {
@@ -434,7 +439,7 @@ fn collect_roles_context(hub: &Hub) -> RolesContext {
     });
     RolesContext {
         refresh_ids,
-        checking_any: !hub.checking_connections.is_empty(),
+        checking_any: !hub.setup.checking_connections.is_empty(),
         stt_models: hub.all_stt_models(),
         active_stt: hub.active_stt_selection(),
         tts_voices: hub.all_tts_voices(),
@@ -607,9 +612,9 @@ fn render_missing_role_hint(
     hint: &'static str,
     btn_id: &'static str,
     theme: &Theme,
-    cx: &Context<SettingsStudio>,
+    cx: &Context<ConnectionsPane>,
 ) -> gpui::Div {
-    let studio_add = cx.entity();
+    let pane_add = cx.entity();
     div()
         .flex()
         .flex_row()
@@ -623,16 +628,16 @@ fn render_missing_role_hint(
             Tone::Ghost.icon(Icon::Plus),
             theme,
             move |_, cx| {
-                studio_add.update(cx, |this, cx| {
-                    this.connection_form.adding_connection = true;
+                pane_add.update(cx, |this, cx| {
+                    this.form.adding_connection = true;
                     cx.notify();
                 });
             },
         ))
 }
 
-fn toggle_studio_dropdown(studio: &Entity<SettingsStudio>, key: &str, cx: &mut gpui::App) {
-    studio.update(cx, |this, cx| {
+fn toggle_pane_dropdown(pane: &Entity<ConnectionsPane>, key: &str, cx: &mut gpui::App) {
+    pane.update(cx, |this, cx| {
         this.open_dropdown = if this.open_dropdown.as_deref() == Some(key) {
             None
         } else {
@@ -642,8 +647,8 @@ fn toggle_studio_dropdown(studio: &Entity<SettingsStudio>, key: &str, cx: &mut g
     });
 }
 
-fn close_studio_dropdown(studio: &Entity<SettingsStudio>, cx: &mut gpui::App) {
-    studio.update(cx, |this, cx| {
+fn close_pane_dropdown(pane: &Entity<ConnectionsPane>, cx: &mut gpui::App) {
+    pane.update(cx, |this, cx| {
         this.open_dropdown = None;
         cx.notify();
     });

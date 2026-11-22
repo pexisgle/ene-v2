@@ -1,256 +1,51 @@
 //! Standalone `設定 — ene` window with 38px Strawberry-Milk titlebar,
 //! 196px 3-chapter sidebar (`コンパニオン`, `接続`, `この端末`), and flat content pane.
 
+use super::companions::{CompanionsPane, voice::VoicePane};
+use super::connections::ConnectionsPane;
+use super::device::DevicePane;
 use super::icons::{Icon, icon};
 use super::theme::{Theme, resolve_ui_font_family, ui_font_fallbacks};
 use super::widgets::{CircleButtonStyle, Tone, circle_icon_button, pill_button, window_drag_area};
-use super::{DraftSpec, Hub, SettingsSection, window_draft};
-use crate::{input::Draft, state::NoticeKind};
-use ene_client_core::domain::{ConnectionKind, PolicyEffect};
+use super::{Hub, SettingsSection};
+use crate::state::NoticeKind;
 use gpui::{
     AnyElement, Context, Entity, MouseButton, MouseDownEvent, SharedString, Subscription, Window,
     div, prelude::*, px,
 };
-use std::collections::{BTreeMap, HashSet};
-
-/// Form and expansion state for the Companions tab in [`SettingsStudio`].
-#[derive(Default)]
-pub(crate) struct CompanionFormState {
-    pub(crate) creating_companion: bool,
-    pub(crate) importing_template: bool,
-    pub(crate) preview_pending: bool,
-    pub(crate) expanded_companion_id: Option<String>,
-    pub(crate) mind_disclosure_open: bool,
-    pub(crate) delete_armed_companion: Option<String>,
-    last_created_ping: u64,
-}
-
-/// Form and disclosure state for the Connections tab in [`SettingsStudio`].
-pub(crate) struct ConnectionFormState {
-    pub(crate) adding_connection: bool,
-    pub(crate) custom_connection_open: bool,
-    pub(crate) custom_kind: ConnectionKind,
-    pub(crate) mcp_add_mode: super::mcp_add::Mode,
-    pub(crate) mcp_add_advanced_open: bool,
-    pub(crate) pending_mcp: Option<String>,
-    pub(crate) expanded_connection_id: Option<String>,
-    pub(crate) revealed_secret_for: Option<String>,
-    pub(crate) revoke_armed_for: Option<String>,
-    pub(crate) advanced_roles_open: bool,
-    pub(crate) auto_probed_connections: HashSet<String>,
-    last_cleared_secret_seq: u64,
-}
-
-impl Default for ConnectionFormState {
-    fn default() -> Self {
-        Self {
-            adding_connection: false,
-            custom_connection_open: false,
-            custom_kind: ConnectionKind::Llm,
-            mcp_add_mode: super::mcp_add::Mode::Npx,
-            mcp_add_advanced_open: false,
-            pending_mcp: None,
-            expanded_connection_id: None,
-            revealed_secret_for: None,
-            revoke_armed_for: None,
-            advanced_roles_open: false,
-            auto_probed_connections: HashSet::new(),
-            last_cleared_secret_seq: 0,
-        }
-    }
-}
-
-/// Form and arming state for the Device & Policy tab in [`SettingsStudio`].
-pub(crate) struct DeviceFormState {
-    pub(crate) delete_armed_policy: Option<String>,
-    pub(crate) adding_policy_open: bool,
-    pub(crate) new_policy_effect: PolicyEffect,
-    pub(crate) delete_armed_policy_text: Option<String>,
-    pub(crate) editing_policy_text_id: Option<String>,
-    pub(crate) adding_policy_text_open: bool,
-    pub(crate) adding_plugin_open: bool,
-    pub(crate) remote_host_open: bool,
-    pub(crate) skip_confirm_armed: bool,
-}
-
-impl Default for DeviceFormState {
-    fn default() -> Self {
-        Self {
-            delete_armed_policy: None,
-            adding_policy_open: false,
-            new_policy_effect: PolicyEffect::Allow,
-            delete_armed_policy_text: None,
-            editing_policy_text_id: None,
-            adding_policy_text_open: false,
-            adding_plugin_open: false,
-            remote_host_open: false,
-            skip_confirm_armed: false,
-        }
-    }
-}
 
 /// Settings window managing companions, connections and local device permissions.
 pub struct SettingsStudio {
     pub(crate) hub: Entity<Hub>,
-    drafts: BTreeMap<String, Entity<Draft>>,
-    initialized: bool,
-    pub(crate) companion_form: CompanionFormState,
-    pub(crate) connection_form: ConnectionFormState,
-    pub(crate) device_form: DeviceFormState,
-    pub(crate) open_dropdown: Option<String>,
+    companions: Entity<CompanionsPane>,
+    connections: Entity<ConnectionsPane>,
+    voice: Entity<VoicePane>,
+    device: Entity<DevicePane>,
     content_scroll: gpui::ScrollHandle,
     _observe: Subscription,
 }
 
 impl std::fmt::Debug for SettingsStudio {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SettingsStudio")
-            .field("initialized", &self.initialized)
-            .finish_non_exhaustive()
+        f.debug_struct("SettingsStudio").finish_non_exhaustive()
     }
 }
 
 impl SettingsStudio {
     pub fn new(hub: Entity<Hub>, cx: &mut Context<Self>) -> Self {
         let _observe = cx.observe(&hub, |_, _, cx| cx.notify());
+        let companions = cx.new(|cx| CompanionsPane::new(hub.clone(), cx));
+        let connections = cx.new(|cx| ConnectionsPane::new(hub.clone(), cx));
+        let voice = cx.new(|cx| VoicePane::new(hub.clone(), cx));
+        let device = cx.new(|cx| DevicePane::new(hub.clone(), cx));
         Self {
             hub,
-            drafts: BTreeMap::new(),
-            initialized: false,
-            companion_form: CompanionFormState::default(),
-            connection_form: ConnectionFormState::default(),
-            device_form: DeviceFormState::default(),
-            open_dropdown: None,
+            companions,
+            connections,
+            voice,
+            device,
             content_scroll: gpui::ScrollHandle::new(),
             _observe,
-        }
-    }
-
-    pub(crate) fn draft(
-        &mut self,
-        cx: &mut Context<Self>,
-        key: impl Into<String>,
-        placeholder: &'static str,
-        initial: Option<&str>,
-        theme: &Theme,
-    ) -> Entity<Draft> {
-        window_draft(
-            &mut self.drafts,
-            cx,
-            DraftSpec {
-                key: key.into(),
-                placeholder,
-                initial,
-                look: theme.field_look(false, false),
-                context: "TextField",
-            },
-        )
-    }
-
-    pub(crate) fn description_draft(
-        &mut self,
-        cx: &mut Context<Self>,
-        key: impl Into<String>,
-        placeholder: &'static str,
-        initial: Option<&str>,
-        theme: &Theme,
-    ) -> Entity<Draft> {
-        window_draft(
-            &mut self.drafts,
-            cx,
-            DraftSpec {
-                key: key.into(),
-                placeholder,
-                initial,
-                look: theme.field_look(false, false),
-                context: "TextField Multiline",
-            },
-        )
-    }
-
-    pub(crate) fn clear_mcp_drafts(&mut self) {
-        self.drafts.retain(|key, _| !key.starts_with("add:mcp:"));
-    }
-
-    pub(crate) fn masked_draft(
-        &mut self,
-        cx: &mut Context<Self>,
-        key: impl Into<String>,
-        placeholder: &'static str,
-        masked: bool,
-        theme: &Theme,
-    ) -> Entity<Draft> {
-        let entity = self.draft(cx, key, placeholder, None, theme);
-        if entity.read(cx).is_masked() != masked {
-            entity.update(cx, |draft, cx| draft.set_masked(masked, cx));
-        }
-        entity
-    }
-
-    fn sync_hub_events(&mut self, cx: &mut Context<Self>) {
-        let (created_ping, cleared, active_comp, has_preview) = {
-            let hub = self.hub.read(cx);
-            (
-                hub.created_ping,
-                hub.cleared_secret_for.clone(),
-                hub.model.companion_id().map(str::to_owned),
-                hub.model.companions.preview_reply.is_some(),
-            )
-        };
-        if has_preview {
-            self.companion_form.preview_pending = false;
-        }
-        if !self.initialized {
-            self.initialized = true;
-            self.companion_form.expanded_companion_id = active_comp;
-            self.companion_form.last_created_ping = created_ping;
-            self.connection_form.last_cleared_secret_seq =
-                cleared.as_ref().map_or(0, |(_, seq)| *seq);
-            return;
-        }
-        if created_ping != self.companion_form.last_created_ping {
-            self.companion_form.last_created_ping = created_ping;
-            self.companion_form.creating_companion = false;
-            self.companion_form.importing_template = false;
-            self.companion_form.preview_pending = false;
-            self.companion_form.expanded_companion_id = active_comp;
-            for key in ["new:name", "new:mind", "new:persona", "import:json"] {
-                if let Some(d) = self.drafts.get(key).cloned() {
-                    d.update(cx, |draft, cx| draft.clear(cx));
-                }
-            }
-        }
-        if let Some((conn_id, seq)) = cleared
-            && seq != self.connection_form.last_cleared_secret_seq
-        {
-            self.connection_form.last_cleared_secret_seq = seq;
-            let adapter = self.hub.read(cx).model.settings().and_then(|s| {
-                s.connections
-                    .iter()
-                    .find(|c| c.id == conn_id)
-                    .and_then(|c| c.search_adapter())
-                    .map(|a| a.to_ascii_lowercase())
-            });
-            let mut keys = vec![format!("conn:secret:{conn_id}")];
-            if let Some(adapter) = adapter {
-                keys.push(format!("search-card:secret:{adapter}"));
-            } else if let Some(suffix) = conn_id.strip_prefix("search-") {
-                keys.push(format!("search-card:secret:{suffix}"));
-            }
-            for key in keys {
-                if let Some(d) = self.drafts.get(&key).cloned() {
-                    d.update(cx, |draft, cx| draft.clear(cx));
-                }
-            }
-            if self.connection_form.revealed_secret_for.as_deref() == Some(conn_id.as_str())
-                || self
-                    .connection_form
-                    .revealed_secret_for
-                    .as_deref()
-                    .is_some_and(|r| r.starts_with("search-card:"))
-            {
-                self.connection_form.revealed_secret_for = None;
-            }
         }
     }
 
@@ -338,13 +133,14 @@ impl SettingsStudio {
                         this.hover(|this| this.bg(theme.bg_surface.alpha(0.65)))
                     })
                     .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _, cx| {
-                        studio.update(cx, |this, _| {
-                            this.open_dropdown = None;
-                            this.device_form.skip_confirm_armed = false;
+                        studio.update(cx, |this, cx| {
+                            this.companions.update(cx, |p, _| p.on_leave());
+                            this.connections.update(cx, |p, _| p.on_leave());
+                            this.device.update(cx, |p, _| p.on_leave());
                             this.content_scroll.set_offset(gpui::point(px(0.), px(0.)));
                         });
                         hub.update(cx, |hub, cx| {
-                            hub.settings_section = section;
+                            hub.windows.settings_section = section;
                             if section == SettingsSection::Companions {
                                 hub.load_companion_templates(cx);
                             } else if section == SettingsSection::Connections {
@@ -386,8 +182,6 @@ impl SettingsStudio {
                     .into_any_element(),
             );
         }
-
-        let _ = cx;
 
         div()
             .flex_none()
@@ -485,18 +279,17 @@ impl SettingsStudio {
 
 impl Render for SettingsStudio {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_hub_events(cx);
         let (section, theme) = {
             let hub = self.hub.read(cx);
-            (hub.settings_section, hub.theme())
+            (hub.windows.settings_section, hub.theme())
         };
 
         let notice_block = self.render_notices(&theme, cx);
-        let section_body = match section {
-            SettingsSection::Companions => self.render_companions(&theme, cx),
-            SettingsSection::Connections => self.render_connections(&theme, cx),
-            SettingsSection::Voice => self.render_voice(&theme, cx),
-            SettingsSection::Device => self.render_device(&theme, cx),
+        let section_body: AnyElement = match section {
+            SettingsSection::Companions => self.companions.clone().into_any_element(),
+            SettingsSection::Connections => self.connections.clone().into_any_element(),
+            SettingsSection::Voice => self.voice.clone().into_any_element(),
+            SettingsSection::Device => self.device.clone().into_any_element(),
         };
 
         div()

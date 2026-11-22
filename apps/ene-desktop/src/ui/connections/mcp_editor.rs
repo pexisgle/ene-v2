@@ -1,5 +1,5 @@
+use super::ConnectionsPane;
 use crate::input::Draft;
-use crate::ui::SettingsStudio;
 use crate::ui::icons::Icon;
 use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
@@ -26,169 +26,167 @@ pub(super) type ParsedMcpExtra = (
     Result<Vec<(String, String)>, &'static str>,
 );
 
-impl SettingsStudio {
-    pub(super) fn process_command_draft(
-        &mut self,
-        conn: &Connection,
-        cfg: Option<&ConnectionConfig>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<Draft>> {
-        if !matches!(conn.kind, ConnectionKind::Mcp | ConnectionKind::Acp) {
-            return None;
-        }
-        let cmd_init = match cfg {
-            Some(ConnectionConfig::Mcp(m)) => m.command.as_str(),
-            Some(ConnectionConfig::Acp(a)) => a.command.as_str(),
-            _ => "",
-        };
-        Some(self.draft(
-            cx,
-            format!("conn:{}:r{}:cmd", conn.id, conn.revision),
-            "実行コマンド",
-            Some(cmd_init),
-            theme,
-        ))
+pub(super) fn process_command_draft(
+    pane: &mut ConnectionsPane,
+    conn: &Connection,
+    cfg: Option<&ConnectionConfig>,
+    theme: &Theme,
+    cx: &mut Context<ConnectionsPane>,
+) -> Option<Entity<Draft>> {
+    if !matches!(conn.kind, ConnectionKind::Mcp | ConnectionKind::Acp) {
+        return None;
     }
+    let cmd_init = match cfg {
+        Some(ConnectionConfig::Mcp(m)) => m.command.as_str(),
+        Some(ConnectionConfig::Acp(a)) => a.command.as_str(),
+        _ => "",
+    };
+    Some(pane.drafts.draft(
+        cx,
+        format!("conn:{}:r{}:cmd", conn.id, conn.revision),
+        "実行コマンド",
+        Some(cmd_init),
+        theme,
+    ))
+}
 
-    pub(super) fn mcp_args_draft(
-        &mut self,
-        id: &str,
-        rev: u64,
-        cfg: Option<&ConnectionConfig>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<Draft>> {
-        let Some(ConnectionConfig::Mcp(mcp)) = cfg else {
-            return None;
-        };
-        let initial = serde_json::json!(mcp.args).to_string();
-        Some(self.description_draft(
+pub(super) fn mcp_args_draft(
+    pane: &mut ConnectionsPane,
+    id: &str,
+    rev: u64,
+    cfg: Option<&ConnectionConfig>,
+    theme: &Theme,
+    cx: &mut Context<ConnectionsPane>,
+) -> Option<Entity<Draft>> {
+    let Some(ConnectionConfig::Mcp(mcp)) = cfg else {
+        return None;
+    };
+    let initial = serde_json::json!(mcp.args).to_string();
+    Some(pane.drafts.description_draft(
+        cx,
+        format!("conn:{id}:r{rev}:mcp-args"),
+        r#"["-y", "@scope/mcp-server", "--stdio"]"#,
+        Some(&initial),
+        theme,
+    ))
+}
+
+pub(super) fn mcp_extra_drafts(
+    pane: &mut ConnectionsPane,
+    id: &str,
+    rev: u64,
+    cfg: Option<&ConnectionConfig>,
+    theme: &Theme,
+    cx: &mut Context<ConnectionsPane>,
+) -> Option<McpDraftGroup> {
+    let Some(ConnectionConfig::Mcp(mcp)) = cfg else {
+        return None;
+    };
+    let env_init = format_kv_lines(&mcp.env, '=');
+    let headers_init = format_kv_lines(&mcp.headers, ':');
+    Some(McpDraftGroup {
+        cwd_d: pane.drafts.draft(
             cx,
-            format!("conn:{id}:r{rev}:mcp-args"),
-            r#"["-y", "@scope/mcp-server", "--stdio"]"#,
-            Some(&initial),
+            format!("conn:{id}:r{rev}:mcp-cwd"),
+            "作業ディレクトリ (cwd)",
+            Some(&mcp.cwd),
             theme,
-        ))
-    }
+        ),
+        secret_env_d: pane.drafts.draft(
+            cx,
+            format!("conn:{id}:r{rev}:mcp-secret-env"),
+            "例: GITHUB_TOKEN",
+            Some(&mcp.secret_env_var),
+            theme,
+        ),
+        auth_hdr_d: pane.drafts.draft(
+            cx,
+            format!("conn:{id}:r{rev}:mcp-auth-header"),
+            "例: Authorization / X-Api-Key",
+            Some(&mcp.auth_header),
+            theme,
+        ),
+        env_d: pane.drafts.description_draft(
+            cx,
+            format!("conn:{id}:r{rev}:mcp-env"),
+            "KEY=VALUE（1行に1つ）",
+            Some(&env_init),
+            theme,
+        ),
+        headers_d: pane.drafts.description_draft(
+            cx,
+            format!("conn:{id}:r{rev}:mcp-headers"),
+            "Header-Name: value（1行に1つ）",
+            Some(&headers_init),
+            theme,
+        ),
+    })
+}
 
-    pub(super) fn mcp_extra_drafts(
-        &mut self,
-        id: &str,
-        rev: u64,
-        cfg: Option<&ConnectionConfig>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<McpDraftGroup> {
-        let Some(ConnectionConfig::Mcp(mcp)) = cfg else {
-            return None;
-        };
-        let env_init = format_kv_lines(&mcp.env, '=');
-        let headers_init = format_kv_lines(&mcp.headers, ':');
-        Some(McpDraftGroup {
-            cwd_d: self.draft(
-                cx,
-                format!("conn:{id}:r{rev}:mcp-cwd"),
-                "作業ディレクトリ (cwd)",
-                Some(&mcp.cwd),
+pub(super) fn render_mcp_tools_strip(
+    pane: &mut ConnectionsPane,
+    conn: &Connection,
+    check: Option<&ConnectionCheck>,
+    list_d: &Entity<Draft>,
+    theme: &Theme,
+    cx: &mut Context<ConnectionsPane>,
+) -> Option<gpui::Div> {
+    if conn.kind != ConnectionKind::Mcp {
+        return None;
+    }
+    let caps = check.map(|c| &c.resources).filter(|c| !c.is_empty())?;
+    let id = &conn.id;
+    let filter_d = pane.drafts.draft(
+        cx,
+        format!("conn:{id}:mcp-filter"),
+        "ツール名で絞り込み…",
+        None,
+        theme,
+    );
+    let filter = filter_d.read(cx).text().trim().to_lowercase();
+    let current_allowed = split_comma(list_d.read(cx).text());
+    let chips: Vec<AnyElement> = caps
+        .iter()
+        .filter(|cap| filter.is_empty() || cap.to_lowercase().contains(&filter))
+        .map(|cap| {
+            let selected = current_allowed.iter().any(|a| a == cap);
+            let ld = list_d.clone();
+            let next_list = toggle_comma_item(&current_allowed, cap);
+            pill_button(
+                SharedString::from(format!("mcp-tool-{id}-{cap}")),
+                cap.clone(),
+                if selected { Tone::Primary } else { Tone::Ghost }
+                    .maybe_icon(selected.then_some(Icon::Check)),
                 theme,
-            ),
-            secret_env_d: self.draft(
-                cx,
-                format!("conn:{id}:r{rev}:mcp-secret-env"),
-                "例: GITHUB_TOKEN",
-                Some(&mcp.secret_env_var),
-                theme,
-            ),
-            auth_hdr_d: self.draft(
-                cx,
-                format!("conn:{id}:r{rev}:mcp-auth-header"),
-                "例: Authorization / X-Api-Key",
-                Some(&mcp.auth_header),
-                theme,
-            ),
-            env_d: self.description_draft(
-                cx,
-                format!("conn:{id}:r{rev}:mcp-env"),
-                "KEY=VALUE（1行に1つ）",
-                Some(&env_init),
-                theme,
-            ),
-            headers_d: self.description_draft(
-                cx,
-                format!("conn:{id}:r{rev}:mcp-headers"),
-                "Header-Name: value（1行に1つ）",
-                Some(&headers_init),
-                theme,
-            ),
+                move |_, cx| ld.update(cx, |d, cx| d.set(next_list.clone(), cx)),
+            )
         })
-    }
-
-    pub(super) fn render_mcp_tools_strip(
-        &mut self,
-        conn: &Connection,
-        check: Option<&ConnectionCheck>,
-        list_d: &Entity<Draft>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::Div> {
-        if conn.kind != ConnectionKind::Mcp {
-            return None;
-        }
-        let caps = check.map(|c| &c.resources).filter(|c| !c.is_empty())?;
-        let id = &conn.id;
-        let filter_d = self.draft(
-            cx,
-            format!("conn:{id}:mcp-filter"),
-            "ツール名で絞り込み…",
-            None,
-            theme,
-        );
-        let filter = filter_d.read(cx).text().trim().to_lowercase();
-        let current_allowed = split_comma(list_d.read(cx).text());
-        let chips: Vec<AnyElement> = caps
-            .iter()
-            .filter(|cap| filter.is_empty() || cap.to_lowercase().contains(&filter))
-            .map(|cap| {
-                let selected = current_allowed.iter().any(|a| a == cap);
-                let ld = list_d.clone();
-                let next_list = toggle_comma_item(&current_allowed, cap);
-                pill_button(
-                    SharedString::from(format!("mcp-tool-{id}-{cap}")),
-                    cap.clone(),
-                    if selected { Tone::Primary } else { Tone::Ghost }
-                        .maybe_icon(selected.then_some(Icon::Check)),
-                    theme,
-                    move |_, cx| ld.update(cx, |d, cx| d.set(next_list.clone(), cx)),
-                )
-            })
-            .collect();
-        Some(
-            div()
-                .rounded(px(10.))
-                .bg(theme.bg_blush)
-                .p(px(12.))
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(theme.ink)
-                        .child(format!("検出されたMCPツール（{}件）", caps.len())),
-                )
-                .when(caps.len() > 20, |this| this.child(filter_d))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap(px(6.))
-                        .children(chips),
-                ),
-        )
-    }
+        .collect();
+    Some(
+        div()
+            .rounded(px(10.))
+            .bg(theme.bg_blush)
+            .p(px(12.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme.ink)
+                    .child(format!("検出されたMCPツール（{}件）", caps.len())),
+            )
+            .when(caps.len() > 20, |this| this.child(filter_d))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap(px(6.))
+                    .children(chips),
+            ),
+    )
 }
 
 pub(super) fn read_mcp_extra(group: &McpDraftGroup, cx: &gpui::App) -> ParsedMcpExtra {

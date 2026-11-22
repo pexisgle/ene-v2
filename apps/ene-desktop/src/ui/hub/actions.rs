@@ -1,14 +1,17 @@
-//! Chat, audio, device, approval, policy, plugin, and remote-host actions on [`Hub`].
+//! Chat, audio, device, approval, policy, plugin, remote-host, and companion actions on [`Hub`].
 
-use super::Hub;
+use super::{Hub, companions};
 use crate::{
     rpc,
-    state::{Chat, Effects, NoticeKind},
-    update::{Command, Update},
+    state::{Chat, NoticeKind},
+    update::Command,
 };
-use ene_client_core::domain::{
-    ApprovalDecision, ConnectionKind, NotificationEvent, PolicyEffect, PolicyRule,
-    PolicyRulesUpdate, PolicyText, PolicyTextsUpdate,
+use ene_client_core::{
+    ModelRoleSlot,
+    domain::{
+        ApprovalDecision, CompanionProfilePatch, CompanionTemplate, MindProfile, NewCompanionSpec,
+        PolicyEffect, PolicyRule, PolicyRulesUpdate, PolicyText, PolicyTextsUpdate,
+    },
 };
 use gpui::Context;
 
@@ -20,218 +23,7 @@ pub(crate) enum RemoteHostError {
     Save(#[from] crate::host::Connect),
 }
 
-pub(super) struct ApplyFlags {
-    pub(super) conflicted: bool,
-    pub(super) history_arrived: bool,
-    pub(super) settings_changed: bool,
-    pub(super) companion_or_snapshot: bool,
-    pub(super) models_or_check: bool,
-    pub(super) message_arrived: bool,
-}
-
-impl ApplyFlags {
-    fn from_update(update: &Update) -> Self {
-        let notification_event = match update {
-            Update::Notification(notification) => notification.event.as_ref(),
-            _ => None,
-        };
-        Self {
-            conflicted: matches!(update, Update::Conflict { .. }),
-            history_arrived: matches!(update, Update::History { .. }),
-            settings_changed: matches!(
-                notification_event,
-                Some(NotificationEvent::SettingsUpdated(_))
-            ),
-            companion_or_snapshot: matches!(
-                notification_event,
-                Some(
-                    NotificationEvent::InitialState(_)
-                        | NotificationEvent::Companion(_)
-                        | NotificationEvent::SettingsUpdated(_)
-                )
-            ),
-            models_or_check: matches!(
-                update,
-                Update::Providers(_) | Update::Models { .. } | Update::Checked { .. }
-            ),
-            message_arrived: matches!(
-                notification_event,
-                Some(NotificationEvent::MessageCreated(_) | NotificationEvent::MessageDelta(_))
-            ),
-        }
-    }
-}
-
 impl Hub {
-    pub(super) fn pre_apply_hub_state(
-        &mut self,
-        update: &Update,
-        cx: &mut Context<Self>,
-    ) -> ApplyFlags {
-        self.apply_ui_update_bookkeeping(update, cx);
-        if let Update::Checked {
-            connection_id: _,
-            check,
-        } = update
-            && check.healthy
-        {
-            self.load_models(cx);
-        }
-        if let Update::Failed { context, .. }
-        | Update::Conflict { context, .. }
-        | Update::Denied { context, .. } = update
-            && *context == "接続確認"
-        {
-            self.checking_connections.clear();
-        }
-        if let Update::SendFailed { reason, .. } = update {
-            tracing::warn!(reason = %reason, "the message was not accepted");
-        }
-        ApplyFlags::from_update(update)
-    }
-
-    fn apply_ui_update_bookkeeping(&mut self, update: &Update, cx: &mut Context<Self>) {
-        match update {
-            Update::CredentialRegistered { connection_id } => {
-                let next_seq = self
-                    .cleared_secret_for
-                    .as_ref()
-                    .map_or(1, |(_, seq)| seq + 1);
-                self.cleared_secret_for = Some((connection_id.clone(), next_seq));
-            }
-            Update::Checked {
-                connection_id: id,
-                check,
-            } => {
-                self.checking_connections.remove(id);
-                if check.healthy
-                    && self.model.settings().is_some_and(|s| {
-                        s.connections
-                            .iter()
-                            .any(|c| &c.id == id && c.kind == ConnectionKind::Llm)
-                    })
-                {
-                    self.setup_error = None;
-                    self.setup_error_detail = None;
-                }
-            }
-            Update::SetupFinished {
-                ok,
-                connection_id,
-                models,
-                error,
-            } => {
-                self.setup_pending = false;
-                if *ok {
-                    self.setup_error = None;
-                    self.setup_error_detail = None;
-                    self.pending_setup_connection_id = connection_id.clone();
-                    self.pending_setup_models = models.clone();
-                } else {
-                    self.setup_error = Some(
-                        "接続を確認できませんでした。選んだサービスのキーとネットワークを確認して、もう一度登録してください。",
-                    );
-                    self.setup_error_detail = error.clone();
-                }
-                self.resnapshot();
-                if *ok {
-                    self.load_models(cx);
-                }
-            }
-            Update::Resnapshot => self.resnapshot(),
-            Update::Created(id) => {
-                let created_id = id.clone();
-                self.created_ping = self.created_ping.saturating_add(1);
-                self.resnapshot();
-                self.select_companion(&created_id, cx);
-            }
-            _ => {}
-        }
-    }
-
-    pub(super) fn dispatch_apply_effects(
-        &mut self,
-        flags: ApplyFlags,
-        effects: Effects,
-        had_companion: bool,
-        had_approvals: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let selected_now = !had_companion && self.model.companion_id().is_some();
-        if flags.settings_changed {
-            let _ = self.commands.send(Command::Refresh);
-            self.load_models(cx);
-        }
-        if flags.companion_or_snapshot || flags.models_or_check || selected_now {
-            self.maybe_auto_assign_default_model();
-        }
-        if flags.conflicted {
-            self.resnapshot();
-            self.refresh_active_data(cx);
-        }
-        if self.model.approvals().len() > had_approvals
-            || flags.message_arrived
-            || flags.history_arrived
-        {
-            self.pod_scroll_ping = self.pod_scroll_ping.saturating_add(1);
-        }
-        if effects.history || selected_now {
-            self.load_history(cx);
-        }
-        if effects.approvals || selected_now {
-            self.load_approvals(cx);
-        }
-        if effects.mind || selected_now {
-            self.load_mind(cx);
-        }
-        if self.live() && self.model.connections.providers.is_none() {
-            self.load_providers(cx);
-        }
-        if selected_now {
-            self.load_models(cx);
-            self.load_policy_rules(cx);
-            self.load_policy_texts(cx);
-        }
-        self.sync_tray_state();
-        cx.notify();
-    }
-
-    fn maybe_auto_assign_default_model(&mut self) {
-        if !self.live() || self.setup_pending || self.pending_setup_connection_id.is_some() {
-            return;
-        }
-        let Some(patch) = self
-            .model
-            .auto_assign_default_model_request(&self.auto_assigned_revisions)
-        else {
-            return;
-        };
-        if self.rpc.host().is_none() {
-            return;
-        }
-        self.auto_assigned_revisions
-            .insert(patch.companion_id.clone(), patch.revision);
-        rpc::companions::auto_assign_default_model(
-            &self.rpc,
-            self.model.connections.link_epoch,
-            patch,
-        );
-    }
-
-    pub(crate) fn refresh_active_data(&mut self, cx: &mut Context<Self>) {
-        self.load_history(cx);
-        self.load_approvals(cx);
-        self.load_providers(cx);
-        self.load_models(cx);
-        self.load_mind(cx);
-        self.load_policy_rules(cx);
-        self.load_policy_texts(cx);
-    }
-
-    pub(crate) fn resnapshot(&self) {
-        rpc::chat::resnapshot(&self.rpc, self.model.connections.link_epoch);
-    }
-
     pub(crate) fn select_companion(&mut self, companion_id: &str, cx: &mut Context<Self>) {
         if self.model.companion_id() == Some(companion_id) {
             return;
@@ -247,7 +39,7 @@ impl Hub {
         let _ = self.commands.send(Command::Serve(companion_id.to_owned()));
         self.load_history(cx);
         self.load_mind(cx);
-        self.pod_scroll_ping = self.pod_scroll_ping.saturating_add(1);
+        self.windows.pod_scroll_ping = self.windows.pod_scroll_ping.saturating_add(1);
         cx.notify();
     }
 
@@ -334,7 +126,7 @@ impl Hub {
             request_key,
             text,
         );
-        self.pod_scroll_ping = self.pod_scroll_ping.saturating_add(1);
+        self.windows.pod_scroll_ping = self.windows.pod_scroll_ping.saturating_add(1);
         cx.notify();
         true
     }
@@ -682,54 +474,89 @@ impl Hub {
         cx.notify();
     }
 
-    pub(crate) fn tts_voice_choices(&self) -> Vec<(String, String, String, String)> {
-        self.model.tts_voice_choices()
+    pub(crate) fn create_companion(&mut self, spec: NewCompanionSpec, cx: &mut Context<Self>) {
+        companions::create_companion(self, spec, cx);
     }
 
-    pub(crate) fn voice_choices_for_connection(&self, conn_id: &str) -> Vec<(String, String)> {
-        self.model.voice_choices_for_connection(conn_id)
+    pub(crate) fn update_companion_profile(
+        &mut self,
+        patch: CompanionProfilePatch,
+        cx: &mut Context<Self>,
+    ) {
+        companions::update_companion_profile(self, patch, cx);
     }
 
-    pub(crate) fn stt_model_choices_for_connection(&self, conn_id: &str) -> Vec<(String, String)> {
-        self.model.stt_model_choices_for_connection(conn_id)
+    pub(crate) fn load_companion_templates(&mut self, _cx: &mut Context<Self>) {
+        rpc::companions::load_companion_templates(&self.rpc, self.model.connections.link_epoch);
     }
 
-    pub(crate) fn embedding_model_choices_for_connection(
-        &self,
-        conn_id: &str,
-    ) -> Vec<(String, String)> {
-        self.model.embedding_model_choices_for_connection(conn_id)
+    pub(crate) fn export_companion(&mut self, companion_id: String, cx: &mut Context<Self>) {
+        rpc::companions::export_companion(
+            &self.rpc,
+            self.model.connections.link_epoch,
+            companion_id,
+        );
+        cx.notify();
     }
 
-    pub(crate) fn available_models_for_connection(&self, conn_id: &str) -> Vec<(String, String)> {
-        self.model.available_models_for_connection(conn_id)
+    pub(crate) fn import_companion_json(&mut self, raw: String, cx: &mut Context<Self>) {
+        companions::import_companion_json(self, raw, cx);
     }
 
-    pub(crate) fn model_choices(&self) -> Vec<(String, String, String)> {
-        self.model.model_choices()
+    pub(crate) fn import_companion_template(
+        &mut self,
+        template: CompanionTemplate,
+        cx: &mut Context<Self>,
+    ) {
+        companions::import_companion_template(self, template, cx);
     }
 
-    pub(crate) fn all_llm_models(&self) -> Vec<(String, String, String)> {
-        self.model.all_llm_models()
+    pub(crate) fn preview_companion(
+        &mut self,
+        name: String,
+        mind: String,
+        persona: String,
+        cx: &mut Context<Self>,
+    ) {
+        companions::preview_companion(self, name, mind, persona, cx);
     }
 
-    pub(crate) fn all_embedding_models(&self) -> Vec<(String, String, String)> {
-        self.model.all_embedding_models()
+    pub(crate) fn assign_model(
+        &mut self,
+        slot: ModelRoleSlot,
+        assignment: Option<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        companions::assign_model(self, slot, assignment, cx);
     }
 
-    pub(crate) fn all_stt_models(&self) -> Vec<(String, String, String)> {
-        self.model.all_stt_models()
+    pub(crate) fn delete_companion(&mut self, companion_id: String, cx: &mut Context<Self>) {
+        rpc::companions::delete_companion(
+            &self.rpc,
+            self.model.connections.link_epoch,
+            companion_id,
+        );
+        cx.notify();
     }
 
-    pub(crate) fn active_stt_selection(&self) -> Option<(String, String)> {
-        self.model.active_stt_selection()
+    pub(crate) fn load_mind(&mut self, _cx: &mut Context<Self>) {
+        let Some(companion_id) = self.model.companion_id().map(str::to_owned) else {
+            return;
+        };
+        self.load_mind_for(companion_id);
     }
 
-    pub(crate) fn all_tts_voices(&self) -> Vec<(String, String, String)> {
-        self.model.all_tts_voices()
+    pub(crate) fn load_mind_for(&mut self, companion_id: String) {
+        rpc::companions::load_mind(&self.rpc, self.model.connections.link_epoch, companion_id);
     }
 
-    pub(crate) fn active_tts_selection(&self) -> Option<(String, String)> {
-        self.model.active_tts_selection()
+    pub(crate) fn update_mind_profile(
+        &mut self,
+        companion_id: String,
+        expected_revision: u64,
+        profile: MindProfile,
+        cx: &mut Context<Self>,
+    ) {
+        companions::update_mind_profile(self, companion_id, expected_revision, profile, cx);
     }
 }

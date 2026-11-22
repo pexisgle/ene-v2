@@ -3,14 +3,47 @@
 
 mod create;
 mod editor;
+pub(crate) mod voice;
 
-use super::SettingsStudio;
 use super::icons::Icon;
 use super::theme::Theme;
 use super::widgets::{ButtonStyle, Tone, companion_badge, pill_button, status_pill};
+use super::{DraftStore, Hub};
 use ene_client_core::domain::{Companion, CompanionTemplate, ConnectionKind, MindView};
-use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
+use gpui::{
+    AnyElement, Context, Entity, FontWeight, SharedString, Subscription, div, prelude::*, px,
+};
 use std::collections::BTreeMap;
+
+/// Form and disclosure state owned by [`CompanionsPane`].
+#[derive(Default)]
+pub(super) struct CompanionFormState {
+    pub(super) creating_companion: bool,
+    pub(super) importing_template: bool,
+    pub(super) preview_pending: bool,
+    pub(super) expanded_companion_id: Option<String>,
+    pub(super) mind_disclosure_open: bool,
+    pub(super) delete_armed_companion: Option<String>,
+    last_created_ping: u64,
+}
+
+/// Companion management chapter rendered as an independent GPUI pane entity.
+pub(crate) struct CompanionsPane {
+    pub(crate) hub: Entity<Hub>,
+    pub(super) drafts: DraftStore,
+    pub(super) form: CompanionFormState,
+    pub(super) open_dropdown: Option<String>,
+    initialized: bool,
+    _observe: Subscription,
+}
+
+impl std::fmt::Debug for CompanionsPane {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompanionsPane")
+            .field("initialized", &self.initialized)
+            .finish_non_exhaustive()
+    }
+}
 
 struct RowStatus {
     active: bool,
@@ -19,22 +52,22 @@ struct RowStatus {
     live: bool,
 }
 
-struct CompanionsSnapshot {
-    live: bool,
-    companions: Vec<Companion>,
-    active_id: Option<String>,
-    resident_ids: Vec<String>,
-    has_models: bool,
-    tts_voices: Vec<(String, String, String, String)>,
-    tts_conn_ids: Vec<String>,
-    minds: BTreeMap<String, MindView>,
-    templates: Vec<CompanionTemplate>,
-    exported_template: Option<(String, String)>,
-    preview_reply: Option<Result<String, ene_client_core::state::PreviewError>>,
+pub(super) struct CompanionsSnapshot {
+    pub(super) live: bool,
+    pub(super) companions: Vec<Companion>,
+    pub(super) active_id: Option<String>,
+    pub(super) resident_ids: Vec<String>,
+    pub(super) has_models: bool,
+    pub(super) tts_voices: Vec<(String, String, String, String)>,
+    pub(super) tts_conn_ids: Vec<String>,
+    pub(super) minds: BTreeMap<String, MindView>,
+    pub(super) templates: Vec<CompanionTemplate>,
+    pub(super) exported_template: Option<(String, String)>,
+    pub(super) preview_reply: Option<Result<String, ene_client_core::state::PreviewError>>,
 }
 
 impl CompanionsSnapshot {
-    fn capture(hub: &crate::ui::Hub) -> Self {
+    fn capture(hub: &Hub) -> Self {
         let tts_conn_ids: Vec<String> = hub
             .model
             .settings()
@@ -66,41 +99,50 @@ impl CompanionsSnapshot {
     }
 }
 
-impl SettingsStudio {
-    pub(crate) fn render_companions(
-        &mut self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let snap = CompanionsSnapshot::capture(self.hub.read(cx));
-        let creating = self.companion_form.creating_companion;
-        let importing = self.companion_form.importing_template;
-        let header = render_companions_header(snap.live, creating, importing, theme, cx);
-
-        let import_panel =
-            importing.then(|| self.render_import_panel(snap.live, &snap.templates, theme, cx));
-        let create_panel = creating.then(|| self.render_create_panel(&snap, theme, cx));
-
-        let mut rows: Vec<AnyElement> = snap
-            .companions
-            .iter()
-            .map(|comp| self.render_companion_row(comp, &snap, theme, cx))
-            .collect();
-
-        if rows.is_empty() {
-            rows.push(render_empty_companions_row(creating, theme, cx));
+impl CompanionsPane {
+    pub(crate) fn new(hub: Entity<Hub>, cx: &mut Context<Self>) -> Self {
+        let _observe = cx.observe(&hub, |_, _, cx| cx.notify());
+        Self {
+            hub,
+            drafts: DraftStore::default(),
+            form: CompanionFormState::default(),
+            open_dropdown: None,
+            initialized: false,
+            _observe,
         }
+    }
 
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(16.))
-            .child(header)
-            .when_some(import_panel, |this, p| this.child(p))
-            .when_some(create_panel, |this, p| this.child(p))
-            .child(div().w_full().flex().flex_col().gap(px(10.)).children(rows))
-            .into_any_element()
+    pub(crate) fn on_leave(&mut self) {
+        self.open_dropdown = None;
+    }
+
+    fn sync_hub_events(&mut self, cx: &mut Context<Self>) {
+        let (created_ping, active_comp, has_preview) = {
+            let hub = self.hub.read(cx);
+            (
+                hub.setup.created_ping,
+                hub.model.companion_id().map(str::to_owned),
+                hub.model.companions.preview_reply.is_some(),
+            )
+        };
+        if has_preview {
+            self.form.preview_pending = false;
+        }
+        if !self.initialized {
+            self.initialized = true;
+            self.form.expanded_companion_id = active_comp;
+            self.form.last_created_ping = created_ping;
+            return;
+        }
+        if created_ping != self.form.last_created_ping {
+            self.form.last_created_ping = created_ping;
+            self.form.creating_companion = false;
+            self.form.importing_template = false;
+            self.form.preview_pending = false;
+            self.form.expanded_companion_id = active_comp;
+            self.drafts
+                .clear_keys(cx, ["new:name", "new:mind", "new:persona", "import:json"]);
+        }
     }
 
     fn render_companion_row(
@@ -113,7 +155,7 @@ impl SettingsStudio {
         let id = comp.id.clone();
         let active = snap.active_id.as_deref() == Some(id.as_str());
         let resident = snap.resident_ids.iter().any(|rid| rid == &id);
-        let expanded = self.companion_form.expanded_companion_id.as_deref() == Some(id.as_str());
+        let expanded = self.form.expanded_companion_id.as_deref() == Some(id.as_str());
         let row_header = self.render_companion_row_header(
             comp,
             RowStatus {
@@ -132,7 +174,8 @@ impl SettingsStudio {
             .filter(|(cid, _)| cid == &id)
             .map(|(_, json)| json.as_str());
         let editor = expanded.then(|| {
-            self.render_companion_editor(
+            editor::render_companion_editor(
+                self,
                 editor::EditorContext {
                     comp,
                     mind_view: snap.minds.get(&id),
@@ -290,15 +333,13 @@ impl SettingsStudio {
                 move |_, cx| {
                     let mut next_open = None;
                     studio_expand.update(cx, |this, cx| {
-                        if this.companion_form.expanded_companion_id.as_deref()
-                            == Some(expand_id.as_str())
-                        {
-                            this.companion_form.expanded_companion_id = None;
+                        if this.form.expanded_companion_id.as_deref() == Some(expand_id.as_str()) {
+                            this.form.expanded_companion_id = None;
                         } else {
-                            this.companion_form.expanded_companion_id = Some(expand_id.clone());
+                            this.form.expanded_companion_id = Some(expand_id.clone());
                             next_open = Some(expand_id.clone());
                         }
-                        this.companion_form.delete_armed_companion = None;
+                        this.form.delete_armed_companion = None;
                         cx.notify();
                     });
                     if let Some(target_id) = next_open {
@@ -312,15 +353,50 @@ impl SettingsStudio {
     }
 }
 
+impl gpui::Render for CompanionsPane {
+    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_hub_events(cx);
+        let theme = self.hub.read(cx).theme();
+        let snap = CompanionsSnapshot::capture(self.hub.read(cx));
+        let creating = self.form.creating_companion;
+        let importing = self.form.importing_template;
+        let header = render_companions_header(snap.live, creating, importing, &theme, cx);
+
+        let import_panel = importing
+            .then(|| create::render_import_panel(self, snap.live, &snap.templates, &theme, cx));
+        let create_panel = creating.then(|| create::render_create_panel(self, &snap, &theme, cx));
+
+        let mut rows: Vec<AnyElement> = snap
+            .companions
+            .iter()
+            .map(|comp| self.render_companion_row(comp, &snap, &theme, cx))
+            .collect();
+
+        if rows.is_empty() {
+            rows.push(render_empty_companions_row(creating, &theme, cx));
+        }
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(header)
+            .when_some(import_panel, |this, p| this.child(p))
+            .when_some(create_panel, |this, p| this.child(p))
+            .child(div().w_full().flex().flex_col().gap(px(10.)).children(rows))
+    }
+}
+
 fn render_companions_header(
     live: bool,
     creating: bool,
     importing: bool,
     theme: &Theme,
-    cx: &mut Context<SettingsStudio>,
+    cx: &mut Context<CompanionsPane>,
 ) -> AnyElement {
-    let studio_toggle_create = cx.entity();
-    let studio_toggle_import = cx.entity();
+    let pane_toggle_create = cx.entity();
+    let pane_toggle_import = cx.entity();
     div()
         .flex()
         .flex_row()
@@ -350,11 +426,10 @@ fn render_companions_header(
                     Tone::Ghost.enabled(live),
                     theme,
                     move |_, cx| {
-                        studio_toggle_import.update(cx, |this, cx| {
-                            this.companion_form.importing_template =
-                                !this.companion_form.importing_template;
-                            if this.companion_form.importing_template {
-                                this.companion_form.creating_companion = false;
+                        pane_toggle_import.update(cx, |this, cx| {
+                            this.form.importing_template = !this.form.importing_template;
+                            if this.form.importing_template {
+                                this.form.creating_companion = false;
                             }
                             cx.notify();
                         });
@@ -371,11 +446,10 @@ fn render_companions_header(
                         .maybe_icon((!creating).then_some(Icon::Plus)),
                     theme,
                     move |_, cx| {
-                        studio_toggle_create.update(cx, |this, cx| {
-                            this.companion_form.creating_companion =
-                                !this.companion_form.creating_companion;
-                            if this.companion_form.creating_companion {
-                                this.companion_form.importing_template = false;
+                        pane_toggle_create.update(cx, |this, cx| {
+                            this.form.creating_companion = !this.form.creating_companion;
+                            if this.form.creating_companion {
+                                this.form.importing_template = false;
                             }
                             cx.notify();
                         });
@@ -388,7 +462,7 @@ fn render_companions_header(
 fn render_empty_companions_row(
     creating: bool,
     theme: &Theme,
-    cx: &mut Context<SettingsStudio>,
+    cx: &mut Context<CompanionsPane>,
 ) -> AnyElement {
     div()
         .w_full()
@@ -409,15 +483,15 @@ fn render_empty_companions_row(
                 .child("登録されているコンパニオンはありません。"),
         )
         .when(!creating, |this| {
-            let studio = cx.entity();
+            let pane = cx.entity();
             this.child(pill_button(
                 "comp-empty-create",
                 "新規作成",
                 Tone::Primary.icon(Icon::Plus),
                 theme,
                 move |_, cx| {
-                    studio.update(cx, |this, cx| {
-                        this.companion_form.creating_companion = true;
+                    pane.update(cx, |this, cx| {
+                        this.form.creating_companion = true;
                         cx.notify();
                     });
                 },

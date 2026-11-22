@@ -14,7 +14,7 @@ impl CompanionPod {
         let hub = self.hub.read(cx);
         let theme = hub.theme();
         let live = hub.live();
-        let expanded = hub.pod_mode == PodMode::ExpandedChat;
+        let expanded = hub.windows.pod_mode == PodMode::ExpandedChat;
         let approvals = hub.model.approvals().to_vec();
         let notice = hub.model.notices.first().cloned();
         let streaming_preview: String = hub
@@ -36,7 +36,7 @@ impl CompanionPod {
         } else if let Some(approval) = approvals.first().cloned() {
             self.render_approval_body(&approval, approvals.len(), &theme)
         } else if in_onboarding {
-            self.render_onboarding_body(self.needs_connection(cx), &theme, cx)
+            super::onboarding::render_onboarding_body(self, self.needs_connection(cx), &theme, cx)
         } else if expanded {
             self.render_expanded_timeline(&streaming_preview, is_busy, stop_requested, &theme, cx)
         } else {
