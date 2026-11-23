@@ -11,10 +11,12 @@ use super::widgets::{Tone, pill_button, status_pill};
 use super::{DraftStore, Hub};
 use crate::WORKSPACE_FILE_CAPABILITIES;
 use crate::state::{Device, Link};
+#[cfg(windows)]
+use ene_client_core::domain::COMPUTER_USE;
 use ene_client_core::domain::{
-    COMPUTER_USE, ConnectionKind, PluginInfo, PolicyEffect, PolicyRule, PolicyRulesUpdate,
-    PolicyText, SKIP_TOOL_CONFIRMATION_ID,
-    is_file_confirmation_rule as domain_is_file_confirmation, tool_confirmation_update,
+    ConnectionKind, PluginInfo, PolicyEffect, PolicyRule, PolicyRulesUpdate, PolicyText,
+    SKIP_TOOL_CONFIRMATION_ID, is_file_confirmation_rule as domain_is_file_confirmation,
+    tool_confirmation_update,
 };
 use gpui::{AnyElement, Context, Entity, FontWeight, Subscription, Window, div, prelude::*, px};
 

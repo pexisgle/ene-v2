@@ -22,6 +22,7 @@ pub enum TraySection {
     Voice,
     Device,
 }
+#[cfg(windows)]
 use crate::best_effort::ignore_teardown;
 use std::sync::{
     Arc, RwLock,

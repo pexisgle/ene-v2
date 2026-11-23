@@ -10,7 +10,6 @@ use crate::{
     perception::{Sensor, Watch, WatchParseError},
     update::{Command, Update},
 };
-#[cfg(windows)]
 use buffa::view::MessageView;
 use ene_rpc as w;
 use std::{path::PathBuf, time::Duration};

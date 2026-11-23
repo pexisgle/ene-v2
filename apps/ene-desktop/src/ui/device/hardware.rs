@@ -16,7 +16,7 @@ pub(super) fn render_device_status_card(
     snap: &DeviceSnapshot,
     theme: &Theme,
 ) -> AnyElement {
-    let mut card = div()
+    let card = div()
         .w_full()
         .bg(theme.bg_surface)
         .border_1()
@@ -30,12 +30,12 @@ pub(super) fn render_device_status_card(
         .child(render_eyes_row(pane, snap, theme))
         .child(eyes_description_note(theme));
 
+    // `card` is shadowed rather than reassigned: the Windows-only rows append
+    // through a new binding, so no platform has an unused `mut`.
     #[cfg(windows)]
-    {
-        card = card
-            .child(render_computer_use_row(pane, snap, theme))
-            .child(computer_use_note(theme));
-    }
+    let card = card
+        .child(render_computer_use_row(pane, snap, theme))
+        .child(computer_use_note(theme));
 
     card.child(render_pod_window_row(pane, snap, theme))
         .child(render_avatar_controls_row(pane, snap, theme))
