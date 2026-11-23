@@ -25,10 +25,7 @@ use probe::probe_voicevox_tts;
 use rig_core::catalog::ModelSpec;
 use rig_ecs::prelude::App;
 
-#[expect(
-    refining_impl_trait,
-    reason = "the Connect service trait returns boxed futures while each impl names its concrete future"
-)]
+#[expect(refining_impl_trait, reason = "Connect boxes futures")]
 impl w::SettingsService for Services {
     #[tracing::instrument(
         name = "rpc",

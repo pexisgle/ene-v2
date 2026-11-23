@@ -7,10 +7,7 @@ use connectrpc::{
 use ene_rpc as w;
 use futures_util::StreamExt;
 
-#[expect(
-    refining_impl_trait,
-    reason = "the Connect service trait returns boxed futures while each impl names its concrete future"
-)]
+#[expect(refining_impl_trait, reason = "Connect boxes futures")]
 impl w::HostService for Services {
     #[tracing::instrument(
         name = "rpc",
