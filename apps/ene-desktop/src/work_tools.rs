@@ -24,6 +24,11 @@ const SCAN_LIMIT: usize = 20_000;
 const GREP_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RESULTS: usize = 500;
 const COMMAND_TIMEOUT: u64 = 30;
+/// How long `Drop` waits for a killed tool process to be collected.
+///
+/// `start_kill` is asynchronous, so the status is not available immediately; a
+/// short poll is enough for a process that is already being torn down.
+const REAP_TIMEOUT: Duration = Duration::from_millis(200);
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum WorkToolError {
@@ -547,8 +552,19 @@ struct RunningShell(Option<Box<dyn ChildWrapper>>);
 impl Drop for RunningShell {
     fn drop(&mut self) {
         // Kill the group or job even if the device stream drops the future.
+        //
+        // `start_kill` only signals; nothing here collected the exit status, so
+        // a timed-out command stayed unreaped. `wait` is a future and `Drop`
+        // cannot await, so the status is polled for a bounded moment instead.
         if let Some(child) = &mut self.0 {
             ene_platform_os::warn_if_err(child.start_kill(), "tool process termination");
+            let deadline = std::time::Instant::now() + REAP_TIMEOUT;
+            while std::time::Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(_)) | Err(_) => break,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
         }
     }
 }
