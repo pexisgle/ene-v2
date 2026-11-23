@@ -463,3 +463,49 @@ async fn process_client_opens_the_bidirectional_voice_stream() {
     assert!(answered.view().is_speaking);
     stop(&mut child).await;
 }
+
+/// A supervisor must be able to ask whether the host is alive and ready, and
+/// must be able to do so without the Owner Bearer: the auth layer is exactly
+/// what a health check needs to see past.
+#[cfg(unix)]
+#[tokio::test]
+async fn health_and_ready_answer_without_a_token() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    let runtime = temp.path().join("runtime");
+    let mut child = spawn(&state, &runtime);
+    let (endpoint, _token) = discovery(&runtime).await;
+    // `discovery` returns the RPC endpoint; the probes share the origin.
+    let origin = endpoint
+        .trim_end_matches('/')
+        .rsplit_once('/')
+        .map_or(endpoint.clone(), |(base, _)| base.to_owned());
+
+    for path in ["healthz", "readyz"] {
+        let response = reqwest::Client::new()
+            .get(format!("{origin}/{path}"))
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("{path} must answer: {error}"));
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::OK,
+            "{path} must answer 200 for a running host"
+        );
+    }
+
+    // The RPC surface still refuses a request without the token, which is what
+    // makes the exemption above meaningful rather than a hole.
+    let refused = reqwest::Client::new()
+        .post(format!("{endpoint}/ene.host.v1.HostService/GetSnapshot"))
+        .send()
+        .await
+        .expect("the request is answered");
+    assert!(
+        refused.status().is_client_error() || refused.status().is_server_error(),
+        "an unauthenticated RPC call must not succeed, got {}",
+        refused.status()
+    );
+
+    stop(&mut child).await;
+}
