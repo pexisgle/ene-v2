@@ -105,6 +105,9 @@ if (-not $SkipTests) {
         cargo test --profile ci --workspace --all-features --locked -- @skipArgs
     }
     Invoke-Gate "cargo test (cert-store tests, run from %TEMP%)" {
+        # The binaries must exist for *this* tree before they are copied out;
+        # otherwise the gate can pick a stale build and fail for the wrong reason.
+        cargo test --profile ci --workspace --all-features --locked --no-run | Out-Null
         $stage = Join-Path $stagingRoot ("ene-tls-tests-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Force -Path $stage | Out-Null
         $targets = @(

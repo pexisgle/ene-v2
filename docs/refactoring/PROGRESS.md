@@ -106,7 +106,11 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 - [x] PR-1.2 `ene-plugin` から `ene-rpc` 削除（Rule 7: 3→2）
 - [x] PR-1.3 `ene-catalog` の接続モデル純粋化（Rule 7: 2→1）
 - [x] PR-1.4 `ene-voice` から `ene-rpc` 削除（Rule 7: 1→0）
-- [ ] PR-1.5 `ene-client-core` のワイヤー分離検証
+- [x] PR-1.5 `ene-client-core` のワイヤー分離検証
+
+**Phase 1 完了 (DoD 達成)**: `Rule 7 (domain_no_rpc_dep) == 0`。
+`ene-domain` / `ene-policy` / `ene-catalog` / `ene-plugin` / `ene-voice` の
+いずれも `Cargo.toml` に `ene-rpc` を持たない。
 
 ### Phase 2: `World` 脱却
 - [ ] PR-2.1 `server/rpc/{chat,voice}.rs` の Resource 撤去（Rule 10: 2→0）

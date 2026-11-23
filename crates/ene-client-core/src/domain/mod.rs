@@ -32,9 +32,11 @@ pub struct Failure {
 }
 
 /// Schema-tagged JSON payload carried by companion bindings, mind state, and events.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct JsonDocument {
+    #[serde(default)]
     pub schema: String,
+    #[serde(default)]
     pub json: String,
 }
 

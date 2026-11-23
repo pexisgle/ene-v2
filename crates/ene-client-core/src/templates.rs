@@ -1,7 +1,6 @@
 //! Pure companion template JSON serialization, validation, and sanitization.
 
 use crate::domain::{CompanionTemplate, VoiceBinding};
-use ene_rpc as w;
 
 /// Supported companion template JSON schema format version.
 pub const TEMPLATE_FORMAT_VERSION: u32 = 1;
@@ -28,8 +27,7 @@ pub fn export_template_json(template: &CompanionTemplate) -> Result<String, Temp
         sanitized.format_version = TEMPLATE_FORMAT_VERSION;
     }
     sanitize_template(&mut sanitized);
-    let wire_template: w::CompanionTemplate = sanitized.into();
-    serde_json::to_string_pretty(&wire_template).map_err(TemplateError::Export)
+    serde_json::to_string_pretty(&sanitized).map_err(TemplateError::Export)
 }
 
 /// Parses, validates, and sanitizes a companion template from JSON.
@@ -38,8 +36,7 @@ pub fn parse_template_json(raw: &str) -> Result<CompanionTemplate, TemplateError
     if trimmed.is_empty() {
         return Err(TemplateError::EmptyInput);
     }
-    let wire_template: w::CompanionTemplate = serde_json::from_str(trimmed)?;
-    let mut template: CompanionTemplate = wire_template.into();
+    let mut template: CompanionTemplate = serde_json::from_str(trimmed)?;
     if template.format_version > TEMPLATE_FORMAT_VERSION {
         return Err(TemplateError::UnsupportedVersion(template.format_version));
     }

@@ -50,13 +50,20 @@ pub struct VoiceBinding {
 }
 
 /// Structured personality profile stored on a companion's mind.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MindProfile {
+    #[serde(default)]
     pub core: String,
+    #[serde(default)]
     pub revision: u64,
+    #[serde(default)]
     pub facets: Vec<String>,
+    #[serde(default)]
     pub examples: Vec<String>,
+    #[serde(default)]
     pub background: Vec<String>,
+    #[serde(default)]
     pub expression: Vec<String>,
 }
 
@@ -107,16 +114,32 @@ pub struct Companion {
 }
 
 /// Portable starter or exported companion template.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CompanionTemplate {
+    // The wire contract emits `formatVersion` and accepts the snake_case
+    // spelling older exports used, so both must keep parsing.
+    #[serde(default, alias = "format_version")]
     pub format_version: u32,
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub mind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<MindProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<JsonDocument>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<JsonDocument>,
+    #[serde(
+        default,
+        alias = "voice_identifier",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub voice_identifier: Option<String>,
 }
 
