@@ -245,3 +245,90 @@ fn b03_b04_mcp_and_web_search_require_gate_and_respect_rules() {
         Verdict::Deny { .. }
     ));
 }
+
+/// The badge on an approval card must not disagree with what the policy
+/// engine blocks, so the level is derived from the same capability rules.
+#[test]
+fn risk_levels_follow_the_hard_deny_and_mutation_rules() {
+    for capability in ["payment.transfer", "securities.trade", "banking.wire"] {
+        assert_eq!(
+            RiskLevel::of(Some(capability), "device_request", "{}"),
+            RiskLevel::High,
+            "{capability} is hard-denied, so its card must say High"
+        );
+    }
+
+    for (capability, tool, args, expected) in [
+        (
+            "work.delete",
+            "work_delete",
+            r#"{"path":"a.txt"}"#,
+            RiskLevel::High,
+        ),
+        (
+            "work.shell",
+            "work_powershell",
+            r#"{"command":"rm a"}"#,
+            RiskLevel::High,
+        ),
+        (
+            "work.write",
+            "work_write",
+            r#"{"path":"a.txt"}"#,
+            RiskLevel::Moderate,
+        ),
+        (
+            "work.edit",
+            "work_edit",
+            r#"{"path":"a.txt"}"#,
+            RiskLevel::Moderate,
+        ),
+        (
+            "device.files",
+            "device_files",
+            r#"{"path":"a.txt"}"#,
+            RiskLevel::Moderate,
+        ),
+        (
+            "work.read",
+            "work_read",
+            r#"{"path":"a.txt"}"#,
+            RiskLevel::Low,
+        ),
+        (
+            "web.search",
+            "web_search",
+            r#"{"query":"rust"}"#,
+            RiskLevel::Low,
+        ),
+    ] {
+        assert_eq!(
+            RiskLevel::of(Some(capability), tool, args),
+            expected,
+            "{capability} / {tool}"
+        );
+    }
+}
+
+/// A tool without a capability is judged by its name and arguments, which is
+/// how an MCP or plugin tool reaches the card.
+#[test]
+fn a_tool_without_a_capability_is_judged_by_its_name_and_arguments() {
+    assert_eq!(
+        RiskLevel::of(None, "mcp__github__delete_file", "{}"),
+        RiskLevel::High
+    );
+    assert_eq!(
+        RiskLevel::of(None, "mcp__fs__write_file", r#"{"path":"a.txt"}"#),
+        RiskLevel::Moderate
+    );
+    assert_eq!(
+        RiskLevel::of(None, "mcp__fs__read_file", r#"{"path":"a.txt"}"#),
+        RiskLevel::Low
+    );
+    // An empty capability falls back to the tool name rather than panicking.
+    assert_eq!(
+        RiskLevel::of(Some(""), "mcp__x__remove_thing", "{}"),
+        RiskLevel::High
+    );
+}

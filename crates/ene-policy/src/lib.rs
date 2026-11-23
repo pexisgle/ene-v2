@@ -14,7 +14,7 @@ pub use capability::{
 pub use error::{PolicyError, Result};
 pub use rules::{
     ActionTarget, Approval, ApprovalDecision, ApprovalStatus, CandidateAction,
-    MAX_POLICY_TEXT_CHARS, PolicyEffect, PolicyRule, PolicyText, Verdict, canonical_json,
-    canonicalise, decide_action, decide_capability, extract_target, hard_denied,
+    MAX_POLICY_TEXT_CHARS, PolicyEffect, PolicyRule, PolicyText, RiskLevel, Verdict,
+    canonical_json, canonicalise, decide_action, decide_capability, extract_target, hard_denied,
     hard_denied_action, hex_digest, is_host_tool,
 };
