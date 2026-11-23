@@ -56,7 +56,13 @@ pub fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
             bytes[offset + 7],
         ]) as usize;
         offset += 8;
-        let end = offset.saturating_add(size).min(bytes.len());
+        // A chunk that claims more bytes than the file holds is malformed.
+        // Truncating instead would hand the resampler a short buffer and make
+        // a corrupt response look like valid audio.
+        let end = offset
+            .checked_add(size)
+            .filter(|end| *end <= bytes.len())
+            .ok_or(VoiceHttpError::InvalidWav)?;
         let chunk = &bytes[offset..end];
         if id == b"fmt " && chunk.len() >= 16 {
             audio_format = u16::from_le_bytes([chunk[0], chunk[1]]);
@@ -214,5 +220,24 @@ mod tests {
                 resample_mono(&pcm, from, to, &mut None).unwrap(),
             );
         }
+    }
+
+    /// A WAV whose `data` chunk claims more bytes than the file holds is
+    /// malformed. It must be refused, not silently truncated: truncation feeds
+    /// a short buffer to the resampler and hides a corrupt response.
+    #[test]
+    fn a_data_chunk_larger_than_the_file_is_refused() {
+        let pcm = [1i16.to_le_bytes(), 2i16.to_le_bytes()].concat();
+        let good = wav_wrap(&pcm, 24_000).unwrap();
+        assert_eq!(parse_wav(&good).unwrap(), (pcm.clone(), 24_000));
+
+        let mut lying = good.clone();
+        // Overwrite the `data` chunk size (bytes 40..44) with more than exists.
+        lying[40..44].copy_from_slice(&999_999u32.to_le_bytes());
+        assert!(
+            matches!(parse_wav(&lying), Err(VoiceHttpError::InvalidWav)),
+            "an oversized data chunk must be refused, got {:?}",
+            parse_wav(&lying).map(|(pcm, _)| pcm.len())
+        );
     }
 }
