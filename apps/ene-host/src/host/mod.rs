@@ -94,11 +94,11 @@ struct Handle {
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        let _ = self.shutdown.try_send(());
+        let _shutdown = self.shutdown.try_send(());
         if let Ok(mut thread) = self.thread.lock()
             && let Some(thread) = thread.take()
         {
-            let _ = thread.join();
+            let _joined = thread.join();
         }
     }
 }
@@ -229,7 +229,7 @@ impl Runtime {
                 }
                 tick(app);
                 let result = app.world().resource::<HostState>().ready().and(result);
-                let _ = reply.send(result);
+                let _reply = reply.send(result);
             })
         })
     }
@@ -255,7 +255,7 @@ impl Runtime {
                 {
                     fail(app.world_mut(), error.to_string());
                 }
-                let _ = reply.send(result);
+                let _reply = reply.send(result);
             })
         })
     }
@@ -301,7 +301,7 @@ impl Runtime {
             .take();
         tokio::task::spawn_blocking(move || {
             thread.map_or(Ok(()), |thread| {
-                let _ = shutdown.try_send(());
+                let _shutdown = shutdown.try_send(());
                 thread
                     .join()
                     .map_err(|_| HostError::Internal(("Rig kernel panicked").into()))?
@@ -567,7 +567,7 @@ fn spawn_kernel_thread(launch: KernelLaunch) -> std::io::Result<JoinHandle<Resul
                 Ok(())
             })();
             let ok = result.is_ok();
-            let _ = launch.ready_tx.send(result);
+            let _ready = launch.ready_tx.send(result);
             if !ok {
                 return Ok(());
             }
@@ -603,7 +603,7 @@ fn build_kernel_app(res: KernelResources) -> App {
         .insert_resource(Approvals::default())
         .insert_resource(DeviceTimeout(res.device_timeout))
         .insert_resource(rig_ecs::tasks::Wake::new(move || {
-            let _ = res.wake.try_send(());
+            let _wake = res.wake.try_send(());
         }))
         .insert_resource(SessionStore::new(res.logs))
         .add_plugins((

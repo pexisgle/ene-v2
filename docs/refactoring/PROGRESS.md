@@ -147,7 +147,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 - [ ] PR-4.6 `session/` 状態機械化・TaskTracker 統一
 
 ### Phase 5: 運用・テスト完成
-- [ ] PR-5.1 `let _ = ...` の系統的撲滅（platform crate 49→0、apps/* 208→156。残り 156 は UI/IO 系）
+- [ ] PR-5.1 `let _ = ...` の系統的撲滅（platform crate 49→0、apps/* 208→151。client/mod.rs は複雑度上限のため未着手）
 - [ ] PR-5.2 観測性標準化・`ErrorCode`・otel feature
 - [ ] PR-5.3 proptest / insta / E2E 拡充
 

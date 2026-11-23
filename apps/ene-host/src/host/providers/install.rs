@@ -83,7 +83,9 @@ fn copy_verified_file(src: &Path, dst: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(dst, std::fs::Permissions::from_mode(0o600));
+        if let Err(error) = std::fs::set_permissions(dst, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!(%error, "the plugin file permissions could not be tightened");
+        }
     }
     Ok(())
 }
@@ -116,7 +118,11 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(src.path(), std::fs::Permissions::from_mode(0o700));
+            if let Err(error) =
+                std::fs::set_permissions(src.path(), std::fs::Permissions::from_mode(0o700))
+            {
+                tracing::warn!(%error, "the plugin file permissions could not be tightened");
+            }
             let _ = std::fs::set_permissions(
                 src.path().join("main.wasm"),
                 std::fs::Permissions::from_mode(0o600),
