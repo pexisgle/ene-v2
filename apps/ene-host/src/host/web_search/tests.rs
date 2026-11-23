@@ -683,3 +683,46 @@ async fn exa_and_tavily_work_end_to_end_and_switch_cleanly_in_work_agent() {
     assert_eq!(tavily_hits.load(Ordering::SeqCst), 2);
     server.abort();
 }
+
+#[test]
+fn adapters_parse_their_config_spellings_and_label_themselves() {
+    // The parse key is what a saved `Search` connection stores; the label is
+    // what error text and the result header show. Both are pinned here so a
+    // derive change cannot silently swap one for the other.
+    for (adapter, key, label) in [
+        (SearchAdapter::Mwmbl, "mwmbl", "Mwmbl"),
+        (SearchAdapter::Searxng, "searxng", "SearXNG"),
+        (SearchAdapter::Brave, "brave", "Brave"),
+        (SearchAdapter::Tavily, "tavily", "Tavily"),
+        (SearchAdapter::Exa, "exa", "Exa"),
+    ] {
+        assert_eq!(adapter.display_name(), label);
+        assert_eq!(SearchAdapter::parse(key), Some(adapter));
+        // The old parser trimmed and lowercased, so padded or upper case
+        // configuration still resolved.
+        assert_eq!(
+            SearchAdapter::parse(&format!(" {} ", key.to_uppercase())),
+            Some(adapter)
+        );
+    }
+    assert_eq!(SearchAdapter::parse("bing"), None);
+    assert_eq!(SearchAdapter::parse(""), None);
+}
+
+#[test]
+fn the_tool_arguments_schema_is_derived_without_drift() {
+    // Pinned because this schema is the LLM tool-calling contract: the model
+    // sees exactly these keys and this required set.
+    assert_eq!(
+        WebSearch::schema_for_arguments(),
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "minLength": 1, "maxLength": MAX_QUERY_CHARS},
+                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTS, "default": DEFAULT_RESULTS},
+            },
+            "required": ["query"],
+            "additionalProperties": false,
+        })
+    );
+}

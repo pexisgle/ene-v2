@@ -19,6 +19,7 @@ use rig_ecs::prelude::{App, AppToolsExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
+use strum::{EnumString, IntoStaticStr};
 use tokio::{runtime::Handle, sync::Mutex, time::Instant};
 
 pub(crate) const NAME: &str = "web_search";
@@ -33,35 +34,30 @@ const MAX_BODY_BYTES: usize = 512 * 1024;
 const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(25);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, EnumString, IntoStaticStr)]
+#[strum(ascii_case_insensitive)]
 pub(crate) enum SearchAdapter {
+    /// The parse key is the lowercase configuration spelling; the label is what
+    /// the user-facing error text and the search result header show.
+    #[strum(serialize = "mwmbl", to_string = "Mwmbl")]
     Mwmbl,
+    #[strum(serialize = "searxng", to_string = "SearXNG")]
     Searxng,
+    #[strum(serialize = "brave", to_string = "Brave")]
     Brave,
+    #[strum(serialize = "tavily", to_string = "Tavily")]
     Tavily,
+    #[strum(serialize = "exa", to_string = "Exa")]
     Exa,
 }
 
 impl SearchAdapter {
     fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "mwmbl" => Some(Self::Mwmbl),
-            "searxng" => Some(Self::Searxng),
-            "brave" => Some(Self::Brave),
-            "tavily" => Some(Self::Tavily),
-            "exa" => Some(Self::Exa),
-            _ => None,
-        }
+        raw.trim().parse().ok()
     }
 
     fn display_name(self) -> &'static str {
-        match self {
-            Self::Mwmbl => "Mwmbl",
-            Self::Searxng => "SearXNG",
-            Self::Brave => "Brave",
-            Self::Tavily => "Tavily",
-            Self::Exa => "Exa",
-        }
+        self.into()
     }
 
     fn default_endpoint(self) -> Option<&'static str> {
@@ -272,11 +268,43 @@ pub(crate) fn register(app: &mut App) {
     });
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
 struct SearchArgs {
+    #[schemars(length(min = 1, max = MAX_QUERY_CHARS))]
     query: String,
+    // `default` is a no-op on `Option`, and it is what keeps `limit` out of
+    // `required` now that `with` supplies the plain integer shape.
+    #[serde(default)]
+    #[schemars(
+        with = "usize",
+        range(min = 1, max = MAX_RESULTS),
+        extend("default" = DEFAULT_RESULTS),
+        transform = plain_integer
+    )]
     limit: Option<usize>,
+}
+
+/// schemars names the integer width in `format`; the model-facing contract
+/// carries no format keyword.
+fn plain_integer(schema: &mut schemars::Schema) {
+    schema.remove("format");
+}
+
+impl WebSearch {
+    /// The tool-calling schema, derived from `SearchArgs` so it cannot drift
+    /// from the type the arguments decode into.
+    fn schema_for_arguments() -> Value {
+        let schema = schemars::schema_for!(SearchArgs);
+        let mut schema = serde_json::to_value(schema).unwrap_or(Value::Null);
+        // The tool contract carries no root `$schema` or `title`.
+        if let Some(object) = schema.as_object_mut() {
+            object.remove("$schema");
+            object.remove("title");
+        }
+        schema
+    }
 }
 
 #[derive(Deserialize)]
@@ -369,15 +397,7 @@ impl Tool for WebSearch {
     }
 
     fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "minLength": 1, "maxLength": MAX_QUERY_CHARS},
-                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTS, "default": DEFAULT_RESULTS},
-            },
-            "required": ["query"],
-            "additionalProperties": false,
-        })
+        Self::schema_for_arguments()
     }
 
     fn annotations(&self) -> ToolAnnotations {
