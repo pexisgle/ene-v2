@@ -59,7 +59,7 @@ fn process_name(pid: u32) -> Option<String> {
             windows::core::PWSTR(buffer.as_mut_ptr()),
             &mut size,
         );
-        let _ = CloseHandle(handle);
+        let _ignored = CloseHandle(handle);
         result.ok()?;
         let path = String::from_utf16_lossy(&buffer[..size as usize]);
         path.rsplit(['\\', '/']).next().map(ToOwned::to_owned)

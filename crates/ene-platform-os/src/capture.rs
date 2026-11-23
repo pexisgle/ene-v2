@@ -44,7 +44,7 @@ pub fn unlocked() -> bool {
             size_of::<[u16; 64]>() as u32,
             None,
         );
-        let _ = CloseDesktop(desktop);
+        let _ignored = CloseDesktop(desktop);
         result.is_ok()
             && String::from_utf16_lossy(&name[..name.iter().position(|&ch| ch == 0).unwrap_or(64)])
                 .eq_ignore_ascii_case("default")
@@ -72,7 +72,7 @@ pub fn physical<T>(action: impl FnOnce() -> T) -> Option<T> {
             return None;
         }
         let result = action();
-        let _ = SetThreadDpiAwarenessContext(context);
+        let _ignored = SetThreadDpiAwarenessContext(context);
         Some(result)
     }
 }
@@ -168,7 +168,7 @@ unsafe fn pixels(src: RECT) -> Option<(Vec<u8>, u32, u32)> {
             None
         } else {
             let result = copy(desktop, memory, src, width, height);
-            let _ = Gdi::DeleteDC(memory);
+            let _ignored = Gdi::DeleteDC(memory);
             result
         };
         Gdi::ReleaseDC(None, desktop);
@@ -207,7 +207,7 @@ unsafe fn copy(
         let result = if previous.is_invalid() || bits.is_null() {
             None
         } else {
-            let _ = Gdi::SetStretchBltMode(memory, HALFTONE);
+            let _ignored = Gdi::SetStretchBltMode(memory, HALFTONE);
             let copied = Gdi::StretchBlt(
                 memory,
                 0,

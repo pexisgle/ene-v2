@@ -294,14 +294,19 @@ mod windows_tray {
     pub(super) fn request_tip_refresh(hwnd_raw: isize) {
         let hwnd = HWND(hwnd_raw as *mut c_void);
         unsafe {
-            let _ = PostMessageW(Some(hwnd), WM_TRAY_UPDATE, WPARAM(0), LPARAM(0));
+            drop(PostMessageW(
+                Some(hwnd),
+                WM_TRAY_UPDATE,
+                WPARAM(0),
+                LPARAM(0),
+            ));
         }
     }
 
     pub(super) fn request_close(hwnd_raw: isize) {
         let hwnd = HWND(hwnd_raw as *mut c_void);
         unsafe {
-            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            let _ignored = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
         }
     }
 
@@ -479,7 +484,7 @@ mod windows_tray {
             ..Default::default()
         };
         unsafe {
-            let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+            let _ignored = Shell_NotifyIconW(NIM_MODIFY, &nid);
         }
     }
 
@@ -491,7 +496,7 @@ mod windows_tray {
             ..Default::default()
         };
         unsafe {
-            let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+            let _ignored = Shell_NotifyIconW(NIM_DELETE, &nid);
         }
     }
 
@@ -567,7 +572,7 @@ mod windows_tray {
             }
             WM_CLOSE => {
                 unsafe {
-                    let _ = DestroyWindow(hwnd);
+                    let _ignored = DestroyWindow(hwnd);
                 }
                 LRESULT(0)
             }
@@ -682,8 +687,8 @@ mod windows_tray {
             )
         };
         unsafe {
-            let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-            let _ = DestroyMenu(menu);
+            let _ignored = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+            let _ignored = DestroyMenu(menu);
         }
         if picked.0 > 0
             && let Some(action) = action_for_command(picked.0 as u32)
