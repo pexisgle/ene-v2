@@ -68,16 +68,15 @@ if (-not $SkipDeny) {
     Invoke-Gate "cargo machete" { cargo machete --with-metadata }
 }
 
-# These three lints are declared `warn` in `[workspace.lints.clippy]` so every
-# normal build already reports them. They are exempted from `-D warnings` only
-# because their clean-up is scheduled later by the refactoring plan:
-#   undocumented_unsafe_blocks / multiple_unsafe_ops_per_block -> PR-4.3
-#   let_underscore_must_use                                   -> PR-5.1
-# Each PR drops its own `-A` here (and flips the lint to `deny`) when the last
+# `undocumented_unsafe_blocks` and `multiple_unsafe_ops_per_block` are `deny`
+# workspace-wide as of PR-4.3b, so they need no exemption here.
+#
+# `let_underscore_must_use` is still `warn` in `[workspace.lints.clippy]` and
+# exempted from `-D warnings` only because its clean-up is scheduled later:
+#   let_underscore_must_use -> PR-5.1
+# That PR drops the `-A` below (and flips the lint to `deny`) when the last
 # site is fixed. Never add a new exemption to this list.
 $stagedLints = @(
-    "-A", "clippy::undocumented_unsafe_blocks",
-    "-A", "clippy::multiple_unsafe_ops_per_block",
     "-A", "clippy::let_underscore_must_use"
 )
 

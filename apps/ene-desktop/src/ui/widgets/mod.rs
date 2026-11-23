@@ -1,0 +1,16 @@
+//! Small shared widgets: buttons, pills and the dropdown.
+//!
+//! Each submodule owns one family and re-exports its surface here, so
+
+mod buttons;
+mod dropdown;
+mod pills;
+
+pub use buttons::{
+    ButtonStyle, CircleButtonStyle, Tone, circle_icon_button, floating_orb_button, pill_button,
+    toggle_switch,
+};
+pub use dropdown::{DropdownOption, DropdownSpec, dropdown_select};
+pub use pills::{companion_badge, disclosure_row, kind_pill, status_pill, window_drag_area};
+
+// Unmoved remainder:
