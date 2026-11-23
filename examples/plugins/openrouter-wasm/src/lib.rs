@@ -136,9 +136,7 @@ mod guest {
                         context_window: m["context_length"].as_u64(),
                         max_output_tokens: m["top_provider"]["max_completion_tokens"].as_u64(),
                         ..Default::default()
-                    }
-                    .into(),
-                    ..Default::default()
+                    },
                 })
             })
             .collect::<Result<Vec<_>, extism_pdk::Error>>()?;

@@ -4186,7 +4186,6 @@ name = "ene-plugin"
 version = "0.1.8"
 dependencies = [
  "agent-client-protocol-schema",
- "ene-rpc",
  "extism-pdk",
  "serde",
  "serde_json",

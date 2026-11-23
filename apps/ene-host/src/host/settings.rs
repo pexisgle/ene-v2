@@ -158,7 +158,7 @@ fn plugin_entry(adapter: &str, loaded: &Providers) -> Option<w::LlmProvider> {
         name: plugin.package.manifest.name.clone(),
         adapter: adapter.into(),
         endpoint: provider.endpoint.clone(),
-        settings: provider.settings.clone(),
+        settings: provider.settings.iter().map(setting_field).collect(),
         requires_credentials: !matches!(&provider.auth, AuthProfile::None),
         environment_variable: provider
             .environment_variable
@@ -166,6 +166,19 @@ fn plugin_entry(adapter: &str, loaded: &Providers) -> Option<w::LlmProvider> {
             .filter(|name| !name.is_empty()),
         ..Default::default()
     })
+}
+
+/// Plugin ABI -> wire shape. `ene-plugin` owns the guest-facing type; this is
+/// the only place the two meet.
+fn setting_field(field: &ene_plugin::SettingField) -> w::SettingField {
+    w::SettingField {
+        key: field.key.clone(),
+        label: field.label.clone(),
+        kind: field.kind.clone(),
+        required: field.required,
+        choices: field.choices.clone(),
+        ..Default::default()
+    }
 }
 
 pub(crate) fn provider(adapter: &str, loaded: &Providers) -> Option<w::LlmProvider> {

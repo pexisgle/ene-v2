@@ -116,8 +116,12 @@ if (-not $SkipTests) {
         try {
             foreach ($t in $targets) {
                 $pattern = if ($t.Crate -eq "ene-rpc") { "ene_rpc-*.exe" } else { "ene_desktop-*.exe" }
+                # Several builds share a crate name (lib, lib-test, bin). The test
+                # binaries are the large ones (unit tests linked in); picking the
+                # newest instead grabs whatever `cargo test --no-run` built last.
                 $exe = Get-ChildItem (Join-Path $repo "target\ci") -Recurse -Filter $pattern -ErrorAction SilentlyContinue |
-                    Where-Object { $_.DirectoryName -match '\\out$' } | Select-Object -First 1
+                    Where-Object { $_.DirectoryName -match '\\out$' -and $_.Length -gt 1MB } |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
                 if (-not $exe) {
                     Write-Host "missing test binary for $($t.Crate)" -ForegroundColor Red
                     $failed += $t.Crate
