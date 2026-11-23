@@ -1,6 +1,5 @@
 //! Vendor endpoints, known model defaults, and adapter predicates shared
 //! between `ene-host` and `ene-desktop`.
-use ene_rpc as w;
 
 pub const GOOGLE_AGENT_PLATFORM: &str = "google-agent-platform";
 pub const GOOGLE_AGENT_PLATFORM_ENDPOINT: &str = "https://aiplatform.googleapis.com";
@@ -68,22 +67,10 @@ pub fn is_sakura_endpoint(endpoint: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// A connection targets Sakura AI Engine when its adapter says so or its
+/// endpoint host is Sakura's.
 pub fn is_sakura_connection(adapter: &str, endpoint: &str) -> bool {
     adapter.trim().eq_ignore_ascii_case("sakura") || is_sakura_endpoint(endpoint)
-}
-
-pub fn is_sakura_conn(conn: &w::Connection) -> bool {
-    let ep = match conn.config.as_option().and_then(|c| c.config.as_ref()) {
-        Some(w::connection_config::Config::Llm(c)) => c.endpoint.as_option(),
-        Some(w::connection_config::Config::Tts(c)) => c.endpoint.as_option(),
-        Some(w::connection_config::Config::Stt(c)) => c.endpoint.as_option(),
-        Some(w::connection_config::Config::Embedding(c)) => c.endpoint.as_option(),
-        Some(w::connection_config::Config::Mcp(c)) => c.endpoint.as_option(),
-        Some(w::connection_config::Config::Acp(c)) => c.endpoint.as_option(),
-        Some(w::connection_config::Config::Search(c)) => c.endpoint.as_option(),
-        None => None,
-    };
-    ep.is_some_and(|e| is_sakura_connection(&e.adapter, &e.endpoint))
 }
 
 pub fn is_sakura_tts_model_id(id: &str) -> bool {

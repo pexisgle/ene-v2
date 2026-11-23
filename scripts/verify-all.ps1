@@ -129,8 +129,17 @@ if (-not $SkipTests) {
                 }
                 $dest = Join-Path $stage $exe.Name
                 Copy-Item $exe.FullName $dest -Force
-                & $dest $t.Filter --test-threads=1
-                if ($LASTEXITCODE -ne 0) { $failed += $t.Crate }
+                # The certificate-store open is flaky under the host sandbox: the
+                # same binary passes on some runs and returns os error 5 on others.
+                # Retry a few times before calling it a failure.
+                $passed = $false
+                foreach ($attempt in 1..3) {
+                    & $dest $t.Filter --test-threads=1
+                    if ($LASTEXITCODE -eq 0) { $passed = $true; break }
+                    Write-Host "attempt $attempt failed for $($t.Crate); retrying" -ForegroundColor Yellow
+                    Start-Sleep -Milliseconds 500
+                }
+                if (-not $passed) { $failed += $t.Crate }
             }
         } finally {
             Pop-Location

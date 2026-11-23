@@ -274,3 +274,288 @@ pub fn build_connection_enabled_input(conn: &Connection, enabled: bool) -> Conne
     input.enabled = enabled;
     input
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{
+        ConnectionCheck, EmbeddingConnection, LlmConnection, LlmProvider, SearchConnection,
+        SttConnection, TtsConnection,
+    };
+
+    fn endpoint(adapter: &str, endpoint: &str, options: &str) -> ConnectionEndpoint {
+        ConnectionEndpoint {
+            adapter: adapter.into(),
+            endpoint: endpoint.into(),
+            options: options.into(),
+            ..Default::default()
+        }
+    }
+
+    fn stt_conn(id: &str, enabled: bool, adapter: &str, ep: &str, model: &str) -> Connection {
+        Connection {
+            id: id.into(),
+            name: id.into(),
+            enabled,
+            revision: 3,
+            kind: ConnectionKind::Stt,
+            last_check: None,
+            config: Some(ConnectionConfig::Stt(SttConnection {
+                endpoint: Some(endpoint(
+                    adapter,
+                    ep,
+                    &serde_json::json!({ "model": model }).to_string(),
+                )),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    fn tts_conn(
+        id: &str,
+        enabled: bool,
+        adapter: &str,
+        ep: &str,
+        voices: Vec<&str>,
+        options: serde_json::Value,
+    ) -> Connection {
+        Connection {
+            id: id.into(),
+            name: id.into(),
+            enabled,
+            revision: 5,
+            kind: ConnectionKind::Tts,
+            last_check: None,
+            config: Some(ConnectionConfig::Tts(TtsConnection {
+                endpoint: Some(endpoint(adapter, ep, &options.to_string())),
+                voice_ids: voices.into_iter().map(str::to_owned).collect(),
+            })),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn active_stt_and_tts_selection_reads_first_enabled_connection() {
+        let sakura = ene_catalog::SAKURA_AI_ENDPOINT;
+        let connections = vec![
+            stt_conn(
+                "stt-disabled",
+                false,
+                "openai",
+                "https://api.openai.com/v1",
+                "whisper-1",
+            ),
+            stt_conn(
+                "stt-sakura",
+                true,
+                "sakura",
+                sakura,
+                "whisper-large-v3-turbo",
+            ),
+            tts_conn(
+                "tts-voicevox",
+                false,
+                "voicevox",
+                "http://127.0.0.1:50021",
+                vec![],
+                serde_json::json!({ "speaker": 3 }),
+            ),
+            tts_conn(
+                "tts-sakura",
+                true,
+                "sakura",
+                sakura,
+                vec!["zundamon/amaama"],
+                serde_json::json!({ "protocol": "sakura", "model": "zundamon", "voice": "amaama" }),
+            ),
+        ];
+        assert_eq!(
+            active_stt_in_connections(&connections),
+            Some(("stt-sakura".into(), "whisper-large-v3-turbo".into()))
+        );
+        assert_eq!(
+            active_tts_in_connections(&connections),
+            Some(("tts-sakura".into(), "zundamon/amaama".into()))
+        );
+    }
+
+    #[test]
+    fn stt_assignment_inputs_activates_target_and_disables_others() {
+        let sakura = ene_catalog::SAKURA_AI_ENDPOINT;
+        let connections = vec![
+            stt_conn(
+                "stt-openai",
+                true,
+                "openai",
+                "https://api.openai.com/v1",
+                "whisper-1",
+            ),
+            stt_conn(
+                "stt-sakura",
+                false,
+                "sakura",
+                sakura,
+                "whisper-large-v3-turbo",
+            ),
+        ];
+
+        let inputs =
+            build_stt_assignment_inputs(&connections, Some(("stt-sakura", "gpt-4o-transcribe")));
+        assert_eq!(inputs.len(), 2);
+        let disabled = inputs
+            .iter()
+            .find(|i| i.id == "stt-openai")
+            .expect("old disabled");
+        assert!(!disabled.enabled);
+        assert_eq!(disabled.expected_revision, 3);
+
+        let activated = inputs
+            .iter()
+            .find(|i| i.id == "stt-sakura")
+            .expect("target enabled");
+        assert!(activated.enabled);
+        let Some(ConnectionConfig::Stt(stt)) = activated.config.as_ref() else {
+            panic!("expected Stt config");
+        };
+        let opts: serde_json::Value =
+            serde_json::from_str(&stt.endpoint.as_ref().expect("endpoint").options)
+                .expect("json options");
+        assert_eq!(opts["model"], "gpt-4o-transcribe");
+
+        let off_inputs = build_stt_assignment_inputs(&connections, None);
+        assert_eq!(off_inputs.len(), 1);
+        assert_eq!(off_inputs[0].id, "stt-openai");
+        assert!(!off_inputs[0].enabled);
+    }
+
+    #[test]
+    fn tts_assignment_inputs_activates_target_updates_voice_and_disables_others() {
+        let sakura = ene_catalog::SAKURA_AI_ENDPOINT;
+        let connections = vec![
+            tts_conn(
+                "tts-voicevox",
+                true,
+                "voicevox",
+                "http://127.0.0.1:50021",
+                vec!["3"],
+                serde_json::json!({ "speaker": 3 }),
+            ),
+            tts_conn(
+                "tts-sakura",
+                false,
+                "sakura",
+                sakura,
+                vec!["zundamon/normal"],
+                serde_json::json!({ "protocol": "sakura", "model": "zundamon", "voice": "normal" }),
+            ),
+        ];
+
+        let inputs =
+            build_tts_assignment_inputs(&connections, Some(("tts-sakura", "shikokumetan/amaama")));
+        assert_eq!(inputs.len(), 2);
+        let disabled = inputs
+            .iter()
+            .find(|i| i.id == "tts-voicevox")
+            .expect("old disabled");
+        assert!(!disabled.enabled);
+        assert_eq!(disabled.expected_revision, 5);
+
+        let activated = inputs
+            .iter()
+            .find(|i| i.id == "tts-sakura")
+            .expect("target enabled");
+        assert!(activated.enabled);
+        let Some(ConnectionConfig::Tts(tts)) = activated.config.as_ref() else {
+            panic!("expected Tts config");
+        };
+        assert_eq!(tts.voice_ids, vec!["shikokumetan/amaama"]);
+        let opts: serde_json::Value =
+            serde_json::from_str(&tts.endpoint.as_ref().expect("endpoint").options)
+                .expect("json options");
+        assert_eq!(opts["model"], "shikokumetan");
+        assert_eq!(opts["voice"], "amaama");
+        assert_eq!(opts["protocol"], "sakura");
+    }
+
+    #[test]
+    fn a_public_model_list_does_not_make_an_unregistered_connection_ready() {
+        let provider = LlmProvider {
+            requires_credentials: true,
+            adapter: "openrouter".into(),
+            endpoint: "https://openrouter.ai/api/v1".into(),
+            ..Default::default()
+        };
+        let mut conn = Connection {
+            enabled: true,
+            kind: ConnectionKind::Llm,
+            last_check: Some(ConnectionCheck {
+                healthy: true,
+                ..Default::default()
+            }),
+            config: Some(ConnectionConfig::Llm(LlmConnection {
+                endpoint: Some(endpoint("openrouter", "https://openrouter.ai/api/v1", "{}")),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let catalog = std::slice::from_ref(&provider);
+        assert!(!conn.can_start_chat(catalog));
+        conn.credential_state = "registered".into();
+        assert!(conn.can_start_chat(catalog));
+        conn.last_check = Some(ConnectionCheck::default());
+        assert!(!conn.can_start_chat(catalog));
+    }
+
+    #[test]
+    fn search_connections_detect_key_requirements_for_exa_and_tavily() {
+        let make_search = |adapter: &str, ep: &str, cred_state: &str| Connection {
+            id: format!("search-{adapter}"),
+            name: format!("Web検索 ({adapter})"),
+            enabled: true,
+            revision: 1,
+            credential_state: cred_state.into(),
+            kind: ConnectionKind::Search,
+            last_check: None,
+            config: Some(ConnectionConfig::Search(SearchConnection {
+                endpoint: Some(endpoint(adapter, ep, "{}")),
+                max_results: 5,
+            })),
+        };
+
+        let exa_absent = make_search("exa", "https://api.exa.ai/search", "absent");
+        let exa_registered = make_search("exa", "https://api.exa.ai/search", "registered");
+        let tavily_absent = make_search("tavily", "https://api.tavily.com/search", "absent");
+        let tavily_env = make_search("tavily", "https://api.tavily.com/search", "environment");
+        let mwmbl_absent = make_search("mwmbl", "https://api.mwmbl.org/api/v2/search/", "absent");
+
+        assert_eq!(exa_absent.search_adapter(), Some("exa"));
+        assert_eq!(tavily_absent.search_adapter(), Some("tavily"));
+        assert!(exa_absent.needs_key(&[]));
+        assert!(!exa_registered.needs_key(&[]));
+        assert!(tavily_absent.needs_key(&[]));
+        assert!(!tavily_env.needs_key(&[]));
+        assert!(!mwmbl_absent.needs_key(&[]));
+    }
+
+    #[test]
+    fn embedding_model_inputs_pick_the_catalog_default_dimensions() {
+        let conn = Connection {
+            id: "emb".into(),
+            enabled: true,
+            kind: ConnectionKind::Embedding,
+            config: Some(ConnectionConfig::Embedding(EmbeddingConnection {
+                endpoint: Some(endpoint("openai", "https://api.openai.com/v1", "{}")),
+                model_id: "text-embedding-3-small".into(),
+                dimensions: 1536,
+            })),
+            ..Default::default()
+        };
+        let input = build_embedding_model_input(&conn, "multilingual-e5-large");
+        let Some(ConnectionConfig::Embedding(emb)) = input.config.as_ref() else {
+            panic!("expected Embedding config");
+        };
+        assert_eq!(emb.dimensions, 1024);
+        assert_eq!(emb.model_id, "multilingual-e5-large");
+    }
+}

@@ -4024,8 +4024,6 @@ dependencies = [
 name = "ene-catalog"
 version = "0.1.8"
 dependencies = [
- "ene-rpc",
- "serde_json",
  "url",
 ]
 
