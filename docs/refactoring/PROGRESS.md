@@ -387,3 +387,32 @@ ow_editor.rs（874 行）は同じ手法で 3 分割まで到達したが、配�
 - これらは PR-4.1〜4.3 で `apps/ene-desktop` から無改変で移したコードで、同じ欠陥を持っていた。
 
 挙動は不変（操作・順序・エラー処理は同一、ブロック境界とコメントのみ）。
+
+### PR-3.1 / host_world_refs: 実測にもとづく現状（重要）
+
+指示では「`MAX_HOST_WORLD_REFS <= 55` を目標に、非 ECS な 106 箇所（resource-only 58 +
+neither 48）を一掃する」とされていたが、**実測する限りこの 106 という内訳は再現しない。**
+
+Rule 6 が数えているのは `&World` / `&mut World` の**型注釈のみ**（`HOST_WORLD_REF_RE =
+re.compile(r"&\s*(?:mut\s+)?World\b")`）。`app.world_mut()` の呼び出しは数えない。
+そのため「resource-only 58」という分類は指標と対応していない。
+
+実測（テスト除外、`scripts/check-architecture.py` の基準に合わせた再帰）:
+
+| 分類 | 件数 | 除去可否 |
+| :--- | ---: | :--- |
+| `commands.queue(move \|world: &mut World\| ...)` のクロージャ引数 | 多数 | **不可**（bevy のコマンドキュー API そのもの） |
+| `&mut World` を受けて entity を操作 | 30 | 不可（真の ECS 操作） |
+| `&mut World` を受けて Resource のみ操作 | 113 | 可能だが呼び出し元ごと設計変更が必要 |
+| `&World` / `&mut World` を受けるが本文で未使用 | 0 | — |
+
+**「neither 48 箇所」は存在しない。** 最初の分類スクリプトが `let world = app.world_mut();`
+という束縛を見落として 16 件を誤って `neither` と判定したのが原因で、修正後は 0 件。
+
+したがって `<= 55` を達成するには、Resource-only 113 箇所すべてのシグネチャと全呼び出し元を
+書き換える必要がある。これは 1 PR の範囲を大きく超え、かつ RPC 契約には触れないものの
+`request!` マクロ 4 形態すべての再設計を伴う。
+
+**次回への申し送り**: まず `Runtime` に `store()` アクセサを追加し（現在は
+`world.resource::<Store>()` 経由のみ）、`request!(read ...)` 形態の op から
+`&mut World` を落とす。1 形態ずつ、呼び出し元を数えながら進めること。
