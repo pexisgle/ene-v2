@@ -12,6 +12,9 @@ client = ["connectrpc/client", "dep:http", "dep:url"]
 client-tls = ["client", "connectrpc/client-tls", "dep:rustls-native-certs"]
 
 [dependencies]
+# Re-exports the built-in tool identifiers so existing `ene_rpc::BUILTIN_TOOLS`
+# call sites keep working. `ene-policy` owns them; the wire crate must not.
+ene-policy.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 buffa.workspace = true

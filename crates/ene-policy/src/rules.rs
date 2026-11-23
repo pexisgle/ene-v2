@@ -1,8 +1,7 @@
 //! Saved policy rules, free-text policies, canonical hashing and gate evaluation.
 use crate::capability::{
-    BUILTIN_TOOLS, CapabilityApproval, CapabilitySpec, approval_target, truncate,
+    BUILTIN_TOOLS, COMPUTER_USE, CapabilityApproval, CapabilitySpec, approval_target, truncate,
 };
-use ene_rpc as w;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -244,7 +243,7 @@ pub fn extract_target(action: &CandidateAction) -> ActionTarget {
                 return first_string_field(input, &["target_pattern"])
                     .map_or(ActionTarget::None, ActionTarget::Pattern);
             }
-            if capability == w::COMPUTER_USE {
+            if capability == COMPUTER_USE {
                 return ActionTarget::None;
             }
             extract_common_target(input)
@@ -471,7 +470,7 @@ fn resolve_action<'a>(
                 Some(spec) if spec.approval == CapabilityApproval::Auto => {
                     DefaultActionApproval::Auto
                 }
-                _ if capability == w::COMPUTER_USE => DefaultActionApproval::HumanRequired,
+                _ if capability == COMPUTER_USE => DefaultActionApproval::HumanRequired,
                 _ => DefaultActionApproval::NeedsDecision,
             };
             ResolvedAction {

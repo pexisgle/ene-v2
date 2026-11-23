@@ -6,8 +6,30 @@ use std::collections::HashSet;
 
 pub const WORKSPACE_CAPABILITY_PREFIX: &str = "work.";
 
-/// Tools the host itself owns. A client capability may not shadow one.
-pub const BUILTIN_TOOLS: &[&str] = ene_rpc::BUILTIN_TOOLS;
+/// Desktop capability executed by a work agent on its bound client.
+pub const COMPUTER_USE: &str = "computer.use";
+
+/// Tools the host itself owns. A client capability may not shadow one, and a
+/// plugin may not register a tool with one of these names.
+pub const BUILTIN_TOOLS: &[&str] = &[
+    "mind_recall",
+    "mind_read",
+    "mind_update",
+    "start_work",
+    "send_work",
+    "stop_work",
+    "device_request",
+    "resolve_approval",
+    "noop",
+    "schedule_create",
+    "schedule_list",
+    "schedule_cancel",
+    "report",
+    "web_search",
+    "skill_list",
+    "skill_read",
+    "skill_save",
+];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

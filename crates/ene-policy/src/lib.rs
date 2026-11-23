@@ -4,7 +4,7 @@ pub mod error;
 pub mod rules;
 
 pub use capability::{
-    BUILTIN_TOOLS, CapabilityApproval, CapabilitySpec, WORKSPACE_CAPABILITY_PREFIX,
+    BUILTIN_TOOLS, COMPUTER_USE, CapabilityApproval, CapabilitySpec, WORKSPACE_CAPABILITY_PREFIX,
     approval_target, validate_declarations,
 };
 pub use error::{PolicyError, Result};

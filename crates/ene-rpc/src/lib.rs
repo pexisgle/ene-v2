@@ -16,33 +16,15 @@ pub mod rpc {
     pub use ene::host::v1::*;
 }
 
-pub use rpc::*;
+/// Built-in tools owned by `ene-host`. Client capabilities and plugins may not shadow them.
+pub use ene_policy::BUILTIN_TOOLS;
 /// Desktop GUI capability executed by a work agent on its bound client.
-pub const COMPUTER_USE: &str = "computer.use";
+pub use ene_policy::COMPUTER_USE;
+pub use rpc::*;
 /// Maximum width or height of a reported JPEG frame.
 pub const MAX_PERCEPTION_FRAME_EDGE: u32 = 1280;
 /// Maximum encoded JPEG size before Connect serialization.
 pub const MAX_PERCEPTION_JPEG_BYTES: usize = 512 * 1024;
-/// Built-in tools owned by `ene-host`. Client capabilities and plugins may not shadow them.
-pub const BUILTIN_TOOLS: &[&str] = &[
-    "mind_recall",
-    "mind_read",
-    "mind_update",
-    "start_work",
-    "send_work",
-    "stop_work",
-    "device_request",
-    "resolve_approval",
-    "noop",
-    "schedule_create",
-    "schedule_list",
-    "schedule_cancel",
-    "report",
-    "web_search",
-    "skill_list",
-    "skill_read",
-    "skill_save",
-];
 
 /// Structured payload for `Companion.body` (`schema = "ene.body.v1"`).
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]

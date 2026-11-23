@@ -4222,7 +4222,6 @@ dependencies = [
 name = "ene-policy"
 version = "0.1.8"
 dependencies = [
- "ene-rpc",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
@@ -4247,6 +4246,7 @@ dependencies = [
  "buffa-build",
  "connectrpc",
  "connectrpc-build",
+ "ene-policy",
  "http",
  "rustls-native-certs",
  "serde",

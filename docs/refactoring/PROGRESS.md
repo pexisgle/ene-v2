@@ -79,6 +79,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 | :--- | ---: | ---: | ---: | ---: | ---: |
 | **ベースライン (2026-11-23, commit c9f0758)** | 4 | 171 | 84 | 47 | 0 |
 | PR-0.1 後 | 4 | 171 | 84 | 47 | 0 |
+| PR-1.1 後 | 3 | 171 | 84 | 47 | 0 |
 
 > **設計書との差分（重要）**: 設計書 §3 は「本番 500 行超ファイル数 = 43」「`Resource` = 2」としているが、
 > 実測は **47** と **0** だった。
@@ -98,7 +99,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 - [x] PR-0.2 CI nextest / Clippy lint 厳格化 / AGENTS.md 追記
 
 ### Phase 1: 依存方向の逆転解消
-- [ ] PR-1.1 `ene-policy` から `ene-rpc` 削除（Rule 7: 4→3）
+- [x] PR-1.1 `ene-policy` から `ene-rpc` 削除（Rule 7: 4→3）
 - [ ] PR-1.2 `ene-plugin` から `ene-rpc` 削除（Rule 7: 3→2）
 - [ ] PR-1.3 `ene-catalog` の接続モデル純粋化（Rule 7: 2→1）
 - [ ] PR-1.4 `ene-voice` から `ene-rpc` 削除（Rule 7: 1→0）
