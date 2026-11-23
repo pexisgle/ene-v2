@@ -199,12 +199,17 @@ fn spawn_engine(exe: &Path, host: &str, port: u16) -> Result<Box<dyn ChildWrappe
 }
 
 pub async fn is_reachable(base_url: &str, timeout: Duration) -> bool {
-    let Ok(client) = reqwest::Client::builder().timeout(timeout).build() else {
+    // One client for every poll, so the connection pool survives between them.
+    // The deadline is per request because each caller has its own budget.
+    static CLIENT: std::sync::LazyLock<Option<reqwest::Client>> =
+        std::sync::LazyLock::new(|| reqwest::Client::builder().build().ok());
+    let Some(client) = CLIENT.as_ref() else {
         return false;
     };
     let url = format!("{}/speakers", base_url.trim_end_matches('/'));
     client
         .get(url)
+        .timeout(timeout)
         .send()
         .await
         .is_ok_and(|res| res.status().is_success())
