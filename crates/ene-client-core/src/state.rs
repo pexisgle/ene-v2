@@ -135,6 +135,12 @@ pub struct Effects {
 pub struct ConnectionViewState {
     pub link: Link,
     pub link_epoch: u64,
+    /// Highest `Update::Scoped` sequence applied in `link_epoch`.
+    ///
+    /// RPC replies race: two requests start in order, and the earlier one can
+    /// arrive second. Its `seq` is lower, so applying it would overwrite newer
+    /// state with an older answer.
+    pub applied_seq: u64,
     pub providers: Option<Vec<LlmProvider>>,
     pub models: BTreeMap<String, Vec<ModelInfo>>,
     pub checks: BTreeMap<String, ConnectionCheck>,
@@ -150,6 +156,7 @@ impl ConnectionViewState {
                 reason: String::new(),
             },
             link_epoch: 1,
+            applied_seq: 0,
             providers: None,
             models: BTreeMap::new(),
             checks: BTreeMap::new(),

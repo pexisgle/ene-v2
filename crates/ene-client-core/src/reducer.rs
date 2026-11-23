@@ -18,14 +18,17 @@ impl Model {
     pub fn apply(&mut self, update: Update) -> Effects {
         let mut effects = Effects::default();
         match update {
-            Update::Scoped {
-                epoch,
-                seq: _,
-                inner,
-            } => {
+            Update::Scoped { epoch, seq, inner } => {
                 if epoch != self.connections.link_epoch {
                     return Effects::default();
                 }
+                // A reply that started earlier can arrive later. Applying it
+                // would put an older answer over a newer one, so anything at or
+                // below the highest sequence already applied is stale.
+                if seq <= self.connections.applied_seq {
+                    return Effects::default();
+                }
+                self.connections.applied_seq = seq;
                 return self.apply(*inner);
             }
             Update::Link(link) => apply_link(self, *link, &mut effects),

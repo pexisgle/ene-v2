@@ -189,15 +189,15 @@ impl Hub {
     }
 
     fn apply(&mut self, mut update: Update, cx: &mut Context<Self>) {
-        if let Update::Scoped {
-            epoch,
-            seq: _,
-            inner,
-        } = update
-        {
-            if epoch != self.model.connections.link_epoch {
+        if let Update::Scoped { epoch, seq, inner } = update {
+            // The same staleness rule the reducer applies, needed here because
+            // the hub does its own pre-apply work before handing the update on.
+            if epoch != self.model.connections.link_epoch
+                || seq <= self.model.connections.applied_seq
+            {
                 return;
             }
+            self.model.connections.applied_seq = seq;
             update = *inner;
         }
         let flags = self.pre_apply_hub_state(&update, cx);

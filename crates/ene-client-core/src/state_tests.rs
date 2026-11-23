@@ -519,3 +519,43 @@ fn finalized_lines_keep_the_newest_twenty_in_order() {
         "the newest line stays last"
     );
 }
+
+/// An RPC reply that started earlier can arrive later. Applying it would put an
+/// older answer over a newer one, so its sequence must be refused.
+#[test]
+fn a_stale_scoped_update_is_refused_but_a_newer_one_applies() {
+    let mut model = with_chat();
+    model.apply(Update::Link(Box::new(Link::Live {
+        version: "1".into(),
+    })));
+    let epoch = model.connections.link_epoch;
+    let scoped = |seq: u64, text: &str| Update::Scoped {
+        epoch,
+        seq,
+        inner: Box::new(Update::Transcription {
+            text: text.into(),
+            is_final: true,
+            is_speaking: false,
+        }),
+    };
+
+    model.apply(scoped(1, "first"));
+    assert_eq!(model.audio.recognized, ["first"]);
+
+    // Out of order: the older request answers after the newer one did.
+    model.apply(scoped(3, "third"));
+    model.apply(scoped(2, "second"));
+    assert_eq!(
+        model.audio.recognized,
+        ["first", "third"],
+        "the late reply with a lower sequence must not be applied"
+    );
+
+    // A newer sequence still applies.
+    model.apply(scoped(4, "fourth"));
+    assert_eq!(model.audio.recognized, ["first", "third", "fourth"]);
+
+    // A replayed sequence is refused too, so a duplicate cannot double-apply.
+    model.apply(scoped(4, "fourth"));
+    assert_eq!(model.audio.recognized.len(), 3);
+}
