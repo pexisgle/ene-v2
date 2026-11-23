@@ -27,5 +27,6 @@ buffa-build = "0.9"
 connectrpc-build = "0.9"
 
 # `OUT_DIR/_connectrpc.rs` (included via `include!`) uses `buffa` and `serde_json`.
+# `*-build` are build-script only, which cargo-machete does not scan.
 [package.metadata.cargo-machete]
-ignored = ["buffa", "serde_json"]
+ignored = ["buffa", "serde_json", "buffa-build", "connectrpc-build"]

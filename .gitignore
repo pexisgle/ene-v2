@@ -29,3 +29,7 @@
 **/.impeccable/live/deferred-svelte-component-accepts.json
 **/.impeccable/live/*.png
 # impeccable-ignore-end
+# Build/test scratch. Kept in-tree because sccache's per-compile directory under
+# the system temp can be removed mid-build, which fails rustc with LNK1104.
+.cargo-tmp/
+__pycache__/

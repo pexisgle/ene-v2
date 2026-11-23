@@ -69,7 +69,6 @@ bevy_time = "=0.20.0"
 ene-rpc = { workspace = true, features = ["client"] }
 process-wrap.workspace = true
 rig-core = { workspace = true, features = ["test-utils"] }
-serde_json_canonicalizer.workspace = true
 tempfile.workspace = true
 # `start_paused` lets the decision-timeout test fire the 15s deadline
 # without waiting it out.

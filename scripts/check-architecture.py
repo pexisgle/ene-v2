@@ -20,10 +20,22 @@ MAX_UI_RPC_REFS = 0
 MAX_DB_UPWARD_REFS = 0
 MAX_PROVIDERS_MODEL_REFS = 0
 MAX_HOST_WORLD_REFS = 171
+# Rule 7: domain crates that must not depend on the wire protocol crate.
+MAX_DOMAIN_RPC_DEPS = 4
+# Rule 8: production `unsafe` occurrences under apps/ene-desktop.
+MAX_DESKTOP_UNSAFE = 84
+# Rule 9: production files longer than PROD_FILE_LINE_LIMIT.
+MAX_LONG_PROD_FILES = 47
+# Rule 10: production `#[derive(Resource)]` items under the RPC transport layer.
+MAX_RPC_ECS_RESOURCES = 0
 DEFAULT_MAX_IMPL_FILES = 3
 IMPL_SPREAD_ALLOWLIST: dict[tuple[str, str], int] = {
     ("crates/ene-plugin-runtime", "Events"): 4,
 }
+
+# `ene-domain` is the shared kernel; the rest are L0 domain crates.
+DOMAIN_CRATES = ("ene-domain", "ene-policy", "ene-catalog", "ene-plugin", "ene-voice")
+PROD_FILE_LINE_LIMIT = 500
 
 ALLOW_STDERR_MARKER = "architecture:allow-stderr:"
 CFG_TEST_RE = re.compile(r"^\s*#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
@@ -39,6 +51,9 @@ INHERENT_IMPL_RE = re.compile(
     re.MULTILINE,
 )
 PRINTLN_RE = re.compile(r"\b(?:e?println!)\s*\(")
+UNSAFE_RE = re.compile(r"\bunsafe\b")
+DERIVE_RE = re.compile(r"#\s*\[\s*derive\s*\(([^)]*)\)\s*\]")
+RPC_DEP_RE = re.compile(r"^\s*ene-rpc\s*[.=]", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -49,6 +64,11 @@ class Baselines:
     max_host_world_refs: int = MAX_HOST_WORLD_REFS
     default_max_impl_files: int = DEFAULT_MAX_IMPL_FILES
     impl_spread_allowlist: dict[tuple[str, str], int] | None = None
+    max_domain_rpc_deps: int = MAX_DOMAIN_RPC_DEPS
+    max_desktop_unsafe: int = MAX_DESKTOP_UNSAFE
+    max_long_prod_files: int = MAX_LONG_PROD_FILES
+    prod_file_line_limit: int = PROD_FILE_LINE_LIMIT
+    max_rpc_ecs_resources: int = MAX_RPC_ECS_RESOURCES
 
     def allowlist(self) -> dict[tuple[str, str], int]:
         return IMPL_SPREAD_ALLOWLIST if self.impl_spread_allowlist is None else self.impl_spread_allowlist
@@ -359,6 +379,114 @@ def check_no_prod_println(root: Path, workspace_rs: list[Path]) -> tuple[list[st
     return violations, errors
 
 
+def production_files(root: Path, base: str, workspace_rs: list[Path] | None = None) -> list[Path]:
+    """Return non-test Rust files under `root/base`."""
+    base_dir = root / base
+    if not base_dir.is_dir():
+        return []
+    return sorted(
+        path
+        for path in base_dir.rglob("*.rs")
+        if not is_test_or_example(path.relative_to(root))
+    )
+
+
+def check_domain_no_rpc_dep(root: Path, max_deps: int) -> tuple[dict[str, object], list[str]]:
+    """Rule 7: L0 domain crates must not depend on the wire crate `ene-rpc`."""
+    offenders: list[str] = []
+    seen: list[str] = []
+    for crate in DOMAIN_CRATES:
+        manifest = root / "crates" / crate / "Cargo.toml"
+        if not manifest.is_file():
+            continue
+        seen.append(crate)
+        if RPC_DEP_RE.search(manifest.read_text(encoding="utf-8")):
+            offenders.append(crate)
+    errors: list[str] = []
+    if len(offenders) > max_deps:
+        errors.append(
+            f"Rule 7 (domain_no_rpc_dep): {len(offenders)} domain crate(s) depend on `ene-rpc` "
+            f"(baseline max {max_deps}): {offenders}"
+        )
+    return {
+        "count": len(offenders),
+        "max": max_deps,
+        "crates_checked": seen,
+        "offenders": offenders,
+    }, errors
+
+
+def check_desktop_unsafe(root: Path, max_refs: int) -> tuple[dict[str, object], list[str]]:
+    """Rule 8: production `unsafe` must stay out of the desktop app crate."""
+    per_file: dict[str, int] = {}
+    for path in production_files(root, "apps/ene-desktop/src"):
+        prod = strip_cfg_test(path.read_text(encoding="utf-8"))
+        count = sum(
+            len(UNSAFE_RE.findall(strip_line_comment(line))) for line in prod.splitlines()
+        )
+        if count:
+            per_file[path.relative_to(root).as_posix()] = count
+    total = sum(per_file.values())
+    sorted_files = dict(sorted(per_file.items(), key=lambda item: (-item[1], item[0])))
+    errors: list[str] = []
+    if total > max_refs:
+        errors.append(
+            f"Rule 8 (app_unsafe_count): found {total} production `unsafe` occurrence(s) in "
+            f"apps/ene-desktop (baseline max {max_refs}); top={list(sorted_files.items())[:5]}"
+        )
+    return {"count": total, "max": max_refs, "files": sorted_files}, errors
+
+
+def check_max_prod_file_lines(
+    root: Path, workspace_rs: list[Path], max_files: int, limit: int
+) -> tuple[dict[str, object], list[str]]:
+    """Rule 9: cap how many production files exceed the line limit."""
+    over: list[tuple[int, str]] = []
+    for path in workspace_rs:
+        rel = path.relative_to(root)
+        if is_test_or_example(rel) or rel.name == "build.rs":
+            continue
+        prod = strip_cfg_test(path.read_text(encoding="utf-8"))
+        lines = len(prod.splitlines())
+        if lines > limit:
+            over.append((lines, rel.as_posix()))
+    over.sort(reverse=True)
+    errors: list[str] = []
+    if len(over) > max_files:
+        errors.append(
+            f"Rule 9 (max_prod_file_lines): {len(over)} production file(s) exceed {limit} lines "
+            f"(baseline max {max_files}); largest={over[:5]}"
+        )
+    return {
+        "count": len(over),
+        "max": max_files,
+        "limit": limit,
+        "files": {name: lines for lines, name in over},
+    }, errors
+
+
+def check_rpc_no_ecs_resource(root: Path, max_resources: int) -> tuple[dict[str, object], list[str]]:
+    """Rule 10: the RPC transport layer must not define ECS resources."""
+    found: dict[str, list[str]] = {}
+    for path in production_files(root, "apps/ene-host/src/server/rpc"):
+        prod = strip_cfg_test(path.read_text(encoding="utf-8"))
+        names = [
+            match.group(0)
+            for match in DERIVE_RE.finditer(prod)
+            if re.search(r"\bResource\b", match.group(1))
+        ]
+        if names:
+            found[path.relative_to(root).as_posix()] = names
+    total = sum(len(v) for v in found.values())
+    errors: list[str] = []
+    if total > max_resources:
+        errors.append(
+            f"Rule 10 (rpc_no_ecs_resource): found {total} `#[derive(Resource)]` in "
+            f"apps/ene-host/src/server/rpc/ (baseline max {max_resources}): {found}"
+        )
+    return {"count": total, "max": max_resources, "files": found}, errors
+
+
 def evaluate(root: Path, baselines: Baselines | None = None) -> tuple[dict[str, object], list[str]]:
     cfg = baselines or Baselines()
     workspace_rs = iter_workspace_rs(root)
@@ -374,6 +502,12 @@ def evaluate(root: Path, baselines: Baselines | None = None) -> tuple[dict[str, 
         root, workspace_rs, cfg.default_max_impl_files, cfg.allowlist()
     )
     println_violations, println_errors = check_no_prod_println(root, workspace_rs)
+    domain_rpc_report, domain_rpc_errors = check_domain_no_rpc_dep(root, cfg.max_domain_rpc_deps)
+    unsafe_report, unsafe_errors = check_desktop_unsafe(root, cfg.max_desktop_unsafe)
+    long_files_report, long_files_errors = check_max_prod_file_lines(
+        root, workspace_rs, cfg.max_long_prod_files, cfg.prod_file_line_limit
+    )
+    rpc_ecs_report, rpc_ecs_errors = check_rpc_no_ecs_resource(root, cfg.max_rpc_ecs_resources)
     errors = [
         *ui_errors,
         *db_errors,
@@ -381,6 +515,10 @@ def evaluate(root: Path, baselines: Baselines | None = None) -> tuple[dict[str, 
         *println_errors,
         *providers_model_errors,
         *host_world_errors,
+        *domain_rpc_errors,
+        *unsafe_errors,
+        *long_files_errors,
+        *rpc_ecs_errors,
     ]
     report: dict[str, object] = {
         "status": "fail" if errors else "pass",
@@ -394,6 +532,10 @@ def evaluate(root: Path, baselines: Baselines | None = None) -> tuple[dict[str, 
             "host_world_refs": host_world_report,
             "impl_file_spread_over_default": impl_over_default,
             "no_prod_println": {"violations": len(println_violations)},
+            "domain_no_rpc_dep": domain_rpc_report,
+            "app_unsafe_count": unsafe_report,
+            "max_prod_file_lines": long_files_report,
+            "rpc_no_ecs_resource": rpc_ecs_report,
         },
         "errors": errors,
     }
@@ -449,6 +591,10 @@ def self_test() -> None:
         "crates/demo/src/b.rs": "impl S { fn b() {} }\nimpl T for S {}\n",
         "crates/demo/src/c.rs": "impl S { fn c() {} }\nimpl T for S {}\n",
         "crates/demo/src/d.rs": "impl T for S {}\n",
+        "crates/ene-policy/Cargo.toml": "[package]\nname = \"ene-policy\"\n",
+        "crates/ene-catalog/Cargo.toml": "[dependencies]\nserde = \"1\"\n",
+        "apps/ene-desktop/src/tray.rs": "pub fn show() {}\n",
+        "apps/ene-host/src/server/rpc/chat.rs": "pub fn chat() {}\n",
     }
     baselines = Baselines(
         max_ui_rpc_refs=0,
@@ -457,6 +603,11 @@ def self_test() -> None:
         max_host_world_refs=1,
         default_max_impl_files=3,
         impl_spread_allowlist={("apps/ene-desktop", "SettingsStudio"): 4},
+        max_domain_rpc_deps=0,
+        max_desktop_unsafe=0,
+        max_long_prod_files=0,
+        prod_file_line_limit=20,
+        max_rpc_ecs_resources=0,
     )
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -567,6 +718,111 @@ def self_test() -> None:
         _, errors = evaluate(root, baselines)
         assert any("Rule 6" in e for e in errors), f"expected Rule 6 error, got {errors}"
 
+        # Rule 7 violation (a domain crate depends on `ene-rpc`)
+        _write_fixture(
+            root,
+            {
+                **clean_files,
+                "apps/ene-host/src/host/entry.rs": "pub fn ok() {}\n",
+                "crates/ene-policy/Cargo.toml": (
+                    "[package]\nname = \"ene-policy\"\n\n[dependencies]\nene-rpc.workspace = true\n"
+                ),
+            },
+        )
+        _, errors = evaluate(root, baselines)
+        assert any("Rule 7" in e for e in errors), f"expected Rule 7 error, got {errors}"
+
+        # Rule 8 violation (production `unsafe` in the desktop app)
+        _write_fixture(
+            root,
+            {
+                **clean_files,
+                "crates/ene-policy/Cargo.toml": "[package]\nname = \"ene-policy\"\n",
+                "apps/ene-desktop/src/tray.rs": (
+                    "pub fn show() {\n"
+                    "    // SAFETY: fixture\n"
+                    "    unsafe { hide() }\n"
+                    "}\n"
+                    "#[cfg(test)]\n"
+                    "mod tests { fn t() { unsafe { ok() } } }\n"
+                ),
+            },
+        )
+        _, errors = evaluate(root, baselines)
+        assert any("Rule 8" in e for e in errors), f"expected Rule 8 error, got {errors}"
+
+        # Rule 8 must ignore `unsafe` that only appears in a comment or test module.
+        _write_fixture(
+            root,
+            {
+                **clean_files,
+                "crates/ene-policy/Cargo.toml": "[package]\nname = \"ene-policy\"\n",
+                "apps/ene-desktop/src/tray.rs": (
+                    "// no unsafe here\n"
+                    "pub fn show() {}\n"
+                    "#[cfg(test)]\n"
+                    "mod tests { fn t() { unsafe { ok() } } }\n"
+                ),
+            },
+        )
+        _, errors = evaluate(root, baselines)
+        assert not any("Rule 8" in e for e in errors), f"unexpected Rule 8 error, got {errors}"
+
+        # Rule 9 violation (a production file over the line limit)
+        _write_fixture(
+            root,
+            {
+                **clean_files,
+                "apps/ene-desktop/src/big.rs": "pub fn f() {}\n" * 30,
+            },
+        )
+        _, errors = evaluate(root, baselines)
+        assert any("Rule 9" in e for e in errors), f"expected Rule 9 error, got {errors}"
+
+        # Rule 9 must ignore a long `#[cfg(test)]` module in an otherwise small file.
+        _write_fixture(
+            root,
+            {
+                **clean_files,
+                "apps/ene-desktop/src/big.rs": (
+                    "pub fn f() {}\n#[cfg(test)]\nmod tests {\n" + "    fn t() {}\n" * 40 + "}\n"
+                ),
+            },
+        )
+        _, errors = evaluate(root, baselines)
+        assert not any("Rule 9" in e for e in errors), f"unexpected Rule 9 error, got {errors}"
+
+        # Rule 10 violation (an ECS `Resource` derived in the RPC transport layer)
+        _write_fixture(
+            root,
+            {
+                **clean_files,
+                "apps/ene-host/src/server/rpc/chat.rs": (
+                    "#[derive(bevy_ecs::prelude::Resource)]\nstruct Observed(u8);\n"
+                ),
+            },
+        )
+        _, errors = evaluate(root, baselines)
+        assert any("Rule 10" in e for e in errors), f"expected Rule 10 error, got {errors}"
+
+        # Rule 10 must ignore a `Resource` that only a test module defines.
+        _write_fixture(
+            root,
+            {
+                **clean_files,
+                "apps/ene-host/src/server/rpc/chat.rs": (
+                    "pub fn chat() {}\n"
+                    "#[cfg(test)]\n"
+                    "mod tests {\n"
+                    "    #[derive(bevy_ecs::prelude::Resource)]\n"
+                    "    struct Frames(u64);\n"
+                    "}\n"
+                ),
+            },
+        )
+        _, errors = evaluate(root, baselines)
+        assert not any("Rule 10" in e for e in errors), f"unexpected Rule 10 error, got {errors}"
+
     # Verify strip_cfg_test keeps code after an inline test module and ignores braces in strings/comments.
     sample = (
         "fn before() {}\n"
@@ -580,7 +836,7 @@ def self_test() -> None:
     stripped = strip_cfg_test(sample)
     assert "fn before()" in stripped and "fn after()" in stripped and "mod tests" not in stripped
 
-    print("PASS all 6 architecture rules and self-test fixtures")
+    print("PASS all 10 architecture rules and self-test fixtures")
 
 
 def main() -> int:
@@ -605,13 +861,21 @@ def main() -> int:
         hw = rules["host_world_refs"]
         println = rules["no_prod_println"]
         spread = rules["impl_file_spread_over_default"]
+        domain_rpc = rules["domain_no_rpc_dep"]
+        unsafe = rules["app_unsafe_count"]
+        long_files = rules["max_prod_file_lines"]
+        rpc_ecs = rules["rpc_no_ecs_resource"]
         print(
             f"architecture check: ui_rpc_leak={ui['count']}/{ui['max']}, "
             f"db_upward_imports={db['count']}/{db['max']}, "
             f"providers_no_model_import={pm['count']}/{pm['max']}, "
             f"host_world_refs={hw['count']}/{hw['max']}, "
             f"impl_over_default={spread}, "
-            f"no_prod_println={println['violations']}"
+            f"no_prod_println={println['violations']}, "
+            f"domain_no_rpc_dep={domain_rpc['count']}/{domain_rpc['max']}, "
+            f"app_unsafe_count={unsafe['count']}/{unsafe['max']}, "
+            f"max_prod_file_lines={long_files['count']}/{long_files['max']}, "
+            f"rpc_no_ecs_resource={rpc_ecs['count']}/{rpc_ecs['max']}"
         )
         for error in errors:
             print(error, file=sys.stderr)

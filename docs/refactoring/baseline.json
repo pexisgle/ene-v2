@@ -1,0 +1,148 @@
+{
+  "errors": [],
+  "rules": {
+    "app_unsafe_count": {
+      "count": 84,
+      "files": {
+        "apps/ene-desktop/src/computer.rs": 6,
+        "apps/ene-desktop/src/perception/platform_windows.rs": 3,
+        "apps/ene-desktop/src/perception/screen.rs": 8,
+        "apps/ene-desktop/src/tray.rs": 55,
+        "apps/ene-desktop/src/ui/pod/mod.rs": 1,
+        "apps/ene-desktop/src/ui/pod/win32.rs": 11
+      },
+      "max": 84
+    },
+    "db_upward_imports": {
+      "count": 0,
+      "max": 0
+    },
+    "domain_no_rpc_dep": {
+      "count": 4,
+      "crates_checked": [
+        "ene-domain",
+        "ene-policy",
+        "ene-catalog",
+        "ene-plugin",
+        "ene-voice"
+      ],
+      "max": 4,
+      "offenders": [
+        "ene-policy",
+        "ene-catalog",
+        "ene-plugin",
+        "ene-voice"
+      ]
+    },
+    "host_world_refs": {
+      "count": 171,
+      "file_count": 29,
+      "files": {
+        "apps/ene-host/src/host/agent/mod.rs": 14,
+        "apps/ene-host/src/host/autonomy.rs": 4,
+        "apps/ene-host/src/host/chat.rs": 6,
+        "apps/ene-host/src/host/client/computer.rs": 5,
+        "apps/ene-host/src/host/client/device.rs": 13,
+        "apps/ene-host/src/host/client/dynamic.rs": 8,
+        "apps/ene-host/src/host/client/mod.rs": 7,
+        "apps/ene-host/src/host/delegation.rs": 2,
+        "apps/ene-host/src/host/eyes/mod.rs": 9,
+        "apps/ene-host/src/host/mcp/projection.rs": 6,
+        "apps/ene-host/src/host/mcp/supervisor.rs": 5,
+        "apps/ene-host/src/host/mind/embedding/backfill.rs": 2,
+        "apps/ene-host/src/host/mind/mod.rs": 9,
+        "apps/ene-host/src/host/mind/recall/mod.rs": 2,
+        "apps/ene-host/src/host/mind/tools.rs": 7,
+        "apps/ene-host/src/host/mod.rs": 3,
+        "apps/ene-host/src/host/model/catalog.rs": 1,
+        "apps/ene-host/src/host/permission/approval.rs": 8,
+        "apps/ene-host/src/host/permission/decision.rs": 2,
+        "apps/ene-host/src/host/permission/gate.rs": 9,
+        "apps/ene-host/src/host/providers/extensions.rs": 6,
+        "apps/ene-host/src/host/tools/mod.rs": 2,
+        "apps/ene-host/src/host/tools/sync.rs": 5,
+        "apps/ene-host/src/host/voice/engine.rs": 3,
+        "apps/ene-host/src/host/voice/session.rs": 4,
+        "apps/ene-host/src/host/work/hand.rs": 8,
+        "apps/ene-host/src/host/work/mod.rs": 16,
+        "apps/ene-host/src/host/work/skills.rs": 1,
+        "apps/ene-host/src/host/work/tools.rs": 4
+      },
+      "max": 171
+    },
+    "impl_file_spread_over_default": {
+      "crates/ene-plugin-runtime::Events": 4
+    },
+    "max_prod_file_lines": {
+      "count": 47,
+      "files": {
+        "apps/ene-avatar/src/character.rs": 589,
+        "apps/ene-desktop/src/audio/capture.rs": 636,
+        "apps/ene-desktop/src/avatar/client.rs": 672,
+        "apps/ene-desktop/src/computer.rs": 502,
+        "apps/ene-desktop/src/input/render.rs": 531,
+        "apps/ene-desktop/src/session/commands.rs": 656,
+        "apps/ene-desktop/src/session/stream.rs": 803,
+        "apps/ene-desktop/src/tray.rs": 801,
+        "apps/ene-desktop/src/ui/companions/editor.rs": 761,
+        "apps/ene-desktop/src/ui/companions/mod.rs": 528,
+        "apps/ene-desktop/src/ui/companions/voice.rs": 609,
+        "apps/ene-desktop/src/ui/connections/pickers.rs": 567,
+        "apps/ene-desktop/src/ui/connections/roles_panel.rs": 655,
+        "apps/ene-desktop/src/ui/connections/row_editor.rs": 908,
+        "apps/ene-desktop/src/ui/device/policy.rs": 805,
+        "apps/ene-desktop/src/ui/hub/actions.rs": 562,
+        "apps/ene-desktop/src/ui/hub/connections.rs": 525,
+        "apps/ene-desktop/src/ui/pod/bubble.rs": 930,
+        "apps/ene-desktop/src/ui/pod/controls.rs": 722,
+        "apps/ene-desktop/src/ui/pod/onboarding.rs": 750,
+        "apps/ene-desktop/src/ui/widgets.rs": 742,
+        "apps/ene-desktop/src/work_tools.rs": 662,
+        "apps/ene-host/src/host/agent/mod.rs": 845,
+        "apps/ene-host/src/host/client/device.rs": 897,
+        "apps/ene-host/src/host/client/mod.rs": 552,
+        "apps/ene-host/src/host/compaction/mod.rs": 531,
+        "apps/ene-host/src/host/eyes/mod.rs": 898,
+        "apps/ene-host/src/host/mcp/supervisor.rs": 596,
+        "apps/ene-host/src/host/mind/mod.rs": 536,
+        "apps/ene-host/src/host/mind/recall/mod.rs": 773,
+        "apps/ene-host/src/host/mod.rs": 678,
+        "apps/ene-host/src/host/model/mod.rs": 764,
+        "apps/ene-host/src/host/permission/gate.rs": 729,
+        "apps/ene-host/src/host/providers/extensions.rs": 547,
+        "apps/ene-host/src/host/web_search/mod.rs": 696,
+        "apps/ene-host/src/host/wire.rs": 509,
+        "apps/ene-host/src/host/work/hand.rs": 713,
+        "apps/ene-host/src/host/work/mod.rs": 819,
+        "apps/ene-host/src/server/rpc/settings/mod.rs": 1005,
+        "crates/ene-client-core/src/reducer.rs": 655,
+        "crates/ene-policy/src/rules.rs": 668,
+        "crates/ene-store/src/memories/mod.rs": 512,
+        "crates/ene-store/src/memories/ops.rs": 616,
+        "crates/ene-voice/src/engine.rs": 590,
+        "crates/ene-voice/src/session/mod.rs": 651,
+        "crates/ene-vrm/src/animation.rs": 579,
+        "crates/ene-vrm/src/loader.rs": 586
+      },
+      "limit": 500,
+      "max": 47
+    },
+    "no_prod_println": {
+      "violations": 0
+    },
+    "providers_no_model_import": {
+      "count": 0,
+      "max": 0
+    },
+    "rpc_no_ecs_resource": {
+      "count": 0,
+      "files": {},
+      "max": 0
+    },
+    "ui_rpc_leak": {
+      "count": 0,
+      "max": 0
+    }
+  },
+  "status": "pass"
+}

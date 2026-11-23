@@ -67,3 +67,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# libc is a deliberate transitive-graph pin (see the target section above),
+# not a direct dependency, so nothing in src/ names it.
+[package.metadata.cargo-machete]
+ignored = ["libc"]
