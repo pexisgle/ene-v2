@@ -39,6 +39,7 @@ regex = "1"
 unicode-segmentation = "1"
 uuid.workspace = true
 which.workspace = true
+image.workspace = true
 
 # gpui's Linux backends are features, and the workspace pins the crate with
 # default-features off (so its Windows manifest is not embedded twice). A Linux

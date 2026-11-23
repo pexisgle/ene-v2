@@ -588,12 +588,20 @@ fn text(bytes: &[u8]) -> Result<&str, WorkToolError> {
     std::str::from_utf8(bytes).map_err(|_| WorkToolError::NotUtf8)
 }
 
+/// The formats the read tool hands to the model as a base64 image.
+///
+/// `guess_format` recognises more than this (BMP, TIFF, ICO, ...), but the
+/// downstream image pipeline only ever received these four, so the set stays
+/// explicit rather than silently widening what is sent.
+const IMAGE_FORMATS: [image::ImageFormat; 4] = [
+    image::ImageFormat::Png,
+    image::ImageFormat::Jpeg,
+    image::ImageFormat::Gif,
+    image::ImageFormat::WebP,
+];
+
 fn image(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"\x89PNG\r\n\x1a\n")
-        || bytes.starts_with(b"\xff\xd8\xff")
-        || bytes.starts_with(b"GIF87a")
-        || bytes.starts_with(b"GIF89a")
-        || (bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"))
+    image::guess_format(bytes).is_ok_and(|format| IMAGE_FORMATS.contains(&format))
 }
 
 fn edit(content: &str, input: &Value) -> Result<String, WorkToolError> {
@@ -751,6 +759,42 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn only_the_four_supported_images_are_treated_as_images() {
+        // The old check was four magic-byte tests; `guess_format` must accept
+        // exactly the same inputs and still reject the formats it recognises
+        // but the image pipeline never received.
+        let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+        let jpeg = b"\xff\xd8\xff\xe0\0\x10JFIF";
+        let gif87 = b"GIF87a\0\0";
+        let gif89 = b"GIF89a\0\0";
+        let mut webp = Vec::from(*b"RIFF\x1a\0\0\0WEBPVP8 ");
+        webp.push(0);
+        for (name, bytes) in [
+            ("png", png.as_slice()),
+            ("jpeg", jpeg.as_slice()),
+            ("gif87", gif87.as_slice()),
+            ("gif89", gif89.as_slice()),
+            ("webp", webp.as_slice()),
+        ] {
+            assert!(image(bytes), "{name} must still be an image");
+        }
+
+        // Formats `guess_format` knows but this tool must not forward.
+        let bmp = b"BM\x1a\0\0\0\0\0\0\0";
+        let tiff = b"II*\0\x08\0\0\0";
+        let ico = b"\0\0\x01\0\x01\0";
+        for (name, bytes) in [
+            ("bmp", bmp.as_slice()),
+            ("tiff", tiff.as_slice()),
+            ("ico", ico.as_slice()),
+            ("plain text", b"hello".as_slice()),
+            ("empty", b"".as_slice()),
+        ] {
+            assert!(!image(bytes), "{name} must not be treated as an image");
+        }
+    }
+
     #[test]
     fn file_operations_cannot_follow_a_link_out_of_the_workspace() {
         let directory = tempfile::tempdir().unwrap();
