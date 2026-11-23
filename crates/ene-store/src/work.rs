@@ -67,6 +67,21 @@ impl<'a> WorkRepo<'a> {
         )
     }
 
+    /// Every work session, newest first per companion.
+    ///
+    /// One query rather than one per companion: a snapshot over a host with
+    /// many companions otherwise pays a round trip for each.
+    pub fn all_work_sessions(&self) -> Result<Vec<WorkSession>> {
+        self.0.fetch_all(
+            &format!(
+                "SELECT {SESSION_COLUMNS} FROM work_sessions \
+                 ORDER BY companion_id, updated_at DESC, id"
+            ),
+            [],
+            row_to_session,
+        )
+    }
+
     pub fn work_session(&self, id: &str) -> Result<Option<WorkSession>> {
         self.0.fetch(
             &format!("SELECT {SESSION_COLUMNS} FROM work_sessions WHERE id = ?1"),

@@ -446,9 +446,21 @@ pub(crate) fn snapshot(app: &mut App) -> Result<w::Snapshot> {
         .iter()
         .find(|activation| activation.client_id.is_some())
         .map(|activation| activation.companion_id.clone());
+    // One query, then grouped back into the per-companion order this loop used
+    // to produce: companions in snapshot order, each companion's sessions
+    // newest first. The wire output stays identical, and a host with many
+    // companions no longer pays a round trip for each.
+    let mut by_companion: std::collections::HashMap<String, Vec<_>> =
+        std::collections::HashMap::new();
+    for session in store.work_repo().all_work_sessions()? {
+        by_companion
+            .entry(session.companion_id.clone())
+            .or_default()
+            .push(session);
+    }
     let mut work_sessions = Vec::new();
     for companion in &companions {
-        for session in store.work_repo().work_sessions(&companion.id)? {
+        for session in by_companion.remove(&companion.id).unwrap_or_default() {
             work_sessions.push(wire::work_session(&session));
         }
     }

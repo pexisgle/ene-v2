@@ -539,6 +539,68 @@ mod tests {
     }
 
     #[test]
+    fn the_bulk_session_query_matches_the_per_companion_query() {
+        // `snapshot` used to loop one `work_sessions(companion)` call per
+        // companion. The bulk query replaces that loop, so its rows must group
+        // by companion and stay newest-first within each companion.
+        use ene_domain::{WorkSession, WorkStatus};
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        let repo = store.work_repo();
+        let stamp = |minute: u32| format!("2026-01-01T00:{minute:02}:00Z");
+        for (id, companion, minute) in [
+            ("a-old", "alpha", 1),
+            ("a-new", "alpha", 5),
+            ("b-only", "beta", 3),
+            ("a-mid", "alpha", 3),
+        ] {
+            repo.insert_work_session(&WorkSession {
+                id: id.into(),
+                companion_id: companion.into(),
+                title: id.into(),
+                status: WorkStatus::Active,
+                client_id: None,
+                created_at: stamp(minute),
+                updated_at: stamp(minute),
+            })
+            .unwrap();
+        }
+
+        let bulk = repo.all_work_sessions().unwrap();
+        let seen: Vec<(&str, &str)> = bulk
+            .iter()
+            .map(|session| (session.companion_id.as_str(), session.id.as_str()))
+            .collect();
+        // The exact row order the query promises, stated once so a change to
+        // the ORDER BY fails here rather than silently reordering a snapshot.
+        assert_eq!(
+            seen,
+            [
+                ("alpha", "a-new"),
+                ("alpha", "a-mid"),
+                ("alpha", "a-old"),
+                ("beta", "b-only"),
+            ],
+            "the bulk query must group by companion, newest first"
+        );
+
+        // And it must agree with the per-companion query per companion.
+        for companion in ["alpha", "beta"] {
+            let one = repo.work_sessions(companion).unwrap();
+            let many: Vec<&str> = bulk
+                .iter()
+                .filter(|session| session.companion_id == companion)
+                .map(|session| session.id.as_str())
+                .collect();
+            let expected: Vec<&str> = one.iter().map(|session| session.id.as_str()).collect();
+            assert_eq!(
+                many, expected,
+                "{companion} must match the single-companion query"
+            );
+        }
+    }
+
+    #[test]
     fn repeated_queries_keep_parameters_results_and_errors_separate() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
