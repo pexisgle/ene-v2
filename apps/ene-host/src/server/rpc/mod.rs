@@ -197,6 +197,27 @@ impl From<HostError> for ConnectError {
     }
 }
 
+/// Liveness: the process is running and serving HTTP at all.
+async fn healthz() -> axum::http::StatusCode {
+    axum::http::StatusCode::OK
+}
+
+/// Readiness: the host kernel can accept RPC calls.
+///
+/// It asks the same `HostState::ready` the RPC layer asks, so a 200 here means
+/// the host would not refuse a call for being failed or closing.
+async fn readyz(
+    axum::extract::State(services): axum::extract::State<Arc<Services>>,
+) -> axum::http::StatusCode {
+    match services.runtime.ready().await {
+        Ok(()) => axum::http::StatusCode::OK,
+        Err(error) => {
+            tracing::debug!(%error, "readiness probe failed");
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        }
+    }
+}
+
 pub(super) fn router(
     runtime: Runtime,
     guard: auth::Guard,
@@ -208,8 +229,16 @@ pub(super) fn router(
     let connect = w::SettingsServiceExt::register(services.clone(), connect);
     let connect = w::WorkServiceExt::register(services.clone(), connect);
     let connect = w::ClientServiceExt::register(services.clone(), connect);
-    let connect = w::VoiceServiceExt::register(services, connect);
-    axum::Router::new()
+    let connect = w::VoiceServiceExt::register(services.clone(), connect);
+    // The RPC surface carries the auth layer; the probes do not. A load
+    // balancer or supervisor has no Bearer token, and a health check that
+    // needs one cannot report that the host is down.
+    let authenticated = axum::Router::new()
         .nest_service("/rpc", connect.into_axum_router())
-        .layer(middleware::from_fn_with_state(guard, auth::authenticate))
+        .layer(middleware::from_fn_with_state(guard, auth::authenticate));
+    axum::Router::new()
+        .route("/healthz", axum::routing::get(healthz))
+        .route("/readyz", axum::routing::get(readyz))
+        .with_state(services)
+        .merge(authenticated)
 }

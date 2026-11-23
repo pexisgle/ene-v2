@@ -302,6 +302,15 @@ impl Runtime {
         }
     }
 
+    /// The same readiness predicate the RPC layer applies, for `/readyz`.
+    ///
+    /// It reads the world rather than a separate flag, so a host that answers
+    /// `/readyz` with 200 is one whose RPC calls would also be accepted.
+    pub(crate) async fn ready(&self) -> Result<()> {
+        self.read(|app| app.world().resource::<HostState>().ready())
+            .await
+    }
+
     pub(crate) async fn begin_shutdown(&self) {
         // A shutdown that cannot mark itself closing still proceeds; the
         // failure is reported so a wedged kernel is visible rather than silent.
