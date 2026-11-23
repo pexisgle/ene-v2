@@ -323,11 +323,10 @@ fn apply_transcription(audio: &mut AudioState, text: String, is_final: bool, is_
         let trimmed = text.trim();
         if !trimmed.is_empty() {
             audio.recognized.push(trimmed.to_owned());
-            drop(
-                audio
-                    .recognized
-                    .split_off(audio.recognized.len().saturating_sub(20)),
-            );
+            // Keep the newest 20 lines: `split_off` returns the tail, so it
+            // must be the retained half, never the discarded one.
+            let overflow = audio.recognized.len().saturating_sub(20);
+            audio.recognized.drain(..overflow);
         }
     }
     if is_final || (text.trim().is_empty() && !is_speaking) {

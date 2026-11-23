@@ -472,3 +472,50 @@ fn f01_r03_resident_companions_queries_multiple_activations_on_one_client() {
     assert!(model.is_resident("miku", "desk-a"));
     assert!(!model.is_resident("kai", "desk-a"));
 }
+
+fn finalized_line(line: usize) -> Update {
+    Update::Transcription {
+        text: format!("line-{line}"),
+        is_final: true,
+        is_speaking: false,
+    }
+}
+
+#[test]
+fn finalized_lines_keep_the_newest_twenty_in_order() {
+    let mut model = model();
+    model.apply(finalized_line(1));
+    assert_eq!(
+        model.audio.recognized,
+        ["line-1"],
+        "a single finalized line must survive"
+    );
+
+    for line in 2..=20 {
+        model.apply(finalized_line(line));
+    }
+    assert_eq!(
+        model.audio.recognized.len(),
+        20,
+        "twenty finalized lines all stay"
+    );
+    assert_eq!(model.audio.recognized[0], "line-1");
+    assert_eq!(model.audio.recognized[19], "line-20");
+
+    for line in 21..=25 {
+        model.apply(finalized_line(line));
+    }
+    assert_eq!(
+        model.audio.recognized.len(),
+        20,
+        "the list is capped at twenty"
+    );
+    assert_eq!(
+        model.audio.recognized[0], "line-6",
+        "the oldest lines fall off first"
+    );
+    assert_eq!(
+        model.audio.recognized[19], "line-25",
+        "the newest line stays last"
+    );
+}
