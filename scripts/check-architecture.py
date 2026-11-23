@@ -28,6 +28,15 @@ MAX_DESKTOP_UNSAFE = 0
 MAX_LONG_PROD_FILES = 40
 # Rule 10: production `#[derive(Resource)]` items under the RPC transport layer.
 MAX_RPC_ECS_RESOURCES = 0
+# Rule 11: production `block_on`/`block_in_place` sites. A ratchet rather than
+# a hard zero, because three callers legitimately own the runtime they block:
+#   apps/ene-desktop/src/main.rs            the process entry point, once
+#   apps/ene-desktop/src/plugins.rs         startup loader, before any actor runs
+#   crates/ene-plugin-runtime/.../invocation.rs  the guest call's own runtime
+# The host's kernel thread is NOT such a caller: it runs every queued command,
+# so `permission/gate.rs` blocking there stalls unrelated work. That site is
+# what this rule exists to drive down.
+MAX_PROD_BLOCK_ON = 7
 DEFAULT_MAX_IMPL_FILES = 3
 IMPL_SPREAD_ALLOWLIST: dict[tuple[str, str], int] = {
     ("crates/ene-plugin-runtime", "Events"): 4,
@@ -54,6 +63,10 @@ PRINTLN_RE = re.compile(r"\b(?:e?println!)\s*\(")
 UNSAFE_RE = re.compile(r"\bunsafe\b")
 DERIVE_RE = re.compile(r"#\s*\[\s*derive\s*\(([^)]*)\)\s*\]")
 RPC_DEP_RE = re.compile(r"^\s*ene-rpc\s*[.=]", re.MULTILINE)
+# `block_on`/`block_in_place` park an OS thread until the future finishes. In
+# the host that thread is the kernel actor, so a call made from there stalls
+# every other job queued behind it.
+BLOCK_ON_RE = re.compile(r"\b(?:block_on|block_in_place)\s*\(")
 
 
 @dataclass(frozen=True)
@@ -69,6 +82,7 @@ class Baselines:
     max_long_prod_files: int = MAX_LONG_PROD_FILES
     prod_file_line_limit: int = PROD_FILE_LINE_LIMIT
     max_rpc_ecs_resources: int = MAX_RPC_ECS_RESOURCES
+    max_prod_block_on: int = MAX_PROD_BLOCK_ON
 
     def allowlist(self) -> dict[tuple[str, str], int]:
         return IMPL_SPREAD_ALLOWLIST if self.impl_spread_allowlist is None else self.impl_spread_allowlist
@@ -437,6 +451,37 @@ def check_desktop_unsafe(root: Path, max_refs: int) -> tuple[dict[str, object], 
     return {"count": total, "max": max_refs, "files": sorted_files}, errors
 
 
+def check_prod_block_on(
+    root: Path, workspace_rs: list[Path], max_sites: int
+) -> tuple[dict[str, object], list[str]]:
+    """Rule 11: count production `block_on`/`block_in_place` sites.
+
+    Both park the calling thread. On the host's kernel thread that thread runs
+    every queued command, so one blocking call stalls unrelated work.
+    """
+    per_file: dict[str, int] = {}
+    for path in workspace_rs:
+        rel = path.relative_to(root)
+        if is_test_or_example(rel) or rel.name == "build.rs":
+            continue
+        prod = strip_cfg_test(path.read_text(encoding="utf-8"))
+        count = sum(
+            len(BLOCK_ON_RE.findall(strip_line_comment(line))) for line in prod.splitlines()
+        )
+        if count:
+            per_file[rel.as_posix()] = count
+    total = sum(per_file.values())
+    sorted_files = dict(sorted(per_file.items(), key=lambda item: (-item[1], item[0])))
+    errors: list[str] = []
+    if total > max_sites:
+        errors.append(
+            f"Rule 11 (prod_block_on): found {total} production blocking call(s) "
+            f"(baseline max {max_sites}); top={list(sorted_files.items())[:5]}. "
+            "Await the future instead, or move the work off the thread that must stay free."
+        )
+    return {"count": total, "max": max_sites, "files": sorted_files}, errors
+
+
 def check_max_prod_file_lines(
     root: Path, workspace_rs: list[Path], max_files: int, limit: int
 ) -> tuple[dict[str, object], list[str]]:
@@ -508,6 +553,9 @@ def evaluate(root: Path, baselines: Baselines | None = None) -> tuple[dict[str, 
         root, workspace_rs, cfg.max_long_prod_files, cfg.prod_file_line_limit
     )
     rpc_ecs_report, rpc_ecs_errors = check_rpc_no_ecs_resource(root, cfg.max_rpc_ecs_resources)
+    block_on_report, block_on_errors = check_prod_block_on(
+        root, workspace_rs, cfg.max_prod_block_on
+    )
     errors = [
         *ui_errors,
         *db_errors,
@@ -519,6 +567,7 @@ def evaluate(root: Path, baselines: Baselines | None = None) -> tuple[dict[str, 
         *unsafe_errors,
         *long_files_errors,
         *rpc_ecs_errors,
+        *block_on_errors,
     ]
     report: dict[str, object] = {
         "status": "fail" if errors else "pass",
@@ -536,6 +585,7 @@ def evaluate(root: Path, baselines: Baselines | None = None) -> tuple[dict[str, 
             "app_unsafe_count": unsafe_report,
             "max_prod_file_lines": long_files_report,
             "rpc_no_ecs_resource": rpc_ecs_report,
+            "prod_block_on": block_on_report,
         },
         "errors": errors,
     }
@@ -608,6 +658,7 @@ def self_test() -> None:
         max_long_prod_files=0,
         prod_file_line_limit=20,
         max_rpc_ecs_resources=0,
+        max_prod_block_on=0,
     )
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -640,6 +691,26 @@ def self_test() -> None:
         )
         _, errors = evaluate(root, baselines)
         assert any("Rule 1" in e for e in errors), f"expected Rule 1 error for ene_rpc::/connectrpc, got {errors}"
+
+        # Rule 11 violation: a production `block_on`, and a test-only one that
+        # must not count.
+        _write_fixture(
+            root,
+            {
+                **clean_files,
+                "apps/ene-host/src/host/gate.rs": (
+                    "pub fn g() { let _ = runtime.block_on(async {}); }\n"
+                    "#[cfg(test)]\n"
+                    "mod tests {\n"
+                    "    fn t() { runtime.block_on(async {}); }\n"
+                    "}\n"
+                ),
+            },
+        )
+        report, errors = evaluate(root, baselines)
+        assert any("Rule 11" in e for e in errors), f"expected Rule 11 error, got {errors}"
+        block_on = report["rules"]["prod_block_on"]
+        assert block_on["count"] == 1, f"tests must not count toward Rule 11, got {block_on}"
 
         # Rule 2 violation
         _write_fixture(
@@ -865,6 +936,7 @@ def main() -> int:
         unsafe = rules["app_unsafe_count"]
         long_files = rules["max_prod_file_lines"]
         rpc_ecs = rules["rpc_no_ecs_resource"]
+        block_on = rules["prod_block_on"]
         print(
             f"architecture check: ui_rpc_leak={ui['count']}/{ui['max']}, "
             f"db_upward_imports={db['count']}/{db['max']}, "
@@ -875,7 +947,8 @@ def main() -> int:
             f"domain_no_rpc_dep={domain_rpc['count']}/{domain_rpc['max']}, "
             f"app_unsafe_count={unsafe['count']}/{unsafe['max']}, "
             f"max_prod_file_lines={long_files['count']}/{long_files['max']}, "
-            f"rpc_no_ecs_resource={rpc_ecs['count']}/{rpc_ecs['max']}"
+            f"rpc_no_ecs_resource={rpc_ecs['count']}/{rpc_ecs['max']}, "
+            f"prod_block_on={block_on['count']}/{block_on['max']}"
         )
         for error in errors:
             print(error, file=sys.stderr)
