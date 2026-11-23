@@ -106,9 +106,13 @@ struct Exchange {
     failed: bool,
 }
 
-// `rig_core::http_client::Error` (`HttpError`) is owned by an external crate and exceeds
-// Clippy's 128-byte error threshold; remove if rig-core boxes its error variants.
-#[allow(clippy::result_large_err)]
+// `rig_core::http_client::Error` (`HttpError`) is owned by an external crate
+// and exceeds Clippy's 128-byte error threshold; this fails the build if that
+// stops being true.
+#[expect(
+    clippy::result_large_err,
+    reason = "rig-core's HttpError exceeds clippy's threshold and cannot be boxed here"
+)]
 impl Exchange {
     fn accept(&mut self, chunk: HttpChunk) -> Result<(), HttpError> {
         if self.done {
@@ -234,8 +238,11 @@ impl Drop for Exchange {
 }
 
 impl GuestClient {
-    // `HttpError` is defined by `rig-core` and exceeds 128 bytes; remove when `Exchange` no longer returns `HttpError`.
-    #[allow(clippy::result_large_err)]
+    // `HttpError` is defined by `rig-core` and exceeds 128 bytes.
+    #[expect(
+        clippy::result_large_err,
+        reason = "rig-core's HttpError exceeds clippy's threshold and cannot be boxed here"
+    )]
     fn exchange(&self, parts: &http::request::Parts, body: Bytes) -> Result<Exchange, HttpError> {
         let url = if parts.uri.scheme().is_some() {
             parts.uri.to_string()
@@ -287,9 +294,12 @@ impl GuestClient {
     }
 }
 
-// `HttpClientExt` requires returning `'static` futures while extracting `&self` fields
-// synchronously, so `async fn` cannot be used; remove if `HttpClientExt` adopts async fn.
-#[allow(clippy::manual_async_fn, clippy::result_large_err)]
+// `HttpClientExt` requires returning `'static` futures while extracting `&self`
+// fields synchronously, so `async fn` cannot be used.
+#[expect(
+    clippy::manual_async_fn,
+    reason = "the trait demands a 'static future, so this cannot be an async fn"
+)]
 impl HttpClientExt for GuestClient {
     fn send<T, U>(
         &self,

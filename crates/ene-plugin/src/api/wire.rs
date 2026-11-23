@@ -60,8 +60,11 @@ impl Operation {
 }
 
 // Built once per plugin event and consumed immediately; boxing the harness
-// variant would add an allocation to every update. Remove if `Event` is kept in collections.
-#[allow(clippy::large_enum_variant)]
+// variant would add an allocation to every update.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "an event is built and consumed immediately, so boxing would cost an allocation per update"
+)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
