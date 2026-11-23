@@ -1,6 +1,8 @@
+//! The companion editor's visual sections.
+
 //! Per-companion profile, VRM model, voice binding, and mind profile editor.
 
-use super::{CompanionsPane, parse_voice_selection, split_pipe};
+use super::super::{CompanionsPane, split_pipe};
 use crate::{
     input::Draft,
     ui::{
@@ -8,223 +10,15 @@ use crate::{
         icons::Icon,
         studio::labeled_field,
         theme::Theme,
-        widgets::{
-            DropdownOption, DropdownSpec, Tone, disclosure_row, dropdown_select, pill_button,
-        },
+        widgets::{DropdownSpec, Tone, disclosure_row, dropdown_select, pill_button},
     },
 };
-use ene_client_core::domain::{BodyBinding, Companion, MindProfile, MindView, VoiceBinding};
+use ene_client_core::domain::MindProfile;
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 
-pub(super) struct EditorContext<'a> {
-    pub(super) comp: &'a Companion,
-    pub(super) mind_view: Option<&'a MindView>,
-    pub(super) tts_voices: &'a [(String, String, String, String)],
-    pub(super) tts_conn_ids: &'a [String],
-    pub(super) exported_json: Option<&'a str>,
-    pub(super) live: bool,
-}
+use super::form::*;
 
-struct CompanionEditorDrafts {
-    name_d: Entity<Draft>,
-    mind_d: Entity<Draft>,
-    persona_d: Entity<Draft>,
-    body_model_d: Entity<Draft>,
-    voice_key_d: Entity<Draft>,
-    voice_d: Entity<Draft>,
-    voice_speed_d: Entity<Draft>,
-    voice_pitch_d: Entity<Draft>,
-    voice_style_d: Entity<Draft>,
-}
-
-pub(super) fn render_companion_editor(
-    pane: &mut CompanionsPane,
-    ctx: EditorContext<'_>,
-    theme: &Theme,
-    cx: &mut Context<CompanionsPane>,
-) -> AnyElement {
-    let id = ctx.comp.id.clone();
-    let current_body = ctx
-        .comp
-        .body
-        .as_ref()
-        .and_then(|doc| serde_json::from_str::<BodyBinding>(&doc.json).ok())
-        .unwrap_or_default();
-    let drafts = init_companion_editor_drafts(pane, ctx.comp, &current_body, theme, cx);
-
-    let name_val = drafts.name_d.read(cx).text().trim().to_owned();
-    let mind_val = drafts.mind_d.read(cx).text().trim().to_owned();
-    let persona_val = drafts.persona_d.read(cx).text().trim().to_owned();
-    let body_model_val = drafts.body_model_d.read(cx).text().trim().to_owned();
-    let voice_key_val = drafts.voice_key_d.read(cx).text().to_owned();
-    let voice_manual_val = drafts.voice_d.read(cx).text().trim().to_owned();
-    let (picked_conn_id, picked_voice_id) =
-        parse_voice_selection(&voice_key_val, &voice_manual_val);
-    let mut next_body = current_body;
-    next_body.model = (!body_model_val.is_empty()).then_some(body_model_val);
-    let next_voice = VoiceBinding {
-        connection_id: picked_conn_id.clone(),
-        voice_id: picked_voice_id.clone(),
-        speed: parse_finite_f32(&drafts.voice_speed_d, cx),
-        pitch: parse_finite_f32(&drafts.voice_pitch_d, cx),
-        style: non_empty_trimmed(&drafts.voice_style_d, cx),
-    };
-
-    let model_field = render_body_model_field(&id, drafts.body_model_d.clone(), theme);
-    let voice_selector = render_voice_selector(
-        pane,
-        &ctx,
-        &drafts,
-        (
-            &voice_key_val,
-            picked_conn_id.as_deref(),
-            picked_voice_id.as_deref(),
-        ),
-        theme,
-        cx,
-    );
-    let (disclosure, mind_strip) = render_mind_section(pane, &ctx, &mind_val, theme, cx);
-    let footer = render_companion_footer(
-        pane,
-        &id,
-        ctx.live,
-        CompanionProfilePatch {
-            companion_id: id.clone(),
-            name: name_val,
-            persona: persona_val,
-            mind: mind_val,
-            body: next_body,
-            voice: next_voice,
-        },
-        theme,
-        cx,
-    );
-
-    div()
-        .border_t_1()
-        .border_color(theme.border)
-        .px(px(16.))
-        .py(px(16.))
-        .flex()
-        .flex_col()
-        .gap(px(12.))
-        .child(labeled_field("名前", drafts.name_d, theme))
-        .child(labeled_field("人格の核", drafts.mind_d, theme))
-        .child(labeled_field("話し方", drafts.persona_d, theme))
-        .child(model_field)
-        .child(voice_selector)
-        .child(disclosure)
-        .when_some(mind_strip, |this, strip| this.child(strip))
-        .when_some(ctx.exported_json, |this, json| {
-            this.child(render_exported_template_box(&id, json, theme))
-        })
-        .child(footer)
-        .into_any_element()
-}
-
-fn init_companion_editor_drafts(
-    pane: &mut CompanionsPane,
-    comp: &Companion,
-    current_body: &BodyBinding,
-    theme: &Theme,
-    cx: &mut Context<CompanionsPane>,
-) -> CompanionEditorDrafts {
-    let id = &comp.id;
-    let rev = comp.revision;
-    let mut current_voice = comp
-        .voice
-        .as_ref()
-        .and_then(|doc| serde_json::from_str::<VoiceBinding>(&doc.json).ok())
-        .unwrap_or_default();
-    if current_voice
-        .voice_id
-        .as_deref()
-        .is_none_or(|v| v.trim().is_empty())
-    {
-        current_voice.voice_id = comp.voice_identifier.clone();
-    }
-    let initial_voice_key = match (
-        current_voice
-            .connection_id
-            .as_deref()
-            .filter(|s| !s.is_empty()),
-        current_voice.voice_id.as_deref().filter(|s| !s.is_empty()),
-    ) {
-        (Some(cid), Some(vid)) => format!("{cid}\0{vid}"),
-        (None, Some(vid)) => format!("\0{vid}"),
-        _ => String::new(),
-    };
-    let initial_speed = current_voice.speed.map(|v| format!("{v:.2}"));
-    let initial_pitch = current_voice.pitch.map(|v| format!("{v:.2}"));
-
-    CompanionEditorDrafts {
-        name_d: pane.drafts.draft(
-            cx,
-            format!("comp:{id}:r{rev}:name"),
-            "名前",
-            Some(&comp.name),
-            theme,
-        ),
-        mind_d: pane.drafts.description_draft(
-            cx,
-            format!("comp:{id}:r{rev}:mind"),
-            "人格の核",
-            Some(&comp.mind),
-            theme,
-        ),
-        persona_d: pane.drafts.description_draft(
-            cx,
-            format!("comp:{id}:r{rev}:persona"),
-            "話し方",
-            comp.persona.as_deref(),
-            theme,
-        ),
-        body_model_d: pane.drafts.draft(
-            cx,
-            format!("comp:{id}:r{rev}:body-model"),
-            "VRM モデル（例: ENE.vrm / Seed-san.vrm / .vrm パス）",
-            current_body.model.as_deref(),
-            theme,
-        ),
-        voice_key_d: pane.drafts.draft(
-            cx,
-            format!("comp:{id}:r{rev}:voice-key"),
-            "",
-            Some(&initial_voice_key),
-            theme,
-        ),
-        voice_d: pane.drafts.draft(
-            cx,
-            format!("comp:{id}:r{rev}:voice"),
-            "話者ID（任意）",
-            current_voice.voice_id.as_deref(),
-            theme,
-        ),
-        voice_speed_d: pane.drafts.draft(
-            cx,
-            format!("comp:{id}:r{rev}:voice-speed"),
-            "速度（例: 1.0）",
-            initial_speed.as_deref(),
-            theme,
-        ),
-        voice_pitch_d: pane.drafts.draft(
-            cx,
-            format!("comp:{id}:r{rev}:voice-pitch"),
-            "音高（例: 0.0）",
-            initial_pitch.as_deref(),
-            theme,
-        ),
-        voice_style_d: pane.drafts.draft(
-            cx,
-            format!("comp:{id}:r{rev}:voice-style"),
-            "例: 丁寧・元気（任意）",
-            current_voice.style.as_deref(),
-            theme,
-        ),
-    }
-}
-
-fn render_voice_selector(
+pub(super) fn render_voice_selector(
     pane: &mut CompanionsPane,
     ctx: &EditorContext<'_>,
     drafts: &CompanionEditorDrafts,
@@ -343,7 +137,7 @@ fn render_voice_selector(
         .into_any_element()
 }
 
-fn render_mind_section(
+pub(super) fn render_mind_section(
     pane: &mut CompanionsPane,
     ctx: &EditorContext<'_>,
     mind_val: &str,
@@ -450,7 +244,7 @@ fn render_mind_section(
     (disclosure, Some(strip))
 }
 
-fn render_companion_footer(
+pub(super) fn render_companion_footer(
     pane: &CompanionsPane,
     id: &str,
     live: bool,
@@ -567,7 +361,11 @@ fn render_companion_footer(
         .into_any_element()
 }
 
-fn render_body_model_field(id: &str, body_model_d: Entity<Draft>, theme: &Theme) -> AnyElement {
+pub(super) fn render_body_model_field(
+    id: &str,
+    body_model_d: Entity<Draft>,
+    theme: &Theme,
+) -> AnyElement {
     let model_d_pick = body_model_d.clone();
     let model_d_default = body_model_d.clone();
     div()
@@ -636,7 +434,7 @@ fn render_body_model_field(id: &str, body_model_d: Entity<Draft>, theme: &Theme)
         .into_any_element()
 }
 
-fn render_exported_template_box(id: &str, json: &str, theme: &Theme) -> AnyElement {
+pub(super) fn render_exported_template_box(id: &str, json: &str, theme: &Theme) -> AnyElement {
     div()
         .rounded(px(10.))
         .bg(theme.bg_blush)
@@ -663,59 +461,7 @@ fn render_exported_template_box(id: &str, json: &str, theme: &Theme) -> AnyEleme
         .into_any_element()
 }
 
-fn build_voice_options(tts_voices: &[(String, String, String, String)]) -> Vec<DropdownOption> {
-    let mut voice_options = vec![DropdownOption {
-        value: String::new(),
-        label: "接続の既定を使用".to_owned(),
-        detail: None,
-    }];
-    for (cid, vid, label, conn_name) in tts_voices {
-        voice_options.push(DropdownOption {
-            value: format!("{cid}\0{vid}"),
-            label: label.clone(),
-            detail: Some(format!("{conn_name} / ID: {vid}")),
-        });
-    }
-    voice_options
-}
-
-fn format_selected_voice_label(
-    tts_voices: &[(String, String, String, String)],
-    picked_conn_id: Option<&str>,
-    picked_voice_id: Option<&str>,
-) -> Option<String> {
-    match (picked_conn_id, picked_voice_id) {
-        (None, None) => Some("接続の既定を使用".to_owned()),
-        (Some(cid), Some(vid)) => tts_voices
-            .iter()
-            .find(|(c, v, _, _)| c == cid && v == vid)
-            .map(|(_, v, label, cname)| format!("{label} ({cname} / ID: {v})"))
-            .or_else(|| Some(format!("{cid} / {vid}"))),
-        (None, Some(vid)) => tts_voices
-            .iter()
-            .find(|(_, v, _, _)| v == vid)
-            .map(|(_, v, label, cname)| format!("{label} ({cname} / ID: {v})"))
-            .or_else(|| Some(vid.to_owned())),
-        (Some(cid), None) => Some(cid.to_owned()),
-    }
-}
-
-fn parse_finite_f32(draft: &Entity<Draft>, cx: &gpui::App) -> Option<f32> {
-    draft
-        .read(cx)
-        .text()
-        .trim()
-        .parse::<f32>()
-        .ok()
-        .filter(|v| v.is_finite())
-}
-
-fn non_empty_trimmed(draft: &Entity<Draft>, cx: &gpui::App) -> Option<String> {
-    let s = draft.read(cx).text().trim().to_owned();
-    (!s.is_empty()).then_some(s)
-}
-
-fn render_voice_header_row(
+pub(super) fn render_voice_header_row(
     id: &str,
     voice_checking: bool,
     ctx: &EditorContext<'_>,
