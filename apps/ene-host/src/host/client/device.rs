@@ -264,7 +264,11 @@ pub(crate) fn accept(
             ));
         }
         Some(computer::prepare(
-            world,
+            computer::ComputerState {
+                store: world.resource::<Store>(),
+                hub: world.resource::<DeviceHub>(),
+                computer: world.resource::<computer::ComputerUse>(),
+            },
             work,
             &binding.client_id,
             run,

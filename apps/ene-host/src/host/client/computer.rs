@@ -79,19 +79,30 @@ pub(super) fn active(store: &Store, hub: &DeviceHub, pending: &Pending) -> bool 
             })
 }
 
+/// The state `prepare` reads, borrowed from the world by the caller.
+pub(super) struct ComputerState<'a> {
+    pub(super) store: &'a Store,
+    pub(super) hub: &'a DeviceHub,
+    pub(super) computer: &'a ComputerUse,
+}
+
 pub(super) fn prepare(
-    world: &World,
+    state: ComputerState<'_>,
     work: &WorkAgent,
     client: &str,
     run: &str,
     input: &Value,
 ) -> Result<Pending> {
+    let ComputerState {
+        store,
+        hub,
+        computer,
+    } = state;
     let unavailable = || {
         HostError::Conflict(
             ("Computer Use requires a live device bound to this running work session").into(),
         )
     };
-    let hub = world.resource::<DeviceHub>();
     let subscription = hub.subscription(client).ok_or_else(unavailable)?;
     let action = input["action"].as_str().unwrap_or_default();
     if !matches!(
@@ -107,10 +118,9 @@ pub(super) fn prepare(
         work: work.work_id.clone(),
         screenshot: action == "screenshot",
     };
-    if work.run_id != run || !active(world.resource::<Store>(), hub, &pending) {
+    if work.run_id != run || !active(store, hub, &pending) {
         return Err(unavailable());
     }
-    let computer = world.resource::<ComputerUse>();
     if computer
         .operations
         .values()

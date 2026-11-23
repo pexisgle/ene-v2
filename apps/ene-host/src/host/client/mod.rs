@@ -410,7 +410,10 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
             .resource_mut::<Perception>()
             .events
             .remove(&request.companion_id);
-        super::eyes::clear(world, &request.companion_id);
+        super::eyes::clear(
+            &mut world.resource_mut::<super::eyes::Eyes>(),
+            &request.companion_id,
+        );
         // The old client keeps its stream but is no longer the active one.
         if let Some(old) = store.client_repo().client(&old_client)? {
             let hub = world.resource::<DeviceHub>();
@@ -467,7 +470,7 @@ pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) ->
             return Ok(());
         }
         for companion_id in targets {
-            super::eyes::report(world, companion_id, event.clone())?;
+            super::eyes::report_with(world, companion_id, event.clone())?;
         }
         return Ok(());
     }

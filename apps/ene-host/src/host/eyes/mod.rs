@@ -278,18 +278,20 @@ impl Session {
     }
 }
 
-pub(crate) fn clear(world: &mut World, companion: &str) {
-    if let Some(mut eyes) = world.get_resource_mut::<Eyes>() {
-        eyes.sessions.remove(companion);
-    }
+pub(crate) fn clear(eyes: &mut Eyes, companion: &str) {
+    eyes.sessions.remove(companion);
 }
 
-pub(crate) fn report(
+/// Applies a perception event to `companion`.
+///
+/// The three maps this touches are fetched here; the actual event handling in
+/// [`apply_report`] takes them explicitly so it can be tested without a world.
+pub(crate) fn report_with(
     world: &mut World,
     companion: String,
     event: w::PerceptionEvent,
 ) -> Result<()> {
-    use w::perception_event::Event;
+    // A stream the activating client no longer owns carries nothing to apply.
     if world
         .resource::<DeviceHub>()
         .subscription(&event.client_id)
@@ -298,26 +300,60 @@ pub(crate) fn report(
     {
         return Ok(());
     }
+    let mut eyes = std::mem::take(&mut *world.resource_mut::<Eyes>());
+    let mut perception = std::mem::take(&mut *world.resource_mut::<Perception>());
+    let mut notifier = world.remove_resource::<Notifier>();
+    let outcome = apply_report(
+        &mut eyes,
+        &mut perception,
+        notifier.as_mut(),
+        &companion,
+        event,
+    );
+    *world.resource_mut::<Eyes>() = eyes;
+    *world.resource_mut::<Perception>() = perception;
+    if let Some(notifier) = notifier {
+        world.insert_resource(notifier);
+    }
+    outcome
+}
+
+/// The event handling itself: pure over the three maps it is given.
+fn apply_report(
+    eyes: &mut Eyes,
+    perception: &mut Perception,
+    notifier: Option<&mut Notifier>,
+    companion: &str,
+    event: w::PerceptionEvent,
+) -> Result<()> {
+    let Some(notifier) = notifier else {
+        return Ok(());
+    };
     let now = Instant::now();
     let Some(event_type) = event.event else {
         return Ok(());
     };
-    if let Event::Enabled(enabled) = event_type {
+    if let w::perception_event::Event::Enabled(enabled) = event_type {
         handle_enabled_event(
-            world,
-            &companion,
-            event.client_id,
-            event.subscription_id,
-            enabled,
-            now,
+            eyes,
+            perception,
+            notifier,
+            EnabledTarget {
+                companion,
+                stream: StreamId {
+                    client: event.client_id,
+                    subscription: event.subscription_id,
+                },
+                enabled,
+                now,
+            },
         );
         return Ok(());
     }
     let outcome = {
-        let mut eyes = world.resource_mut::<Eyes>();
         let Some(session) = eyes
             .sessions
-            .get_mut(&companion)
+            .get_mut(companion)
             .filter(|s| s.subscription == event.subscription_id)
         else {
             return Ok(());
@@ -329,15 +365,15 @@ pub(crate) fn report(
         SessionOutcome::Ignore => {}
         SessionOutcome::WatchMatched(transition) => {
             diagnostic(
-                world,
-                &companion,
+                notifier,
+                companion,
                 "watch_matched",
                 json!({"transition": transition}),
             );
         }
         SessionOutcome::Diagnostic(diag) => {
             if let Some((action, detail)) = diag {
-                diagnostic(world, &companion, action, detail);
+                diagnostic(notifier, companion, action, detail);
             }
         }
     }
@@ -350,16 +386,37 @@ enum SessionOutcome {
     Diagnostic(Option<(&'static str, Value)>),
 }
 
-fn handle_enabled_event(
-    world: &mut World,
-    companion: &str,
-    client_id: String,
-    subscription_id: String,
+/// The identity of the stream an enable/disable event arrived on.
+struct StreamId {
+    client: String,
+    subscription: String,
+}
+
+/// What `handle_enabled_event` mutates besides the two maps.
+struct EnabledTarget<'a> {
+    companion: &'a str,
+    stream: StreamId,
     enabled: bool,
     now: Instant,
+}
+
+fn handle_enabled_event(
+    eyes: &mut Eyes,
+    perception: &mut Perception,
+    notifier: &mut Notifier,
+    target: EnabledTarget<'_>,
 ) {
+    let EnabledTarget {
+        companion,
+        stream,
+        enabled,
+        now,
+    } = target;
+    let StreamId {
+        client: client_id,
+        subscription: subscription_id,
+    } = stream;
     let diag_action = {
-        let mut eyes = world.resource_mut::<Eyes>();
         let same_stream = eyes
             .sessions
             .get(companion)
@@ -385,10 +442,10 @@ fn handle_enabled_event(
         }
     };
     if let Some(action) = diag_action {
-        diagnostic(world, companion, action, json!({}));
+        diagnostic(notifier, companion, action, json!({}));
     }
     if enabled {
-        world.resource_mut::<Perception>().events.remove(companion);
+        perception.events.remove(companion);
     }
 }
 
@@ -519,10 +576,17 @@ fn record_avatar_interaction(
     ))
 }
 
-fn diagnostic(world: &mut World, companion: &str, action: &str, detail: Value) {
-    world
-        .resource_mut::<Notifier>()
-        .diagnostic(companion, "eyes", action, detail);
+/// Runs `with` against the world's notifier. Callers that already hold other
+/// world state cannot borrow it in place, so it is temporarily removed.
+fn with_notifier<R>(world: &mut World, with: impl FnOnce(&mut Notifier) -> R) -> Option<R> {
+    let mut notifier = world.remove_resource::<Notifier>()?;
+    let result = with(&mut notifier);
+    world.insert_resource(notifier);
+    Some(result)
+}
+
+fn diagnostic(notifier: &mut Notifier, companion: &str, action: &str, detail: Value) {
+    notifier.diagnostic(companion, "eyes", action, detail);
 }
 
 fn window_data(window: &w::ActiveWindowChanged) -> Value {
@@ -596,15 +660,17 @@ pub(crate) fn poll(world: &mut World) {
                     ("image", None) => "no_frame",
                     _ => "model_text_only",
                 };
-                diagnostic(
-                    world,
-                    companion_id,
-                    "evaluated",
-                    json!({
-                        "image": frame_id.is_some(), "input": input, "frame_id": frame_id,
-                        "decision": decision, "summary": summary,
-                    }),
-                );
+                with_notifier(world, |notifier| {
+                    diagnostic(
+                        notifier,
+                        companion_id,
+                        "evaluated",
+                        json!({
+                            "image": frame_id.is_some(), "input": input, "frame_id": frame_id,
+                            "decision": decision, "summary": summary,
+                        }),
+                    );
+                });
                 if result.screen.is_some() {
                     session.last_evaluated = result.screen;
                 }
@@ -667,18 +733,20 @@ fn deliver(
         DeliveryMode::Queue,
         author,
     ) {
-        diagnostic(
-            world,
-            companion,
-            "delivered",
-            json!({
-                "watch": reaction.kind == ReportKind::Watch,
-                "important": reaction.kind.important(),
-                "heartbeat": reaction.kind == ReportKind::Heartbeat,
-                "report_id": id.0,
-                "summary": reaction.summary
-            }),
-        );
+        with_notifier(world, |notifier| {
+            diagnostic(
+                notifier,
+                companion,
+                "delivered",
+                json!({
+                    "watch": reaction.kind == ReportKind::Watch,
+                    "important": reaction.kind.important(),
+                    "heartbeat": reaction.kind == ReportKind::Heartbeat,
+                    "report_id": id.0,
+                    "summary": reaction.summary
+                }),
+            );
+        });
         session.last_delivery = now;
         match reaction.kind {
             ReportKind::Automatic => session.last_automatic = Some((now, reaction.summary.clone())),
