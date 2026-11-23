@@ -499,19 +499,26 @@ impl Harness {
         let secret =
             crate::host::model::connection_secret(&connection, Some(&credentials), &self.providers)
                 .unwrap();
-        let grant = Grant::new(self.running.provider(), secret);
+        let role = self.running.provider().unwrap();
+        let grant = Grant::new(&role.configuration, secret);
         let recording = Arc::new(Recording {
             inner: grant,
             seen: Arc::clone(&self.seen),
         });
         let broker = http_broker(recording as Arc<dyn HttpGrants>).unwrap();
         let context = crate::host::providers::ProviderInvocationContext::with_broker(
-            &self.running,
+            role,
             &connection,
             &self.providers,
             broker,
         );
-        plugin_completion(Arc::clone(&self.running), context, model.into(), false)
+        plugin_completion(
+            Arc::clone(&self.running),
+            role,
+            context,
+            model.into(),
+            false,
+        )
     }
 
     fn seen(&self) -> Vec<HeaderMap> {

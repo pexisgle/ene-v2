@@ -28,7 +28,9 @@ pub(crate) struct EmbedPayload {
 /// The embedding wire of one provider plugin.
 #[derive(Clone)]
 pub(crate) struct PluginEmbedding {
-    provider: Arc<Running>,
+    /// The vendor this embedding model files under. Held rather than read back
+    /// from `provider`, whose role is optional for the harness case.
+    vendor: String,
     model: String,
     dimensions: usize,
 }
@@ -36,17 +38,19 @@ pub(crate) struct PluginEmbedding {
 /// A plugin-backed embedding model, erased to rig's operation.
 pub(crate) fn embedding(
     provider: Arc<Running>,
+    vendor: String,
     context: ProviderInvocationContext,
     model: String,
     dimensions: usize,
 ) -> DynModel<EmbeddingOp> {
     let wire = PluginEmbedding {
-        provider: Arc::clone(&provider),
+        vendor: vendor.clone(),
         model: model.clone(),
         dimensions,
     };
     let transport = PluginTransport {
         provider,
+        vendor,
         context,
         model,
     };
@@ -62,7 +66,7 @@ impl Wire for PluginEmbedding {
     type Reassembler = Unreassembled;
 
     fn describe(&self) -> Descriptor<'_> {
-        Descriptor::new(self.provider.provider().id.as_str()).model(self.model.as_str())
+        Descriptor::new(self.vendor.as_str()).model(self.model.as_str())
     }
 
     fn encode(&self, request: Vec<String>, _mode: Mode) -> Result<EmbedPayload, EncodeError> {
@@ -81,6 +85,8 @@ impl Wire for PluginEmbedding {
 #[derive(Clone)]
 pub(crate) struct PluginTransport {
     provider: Arc<Running>,
+    /// The vendor the reply is filed under.
+    vendor: String,
     context: ProviderInvocationContext,
     model: String,
 }
@@ -88,6 +94,7 @@ pub(crate) struct PluginTransport {
 impl Transport<PluginEmbedding> for PluginTransport {
     fn send(&self, payload: EmbedPayload, _exchange: Exchange) -> Opening<WireFrame> {
         let provider = Arc::clone(&self.provider);
+        let vendor = self.vendor.clone();
         let context = self.context.clone();
         let model = self.model.clone();
         Opening::new(async move {
@@ -116,7 +123,7 @@ impl Transport<PluginEmbedding> for PluginTransport {
             let response = EmbeddingResponse {
                 embeddings,
                 usage: Default::default(),
-                provider: provider.provider().id.clone(),
+                provider: vendor,
                 model: None,
                 response_id: None,
                 provider_request_id: None,

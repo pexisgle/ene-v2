@@ -54,12 +54,13 @@ const HOST_OWNED: &[&str] = &[
 /// that wire, not the Responses API an OpenAI config defaults to.
 pub(crate) fn completion(
     provider: Arc<Running>,
+    role: &crate::host::providers::ProviderRole,
     context: ProviderInvocationContext,
     model: String,
     image_input: bool,
 ) -> DynModel<Completion> {
     let endpoint = context.endpoint.clone();
-    let provider_id = provider.provider_id();
+    let provider_id = role.id;
     // An unlisted model is assumed to call tools; the host cannot prove
     // otherwise without a probe. Its limits stay unknown rather than guessed.
     let mut spec = ModelSpec::new(provider_id, model.clone()).with_tools(true);

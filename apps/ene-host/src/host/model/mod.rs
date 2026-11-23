@@ -317,8 +317,12 @@ pub(crate) fn connect_assignment(
             providers,
             Some(super::net::MODEL_TIMEOUT),
         )?;
+        let role = running.provider().ok_or_else(|| {
+            HostError::Unavailable(("the extension serves no provider to call").into())
+        })?;
         return Ok(plugin_completion(
-            running,
+            Arc::clone(&running),
+            role,
             context,
             assignment.model_id.clone(),
             catalog

@@ -292,20 +292,34 @@ fn load_one(path: &Path) -> Result<(String, Loaded), HostError> {
     ))
 }
 
+/// What a running provider-plugin instance is answering as.
+pub(crate) enum RunningRole {
+    /// The extension serves one provider; both values come from its manifest.
+    /// Boxed because the configuration dwarfs the unit variant.
+    Provider(Box<ProviderRole>),
+    /// A tool-only extension: it has no provider configuration at all.
+    Harness,
+}
+
+/// The provider metadata a provider extension declares once, in its manifest.
+pub(crate) struct ProviderRole {
+    pub(crate) configuration: ProviderConfiguration,
+    /// The catalog vendor this provider's models are filed under. A plugin
+    /// serves a provider rig does not ship, so it is declared once here and
+    /// every model spec the host builds for it names it.
+    pub(crate) id: ProviderId,
+}
+
 /// One running provider: its loaded package and the instance that answers.
 ///
 /// An instance is not `Sync`, so calls serialize behind a mutex. One provider
 /// serves one connection, and a call is short, so this is not a bottleneck.
 ///
-/// The provider configuration and its catalogue vendor belong to a provider
-/// extension alone; the harness extension serves none, so both stay absent
-/// there and the accessors answer only a provider's callers.
 pub(crate) struct Running {
-    provider: Option<ProviderConfiguration>,
-    /// The catalog vendor this provider's models are filed under. A plugin
-    /// serves a provider rig does not ship, so it is declared once here and
-    /// every model spec the host builds for it names it.
-    provider_id: Option<ProviderId>,
+    /// Present only when the extension serves a provider. One field rather
+    /// than two `Option`s, so "has a configuration but no vendor name" cannot
+    /// be constructed.
+    role: RunningRole,
     instance: tokio::sync::Mutex<Option<Instance>>,
     package: Package,
     entrypoint: String,
@@ -322,14 +336,14 @@ impl Running {
         loaded: Arc<Loaded>,
         extension: Extension,
     ) -> Result<Self, HostError> {
-        let (entrypoint, provider, provider_id) = if !extension.serves_provider() {
+        let (entrypoint, role) = if !extension.serves_provider() {
             let entrypoint = loaded.extension_entrypoint(extension).ok_or_else(|| {
                 HostError::Unavailable(format!(
                     "the plugin `{}` serves no {extension:?} entrypoint",
                     loaded.package.manifest.id
                 ))
             })?;
-            (entrypoint.to_owned(), None, None)
+            (entrypoint.to_owned(), RunningRole::Harness)
         } else {
             let (entrypoint, provider) = loaded.entry(extension).ok_or_else(|| {
                 HostError::Unavailable(format!(
@@ -345,8 +359,10 @@ impl Running {
             })?;
             (
                 entrypoint.to_owned(),
-                Some(provider.clone()),
-                Some(provider_id),
+                RunningRole::Provider(Box::new(ProviderRole {
+                    configuration: provider.clone(),
+                    id: provider_id,
+                })),
             )
         };
         let package = loaded.package.clone();
@@ -357,8 +373,7 @@ impl Running {
             .await
             .map_err(|error| HostError::Unavailable(format!("plugin load: {error}")))?;
         Ok(Self {
-            provider,
-            provider_id,
+            role,
             instance: tokio::sync::Mutex::new(Some(instance)),
             package,
             entrypoint,
@@ -433,22 +448,16 @@ impl Running {
             .map_err(|error| HostError::Unavailable(format!("plugin reload: {error}")))
     }
 
-    /// The provider configuration this instance answers under. Only a
-    /// provider extension has one; a harness caller never asks.
-    // Provider extensions always populate `provider` in `Running::start`; remove when non-provider handles are split.
-    #[allow(clippy::expect_used)]
-    pub(crate) fn provider(&self) -> &ProviderConfiguration {
-        self.provider
-            .as_ref()
-            .expect("a provider extension serves a configuration")
-    }
-
-    /// The catalog vendor this provider's models are filed under.
-    // Provider extensions always populate `provider_id` in `Running::start`; remove when non-provider handles are split.
-    #[allow(clippy::expect_used)]
-    pub(crate) fn provider_id(&self) -> ProviderId {
-        self.provider_id
-            .expect("a provider extension serves a vendor name")
+    /// The provider this instance answers under.
+    ///
+    /// `None` is the harness case: a tool-only extension has no configuration
+    /// and no vendor name, so callers on a provider path turn that into their
+    /// own error instead of the accessor panicking.
+    pub(crate) fn provider(&self) -> Option<&ProviderRole> {
+        match &self.role {
+            RunningRole::Provider(role) => Some(role),
+            RunningRole::Harness => None,
+        }
     }
 }
 

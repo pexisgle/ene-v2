@@ -524,8 +524,11 @@ async fn p08_handles_remain_broker_scoped_after_calls_and_provider_cancellation(
     );
     let providers = providers(root.path(), Extension::Llm, &body, &upstream.base).await;
     let running = providers.running("openrouter", Extension::Llm).unwrap();
+    let role = running
+        .provider()
+        .expect("the fixture starts a provider extension");
     let broker = http_broker(Arc::new(grant_for(
-        running.provider(),
+        &role.configuration,
         &connection,
         None,
         &providers,

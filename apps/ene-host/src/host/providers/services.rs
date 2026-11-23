@@ -182,7 +182,12 @@ impl ProviderInvocationContext {
         providers: &super::Providers,
         deadline: Option<std::time::Duration>,
     ) -> crate::host::error::Result<Self> {
-        let grant = super::Grant::new(running.provider(), secret);
+        let role = running.provider().ok_or_else(|| {
+            crate::host::error::HostError::Unavailable(
+                ("the extension serves no provider to call").into(),
+            )
+        })?;
+        let grant = super::Grant::new(&role.configuration, secret);
         let broker = match deadline {
             Some(deadline) => http_broker_with_deadline(Arc::new(grant), deadline),
             None => http_broker(Arc::new(grant)),
@@ -190,21 +195,24 @@ impl ProviderInvocationContext {
         .map_err(|error| {
             crate::host::error::HostError::Unavailable(format!("plugin HTTP transport: {error}"))
         })?;
-        Ok(Self::with_broker(running, connection, providers, broker))
+        Ok(Self::with_broker(role, connection, providers, broker))
     }
 
     /// Builds an invocation context using a caller-provided broker.
+    ///
+    /// It takes the provider role rather than `Running`, so the harness case
+    /// cannot reach it.
     pub(crate) fn with_broker(
-        running: &super::Running,
+        role: &super::ProviderRole,
         connection: &crate::host::settings::Connection,
         providers: &super::Providers,
         broker: Arc<HttpBroker>,
     ) -> Self {
         let endpoint = crate::host::settings::endpoint_of(connection, providers)
-            .unwrap_or_else(|| running.provider().endpoint.clone());
-        let options = merge_options(&running.provider().options, &connection.endpoint().options);
+            .unwrap_or_else(|| role.configuration.endpoint.clone());
+        let options = merge_options(&role.configuration.options, &connection.endpoint().options);
         Self {
-            provider_id: running.provider().id.clone(),
+            provider_id: role.id.to_string(),
             endpoint,
             options,
             broker,

@@ -159,8 +159,16 @@ fn connect_with_ndims(params: ConnectParams<'_>) -> Result<DynModel<Embedding>> 
             providers,
             Some(EMBED_TIMEOUT),
         )?;
+        let vendor = running
+            .provider()
+            .ok_or_else(|| {
+                HostError::Unavailable(("the extension serves no provider to call").into())
+            })?
+            .id
+            .to_string();
         return Ok(super::plugin::embedding(
             running,
+            vendor,
             context,
             model_id.to_owned(),
             plugin_ndims,
