@@ -30,6 +30,10 @@ pub(super) struct DeviceBridge {
     pub(super) client_plugins: Arc<crate::plugins::ClientPlugins>,
     /// Long-lived workspace operations so settings updates/resyncs never abort them.
     pub(super) work: tokio::task::JoinSet<w::DeviceOperationResult>,
+    /// Fire-and-forget work whose completion nobody waits on but which must not
+    /// outlive the session: draining it on shutdown is the whole point. The
+    /// mutex is held only for the spawn call, never across an await.
+    pub(super) background: std::sync::Mutex<tokio::task::JoinSet<()>>,
     /// Per-character debounce timestamp for avatar click/interaction perception (`F21`).
     pub(super) last_avatar_interaction: HashMap<String, std::time::Instant>,
 }
@@ -50,6 +54,7 @@ impl DeviceBridge {
             workspace,
             client_plugins,
             work: tokio::task::JoinSet::new(),
+            background: std::sync::Mutex::new(tokio::task::JoinSet::new()),
             last_avatar_interaction: HashMap::new(),
         }
     }
@@ -182,9 +187,12 @@ impl DeviceBridge {
             ))),
             ..Default::default()
         };
-        tokio::spawn(async move {
-            let _sampled = host.client.report_perception(event).await;
-        });
+        // Tracked so shutdown can wait for the last report to land.
+        if let Ok(mut background) = self.background.lock() {
+            background.spawn(async move {
+                let _sampled = host.client.report_perception(event).await;
+            });
+        }
     }
 
     pub(super) fn set_eyes_enabled(&mut self, enabled: bool, updates: &UnboundedSender<Update>) {

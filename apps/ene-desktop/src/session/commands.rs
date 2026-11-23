@@ -632,7 +632,10 @@ impl Session {
         let client_id = self.transport.options.id.clone();
         // Synthesis is a network call; awaiting it here would stall the
         // microphone and the playback this loop owns.
-        tokio::spawn(async move {
+        let Ok(mut background) = self.devices.background.lock() else {
+            return;
+        };
+        background.spawn(async move {
             let update = match host
                 .voice
                 .speak(w::SpeakRequest {

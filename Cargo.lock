@@ -4067,6 +4067,7 @@ version = "0.1.8"
 dependencies = [
  "ene-catalog",
  "ene-rpc",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

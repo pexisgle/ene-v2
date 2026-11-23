@@ -17,3 +17,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 url.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+# Property tests for the reducer, where the interesting inputs are sequences
+# of updates rather than single values.
+proptest = "1"

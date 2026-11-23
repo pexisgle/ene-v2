@@ -653,3 +653,79 @@ fn upsert_activation(activations: &mut Vec<Activation>, activation: Activation) 
         None => activations.push(activation),
     }
 }
+
+#[cfg(test)]
+mod reducer_property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn any_id() -> impl Strategy<Value = String> {
+        "[a-z0-9]{1,8}".prop_map(|s| s)
+    }
+
+    fn any_message() -> impl Strategy<Value = Message> {
+        (any_id(), "[ -~]{0,32}", any::<u64>()).prop_map(|(id, text, sequence)| Message {
+            id,
+            text,
+            sequence,
+            ..Default::default()
+        })
+    }
+
+    proptest! {
+        /// A message merged twice appears once. Notifications can be replayed
+        /// after a resubscribe, so duplicates in the list would be visible.
+        #[test]
+        fn merging_a_message_twice_yields_one_row(message in any_message()) {
+            let mut messages = Vec::new();
+            merge_message(&mut messages, message.clone());
+            merge_message(&mut messages, message);
+            prop_assert_eq!(messages.len(), 1);
+        }
+
+        /// Merging a sequence never loses an id: every distinct id that was
+        /// ever merged is present exactly once at the end.
+        #[test]
+        fn merging_keeps_each_id_exactly_once(batch in prop::collection::vec(any_message(), 0..12)) {
+            let mut messages = Vec::new();
+            for message in &batch {
+                merge_message(&mut messages, message.clone());
+            }
+            let mut ids: Vec<&String> = messages.iter().map(|m| &m.id).collect();
+            let total = ids.len();
+            ids.sort();
+            ids.dedup();
+            prop_assert_eq!(ids.len(), total, "an id appeared twice");
+
+            for message in &batch {
+                prop_assert!(
+                    messages.iter().any(|m| m.id == message.id),
+                    "{} vanished",
+                    message.id
+                );
+            }
+        }
+
+        /// Merging is order-independent for the final id set: the same messages
+        /// in a different order produce the same set, so a reordered replay
+        /// cannot change what the window shows.
+        #[test]
+        fn the_resulting_id_set_does_not_depend_on_order(
+            batch in prop::collection::vec(any_message(), 0..8),
+        ) {
+            let mut forward = Vec::new();
+            for message in &batch {
+                merge_message(&mut forward, message.clone());
+            }
+            let mut backward = Vec::new();
+            for message in batch.iter().rev() {
+                merge_message(&mut backward, message.clone());
+            }
+            let mut a: Vec<&String> = forward.iter().map(|m| &m.id).collect();
+            let mut b: Vec<&String> = backward.iter().map(|m| &m.id).collect();
+            a.sort();
+            b.sort();
+            prop_assert_eq!(a, b);
+        }
+    }
+}
