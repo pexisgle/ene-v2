@@ -49,6 +49,28 @@ use tokio::sync::mpsc;
 
 type DriverOutcome = std::result::Result<Value, HostError>;
 
+/// The one ECS operation the hand needs: despawning a held tool-call entity.
+///
+/// Isolating it keeps the hand's session bookkeeping independent of `World`;
+/// the host supplies the real implementation, tests can supply a stub.
+pub(crate) struct CallDespawner<'w> {
+    world: &'w mut World,
+}
+
+impl<'w> CallDespawner<'w> {
+    pub(crate) fn new(world: &'w mut World) -> Self {
+        Self { world }
+    }
+
+    /// Despawns `call` when it is still alive. A stale entity is not an error:
+    /// permission cleanup may already have removed it.
+    fn despawn(&mut self, call: Entity) {
+        if self.world.get_entity(call).is_ok() {
+            self.world.entity_mut(call).despawn();
+        }
+    }
+}
+
 /// The plugin hands this host is running, keyed by the adapter each holds.
 /// One hand per adapter, for as long as the work session it serves is open.
 #[derive(Resource, Default)]
@@ -112,29 +134,37 @@ pub(crate) fn selected(
     Some((adapter, running))
 }
 
+/// The session, run and instruction an invocation is started for.
+pub(crate) struct RunStart<'a> {
+    pub(crate) session: &'a WorkSession,
+    pub(crate) run: &'a Run,
+    pub(crate) instruction: &'a str,
+}
+
 /// Starts a run on the plugin hand: claims the adapter for the session and
 /// dispatches the first turn of the session as `Start`, or a follow-up as
 /// `Prompt` on the session that already holds the adapter.
 pub(crate) fn start_run(
     world: &mut World,
-    session: &WorkSession,
-    run: &Run,
-    instruction: &str,
+    hands: &mut Hands,
+    start: RunStart<'_>,
     adapter: String,
     running: Arc<Running>,
 ) -> Result<()> {
-    let claimed = {
-        let hands = world.resource::<Hands>();
-        if let Some(owner) = hands.by_adapter.get(&adapter)
-            && owner.work_id != session.id
-        {
-            return Err(HostError::Unavailable(format!(
-                "the harness plugin `{adapter}` is already serving work session `{}`",
-                owner.work_id
-            )));
-        }
-        hands.by_adapter.contains_key(&adapter)
-    };
+    let RunStart {
+        session,
+        run,
+        instruction,
+    } = start;
+    if let Some(owner) = hands.by_adapter.get(&adapter)
+        && owner.work_id != session.id
+    {
+        return Err(HostError::Unavailable(format!(
+            "the harness plugin `{adapter}` is already serving work session `{}`",
+            owner.work_id
+        )));
+    }
+    let claimed = hands.by_adapter.contains_key(&adapter);
     let input = if claimed {
         HarnessInput::Prompt {
             prompt: prompt_of(instruction),
@@ -145,7 +175,7 @@ pub(crate) fn start_run(
             cwd: cwd(),
         }
     };
-    world.resource_mut::<Hands>().by_adapter.insert(
+    hands.by_adapter.insert(
         adapter.clone(),
         Hand {
             work_id: session.id.clone(),
@@ -161,13 +191,7 @@ pub(crate) fn start_run(
     super::note_activity(&mut world.resource_mut(), &run.run_id);
     let runtime = world.resource::<HostRuntime>().0.clone();
     let wake = world.get_resource::<rig_ecs::tasks::Wake>().cloned();
-    dispatch_to_hand(
-        &mut world.resource_mut::<Hands>(),
-        &runtime,
-        wake.as_ref(),
-        &adapter,
-        input,
-    );
+    dispatch_to_hand(hands, &runtime, wake.as_ref(), &adapter, input);
     Ok(())
 }
 
@@ -188,12 +212,18 @@ pub(crate) fn steer(hands: &mut Hands, work_id: &str, text: &str) {
 /// Stops the hand's turn. A run mid-invocation is killed outright, which also
 /// ends the session (the next request reloads a fresh guest); a run parked on
 /// a permission request is told `Cancel` and keeps its session.
-pub(crate) fn stop(world: &mut World, work_id: &str) {
-    let Some(adapter) = adapter_of(world.resource::<Hands>(), work_id) else {
+pub(crate) fn stop(
+    hands: &mut Hands,
+    calls: &mut CallDespawner<'_>,
+    runtime: &tokio::runtime::Handle,
+    wake: Option<&rig_ecs::tasks::Wake>,
+    work_id: &str,
+) {
+    let Some(adapter) = adapter_of(hands, work_id) else {
         return;
     };
     let (running, in_flight, parked) = {
-        let Some(hand) = world.resource::<Hands>().by_adapter.get(&adapter) else {
+        let Some(hand) = hands.by_adapter.get(&adapter) else {
             return;
         };
         (
@@ -205,7 +235,7 @@ pub(crate) fn stop(world: &mut World, work_id: &str) {
         )
     };
     if in_flight {
-        edit_hand(&mut world.resource_mut::<Hands>(), work_id, |hand| {
+        edit_hand(hands, work_id, |hand| {
             // Dropping the driver aborts the call, which leaves the instance
             // without its guest. The next request reloads one whose session
             // state is empty, so the hand's claim on the adapter ends here.
@@ -213,28 +243,20 @@ pub(crate) fn stop(world: &mut World, work_id: &str) {
             hand.buffer.clear_message();
             hand.parked.clear();
         });
-        drop_pending(world, &adapter);
+        drop_pending(calls, hands, &adapter);
         running.note_cancelled();
-        world.resource_mut::<Hands>().by_adapter.remove(&adapter);
+        hands.by_adapter.remove(&adapter);
         return;
     }
     // The turn is parked on a permission request (or already drained): tell
     // the guest its turn was cancelled, and let the approval row expire.
     if parked {
-        edit_hand(&mut world.resource_mut::<Hands>(), work_id, |hand| {
+        edit_hand(hands, work_id, |hand| {
             hand.buffer.clear_message();
             hand.parked.clear();
         });
-        drop_pending(world, &adapter);
-        let runtime = world.resource::<HostRuntime>().0.clone();
-        let wake = world.get_resource::<rig_ecs::tasks::Wake>().cloned();
-        dispatch_to_hand(
-            &mut world.resource_mut::<Hands>(),
-            &runtime,
-            wake.as_ref(),
-            &adapter,
-            HarnessInput::Cancel,
-        );
+        drop_pending(calls, hands, &adapter);
+        dispatch_to_hand(hands, runtime, wake, &adapter, HarnessInput::Cancel);
     }
 }
 
@@ -242,22 +264,18 @@ pub(crate) fn stop(world: &mut World, work_id: &str) {
 /// and the guest keeps whatever state it kept, as the concurrency bound above
 /// documents. An invocation still in flight dies with the hand, so the next
 /// request reloads a fresh guest.
-pub(crate) fn release(world: &mut World, work_id: &str) {
-    let Some(adapter) = adapter_of(world.resource::<Hands>(), work_id) else {
+pub(crate) fn release(calls: &mut CallDespawner<'_>, hands: &mut Hands, work_id: &str) {
+    let Some(adapter) = adapter_of(hands, work_id) else {
         return;
     };
     // A parked approval, if any, is a hold on a call of the session being
     // closed; dropping the call lets the orphan path expire the row.
-    drop_pending(world, &adapter);
-    let in_flight = world
-        .resource::<Hands>()
-        .by_adapter
-        .get(&adapter)
-        .is_some_and(|hand| {
-            hand.driver
-                .as_ref()
-                .is_some_and(|driver| !driver.is_finished())
-        });
+    drop_pending(calls, hands, &adapter);
+    let in_flight = hands.by_adapter.get(&adapter).is_some_and(|hand| {
+        hand.driver
+            .as_ref()
+            .is_some_and(|driver| !driver.is_finished())
+    });
     if in_flight {
         // Closing the session drops the hand, which drops the events channel
         // an in-flight call is still writing to. That call then fails and
@@ -265,11 +283,11 @@ pub(crate) fn release(world: &mut World, work_id: &str) {
         // reload one: abort the driver here and note the cancellation, the
         // same way a stop does. Leaving it to the drop would strand the
         // adapter on an unusable instance.
-        edit_hand(&mut world.resource_mut::<Hands>(), work_id, |hand| {
+        edit_hand(hands, work_id, |hand| {
             hand.driver = None;
         });
     }
-    if let Some(hand) = world.resource_mut::<Hands>().by_adapter.remove(&adapter)
+    if let Some(hand) = hands.by_adapter.remove(&adapter)
         && in_flight
     {
         hand.running.note_cancelled();
@@ -294,17 +312,14 @@ pub(crate) fn settle_restarts(world: &mut World, run: Run) {
 /// Takes the pending approval out of the hand and drops its held call, which
 /// the permission module's orphan path answers by releasing the hold and
 /// expiring the row.
-fn drop_pending(world: &mut World, adapter: &str) {
-    let call = world
-        .resource_mut::<Hands>()
+fn drop_pending(calls: &mut CallDespawner<'_>, hands: &mut Hands, adapter: &str) {
+    let call = hands
         .by_adapter
         .get_mut(adapter)
         .and_then(|hand| hand.pending.take())
         .map(|pending| pending.call);
-    if let Some(call) = call
-        && world.get_entity(call).is_ok()
-    {
-        world.entity_mut(call).despawn();
+    if let Some(call) = call {
+        calls.despawn(call);
     }
 }
 
@@ -359,14 +374,15 @@ fn dispatch_to_hand(
 /// invocation, the outcome of a finished driver, the reply to a resolved
 /// approval, and the input a finished run parked.
 pub(crate) fn collect(world: &mut World) {
-    let batches = take_events(&mut world.resource_mut::<Hands>());
+    let mut hands = std::mem::take(&mut *world.resource_mut::<Hands>());
+    let batches = take_events(&mut hands);
+    let store = world.resource::<Store>().clone();
     for (adapter, events) in batches {
         for event in events {
-            apply(world, &adapter, event);
+            apply(world, &mut hands, &store, &adapter, event);
         }
     }
-    let store = world.resource::<Store>().clone();
-    let driver_failures = take_driver_failures(&mut world.resource_mut::<Hands>(), &store);
+    let driver_failures = take_driver_failures(&mut hands, &store);
     for (run, why) in driver_failures {
         super::finish_run(
             world,
@@ -375,11 +391,10 @@ pub(crate) fn collect(world: &mut World) {
             Some(format!("作業を続けられませんでした: {why}")),
         );
     }
-    let approvals = take_resolved_approvals(&mut world.resource_mut::<Hands>(), &store);
+    let approvals = take_resolved_approvals(&mut hands, &store);
     if !approvals.is_empty() {
         let runtime = world.resource::<HostRuntime>().0.clone();
         let wake = world.get_resource::<rig_ecs::tasks::Wake>().cloned();
-        let mut hands = world.resource_mut::<Hands>();
         for (adapter, request, reply) in approvals {
             dispatch_to_hand(
                 &mut hands,
@@ -393,7 +408,8 @@ pub(crate) fn collect(world: &mut World) {
             );
         }
     }
-    let parked = take_parked_sessions(&mut world.resource_mut::<Hands>(), &store);
+    let parked = take_parked_sessions(&mut hands, &store);
+    *world.resource_mut::<Hands>() = hands;
     for (session, text) in parked {
         let work_id = session.id.clone();
         if let Err(error) = super::start_run(world, &session, &text) {
@@ -428,19 +444,23 @@ fn take_events(hands: &mut Hands) -> Vec<(String, Vec<ene_plugin::Event>)> {
     batches
 }
 
-fn apply(world: &mut World, adapter: &str, event: ene_plugin::Event) {
+fn apply(
+    world: &mut World,
+    hands: &mut Hands,
+    store: &Store,
+    adapter: &str,
+    event: ene_plugin::Event,
+) {
     let ene_plugin::Event::Harness { event } = event else {
         return;
     };
-    let Some((work_id, companion_id)) = world
-        .resource::<Hands>()
+    let Some((work_id, companion_id)) = hands
         .by_adapter
         .get(adapter)
         .map(|hand| (hand.work_id.clone(), hand.companion_id.clone()))
     else {
         return;
     };
-    let store = world.resource::<Store>().clone();
     let Ok(active) = store.work_repo().active_run(&work_id) else {
         return;
     };
@@ -449,7 +469,6 @@ fn apply(world: &mut World, adapter: &str, event: ene_plugin::Event) {
             // A non-chunk update ends whatever message was accumulating, so
             // the head reads each report as one message, not fragments.
             let effects = {
-                let mut hands = world.resource_mut::<Hands>();
                 let Some(hand) = hands.by_adapter.get_mut(adapter) else {
                     return;
                 };
@@ -486,6 +505,8 @@ fn apply(world: &mut World, adapter: &str, event: ene_plugin::Event) {
             if let Some(run) = active {
                 request_permission(
                     world,
+                    hands,
+                    store,
                     PermissionTarget {
                         adapter,
                         run: &run,
@@ -499,7 +520,6 @@ fn apply(world: &mut World, adapter: &str, event: ene_plugin::Event) {
         }
         HarnessEvent::Stop { stop_reason } => {
             let text = {
-                let mut hands = world.resource_mut::<Hands>();
                 let Some(hand) = hands.by_adapter.get_mut(adapter) else {
                     return;
                 };
@@ -530,6 +550,8 @@ struct PermissionTarget<'a> {
 /// `SubmitApproval` call and the head's `resolve_approval` all resolve it.
 fn request_permission(
     world: &mut World,
+    hands: &mut Hands,
+    store: &Store,
     target: PermissionTarget<'_>,
     tool_call: ToolCallUpdate,
     options: Vec<PermissionOption>,
@@ -541,7 +563,6 @@ fn request_permission(
         request,
     } = target;
     let (tool_name, arguments) = {
-        let mut hands = world.resource_mut::<Hands>();
         let Some(hand) = hands.by_adapter.get_mut(adapter) else {
             return;
         };
@@ -549,7 +570,6 @@ fn request_permission(
         let tool_name = hand.buffer.resolve_tool_name(&tool_call);
         (tool_name, arguments_of(&tool_call))
     };
-    let store = world.resource::<Store>().clone();
     let Ok(name) = ToolName::new(&tool_name) else {
         tracing::warn!(work = %run.work_id, "the harness named an empty tool");
         return;
@@ -587,12 +607,12 @@ fn request_permission(
             ),
         })
         .id();
-    if let Err(error) = permission::issue_hold(world, &store, approval.clone(), call) {
+    if let Err(error) = permission::issue_hold(world, store, approval.clone(), call) {
         world.entity_mut(call).despawn();
         crate::host::fail(world, error.to_string());
         return;
     }
-    if let Some(hand) = world.resource_mut::<Hands>().by_adapter.get_mut(adapter) {
+    if let Some(hand) = hands.by_adapter.get_mut(adapter) {
         hand.pending = Some(Pending {
             approval: approval_id,
             call,

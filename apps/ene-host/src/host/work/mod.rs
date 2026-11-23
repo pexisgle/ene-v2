@@ -328,7 +328,20 @@ pub(crate) fn start_run(
     // runs the session on the plugin hand; anything else keeps the rig agent.
     let failure = match hand::selected(&store, world.get_resource::<Providers>(), &companion) {
         Some((adapter, running)) => {
-            hand::start_run(world, session, &run, instruction, adapter, running).err()
+            let mut hands = std::mem::take(&mut *world.resource_mut::<hand::Hands>());
+            let outcome = hand::start_run(
+                world,
+                &mut hands,
+                hand::RunStart {
+                    session,
+                    run: &run,
+                    instruction,
+                },
+                adapter,
+                running,
+            );
+            *world.resource_mut::<hand::Hands>() = hands;
+            outcome.err()
         }
         None => {
             let agent = ensure(world, &companion, &session.id, &run.run_id, instruction);
@@ -563,7 +576,17 @@ pub(crate) fn stop_with(world: &mut World, work_id: &str, reason: Option<&str>) 
     };
     let reason = reason.unwrap_or("the user stopped the work");
     if hand::owns(world.resource::<hand::Hands>(), work_id) {
-        hand::stop(world, work_id);
+        let runtime = world
+            .resource::<crate::host::resources::HostRuntime>()
+            .0
+            .clone();
+        let wake = world.get_resource::<rig_ecs::tasks::Wake>().cloned();
+        let mut hands = std::mem::take(&mut *world.resource_mut::<hand::Hands>());
+        {
+            let mut calls = hand::CallDespawner::new(world);
+            hand::stop(&mut hands, &mut calls, &runtime, wake.as_ref(), work_id);
+        }
+        *world.resource_mut::<hand::Hands>() = hands;
     } else if let Some(agent) = agent_of(world, work_id) {
         world.trigger(StopTurn {
             entity: agent,
@@ -584,7 +607,12 @@ pub(crate) fn close(world: &mut World, work_id: &str) -> Result<()> {
     if let Ok(Some(session)) = store.work_repo().work_session(work_id) {
         notify_status(&mut world.resource_mut::<Notifier>(), &session);
     }
-    hand::release(world, work_id);
+    let mut hands = std::mem::take(&mut *world.resource_mut::<hand::Hands>());
+    {
+        let mut calls = hand::CallDespawner::new(world);
+        hand::release(&mut calls, &mut hands, work_id);
+    }
+    *world.resource_mut::<hand::Hands>() = hands;
     retire(world, work_id);
     Ok(())
 }

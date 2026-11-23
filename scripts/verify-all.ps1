@@ -23,10 +23,18 @@ $buildTmp = Join-Path $repo ".cargo-tmp"
 New-Item -ItemType Directory -Force -Path $buildTmp | Out-Null
 
 # Test binaries must be staged outside the workspace: the sandbox denies the
-# certificate-store open to processes rooted under it (see the test gate below).
-# Capture the real system temp before redirecting TMP/TEMP for sccache scratch,
-# because GetTempPath() itself reads those variables.
-$stagingRoot = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+# certificate-store open to processes whose TMP/TEMP (or cwd) is under it.
+# Capture a *system* temp before redirecting TMP/TEMP for the build scratch.
+# The inherited value may itself already point into the repo, so fall back to
+# the OS default in that case rather than staging back inside the sandbox.
+$stagingRoot = if ($env:TEMP -and -not $env:TEMP.StartsWith($repo, 'OrdinalIgnoreCase')) {
+    $env:TEMP
+} elseif ($env:LOCALAPPDATA) {
+    Join-Path $env:LOCALAPPDATA "Temp"
+} else {
+    "C:\Windows\Temp"
+}
+New-Item -ItemType Directory -Force -Path $stagingRoot | Out-Null
 $env:TMP = $buildTmp
 $env:TEMP = $buildTmp
 

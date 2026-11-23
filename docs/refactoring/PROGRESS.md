@@ -85,6 +85,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 | PR-1.4 後 | 0 | 171 | 84 | 47 | 0 |
 | PR-1.5 後 | 0 | 171 | 84 | 47 | 0 |
 | PR-2.1 後 | 0 | 171 | 84 | 47 | 0 |
+| PR-2.2 後 | 0 | 168 | 84 | 47 | 0 |
 
 > **設計書との差分（重要）**: 設計書 §3 は「本番 500 行超ファイル数 = 43」「`Resource` = 2」としているが、
 > 実測は **47** と **0** だった。
@@ -116,7 +117,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 
 ### Phase 2: `World` 脱却
 - [x] PR-2.1 `server/rpc/{chat,voice}.rs` の Resource 撤去（Rule 10: 2→0）
-- [ ] PR-2.2 `host/work/*` の World 参照解体（171→125）
+- [x] PR-2.2 `host/work/*` の World 参照解体（171→168）
 - [ ] PR-2.3 `host/mcp/supervisor.rs` 統合（→95）
 - [ ] PR-2.4 `host/client/*` + `eyes` の Gateway 化（→55）
 - [ ] PR-2.5 `host/permission/*` の PermissionService 化（→25）
@@ -164,37 +165,50 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 3. `pwsh -NoProfile -File scripts/verify-all.ps1` で現状の green を確認する。
 4. その PR を実装 → ゲート通過 → `PROGRESS.md` 更新 → コミット。
 
-## 5. 次セッションへの引き継ぎ（PR-2.2 の設計メモ）
+## 5. 次セッションへの引き継ぎ（PR-2.3 以降の設計メモ）
 
-**現状**: Phase 0・Phase 1 完了、PR-2.1 完了。`host_world_refs = 171`（未着手）。
+### PR-2.2 の結果（実測 171 → 168）
 
-**PR-2.2 で判明している構造的事実**（再調査不要）:
+計画は 171→125 を目標にしていたが、**実測は 168**。理由を記録する。
 
-- `host/work/` の `&mut World` は **2種類が混在**している。
-  1. **ただの状態コンテナ**（`World` から引く必要がない）:
-     `Hands`（`hand.rs:55`、`HashMap<String, Hand>`）、`Runs`（`mod.rs:34`、
-     `ene_work::RunTracker` の newtype）、`Receipts`（`mod.rs:53`、
-     `ene_work::WorkReceipts` の newtype）。この3つは引数注入
-     （`&mut Hands`, `&mut Runs`, `&mut Receipts`）へ置換可能。
-  2. **本物の ECS エンティティ操作**（ECS に残すべき）:
-     `World::query::<(Entity, &WorkAgent)>`（`mod.rs:71,112,129`）、
-     `world.get_mut::<WorkAgent>(entity)`（`mod.rs:94,455`）、
-     `world.get::<Conversation>(entity)`（`mod.rs:421`）、
-     `world.entity_mut(call).despawn()`（`hand.rs:307`）。
-- 外部呼び出し元は `server/rpc/work.rs` の `request!` マクロ
-  （`work::start` / `work::send` / `work::stop` / `work::close`）と
-  `host/agent/mod.rs:722` の `work::settle_run` の **5箇所のみ**。
+Rule 6 は「`&mut World` / `&World` を**引数に取る**関数」を数える。したがって
+`World` を取る関数の引数を増やしても減らない。減らすには
+「`World` を取る関数を廃止する」しかない。PR-2.2 で実際に廃止できたのは:
 
-**PR-2.2 の推奨アプローチ**:
-`WorkOrchestrator` を新設し、`Hands`/`Runs`/`Receipts` を所有させる。
-`World` を取る公開関数は「orchestrator + `&mut World`（ECS操作のみ）」を
-受け取る形へ変える。`request!` マクロ側は PR-3.1 で
-`ene-host-core` を入れるときにまとめて変わるため、PR-2.2 では
-マクロの呼び出しシグネチャを壊さない範囲で内部実装を差し替えるのが安全。
+| 関数 | 旧 | 新 |
+| :--- | :--- | :--- |
+| `hand::stop` | `(world, work_id)` | `(hands, calls, runtime, wake, work_id)` |
+| `hand::release` | `(world, work_id)` | `(calls, hands, work_id)` |
+| `hand::drop_pending` | `(world, hands, adapter)` | `(calls, hands, adapter)` |
 
-**注意**: `World` を完全に 0 にする（PR-2.6 の目標）には、`WorkAgent` /
-`Conversation` を ECS から追い出す設計判断が要る。設計書 §5.2 は
-「`Connections`, `WorkReports` は ECS に残留」としており、
-`WorkAgent`/`Conversation` の扱いは設計書に明記が無い。
-PR-2.6 着手時にこの点を判断し、ここへ記録すること。
+これらは `World` を **リソース参照のためだけ**に取っていた。`CallDespawner`
+（`hand.rs`）が唯一の真の ECS 操作（保留 call エンティティの despawn）を隔離する。
+
+**167→125 に進めない理由**（重要 / 次セッションは再調査不要）:
+残る `host/work/` の `World` 取得関数は、いずれも**本物の ECS 操作**を行う。
+
+- `agent_of` / `retire_entity` / `retire` / `restore` — `query::<(Entity, &WorkAgent)>`
+- `start` / `send` / `stop_with` / `close` / `finish_run` / `detect_stalls` / `inform`
+  — `world.spawn` / `world.trigger` / `world.get_mut::<WorkAgent>`、加えて
+  `super::fail` と `client::computer::invalidate_run` が `&mut World` を要求する
+- `tools.rs` の 4 関数 — `world.get::<CompanionAgent>` / `Conversation` の読み出し
+
+つまり **`WorkAgent` / `Conversation` を ECS から追い出さない限り、125 には到達しない**。
+これは設計書 §5.2 が「ECS 残留」と明記していない設計判断であり、
+PR-2.6（World = 0）の前提でもある。**PR-2.3 に着手する前に、この判断をここへ記録すること。**
+
+### 検証ゲートの既知の罠（解決済み・再発防止）
+
+`scripts/verify-all.ps1` の cert-store ゲートが断続的に落ちていた原因は
+**スクリプト側のバグ**だった（環境要因ではなかった）。
+
+- 症状: 2 つの TLS テストが `os error 5` で落ちる。単体実行では 10/10 通る。
+- 原因: 呼び出し元が `$env:TEMP` をリポジトリ配下（`.cargo-tmp`）に設定して
+  `verify-all.ps1` を起動すると、スクリプトはそれを `$stagingRoot` として
+  引き継ぎ、**子プロセスの TMP/TEMP をワークスペース配下に戻していた**。
+  サンドボックスはその配下のプロセスに証明書ストアを開かせない。
+- 修正: `$env:TEMP` が `$repo` 配下なら `%LOCALAPPDATA%\Temp` にフォールバックする。
+- 検証: フルゲートを2回連続実行し、いずれも `ALL GATES PASS`。
+
+
 
