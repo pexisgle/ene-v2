@@ -357,6 +357,7 @@ impl Render for CompanionPod {
         let roster_open = self.roster_open;
 
         div()
+            .key_context("CompanionPod")
             .relative()
             .size_full()
             .bg(gpui::transparent_black())
@@ -381,13 +382,22 @@ impl Render for CompanionPod {
     }
 }
 
+/// The pod's shortcuts. Every one is scoped to a key context: an unscoped
+/// `Escape` would also cancel a pod turn while `SettingsStudio` has focus.
+fn pod_key_bindings() -> [KeyBinding; 2] {
+    [
+        KeyBinding::new("enter", Submit, Some("ChatInput")),
+        KeyBinding::new("escape", CancelOrStop, Some(POD_KEY_CONTEXT)),
+    ]
+}
+
+/// The key context the pod root declares with `.key_context(..)`.
+const POD_KEY_CONTEXT: &str = "CompanionPod";
+
 /// Binds keyboard shortcuts (`Enter` send in `ChatInput`, `Esc` stop/collapse) globally.
 pub fn bind(cx: &mut App, hub: Entity<Hub>) {
     input::bind(cx);
-    cx.bind_keys([
-        KeyBinding::new("enter", Submit, Some("ChatInput")),
-        KeyBinding::new("escape", CancelOrStop, None),
-    ]);
+    cx.bind_keys(pod_key_bindings());
 
     let submit_hub = hub.clone();
     cx.on_action(move |_: &Submit, cx: &mut App| {
@@ -423,5 +433,34 @@ pub(crate) fn ensure_pod_topmost() {
     #[cfg(windows)]
     if let Some(pod) = ene_platform_os::PodWindow::current() {
         pod.keep_topmost();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every pod shortcut is scoped to a key context. An unscoped `Escape`
+    /// cancels a pod turn while `SettingsStudio` has focus, which is what this
+    /// pins: the binding must name a context, and `Escape` must name the pod's.
+    #[test]
+    fn pod_shortcuts_are_scoped_to_a_key_context() {
+        let bindings = pod_key_bindings();
+        assert_eq!(bindings.len(), 2);
+        for binding in &bindings {
+            assert!(
+                binding.predicate().is_some(),
+                "an unscoped binding fires everywhere: {binding:?}"
+            );
+        }
+        let scoped_to_pod = bindings.iter().any(|binding| {
+            binding
+                .predicate()
+                .is_some_and(|predicate| predicate.to_string().contains(POD_KEY_CONTEXT))
+        });
+        assert!(
+            scoped_to_pod,
+            "a binding must be scoped to {POD_KEY_CONTEXT}: {bindings:?}"
+        );
     }
 }

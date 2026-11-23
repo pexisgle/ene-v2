@@ -5,10 +5,7 @@
 
 use crate::ui::icons::{Icon, icon};
 use crate::ui::theme::Theme;
-use gpui::{
-    AnyElement, ElementId, Hsla, MouseButton, MouseDownEvent, SharedString, Window, div,
-    prelude::*, px,
-};
+use gpui::{AnyElement, ClickEvent, ElementId, Hsla, SharedString, Window, div, prelude::*, px};
 
 /// Semantic tone for capsule buttons and tags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,7 +124,8 @@ where
     if style.enabled {
         el.cursor_pointer()
             .hover(move |this| this.bg(hover_bg))
-            .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, window, cx| {
+            .active(|style| style.opacity(0.88))
+            .on_click(move |_: &ClickEvent, window, cx| {
                 on_press(window, cx);
             })
             .into_any_element()
@@ -176,7 +174,8 @@ where
         .justify_center()
         .cursor_pointer()
         .hover(move |this| this.bg(hover_bg))
-        .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, window, cx| {
+        .active(|style| style.opacity(0.88))
+        .on_click(move |_: &ClickEvent, window, cx| {
             on_press(window, cx);
         })
         .child(icon(kind, 16., fg))
@@ -238,7 +237,8 @@ where
     if style.enabled {
         el.cursor_pointer()
             .hover(move |this| this.bg(hover_bg))
-            .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, window, cx| {
+            .active(|style| style.opacity(0.88))
+            .on_click(move |_: &ClickEvent, window, cx| {
                 on_press(window, cx);
             })
             .into_any_element()
@@ -291,7 +291,8 @@ where
         track = track
             .cursor_pointer()
             .hover(move |this| this.bg(track_bg.alpha(0.86)))
-            .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, window, cx| {
+            .active(|style| style.opacity(0.88))
+            .on_click(move |_: &ClickEvent, window, cx| {
                 on_toggle(window, cx);
             });
     }

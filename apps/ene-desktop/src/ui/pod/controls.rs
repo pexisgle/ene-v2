@@ -2,7 +2,10 @@ use super::{CompanionPod, MAX_INPUT};
 use crate::state::{Device, Unsent};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::theme::Theme;
-use crate::ui::widgets::{ButtonStyle, Tone, companion_badge, floating_orb_button, pill_button};
+use crate::ui::widgets::{
+    ButtonStyle, CircleButtonStyle, Tone, circle_icon_button, companion_badge, floating_orb_button,
+    pill_button,
+};
 use crate::ui::{Hub, PodMode, SettingsSection};
 use ene_client_core::domain::{Companion, ConnectionKind};
 use gpui::{
@@ -375,10 +378,9 @@ fn render_unsent_rows(
                         hub_retry.update(cx, |hub, cx| hub.retry_unsent(&key, &retry_text, cx));
                     },
                 ))
-                .child(pill_button(
+                .child(circle_icon_button(
                     SharedString::from(format!("pod-dismiss-unsent-{idx}")),
-                    "×",
-                    Tone::Ghost,
+                    CircleButtonStyle::new(Icon::Close, 22., 11.),
                     theme,
                     move |_, cx| {
                         hub_dismiss.update(cx, |hub, cx| hub.dismiss_unsent(&dismiss_key, cx));

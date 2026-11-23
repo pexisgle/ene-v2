@@ -4,9 +4,10 @@ use crate::input::Draft;
 use crate::ui::icons::{Icon, icon};
 use crate::ui::theme::Theme;
 use gpui::{
-    AnyElement, Entity, MouseButton, MouseDownEvent, SharedString, Window, div, prelude::*, px,
+    AnyElement, Bounds, Entity, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, SharedString,
+    Window, anchored, deferred, div, point, prelude::*, px,
 };
-use std::rc::Rc;
+use std::{cell::Cell, rc::Rc};
 
 /// Option item shown in [`dropdown_select`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,7 +30,10 @@ pub struct DropdownSpec<'a> {
     pub filter_text: &'a str,
     pub empty_label: &'a str,
 }
-/// Searchable inline dropdown selector built to `DESIGN.md` Strawberry Milk Capsule rules.
+/// Searchable dropdown selector built to `DESIGN.md` Strawberry Milk Capsule rules.
+///
+/// The menu renders through `deferred(anchored(..))`, so it floats above the
+/// surrounding content instead of pushing it down.
 pub fn dropdown_select<T, S>(
     spec: DropdownSpec<'_>,
     theme: &Theme,
@@ -40,14 +44,53 @@ where
     T: Fn(&mut Window, &mut gpui::App) + 'static,
     S: Fn(String, &mut Window, &mut gpui::App) + 'static,
 {
-    let trigger = dropdown_trigger(&spec, theme, on_toggle);
-    let mut root = div().w_full().min_w_0().flex().flex_col().child(trigger);
-    if spec.open && spec.enabled {
-        root = root.child(dropdown_menu(&spec, theme, on_select));
+    let open = spec.open && spec.enabled;
+    let close: Rc<T> = Rc::new(on_toggle);
+    // A press on the trigger is outside the menu, so it would close the menu
+    // that the trigger is about to toggle. Ignore presses inside the trigger.
+    let trigger_bounds: Rc<Cell<Bounds<Pixels>>> = Rc::new(Cell::new(Bounds::default()));
+    let mut root = div()
+        // Must precede `.id()`: only `Div` has `on_children_prepainted`.
+        .on_children_prepainted({
+            let trigger_bounds = Rc::clone(&trigger_bounds);
+            move |children, _, _| {
+                if let Some(bounds) = children.first() {
+                    trigger_bounds.set(*bounds);
+                }
+            }
+        })
+        .id(SharedString::from(format!("{}-root", spec.id)))
+        // Focusable so `Escape` reaches this subtree: clicking the trigger focuses
+        // the root, and the open menu hangs off it.
+        .focusable()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .on_key_down({
+            let close = Rc::clone(&close);
+            move |event: &KeyDownEvent, window, cx| {
+                if open && event.keystroke.key == "escape" {
+                    close(window, cx);
+                }
+            }
+        })
+        .child(dropdown_trigger(&spec, theme, &close));
+    if open {
+        // Zero-height slot below the trigger: `anchored()` measures from the
+        // containing block, so the menu opens just under the trigger and the
+        // `deferred` draw keeps it out of the surrounding layout.
+        root = root.child(
+            div()
+                .w_full()
+                .child(deferred(anchored().offset(point(px(0.), px(4.))).child(
+                    dropdown_menu(&spec, theme, &close, &trigger_bounds, on_select),
+                ))),
+        );
     }
     root.into_any_element()
 }
-fn dropdown_trigger<T>(spec: &DropdownSpec<'_>, theme: &Theme, on_toggle: T) -> AnyElement
+fn dropdown_trigger<T>(spec: &DropdownSpec<'_>, theme: &Theme, on_toggle: &Rc<T>) -> AnyElement
 where
     T: Fn(&mut Window, &mut gpui::App) + 'static,
 {
@@ -111,6 +154,7 @@ where
             },
         ));
     if spec.enabled {
+        let on_toggle = Rc::clone(on_toggle);
         trigger
             .cursor_pointer()
             .hover(move |this| this.border_color(hover_border))
@@ -122,8 +166,15 @@ where
         trigger.into_any_element()
     }
 }
-fn dropdown_menu<S>(spec: &DropdownSpec<'_>, theme: &Theme, on_select: S) -> gpui::Div
+fn dropdown_menu<T, S>(
+    spec: &DropdownSpec<'_>,
+    theme: &Theme,
+    on_toggle: &Rc<T>,
+    trigger_bounds: &Rc<Cell<Bounds<Pixels>>>,
+    on_select: S,
+) -> gpui::Div
 where
+    T: Fn(&mut Window, &mut gpui::App) + 'static,
     S: Fn(String, &mut Window, &mut gpui::App) + 'static,
 {
     let on_select = Rc::new(on_select);
@@ -172,8 +223,9 @@ where
         });
 
     div()
-        .mt(px(4.))
-        .w_full()
+        .occlude()
+        .min_w(px(240.))
+        .max_w(px(360.))
         .rounded(px(10.))
         .bg(theme.bg_surface)
         .border_1()
@@ -182,6 +234,15 @@ where
         .flex()
         .flex_col()
         .gap(px(4.))
+        .on_mouse_down_out({
+            let on_toggle = Rc::clone(on_toggle);
+            let trigger_bounds = Rc::clone(trigger_bounds);
+            move |event: &MouseDownEvent, window, cx| {
+                if !trigger_bounds.get().contains(&event.position) {
+                    on_toggle(window, cx);
+                }
+            }
+        })
         .when_some(search_bar, |this, bar| this.child(bar))
         .child(
             div()
