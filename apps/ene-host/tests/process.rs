@@ -147,27 +147,14 @@ async fn process_publishes_private_discovery_authenticates_and_stops() {
     assert!(!runtime.join("connection.json").exists());
 }
 
-/// A conversation and its acceptance receipt survive a restart: the restored
-/// agent keeps its role, and a retry with the same request key is not run
-/// again.
+/// Stores an unreachable connection and its session credential, and creates
+/// a companion bound to it. Returns the companion id.
 #[cfg(unix)]
-#[tokio::test]
-async fn process_restores_a_conversation_and_its_acceptance() {
-    let temp = tempfile::tempdir().unwrap();
-    let state = temp.path().join("state");
-    let runtime = temp.path().join("runtime");
-    let assignment = ene_rpc::ModelAssignment {
-        connection_id: "c1".into(),
-        model_id: "gpt-4o-mini".into(),
-        ..Default::default()
-    };
-
-    let mut child = spawn(&state, &runtime);
-    let (endpoint, token) = discovery(&runtime).await;
-    let (transport, config) = ene_rpc::connect(&endpoint, &token).unwrap();
-    let settings = ene_rpc::SettingsServiceClient::new(transport.clone(), config.clone());
-    let host = ene_rpc::HostServiceClient::new(transport.clone(), config.clone());
-    let chat = ene_rpc::ChatServiceClient::new(transport, config);
+async fn seed_companion(
+    settings: &ene_rpc::SettingsServiceClient<connectrpc::client::HttpClient>,
+    host: &ene_rpc::HostServiceClient<connectrpc::client::HttpClient>,
+    assignment: &ene_rpc::ModelAssignment,
+) -> String {
     // A connection the turn cannot reach: acceptance and the saved input do
     // not depend on the provider answering.
     settings
@@ -200,6 +187,30 @@ async fn process_restores_a_conversation_and_its_acceptance() {
         })
         .await
         .expect("the connection is stored");
+    register_credential(settings).await;
+    host.create_companion(ene_rpc::CreateCompanionRequest {
+        name: "Mio".into(),
+        mind: "kind".into(),
+        assignments: Some(ene_rpc::ModelAssignments {
+            companion: Some(assignment.clone()).into(),
+            task: Some(assignment.clone()).into(),
+            ..Default::default()
+        })
+        .into(),
+        ..Default::default()
+    })
+    .await
+    .expect("a companion")
+    .view()
+    .id
+    .to_owned()
+}
+
+#[cfg(unix)]
+async fn register_credential(
+    settings: &ene_rpc::SettingsServiceClient<connectrpc::client::HttpClient>,
+) {
+    // The credential is session-only, so it is gone after a restart.
     settings
         .register_credentials(ene_rpc::CredentialRequest {
             id: "c1".into(),
@@ -208,35 +219,67 @@ async fn process_restores_a_conversation_and_its_acceptance() {
         })
         .await
         .expect("the credential is stored for this session");
-    let companion = host
-        .create_companion(ene_rpc::CreateCompanionRequest {
-            name: "Mio".into(),
-            mind: "kind".into(),
-            assignments: Some(ene_rpc::ModelAssignments {
-                companion: Some(assignment.clone()).into(),
-                task: Some(assignment).into(),
-                ..Default::default()
-            })
-            .into(),
-            ..Default::default()
-        })
-        .await
-        .expect("a companion")
-        .view()
-        .id
-        .to_owned();
-    let accepted = chat
-        .send_message(ene_rpc::SendMessageRequest {
-            companion_id: companion.clone(),
-            request_key: "k1".into(),
-            text: "覚えていて".into(),
-            ..Default::default()
-        })
-        .await
-        .expect("the message is accepted")
-        .view()
-        .request_id
-        .to_owned();
+}
+
+#[cfg(unix)]
+async fn accept_message(
+    chat: &ene_rpc::ChatServiceClient<connectrpc::client::HttpClient>,
+    companion: &str,
+) -> String {
+    chat.send_message(ene_rpc::SendMessageRequest {
+        companion_id: companion.to_owned(),
+        request_key: "k1".into(),
+        text: "覚えていて".into(),
+        ..Default::default()
+    })
+    .await
+    .expect("the message is accepted")
+    .view()
+    .request_id
+    .to_owned()
+}
+
+#[cfg(unix)]
+async fn saved_texts(
+    chat: &ene_rpc::ChatServiceClient<connectrpc::client::HttpClient>,
+    companion: &str,
+) -> Vec<String> {
+    chat.get_history(ene_rpc::HistoryRequest {
+        companion_id: companion.to_owned(),
+        ..Default::default()
+    })
+    .await
+    .expect("the history is readable")
+    .view()
+    .items
+    .iter()
+    .map(|item| item.text.to_owned())
+    .collect()
+}
+
+/// A conversation and its acceptance receipt survive a restart: the restored
+/// agent keeps its role, and a retry with the same request key is not run
+/// again.
+#[cfg(unix)]
+#[tokio::test]
+async fn process_restores_a_conversation_and_its_acceptance() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    let runtime = temp.path().join("runtime");
+    let assignment = ene_rpc::ModelAssignment {
+        connection_id: "c1".into(),
+        model_id: "gpt-4o-mini".into(),
+        ..Default::default()
+    };
+
+    let mut child = spawn(&state, &runtime);
+    let (endpoint, token) = discovery(&runtime).await;
+    let (transport, config) = ene_rpc::connect(&endpoint, &token).unwrap();
+    let settings = ene_rpc::SettingsServiceClient::new(transport.clone(), config.clone());
+    let host = ene_rpc::HostServiceClient::new(transport.clone(), config.clone());
+    let chat = ene_rpc::ChatServiceClient::new(transport, config);
+    let companion = seed_companion(&settings, &host, &assignment).await;
+    let accepted = accept_message(&chat, &companion).await;
     stop(&mut child).await;
 
     let mut child = spawn(&state, &runtime);
@@ -244,61 +287,21 @@ async fn process_restores_a_conversation_and_its_acceptance() {
     let (transport, config) = ene_rpc::connect(&endpoint, &token).unwrap();
     let settings = ene_rpc::SettingsServiceClient::new(transport.clone(), config.clone());
     let chat = ene_rpc::ChatServiceClient::new(transport, config);
-    // The credential is session-only, so it is gone after the restart.
-    settings
-        .register_credentials(ene_rpc::CredentialRequest {
-            id: "c1".into(),
-            secret: Some("dummy-key".into()),
-            ..Default::default()
-        })
-        .await
-        .expect("the credential is stored for this session");
-    let restored = chat
-        .get_history(ene_rpc::HistoryRequest {
-            companion_id: companion.clone(),
-            ..Default::default()
-        })
-        .await
-        .expect("the restored history is readable");
-    let restored = restored
-        .view()
-        .items
-        .iter()
-        .map(|item| item.text)
-        .collect::<Vec<_>>();
+    register_credential(&settings).await;
     assert_eq!(
-        restored,
+        saved_texts(&chat, &companion).await,
         ["覚えていて"],
         "the accepted input survives the restart"
     );
-    let retried = chat
-        .send_message(ene_rpc::SendMessageRequest {
-            companion_id: companion.clone(),
-            request_key: "k1".into(),
-            text: "覚えていて".into(),
-            ..Default::default()
-        })
-        .await
-        .expect("the retry is accepted")
-        .view()
-        .request_id
-        .to_owned();
     assert_eq!(
-        retried, accepted,
+        accept_message(&chat, &companion).await,
+        accepted,
         "the retry binds to the restored acceptance instead of running again"
     );
-    let history = chat
-        .get_history(ene_rpc::HistoryRequest {
-            companion_id: companion,
-            ..Default::default()
-        })
+    let history = saved_texts(&chat, &companion)
         .await
-        .expect("the history is readable");
-    let history = history
-        .view()
-        .items
         .iter()
-        .filter(|item| item.text == "覚えていて")
+        .filter(|text| text.as_str() == "覚えていて")
         .count();
     assert_eq!(history, 1, "the retry does not add a second input");
     stop(&mut child).await;
