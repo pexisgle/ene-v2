@@ -36,7 +36,59 @@ pub(crate) enum HostError {
     Internal(String),
 }
 
+/// The classified reason an operation failed.
+///
+/// One place decides how a failure is named on the wire and whether repeating
+/// it can help, so the wire mapping and the retry decision cannot drift apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ErrorCode {
+    InvalidArgument,
+    NotFound,
+    Aborted,
+    AlreadyExists,
+    PermissionDenied,
+    ResourceExhausted,
+    Unavailable,
+    FailedPrecondition,
+    Storage,
+    Internal,
+}
+
+impl ErrorCode {
+    /// The stable machine-readable name carried in `Failure.code`.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidArgument => "invalid_argument",
+            Self::NotFound => "not_found",
+            Self::Aborted => "aborted",
+            Self::AlreadyExists => "already_exists",
+            Self::PermissionDenied => "permission_denied",
+            Self::ResourceExhausted => "resource_exhausted",
+            Self::Unavailable => "unavailable",
+            Self::FailedPrecondition => "failed_precondition",
+            Self::Storage => "storage_error",
+            Self::Internal => "internal",
+        }
+    }
+}
+
 impl HostError {
+    /// The classified reason, which drives both the wire code and retryability.
+    pub(crate) fn code(&self) -> ErrorCode {
+        match self {
+            Self::Invalid(_) => ErrorCode::InvalidArgument,
+            Self::NotFound(_) => ErrorCode::NotFound,
+            Self::Conflict(_) => ErrorCode::Aborted,
+            Self::AlreadyExists(_) => ErrorCode::AlreadyExists,
+            Self::Permission(_) => ErrorCode::PermissionDenied,
+            Self::Exhausted(_) => ErrorCode::ResourceExhausted,
+            Self::Unavailable(_) => ErrorCode::Unavailable,
+            Self::FailedPrecondition(_) => ErrorCode::FailedPrecondition,
+            Self::Storage(_) => ErrorCode::Storage,
+            Self::Internal(_) => ErrorCode::Internal,
+        }
+    }
+
     /// Whether this failure means the host can no longer trust its state and
     /// must stop accepting new work.
     pub(crate) fn is_storage(&self) -> bool {
@@ -55,21 +107,6 @@ impl HostError {
             | Self::FailedPrecondition(message)
             | Self::Storage(message)
             | Self::Internal(message) => message,
-        }
-    }
-
-    pub(crate) fn code(&self) -> &'static str {
-        match self {
-            Self::Invalid(_) => "invalid_argument",
-            Self::NotFound(_) => "not_found",
-            Self::Conflict(_) => "aborted",
-            Self::AlreadyExists(_) => "already_exists",
-            Self::Permission(_) => "permission_denied",
-            Self::Exhausted(_) => "resource_exhausted",
-            Self::Unavailable(_) => "unavailable",
-            Self::FailedPrecondition(_) => "failed_precondition",
-            Self::Storage(_) => "storage_error",
-            Self::Internal(_) => "internal",
         }
     }
 }
@@ -181,5 +218,28 @@ mod tests {
             let mapped = HostError::from(sqlite(code));
             assert!(mapped.is_storage(), "{code:?} must stop the host");
         }
+    }
+
+    /// Every variant must have a distinct wire code: two failures that map to
+    /// the same string are indistinguishable to a client deciding what to do.
+    #[test]
+    fn every_failure_has_its_own_wire_code() {
+        let errors = [
+            HostError::Invalid(String::new()),
+            HostError::NotFound(String::new()),
+            HostError::Conflict(String::new()),
+            HostError::AlreadyExists(String::new()),
+            HostError::Permission(String::new()),
+            HostError::Exhausted(String::new()),
+            HostError::Unavailable(String::new()),
+            HostError::FailedPrecondition(String::new()),
+            HostError::Storage(String::new()),
+            HostError::Internal(String::new()),
+        ];
+        let codes: Vec<&str> = errors.iter().map(|error| error.code().as_str()).collect();
+        let mut unique = codes.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), codes.len(), "duplicate codes in {codes:?}");
     }
 }

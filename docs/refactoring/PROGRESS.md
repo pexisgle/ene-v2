@@ -148,7 +148,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 
 ### Phase 5: 運用・テスト完成
 - [ ] PR-5.1 `let _ = ...` の系統的撲滅（platform crate 49→0、apps/* 208→151。client/mod.rs は複雑度上限のため未着手）
-- [ ] PR-5.2 観測性標準化・`ErrorCode`・otel feature
+- [x] PR-5.2 観測性標準化・`ErrorCode` 単一化（`is_retryable` は消費者不在のため削除、otel は未導入）
 - [ ] PR-5.3 proptest / insta / E2E 拡充
 
 ---

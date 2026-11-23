@@ -115,7 +115,10 @@ mod voice_convert;
 mod work;
 
 use super::auth;
-use crate::host::{Runtime, error::HostError};
+use crate::host::{
+    Runtime,
+    error::{ErrorCode, HostError},
+};
 use axum::middleware;
 use connectrpc::{ConnectError, Response, Router, ServiceResult};
 use ene_rpc as w;
@@ -157,19 +160,22 @@ impl Services {
 
 impl From<HostError> for ConnectError {
     fn from(error: HostError) -> Self {
-        match error {
-            HostError::Invalid(message) => ConnectError::invalid_argument(message),
-            HostError::NotFound(message) => ConnectError::not_found(message),
-            HostError::Conflict(message) => ConnectError::aborted(message),
-            HostError::AlreadyExists(message) => ConnectError::already_exists(message),
-            HostError::Permission(message) => ConnectError::permission_denied(message),
-            HostError::Exhausted(message) => ConnectError::resource_exhausted(message),
-            HostError::Unavailable(message) => ConnectError::unavailable(message),
-            HostError::FailedPrecondition(message) => ConnectError::failed_precondition(message),
-            HostError::Storage(_) => {
+        // One lookup decides the status, so a new `ErrorCode` variant cannot be
+        // mapped inconsistently here and in `HostError::code`.
+        let message = error.message().to_owned();
+        match error.code() {
+            ErrorCode::InvalidArgument => ConnectError::invalid_argument(message),
+            ErrorCode::NotFound => ConnectError::not_found(message),
+            ErrorCode::Aborted => ConnectError::aborted(message),
+            ErrorCode::AlreadyExists => ConnectError::already_exists(message),
+            ErrorCode::PermissionDenied => ConnectError::permission_denied(message),
+            ErrorCode::ResourceExhausted => ConnectError::resource_exhausted(message),
+            ErrorCode::Unavailable => ConnectError::unavailable(message),
+            ErrorCode::FailedPrecondition => ConnectError::failed_precondition(message),
+            ErrorCode::Storage => {
                 ConnectError::unavailable("state storage failed; restart after repairing storage")
             }
-            HostError::Internal(message) => ConnectError::internal(message),
+            ErrorCode::Internal => ConnectError::internal(message),
         }
     }
 }
