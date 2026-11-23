@@ -67,7 +67,7 @@ pub(super) fn render_policy_rules_section(
         .bg(theme.bg_surface)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(14.))
+        .rounded(crate::ui::theme::radius::surface())
         .flex()
         .flex_col()
         .child(confirm_row)
@@ -136,7 +136,7 @@ pub(super) fn render_policy_texts_section(
         .bg(theme.bg_surface)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(14.))
+        .rounded(crate::ui::theme::radius::surface())
         .when(text_items.is_empty(), |card| {
             card.child(
                 div()

@@ -47,7 +47,7 @@ pub(super) fn render_mcp_add(
         .bg(theme.bg_surface)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(14.))
+        .rounded(crate::ui::theme::radius::surface())
         .p(px(16.))
         .flex()
         .flex_col()
@@ -200,7 +200,7 @@ fn render_mcp_http_advanced(
     let adv_err = headers_parsed.as_ref().err().copied();
     let panel = div()
         .w_full()
-        .rounded(px(10.))
+        .rounded(crate::ui::theme::radius::medium())
         .bg(theme.bg_blush)
         .p(px(12.))
         .flex()
@@ -266,7 +266,7 @@ fn render_mcp_process_advanced(
     let adv_err = env_parsed.as_ref().err().copied();
     let panel = div()
         .w_full()
-        .rounded(px(10.))
+        .rounded(crate::ui::theme::radius::medium())
         .bg(theme.bg_blush)
         .p(px(12.))
         .flex()

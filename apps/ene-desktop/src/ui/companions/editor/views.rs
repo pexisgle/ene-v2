@@ -99,7 +99,7 @@ pub(super) fn render_mind_section(
     let comp_id_save = id.to_owned();
     let hub_mind = pane.hub.clone();
     let strip = div()
-        .rounded(px(10.))
+        .rounded(crate::ui::theme::radius::medium())
         .bg(theme.bg_blush)
         .p(px(12.))
         .flex()
@@ -317,7 +317,7 @@ pub(super) fn render_body_model_field(
 
 pub(super) fn render_exported_template_box(id: &str, json: &str, theme: &Theme) -> AnyElement {
     div()
-        .rounded(px(10.))
+        .rounded(crate::ui::theme::radius::medium())
         .bg(theme.bg_blush)
         .p(px(10.))
         .flex()

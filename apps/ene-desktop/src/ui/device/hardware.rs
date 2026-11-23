@@ -21,7 +21,7 @@ pub(super) fn render_device_status_card(
         .bg(theme.bg_surface)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(14.))
+        .rounded(crate::ui::theme::radius::surface())
         .flex()
         .flex_col()
         .child(render_active_client_row(pane, snap, theme))

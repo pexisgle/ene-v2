@@ -164,7 +164,7 @@ pub(super) fn render_mcp_tools_strip(
         .collect();
     Some(
         div()
-            .rounded(px(10.))
+            .rounded(crate::ui::theme::radius::medium())
             .bg(theme.bg_blush)
             .p(px(12.))
             .flex()

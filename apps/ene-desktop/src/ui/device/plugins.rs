@@ -95,7 +95,7 @@ fn render_add_plugin_panel(
         .bg(theme.bg_surface)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(14.))
+        .rounded(crate::ui::theme::radius::surface())
         .p(px(16.))
         .flex()
         .flex_col()
@@ -191,7 +191,7 @@ pub(super) fn render_remote_host_section(
         .bg(theme.bg_surface)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(14.))
+        .rounded(crate::ui::theme::radius::surface())
         .flex()
         .flex_col()
         .child(row_frame(
@@ -331,7 +331,7 @@ fn render_plugins_card(
 ) -> AnyElement {
     div()
         .w_full()
-        .rounded(px(14.))
+        .rounded(crate::ui::theme::radius::surface())
         .border_1()
         .border_color(theme.border)
         .bg(theme.bg_surface)

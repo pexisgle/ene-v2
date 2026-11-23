@@ -234,7 +234,7 @@ fn render_history_reset_card(
             .bg(theme.bg_surface)
             .border_1()
             .border_color(theme.border)
-            .rounded(px(14.))
+            .rounded(crate::ui::theme::radius::surface())
             .child(row_frame(
                 false,
                 "会話・作業の履歴と記憶",

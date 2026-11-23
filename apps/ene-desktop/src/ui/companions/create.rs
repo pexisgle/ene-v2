@@ -56,7 +56,7 @@ pub(super) fn render_import_panel(
         .bg(theme.bg_surface)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(14.))
+        .rounded(crate::ui::theme::radius::surface())
         .p(px(16.))
         .flex()
         .flex_col()
@@ -171,7 +171,7 @@ pub(super) fn render_create_panel(
         .bg(theme.bg_surface)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(14.))
+        .rounded(crate::ui::theme::radius::surface())
         .p(px(16.))
         .flex()
         .flex_col()
@@ -339,7 +339,7 @@ fn render_preview_outcome(
         ),
     };
     div()
-        .rounded(px(10.))
+        .rounded(crate::ui::theme::radius::medium())
         .bg(bg)
         .px(px(12.))
         .py(px(8.))
@@ -351,7 +351,7 @@ fn render_preview_outcome(
 
 fn render_missing_model_banner(hub: Entity<crate::ui::Hub>, theme: &Theme) -> AnyElement {
     div()
-        .rounded(px(10.))
+        .rounded(crate::ui::theme::radius::medium())
         .bg(theme.amber_soft)
         .px(px(12.))
         .py(px(8.))

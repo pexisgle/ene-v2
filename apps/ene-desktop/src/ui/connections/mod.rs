@@ -315,7 +315,7 @@ fn render_empty_connections_notice(theme: &Theme) -> AnyElement {
         .bg(theme.bg_surface)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(14.))
+        .rounded(crate::ui::theme::radius::surface())
         .px(px(16.))
         .py(px(18.))
         .text_xs()

@@ -61,7 +61,7 @@ pub(super) fn render_web_search_card(
         .bg(theme.bg_surface)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(14.))
+        .rounded(crate::ui::theme::radius::surface())
         .p(px(16.))
         .flex()
         .flex_col()
@@ -146,7 +146,7 @@ fn render_search_provider_row(
 
     div()
         .w_full()
-        .rounded(px(10.))
+        .rounded(crate::ui::theme::radius::medium())
         .bg(theme.bg_blush)
         .p(px(12.))
         .flex()
@@ -163,7 +163,7 @@ fn render_search_provider_row(
         .when_some(err_msg, |this, msg| {
             this.child(
                 div()
-                    .rounded(px(8.))
+                    .rounded(crate::ui::theme::radius::small())
                     .bg(theme.danger_soft)
                     .px(px(10.))
                     .py(px(6.))

@@ -226,7 +226,7 @@ pub(super) fn render_add_policy_text_panel(
         .bg(theme.bg_surface)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(14.))
+        .rounded(crate::ui::theme::radius::surface())
         .p(px(16.))
         .flex()
         .flex_col()

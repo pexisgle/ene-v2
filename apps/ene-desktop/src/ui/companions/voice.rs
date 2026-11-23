@@ -235,7 +235,7 @@ fn render_stt_card(snap: &VoiceSnapshot, hub: &Entity<Hub>, theme: &Theme) -> gp
         .bg(theme.bg_surface)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(14.))
+        .rounded(crate::ui::theme::radius::surface())
         .flex()
         .flex_col()
         .child(render_stt_mic_row(snap, mic_ready, hub, theme))
@@ -529,7 +529,7 @@ fn render_tts_card(
         .bg(theme.bg_surface)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(14.))
+        .rounded(crate::ui::theme::radius::surface())
         .p(px(16.))
         .flex()
         .flex_col()
@@ -589,7 +589,7 @@ fn render_tts_card(
         .when_some(report, |this, report| {
             this.child(
                 div()
-                    .rounded(px(10.))
+                    .rounded(crate::ui::theme::radius::medium())
                     .bg(if report.failed {
                         theme.danger_soft
                     } else {

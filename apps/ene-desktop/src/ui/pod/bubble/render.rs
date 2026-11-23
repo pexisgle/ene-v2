@@ -64,7 +64,7 @@ pub(super) fn render_notice_strip(notice: Notice, hub: &Entity<Hub>, theme: &The
     };
     div()
         .w_full()
-        .rounded(px(12.))
+        .rounded(crate::ui::theme::radius::large())
         .bg(if is_conflict {
             theme.amber_soft
         } else {
@@ -225,7 +225,7 @@ pub(super) fn render_approval_header(
 
 pub(super) fn render_approval_args(args: &str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     div()
-        .rounded(px(10.))
+        .rounded(crate::ui::theme::radius::medium())
         .bg(theme.bg_blush)
         .px(px(10.))
         .py(px(6.))
@@ -341,7 +341,7 @@ pub(super) fn collect_timeline_rows(
     if let Some(err) = model.companions.chat.error.as_ref() {
         rows.push(
             div()
-                .rounded(px(12.))
+                .rounded(crate::ui::theme::radius::large())
                 .bg(theme.danger_soft)
                 .px(px(10.))
                 .py(px(8.))
@@ -378,7 +378,7 @@ pub(super) fn collect_timeline_rows(
         rows.push(
             div()
                 .w_full()
-                .rounded(px(12.))
+                .rounded(crate::ui::theme::radius::large())
                 .bg(theme.danger_soft)
                 .px(px(12.))
                 .py(px(8.))
@@ -408,7 +408,7 @@ pub(super) fn render_message_bubble(
                 .max_w(px(300.))
                 .px(px(12.))
                 .py(px(8.))
-                .rounded(px(14.))
+                .rounded(crate::ui::theme::radius::surface())
                 .when(is_user, |this| {
                     this.rounded_br(px(4.))
                         .bg(theme.bg_user_msg)
@@ -430,7 +430,7 @@ pub(super) fn render_message_bubble(
 
 pub(super) fn render_mini_error_banner(reason: &str, theme: &Theme) -> gpui::Div {
     div()
-        .rounded(px(10.))
+        .rounded(crate::ui::theme::radius::medium())
         .bg(theme.danger_soft)
         .px(px(10.))
         .py(px(5.))
@@ -441,7 +441,7 @@ pub(super) fn render_mini_error_banner(reason: &str, theme: &Theme) -> gpui::Div
 
 pub(super) fn render_live_stt_badge(label: String, theme: &Theme) -> gpui::Div {
     div()
-        .rounded(px(12.))
+        .rounded(crate::ui::theme::radius::large())
         .bg(theme.mint_soft)
         .px(px(10.))
         .py(px(5.))

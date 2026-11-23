@@ -180,7 +180,7 @@ fn render_controls(pod: &CompanionPod, theme: &Theme, cx: &Context<CompanionPod>
         .left(px(0.))
         .right(px(0.))
         .occlude()
-        .rounded(px(18.))
+        .rounded(crate::ui::theme::radius::orb())
         .border_2()
         .border_color(theme.border_float)
         .bg(theme.bg_surface)
@@ -299,7 +299,7 @@ pub(super) fn render_roster_popover(
         .border_2()
         .border_color(theme.border_float)
         .shadow(theme.float_shadow())
-        .rounded(px(18.))
+        .rounded(crate::ui::theme::radius::orb())
         .p(px(8.))
         .flex()
         .flex_col()
@@ -337,7 +337,7 @@ fn render_unsent_rows(
             let hub_dismiss = hub.clone();
             div()
                 .w_full()
-                .rounded(px(14.))
+                .rounded(crate::ui::theme::radius::surface())
                 .bg(theme.danger_soft)
                 .px(px(12.))
                 .py(px(6.))
@@ -625,7 +625,7 @@ fn render_roster_row(
         .id(SharedString::from(format!("pod-roster-{}", comp.id)))
         .px(px(10.))
         .py(px(8.))
-        .rounded(px(12.))
+        .rounded(crate::ui::theme::radius::large())
         .bg(if active {
             theme.bg_blush
         } else {

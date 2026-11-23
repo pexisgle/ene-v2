@@ -140,7 +140,7 @@ pub(super) fn render_credentials_strip(
     let revoke_armed = pane.form.revoke_armed_for.as_deref() == Some(id.as_str());
 
     div()
-        .rounded(px(10.))
+        .rounded(crate::ui::theme::radius::medium())
         .bg(theme.bg_blush)
         .p(px(12.))
         .flex()
@@ -173,7 +173,7 @@ pub(super) fn render_credentials_strip(
 
 pub(super) fn render_schema_box(schema_controls: Vec<AnyElement>, theme: &Theme) -> gpui::Div {
     div()
-        .rounded(px(10.))
+        .rounded(crate::ui::theme::radius::medium())
         .bg(theme.bg_blush)
         .p(px(12.))
         .flex()
@@ -280,7 +280,7 @@ pub(super) fn error_banner(check: Option<&ConnectionCheck>, theme: &Theme) -> Op
         .filter(|f| f.code != "unsupported" && !f.message.trim().is_empty())
         .map(|f| {
             div()
-                .rounded(px(10.))
+                .rounded(crate::ui::theme::radius::medium())
                 .bg(theme.danger_soft)
                 .px(px(12.))
                 .py(px(8.))

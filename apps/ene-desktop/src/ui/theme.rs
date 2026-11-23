@@ -3,6 +3,35 @@
 use crate::input::FieldLook;
 use gpui::{BoxShadow, FontFallbacks, Hsla, hsla, point, px, rgb};
 
+/// Corner radii, named by how large the surface is.
+///
+/// These are the values the UI already used as bare literals; naming them makes
+/// a mismatch visible instead of looking like a typo.
+pub mod radius {
+    use gpui::{Pixels, px};
+
+    /// Tags, pills and small chips.
+    pub fn small() -> Pixels {
+        px(8.)
+    }
+    /// Inputs and inline cards.
+    pub fn medium() -> Pixels {
+        px(10.)
+    }
+    /// Menus and grouped rows.
+    pub fn large() -> Pixels {
+        px(12.)
+    }
+    /// The pod and the settings panes.
+    pub fn surface() -> Pixels {
+        px(14.)
+    }
+    /// The floating orb.
+    pub fn orb() -> Pixels {
+        px(18.)
+    }
+}
+
 /// Visual token table for `ene-desktop`, verified for >= 4.5:1 text contrast.
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {

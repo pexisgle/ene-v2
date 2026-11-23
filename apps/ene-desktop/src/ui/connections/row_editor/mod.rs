@@ -53,7 +53,7 @@ pub(super) fn render_connection_row(
         .bg(theme.bg_surface)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(14.))
+        .rounded(crate::ui::theme::radius::surface())
         .flex()
         .flex_col()
         .child(header)

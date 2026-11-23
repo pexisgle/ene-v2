@@ -211,7 +211,7 @@ impl SettingsStudio {
             strips.push(
                 div()
                     .w_full()
-                    .rounded(px(12.))
+                    .rounded(crate::ui::theme::radius::large())
                     .bg(if is_conflict {
                         theme.amber_soft
                     } else {
