@@ -57,7 +57,11 @@ pub struct ConnectFailure {
 }
 
 pub fn backoff_delay(attempts: u32) -> Duration {
-    let exp = attempts.saturating_sub(1).min(5);
+    // The shift is bounded so the multiplication cannot overflow, but bounding
+    // it at 5 capped the delay at 32s and made MAX_BACKOFF unreachable: the
+    // schedule went 1, 2, 4, 8, 16, 32, 32, ... forever. Fourteen doublings
+    // reach the 60s ceiling from 1s, so that is the bound.
+    let exp = attempts.saturating_sub(1).min(14);
     INITIAL_BACKOFF.saturating_mul(1u32 << exp).min(MAX_BACKOFF)
 }
 
@@ -273,7 +277,11 @@ mod tests {
         assert_eq!(backoff_delay(1), Duration::from_secs(1));
         assert_eq!(backoff_delay(2), Duration::from_secs(2));
         assert_eq!(backoff_delay(6), Duration::from_secs(32));
-        assert_eq!(backoff_delay(10), Duration::from_secs(32));
+        // The delay keeps growing until it reaches the 60s ceiling instead of
+        // stopping at 32s, and stays there.
+        assert_eq!(backoff_delay(7), Duration::from_secs(60));
+        assert_eq!(backoff_delay(10), Duration::from_secs(60));
+        assert_eq!(backoff_delay(u32::MAX), Duration::from_secs(60));
 
         assert!(is_config_error_message("HTTP 401 Unauthorized"));
         assert!(is_config_error_message("ENOENT: no such file"));
