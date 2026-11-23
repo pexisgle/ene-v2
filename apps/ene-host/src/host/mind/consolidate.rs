@@ -26,10 +26,8 @@ use rig_core::{DynModel, operation::Completion};
 use rig_ecs::model::Models;
 use serde::{Deserialize, Serialize};
 
-const MAX_FACTS: usize = 32;
 /// How many candidate memories the extraction model may merge into.
 const MAX_CONTEXT: usize = 20;
-const MAX_CITATIONS: usize = 64;
 /// The longest turn text used as the retrieval query for merge candidates.
 const MAX_QUERY_CHARS: usize = 2_000;
 /// How many newest turns are joined into that query.
@@ -304,36 +302,6 @@ pub(crate) fn prompt(
     prompt
 }
 
-fn normalize(facts: Vec<Fact>) -> Vec<Fact> {
-    let mut normalized = Vec::new();
-    for mut fact in facts {
-        fact.content = fact.content.trim().to_owned();
-        if fact.content.is_empty() || fact.content.chars().count() > 4_000 {
-            continue;
-        }
-        fact.importance = Some(fact.importance.unwrap_or(3).min(10));
-        fact.scope = fact
-            .scope
-            .map(|scope| scope.trim().chars().take(128).collect())
-            .filter(|scope: &String| !scope.is_empty());
-        fact.supersedes = fact
-            .supersedes
-            .map(|id| id.trim().to_owned())
-            .filter(|id| !id.is_empty());
-        fact.cited_memory_ids = fact
-            .cited_memory_ids
-            .into_iter()
-            .filter(|id| !id.trim().is_empty())
-            .take(MAX_CITATIONS)
-            .collect();
-        normalized.push(fact);
-        if normalized.len() >= MAX_FACTS {
-            break;
-        }
-    }
-    normalized
-}
-
 /// The provider must submit typed facts. Text and fenced JSON are not accepted.
 async fn extract(model: &DynModel<Completion>, prompt: String) -> Result<Extraction> {
     let options = model
@@ -349,7 +317,7 @@ async fn extract(model: &DynModel<Completion>, prompt: String) -> Result<Extract
         .await
         .map_err(|error| HostError::Unavailable(format!("consolidation output: {error}")))?;
     Ok(Extraction {
-        facts: normalize(extraction.output.facts),
+        facts: ene_mind::normalize(extraction.output.facts),
         state: extraction.output.state,
     })
 }

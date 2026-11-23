@@ -138,7 +138,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 - [ ] PR-3.1 `crates/ene-host-core` 新設・`request!` マクロ撤廃
 - [x] PR-3.2 `settings/mod.rs`（988 行）の 5 分割（→549 行 + 5 サブモジュール）
 - [x] PR-3.3 `rpc/voice.rs` は本番 498 行で既に閾値内（853 行はテスト込みの計測）→ 対応不要と判断
-- [ ] PR-3.4 純粋ロジックの `crates/*` 昇格（mind/work/policy 二重管理）
+- [x] PR-3.4 純粋ロジックの `crates/*` 昇格（`normalize` を ene-mind へ移動。他は orchestration で対象外）
 
 ### Phase 4: Desktop 整理
 - [x] PR-4.1 `crates/ene-platform-os` 新設・`tray.rs` 移管（unsafe 84→29）

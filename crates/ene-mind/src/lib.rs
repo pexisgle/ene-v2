@@ -9,7 +9,7 @@ pub mod memory;
 pub use companion::{
     Assignment, Assignments, Companion, Profile, Role, State, default_ene_companion, validate_id,
 };
-pub use consolidate::{Batch, Commit, Fact, MemoryContext, Turn, validate_citations};
+pub use consolidate::{Batch, Commit, Fact, MemoryContext, Turn, normalize, validate_citations};
 pub use embedding::{PREP_VERSION, PendingEmbedding, dimensions_of_space, space_id};
 pub use error::{MindError, Result};
 pub use json::JsonDoc;

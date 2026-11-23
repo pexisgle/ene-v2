@@ -72,3 +72,89 @@ pub fn validate_citations(cited: &[String], injected: &[String]) -> Vec<String> 
         .cloned()
         .collect()
 }
+
+/// Trims, bounds and deduplicates the facts a pass proposed.
+///
+/// A fact with no content, or one over the length budget, is dropped; the
+/// remaining list is capped so one verbose answer cannot flood the store.
+/// How many facts one consolidation pass may commit.
+const MAX_FACTS: usize = 32;
+/// How many cited memory ids one fact may carry.
+const MAX_CITATIONS: usize = 64;
+
+pub fn normalize(facts: Vec<Fact>) -> Vec<Fact> {
+    let mut normalized = Vec::new();
+    for mut fact in facts {
+        fact.content = fact.content.trim().to_owned();
+        if fact.content.is_empty() || fact.content.chars().count() > 4_000 {
+            continue;
+        }
+        fact.importance = Some(fact.importance.unwrap_or(3).min(10));
+        fact.scope = fact
+            .scope
+            .map(|scope| scope.trim().chars().take(128).collect())
+            .filter(|scope: &String| !scope.is_empty());
+        fact.supersedes = fact
+            .supersedes
+            .map(|id| id.trim().to_owned())
+            .filter(|id| !id.is_empty());
+        fact.cited_memory_ids = fact
+            .cited_memory_ids
+            .into_iter()
+            .filter(|id| !id.trim().is_empty())
+            .take(MAX_CITATIONS)
+            .collect();
+        normalized.push(fact);
+        if normalized.len() >= MAX_FACTS {
+            break;
+        }
+    }
+    normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fact(content: &str) -> Fact {
+        Fact {
+            content: content.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn normalization_bounds_every_field_a_pass_can_supply() {
+        let trimmed = normalize(vec![fact("  padded  ")]);
+        assert_eq!(trimmed[0].content, "padded");
+        // An absent importance defaults to the middle of the scale.
+        assert_eq!(trimmed[0].importance, Some(3));
+
+        let clamped = normalize(vec![Fact {
+            importance: Some(250),
+            ..fact("x")
+        }]);
+        assert_eq!(clamped[0].importance, Some(10));
+
+        let scoped = normalize(vec![Fact {
+            scope: Some("  ".into()),
+            supersedes: Some(String::new()),
+            ..fact("x")
+        }]);
+        assert_eq!(scoped[0].scope, None, "a blank scope is dropped");
+        assert_eq!(scoped[0].supersedes, None, "a blank id is dropped");
+    }
+
+    #[test]
+    fn empty_and_oversized_facts_never_reach_the_store() {
+        assert!(normalize(vec![fact("   ")]).is_empty());
+        assert!(normalize(vec![fact(&"x".repeat(4_001))]).is_empty());
+        assert_eq!(normalize(vec![fact(&"x".repeat(4_000))]).len(), 1);
+    }
+
+    #[test]
+    fn one_verbose_answer_cannot_flood_the_store() {
+        let many: Vec<Fact> = (0..(MAX_FACTS * 3)).map(|_| fact("m")).collect();
+        assert_eq!(normalize(many).len(), MAX_FACTS);
+    }
+}
