@@ -92,6 +92,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 | PR-2.6 後 | 0 | 160 | 84 | 47 | 0 |
 | PR-3.2 後 | 0 | 160 | 84 | 47 | 0 |
 | PR-4.1 後 | 0 | 160 | 29 | 47 | 0 |
+| PR-4.2 (part 1) 後 | 0 | 160 | 17 | 47 | 0 |
 
 > **設計書との差分（重要）**: 設計書 §3 は「本番 500 行超ファイル数 = 43」「`Resource` = 2」としているが、
 > 実測は **47** と **0** だった。
