@@ -130,11 +130,7 @@ impl Package {
         Ok(Self {
             root: root.to_path_buf(),
             manifest,
-            revision: hash
-                .finalize()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect(),
+            revision: hex::encode(hash.finalize()),
             files: Arc::new(files),
             stamps: Arc::new(stamps),
         })

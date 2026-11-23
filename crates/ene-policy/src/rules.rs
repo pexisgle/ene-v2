@@ -429,13 +429,7 @@ pub fn canonicalise(tool_name: &str, arguments: &Value) -> (String, Vec<u8>) {
 }
 
 pub fn hex_digest(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        // Writing into a `String` cannot fail; `write!` is infallible here.
-        let _written = write!(out, "{byte:02x}");
-    }
-    out
+    hex::encode(bytes)
 }
 
 #[derive(Clone, Copy)]
@@ -960,6 +954,15 @@ mod canonical_property_tests {
             let text = hex_digest(&bytes);
             prop_assert_eq!(text.len(), bytes.len() * 2);
             prop_assert!(text.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+
+        /// The digest feeds the approval payload hash, so its bytes are pinned:
+        /// a different encoding would silently invalidate every stored
+        /// `exact_sha256:` approval.
+        #[test]
+        fn hex_digests_match_the_pinned_encoding(bytes in prop::collection::vec(any::<u8>(), 0..64)) {
+            let expected: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+            prop_assert_eq!(hex_digest(&bytes), expected);
         }
     }
 }

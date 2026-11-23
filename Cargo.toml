@@ -71,6 +71,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 gpui = { version = "=0.2.2", default-features = false }
 http = "1"
 hashlink = "0.12"
+hex = "0.4"
 croner = { version = "4", default-features = false, features = ["jiff"] }
 rubato = "5.1"
 jsonschema = "0.61"

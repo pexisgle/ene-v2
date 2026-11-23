@@ -4197,6 +4197,7 @@ dependencies = [
 name = "ene-mind"
 version = "0.1.8"
 dependencies = [
+ "hex",
  "jiff 0.2.46",
  "proptest",
  "schemars 1.2.3",
@@ -4246,6 +4247,7 @@ dependencies = [
  "ene-plugin",
  "extism",
  "futures-util",
+ "hex",
  "http-body-util",
  "reqwest",
  "rustix 1.1.6",
@@ -4266,6 +4268,7 @@ dependencies = [
 name = "ene-policy"
 version = "0.1.8"
 dependencies = [
+ "hex",
  "proptest",
  "serde",
  "serde_json",

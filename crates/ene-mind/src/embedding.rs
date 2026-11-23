@@ -37,12 +37,7 @@ pub fn space_id(
     let canonical = serde_json_canonicalizer::to_string(&canonical_value)
         .unwrap_or_else(|_| canonical_value.to_string());
     let digest = Sha256::digest(canonical.as_bytes());
-    let mut hash = String::with_capacity(16);
-    for byte in digest.into_iter().take(8) {
-        use std::fmt::Write as _;
-        // Writing into a `String` cannot fail; `write!` is infallible here.
-        let _written = write!(hash, "{byte:02x}");
-    }
+    let hash = hex::encode(&digest[..8]);
     format!("{}@{hash}:{dimensions}:{PREP_VERSION}", model.trim())
 }
 
