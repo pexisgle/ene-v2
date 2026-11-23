@@ -45,6 +45,7 @@ ene-domain = { path = "crates/ene-domain" }
 ene-mind = { path = "crates/ene-mind" }
 ene-policy = { path = "crates/ene-policy" }
 ene-plugin = { path = "crates/ene-plugin" }
+ene-platform-os = { path = "crates/ene-platform-os" }
 ene-plugin-runtime = { path = "crates/ene-plugin-runtime" }
 ene-store = { path = "crates/ene-store" }
 ene-voice = { path = "crates/ene-voice" }

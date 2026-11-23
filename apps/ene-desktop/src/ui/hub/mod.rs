@@ -13,10 +13,10 @@ use crate::{
     rpc::{self, RpcDispatcher},
     session::{Connection, Options},
     state::{Effects, Model},
-    tray::{TrayAction, TrayHandle},
     update::{Command, Update},
 };
 use ene_client_core::domain::{ConnectionKind, NotificationEvent};
+use ene_platform_os::{TrayAction, TrayHandle};
 use gpui::{App, Context, Task, WeakEntity, WindowHandle};
 use std::collections::{BTreeMap, HashSet};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};

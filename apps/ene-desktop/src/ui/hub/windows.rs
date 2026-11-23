@@ -3,12 +3,12 @@
 use super::Hub;
 use crate::{
     state::{Device, Link, NoticeKind},
-    tray::{TrayAction, TrayHandle, TrayState},
     ui::{
         CompanionPod, PodMode, SettingsSection, SettingsStudio, focus_chat,
         initial_pod_bounds_for_mode, pod,
     },
 };
+use ene_platform_os::{TrayAction, TrayHandle, TrayMode, TraySection, TrayState};
 use gpui::{
     App, AppContext as _, Bounds, Context, Entity, WeakEntity, WindowBounds, WindowHandle,
     WindowKind, WindowOptions, px, size,
@@ -139,11 +139,29 @@ pub(super) fn sync_tray_state(hub: &Hub) {
     };
     tray.update(TrayState {
         pod_open: is_pod_visible(hub),
-        pod_mode: hub.windows.pod_mode,
+        pod_mode: tray_mode(hub.windows.pod_mode),
         mic_muted: hub.model.audio.mic_muted,
         avatar_ready: matches!(hub.model.connections.devices.avatar, Device::Ready(_)),
         tooltip: format!("{name} — {status}"),
     });
+}
+
+/// The tray crate's copy of the pod mode, which it cannot import from `ui`.
+fn tray_mode(mode: PodMode) -> TrayMode {
+    match mode {
+        PodMode::MiniVoice => TrayMode::MiniVoice,
+        PodMode::ExpandedChat => TrayMode::ExpandedChat,
+    }
+}
+
+/// The settings chapter the tray asked for, in the UI's own type.
+fn settings_section(section: TraySection) -> SettingsSection {
+    match section {
+        TraySection::Companions => SettingsSection::Companions,
+        TraySection::Connections => SettingsSection::Connections,
+        TraySection::Voice => SettingsSection::Voice,
+        TraySection::Device => SettingsSection::Device,
+    }
 }
 
 pub(super) fn handle_tray_action(hub: &mut Hub, action: TrayAction, cx: &mut Context<Hub>) {
@@ -152,7 +170,7 @@ pub(super) fn handle_tray_action(hub: &mut Hub, action: TrayAction, cx: &mut Con
         TrayAction::OpenChat => open_pod(hub, Some(PodMode::ExpandedChat), cx),
         TrayAction::OpenMiniPod => open_pod(hub, Some(PodMode::MiniVoice), cx),
         TrayAction::HidePod => hide_pod(hub, cx),
-        TrayAction::OpenSettings(section) => open_settings(hub, section, cx),
+        TrayAction::OpenSettings(section) => open_settings(hub, settings_section(section), cx),
         TrayAction::CenterAvatar => hub.center_avatar(),
         TrayAction::ToggleMicMute => hub.toggle_mic_mute(cx),
         TrayAction::Quit => cx.quit(),

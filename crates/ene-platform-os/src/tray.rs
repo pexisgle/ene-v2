@@ -5,7 +5,23 @@
 //! unbounded channel. On unsupported platforms `Tray::spawn` returns `None` so
 //! the client degrades cleanly to standard window-lifetime shutdown.
 
-use crate::ui::{PodMode, SettingsSection};
+/// Display mode of the frameless floating companion pod.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TrayMode {
+    #[default]
+    MiniVoice,
+    ExpandedChat,
+}
+
+/// A chapter of the settings window the tray can open directly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TraySection {
+    #[default]
+    Companions,
+    Connections,
+    Voice,
+    Device,
+}
 use std::sync::{
     Arc, RwLock,
     atomic::{AtomicBool, Ordering},
@@ -19,7 +35,7 @@ pub enum TrayAction {
     OpenChat,
     OpenMiniPod,
     HidePod,
-    OpenSettings(SettingsSection),
+    OpenSettings(TraySection),
     CenterAvatar,
     ToggleMicMute,
     Quit,
@@ -29,7 +45,7 @@ pub enum TrayAction {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrayState {
     pub pod_open: bool,
-    pub pod_mode: PodMode,
+    pub pod_mode: TrayMode,
     pub mic_muted: bool,
     pub avatar_ready: bool,
     pub tooltip: String,
@@ -39,7 +55,7 @@ impl Default for TrayState {
     fn default() -> Self {
         Self {
             pod_open: true,
-            pod_mode: PodMode::MiniVoice,
+            pod_mode: TrayMode::MiniVoice,
             mic_muted: false,
             avatar_ready: false,
             tooltip: "ene".to_owned(),
@@ -155,9 +171,9 @@ fn action_for_command(id: u32) -> Option<TrayAction> {
         CMD_OPEN_CHAT => Some(TrayAction::OpenChat),
         CMD_OPEN_MINI => Some(TrayAction::OpenMiniPod),
         CMD_HIDE_POD => Some(TrayAction::HidePod),
-        CMD_SETTINGS_COMPANIONS => Some(TrayAction::OpenSettings(SettingsSection::Companions)),
-        CMD_SETTINGS_CONNECTIONS => Some(TrayAction::OpenSettings(SettingsSection::Connections)),
-        CMD_SETTINGS_DEVICE => Some(TrayAction::OpenSettings(SettingsSection::Device)),
+        CMD_SETTINGS_COMPANIONS => Some(TrayAction::OpenSettings(TraySection::Companions)),
+        CMD_SETTINGS_CONNECTIONS => Some(TrayAction::OpenSettings(TraySection::Connections)),
+        CMD_SETTINGS_DEVICE => Some(TrayAction::OpenSettings(TraySection::Device)),
         CMD_CENTER_AVATAR => Some(TrayAction::CenterAvatar),
         CMD_TOGGLE_MIC => Some(TrayAction::ToggleMicMute),
         CMD_QUIT => Some(TrayAction::Quit),
@@ -589,12 +605,12 @@ mod windows_tray {
             return;
         };
 
-        let chat_flags = if state.pod_open && state.pod_mode == PodMode::ExpandedChat {
+        let chat_flags = if state.pod_open && state.pod_mode == TrayMode::ExpandedChat {
             MF_STRING | MF_CHECKED
         } else {
             MF_STRING
         };
-        let mini_flags = if state.pod_open && state.pod_mode == PodMode::MiniVoice {
+        let mini_flags = if state.pod_open && state.pod_mode == TrayMode::MiniVoice {
             MF_STRING | MF_CHECKED
         } else {
             MF_STRING
@@ -833,15 +849,15 @@ mod tests {
         assert_eq!(action_for_command(CMD_HIDE_POD), Some(TrayAction::HidePod));
         assert_eq!(
             action_for_command(CMD_SETTINGS_COMPANIONS),
-            Some(TrayAction::OpenSettings(SettingsSection::Companions))
+            Some(TrayAction::OpenSettings(TraySection::Companions))
         );
         assert_eq!(
             action_for_command(CMD_SETTINGS_CONNECTIONS),
-            Some(TrayAction::OpenSettings(SettingsSection::Connections))
+            Some(TrayAction::OpenSettings(TraySection::Connections))
         );
         assert_eq!(
             action_for_command(CMD_SETTINGS_DEVICE),
-            Some(TrayAction::OpenSettings(SettingsSection::Device))
+            Some(TrayAction::OpenSettings(TraySection::Device))
         );
         assert_eq!(
             action_for_command(CMD_CENTER_AVATAR),

@@ -4054,6 +4054,7 @@ dependencies = [
  "earshot",
  "ene-avatar-ipc",
  "ene-client-core",
+ "ene-platform-os",
  "ene-plugin",
  "ene-plugin-runtime",
  "ene-rpc",
@@ -4178,6 +4179,15 @@ dependencies = [
  "base64 0.23.1",
  "ene-plugin",
  "serde_json",
+]
+
+[[package]]
+name = "ene-platform-os"
+version = "0.1.8"
+dependencies = [
+ "tokio",
+ "tracing",
+ "windows 0.62.2",
 ]
 
 [[package]]

@@ -18,16 +18,15 @@ mod perception;
 mod plugins;
 mod rpc;
 mod session;
-mod tray;
 mod ui;
 mod work_tools;
 
 pub use avatar::{bundled_ene_model, default_model, default_renderer};
 pub use capabilities::default_allowed_capabilities;
 pub use ene_client_core::{Command, Link, Model, Update, state, update};
+pub use ene_platform_os::{Tray, TrayAction, TrayHandle, TrayState};
 pub use host::{Connect, Discovery, Host};
 pub use session::{Connection, Options, Session, persistent_client_id};
-pub use tray::{Tray, TrayAction, TrayHandle, TrayState};
 pub use ui::{
     CompanionPod, Desktop, EmbeddedAssets, HistoryReset, Hub, HubInit, PodMode, SettingsSection,
     SettingsStudio, bind as bind_actions, focus_chat, initial_pod_bounds,
