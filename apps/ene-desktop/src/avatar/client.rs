@@ -8,7 +8,10 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::Path,
     process::{Child, ChildStdin, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -65,23 +68,24 @@ pub(super) fn lip_sync_line(character: &str, rms: f32) -> Result<String, AvatarE
     .encode_line()?)
 }
 
-enum WriteItem {
+pub(super) enum WriteItem {
     Request { id: u64, line: String },
     OneWay(String),
 }
-
 pub(super) type PendingReplies =
     Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, AvatarError>>>>>;
 
 /// The renderer process and non-blocking async channels to its stdio workers.
 pub struct Avatar {
-    child: Child,
+    child: Option<Child>,
     write_tx: Option<mpsc::Sender<WriteItem>>,
     events_rx: mpsc::UnboundedReceiver<AvatarEvent>,
     pending: PendingReplies,
     events: VecDeque<AvatarEvent>,
     next_id: u64,
-    healthy: bool,
+    /// Shared with both stdio workers, so a renderer that dies while idle is
+    /// reported unhealthy before the next call notices.
+    healthy: Arc<AtomicBool>,
     shown: HashMap<String, CharacterConfig>,
     base_motion: HashMap<String, String>,
     last_motion: HashMap<String, String>,
@@ -90,7 +94,7 @@ pub struct Avatar {
 impl Avatar {
     #[cfg(windows)]
     pub(crate) fn pid(&self) -> u32 {
-        self.child.id()
+        self.child.as_ref().map_or(0, Child::id)
     }
 
     /// Spawns the renderer. `program` is the `ene-avatar` binary; the caller
@@ -116,18 +120,21 @@ impl Avatar {
         let (write_tx, write_rx) = mpsc::channel(64);
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let pending: PendingReplies = Arc::new(Mutex::new(HashMap::new()));
+        let healthy = Arc::new(AtomicBool::new(true));
         let writer_pending = Arc::clone(&pending);
-        thread::spawn(move || write_loop(stdin, write_rx, writer_pending));
+        let writer_healthy = Arc::clone(&healthy);
+        thread::spawn(move || write_loop(stdin, write_rx, writer_pending, &writer_healthy));
         let reader_pending = Arc::clone(&pending);
-        thread::spawn(move || read_loop(stdout, events_tx, reader_pending));
+        let reader_healthy = Arc::clone(&healthy);
+        thread::spawn(move || read_loop(stdout, events_tx, reader_pending, &reader_healthy));
         Ok(Self {
-            child,
+            child: Some(child),
             write_tx: Some(write_tx),
             events_rx,
             pending,
             events: VecDeque::new(),
             next_id: 1,
-            healthy: true,
+            healthy,
             shown: HashMap::new(),
             base_motion: HashMap::new(),
             last_motion: HashMap::new(),
@@ -135,7 +142,7 @@ impl Avatar {
     }
 
     pub fn is_healthy(&self) -> bool {
-        self.healthy
+        self.healthy.load(Ordering::Acquire)
     }
 
     fn push_event(&mut self, event: AvatarEvent) {
@@ -154,7 +161,7 @@ impl Avatar {
     /// Sends one command and awaits its reply with a bounded timeout so a stalled
     /// renderer never freezes the Tokio thread.
     pub async fn call(&mut self, command: Command) -> Result<Value, AvatarError> {
-        if !self.healthy {
+        if !self.is_healthy() {
             return Err(AvatarError::Unhealthy);
         }
         let id = self.next_id;
@@ -181,13 +188,13 @@ impl Avatar {
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
                 .remove(&id);
-            self.healthy = false;
+            self.healthy.store(false, Ordering::Release);
             return Err(AvatarError::InputClosed);
         }
         match tokio::time::timeout(AVATAR_CALL_TIMEOUT, reply_rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => {
-                self.healthy = false;
+                self.healthy.store(false, Ordering::Release);
                 Err(AvatarError::Exited)
             }
             Err(_) => {
@@ -195,8 +202,10 @@ impl Avatar {
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner())
                     .remove(&id);
-                self.healthy = false;
-                if let Err(error) = self.child.kill() {
+                self.healthy.store(false, Ordering::Release);
+                if let Some(child) = self.child.as_mut()
+                    && let Err(error) = child.kill()
+                {
                     tracing::debug!(%error, "the avatar child could not be killed");
                 }
                 Err(AvatarError::Timeout)
@@ -259,7 +268,10 @@ impl Avatar {
         let loads_model = existing
             .as_ref()
             .is_none_or(|shown| shown.model != next.model);
-        self.configure(character, next).await?;
+        // The caller named the placement, so the renderer's old value must not
+        // overwrite it.
+        let preserve_placement = body.monitor.is_some() || body.position.is_some();
+        self.configure(character, next, preserve_placement).await?;
         Ok(loads_model)
     }
 
@@ -284,7 +296,7 @@ impl Avatar {
         }
         let loads_model = existing.is_none_or(|shown| shown.model != next.model);
         if loads_model {
-            self.configure(character, next).await?;
+            self.configure(character, next, false).await?;
         } else {
             self.call(Command::Motion {
                 character: character.to_owned(),
@@ -344,9 +356,14 @@ impl Avatar {
         &mut self,
         character: &str,
         mut next: CharacterConfig,
+        preserve_placement: bool,
     ) -> Result<(), AvatarError> {
         let existing = self.shown.contains_key(character);
-        if existing {
+        // The renderer is authoritative for where a character already sits, so
+        // its snapshot is read back to avoid resetting the placement on every
+        // unrelated update. An explicit monitor/position from the caller must
+        // win, though, or `show_with_body` cannot move a shown character.
+        if existing && !preserve_placement {
             let state = self.call(Command::Get {}).await?;
             if let Ok(snapshot) = serde_json::from_value::<RendererSnapshot>(state)
                 && let Some(actor) = snapshot
@@ -400,7 +417,7 @@ impl Avatar {
             Some(current) => current.with_scale(clamped),
             None => CharacterConfig::for_model(model.to_string_lossy()).with_scale(clamped),
         };
-        self.configure(character, next).await
+        self.configure(character, next, false).await
     }
 
     /// Centers the character on the primary monitor.
@@ -453,7 +470,7 @@ impl Avatar {
 
     /// Queues one mouth amplitude non-blockingly; drops frames when congested.
     pub fn lip_sync(&mut self, character: &str, rms: f32) -> Result<(), AvatarError> {
-        if !self.healthy {
+        if !self.is_healthy() {
             return Err(AvatarError::Unhealthy);
         }
         let Some(write_tx) = &self.write_tx else {
@@ -463,7 +480,7 @@ impl Avatar {
         match write_tx.try_send(WriteItem::OneWay(line)) {
             Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => Ok(()),
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                self.healthy = false;
+                self.healthy.store(false, Ordering::Release);
                 Err(AvatarError::InputClosed)
             }
         }
@@ -545,7 +562,11 @@ impl Avatar {
                 } if got == character
             )
         })?;
-        match &self.events[pos] {
+        // Consume the event: leaving it queued returned the same terminal state
+        // on every later `await_state`, so a character that recovered still
+        // reported its old error.
+        let event = self.events.remove(pos)?;
+        match &event {
             AvatarEvent::State {
                 status: AvatarStatus::Ready | AvatarStatus::Suspended,
                 ..
@@ -574,20 +595,20 @@ impl Avatar {
         {
             let _queued = write_tx.try_send(WriteItem::OneWay(line));
         }
+        // Taking the child marks it reaped, so `Drop` cannot kill a pid that
+        // the OS may already have reused.
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
         let deadline = std::time::Instant::now() + AVATAR_SHUTDOWN_TIMEOUT;
         loop {
-            match self.child.try_wait() {
+            match child.try_wait() {
                 Ok(Some(_)) => return,
                 Ok(None) if std::time::Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(15));
                 }
                 _ => {
-                    if let Err(error) = self.child.kill() {
-                        tracing::debug!(%error, "the avatar child could not be killed");
-                    }
-                    if let Err(error) = self.child.wait() {
-                        tracing::debug!(%error, "the avatar child could not be reaped");
-                    }
+                    reap(&mut child);
                     return;
                 }
             }
@@ -595,19 +616,75 @@ impl Avatar {
     }
 }
 
+/// Channels a test uses to stand in for the renderer process. Constructed by
+/// `Avatar::for_test`, driven by the test module.
+#[cfg(test)]
+pub(super) struct TestRenderer {
+    pub(super) requests: mpsc::Receiver<WriteItem>,
+    pub(super) pending: PendingReplies,
+    pub(super) events: mpsc::UnboundedSender<AvatarEvent>,
+}
+
+#[cfg(test)]
+impl Avatar {
+    /// Builds an `Avatar` with no child process, so a test can answer its own
+    /// requests and publish its own events.
+    pub(super) fn for_test(shown: HashMap<String, CharacterConfig>) -> (Self, TestRenderer) {
+        let (write_tx, requests) = mpsc::channel(64);
+        let (events, events_rx) = mpsc::unbounded_channel();
+        let pending: PendingReplies = Arc::new(Mutex::new(HashMap::new()));
+        let avatar = Self {
+            child: None,
+            write_tx: Some(write_tx),
+            events_rx,
+            pending: Arc::clone(&pending),
+            events: VecDeque::new(),
+            next_id: 1,
+            healthy: Arc::new(AtomicBool::new(true)),
+            shown,
+            base_motion: HashMap::new(),
+            last_motion: HashMap::new(),
+        };
+        (
+            avatar,
+            TestRenderer {
+                requests,
+                pending,
+                events,
+            },
+        )
+    }
+}
+
+/// Kills a still-running renderer and reaps it. Errors are debug-only because
+/// a renderer that already exited makes both calls fail harmlessly.
+fn reap(child: &mut Child) {
+    if let Err(error) = child.kill() {
+        tracing::debug!(%error, "the avatar child could not be killed");
+    }
+    if let Err(error) = child.wait() {
+        tracing::debug!(%error, "the avatar child could not be reaped");
+    }
+}
+
 impl Drop for Avatar {
     fn drop(&mut self) {
         self.write_tx.take();
-        if let Err(error) = self.child.kill() {
-            tracing::debug!(%error, "the avatar child could not be killed");
-        }
-        if let Err(error) = self.child.wait() {
-            tracing::debug!(%error, "the avatar child could not be reaped");
+        if let Some(mut child) = self.child.take() {
+            reap(&mut child);
         }
     }
 }
 
-fn write_loop(mut stdin: ChildStdin, mut rx: mpsc::Receiver<WriteItem>, pending: PendingReplies) {
+/// Runs the writer until the pipe closes, then marks the renderer unhealthy. A
+/// stdio worker only returns when its pipe is gone, so no later call can
+/// succeed.
+fn write_loop(
+    mut stdin: ChildStdin,
+    mut rx: mpsc::Receiver<WriteItem>,
+    pending: PendingReplies,
+    healthy: &AtomicBool,
+) {
     while let Some(item) = rx.blocking_recv() {
         let (id, line) = match item {
             WriteItem::Request { id, line } => (Some(id), line),
@@ -629,12 +706,17 @@ fn write_loop(mut stdin: ChildStdin, mut rx: mpsc::Receiver<WriteItem>, pending:
             break;
         }
     }
+    healthy.store(false, Ordering::Release);
 }
 
+/// Reads renderer output until stdin closes, then marks the renderer
+/// unhealthy, so one that dies while idle is reported before the next call
+/// notices the closed pipe.
 pub(super) fn read_loop(
     stdout: impl std::io::Read,
     events_tx: mpsc::UnboundedSender<AvatarEvent>,
     pending: PendingReplies,
+    healthy: &AtomicBool,
 ) {
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
@@ -679,4 +761,5 @@ pub(super) fn read_loop(
     for tx in waiters {
         let _replied = tx.send(Err(fail_reason.clone()));
     }
+    healthy.store(false, Ordering::Release);
 }

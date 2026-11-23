@@ -1,12 +1,16 @@
-use super::client::{PendingReplies, lip_sync_line, read_loop};
+use super::client::{PendingReplies, TestRenderer, WriteItem, lip_sync_line, read_loop};
 use super::presets::{LOOPING_MOTIONS, idle_return_preset, is_looping_motion, normalize_path};
 use super::*;
-use ene_avatar_ipc::{AvatarEvent, AvatarMessage, CharacterConfig, Command};
+use ene_avatar_ipc::{AvatarEvent, AvatarMessage, AvatarStatus, CharacterConfig, Command, Request};
 use serde_json::Value;
 use std::{
     collections::HashMap,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -170,7 +174,12 @@ fn b09_read_loop_resolves_pending_and_preserves_all_event_kinds() {
     let (waiter_tx, mut waiter_rx) = oneshot::channel();
     pending.lock().unwrap().insert(8, waiter_tx);
 
-    read_loop(input.as_bytes(), events_tx, Arc::clone(&pending));
+    let healthy = AtomicBool::new(true);
+    read_loop(input.as_bytes(), events_tx, Arc::clone(&pending), &healthy);
+    assert!(
+        !healthy.load(Ordering::Acquire),
+        "a reader that reached EOF must mark the renderer unhealthy"
+    );
 
     let mut events = Vec::new();
     while let Ok(ev) = events_rx.try_recv() {
@@ -224,4 +233,120 @@ fn bundled_ene_model_resolves_workspace_asset() {
         );
         assert_eq!(found.file_name().and_then(|n| n.to_str()), Some("ENE.vrm"));
     }
+}
+
+/// Answers requests from a test `Avatar` on a background thread and records
+/// every command the client actually sent, so a test asserts on the wire.
+fn fake_renderer(
+    renderer: TestRenderer,
+    mut respond: impl FnMut(&Command) -> Value + Send + 'static,
+) -> Arc<Mutex<Vec<Command>>> {
+    let TestRenderer {
+        mut requests,
+        pending,
+        ..
+    } = renderer;
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&sent);
+    std::thread::spawn(move || {
+        while let Some(item) = requests.blocking_recv() {
+            let WriteItem::Request { id, line } = item else {
+                continue;
+            };
+            let Ok(request) = serde_json::from_str::<Request>(&line) else {
+                break;
+            };
+            recorded
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push(request.command.clone());
+            let reply = respond(&request.command);
+            let waiter = pending
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .remove(&id);
+            if let Some(tx) = waiter {
+                let _replied = tx.send(Ok(reply));
+            }
+        }
+    });
+    sent
+}
+
+/// A terminal `state` event is published once. Returning it on every later wait
+/// made a character that recovered keep reporting its old error.
+#[tokio::test]
+async fn a_terminal_state_event_is_observed_once() {
+    let (mut avatar, renderer) = Avatar::for_test(HashMap::new());
+    renderer
+        .events
+        .send(AvatarEvent::State {
+            character: "ene".into(),
+            status: AvatarStatus::Error,
+            error: Some("model missing".into()),
+        })
+        .unwrap();
+
+    let first = avatar.await_state("ene", Duration::from_millis(500)).await;
+    assert!(
+        matches!(first, Err(AvatarError::Renderer(_))),
+        "the queued failure must be reported: {first:?}"
+    );
+
+    let second = avatar.await_state("ene", Duration::from_millis(50)).await;
+    assert!(
+        second.is_ok(),
+        "the same terminal event was replayed to a later wait: {second:?}"
+    );
+    // Keep the sender alive so the second wait polls to its deadline instead of
+    // seeing the channel close.
+    drop(renderer);
+}
+
+/// The renderer is authoritative for placement, but an explicit
+/// `Companion.body` monitor or position must beat its older snapshot.
+#[tokio::test]
+async fn an_explicit_body_placement_beats_the_renderer_snapshot() {
+    let model = Path::new("/models/ene.vrm");
+    let mut shown = CharacterConfig::for_model(model.to_string_lossy());
+    shown.monitor = Some("DP-1".into());
+    shown.position = Some([10., 20.]);
+    let renderer_state = serde_json::json!({
+        "characters": [{
+            "character": "ene",
+            "status": "ready",
+            "config": shown,
+        }],
+    });
+    let (mut avatar, renderer) = Avatar::for_test(HashMap::from([("ene".to_owned(), shown)]));
+    let sent = fake_renderer(renderer, move |_| renderer_state.clone());
+
+    let body = ene_rpc::BodyBinding {
+        monitor: Some("HDMI-1".into()),
+        position: Some([300., 400.]),
+        ..ene_rpc::BodyBinding::default()
+    };
+    avatar
+        .show_with_body("ene", model, None, &body, 100.)
+        .await
+        .expect("the renderer accepts the update");
+
+    let sent = sent.lock().unwrap_or_else(|poison| poison.into_inner());
+    let config = sent
+        .iter()
+        .find_map(|command| match command {
+            Command::Set { config, .. } => Some(config),
+            _ => None,
+        })
+        .expect("a shown character is updated with `set`");
+    assert_eq!(
+        config.monitor.as_deref(),
+        Some("HDMI-1"),
+        "the requested monitor was overwritten by the snapshot: {sent:?}"
+    );
+    assert_eq!(
+        config.position,
+        Some([300., 400.]),
+        "the requested position was overwritten by the snapshot: {sent:?}"
+    );
 }
