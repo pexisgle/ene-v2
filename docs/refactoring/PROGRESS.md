@@ -141,7 +141,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 - [x] PR-2.6 残存 World 参照の部分撤去（171→160、→0 は Phase 3 後に再評価）
 
 ### Phase 3: RPC 薄層化・二重管理解消
-- [ ] PR-3.1 `crates/ene-host-core` 新設・`request!` マクロ撤廃（step 1 完了: `Runtime::store()` + `request!(store ...)` 形態、160→159。`ene-host-core` crate 新設は未着手）
+- [x] PR-3.1 `Runtime::store()` + `request!(store ...)` 形態を導入し **159 で確定クローズ**。`ene-host-core` crate 新設と `request!` 全廃は将来課題として明文化（下記）
 - [x] PR-3.2 `settings/mod.rs`（988 行）の 5 分割（→549 行 + 5 サブモジュール）
 - [x] PR-3.3 `rpc/voice.rs` は本番 498 行で既に閾値内（853 行はテスト込みの計測）→ 対応不要と判断
 - [x] PR-3.4 純粋ロジックの `crates/*` 昇格（`normalize` を ene-mind へ移動。他は orchestration で対象外）
@@ -155,7 +155,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 - [x] PR-4.6 `session/` 状態機械化（`ConnectionPhase` + `phase.rs`。TaskTracker 統一は未着手）
 
 ### Phase 5: 運用・テスト完成
-- [ ] PR-5.1 `let _ = ...` の系統的撲滅（platform crate 49→0、apps/* 208→141。残り 141 は 40+ ファイルに分散し、大半は channel send ではなく fs/socket の結果。`let_underscore_must_use` の `deny` 化は未実施）
+- [x] PR-5.1 `let _ = ...` の系統的撲滅 **完了**。`let _ =` 0 件 / `let _ignored` 0 件、`let_underscore_must_use = "deny"`、`verify-all.ps1` の `-A` 除外 **0 件**
 - [x] PR-5.2 観測性標準化・`ErrorCode` 単一化（`is_retryable` は消費者不在のため削除、otel は未導入）
 - [x] PR-5.3 proptest 拡充（`ene-mind::fuse` 3 件、`ene-policy` canonical form 4 件、`rule_from` 契約テスト 3 件）。insta / E2E は未着手
 
@@ -421,3 +421,115 @@ re.compile(r"&\s*(?:mut\s+)?World\b")`）。`app.world_mut()` の呼び出しは
 **次回への申し送り**: まず `Runtime` に `store()` アクセサを追加し（現在は
 `world.resource::<Store>()` 経由のみ）、`request!(read ...)` 形態の op から
 `&mut World` を落とす。1 形態ずつ、呼び出し元を数えながら進めること。
+
+---
+
+## 最終 KPI（ベースライン vs 現在）
+
+`scripts/check-architecture.py --json` の実測値。
+
+| # | 指標 | ベースライン | 最終 | 状態 |
+| :--- | :--- | ---: | ---: | :--- |
+| 1 | `ui_rpc_leak` | 0 | **0** | 維持 |
+| 2 | `db_upward_imports` | 0 | **0** | 維持 |
+| 3 | `impl_file_spread`（既定超過） | `Events: 4` | `Events: 4` | 維持（想定内） |
+| 4 | `no_prod_println` | 0 | **0** | 維持 |
+| 5 | `providers_no_model_import` | 0 | **0** | 維持 |
+| 6 | `host_world_refs` | 171 | **159** | −12 |
+| 7 | `domain_no_rpc_dep` | 4 | **0** | **達成** |
+| 8 | `app_unsafe_count` | 84 | **0** | **達成** |
+| 9 | `max_prod_file_lines` | 47 | **40** | −7 |
+| 10 | `rpc_no_ecs_resource` | 2 | **0** | **達成** |
+
+補助指標:
+
+| 指標 | ベースライン | 最終 |
+| :--- | ---: | ---: |
+| `let _ = ...`（`apps/` + `crates/` + `examples/`） | 230 | **0** |
+| `let _ignored` | 18 | **0** |
+| clippy の `-A` 除外 | 3 | **0** |
+
+## PR-3.1 のクローズ判断（案 A 採用）
+
+`runtime` に `store()` を持たせ、`request!(store ...)` 形態を追加した。
+`mind::list_memories` が `&mut World` ではなく `Store` を取るようになり、
+`host_world_refs` は 171 → 159 に下がった。
+
+**159 で確定する。** 実測すると、残る `&mut World` は三種のみ:
+
+| 分類 | 件数 | 除去 |
+| :--- | ---: | :--- |
+| entity 操作（真の ECS） | 30 | 不可 |
+| `commands.queue(move \|world: &mut World\| ...)` のクロージャ引数 | 多数 | 不可（bevy の API） |
+| Resource を複数まとめて読む | 残り | 呼び出し連鎖の再設計が必要 |
+
+`Store` だけを必要とする関数は 2 つしかなく、そのうち 1 つ（`client::device::get`）は
+`ComputerUse` と `DeviceHub` も読むため対象外だった。
+
+**将来課題**: `crates/ene-host-core` を新設し `request!` の 4 形態を全廃するには、
+上記「Resource を複数まとめて読む」群の呼び出し連鎖を `HostServices` へ移す必要がある。
+これは振る舞い不変の制約下では 1 PR の範囲を超えるため、**再設計プロジェクトとして独立に扱う**。
+
+## 実機検証（未実施・引き継ぎ）
+
+以下はこのセッションで**一度も実行していない**。ゲートはコンパイルと単体テストのみを保証する。
+
+- トレイの常駐・メニュー・終了
+- Pod の透過・最前面・位置
+- スクリーンキャプチャ
+- 入力注入（Computer Use）
+
+`#![forbid(unsafe_code)]` と 3 つの `deny` 化された lint は、**これらが動くことを含意しない**。
+Windows 実機での手動スモークテストを `docs/refactoring/PR-4.3b-smoke-test.md` に記載した。
+
+## 全コミット（このリファクタリング、51 件）
+
+Phase 0–5 を通した 1 PR = 1 コミット。`docs/refactoring/ene_v2_refactoring_plan.md` は
+ユーザーの未コミット変更のため全コミットで除外している。
+
+```
+bdc7203  PR-0.1  check-architecture に rule 7-10 を追加
+dc10025  PR-0.2  厳格な lint を段階導入、CI に nextest
+a26bba4  PR-1.1  ene-policy を ene-rpc から分離
+291dd69  PR-1.2  ene-plugin に独自 provider ABI 型
+700c6b5  PR-1.3  ene-catalog を純粋化
+4bde1bc  PR-1.4  ene-voice を ene-rpc から分離
+cf76980  PR-1.5  templates.rs を wire-free に（Phase 1 完了）
+56415b4  PR-2.1  RPC transport テストから ECS resource を除去
+d82db6c  PR-2.2  plugin hand の Hands を World から出す
+5396d20  PR-2.3  MCP supervisor を単一 resource に統合
+f092f1e  PR-2.4  device/perception 状態を World から出す
+d8976b3  PR-2.5  notification/delegation 状態を World から出す
+48653a8  PR-2.6  companion notification を World から出す
+24233b4  PR-3.2  settings/mod.rs を 5 モジュールに分割
+f536ab2  PR-3.3  no-op（voice.rs は既に上限内）
+66fb932  PR-4.1  ene-platform-os を新設し tray を移管
+9810656  PR-4.2  pod window 層を platform crate へ
+f61663f  PR-4.2  capture/input を platform crate へ
+981da6a  PR-4.3  apps/ene-desktop に forbid(unsafe_code)
+fd1bcb0  PR-4.3b tray.rs 全 55 unsafe に SAFETY、lint を deny 化
+e728358  PR-5.3  RRF の property test
+64352a3  PR-3.4  normalize を ene-mind へ昇格
+e109974  PR-5.2  ErrorCode に単一化
+7943f9d  PR-4.6  ConnectionPhase 状態機械
+f359b62  PR-4.5  widgets.rs を 3 分割
+6d1e181  PR-5.3  proptest + rule_from 契約テスト
+9765e99  PR-4.4  onboarding 分割
+8727832  PR-4.4  editor/bubble の超過分を分割
+ee70916  PR-4.4  bubble 分割
+b2cf030  PR-4.4  row_editor 分割
+8ba6b93  PR-4.4  device/policy 分割
+15e1174  PR-4.4  companion editor 分割
+d3ba0df  PR-3.1  Runtime::store + store! 形態
+2ce4462  PR-5.1  log_if_err
+7e28b76  PR-5.1  platform crate の破棄を明示化
+a487c37  PR-5.1  UI/session の update 送信を helper 化
+0b6a55d  PR-5.1  avatar teardown
+7f7de80  PR-5.1  send_message/remove_file の失敗処理
+f79c210  PR-5.1  host 破棄の命名・plugin 権限
+d7ee931  PR-5.1  残る raw send を helper 化
+2ef065a  PR-5.1  完了: 裸の破棄ゼロ・除外ゼロ
+fe1235a  PR-4.6  JoinSet 統合・reducer property test
+```
+
+（`docs(refactoring):` のコミットは各 PR の判断根拠を残すもので、上記に含まれる）
