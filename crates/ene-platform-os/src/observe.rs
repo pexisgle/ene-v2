@@ -1,4 +1,10 @@
-use super::{Observation, Window};
+//! What the OS reports about the foreground window and user activity.
+//!
+//! Exposes plain data only; no handle or pointer crosses this boundary.
+
+#![cfg(windows)]
+
+use crate::observe_types::{Observation, Window};
 use windows::Win32::{
     Foundation::{CloseHandle, HWND, MAX_PATH},
     System::Threading::{
@@ -11,7 +17,7 @@ use windows::Win32::{
     },
 };
 
-pub(super) fn observe() -> Observation {
+pub fn observe() -> Observation {
     Observation {
         window: foreground(),
         idle_seconds: idle_seconds(),

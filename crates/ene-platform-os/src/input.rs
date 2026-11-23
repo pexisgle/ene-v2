@@ -251,3 +251,19 @@ fn check_window(
     }
     Ok(())
 }
+
+/// Whether an event is a release of the press before it.
+pub fn is_release(event: &input::INPUT) -> bool {
+    // SAFETY: reading the union member the event's type selects, which is the
+    // invariant INPUT requires of any value that was constructed correctly.
+    unsafe {
+        match event.r#type {
+            input::INPUT_KEYBOARD => event.Anonymous.ki.dwFlags.contains(input::KEYEVENTF_KEYUP),
+            input::INPUT_MOUSE => matches!(
+                event.Anonymous.mi.dwFlags,
+                input::MOUSEEVENTF_LEFTUP | input::MOUSEEVENTF_RIGHTUP
+            ),
+            _ => false,
+        }
+    }
+}

@@ -7,8 +7,6 @@ use std::{
 
 #[cfg(target_os = "linux")]
 mod platform_linux;
-#[cfg(windows)]
-mod platform_windows;
 mod rules;
 #[cfg(windows)]
 pub(crate) mod screen;
@@ -75,7 +73,7 @@ pub fn supported() -> bool {
 /// Samples the OS once.
 #[cfg(windows)]
 pub fn observe() -> Observation {
-    platform_windows::observe()
+    ene_platform_os::observe()
 }
 
 /// Samples the OS once on Linux (Wayland `wlr-foreign-toplevel-management`

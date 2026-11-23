@@ -11,6 +11,9 @@
 pub mod capture;
 #[cfg(windows)]
 pub mod input;
+#[cfg(windows)]
+pub mod observe;
+pub mod observe_types;
 pub mod tray;
 #[cfg(windows)]
 pub mod window;
@@ -19,6 +22,9 @@ pub mod window;
 pub use capture::{CapturedFrame, Foreground, MAX_FRAME_EDGE, MAX_JPEG_BYTES};
 #[cfg(windows)]
 pub use input::{Desktop, Rect, UnsafeToSend, check_before_send, send_input};
+#[cfg(windows)]
+pub use observe::observe;
+pub use observe_types::{Observation, Window};
 pub use tray::{Tray, TrayAction, TrayHandle, TrayMode, TraySection, TrayState};
 #[cfg(windows)]
 pub use window::PodWindow;

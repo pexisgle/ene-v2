@@ -7,6 +7,10 @@
 //! This is the reference client `docs/design/desktop-client.md` describes. It
 //! owns no conversation, no memory and no model: those stay in the host.
 
+// The desktop app performs no FFI itself: every platform call lives in
+// ne-platform-os, which states the invariant each one relies on.
+#![forbid(unsafe_code)]
+
 mod audio;
 mod avatar;
 mod capabilities;

@@ -4,14 +4,8 @@ use crate::perception::screen;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{
-    mem::size_of,
-    time::{Duration, Instant},
-};
-use windows::Win32::{
-    Foundation::{HWND, POINT},
-    UI::{Input::KeyboardAndMouse as input, WindowsAndMessaging as window},
-};
+use std::time::{Duration, Instant};
+use windows::Win32::{Foundation::POINT, UI::Input::KeyboardAndMouse as input};
 
 pub(crate) const PREFERENCE: &str = "desktop-computer-use";
 const PARTIAL_INPUT: &str =
@@ -294,7 +288,10 @@ fn apply(
         return Err("Windows rejected the input".into());
     }
     // Each press is immediately paired with its release.
-    if let Some(release) = events.get(sent).filter(|event| is_release(event)) {
+    if let Some(release) = events
+        .get(sent)
+        .filter(|event| ene_platform_os::input::is_release(event))
+    {
         ene_platform_os::send_input(std::slice::from_ref(release));
     }
     Err(ComputerUseError::PartialInput)
@@ -306,72 +303,9 @@ fn verify_target(
     check_focus: bool,
     avatar_pid: Option<u32>,
 ) -> Result<(), ComputerUseError> {
-    if Desktop::read().as_ref() != Some(&frame.desktop) {
-        return Err(REFRESH.into());
-    }
-    let mut gui = window::GUITHREADINFO {
-        cbSize: size_of::<window::GUITHREADINFO>() as u32,
-        ..Default::default()
-    };
-    // SAFETY: Win32 reads the current input state and writes the sized struct.
-    unsafe {
-        if [
-            input::VK_SHIFT,
-            input::VK_CONTROL,
-            input::VK_MENU,
-            input::VK_LWIN,
-            input::VK_RWIN,
-            input::VK_LBUTTON,
-            input::VK_RBUTTON,
-            input::VK_MBUTTON,
-            input::VK_XBUTTON1,
-            input::VK_XBUTTON2,
-        ]
-        .into_iter()
-        .any(|key| input::GetAsyncKeyState(i32::from(key.0)) < 0)
-        {
-            return Err(
-                "a modifier or pointer button is held; take a new screenshot after releasing it"
-                    .into(),
-            );
-        }
-        window::GetGUIThreadInfo(0, &mut gui).map_err(|_| REFRESH)?;
-        if gui.hwndActive.0 as isize != frame.desktop.window() || !gui.hwndCapture.is_invalid() {
-            return Err(REFRESH.into());
-        }
-        if !gui.hwndMenuOwner.is_invalid() {
-            verify_window(gui.hwndMenuOwner, avatar_pid)?;
-        }
-        if check_focus {
-            verify_window(gui.hwndActive, avatar_pid)?;
-            if point.is_none() || !gui.hwndFocus.is_invalid() {
-                verify_window(gui.hwndFocus, avatar_pid)?;
-            }
-        }
-        if let Some(point) = point {
-            verify_window(window::WindowFromPoint(point), avatar_pid)?;
-        }
-    }
-    Ok(())
-}
-
-fn verify_window(target: HWND, avatar_pid: Option<u32>) -> Result<(), ComputerUseError> {
-    if target.is_invalid() {
-        return Err("the input target is unavailable".into());
-    }
-    // SAFETY: queries live handles and uses a valid optional process id pointer.
-    unsafe {
-        for hwnd in [target, window::GetAncestor(target, window::GA_ROOTOWNER)] {
-            let mut pid = 0;
-            if hwnd.is_invalid() || window::GetWindowThreadProcessId(hwnd, Some(&mut pid)) == 0 {
-                return Err("the input target is unavailable".into());
-            }
-            if pid == std::process::id() || Some(pid) == avatar_pid {
-                return Err("Computer Use cannot send input to ene windows".into());
-            }
-        }
-    }
-    Ok(())
+    let target = point.map(|point| (point.x, point.y));
+    ene_platform_os::check_before_send(&frame.desktop, target, check_focus, avatar_pid)
+        .map_err(|refusal| refusal.message().into())
 }
 
 fn point(frame: &Frame, x: u32, y: u32) -> Result<POINT, ComputerUseError> {
@@ -432,20 +366,6 @@ fn pair(key: input::VIRTUAL_KEY, scan: u16, flags: input::KEYBD_EVENT_FLAGS) -> 
             },
         },
     })
-}
-
-fn is_release(event: &input::INPUT) -> bool {
-    // SAFETY: the input type selects the corresponding initialized union member.
-    unsafe {
-        match event.r#type {
-            input::INPUT_KEYBOARD => event.Anonymous.ki.dwFlags.contains(input::KEYEVENTF_KEYUP),
-            input::INPUT_MOUSE => matches!(
-                event.Anonymous.mi.dwFlags,
-                input::MOUSEEVENTF_LEFTUP | input::MOUSEEVENTF_RIGHTUP
-            ),
-            _ => false,
-        }
-    }
 }
 
 #[cfg(test)]

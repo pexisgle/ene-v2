@@ -94,6 +94,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 | PR-4.1 後 | 0 | 160 | 29 | 47 | 0 |
 | PR-4.2 (part 1) 後 | 0 | 160 | 17 | 47 | 0 |
 | PR-4.2 完了 | 0 | 160 | 6 | 46 | 0 |
+| PR-4.3 完了 | 0 | 160 | 0 | 46 | 0 |
 
 > **設計書との差分（重要）**: 設計書 §3 は「本番 500 行超ファイル数 = 43」「`Resource` = 2」としているが、
 > 実測は **47** と **0** だった。
@@ -140,7 +141,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 ### Phase 4: Desktop 整理
 - [x] PR-4.1 `crates/ene-platform-os` 新設・`tray.rs` 移管（unsafe 84→29）
 - [x] PR-4.2 `window` / `capture` / `input` 移管（unsafe 29→6、長大ファイル 47→46）
-- [ ] PR-4.3 `#![forbid(unsafe_code)]` 有効化（Rule 8: →0）
+- [x] PR-4.3 `#![forbid(unsafe_code)]` 有効化（Rule 8: 84→0 達成）
 - [ ] PR-4.4 巨大 GPUI ビュー分割（bubble / row_editor / policy / editor / onboarding）
 - [ ] PR-4.5 `widgets/` プリミティブ分解
 - [ ] PR-4.6 `session/` 状態機械化・TaskTracker 統一

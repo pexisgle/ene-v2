@@ -1,20 +1,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-/// What the sensor can observe right now.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Observation {
-    /// The foreground window's title and process name, when readable.
-    pub window: Option<Window>,
-    /// Seconds since the last input, and whether the user counts as active.
-    pub idle_seconds: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Window {
-    pub title: String,
-    pub app_id: String,
-}
+pub use ene_platform_os::{Observation, Window};
 
 /// A parsed `eye.watch` rule.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
