@@ -30,25 +30,30 @@ use windows::Win32::{
 
 pub fn unlocked() -> bool {
     let mut name = [0u16; 64];
-    // SAFETY: the output is a sized UTF-16 buffer and the input desktop handle
-    // is closed before returning. An inaccessible desktop is treated as locked.
-    unsafe {
-        let Ok(desktop) = OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS)
-        else {
-            return false;
-        };
-        let result = GetUserObjectInformationW(
+    // SAFETY: opens the calling thread's input desktop for reading only; no
+    // memory is borrowed and a sealed desktop is reported as a failure.
+    let Ok(desktop) =
+        (unsafe { OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) })
+    else {
+        return false;
+    };
+    // SAFETY: `name` is a live 64-element UTF-16 buffer whose capacity is
+    // passed explicitly, so the call cannot write past it.
+    let result = unsafe {
+        GetUserObjectInformationW(
             HANDLE(desktop.0),
             UOI_NAME,
             Some(name.as_mut_ptr().cast()),
             size_of::<[u16; 64]>() as u32,
             None,
-        );
-        let _ignored = CloseDesktop(desktop);
-        result.is_ok()
-            && String::from_utf16_lossy(&name[..name.iter().position(|&ch| ch == 0).unwrap_or(64)])
-                .eq_ignore_ascii_case("default")
-    }
+        )
+    };
+    // SAFETY: `desktop` came from `OpenInputDesktop` above and is closed once,
+    // after its last use.
+    let _ignored = unsafe { CloseDesktop(desktop) };
+    result.is_ok()
+        && String::from_utf16_lossy(&name[..name.iter().position(|&ch| ch == 0).unwrap_or(64)])
+            .eq_ignore_ascii_case("default")
 }
 
 pub fn capture() -> Option<Vec<u8>> {
@@ -65,31 +70,35 @@ pub struct CapturedFrame {
 }
 
 pub fn physical<T>(action: impl FnOnce() -> T) -> Option<T> {
-    // SAFETY: both awareness contexts are used on this thread only.
-    unsafe {
-        let context = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        if context.is_invalid() {
-            return None;
-        }
-        let result = action();
-        let _ignored = SetThreadDpiAwarenessContext(context);
-        Some(result)
+    // SAFETY: sets this thread's DPI awareness; the returned previous context
+    // is restored below, so no other thread observes the change.
+    let context =
+        unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    if context.is_invalid() {
+        return None;
     }
+    let result = action();
+    // SAFETY: restores the context this thread had before the call above.
+    let _ignored = unsafe { SetThreadDpiAwarenessContext(context) };
+    Some(result)
 }
 
 fn foreground() -> Option<(HWND, RECT)> {
-    // SAFETY: reads the foreground window and writes a sized monitor info struct.
-    unsafe {
-        let window = GetForegroundWindow();
-        let monitor = Gdi::MonitorFromWindow(window, MONITOR_DEFAULTTONULL);
-        let mut info = MONITORINFO {
-            cbSize: size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        (!window.is_invalid()
-            && !monitor.is_invalid()
-            && Gdi::GetMonitorInfoW(monitor, &mut info).as_bool())
-        .then_some((window, info.rcMonitor))
+    // SAFETY: reads the foreground window handle; no pointer is involved.
+    let window = unsafe { GetForegroundWindow() };
+    // SAFETY: maps a live window handle to its monitor; takes no pointer.
+    let monitor = unsafe { Gdi::MonitorFromWindow(window, MONITOR_DEFAULTTONULL) };
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `info` is a live `MONITORINFO` whose `cbSize` is set, and the
+    // monitor handle was validated just above.
+    let ok = unsafe { Gdi::GetMonitorInfoW(monitor, &mut info).as_bool() };
+    if !window.is_invalid() && !monitor.is_invalid() && ok {
+        Some((window, info.rcMonitor))
+    } else {
+        None
     }
 }
 
@@ -148,32 +157,35 @@ pub fn capture_frame() -> Option<CapturedFrame> {
 }
 
 unsafe fn pixels(src: RECT) -> Option<(Vec<u8>, u32, u32)> {
-    // SAFETY: handles are checked before use. The memory DC owns no selected
-    // bitmap on deletion.
-    unsafe {
-        let (src_width, src_height) = (src.right - src.left, src.bottom - src.top);
-        if src_width <= 0 || src_height <= 0 {
-            return None;
-        }
-        let limit = MAX_FRAME_EDGE as i32;
-        let scale = f64::from(limit) / f64::from(src_width.max(src_height).max(limit));
-        let width = ((f64::from(src_width) * scale).round() as i32).max(1);
-        let height = ((f64::from(src_height) * scale).round() as i32).max(1);
-        let desktop = Gdi::GetDC(None);
-        if desktop.is_invalid() {
-            return None;
-        }
-        let memory = Gdi::CreateCompatibleDC(Some(desktop));
-        let result = if memory.is_invalid() {
-            None
-        } else {
-            let result = copy(desktop, memory, src, width, height);
-            let _ignored = Gdi::DeleteDC(memory);
-            result
-        };
-        Gdi::ReleaseDC(None, desktop);
-        result.map(|pixels| (pixels, width as u32, height as u32))
+    let (src_width, src_height) = (src.right - src.left, src.bottom - src.top);
+    if src_width <= 0 || src_height <= 0 {
+        return None;
     }
+    let limit = MAX_FRAME_EDGE as i32;
+    let scale = f64::from(limit) / f64::from(src_width.max(src_height).max(limit));
+    let width = ((f64::from(src_width) * scale).round() as i32).max(1);
+    let height = ((f64::from(src_height) * scale).round() as i32).max(1);
+    // SAFETY: acquires the screen DC; takes no pointer and the handle is
+    // released on every path below.
+    let desktop = unsafe { Gdi::GetDC(None) };
+    if desktop.is_invalid() {
+        return None;
+    }
+    // SAFETY: creates a memory DC compatible with the live screen DC above.
+    let memory = unsafe { Gdi::CreateCompatibleDC(Some(desktop)) };
+    let result = if memory.is_invalid() {
+        None
+    } else {
+        // SAFETY: both DCs are live and every argument is passed by value.
+        let result = unsafe { copy(desktop, memory, src, width, height) };
+        // SAFETY: `memory` came from `CreateCompatibleDC` and owns no selected
+        // bitmap by this point, because `copy` restores the original one.
+        let _ignored = unsafe { Gdi::DeleteDC(memory) };
+        result
+    };
+    // SAFETY: releases the DC acquired above, exactly once.
+    unsafe { Gdi::ReleaseDC(None, desktop) };
+    result.map(|pixels| (pixels, width as u32, height as u32))
 }
 
 unsafe fn copy(
@@ -195,20 +207,25 @@ unsafe fn copy(
         },
         ..Default::default()
     };
-    // SAFETY: a top-down 32bpp DIB has four bytes per pixel and no row padding.
-    // Flush GDI before reading the mapped pixels and restore the DC's selection
-    // before freeing the bitmap.
-    unsafe {
-        let mut bits = std::ptr::null_mut();
-        let bitmap =
-            Gdi::CreateDIBSection(Some(memory), &info, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
-        let object = HGDIOBJ(bitmap.0);
-        let previous = Gdi::SelectObject(memory, object);
-        let result = if previous.is_invalid() || bits.is_null() {
-            None
-        } else {
-            let _ignored = Gdi::SetStretchBltMode(memory, HALFTONE);
-            let copied = Gdi::StretchBlt(
+    let mut bits = std::ptr::null_mut();
+    // SAFETY: `info` describes a top-down 32bpp DIB and `bits` is a live local
+    // the call points at the mapped pixel buffer through.
+    let bitmap = unsafe {
+        Gdi::CreateDIBSection(Some(memory), &info, DIB_RGB_COLORS, &mut bits, None, 0).ok()?
+    };
+    let object = HGDIOBJ(bitmap.0);
+    // SAFETY: selects the new bitmap into the memory DC and returns the
+    // previous object, which is restored before the bitmap is freed.
+    let previous = unsafe { Gdi::SelectObject(memory, object) };
+    let result = if previous.is_invalid() || bits.is_null() {
+        None
+    } else {
+        // SAFETY: sets a raster mode flag on a live DC; no pointer is involved.
+        let _ignored = unsafe { Gdi::SetStretchBltMode(memory, HALFTONE) };
+        // SAFETY: every handle is live and the arguments describe the source
+        // and destination rectangles by value.
+        let blitted = unsafe {
+            Gdi::StretchBlt(
                 memory,
                 0,
                 0,
@@ -221,23 +238,29 @@ unsafe fn copy(
                 src.bottom - src.top,
                 SRCCOPY | CAPTUREBLT,
             )
-            .as_bool()
-                && Gdi::GdiFlush().as_bool();
-            copied.then(|| {
-                let pixels =
-                    std::slice::from_raw_parts(bits.cast::<u8>(), (width * height * 4) as usize);
-                pixels
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .flat_map(|pixel| [pixel[2], pixel[1], pixel[0]])
-                    .collect()
-            })
         };
-        if !previous.is_invalid() {
-            Gdi::SelectObject(memory, previous);
-        }
-        let _ = Gdi::DeleteObject(object);
-        result
+        // SAFETY: flushes pending GDI work so the mapped pixels are current
+        // before they are read; takes no pointer.
+        let flushed = unsafe { Gdi::GdiFlush().as_bool() };
+        (blitted.as_bool() && flushed).then(|| {
+            // SAFETY: `bits` was produced by `CreateDIBSection` for exactly
+            // `width * height * 4` bytes of a top-down 32bpp surface.
+            let pixels = unsafe {
+                std::slice::from_raw_parts(bits.cast::<u8>(), (width * height * 4) as usize)
+            };
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|pixel| [pixel[2], pixel[1], pixel[0]])
+                .collect()
+        })
+    };
+    if !previous.is_invalid() {
+        // SAFETY: restores the DC's original bitmap before the new one is freed.
+        unsafe { Gdi::SelectObject(memory, previous) };
     }
+    // SAFETY: the bitmap is deselected by now, so releasing it is safe.
+    let _ = unsafe { Gdi::DeleteObject(object) };
+    result
 }

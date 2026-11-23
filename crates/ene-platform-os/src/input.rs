@@ -37,30 +37,33 @@ impl Desktop {
             cbSize: std::mem::size_of::<input::LASTINPUTINFO>() as u32,
             ..Default::default()
         };
-        // SAFETY: the foreground handle came from a live query, and both calls
-        // write into locals this function owns for the duration.
-        unsafe {
-            window::GetWindowRect(foreground.window_handle(), &mut window_bounds).ok()?;
-            if !input::GetLastInputInfo(&mut activity).as_bool() {
-                return None;
-            }
-            let left = window::GetSystemMetrics(window::SM_XVIRTUALSCREEN);
-            let top = window::GetSystemMetrics(window::SM_YVIRTUALSCREEN);
-            let width = window::GetSystemMetrics(window::SM_CXVIRTUALSCREEN);
-            let height = window::GetSystemMetrics(window::SM_CYVIRTUALSCREEN);
-            (width > 0 && height > 0).then_some(Self {
-                window: foreground.window,
-                window_bounds,
-                monitor_rect: foreground.rect(),
-                virtual_screen: RECT {
-                    left,
-                    top,
-                    right: left + width,
-                    bottom: top + height,
-                },
-                last_input: activity.dwTime,
-            })
+        // SAFETY: the handle came from a live foreground query and `window_bounds`
+        // is a local this function owns.
+        unsafe { window::GetWindowRect(foreground.window_handle(), &mut window_bounds).ok()? };
+        // SAFETY: `activity` is a live `LASTINPUTINFO` whose `cbSize` is set.
+        if !unsafe { input::GetLastInputInfo(&mut activity) }.as_bool() {
+            return None;
         }
+        // SAFETY: each call reads one virtual-screen metric; no pointer involved.
+        let left = unsafe { window::GetSystemMetrics(window::SM_XVIRTUALSCREEN) };
+        // SAFETY: as above, for the top edge.
+        let top = unsafe { window::GetSystemMetrics(window::SM_YVIRTUALSCREEN) };
+        // SAFETY: as above, for the width.
+        let width = unsafe { window::GetSystemMetrics(window::SM_CXVIRTUALSCREEN) };
+        // SAFETY: as above, for the height.
+        let height = unsafe { window::GetSystemMetrics(window::SM_CYVIRTUALSCREEN) };
+        (width > 0 && height > 0).then_some(Self {
+            window: foreground.window,
+            window_bounds,
+            monitor_rect: foreground.rect(),
+            virtual_screen: RECT {
+                left,
+                top,
+                right: left + width,
+                bottom: top + height,
+            },
+            last_input: activity.dwTime,
+        })
     }
 
     /// Whether a later snapshot still describes the same desktop.
@@ -187,43 +190,45 @@ pub fn check_before_send(
         cbSize: std::mem::size_of::<window::GUITHREADINFO>() as u32,
         ..Default::default()
     };
-    // SAFETY: every call reads live OS state into locals this function owns;
-    // the handles it returns are only inspected, never retained.
-    unsafe {
-        if [
-            input::VK_SHIFT,
-            input::VK_CONTROL,
-            input::VK_MENU,
-            input::VK_LWIN,
-            input::VK_RWIN,
-            input::VK_LBUTTON,
-            input::VK_RBUTTON,
-            input::VK_MBUTTON,
-            input::VK_XBUTTON1,
-            input::VK_XBUTTON2,
-        ]
-        .into_iter()
-        .any(|key| input::GetAsyncKeyState(i32::from(key.0)) < 0)
-        {
-            return Err(UnsafeToSend::KeyHeld);
+    // SAFETY: reads the current async state of each key; takes an integer and
+    // returns an integer, so nothing is borrowed or retained.
+    let held = [
+        input::VK_SHIFT,
+        input::VK_CONTROL,
+        input::VK_MENU,
+        input::VK_LWIN,
+        input::VK_RWIN,
+        input::VK_LBUTTON,
+        input::VK_RBUTTON,
+        input::VK_MBUTTON,
+        input::VK_XBUTTON1,
+        input::VK_XBUTTON2,
+    ]
+    .into_iter()
+    .any(|key| unsafe { input::GetAsyncKeyState(i32::from(key.0)) } < 0);
+    if held {
+        return Err(UnsafeToSend::KeyHeld);
+    }
+    // SAFETY: `gui` is a live `GUITHREADINFO` whose `cbSize` is set; thread 0
+    // means the calling thread, which is the one sending the input.
+    unsafe { window::GetGUIThreadInfo(0, &mut gui) }.map_err(|_| UnsafeToSend::DesktopChanged)?;
+    if gui.hwndActive.0 as isize != captured.window() || !gui.hwndCapture.is_invalid() {
+        return Err(UnsafeToSend::DesktopChanged);
+    }
+    if !gui.hwndMenuOwner.is_invalid() {
+        check_window(gui.hwndMenuOwner, avatar_pid)?;
+    }
+    if check_focus {
+        check_window(gui.hwndActive, avatar_pid)?;
+        if target.is_none() || !gui.hwndFocus.is_invalid() {
+            check_window(gui.hwndFocus, avatar_pid)?;
         }
-        window::GetGUIThreadInfo(0, &mut gui).map_err(|_| UnsafeToSend::DesktopChanged)?;
-        if gui.hwndActive.0 as isize != captured.window() || !gui.hwndCapture.is_invalid() {
-            return Err(UnsafeToSend::DesktopChanged);
-        }
-        if !gui.hwndMenuOwner.is_invalid() {
-            check_window(gui.hwndMenuOwner, avatar_pid)?;
-        }
-        if check_focus {
-            check_window(gui.hwndActive, avatar_pid)?;
-            if target.is_none() || !gui.hwndFocus.is_invalid() {
-                check_window(gui.hwndFocus, avatar_pid)?;
-            }
-        }
-        if let Some((x, y)) = target {
-            let point = windows::Win32::Foundation::POINT { x, y };
-            check_window(window::WindowFromPoint(point), avatar_pid)?;
-        }
+    }
+    if let Some((x, y)) = target {
+        let point = windows::Win32::Foundation::POINT { x, y };
+        // SAFETY: maps a point to the window under it; takes the point by value.
+        let window_under = unsafe { window::WindowFromPoint(point) };
+        check_window(window_under, avatar_pid)?;
     }
     Ok(())
 }
@@ -236,17 +241,19 @@ fn check_window(
     if target.is_invalid() {
         return Err(UnsafeToSend::NoTarget);
     }
-    // SAFETY: both handles came from live queries; `GetWindowThreadProcessId`
-    // only writes to the stack local passed to it.
-    unsafe {
-        for hwnd in [target, window::GetAncestor(target, window::GA_ROOTOWNER)] {
-            let mut pid = 0;
-            if hwnd.is_invalid() || window::GetWindowThreadProcessId(hwnd, Some(&mut pid)) == 0 {
-                return Err(UnsafeToSend::NoTarget);
-            }
-            if pid == std::process::id() || Some(pid) == avatar_pid {
-                return Err(UnsafeToSend::EneWindow);
-            }
+    // SAFETY: `target` was validated above; the call returns the owning
+    // top-level window and takes no pointer.
+    let owner = unsafe { window::GetAncestor(target, window::GA_ROOTOWNER) };
+    for hwnd in [target, owner] {
+        let mut pid = 0;
+        // SAFETY: `hwnd` came from a live query and `pid` is a stack local
+        // the call only writes into.
+        let thread = unsafe { window::GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        if hwnd.is_invalid() || thread == 0 {
+            return Err(UnsafeToSend::NoTarget);
+        }
+        if pid == std::process::id() || Some(pid) == avatar_pid {
+            return Err(UnsafeToSend::EneWindow);
         }
     }
     Ok(())
@@ -254,16 +261,19 @@ fn check_window(
 
 /// Whether an event is a release of the press before it.
 pub fn is_release(event: &input::INPUT) -> bool {
-    // SAFETY: reading the union member the event's type selects, which is the
-    // invariant INPUT requires of any value that was constructed correctly.
-    unsafe {
-        match event.r#type {
-            input::INPUT_KEYBOARD => event.Anonymous.ki.dwFlags.contains(input::KEYEVENTF_KEYUP),
-            input::INPUT_MOUSE => matches!(
+    match event.r#type {
+        // SAFETY: the event's type tag selects the `ki` member, which is the
+        // invariant `INPUT` requires of any correctly constructed value.
+        input::INPUT_KEYBOARD => unsafe {
+            event.Anonymous.ki.dwFlags.contains(input::KEYEVENTF_KEYUP)
+        },
+        // SAFETY: as above, for the `mi` member.
+        input::INPUT_MOUSE => unsafe {
+            matches!(
                 event.Anonymous.mi.dwFlags,
                 input::MOUSEEVENTF_LEFTUP | input::MOUSEEVENTF_RIGHTUP
-            ),
-            _ => false,
-        }
+            )
+        },
+        _ => false,
     }
 }

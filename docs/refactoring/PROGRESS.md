@@ -95,6 +95,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 | PR-4.2 (part 1) 後 | 0 | 160 | 17 | 47 | 0 |
 | PR-4.2 完了 | 0 | 160 | 6 | 46 | 0 |
 | PR-4.3 完了 | 0 | 160 | 0 | 46 | 0 |
+| PR-4.3b 完了 | 0 | 160 | 0 | 44 | 0 |
 | PR-4.4 (part 2) 後 | 0 | 160 | 0 | 45 | 0 |
 | PR-4.4 (part 3) 後 | 0 | 160 | 0 | 44 | 0 |
 
@@ -375,3 +376,14 @@ ow_editor.rs（874 行）は同じ手法で 3 分割まで到達したが、配�
 
 **ルール**: インデントで可視性を広げない。`struct` 宣言を見つけ、
 ブレースを数えて閉じ `}` までを範囲確定し、**その範囲内の行だけ**を編集する。
+
+### PR-4.3b: unsafe lint を deny 化（完了）
+
+`undocumented_unsafe_blocks` / `multiple_unsafe_ops_per_block` を `deny` に昇格。
+
+- `tray.rs`: 55 箇所の `unsafe` すべてに `// SAFETY:` を付与（0 → 55）。複数呼び出しの
+  ブロックは 1 操作ずつに分割。
+- `capture.rs` / `input.rs` / `observe.rs` / `window.rs`: 11 箇所の複数操作ブロックを分割。
+- これらは PR-4.1〜4.3 で `apps/ene-desktop` から無改変で移したコードで、同じ欠陥を持っていた。
+
+挙動は不変（操作・順序・エラー処理は同一、ブロック境界とコメントのみ）。

@@ -31,9 +31,9 @@ impl PodWindow {
             // `GetWindowTextW` writes at most `buf.len()` code units into it.
             let len = unsafe { GetWindowTextW(hwnd, &mut buf) };
             if len > 0 && String::from_utf16_lossy(&buf[..len as usize]) == POD_TITLE {
-                // SAFETY: `lparam` carries a `*mut Option<HWND>` that outlives the
-                // enumeration; `current` holds it on its own stack frame.
                 let slot = lparam.0 as *mut Option<HWND>;
+                // SAFETY: `lparam` carries a `*mut Option<HWND>` that outlives
+                // the enumeration; `current` holds it on its own stack frame.
                 unsafe { *slot = Some(hwnd) };
                 return false.into();
             }
@@ -41,10 +41,12 @@ impl PodWindow {
         }
         let mut found: Option<HWND> = None;
         let lparam = LPARAM(&raw mut found as isize);
+        // SAFETY: `GetCurrentThreadId` takes no pointer and cannot fail.
+        let thread_id = unsafe { GetCurrentThreadId() };
         // SAFETY: `find_pod` matches `WNDENUMPROC` and only writes through the
         // `lparam` pointer described above.
         unsafe {
-            let _ = EnumThreadWindows(GetCurrentThreadId(), Some(find_pod), lparam);
+            let _ = EnumThreadWindows(thread_id, Some(find_pod), lparam);
         }
         found.map(Self)
     }
@@ -118,8 +120,11 @@ impl PodWindow {
     pub fn suppress_dwm_frame(self) {
         // SAFETY: `self.0` is a live window handle; the style bits are read from
         // and written back to that same window.
+        // SAFETY: reads the extended style of a live window; the value is a
+        // plain integer and nothing is dereferenced.
+        let style = unsafe { GetWindowLongPtrW(self.0, GWL_EXSTYLE) };
+        // SAFETY: writes the adjusted bits back to the same live window.
         unsafe {
-            let style = GetWindowLongPtrW(self.0, GWL_EXSTYLE);
             SetWindowLongPtrW(
                 self.0,
                 GWL_EXSTYLE,
@@ -129,8 +134,7 @@ impl PodWindow {
         let ncrp: u32 = 1; // DWMNCRP_DISABLED
         let corner: u32 = 1; // DWMWCP_DONOTROUND
         let color: u32 = 0xFFFF_FFFE; // DWMWA_COLOR_NONE
-        // SAFETY: each call passes a pointer to a live local `u32` with the
-        // matching size, as `DwmSetWindowAttribute` requires.
+        // SAFETY: `ncrp` is a live local `u32` and the size passed matches it.
         unsafe {
             let _ = DwmSetWindowAttribute(
                 self.0.0,
@@ -138,12 +142,18 @@ impl PodWindow {
                 (&raw const ncrp).cast(),
                 4,
             );
+        }
+        // SAFETY: `corner` is a live local `u32` and the size passed matches it.
+        unsafe {
             let _ = DwmSetWindowAttribute(
                 self.0.0,
                 DWMWA_WINDOW_CORNER_PREFERENCE,
                 (&raw const corner).cast(),
                 4,
             );
+        }
+        // SAFETY: `color` is a live local `u32` and the size passed matches it.
+        unsafe {
             let _ =
                 DwmSetWindowAttribute(self.0.0, DWMWA_BORDER_COLOR, (&raw const color).cast(), 4);
         }

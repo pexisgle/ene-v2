@@ -24,14 +24,12 @@ too_many_lines = "warn"
 cognitive_complexity = "warn"
 rest_pat_in_fully_bound_structs = "warn"
 # Every `unsafe` block must state its invariant in a `// SAFETY:` comment.
-# Staged as `warn`: the 63 remaining sites are the Win32 FFI in ene-desktop
-# (`tray.rs`, `ui/pod/win32.rs`), which PR-4.1/PR-4.3 moves into
-# `ene-platform-os`. Flip to `deny` in PR-4.3, when `#![forbid(unsafe_code)]`
-# lands in `apps/ene-desktop`.
-undocumented_unsafe_blocks = "warn"
+# All FFI now lives in `ene-platform-os`, and every block there documents its
+# invariant, so this is a hard error rather than a staged warning.
+undocumented_unsafe_blocks = "deny"
 # One operation per `unsafe` block keeps each `SAFETY:` claim about a single
-# call. Staged as `warn` for the same 20 sites and the same reason.
-multiple_unsafe_ops_per_block = "warn"
+# call, which is why the multi-call blocks in `tray.rs` were split.
+multiple_unsafe_ops_per_block = "deny"
 # Surfaces discarded `#[must_use]` values that `let _ = ...` hides (PR-5.1).
 # Staged as `warn` (230 sites); flip to `deny` when that pass completes.
 let_underscore_must_use = "warn"
