@@ -77,6 +77,13 @@ fn run(mut app: App) -> AppExit {
             ExWlShellEvent::InitRequest => return ReturnData::RequestCompositor,
             ExWlShellEvent::CompositorProvide(c, qh) => {
                 compositor = Some((c.clone(), qh.clone()));
+                // This reply ends exwlshellev's init loop, and that loop only
+                // accepts `None`, `RequestBind` or `RequestCompositor`: any
+                // other value panics. Returning `None` here skips the frame
+                // body below, so a quit that arrives before the first dispatch
+                // cannot raise `RequestExit` inside the handshake. Dispatch
+                // handles it one event later.
+                return ReturnData::None;
             }
             ExWlShellEvent::UserEvent(()) => {
                 deadline = Instant::now();
