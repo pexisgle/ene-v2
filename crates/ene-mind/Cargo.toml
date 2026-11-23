@@ -17,3 +17,8 @@ serde_json.workspace = true
 serde_json_canonicalizer.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# Property tests for the normalization and scoring invariants, where the
+# interesting inputs are too many to enumerate by hand.
+proptest = "1"

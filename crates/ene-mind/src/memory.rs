@@ -268,3 +268,59 @@ pub enum MemoryActionKind {
     Share,
     Unshare,
 }
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// A list of memory ids, which may contain repeats the way a real
+    /// recall pass can.
+    fn ids() -> impl Strategy<Value = Vec<String>> {
+        prop::collection::vec("[a-z]{1,4}", 0..8)
+    }
+
+    proptest! {
+        /// Fusing one list twice is the same as fusing it once: the function
+        /// is a ranking rule, not an accumulator.
+        #[test]
+        fn fusing_is_idempotent(a in ids()) {
+            let once = fuse(&[&a], 60.0);
+            let twice = fuse(&[&a, &a], 60.0);
+            let order = |v: &[(String, f64)]| v.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+            prop_assert_eq!(order(&once), order(&twice));
+        }
+
+        /// Scores are finite and sorted high to low; a NaN would make the sort
+        /// non-deterministic and silently reorder the recall.
+        #[test]
+        fn scores_are_finite_and_sorted(lists in prop::collection::vec(ids(), 1..4)) {
+            let refs: Vec<&[String]> = lists.iter().map(Vec::as_slice).collect();
+            let fused = fuse(&refs, 60.0);
+            for (_, score) in &fused {
+                prop_assert!(score.is_finite(), "score must be finite, got {score}");
+                prop_assert!(*score > 0.0, "a listed id always scores above zero");
+            }
+            let scores: Vec<f64> = fused.iter().map(|(_, s)| *s).collect();
+            let mut sorted = scores.clone();
+            sorted.sort_by(|a, b| b.partial_cmp(a).expect("finite"));
+            prop_assert_eq!(scores, sorted, "results must be ordered by score");
+        }
+
+        /// Every id that appeared anywhere appears exactly once in the output.
+        #[test]
+        fn output_is_the_union_of_inputs(lists in prop::collection::vec(ids(), 1..4)) {
+            let refs: Vec<&[String]> = lists.iter().map(Vec::as_slice).collect();
+            let fused = fuse(&refs, 60.0);
+            let mut out: Vec<&String> = fused.iter().map(|(id, _)| id).collect();
+            let before = out.len();
+            out.sort();
+            out.dedup();
+            prop_assert_eq!(out.len(), before, "no id may repeat in the output");
+
+            for id in lists.iter().flatten() {
+                prop_assert!(out.contains(&id), "{id} vanished from the union");
+            }
+        }
+    }
+}
