@@ -8,5 +8,9 @@
 //! comment, and exposes only safe methods over owned values.
 
 pub mod tray;
+#[cfg(windows)]
+pub mod window;
 
 pub use tray::{Tray, TrayAction, TrayHandle, TrayMode, TraySection, TrayState};
+#[cfg(windows)]
+pub use window::PodWindow;

@@ -4,8 +4,6 @@
 mod bubble;
 mod controls;
 mod onboarding;
-#[cfg(windows)]
-mod win32;
 
 use crate::input::{self, Draft};
 use crate::ui::theme::{resolve_ui_font_family, ui_font_fallbacks};
@@ -221,14 +219,14 @@ impl CompanionPod {
     fn apply_size(&mut self, desired: Size<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         if self.last_size != desired {
             #[cfg(windows)]
-            let saved_bottom = win32::current_pod_hwnd()
-                .and_then(|hwnd| win32::read_window_bottom(hwnd).map(|b| (hwnd.0 as isize, b)));
+            let saved_bottom = ene_platform_os::PodWindow::current()
+                .and_then(|pod| pod.bottom().map(|bottom| (pod, bottom)));
             self.last_size = desired;
             window.resize(desired);
             #[cfg(windows)]
-            if let Some((hwnd_raw, target_bottom)) = saved_bottom {
+            if let Some((pod, target_bottom)) = saved_bottom {
                 cx.spawn(async move |_, _| {
-                    win32::anchor_window_bottom(hwnd_raw, target_bottom);
+                    pod.anchor_bottom(target_bottom);
                 })
                 .detach();
             }
@@ -326,9 +324,9 @@ impl Render for CompanionPod {
             self.title_initialized = true;
             window.set_window_title("ene-companion-pod");
             #[cfg(windows)]
-            if let Some(hwnd) = win32::current_pod_hwnd() {
-                win32::suppress_dwm_frame(hwnd);
-                win32::apply_hwnd_topmost(hwnd);
+            if let Some(pod) = ene_platform_os::PodWindow::current() {
+                pod.suppress_dwm_frame();
+                pod.keep_topmost();
             }
         }
         let needs_key = self.needs_connection(cx);
@@ -414,14 +412,8 @@ pub fn focus_chat(pod: &CompanionPod, window: &mut Window, cx: &mut App) {
 
 pub(crate) fn set_pod_window_visible(visible: bool) {
     #[cfg(windows)]
-    if let Some(hwnd) = win32::current_pod_hwnd() {
-        use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow};
-        unsafe {
-            let _ = ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
-        }
-        if visible {
-            win32::apply_hwnd_topmost(hwnd);
-        }
+    if let Some(pod) = ene_platform_os::PodWindow::current() {
+        pod.set_visible(visible);
     }
     #[cfg(not(windows))]
     let _ = visible;
@@ -429,7 +421,7 @@ pub(crate) fn set_pod_window_visible(visible: bool) {
 
 pub(crate) fn ensure_pod_topmost() {
     #[cfg(windows)]
-    if let Some(hwnd) = win32::current_pod_hwnd() {
-        win32::apply_hwnd_topmost(hwnd);
+    if let Some(pod) = ene_platform_os::PodWindow::current() {
+        pod.keep_topmost();
     }
 }
