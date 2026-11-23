@@ -56,6 +56,7 @@ agent-client-protocol-schema = { version = "1.15.1", default-features = false }
 process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 regex = "1"
+globset = "0.4"
 cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"
 tempfile = "3"
@@ -70,6 +71,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 # pins the exact version its observed API was written against.
 gpui = { version = "=0.2.2", default-features = false }
 http = "1"
+http-body-util = "0.1"
 hashlink = "0.12"
 hex = "0.4"
 croner = { version = "4", default-features = false, features = ["jiff"] }
@@ -99,8 +101,10 @@ tokio = { version = "1", default-features = false, features = ["macros", "sync",
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 url = "2"
+strum = { version = "0.28", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 which = "8"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [profile.dev]
 opt-level = 1

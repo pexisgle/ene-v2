@@ -2,6 +2,10 @@
 pub mod capability;
 pub mod error;
 pub mod rules;
+#[cfg(test)]
+mod rules_property_tests;
+#[cfg(test)]
+mod rules_tests;
 
 pub use capability::{
     BUILTIN_TOOLS, COMPUTER_USE, CapabilityApproval, CapabilitySpec, WORKSPACE_CAPABILITY_PREFIX,
