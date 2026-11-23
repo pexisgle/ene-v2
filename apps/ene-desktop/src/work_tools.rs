@@ -132,13 +132,7 @@ impl Workspace {
             .map(PathBuf::from)
             .map(|dir| dir.join("System32/WindowsPowerShell/v1.0/powershell.exe"));
         #[cfg(not(windows))]
-        let shell = {
-            let path = std::env::var_os("PATH").unwrap_or_default();
-            std::env::split_paths(&path)
-                .filter(|path| path.is_absolute())
-                .map(|path| path.join("bash"))
-                .find(|path| path.is_file())
-        };
+        let shell = which::which("bash").ok();
         Ok(Self {
             root,
             dir,

@@ -363,14 +363,18 @@ fn find_linux_binary() -> Option<PathBuf> {
 }
 
 fn find_on_path(binary: &str) -> Option<PathBuf> {
-    let path_env = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_env) {
-        let candidate = dir.join(binary);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    let path = std::env::var_os("PATH")?;
+    find_in_paths(binary, &path)
+}
+
+/// The PATH search, taking the path list explicitly so a test can pin the
+/// executable-bit rule without mutating the process environment.
+///
+/// `which` requires the executable bit, which the previous `is_file` scan did
+/// not: a non-executable match on PATH would have been returned and then
+/// failed to spawn.
+fn find_in_paths(binary: &str, paths: &std::ffi::OsStr) -> Option<PathBuf> {
+    which::which_in(binary, Some(paths), ".").ok()
 }
 
 #[cfg(test)]
@@ -408,6 +412,33 @@ mod tests {
         assert_eq!(
             find_engine_binary(&opts).as_deref(),
             Some(fake_exe.as_path())
+        );
+    }
+
+    /// `find_on_path` requires the executable bit, so a plain file on PATH is
+    /// not reported as a usable engine.
+    #[cfg(unix)]
+    #[test]
+    fn find_on_path_requires_an_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let name = "ene-voicevox-probe";
+        let plain = dir.path().join(name);
+        std::fs::write(&plain, b"stub").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let paths = dir.path().as_os_str();
+
+        assert_eq!(
+            find_in_paths(name, paths),
+            None,
+            "a non-executable file on PATH must not be chosen"
+        );
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            find_in_paths(name, paths).as_deref(),
+            Some(plain.as_path()),
+            "the executable file on PATH must be found"
         );
     }
 }

@@ -4111,6 +4111,7 @@ dependencies = [
  "wayland-client",
  "wayland-protocols 0.32.13",
  "wayland-protocols-wlr",
+ "which 8.0.6",
  "windows 0.62.2",
  "x11rb",
 ]
@@ -4346,6 +4347,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "which 8.0.6",
 ]
 
 [[package]]
