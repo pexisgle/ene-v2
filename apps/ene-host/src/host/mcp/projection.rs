@@ -1,5 +1,5 @@
 //! ECS tool projection for connected MCP servers.
-use super::supervisor::{Desired, Launch, McpServers, Server};
+use super::supervisor::{Desired, Launch, McpSupervisor, Server};
 use crate::host::resources::HostRuntime;
 use bevy_ecs::prelude::*;
 use rig_agent::tool::{ToolCatalog, server::ToolServerHandle};
@@ -22,18 +22,34 @@ pub(super) struct McpTool {
     pub(super) key: Key<family::Tool>,
 }
 
-/// The managed registry owns generations and liveness. ECS owns exposed names.
+/// What a freshly connected server brings: the transport, its registry and the
+/// configuration it was launched for.
+pub(super) struct Connected {
+    pub(super) id: String,
+    pub(super) launch: Launch,
+    pub(super) connection: McpConnection,
+    pub(super) registry: ToolServerHandle,
+}
+
+/// Records a newly connected server, retiring whatever it replaces.
+///
+/// The replacement must drop the previous server's tools before the new
+/// registry takes over, so this takes the world as well as the state.
 pub(super) fn attach(
     world: &mut World,
-    id: &str,
-    launch: Launch,
-    connection: McpConnection,
-    registry: ToolServerHandle,
+    supervisor: &mut McpSupervisor,
+    connected: Connected,
     want: &Desired,
 ) {
-    retire_one(world, id);
-    world.resource_mut::<McpServers>().0.insert(
-        id.to_owned(),
+    let Connected {
+        id,
+        launch,
+        connection,
+        registry,
+    } = connected;
+    retire_one(world, supervisor, &id);
+    supervisor.servers.0.insert(
+        id,
         Server {
             connection,
             launch,
@@ -44,16 +60,12 @@ pub(super) fn attach(
     );
 }
 
-pub(super) fn project_servers(world: &mut World) {
-    let ids: Vec<String> = world.resource::<McpServers>().0.keys().cloned().collect();
+/// Publishes every connected server's tools onto the world.
+pub(super) fn project_servers(world: &mut World, supervisor: &McpSupervisor) {
     let mut changed = false;
-    for id in ids {
-        let Some(server) = world.resource_mut::<McpServers>().0.remove(&id) else {
-            continue;
-        };
+    for (id, server) in &supervisor.servers.0 {
         let catalog = server.registry.snapshot();
-        changed |= project(world, &id, &server, Some(&catalog));
-        world.resource_mut::<McpServers>().0.insert(id, server);
+        changed |= project(world, id, server, Some(&catalog));
     }
     if changed {
         refresh_access(world);
@@ -153,9 +165,9 @@ fn refresh_access(world: &mut World) {
     crate::host::tools::sync::sync_access(world);
 }
 
-/// Closes one server and removes the tools it contributed.
-pub(super) fn retire_one(world: &mut World, id: &str) {
-    let Some(server) = world.resource_mut::<McpServers>().0.remove(id) else {
+/// Removes one server's tools and closes its transport.
+pub(super) fn retire_one(world: &mut World, supervisor: &mut McpSupervisor, id: &str) {
+    let Some(server) = supervisor.servers.0.remove(id) else {
         return;
     };
     if project(world, id, &server, None) {

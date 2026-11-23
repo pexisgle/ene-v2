@@ -19,17 +19,13 @@ pub(crate) use ene_work::mcp::{CheckState, is_npx_command};
 #[cfg(test)]
 use projection::tool_names;
 pub(crate) use projection::tool_servers;
-pub(crate) use supervisor::{McpServers, check_state, request_reconnect};
+pub(crate) use supervisor::{McpSupervisor, check_state, request_reconnect};
 
 use bevy_ecs::prelude::*;
 use rig_ecs::prelude::*;
 
 pub(crate) fn register(app: &mut App) {
-    app.init_resource::<McpServers>()
-        .init_resource::<supervisor::Connecting>()
-        .init_resource::<supervisor::McpFailures>()
-        .init_resource::<supervisor::McpEvents>()
-        .init_resource::<supervisor::McpSettings>()
+    app.init_resource::<McpSupervisor>()
         .add_systems(Update, supervisor::sync.after(AgentLoop));
 }
 

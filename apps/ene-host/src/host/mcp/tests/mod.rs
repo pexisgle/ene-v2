@@ -295,11 +295,7 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
         world.insert_resource(store.clone());
         world.insert_resource(HostRuntime(tokio::runtime::Handle::current()));
         world.init_resource::<HostState>();
-        world.init_resource::<McpServers>();
-        world.init_resource::<Connecting>();
-        world.init_resource::<McpFailures>();
-        world.init_resource::<McpSettings>();
-        world.init_resource::<McpEvents>();
+        world.init_resource::<McpSupervisor>();
         sync(&mut world);
         peer.started().await;
         assert!(world.resource::<McpServers>().0.is_empty());

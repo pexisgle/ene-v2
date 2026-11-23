@@ -37,11 +37,11 @@ pub(super) struct Server {
 }
 
 /// The servers that are up right now, keyed by connection id.
-#[derive(Resource, Default)]
+#[derive(Default)]
 pub(crate) struct McpServers(pub(super) HashMap<String, Server>);
 
 /// Connection ids a connect task is running for.
-#[derive(Resource, Default)]
+#[derive(Default)]
 pub(super) struct Connecting(pub(super) HashMap<String, Pending>);
 
 pub(super) struct Pending {
@@ -66,7 +66,7 @@ pub(super) struct FailureState {
 }
 
 /// Backoff and configuration-hold tracking per failing MCP connection.
-#[derive(Resource, Default)]
+#[derive(Default)]
 pub(super) struct McpFailures(pub(super) HashMap<String, FailureState>);
 
 pub(super) enum Event {
@@ -84,24 +84,48 @@ pub(super) enum Event {
     },
 }
 
-#[derive(Resource)]
-pub(super) struct McpEvents {
+/// The event channel the connect tasks report on.
+pub(super) struct EventChannel {
     pub(super) sender: mpsc::Sender<Event>,
     pub(super) receiver: mpsc::Receiver<Event>,
 }
 
-impl Default for McpEvents {
+impl Default for EventChannel {
     fn default() -> Self {
         let (sender, receiver) = mpsc::channel(QUEUE);
         Self { sender, receiver }
     }
 }
 
-#[derive(Resource, Default)]
+#[derive(Default)]
 pub(super) struct McpSettings {
     pub(super) revision: Option<u64>,
     pub(super) credential_generation: Option<u64>,
     pub(super) desired: Vec<(String, Desired)>,
+}
+
+/// Everything the MCP supervisor owns between frames.
+///
+/// This is the single ECS resource the MCP layer declares: the server map, the
+/// in-flight connects, the backoff bookkeeping, the event channel and the
+/// settings snapshot all live here, so nothing else in the host can observe
+/// them in an inconsistent combination.
+#[derive(Resource, Default)]
+pub(crate) struct McpSupervisor {
+    pub(super) servers: McpServers,
+    pub(super) connecting: Connecting,
+    pub(super) failures: McpFailures,
+    pub(super) events: EventChannel,
+    pub(super) settings: McpSettings,
+    /// The wake handle retry timers poke. Set once at startup.
+    pub(super) wake: Option<Wake>,
+}
+
+impl McpSupervisor {
+    /// The event sender a connect task reports on.
+    pub(super) fn sender(&self) -> mpsc::Sender<Event> {
+        self.events.sender.clone()
+    }
 }
 
 fn desired(
@@ -151,11 +175,14 @@ pub(super) fn sync(world: &mut World) {
     let closing = world
         .get_resource::<crate::host::resources::HostState>()
         .is_some_and(|state| state.closing || state.failed.is_some());
+    let mut supervisor = std::mem::take(&mut *world.resource_mut::<McpSupervisor>());
     if closing {
-        handle_closing_servers(world);
+        handle_closing_servers(world, &mut supervisor);
+        *world.resource_mut::<McpSupervisor>() = supervisor;
         return;
     }
     let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) else {
+        *world.resource_mut::<McpSupervisor>() = supervisor;
         return;
     };
     let store = world.resource::<Store>().clone();
@@ -165,58 +192,68 @@ pub(super) fn sync(world: &mut World) {
             if error.is_storage() {
                 crate::host::fail(world, error.to_string());
             }
+            *world.resource_mut::<McpSupervisor>() = supervisor;
             return;
         }
     };
     let credentials = world.get_resource::<Credentials>().cloned();
-    let reload = {
-        let mut settings = world.resource_mut::<McpSettings>();
-        reload_desired_settings(&mut settings, &store, credentials.as_ref(), revision)
-    };
-    match reload {
+    match reload_desired_settings(
+        &mut supervisor.settings,
+        &store,
+        credentials.as_ref(),
+        revision,
+    ) {
         ReloadOutcome::Ready => {}
-        ReloadOutcome::Skip => return,
+        ReloadOutcome::Skip => {
+            *world.resource_mut::<McpSupervisor>() = supervisor;
+            return;
+        }
         ReloadOutcome::Fail(message) => {
+            *world.resource_mut::<McpSupervisor>() = supervisor;
             crate::host::fail(world, message);
             return;
         }
     }
-    let wanted = world.resource::<McpSettings>().desired.clone();
-    prune_connecting(&mut world.resource_mut::<Connecting>(), &wanted);
-    prune_failures(&mut world.resource_mut::<McpFailures>(), &wanted);
-    let events = drain(&mut world.resource_mut::<McpEvents>());
+    let wanted = supervisor.settings.desired.clone();
+    prune_connecting(&mut supervisor.connecting, &wanted);
+    prune_failures(&mut supervisor.failures, &wanted);
+    let events = drain(&mut supervisor.events);
     for event in events {
-        accept_event(world, &wanted, event, &runtime);
+        accept_event(world, &mut supervisor, &wanted, event, &runtime);
     }
-    let retire = collect_retire_ids(world.resource::<McpServers>(), &wanted);
+    let retire = collect_retire_ids(&supervisor.servers, &wanted);
     for id in retire {
-        retire_one(world, &id);
+        retire_one(world, &mut supervisor, &id);
     }
-    project_servers(world);
     let targets = plan_connect_targets(
-        world.resource::<McpServers>(),
-        world.resource::<Connecting>(),
-        world.resource::<McpFailures>(),
+        &supervisor.servers,
+        &supervisor.connecting,
+        &supervisor.failures,
         wanted,
         Instant::now(),
     );
-    if !targets.is_empty() {
-        let sender = world.resource::<McpEvents>().sender.clone();
-        let wake = world.get_resource::<Wake>().cloned();
-        let launched = spawn_connect_tasks(targets, &sender, wake, &runtime);
-        world.resource_mut::<Connecting>().0.extend(launched);
+    if targets.is_empty() {
+        project_servers(world, &supervisor);
+        *world.resource_mut::<McpSupervisor>() = supervisor;
+        return;
     }
+    let sender = supervisor.sender();
+    let wake = world.get_resource::<Wake>().cloned();
+    let launched = spawn_connect_tasks(targets, &sender, wake, &runtime);
+    supervisor.connecting.0.extend(launched);
+    project_servers(world, &supervisor);
+    *world.resource_mut::<McpSupervisor>() = supervisor;
 }
 
-fn handle_closing_servers(world: &mut World) {
-    world.resource_mut::<Connecting>().0.clear();
-    world.resource_mut::<McpFailures>().0.clear();
-    let ids: Vec<String> = world.resource::<McpServers>().0.keys().cloned().collect();
+fn handle_closing_servers(world: &mut World, supervisor: &mut McpSupervisor) {
+    supervisor.connecting.0.clear();
+    supervisor.failures.0.clear();
+    let ids: Vec<String> = supervisor.servers.0.keys().cloned().collect();
     for id in ids {
-        retire_one(world, &id);
+        retire_one(world, supervisor, &id);
     }
     if let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) {
-        for event in drain(&mut world.resource_mut::<McpEvents>()) {
+        for event in drain(&mut supervisor.events) {
             if let Event::Connected { connection, .. } = event {
                 runtime.spawn(async move { connection.close().await });
             }
@@ -391,6 +428,7 @@ fn spawn_connect_tasks(
 
 pub(super) fn accept_event(
     world: &mut World,
+    supervisor: &mut McpSupervisor,
     wanted: &[(String, Desired)],
     event: Event,
     runtime: &tokio::runtime::Handle,
@@ -398,8 +436,8 @@ pub(super) fn accept_event(
     let (id, launch) = match &event {
         Event::Connected { id, launch, .. } | Event::Failed { id, launch, .. } => (id, launch),
     };
-    let current = world
-        .resource::<Connecting>()
+    let current = supervisor
+        .connecting
         .0
         .get(id)
         .is_some_and(|pending| &pending.launch == launch)
@@ -414,7 +452,7 @@ pub(super) fn accept_event(
         }
         return;
     }
-    world.resource_mut::<Connecting>().0.remove(id);
+    supervisor.connecting.0.remove(id);
     match event {
         Event::Connected {
             id,
@@ -422,11 +460,21 @@ pub(super) fn accept_event(
             connection,
             registry,
         } => {
-            world.resource_mut::<McpFailures>().0.remove(&id);
+            supervisor.failures.0.remove(&id);
             let Some((_, want)) = wanted.iter().find(|(wanted, _)| wanted == &id) else {
                 return;
             };
-            attach(world, &id, launch, connection, registry, want);
+            attach(
+                world,
+                supervisor,
+                super::projection::Connected {
+                    id,
+                    launch,
+                    connection,
+                    registry,
+                },
+                want,
+            );
         }
         Event::Failed {
             id,
@@ -435,9 +483,9 @@ pub(super) fn accept_event(
             config_error,
         } => {
             tracing::warn!(connection = %id, config_error, "the MCP server did not connect: {reason}");
-            let wake = world.get_resource::<Wake>().cloned();
+            let wake = supervisor.wake.clone();
             record_failure(
-                &mut world.resource_mut::<McpFailures>(),
+                &mut supervisor.failures,
                 FailureReport {
                     id,
                     launch,
@@ -511,7 +559,7 @@ fn record_failure(
     );
 }
 
-fn drain(events: &mut McpEvents) -> Vec<Event> {
+fn drain(events: &mut EventChannel) -> Vec<Event> {
     let mut out = Vec::new();
     while let Ok(event) = events.receiver.try_recv() {
         out.push(event);
@@ -532,10 +580,8 @@ pub(super) async fn open(
 
 /// Clears any backoff or configuration hold on `id` so the supervisor attempts
 /// a fresh connection on the next frame (used by `CheckConnection`).
-pub(crate) fn request_reconnect(world: &mut World, id: &str) {
-    if let Some(mut failures) = world.get_resource_mut::<McpFailures>() {
-        failures.0.remove(id);
-    }
+pub(crate) fn request_reconnect(supervisor: &mut McpSupervisor, id: &str) {
+    supervisor.failures.0.remove(id);
 }
 
 struct CheckContext<'a> {
@@ -548,14 +594,15 @@ struct CheckContext<'a> {
 /// Inspects the current MCP supervisor state for a specific connection revision
 /// and credential generation.
 pub(crate) fn check_state(world: &World, id: &str, revision: u64) -> CheckState {
+    let supervisor = world.get_resource::<McpSupervisor>();
     check_state_from(
         &CheckContext {
             cred_gen: world
                 .get_resource::<Credentials>()
                 .map(Credentials::generation),
-            servers: world.get_resource::<McpServers>(),
-            connecting: world.get_resource::<Connecting>(),
-            failures: world.get_resource::<McpFailures>(),
+            servers: supervisor.map(|supervisor| &supervisor.servers),
+            connecting: supervisor.map(|supervisor| &supervisor.connecting),
+            failures: supervisor.map(|supervisor| &supervisor.failures),
         },
         id,
         revision,

@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MAX_UI_RPC_REFS = 0
 MAX_DB_UPWARD_REFS = 0
 MAX_PROVIDERS_MODEL_REFS = 0
-MAX_HOST_WORLD_REFS = 168
+MAX_HOST_WORLD_REFS = 167
 # Rule 7: domain crates that must not depend on the wire protocol crate.
 MAX_DOMAIN_RPC_DEPS = 0
 # Rule 8: production `unsafe` occurrences under apps/ene-desktop.

@@ -923,7 +923,12 @@ async fn probe_mcp_connection(
     let reconnect_id = connection.id.clone();
     services
         .call(move |app| {
-            crate::host::mcp::request_reconnect(app.world_mut(), &reconnect_id);
+            if let Some(mut supervisor) = app
+                .world_mut()
+                .get_resource_mut::<crate::host::mcp::McpSupervisor>()
+            {
+                crate::host::mcp::request_reconnect(&mut supervisor, &reconnect_id);
+            }
             Ok(())
         })
         .await?;

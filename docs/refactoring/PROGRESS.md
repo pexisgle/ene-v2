@@ -86,6 +86,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 | PR-1.5 後 | 0 | 171 | 84 | 47 | 0 |
 | PR-2.1 後 | 0 | 171 | 84 | 47 | 0 |
 | PR-2.2 後 | 0 | 168 | 84 | 47 | 0 |
+| PR-2.3 後 | 0 | 167 | 84 | 47 | 0 |
 
 > **設計書との差分（重要）**: 設計書 §3 は「本番 500 行超ファイル数 = 43」「`Resource` = 2」としているが、
 > 実測は **47** と **0** だった。
@@ -118,7 +119,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 ### Phase 2: `World` 脱却
 - [x] PR-2.1 `server/rpc/{chat,voice}.rs` の Resource 撤去（Rule 10: 2→0）
 - [x] PR-2.2 `host/work/*` の World 参照解体（171→168）
-- [ ] PR-2.3 `host/mcp/supervisor.rs` 統合（→95）
+- [x] PR-2.3 `host/mcp/supervisor.rs` 統合（171→167、検出 5→1 Resource）
 - [ ] PR-2.4 `host/client/*` + `eyes` の Gateway 化（→55）
 - [ ] PR-2.5 `host/permission/*` の PermissionService 化（→25）
 - [ ] PR-2.6 残存 World 参照の完全撤去（→0）
