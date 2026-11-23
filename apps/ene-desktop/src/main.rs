@@ -98,8 +98,18 @@ fn main() {
     // The window is gone. The session stops serving, kills its child and returns;
     // joining it is what makes the exit orderly rather than a race.
     drop(tray);
-    let _ = quit.send(Command::Quit);
-    let _ = session_runtime.worker.join();
+    ene_platform_os::debug_if_err(
+        quit.send(Command::Quit)
+            .map_err(|_| "the session already stopped"),
+        "quit command",
+    );
+    ene_platform_os::warn_if_err(
+        session_runtime
+            .worker
+            .join()
+            .map_err(|_| "the worker panicked"),
+        "session worker shutdown",
+    );
     #[cfg(windows)]
     maybe_finish_history_reset(history_reset, local_host, local_host_child);
 }
@@ -210,7 +220,10 @@ fn spawn_shutdown_signal(handle: &tokio::runtime::Handle) -> tokio::sync::onesho
         #[cfg(not(unix))]
         let received = tokio::signal::ctrl_c().await.is_ok();
         if received {
-            let _ = sig_tx.send(());
+            ene_platform_os::debug_if_err(
+                sig_tx.send(()).map_err(|_| "the listener stopped"),
+                "shutdown signal",
+            );
         }
     });
     sig_rx
@@ -227,7 +240,7 @@ fn run_gpui_app(init: DesktopAppInit) {
             let shutdown_rx = init.shutdown_rx;
             cx.spawn(async move |cx| {
                 if shutdown_rx.await.is_ok() {
-                    let _ = cx.update(|cx| cx.quit());
+                    let _quit = cx.update(|cx| cx.quit());
                 }
             })
             .detach();

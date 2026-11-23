@@ -83,7 +83,7 @@ pub fn load_or_create_client_id(path: &Path) -> String {
     {
         use std::io::Write as _;
         if tmp.write_all(id.as_bytes()).is_ok() {
-            let _ = tmp.persist(path);
+            ene_platform_os::warn_if_err(tmp.persist(path), "session file persistence");
         }
     }
     id
@@ -256,13 +256,15 @@ impl Session {
 
     /// Serves until the window closes or the session is asked to quit.
     pub async fn run(mut self) {
-        let _ = self
-            .updates
-            .send(Update::EyesEnabled(self.devices.eyes_enabled));
+        notify_ui(
+            &self.updates,
+            Update::EyesEnabled(self.devices.eyes_enabled),
+        );
         #[cfg(windows)]
-        let _ = self
-            .updates
-            .send(Update::ComputerUseEnabled(self.devices.computer_enabled));
+        notify_ui(
+            &self.updates,
+            Update::ComputerUseEnabled(self.devices.computer_enabled),
+        );
         let mut retry = FIRST_RETRY;
         loop {
             let outcome = Box::pin(self.attempt()).await;

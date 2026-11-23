@@ -449,7 +449,7 @@ async fn models_endpoint() -> (
                  Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
-            let _ = socket.write_all(response.as_bytes()).await;
+            let _discarded = socket.write_all(response.as_bytes()).await;
         }
     });
     (address, received)
@@ -620,7 +620,7 @@ async fn sakura_probe_filters_non_chat_models_from_llm_list() {
     tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut buf = [0u8; 4096];
-        let _ = stream.read(&mut buf).await;
+        let _discarded = stream.read(&mut buf).await;
         let body = serde_json::json!({
             "object": "list",
             "data": [
@@ -637,7 +637,7 @@ async fn sakura_probe_filters_non_chat_models_from_llm_list() {
             body.len(),
             body
         );
-        let _ = stream.write_all(reply.as_bytes()).await;
+        let _discarded = stream.write_all(reply.as_bytes()).await;
     });
 
     let root = tempfile::tempdir().unwrap();

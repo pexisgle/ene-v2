@@ -7,6 +7,7 @@
 //! Each module states the invariant its `unsafe` relies on in a `SAFETY:`
 //! comment, and exposes only safe methods over owned values.
 
+pub mod best_effort;
 #[cfg(windows)]
 pub mod capture;
 #[cfg(windows)]
@@ -18,6 +19,7 @@ pub mod tray;
 #[cfg(windows)]
 pub mod window;
 
+pub use best_effort::{debug_if_err, ignore_teardown, warn_if_err};
 #[cfg(windows)]
 pub use capture::{CapturedFrame, Foreground, MAX_FRAME_EDGE, MAX_JPEG_BYTES};
 #[cfg(windows)]

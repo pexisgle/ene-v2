@@ -23,7 +23,7 @@ async fn a_slow_embedding_holds_the_model_call_without_blocking_the_host() {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut request = [0; 4096];
         assert!(socket.read(&mut request).await.unwrap() > 0);
-        let _ = started.send(());
+        let _discarded = started.send(());
         released.notified().await;
         let body = r#"{"data":[{"embedding":[1.0,0.0],"index":0}],"usage":{"prompt_tokens":1,"total_tokens":1}}"#;
         let response = format!(
@@ -448,6 +448,6 @@ fn q05_storage_fault_in_tail_marks_host_failed_instead_of_empty_state() {
     )
     .unwrap_err();
     assert!(err.is_storage(), "expected storage error, got {err:?}");
-    let _ = harness.accept("k-fault", "こんにちは");
+    let _discarded = harness.accept("k-fault", "こんにちは");
     harness.run_until(|world| world.resource::<crate::host::HostState>().failed.is_some());
 }

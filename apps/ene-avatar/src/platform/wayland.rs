@@ -49,7 +49,7 @@ fn run(mut app: App) -> AppExit {
     {
         Ok(state) => state,
         Err(error) => {
-            let _ = app.world().resource::<Control>().output.try_send(serde_json::json!({"event":"error","error":format!("Wayland layer-shell and xdg-output are required: {error}")}));
+            let _reported = app.world().resource::<Control>().output.try_send(serde_json::json!({"event":"error","error":format!("Wayland layer-shell and xdg-output are required: {error}")}));
             return AppExit::error();
         }
     };
@@ -231,10 +231,10 @@ fn run(mut app: App) -> AppExit {
                     .any(|character| character.state == AvatarState::Loading)
             } {
                 // Without surfaces, only unfinished scene loading needs another frame.
-                let _ = app.world().resource::<Control>().wake_tx.send(());
+                let _woke = app.world().resource::<Control>().wake_tx.send(());
             }
             if let Some(exit) = app.should_exit() {
-                let _ = exit_tx.try_send(exit);
+                let _exited = exit_tx.try_send(exit);
                 return ReturnData::RequestExit;
             }
             if let Some((compositor, qh)) = &compositor {

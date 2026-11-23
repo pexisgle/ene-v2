@@ -257,7 +257,7 @@ mod guest {
                     .get("text")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                let _ = log(format!("reference_echo: {text}"));
+                let _discarded = log(format!("reference_echo: {text}"));
                 let result = ToolInvokeResult {
                     output: json!({ "echo": text }),
                     is_error: false,

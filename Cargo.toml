@@ -30,9 +30,9 @@ undocumented_unsafe_blocks = "deny"
 # One operation per `unsafe` block keeps each `SAFETY:` claim about a single
 # call, which is why the multi-call blocks in `tray.rs` were split.
 multiple_unsafe_ops_per_block = "deny"
-# Surfaces discarded `#[must_use]` values that `let _ = ...` hides (PR-5.1).
-# Staged as `warn` (230 sites); flip to `deny` when that pass completes.
-let_underscore_must_use = "warn"
+# Surfaces discarded `#[must_use]` values that `let _ = ...` hides.
+# Every site now names its discard, so this is a hard error.
+let_underscore_must_use = "deny"
 
 [workspace.dependencies]
 ene-rpc = { path = "crates/ene-rpc" }

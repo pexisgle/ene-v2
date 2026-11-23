@@ -168,7 +168,9 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AcpBridge<R, W> {
                             && let Ok(update) = serde_json::from_value::<SessionUpdate>(update_val)
                             && let Some(tx) = events
                         {
-                            let _ = tx.send(HarnessEvent::Update { update }).await;
+                            // The consumer may have stopped; the caller observes that through the
+                            // channel it owns, so this module only marks the value as handled.
+                            let _forwarded = tx.send(HarnessEvent::Update { update }).await;
                         }
                     }
                     "session/request_permission" => {
@@ -280,7 +282,8 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AcpBridge<R, W> {
             .cloned()
             .and_then(|v| serde_json::from_value::<StopReason>(v).ok())
             .unwrap_or(StopReason::EndTurn);
-        let _ = events.send(HarnessEvent::Stop { stop_reason: stop }).await;
+        // As above: the receiver owns the decision to stop listening.
+        let _reported = events.send(HarnessEvent::Stop { stop_reason: stop }).await;
         Ok(stop)
     }
 }

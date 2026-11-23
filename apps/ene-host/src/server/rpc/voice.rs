@@ -423,7 +423,7 @@ async fn bind_recognition_client(
 }
 
 async fn flush_barge_in(runtime: &Runtime, client_id: String) {
-    let _ = runtime
+    let _written = runtime
         .call(move |app| {
             let companions = app
                 .world()
@@ -433,7 +433,7 @@ async fn flush_barge_in(runtime: &Runtime, client_id: String) {
                 .unwrap_or_default();
             let voice = app.world().get_resource::<voice::Voice>();
             for companion_id in companions {
-                let _ = voice::flush(voice, &companion_id, w::FlushReason::BargeIn);
+                let _flushed = voice::flush(voice, &companion_id, w::FlushReason::BargeIn);
             }
             Ok(())
         })

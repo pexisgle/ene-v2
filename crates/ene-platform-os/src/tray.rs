@@ -22,6 +22,7 @@ pub enum TraySection {
     Voice,
     Device,
 }
+use crate::best_effort::ignore_teardown;
 use std::sync::{
     Arc, RwLock,
     atomic::{AtomicBool, Ordering},
@@ -96,7 +97,7 @@ impl TrayHandle {
             windows_tray::request_tip_refresh(self.hwnd_raw);
         }
         #[cfg(not(windows))]
-        let _ = tip_changed;
+        let _discarded = tip_changed;
     }
 }
 
@@ -116,7 +117,7 @@ impl Tray {
         }
         #[cfg(not(windows))]
         {
-            let _ = (initial, tx);
+            let _discarded = (initial, tx);
             None
         }
     }
@@ -134,7 +135,7 @@ impl Tray {
         {
             windows_tray::request_close(self.handle.hwnd_raw);
             if let Some(thread) = self.thread.take() {
-                let _ = thread.join();
+                let _discarded = thread.join();
             }
         }
     }
@@ -288,7 +289,7 @@ mod windows_tray {
                 thread: Some(thread),
             }),
             _ => {
-                let _ = thread.join();
+                let _discarded = thread.join();
                 None
             }
         }
@@ -314,7 +315,7 @@ mod windows_tray {
         // SAFETY: as in `request_tip_refresh`; posting to a closed window is
         // reported to the caller rather than being unsound.
         unsafe {
-            let _ignored = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            ignore_teardown(PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)));
         }
     }
 
@@ -342,7 +343,7 @@ mod windows_tray {
         };
         // SAFETY: `wc` is a fully initialised `WNDCLASSW` that outlives the
         // call; `wnd_proc` is a valid callback with the required signature.
-        let _ = unsafe { RegisterClassW(&wc) };
+        let _discarded = unsafe { RegisterClassW(&wc) };
 
         let (icon, icon_owned) = load_or_create_tray_icon();
         // SAFETY: the literal is a NUL-terminated UTF-16 string with static
@@ -393,7 +394,7 @@ mod windows_tray {
                     // SAFETY: the icon was created by this module and
                     // `icon_owned` records that this module must destroy it.
                     unsafe {
-                        let _ = DestroyIcon(owned.icon);
+                        let _discarded = DestroyIcon(owned.icon);
                     }
                 }
                 if com_init >= 0 {
@@ -401,7 +402,7 @@ mod windows_tray {
                     // returned success; unbalanced otherwise and skipped.
                     unsafe { CoUninitialize() };
                 }
-                let _ = ready_tx.send(Err(()));
+                let _discarded = ready_tx.send(Err(()));
                 return;
             }
         };
@@ -409,13 +410,15 @@ mod windows_tray {
         // SAFETY: `hwnd` is the window created immediately above on this
         // thread, and the call only lowers the filter for the given message.
         unsafe {
-            let _ = ChangeWindowMessageFilterEx(hwnd, WM_TRAY_CALLBACK, MSGFLT_ALLOW, None);
+            let _discarded =
+                ChangeWindowMessageFilterEx(hwnd, WM_TRAY_CALLBACK, MSGFLT_ALLOW, None);
         }
         if taskbar_created_msg != 0 {
             // SAFETY: same live window; the message id came from the
             // registration above and is only compared, never dereferenced.
             unsafe {
-                let _ = ChangeWindowMessageFilterEx(hwnd, taskbar_created_msg, MSGFLT_ALLOW, None);
+                let _discarded =
+                    ChangeWindowMessageFilterEx(hwnd, taskbar_created_msg, MSGFLT_ALLOW, None);
             }
         }
 
@@ -424,7 +427,7 @@ mod windows_tray {
         // borrow ends before the message loop starts.
         let ctx_ref = unsafe { &*ctx_ptr };
         try_register_tray_icon(hwnd, ctx_ref);
-        let _ = ready_tx.send(Ok(hwnd.0 as isize));
+        let _discarded = ready_tx.send(Ok(hwnd.0 as isize));
 
         let mut msg = MSG::default();
         // SAFETY: `msg` is a live local this thread exclusively owns, and
@@ -432,7 +435,7 @@ mod windows_tray {
         while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
             // SAFETY: `msg` was filled by `GetMessageW` on this thread.
             unsafe {
-                let _ = TranslateMessage(&msg);
+                let _discarded = TranslateMessage(&msg);
             }
             // SAFETY: same message, dispatched on the thread that owns the
             // window, which is what the Win32 message loop requires.
@@ -482,7 +485,7 @@ mod windows_tray {
             // SAFETY: `hwnd` is the tray window; killing a timer that was
             // set on it is a no-op when it has none.
             unsafe {
-                let _ = KillTimer(Some(hwnd), TRAY_RETRY_TIMER_ID);
+                let _discarded = KillTimer(Some(hwnd), TRAY_RETRY_TIMER_ID);
             }
             tracing::info!("system tray icon registered");
             return None;
@@ -499,7 +502,7 @@ mod windows_tray {
         // SAFETY: `hwnd` is the tray window and the callback is `None`, so
         // the timer posts `WM_TIMER` to that window rather than calling back.
         unsafe {
-            let _ = SetTimer(
+            let _discarded = SetTimer(
                 Some(hwnd),
                 TRAY_RETRY_TIMER_ID,
                 TRAY_RETRY_INTERVAL_MS,
@@ -537,7 +540,7 @@ mod windows_tray {
         // SAFETY: `nid` is a live local naming a tooltip buffer this call
         // fills; the shell copies the tooltip before returning.
         unsafe {
-            let _ignored = Shell_NotifyIconW(NIM_MODIFY, &nid);
+            ignore_teardown(Shell_NotifyIconW(NIM_MODIFY, &nid));
         }
     }
 
@@ -551,7 +554,7 @@ mod windows_tray {
         // SAFETY: removal names the icon by window and id only; it reads no
         // borrowed state, so it stays valid even as the window is destroyed.
         unsafe {
-            let _ignored = Shell_NotifyIconW(NIM_DELETE, &nid);
+            ignore_teardown(Shell_NotifyIconW(NIM_DELETE, &nid));
         }
     }
 
@@ -605,7 +608,7 @@ mod windows_tray {
                     // SAFETY: this window's retry timer is no longer needed
                     // because the icon is registered.
                     unsafe {
-                        let _ = KillTimer(Some(hwnd), TRAY_RETRY_TIMER_ID);
+                        let _discarded = KillTimer(Some(hwnd), TRAY_RETRY_TIMER_ID);
                     }
                 } else {
                     let ticks = ctx.retry_ticks.get().saturating_add(1);
@@ -615,7 +618,7 @@ mod windows_tray {
                         // SAFETY: the retry budget is spent, so the timer is
                         // removed to stop it firing forever.
                         unsafe {
-                            let _ = KillTimer(Some(hwnd), TRAY_RETRY_TIMER_ID);
+                            let _discarded = KillTimer(Some(hwnd), TRAY_RETRY_TIMER_ID);
                         }
                     }
                 }
@@ -631,10 +634,10 @@ mod windows_tray {
                 let event = (lparam.0 as u32) & 0xFFFF;
                 match event {
                     WM_LBUTTONUP => {
-                        let _ = ctx.tx.send(TrayAction::ActivatePod);
+                        let _discarded = ctx.tx.send(TrayAction::ActivatePod);
                     }
                     WM_LBUTTONDBLCLK => {
-                        let _ = ctx.tx.send(TrayAction::OpenChat);
+                        let _discarded = ctx.tx.send(TrayAction::OpenChat);
                     }
                     WM_RBUTTONUP | WM_CONTEXTMENU => {
                         show_context_menu(hwnd, ctx);
@@ -647,7 +650,7 @@ mod windows_tray {
                 // SAFETY: `hwnd` is the window currently dispatching this
                 // message; destroying it defers `WM_DESTROY`/`WM_NCDESTROY`.
                 unsafe {
-                    let _ignored = DestroyWindow(hwnd);
+                    ignore_teardown(DestroyWindow(hwnd));
                 }
                 LRESULT(0)
             }
@@ -655,7 +658,7 @@ mod windows_tray {
                 // SAFETY: the window is still alive during `WM_DESTROY`; its
                 // retry timer must be cleared before that is no longer true.
                 unsafe {
-                    let _ = KillTimer(Some(hwnd), TRAY_RETRY_TIMER_ID);
+                    let _discarded = KillTimer(Some(hwnd), TRAY_RETRY_TIMER_ID);
                 }
                 if ctx.added.get() {
                     delete_tray_icon(hwnd);
@@ -680,7 +683,7 @@ mod windows_tray {
                     // SAFETY: the icon is ours per `icon_owned` and is not used
                     // again after the box is dropped.
                     unsafe {
-                        let _ = DestroyIcon(owned.icon);
+                        let _discarded = DestroyIcon(owned.icon);
                     }
                 }
                 LRESULT(0)
@@ -756,19 +759,19 @@ mod windows_tray {
             // SAFETY: `menu` is the live popup built above; the call only
             // marks which entry is the default.
             unsafe {
-                let _ = SetMenuDefaultItem(menu, CMD_OPEN_CHAT, 0);
+                let _discarded = SetMenuDefaultItem(menu, CMD_OPEN_CHAT, 0);
             }
         }
 
         let mut pt = POINT::default();
         // SAFETY: `pt` is a live local the call only writes into.
         unsafe {
-            let _ = GetCursorPos(&mut pt);
+            let _discarded = GetCursorPos(&mut pt);
         }
         // SAFETY: bringing our own window to the foreground is required before
         // `TrackPopupMenu`, or the menu is dismissed by the next click.
         unsafe {
-            let _ = SetForegroundWindow(hwnd);
+            let _discarded = SetForegroundWindow(hwnd);
         }
         // SAFETY: `menu` is live and `hwnd` owns it; the call reads `pt` by
         // value and returns the chosen id without retaining anything.
@@ -786,16 +789,16 @@ mod windows_tray {
         // SAFETY: the documented workaround for the first-click bug — a
         // posted `WM_NULL` lets the menu close cleanly on our own window.
         unsafe {
-            let _ignored = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+            ignore_teardown(PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0)));
         }
         // SAFETY: `menu` was created in this function and is not used again.
         unsafe {
-            let _ignored = DestroyMenu(menu);
+            ignore_teardown(DestroyMenu(menu));
         }
         if picked.0 > 0
             && let Some(action) = action_for_command(picked.0 as u32)
         {
-            let _ = ctx.tx.send(action);
+            let _discarded = ctx.tx.send(action);
         }
     }
 
@@ -803,14 +806,14 @@ mod windows_tray {
         // SAFETY: `menu` is the live popup owned by the caller and `label` is a
         // `w!` literal with static lifetime.
         unsafe {
-            let _ = AppendMenuW(menu, flags, id as usize, label);
+            let _discarded = AppendMenuW(menu, flags, id as usize, label);
         }
     }
 
     fn append_separator(menu: HMENU) {
         // SAFETY: same live popup; a separator takes a null label by contract.
         unsafe {
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _discarded = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         }
     }
 
@@ -877,7 +880,7 @@ mod windows_tray {
             // SAFETY: the section was created but produced no pixels, so it
             // is released here instead of being handed out.
             unsafe {
-                let _ = DeleteObject(color.into());
+                let _discarded = DeleteObject(color.into());
             }
             return None;
         }
@@ -888,7 +891,7 @@ mod windows_tray {
         let s = size as f32;
         let c = (s - 1.0) * 0.5;
         let r = s * 0.45;
-        let _ = USER_DEFAULT_SCREEN_DPI;
+        let _discarded = USER_DEFAULT_SCREEN_DPI;
         for y in 0..size {
             for x in 0..size {
                 let dx = (x as f32 - c) / r;
@@ -938,12 +941,12 @@ mod windows_tray {
         // are ours to release; the mask is skipped when creation failed.
         unsafe {
             if !mask.is_invalid() {
-                let _ = DeleteObject(mask.into());
+                let _discarded = DeleteObject(mask.into());
             }
         }
         // SAFETY: the colour bitmap is always created before this point.
         unsafe {
-            let _ = DeleteObject(color.into());
+            let _discarded = DeleteObject(color.into());
         }
         icon
     }

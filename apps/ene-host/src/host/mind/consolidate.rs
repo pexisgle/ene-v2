@@ -697,9 +697,17 @@ mod tests {
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
-            let _ = socket.write_all(head.as_bytes()).await;
-            let _ = socket.write_all(body.as_bytes()).await;
-            let _ = socket.flush().await;
+            // A write that fails means the batch never reached the peer; the
+            // caller turns this into a retry, so the reason has to survive.
+            ene_platform_os::warn_if_err(
+                socket.write_all(head.as_bytes()).await,
+                "recall header write",
+            );
+            ene_platform_os::warn_if_err(
+                socket.write_all(body.as_bytes()).await,
+                "recall body write",
+            );
+            ene_platform_os::warn_if_err(socket.flush().await, "recall request flush");
         });
         ExtractionServer { base, task }
     }

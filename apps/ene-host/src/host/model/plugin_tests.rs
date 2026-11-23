@@ -209,7 +209,7 @@ async fn serve(
     bodies.lock().unwrap().push(body.clone());
     let model = body["model"].as_str().unwrap_or("test-normal");
     let streaming = body["stream"].as_bool().unwrap_or(false);
-    let _ = (request.method.as_str(), request.path.as_str(), base);
+    let _discarded = (request.method.as_str(), request.path.as_str(), base);
     match model {
         "test-error" => {
             write_json(
@@ -221,7 +221,7 @@ async fn serve(
         }
         "test-large" => {
             let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 16777217\r\n\r\n";
-            let _ = stream.write_all(head.as_bytes()).await;
+            let _discarded = stream.write_all(head.as_bytes()).await;
         }
         "test-broken" => serve_broken_sse(stream).await,
         "test-slow" => serve_slow_sse(stream, closed, cancel).await,
@@ -231,19 +231,19 @@ async fn serve(
         "test-tools" => serve_test_tools(stream, streaming).await,
         _ => serve_normal_reply(stream, model, streaming).await,
     }
-    let _ = stream.flush().await;
+    let _discarded = stream.flush().await;
 }
 
 async fn write_sse_lines(stream: &mut tokio::net::TcpStream, payloads: &[Value]) {
-    let _ = stream
+    let _discarded = stream
         .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
         .await;
     for chunk in payloads {
-        let _ = stream
+        let _discarded = stream
             .write_all(format!("data: {chunk}\n\n").as_bytes())
             .await;
     }
-    let _ = stream.write_all(b"data: [DONE]\n\n").await;
+    let _discarded = stream.write_all(b"data: [DONE]\n\n").await;
 }
 
 async fn serve_broken_sse(stream: &mut tokio::net::TcpStream) {
@@ -254,8 +254,8 @@ async fn serve_broken_sse(stream: &mut tokio::net::TcpStream) {
         )
         .await
         .unwrap();
-    let _ = stream.flush().await;
-    let _ = stream.write_all(b"data: {\"broken\":\n\n").await;
+    let _discarded = stream.flush().await;
+    let _discarded = stream.write_all(b"data: {\"broken\":\n\n").await;
 }
 
 async fn serve_slow_sse(
@@ -270,7 +270,7 @@ async fn serve_slow_sse(
         )
         .await
         .unwrap();
-    let _ = stream.flush().await;
+    let _discarded = stream.flush().await;
     let mut drain = [0u8; 1];
     tokio::select! {
         _ = cancel.cancelled() => {}
@@ -288,13 +288,13 @@ async fn serve_delayed_sse(stream: &mut tokio::net::TcpStream) {
         )
         .await
         .unwrap();
-    let _ = stream.flush().await;
+    let _discarded = stream.flush().await;
     tokio::time::sleep(Duration::from_millis(400)).await;
     let chunk = json!({"id":"1","object":"chat.completion.chunk","created":1,"model":"test-delayed","choices":[{"index":0,"delta":{"content":" second"},"finish_reason":"stop"}]});
-    let _ = stream
+    let _discarded = stream
         .write_all(format!("data: {chunk}\n\n").as_bytes())
         .await;
-    let _ = stream.write_all(b"data: [DONE]\n\n").await;
+    let _discarded = stream.write_all(b"data: [DONE]\n\n").await;
 }
 
 async fn serve_confirm_tool(stream: &mut tokio::net::TcpStream, streaming: bool) {
@@ -373,9 +373,9 @@ async fn write_json(stream: &mut tokio::net::TcpStream, status: u16, body: &Valu
         "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
-    let _ = stream.write_all(head.as_bytes()).await;
-    let _ = stream.write_all(body.as_bytes()).await;
-    let _ = stream.flush().await;
+    let _discarded = stream.write_all(head.as_bytes()).await;
+    let _discarded = stream.write_all(body.as_bytes()).await;
+    let _discarded = stream.flush().await;
 }
 
 /// Records the headers the guest asked the broker to send, before the real

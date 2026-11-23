@@ -572,7 +572,7 @@ impl Avatar {
             })
             .encode_line()
         {
-            let _ = write_tx.try_send(WriteItem::OneWay(line));
+            let _queued = write_tx.try_send(WriteItem::OneWay(line));
         }
         let deadline = std::time::Instant::now() + AVATAR_SHUTDOWN_TIMEOUT;
         loop {
@@ -624,7 +624,7 @@ fn write_loop(mut stdin: ChildStdin, mut rx: mpsc::Receiver<WriteItem>, pending:
                     .unwrap_or_else(|poison| poison.into_inner())
                     .remove(&id)
             {
-                let _ = tx.send(Err(reason));
+                let _replied = tx.send(Err(reason));
             }
             break;
         }
@@ -650,14 +650,14 @@ pub(super) fn read_loop(
                         .unwrap_or_else(|poison| poison.into_inner())
                         .remove(&id)
                     {
-                        let _ = tx.send(match error {
+                        let _discarded = tx.send(match error {
                             Some(error) => Err(AvatarError::Renderer(error)),
                             None => Ok(ok),
                         });
                     }
                 }
                 Ok(AvatarMessage::Event(event)) => {
-                    let _ = events_tx.send(event);
+                    let _emitted = events_tx.send(event);
                 }
                 Err(error) => {
                     fail_reason = AvatarError::InvalidJson(error.to_string());
@@ -677,6 +677,6 @@ pub(super) fn read_loop(
         .map(|(_, tx)| tx)
         .collect();
     for tx in waiters {
-        let _ = tx.send(Err(fail_reason.clone()));
+        let _replied = tx.send(Err(fail_reason.clone()));
     }
 }

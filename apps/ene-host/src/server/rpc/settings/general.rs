@@ -56,7 +56,7 @@ pub(super) async fn update_settings(
             crate::host::settings::ConnectionKind::Mcp
             | crate::host::settings::ConnectionKind::Search => continue,
         };
-        let _ = services
+        let _discarded = services
             .runtime
             .providers()
             .start(&adapter, extension)

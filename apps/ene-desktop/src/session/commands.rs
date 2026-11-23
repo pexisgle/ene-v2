@@ -367,7 +367,7 @@ impl Session {
         {
             let clip = avatar::motion(posture_name);
             if clip.is_some() || posture_name == "idle" {
-                let _ = avatar
+                let _spawned = avatar
                     .show_preset(companion_id, &model_path, posture_name, clip.as_deref())
                     .await;
             }
@@ -648,7 +648,7 @@ impl Session {
                     message: error.to_string(),
                 },
             };
-            let _ = updates.send(update);
+            super::notify_ui(&updates, update);
         });
     }
 

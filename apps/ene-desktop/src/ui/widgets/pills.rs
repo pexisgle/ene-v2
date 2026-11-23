@@ -155,6 +155,6 @@ pub fn window_drag_area(div: gpui::Div, double_click_zoom: bool) -> gpui::Div {
         },
     );
     #[cfg(windows)]
-    let _ = double_click_zoom;
+    let _discarded = double_click_zoom;
     div
 }

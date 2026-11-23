@@ -55,7 +55,7 @@ async fn run_connection_probe(host: Host, connection_id: String) -> Update {
 fn spawn_connection_probe(host: Host, connection_id: String, updates: UnboundedSender<Update>) {
     tokio::spawn(async move {
         let update = run_connection_probe(host, connection_id).await;
-        let _ = updates.send(update);
+        crate::session::notify_ui(&updates, update);
     });
 }
 
@@ -304,7 +304,7 @@ pub(crate) fn save_search_provider_key(
                     })
                     .await?;
                 let updated = response.view().to_owned_message().map_err(decode)?;
-                let _ = updates.send(settings_update(updated));
+                crate::session::notify_ui(&updates, settings_update(updated));
             }
             host.settings
                 .register_credentials(w::CredentialRequest {
@@ -400,7 +400,7 @@ pub(crate) fn complete_setup_selection(rpc: &RpcDispatcher, epoch: u64, selectio
             if let Some(conn) = selection.conn {
                 let wire_input: w::ConnectionInput =
                     build_connection_model_input(&conn, &selection.model_id).into();
-                let _ = host
+                let _written = host
                     .settings
                     .update_settings(w::UpdateSettingsRequest {
                         expected_revision: selection.settings_revision,

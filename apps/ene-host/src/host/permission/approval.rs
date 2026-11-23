@@ -416,7 +416,7 @@ pub(super) fn expire_orphaned_approvals(world: &mut World) {
             && store.is_some_and(|approval| approval.status == ApprovalStatus::Pending)
         {
             let store = world.resource::<Store>().clone();
-            let _ = store
+            let _discarded = store
                 .approval_repo()
                 .resolve_approval(&request, ApprovalStatus::Expired);
         }

@@ -154,7 +154,7 @@ pub(super) fn backfill(mut commands: Commands, params: BackfillParams<'_>) {
                 }
                 Err(error) => Err(error.into()),
             };
-            let _ = sender.send((companion_id, result));
+            let _discarded = sender.send((companion_id, result));
         });
     }
 }

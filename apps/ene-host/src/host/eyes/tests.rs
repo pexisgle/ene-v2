@@ -307,7 +307,7 @@ fn assert_eye_notifications_and_dispositions(
     notifications: &mut tokio::sync::broadcast::Receiver<w::Notification>,
     head: &MockCompletionModel,
 ) -> String {
-    let _ = head;
+    let _discarded = head;
     let entity = harness.companion_agent();
     let mut delivered = Vec::new();
     let mut important = Vec::new();

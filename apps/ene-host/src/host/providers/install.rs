@@ -35,7 +35,7 @@ pub(crate) fn install_local_package(
         }
     }
     // Re-verify the installed copy before recording it.
-    let _ = ene_plugin_runtime::Package::load(&dest).map_err(|error| {
+    let _loaded = ene_plugin_runtime::Package::load(&dest).map_err(|error| {
         HostError::Storage(format!("installed plugin verification failed: {error}"))
     })?;
     let entry = store.plugin_repo().upsert_plugin_entry(
@@ -123,11 +123,11 @@ mod tests {
             {
                 tracing::warn!(%error, "the plugin file permissions could not be tightened");
             }
-            let _ = std::fs::set_permissions(
+            let _tightened = std::fs::set_permissions(
                 src.path().join("main.wasm"),
                 std::fs::Permissions::from_mode(0o600),
             );
-            let _ = std::fs::set_permissions(
+            let _tightened = std::fs::set_permissions(
                 src.path().join("manifest.json"),
                 std::fs::Permissions::from_mode(0o600),
             );

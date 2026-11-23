@@ -65,8 +65,8 @@ pub(super) async fn connect_echo(
         let server = tokio::spawn(async move {
             let transport = AsyncRwTransport::<RoleServer, _, _>::new(server_read, server_write);
             let running = serve_directly(echo, transport, None);
-            let _ = peer_sender.send(running.peer().clone());
-            let _ = running.waiting().await;
+            let _discarded = peer_sender.send(running.peer().clone());
+            let _discarded = running.waiting().await;
         });
         let transport = AsyncRwTransport::<RoleClient, _, _>::new(client_read, client_write);
         let registry = ToolServer::new().run();
@@ -263,7 +263,7 @@ impl PendingPeer {
 impl Drop for PendingPeer {
     fn drop(&mut self) {
         if let Some((_, fd)) = &self.process {
-            let _ = rustix::process::pidfd_send_signal(fd, rustix::process::Signal::KILL);
+            let _discarded = rustix::process::pidfd_send_signal(fd, rustix::process::Signal::KILL);
         }
     }
 }

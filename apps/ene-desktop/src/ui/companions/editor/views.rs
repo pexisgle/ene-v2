@@ -301,7 +301,7 @@ pub(super) fn render_body_model_field(
                                         && let Some(path) = paths.into_iter().next()
                                     {
                                         let path_str = path.to_string_lossy().into_owned();
-                                        let _ = cx.update(|cx| {
+                                        let _discarded = cx.update(|cx| {
                                             draft.update(cx, |d, cx| d.set(path_str, cx));
                                         });
                                     }

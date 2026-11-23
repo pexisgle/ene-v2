@@ -339,7 +339,7 @@ impl Workspace {
         drop(file);
         let saved = saved.and_then(|()| folder.rename(&temp, &folder, name));
         if saved.is_err() {
-            let _ = folder.remove_file(&temp);
+            ene_platform_os::debug_if_err(folder.remove_file(&temp), "temporary file cleanup");
         }
         saved
     }
@@ -554,7 +554,7 @@ impl Drop for RunningShell {
     fn drop(&mut self) {
         // Kill the group or job even if the device stream drops the future.
         if let Some(child) = &mut self.0 {
-            let _ = child.start_kill();
+            ene_platform_os::warn_if_err(child.start_kill(), "tool process termination");
         }
     }
 }

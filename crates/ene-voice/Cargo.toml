@@ -10,6 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+ene-platform-os = { path = "../ene-platform-os" }
 ene-catalog.workspace = true
 ene-domain.workspace = true
 ene-mind.workspace = true

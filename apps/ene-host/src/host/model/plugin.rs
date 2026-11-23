@@ -227,7 +227,7 @@ impl Drop for Exchange {
             self.provider.note_cancelled();
         }
         for handle in &self.handles {
-            let _ = self.broker.close(handle);
+            let _discarded = self.broker.close(handle);
         }
     }
 }

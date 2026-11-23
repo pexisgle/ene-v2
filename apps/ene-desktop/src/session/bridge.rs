@@ -183,7 +183,7 @@ impl DeviceBridge {
             ..Default::default()
         };
         tokio::spawn(async move {
-            let _ignored = host.client.report_perception(event).await;
+            let _sampled = host.client.report_perception(event).await;
         });
     }
 
@@ -260,7 +260,7 @@ impl DeviceBridge {
                 let event = transport.perception_event(Event::Enabled(false));
                 let host = host.clone();
                 observations.spawn(async move {
-                    let _ =
+                    let _discarded =
                         tokio::time::timeout(SAMPLE, host.client.report_perception(event)).await;
                 });
             }
@@ -316,7 +316,8 @@ impl DeviceBridge {
                     jpeg,
                     ..Default::default()
                 })));
-                let _ = tokio::time::timeout(SAMPLE, host.client.report_perception(event)).await;
+                let _sampled =
+                    tokio::time::timeout(SAMPLE, host.client.report_perception(event)).await;
             }
         });
     }

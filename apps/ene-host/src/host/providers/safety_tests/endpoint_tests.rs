@@ -677,7 +677,7 @@ async fn b07_embedding_plugin_uses_provider_context_and_broker() {
     ]
     .join(" ");
     let body = format!("global.get $calls i32.const 1 i32.eq if {call_one} else {call_two} end");
-    let _ = installed_providers(
+    let _discarded = installed_providers(
         root.path(),
         Extension::Embedding,
         &body,

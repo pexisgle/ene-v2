@@ -285,7 +285,7 @@ pub(crate) fn start(world: &mut World, request: w::StartWorkRequest) -> Result<w
     };
     store.work_repo().insert_work_session(&session)?;
     if let Err(error) = start_run(world, &session, &request.instruction) {
-        let _ = store
+        let _written = store
             .work_repo()
             .set_work_status(&session.id, WorkStatus::Closed);
         retire(world, &session.id);
@@ -359,8 +359,8 @@ pub(crate) fn start_run(
         }
     };
     if let Some(error) = failure {
-        let _ = fail_run(&store, &run, &error);
-        let _ = store
+        ene_platform_os::warn_if_err(fail_run(&store, &run, &error), "failed run record");
+        let _written = store
             .work_repo()
             .set_work_status(&session.id, WorkStatus::Idle);
         if let Ok(Some(session)) = store.work_repo().work_session(&session.id) {
@@ -687,7 +687,7 @@ fn finish_run(world: &mut World, mut run: Run, state: RunState, text: Option<Str
     };
     if was_active && let Some(session) = &session {
         if session.status != WorkStatus::Closed {
-            let _ = store
+            let _written = store
                 .work_repo()
                 .set_work_status(&session.id, WorkStatus::Idle);
         }

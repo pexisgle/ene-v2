@@ -127,7 +127,7 @@ fn render_add_plugin_panel(
                                 && let Some(path) = paths.into_iter().next()
                             {
                                 let path_str = path.to_string_lossy().into_owned();
-                                let _ = cx.update(|cx| {
+                                let _updated = cx.update(|cx| {
                                     draft.update(cx, |d, cx| d.set(path_str, cx));
                                 });
                             }
@@ -312,7 +312,10 @@ fn render_remote_host_form(
                         let ep = ep_val.clone();
                         let tok = tok_val.clone();
                         hub_save_remote.update(cx, |h, cx| {
-                            let _ = h.save_remote_host(ep, tok, cx);
+                            ene_platform_os::warn_if_err(
+                                h.save_remote_host(ep, tok, cx),
+                                "remote host save",
+                            );
                         });
                     },
                 )),

@@ -206,9 +206,9 @@ async fn serve(text: &'static str, delay: Duration) -> Provider {
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 answer.len()
             );
-            let _ = socket.write_all(head.as_bytes()).await;
-            let _ = socket.write_all(answer.as_bytes()).await;
-            let _ = socket.flush().await;
+            let _discarded = socket.write_all(head.as_bytes()).await;
+            let _discarded = socket.write_all(answer.as_bytes()).await;
+            let _discarded = socket.flush().await;
         }
     });
     Provider { base, bodies, task }
@@ -722,7 +722,7 @@ fn the_prompt_the_model_received_carries_the_bounded_inputs() {
             &[],
         )
         .unwrap();
-    let _ = world.gated_call("/tmp/a");
+    let _discarded = world.gated_call("/tmp/a");
     world.app.update();
     settle(&mut world.app, &runtime);
 

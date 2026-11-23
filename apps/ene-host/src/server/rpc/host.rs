@@ -546,8 +546,11 @@ mod tests {
                 body.len(),
                 body
             );
-            let _ = stream.write_all(reply.as_bytes()).await;
-            let _ = stream.shutdown().await;
+            ene_platform_os::debug_if_err(
+                stream.write_all(reply.as_bytes()).await,
+                "event reply write",
+            );
+            ene_platform_os::debug_if_err(stream.shutdown().await, "event stream shutdown");
         });
         addr
     }

@@ -107,7 +107,7 @@ pub fn ui_font_family() -> &'static str {
 pub fn resolve_ui_font_family(cx: &gpui::App) -> gpui::SharedString {
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     {
-        let _ = cx;
+        let _discarded = cx;
         gpui::SharedString::new_static(ui_font_family())
     }
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]

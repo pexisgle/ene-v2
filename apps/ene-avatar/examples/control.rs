@@ -168,7 +168,8 @@ fn reap(child: &mut Child, deadline: Instant) -> Option<std::process::ExitStatus
 impl Drop for Client {
     fn drop(&mut self) {
         self.input.take();
-        let _ = reap(&mut self.child, Instant::now() + Duration::from_secs(5));
+        // The exit status is not interesting here: the child is being replaced.
+        let _exit_status = reap(&mut self.child, Instant::now() + Duration::from_secs(5));
     }
 }
 

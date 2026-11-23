@@ -437,7 +437,7 @@ impl gpui::Element for FieldElement {
         };
         window.with_content_mask(Some(ContentMask { bounds }), |window| match &layout {
             FieldLayout::Single(line) => {
-                let _ = line.paint(
+                let _painted = line.paint(
                     bounds.origin - point(offset, px(0.)),
                     window.line_height(),
                     window,
@@ -447,7 +447,7 @@ impl gpui::Element for FieldElement {
             FieldLayout::Multiline(lines, height) => {
                 let mut origin = bounds.origin;
                 for line in lines {
-                    let _ = line.paint_background(
+                    let _painter = line.paint_background(
                         origin,
                         *height,
                         gpui::TextAlign::Left,
@@ -455,7 +455,8 @@ impl gpui::Element for FieldElement {
                         window,
                         cx,
                     );
-                    let _ = line.paint(origin, *height, gpui::TextAlign::Left, None, window, cx);
+                    let _painted =
+                        line.paint(origin, *height, gpui::TextAlign::Left, None, window, cx);
                     origin.y += line.size(*height).height;
                 }
             }

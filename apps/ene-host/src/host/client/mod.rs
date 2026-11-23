@@ -310,12 +310,12 @@ pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> 
         Ok(view) => Ok(view),
         Err(error) => {
             if let Some(previous) = previous {
-                super::util::log_if_err(
+                ene_platform_os::warn_if_err(
                     store.client_repo().restore_client(&previous),
                     "client declaration rollback",
                 );
             } else {
-                super::util::log_if_err(
+                ene_platform_os::warn_if_err(
                     store.client_repo().delete_client(&request.id),
                     "rejected client cleanup",
                 );
@@ -353,7 +353,7 @@ pub(crate) fn set_capabilities(
         Ok(view) => Ok(view),
         Err(error) => {
             if let Some(previous) = previous {
-                super::util::log_if_err(
+                ene_platform_os::warn_if_err(
                     store.client_repo().restore_client(&previous),
                     "client declaration rollback",
                 );

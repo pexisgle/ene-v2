@@ -114,7 +114,7 @@ pub fn setup(app: &mut App) {
                 break;
             }
             #[cfg(target_os = "linux")]
-            let _ = input_wake.send(());
+            let _discarded = input_wake.send(());
             if end {
                 break;
             }

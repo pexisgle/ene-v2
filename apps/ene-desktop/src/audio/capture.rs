@@ -434,7 +434,7 @@ impl Microphone {
         if self.mode != mode {
             self.mode = mode;
             self.ptt.cancel();
-            let _ = self.voice_gate.reset();
+            let _discarded = self.voice_gate.reset();
             self.echo.reset();
         }
     }

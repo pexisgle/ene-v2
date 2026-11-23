@@ -144,7 +144,7 @@ pub(super) fn describe_device_request(
                 if let Some(spec) = client.spec(name)
                     && let Ok(schema) = super::json::parse_schema(&spec.input_schema)
                 {
-                    let _ = write!(
+                    let _discarded = write!(
                         inputs,
                         "\n{name}: {} Input schema: {schema}",
                         spec.tool_description()
@@ -361,7 +361,7 @@ pub(crate) fn dispatch_direct(
         hub: &hub,
         notifier: &mut notifier,
     };
-    let _ = dispatch(&mut ctx, &operation, None, Some(companion_id))?;
+    let _reply = dispatch(&mut ctx, &operation, None, Some(companion_id))?;
     Ok(operation_id)
 }
 
@@ -507,7 +507,7 @@ pub(crate) fn resend(world: &mut World, client: &str) {
                 hub: &hub,
                 notifier: &mut notifier,
             };
-            let _ = dispatch(&mut ctx, &operation, None, plan.active_companion.as_deref());
+            let _reply = dispatch(&mut ctx, &operation, None, plan.active_companion.as_deref());
         }
     }
 }
@@ -875,7 +875,7 @@ pub(super) fn uncertain(world: &mut World, operation_id: &str, reason: &str) {
         return;
     };
     if !operation.status.is_terminal() {
-        let _ = store
+        let _written = store
             .client_repo()
             .set_operation_status(operation_id, DeviceStatus::Uncertain);
     }

@@ -97,10 +97,14 @@ async fn wait_for_shutdown() {
     // The desktop holds the write end until it exits, including on a crash.
     let (closed, wait) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
-        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
-        let _ = closed.send(());
+        // Draining stdin blocks until the desktop closes the pipe; the byte count
+        // and any I/O error are both expected to be uninteresting.
+        let _drained = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+        // The receiver stops listening once the host is already closing.
+        let _signalled = closed.send(());
     });
-    let _ = wait.await;
+    // This wait ends by design when the pipe closes.
+    let _closed = wait.await;
 }
 
 async fn wait_for_signal() {
@@ -116,5 +120,7 @@ async fn wait_for_signal() {
             return;
         }
     }
-    let _ = tokio::signal::ctrl_c().await;
+    // A signal handler that cannot be installed leaves the host running
+    // until the pipe closes, which is the non-unix fallback anyway.
+    let _signal = tokio::signal::ctrl_c().await;
 }

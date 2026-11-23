@@ -46,7 +46,7 @@ impl PodWindow {
         // SAFETY: `find_pod` matches `WNDENUMPROC` and only writes through the
         // `lparam` pointer described above.
         unsafe {
-            let _ = EnumThreadWindows(thread_id, Some(find_pod), lparam);
+            let _discarded = EnumThreadWindows(thread_id, Some(find_pod), lparam);
         }
         found.map(Self)
     }
@@ -75,7 +75,7 @@ impl PodWindow {
         // SAFETY: `self.0` came from a live enumeration, so it stays a valid
         // window handle for as long as the pod exists.
         unsafe {
-            let _ = SetWindowPos(
+            let _discarded = SetWindowPos(
                 self.0,
                 Some(HWND_TOPMOST),
                 rect.left,
@@ -93,7 +93,7 @@ impl PodWindow {
         // SAFETY: `self.0` is a live window handle; `ShowWindow` only changes
         // that window's visibility.
         unsafe {
-            let _ = ShowWindow(self.0, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+            let _discarded = ShowWindow(self.0, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
         }
         if visible {
             self.keep_topmost();
@@ -104,7 +104,7 @@ impl PodWindow {
     pub fn keep_topmost(self) {
         // SAFETY: `self.0` is a live window handle (see `current`).
         unsafe {
-            let _ = SetWindowPos(
+            let _discarded = SetWindowPos(
                 self.0,
                 Some(HWND_TOPMOST),
                 0,
@@ -136,7 +136,7 @@ impl PodWindow {
         let color: u32 = 0xFFFF_FFFE; // DWMWA_COLOR_NONE
         // SAFETY: `ncrp` is a live local `u32` and the size passed matches it.
         unsafe {
-            let _ = DwmSetWindowAttribute(
+            let _discarded = DwmSetWindowAttribute(
                 self.0.0,
                 DWMWA_NCRENDERING_POLICY,
                 (&raw const ncrp).cast(),
@@ -145,7 +145,7 @@ impl PodWindow {
         }
         // SAFETY: `corner` is a live local `u32` and the size passed matches it.
         unsafe {
-            let _ = DwmSetWindowAttribute(
+            let _discarded = DwmSetWindowAttribute(
                 self.0.0,
                 DWMWA_WINDOW_CORNER_PREFERENCE,
                 (&raw const corner).cast(),
@@ -154,7 +154,7 @@ impl PodWindow {
         }
         // SAFETY: `color` is a live local `u32` and the size passed matches it.
         unsafe {
-            let _ =
+            let _discarded =
                 DwmSetWindowAttribute(self.0.0, DWMWA_BORDER_COLOR, (&raw const color).cast(), 4);
         }
     }

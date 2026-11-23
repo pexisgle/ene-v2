@@ -62,27 +62,30 @@ pub(super) fn open_pod(hub: &mut Hub, mode: Option<PodMode>, cx: &mut Context<Hu
     cx.notify();
 
     cx.spawn(async move |this, cx| {
-        let _ignored = cx.update(|cx| {
-            let Some(hub) = this.upgrade() else {
-                return;
-            };
-            if let Some(handle) = existing
-                && handle
-                    .update(cx, |view, window, cx| {
-                        pod::set_pod_window_visible(true);
-                        view.sync_mode_and_focus(window, cx);
-                        window.activate_window();
-                        cx.activate(true);
-                        cx.notify();
-                    })
-                    .is_ok()
-            {
-                return;
-            }
-            if open_pod_window(cx, hub).is_some() {
-                cx.activate(true);
-            }
-        });
+        ene_platform_os::debug_if_err(
+            cx.update(|cx| {
+                let Some(hub) = this.upgrade() else {
+                    return;
+                };
+                if let Some(handle) = existing
+                    && handle
+                        .update(cx, |view, window, cx| {
+                            pod::set_pod_window_visible(true);
+                            view.sync_mode_and_focus(window, cx);
+                            window.activate_window();
+                            cx.activate(true);
+                            cx.notify();
+                        })
+                        .is_ok()
+                {
+                    return;
+                }
+                if open_pod_window(cx, hub).is_some() {
+                    cx.activate(true);
+                }
+            }),
+            "window update",
+        );
     })
     .detach();
 }
@@ -199,59 +202,65 @@ pub(super) fn open_settings(hub: &mut Hub, section: SettingsSection, cx: &mut Co
     cx.notify();
 
     cx.spawn(async move |this, cx| {
-        let _ignored = cx.update(|cx| {
-            let Some(hub) = this.upgrade() else {
-                return;
-            };
-            let existing = hub.read(cx).windows.settings_window;
-            if let Some(handle) = existing
-                && handle
-                    .update(cx, |_, window, cx| {
-                        window.activate_window();
-                        cx.notify();
-                    })
-                    .is_ok()
-            {
-                return;
-            }
+        ene_platform_os::debug_if_err(
+            cx.update(|cx| {
+                let Some(hub) = this.upgrade() else {
+                    return;
+                };
+                let existing = hub.read(cx).windows.settings_window;
+                if let Some(handle) = existing
+                    && handle
+                        .update(cx, |_, window, cx| {
+                            window.activate_window();
+                            cx.notify();
+                        })
+                        .is_ok()
+                {
+                    return;
+                }
 
-            let hub_for_view = hub.clone();
-            let bounds = settings_window_bounds(cx);
-            let opened = cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(680.), px(480.))),
-                    window_decorations: Some(gpui::WindowDecorations::Client),
-                    app_id: Some("ene-desktop".into()),
-                    titlebar: Some(gpui::TitlebarOptions {
-                        title: Some("設定 — ene".into()),
-                        appears_transparent: true,
+                let hub_for_view = hub.clone();
+                let bounds = settings_window_bounds(cx);
+                let opened = cx.open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        window_min_size: Some(size(px(680.), px(480.))),
+                        window_decorations: Some(gpui::WindowDecorations::Client),
+                        app_id: Some("ene-desktop".into()),
+                        titlebar: Some(gpui::TitlebarOptions {
+                            title: Some("設定 — ene".into()),
+                            appears_transparent: true,
+                            ..Default::default()
+                        }),
                         ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                move |_window, cx| cx.new(|cx| SettingsStudio::new(hub_for_view.clone(), cx)),
-            );
-            match opened {
-                Ok(handle) => {
-                    let _ignored = handle.update(cx, |_, window, _| window.activate_window());
-                    let _ignored = this.update(cx, |hub, cx| {
-                        hub.windows.settings_window = Some(handle);
-                        cx.notify();
-                    });
-                }
-                Err(error) => {
-                    let _ignored = this.update(cx, |hub, cx| {
-                        hub.model.notice(
-                            NoticeKind::Failed,
-                            "設定ウィンドウを開く",
-                            error.to_string(),
+                    },
+                    move |_window, cx| cx.new(|cx| SettingsStudio::new(hub_for_view.clone(), cx)),
+                );
+                match opened {
+                    Ok(handle) => {
+                        ene_platform_os::debug_if_err(
+                            handle.update(cx, |_, window, _| window.activate_window()),
+                            "window activation",
                         );
-                        cx.notify();
-                    });
+                        let _activated = this.update(cx, |hub, cx| {
+                            hub.windows.settings_window = Some(handle);
+                            cx.notify();
+                        });
+                    }
+                    Err(error) => {
+                        let _activated = this.update(cx, |hub, cx| {
+                            hub.model.notice(
+                                NoticeKind::Failed,
+                                "設定ウィンドウを開く",
+                                error.to_string(),
+                            );
+                            cx.notify();
+                        });
+                    }
                 }
-            }
-        });
+            }),
+            "window update",
+        );
     })
     .detach();
 }

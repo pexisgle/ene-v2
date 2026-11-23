@@ -537,8 +537,12 @@ mod tests {
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n\r\n",
                         body.len()
                     );
-                    let _ = stream.write_all(reply.as_bytes()).await;
-                    let _ = stream.write_all(body).await;
+                    if let Err(error) = stream.write_all(reply.as_bytes()).await {
+                        tracing::debug!(%error, "http reply write failed");
+                    }
+                    if let Err(error) = stream.write_all(body).await {
+                        tracing::debug!(%error, "http body write failed");
+                    }
                 });
             }
         });
@@ -581,9 +585,12 @@ mod tests {
                 }
                 head.push(byte[0]);
             }
-            let _ = stream
+            if let Err(error) = stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
-                .await;
+                .await
+            {
+                tracing::debug!(%error, "test reply write failed");
+            }
             String::from_utf8_lossy(&head).into_owned()
         });
         let broker = HttpBroker::new(Arc::new(Allow(format!("http://{address}")))).unwrap();
@@ -767,7 +774,9 @@ mod tests {
                 .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
                 .await
                 .unwrap();
-            let _ = socket.write_all(&vec![b'x'; MAX_HTTP_BODY + 1]).await;
+            if let Err(error) = socket.write_all(&vec![b'x'; MAX_HTTP_BODY + 1]).await {
+                tracing::debug!(%error, "oversized fixture write failed");
+            }
         });
         let broker = HttpBroker::new(Arc::new(Allow(origin.clone()))).unwrap();
         assert_eq!(

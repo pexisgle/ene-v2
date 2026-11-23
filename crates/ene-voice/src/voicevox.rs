@@ -157,8 +157,11 @@ async fn wait_for_engine_ready(
 
 async fn stop_inner(managed: &mut ManagedProcess) {
     if let Some(mut child) = managed.child.take() {
-        let _ = Box::into_pin(child.kill()).await;
-        let _ = child.wait().await;
+        ene_platform_os::debug_if_err(
+            Box::into_pin(child.kill()).await,
+            "voicevox child termination",
+        );
+        ene_platform_os::debug_if_err(child.wait().await, "voicevox child reap");
     }
     managed.endpoint.clear();
 }

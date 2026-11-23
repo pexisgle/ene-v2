@@ -68,17 +68,9 @@ if (-not $SkipDeny) {
     Invoke-Gate "cargo machete" { cargo machete --with-metadata }
 }
 
-# `undocumented_unsafe_blocks` and `multiple_unsafe_ops_per_block` are `deny`
-# workspace-wide as of PR-4.3b, so they need no exemption here.
-#
-# `let_underscore_must_use` is still `warn` in `[workspace.lints.clippy]` and
-# exempted from `-D warnings` only because its clean-up is scheduled later:
-#   let_underscore_must_use -> PR-5.1
-# That PR drops the `-A` below (and flips the lint to `deny`) when the last
-# site is fixed. Never add a new exemption to this list.
-$stagedLints = @(
-    "-A", "clippy::let_underscore_must_use"
-)
+# All three staged lints are now `deny` workspace-wide, so this script passes
+# no exemptions. Do not add one: if a lint is noisy, fix the sites.
+$stagedLints = @()
 
 if (-not $SkipWasm) {
     Invoke-Gate "clippy wasm targets" {

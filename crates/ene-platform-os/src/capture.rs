@@ -10,6 +10,7 @@ pub const MAX_FRAME_EDGE: u32 = 1280;
 /// Maximum encoded JPEG size before it is rejected.
 pub const MAX_JPEG_BYTES: usize = 512 * 1024;
 
+use crate::best_effort::ignore_teardown;
 use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
 use std::mem::size_of;
 use windows::Win32::{
@@ -50,7 +51,7 @@ pub fn unlocked() -> bool {
     };
     // SAFETY: `desktop` came from `OpenInputDesktop` above and is closed once,
     // after its last use.
-    let _ignored = unsafe { CloseDesktop(desktop) };
+    ignore_teardown(unsafe { CloseDesktop(desktop) });
     result.is_ok()
         && String::from_utf16_lossy(&name[..name.iter().position(|&ch| ch == 0).unwrap_or(64)])
             .eq_ignore_ascii_case("default")
@@ -79,7 +80,7 @@ pub fn physical<T>(action: impl FnOnce() -> T) -> Option<T> {
     }
     let result = action();
     // SAFETY: restores the context this thread had before the call above.
-    let _ignored = unsafe { SetThreadDpiAwarenessContext(context) };
+    ignore_teardown(unsafe { SetThreadDpiAwarenessContext(context) });
     Some(result)
 }
 
@@ -180,7 +181,7 @@ unsafe fn pixels(src: RECT) -> Option<(Vec<u8>, u32, u32)> {
         let result = unsafe { copy(desktop, memory, src, width, height) };
         // SAFETY: `memory` came from `CreateCompatibleDC` and owns no selected
         // bitmap by this point, because `copy` restores the original one.
-        let _ignored = unsafe { Gdi::DeleteDC(memory) };
+        ignore_teardown(unsafe { Gdi::DeleteDC(memory) });
         result
     };
     // SAFETY: releases the DC acquired above, exactly once.
@@ -221,7 +222,7 @@ unsafe fn copy(
         None
     } else {
         // SAFETY: sets a raster mode flag on a live DC; no pointer is involved.
-        let _ignored = unsafe { Gdi::SetStretchBltMode(memory, HALFTONE) };
+        ignore_teardown(unsafe { Gdi::SetStretchBltMode(memory, HALFTONE) });
         // SAFETY: every handle is live and the arguments describe the source
         // and destination rectangles by value.
         let blitted = unsafe {
@@ -261,6 +262,6 @@ unsafe fn copy(
         unsafe { Gdi::SelectObject(memory, previous) };
     }
     // SAFETY: the bitmap is deselected by now, so releasing it is safe.
-    let _ = unsafe { Gdi::DeleteObject(object) };
+    let _discarded = unsafe { Gdi::DeleteObject(object) };
     result
 }

@@ -194,19 +194,19 @@ impl WaylandBackend {
     }
 
     fn pump(&mut self) {
-        let _ = self.queue.flush();
-        let _ = self.queue.dispatch_pending(&mut self.state);
+        let _flushed = self.queue.flush();
+        let _dispatched = self.queue.dispatch_pending(&mut self.state);
         if let Some(guard) = self.queue.prepare_read() {
             match guard.read() {
                 Ok(_) => {
-                    let _ = self.queue.dispatch_pending(&mut self.state);
+                    let _dispatched = self.queue.dispatch_pending(&mut self.state);
                 }
                 Err(wayland_client::backend::WaylandError::Io(err))
                     if err.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(_) => {}
             }
         } else {
-            let _ = self.queue.dispatch_pending(&mut self.state);
+            let _dispatched = self.queue.dispatch_pending(&mut self.state);
         }
     }
 }

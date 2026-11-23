@@ -446,7 +446,7 @@ impl Session {
                 let event = self
                     .transport
                     .perception_event(w::perception_event::Event::Enabled(false));
-                let _ = tokio::time::timeout(
+                let _waited = tokio::time::timeout(
                     Duration::from_secs(1),
                     host.client.report_perception(event),
                 )
@@ -585,7 +585,7 @@ impl Session {
             }
             _ => {}
         }
-        let _ = self
+        let _discarded = self
             .updates
             .send(Update::Notification(Box::new(notification.into())));
         if restart {

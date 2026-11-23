@@ -535,7 +535,7 @@ async fn start_fake_embed_server(val: f32) -> String {
                 body.len(),
                 body
             );
-            let _ = socket.write_all(reply.as_bytes()).await;
+            let _discarded = socket.write_all(reply.as_bytes()).await;
         }
     });
     format!("http://{addr}")
@@ -717,7 +717,7 @@ async fn sakura_embedding_omits_dimensions_and_decodes_without_usage() {
                         .unwrap_or(0);
                     if buf.len() >= pos + 4 + cl {
                         let body_start = pos + 4;
-                        let _ = tx.send(
+                        let _discarded = tx.send(
                             String::from_utf8_lossy(&buf[body_start..body_start + cl]).into_owned(),
                         );
                         break;

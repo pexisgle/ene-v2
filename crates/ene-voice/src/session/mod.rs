@@ -579,7 +579,7 @@ fn finish(state: &mut State, companion: &str, reason: Option<FlushReason>) {
     if let Some(reason) = reason
         && let Some(stream) = state.streams.get(&owner.client_id)
     {
-        let _ = stream.control.send(flush_event(
+        let _sent = stream.control.send(flush_event(
             companion,
             &utterance.id,
             owner.generation_id,

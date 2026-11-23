@@ -707,7 +707,7 @@ fn turn_settled(
                 let mut notifier = world.get_resource_mut::<Notifier>();
                 super::voice::on_turn_end(voice.as_ref(), notifier.as_deref_mut(), &companion_id);
             } else {
-                let _ = super::voice::flush(
+                let _discarded = super::voice::flush(
                     world.get_resource::<super::voice::Voice>(),
                     &companion_id,
                     w::FlushReason::Cancelled,

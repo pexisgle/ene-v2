@@ -396,7 +396,7 @@ pub(crate) fn drain(world: &mut World) {
         });
     for call in calls {
         let reply = forward(world, &call);
-        let _ = call.reply.send(reply);
+        let _discarded = call.reply.send(reply);
     }
 }
 

@@ -397,8 +397,8 @@ fn p10_concurrent_cold_probes_share_startup_without_admission_failures() {
         let (release, blocked) = std::sync::mpsc::channel::<()>();
         let (entered, ready) = tokio::sync::oneshot::channel();
         let blocker = tokio::task::spawn_blocking(move || {
-            let _ = entered.send(());
-            let _ = blocked.recv();
+            let _discarded = entered.send(());
+            let _discarded = blocked.recv();
         });
         ready.await.unwrap();
         let mut probes: Vec<_> = (0..17)
@@ -472,8 +472,8 @@ fn p10_cold_probe_deadline_includes_queued_startup_and_allows_retry() {
         let (release, blocked) = std::sync::mpsc::channel::<()>();
         let (entered, ready) = tokio::sync::oneshot::channel();
         let blocker = tokio::task::spawn_blocking(move || {
-            let _ = entered.send(());
-            let _ = blocked.recv();
+            let _discarded = entered.send(());
+            let _discarded = blocked.recv();
         });
         ready.await.unwrap();
         let started = Instant::now();

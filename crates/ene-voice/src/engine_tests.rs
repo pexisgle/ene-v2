@@ -103,13 +103,13 @@ async fn sakura_tts_sends_wav_request_and_decodes_wav_response() {
                 }
             }
         }
-        let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+        let _discarded = tx.send(String::from_utf8_lossy(&buf).into_owned());
         let reply = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             wav.len()
         );
-        let _ = stream.write_all(reply.as_bytes()).await;
-        let _ = stream.write_all(&wav).await;
+        let _discarded = stream.write_all(reply.as_bytes()).await;
+        let _discarded = stream.write_all(&wav).await;
     });
 
     let base = format!("http://{addr}/v1");
@@ -175,7 +175,7 @@ async fn sakura_tts_voicevox_protocol_uses_tts_v1_paths() {
             let mut buf = [0u8; 4096];
             let n = stream.read(&mut buf).await.unwrap();
             let req = String::from_utf8_lossy(&buf[..n]).into_owned();
-            let _ = tx.send(req);
+            let _discarded = tx.send(req);
             if i == 0 {
                 let body = r#"{"accent_phrases":[]}"#;
                 let reply = format!(
@@ -183,14 +183,14 @@ async fn sakura_tts_voicevox_protocol_uses_tts_v1_paths() {
                     body.len(),
                     body
                 );
-                let _ = stream.write_all(reply.as_bytes()).await;
+                let _discarded = stream.write_all(reply.as_bytes()).await;
             } else {
                 let reply = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     wav.len()
                 );
-                let _ = stream.write_all(reply.as_bytes()).await;
-                let _ = stream.write_all(&wav).await;
+                let _discarded = stream.write_all(reply.as_bytes()).await;
+                let _discarded = stream.write_all(&wav).await;
             }
         }
     });
@@ -270,14 +270,14 @@ async fn sakura_stt_uses_whisper_turbo_and_omits_response_format() {
                 }
             }
         }
-        let _ = tx.send(buf);
+        let _discarded = tx.send(buf);
         let body = r#"{"model":"whisper-large-v3-turbo","text":"こんにちは"}"#;
         let reply = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             body
         );
-        let _ = stream.write_all(reply.as_bytes()).await;
+        let _discarded = stream.write_all(reply.as_bytes()).await;
     });
 
     let base = format!("http://{addr}/v1");

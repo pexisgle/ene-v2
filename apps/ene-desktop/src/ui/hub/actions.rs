@@ -152,7 +152,7 @@ impl Hub {
             .chat
             .unsent
             .retain(|item| item.request_key != request_key);
-        let _ = self.send_keyed(text.to_owned(), request_key.to_owned(), cx);
+        let _discarded = self.send_keyed(text.to_owned(), request_key.to_owned(), cx);
     }
 
     pub(crate) fn dismiss_unsent(&mut self, request_key: &str, cx: &mut Context<Self>) {

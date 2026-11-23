@@ -300,7 +300,7 @@ impl Hub {
     ) {
         let selected_now = !had_companion && self.model.companion_id().is_some();
         if flags.settings_changed {
-            let _ = self.commands.send(Command::Refresh);
+            let _discarded = self.commands.send(Command::Refresh);
             self.load_models(cx);
         }
         if flags.companion_or_snapshot || flags.models_or_check || selected_now {

@@ -70,7 +70,7 @@ impl Access {
 
 impl Drop for Access {
     fn drop(&mut self) {
-        let _ = self
+        let _discarded = self
             .directory
             .remove_file("connection.json", Durability::None);
     }

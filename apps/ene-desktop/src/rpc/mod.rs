@@ -75,11 +75,14 @@ impl RpcDispatcher {
                 Ok(value) => done(value),
                 Err(failed) => error(context, failed),
             };
-            let _ = updates.send(Update::Scoped {
-                epoch,
-                seq,
-                inner: Box::new(inner),
-            });
+            crate::session::notify_ui(
+                &updates,
+                Update::Scoped {
+                    epoch,
+                    seq,
+                    inner: Box::new(inner),
+                },
+            );
         });
     }
 
@@ -92,11 +95,14 @@ impl RpcDispatcher {
         let seq = self.request_seq.fetch_add(1, Ordering::Relaxed);
         self.runtime.spawn(async move {
             let inner = future.await;
-            let _ = updates.send(Update::Scoped {
-                epoch,
-                seq,
-                inner: Box::new(inner),
-            });
+            crate::session::notify_ui(
+                &updates,
+                Update::Scoped {
+                    epoch,
+                    seq,
+                    inner: Box::new(inner),
+                },
+            );
         });
     }
 }

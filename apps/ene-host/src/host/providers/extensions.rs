@@ -197,7 +197,7 @@ pub(crate) fn apply_character_actions(
                     && world.resource::<DeviceHub>().connected(client_id)
                 {
                     let input = serde_json::json!({"motion": "idle", "expression": name});
-                    let _ = device::dispatch_direct(
+                    let _dispatched = device::dispatch_direct(
                         world,
                         companion_id,
                         client_id,
@@ -211,7 +211,7 @@ pub(crate) fn apply_character_actions(
                     && world.resource::<DeviceHub>().connected(client_id)
                 {
                     let input = serde_json::json!({"motion": asset});
-                    let _ = device::dispatch_direct(
+                    let _dispatched = device::dispatch_direct(
                         world,
                         companion_id,
                         client_id,
@@ -499,7 +499,7 @@ pub(crate) fn trigger_character_event(
     runtime.spawn(async move {
         let actions = dispatch_character_event(&providers, &store, target, event).await;
         if !actions.is_empty() {
-            let _ = tx.try_send((cid, actions));
+            let _queued = tx.try_send((cid, actions));
             if let Some(wake) = wake {
                 wake.wake();
             }

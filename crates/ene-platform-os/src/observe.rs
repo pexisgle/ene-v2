@@ -4,6 +4,7 @@
 
 #![cfg(windows)]
 
+use crate::best_effort::ignore_teardown;
 use crate::observe_types::{Observation, Window};
 use windows::Win32::{
     Foundation::{CloseHandle, HWND, MAX_PATH},
@@ -68,7 +69,7 @@ fn process_name(pid: u32) -> Option<String> {
     };
     // SAFETY: `handle` came from `OpenProcess` above and is closed exactly
     // once, on this path and after its last use.
-    let _ignored = unsafe { CloseHandle(handle) };
+    ignore_teardown(unsafe { CloseHandle(handle) });
     result.ok()?;
     let path = String::from_utf16_lossy(&buffer[..size as usize]);
     path.rsplit(['\\', '/']).next().map(ToOwned::to_owned)

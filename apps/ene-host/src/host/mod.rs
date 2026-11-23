@@ -293,15 +293,14 @@ impl Runtime {
     pub(crate) async fn begin_shutdown(&self) {
         // A shutdown that cannot mark itself closing still proceeds; the
         // failure is reported so a wedged kernel is visible rather than silent.
-        if let Err(error) = self
-            .call(|app| {
+        ene_platform_os::warn_if_err(
+            self.call(|app| {
                 app.world_mut().resource_mut::<HostState>().closing = true;
                 Ok(())
             })
-            .await
-        {
-            tracing::warn!(%error, "the host could not mark itself as closing");
-        }
+            .await,
+            "host closing flag",
+        );
     }
 
     pub(crate) async fn shutdown(&self) -> Result<()> {

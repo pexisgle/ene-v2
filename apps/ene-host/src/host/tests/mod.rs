@@ -87,7 +87,7 @@ impl Harness {
             .insert_resource(permission::Approvals::default())
             .insert_resource(super::resources::DeviceTimeout(Duration::from_millis(100)))
             .insert_resource(rig_ecs::tasks::Wake::new(move || {
-                let _ = sender.send(());
+                let _discarded = sender.send(());
             }))
             .insert_resource(SessionStore::new(logs))
             .insert_resource(super::model::ModelFactory(Arc::new(
@@ -200,7 +200,7 @@ impl Harness {
             if done(self.app.world_mut()) {
                 return;
             }
-            let _ = self.wakes.recv_timeout(Duration::from_millis(20));
+            let _discarded = self.wakes.recv_timeout(Duration::from_millis(20));
         }
         let failed = self
             .app

@@ -729,7 +729,7 @@ async fn an_embedding_plugin_reaches_its_endpoint_through_the_broker() {
             }
             head.push(byte[0]);
         }
-        let _ = stream
+        let _discarded = stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
             .await;
     });

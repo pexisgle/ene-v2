@@ -163,7 +163,7 @@ pub(crate) fn install_plugin(rpc: &RpcDispatcher, epoch: u64, source_path: Strin
         epoch,
         "プラグインの導入",
         async move {
-            let _ = host
+            let _written = host
                 .settings
                 .install_plugin(w::InstallPluginRequest {
                     source_path,
@@ -190,7 +190,7 @@ pub(crate) fn set_plugin_enabled(
         epoch,
         "プラグイン状態の更新",
         async move {
-            let _ = host
+            let _written = host
                 .settings
                 .set_plugin_enabled(w::SetPluginEnabledRequest {
                     plugin_id,
@@ -213,7 +213,7 @@ pub(crate) fn remove_plugin(rpc: &RpcDispatcher, epoch: u64, plugin_id: String) 
         epoch,
         "プラグインの削除",
         async move {
-            let _ = host
+            let _written = host
                 .settings
                 .remove_plugin(w::RemovePluginRequest {
                     plugin_id,

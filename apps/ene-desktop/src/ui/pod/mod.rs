@@ -231,7 +231,7 @@ impl CompanionPod {
                 .detach();
             }
             #[cfg(not(windows))]
-            let _ = cx;
+            let _cx = cx;
         }
     }
 
@@ -394,14 +394,14 @@ pub fn bind(cx: &mut App, hub: Entity<Hub>) {
         let Some(view) = submit_hub.read(cx).pod_view() else {
             return;
         };
-        let _ = view.update(cx, |this, cx| this.submit(cx));
+        let _updated = view.update(cx, |this, cx| this.submit(cx));
     });
 
     cx.on_action(move |_: &CancelOrStop, cx: &mut App| {
         let Some(view) = hub.read(cx).pod_view() else {
             return;
         };
-        let _ = view.update(cx, |this, cx| this.handle_escape(cx));
+        let _updated = view.update(cx, |this, cx| this.handle_escape(cx));
     });
 }
 
@@ -416,7 +416,7 @@ pub(crate) fn set_pod_window_visible(visible: bool) {
         pod.set_visible(visible);
     }
     #[cfg(not(windows))]
-    let _ = visible;
+    let _visible = visible;
 }
 
 pub(crate) fn ensure_pod_topmost() {

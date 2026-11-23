@@ -132,7 +132,9 @@ impl Notifier {
             if self.history.len() > REPLAY {
                 self.history.pop_front();
             }
-            let _ = self.events.send(event);
+            if self.events.send(event).is_err() {
+                tracing::debug!("the notification stream has no receiver; event dropped");
+            }
         }
     }
 
@@ -187,7 +189,12 @@ impl Notifier {
             }))),
             ..Default::default()
         };
-        let _ = self.events.send(event);
+        ene_platform_os::debug_if_err(
+            self.events
+                .send(event)
+                .map_err(|_| "the notification stream has no receiver"),
+            "notification delivery",
+        );
     }
 }
 
