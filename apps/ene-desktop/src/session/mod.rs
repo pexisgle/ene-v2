@@ -301,22 +301,39 @@ impl Session {
     }
 
     /// Waits out reconnect backoff without ignoring quit or local sensor toggles.
+    ///
+    /// A local toggle is applied and the wait continues: returning early would
+    /// let any command short-circuit the backoff, so a user flipping a switch
+    /// during an outage would retry the host as fast as they can click.
     async fn wait_retry_or_control(&mut self, retry_in: Duration) -> bool {
-        tokio::select! {
-            () = tokio::time::sleep(retry_in) => true,
-            command = self.commands.recv() => match command {
-                Some(Command::SetEyesEnabled(enabled)) => {
-                    self.devices.set_eyes_enabled(enabled, &self.updates);
-                    true
-                }
-                #[cfg(windows)]
-                Some(Command::SetComputerUseEnabled(enabled)) => {
-                    self.devices.set_computer_use_enabled(enabled, &self.updates);
-                    true
-                }
-                Some(Command::Quit) | None => false,
-                _ => true,
-            },
+        let deadline = tokio::time::Instant::now() + retry_in;
+        loop {
+            tokio::select! {
+                () = tokio::time::sleep_until(deadline) => return true,
+                command = self.commands.recv() => match command {
+                    Some(Command::Quit) | None => return false,
+                    Some(Command::SetEyesEnabled(enabled)) => {
+                        self.devices.set_eyes_enabled(enabled, &self.updates);
+                    }
+                    #[cfg(windows)]
+                    Some(Command::SetComputerUseEnabled(enabled)) => {
+                        self.devices.set_computer_use_enabled(enabled, &self.updates);
+                    }
+                    // Anything else is addressed to the live session, which is
+                    // not running, so acting on it would do nothing. Keep
+                    // waiting: returning here is what let any command cut the
+                    // backoff short.
+                    Some(command) => {
+                        // The two arms above are the local-only commands this
+                        // client can act on while disconnected; this one is
+                        // everything the domain does not call local-only.
+                        debug_assert!(
+                            !command.is_local_only(),
+                            "a local-only command reached the wait without being applied"
+                        );
+                    }
+                },
+            }
         }
     }
 

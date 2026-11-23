@@ -220,3 +220,71 @@ pub enum Command {
     /// Stop serving and exit. Sent when the window closes.
     Quit,
 }
+
+impl Command {
+    /// Whether this command only touches this client, so it can be applied
+    /// while the link is down and the wait for a reconnect should continue.
+    ///
+    /// Everything else addresses a live session: applying it during an outage
+    /// does nothing, and "handling" it must not cut the reconnect backoff short.
+    /// A `Quit` is neither: it ends the wait entirely.
+    pub fn is_local_only(&self) -> bool {
+        match self {
+            Self::SetEyesEnabled(_) | Self::SetMicMuted(_) | Self::SetOutputMuted(_) => true,
+            #[cfg(windows)]
+            Self::SetComputerUseEnabled(_) => true,
+            Self::Serve(_)
+            | Self::ActivateCompanion(_)
+            | Self::ReleaseCompanion(_)
+            | Self::StopPlayback
+            | Self::Refresh
+            | Self::SetCaptureMode(_)
+            | Self::PttStart
+            | Self::PttCommit
+            | Self::PttCancel
+            | Self::SetAvatarScale(_)
+            | Self::CenterAvatar
+            | Self::Speak { .. }
+            | Self::Quit => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    /// The distinction that keeps a reconnect backoff intact: a command this
+    /// client can apply alone must not be treated as one that needs the host.
+    #[test]
+    fn only_local_state_commands_are_local() {
+        for command in [
+            Command::SetEyesEnabled(false),
+            Command::SetMicMuted(true),
+            Command::SetOutputMuted(true),
+        ] {
+            assert!(
+                command.is_local_only(),
+                "{command:?} only touches this client"
+            );
+        }
+
+        for command in [
+            Command::StopPlayback,
+            Command::Refresh,
+            Command::PttCancel,
+            Command::CenterAvatar,
+            Command::Serve("ene".into()),
+            Command::Quit,
+            Command::Speak {
+                companion_id: None,
+                text: "hi".into(),
+            },
+        ] {
+            assert!(
+                !command.is_local_only(),
+                "{command:?} needs the live session or ends the wait"
+            );
+        }
+    }
+}
