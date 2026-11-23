@@ -73,13 +73,10 @@ jobs:
 
       - name: Clippy and tests
         run: |
-          # The three staged lints are `warn` in [workspace.lints.clippy]; they are
-          # exempt from -D warnings until their scheduled clean-up (PR-4.3, PR-5.1).
+          # The workspace denies these lints in Cargo.toml, so CI must not
+          # re-enable them with a later `-A` flag.
           cargo clippy --profile ci --workspace --all-targets --all-features --locked -- \
-            -D warnings \
-            -A clippy::undocumented_unsafe_blocks \
-            -A clippy::multiple_unsafe_ops_per_block \
-            -A clippy::let_underscore_must_use
+            -D warnings
           cargo nextest run --profile ci --workspace --all-features --locked --no-fail-fast
 
       - name: Native Wasm tool-call regressions
