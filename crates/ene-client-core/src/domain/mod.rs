@@ -15,6 +15,9 @@ pub use connection::{
     McpConnection, ModelInfo, PluginInfo, SearchConnection, SettingField, SttConnection,
     TtsConnection,
 };
+/// Re-exported from the policy crate so the UI reaches it through the domain
+/// module it already imports rather than depending on `ene-policy` directly.
+pub use ene_rpc::RiskLevel;
 pub use policy::{
     ApprovalDecision, ApprovalRequest, ApprovalStatus, PolicyEffect, PolicyRule, PolicyRulesUpdate,
     PolicyText, PolicyTextsUpdate, SKIP_FILE_CONFIRMATION_PREFIX, SKIP_TOOL_CONFIRMATION_ID,

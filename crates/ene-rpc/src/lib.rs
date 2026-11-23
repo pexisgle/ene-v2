@@ -20,6 +20,9 @@ pub mod rpc {
 pub use ene_policy::BUILTIN_TOOLS;
 /// Desktop GUI capability executed by a work agent on its bound client.
 pub use ene_policy::COMPUTER_USE;
+/// How much damage an approval's action could do. The desktop renders it on
+/// the approval card and the host decides it, so it travels with the contract.
+pub use ene_policy::RiskLevel;
 pub use rpc::*;
 /// Maximum width or height of a reported JPEG frame.
 pub const MAX_PERCEPTION_FRAME_EDGE: u32 = 1280;
