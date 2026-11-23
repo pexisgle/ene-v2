@@ -277,7 +277,10 @@ fn publish(world: &mut World, client: &Client) -> Result<w::Client> {
     if !client.is_granted(w::COMPUTER_USE) {
         computer::invalidate_client(world, &client.id, None);
     }
-    notify_client(world, &view);
+    {
+        let mut notifier = world.resource_mut::<Notifier>();
+        notify_client(&mut notifier, &view);
+    }
     Ok(view)
 }
 
@@ -352,8 +355,7 @@ pub(crate) fn set_capabilities(
     }
 }
 
-fn notify_client(world: &mut World, client: &w::Client) {
-    let mut notifier = world.resource_mut::<Notifier>();
+fn notify_client(notifier: &mut Notifier, client: &w::Client) {
     notifier.push(
         None,
         Some(&client.id),
@@ -416,9 +418,13 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
         );
         // The old client keeps its stream but is no longer the active one.
         if let Some(old) = store.client_repo().client(&old_client)? {
-            let hub = world.resource::<DeviceHub>();
-            let active = store.client_repo().active_companions_for_client(&old.id)?;
-            notify_client(world, &wire::client(&old, hub.connected(&old.id), active));
+            let view = {
+                let hub = world.resource::<DeviceHub>();
+                let active = store.client_repo().active_companions_for_client(&old.id)?;
+                wire::client(&old, hub.connected(&old.id), active)
+            };
+            let mut notifier = world.resource_mut::<Notifier>();
+            notify_client(&mut notifier, &view);
         }
     }
     if !request.release {

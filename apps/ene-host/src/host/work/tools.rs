@@ -112,7 +112,11 @@ fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
     // §5.2). A manual chat message has no recorded transcription id and is
     // never claimed.
     if let Some(transcription_id) = transcription_id(world.get::<Conversation>(agent))
-        && !delegation::try_claim(world, &transcription_id, &companion)
+        && !{
+            let mut claims = world
+                .get_resource_or_insert_with(crate::host::delegation::DeliveredClaims::default);
+            delegation::try_claim(&mut claims, &transcription_id, &companion)
+        }
     {
         // A peer already took the task: this is a normal result, not an error,
         // so the model can support the peer instead of retrying.
@@ -411,7 +415,11 @@ mod tests {
                 .unwrap();
         }
         let mut world = work_world(store.clone());
-        delegation::record(&mut world, "t1");
+        {
+            let mut claims = world
+                .get_resource_or_insert_with(crate::host::delegation::DeliveredClaims::default);
+            delegation::record(&mut claims, "t1");
+        }
         let ene = companion_turn(&mut world, "ene", Some("t1"));
         let kuro = companion_turn(&mut world, "kuro", Some("t1"));
         let args = || StartArgs {
@@ -445,6 +453,10 @@ mod tests {
             transcription_id(world.get::<Conversation>(chat)).as_deref(),
             Some("chat-request")
         );
-        assert!(delegation::try_claim(&mut world, "chat-request", "kuro"));
+        assert!({
+            let mut claims = world
+                .get_resource_or_insert_with(crate::host::delegation::DeliveredClaims::default);
+            delegation::try_claim(&mut claims, "chat-request", "kuro")
+        });
     }
 }

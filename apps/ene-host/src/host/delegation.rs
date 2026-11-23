@@ -49,25 +49,24 @@ impl DeliveredClaims {
 }
 
 /// Records a final transcript the voice pipeline delivered to the companions.
-pub(crate) fn record(world: &mut World, transcription_id: &str) {
+pub(crate) fn record(claims: &mut DeliveredClaims, transcription_id: &str) {
     if transcription_id.is_empty() {
         return;
     }
-    world
-        .get_resource_or_insert_with(DeliveredClaims::default)
-        .record(transcription_id);
+    claims.record(transcription_id);
 }
 
 /// Atomically claims `transcription_id` for `companion_id`. `true` means this
 /// companion may start the work; `false` means another companion already did.
-pub(crate) fn try_claim(world: &mut World, transcription_id: &str, companion_id: &str) -> bool {
+pub(crate) fn try_claim(
+    claims: &mut DeliveredClaims,
+    transcription_id: &str,
+    companion_id: &str,
+) -> bool {
     if transcription_id.is_empty() {
         return true;
     }
-    let Some(mut delegation) = world.get_resource_mut::<DeliveredClaims>() else {
-        return true;
-    };
-    delegation.try_claim(transcription_id, companion_id)
+    claims.try_claim(transcription_id, companion_id)
 }
 
 #[cfg(test)]
@@ -76,18 +75,18 @@ mod tests {
 
     #[test]
     fn replayed_transcriptions_do_not_renew_or_release_a_delegation() {
-        let mut world = World::new();
-        record(&mut world, "first");
-        assert!(try_claim(&mut world, "first", "ene"));
+        let mut claims = DeliveredClaims::default();
+        record(&mut claims, "first");
+        assert!(try_claim(&mut claims, "first", "ene"));
         for id in 1..MAX_TRANSCRIPTIONS {
-            record(&mut world, &id.to_string());
+            record(&mut claims, &id.to_string());
         }
-        record(&mut world, "first");
-        assert!(try_claim(&mut world, "first", "ene"));
-        assert!(!try_claim(&mut world, "first", "other"));
-        record(&mut world, "next");
-        assert!(try_claim(&mut world, "first", "other"));
-        assert!(try_claim(&mut world, "1", "ene"));
-        assert!(!try_claim(&mut world, "1", "other"));
+        record(&mut claims, "first");
+        assert!(try_claim(&mut claims, "first", "ene"));
+        assert!(!try_claim(&mut claims, "first", "other"));
+        record(&mut claims, "next");
+        assert!(try_claim(&mut claims, "first", "other"));
+        assert!(try_claim(&mut claims, "1", "ene"));
+        assert!(!try_claim(&mut claims, "1", "other"));
     }
 }

@@ -144,7 +144,11 @@ pub(crate) fn accept_transcription(
     {
         return Ok(false);
     }
-    delegation::record(world, transcription_id);
+    {
+        let mut claims =
+            world.get_resource_or_insert_with(crate::host::delegation::DeliveredClaims::default);
+        delegation::record(&mut claims, transcription_id);
+    }
     let Some(store) = world.get_resource::<Store>().cloned() else {
         return Ok(false);
     };
