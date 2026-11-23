@@ -592,12 +592,19 @@ async fn send_mwmbl_request(
         .host_str()
         .is_some_and(|host| host.eq_ignore_ascii_case("api.mwmbl.org"))
     {
-        let mut next = mwmbl_next_request.lock().await;
-        if let Some(deadline) = *next {
+        // Reserve the slot under the lock, then wait for it outside: holding
+        // the guard across the sleep would queue every later request behind
+        // this one's wait instead of letting them run up to the same deadline.
+        let deadline = {
+            let mut next = mwmbl_next_request.lock().await;
+            let deadline = *next;
+            // Mwmbl's anonymous tier allows one request per second.
+            *next = Some(Instant::now() + Duration::from_secs(1));
+            deadline
+        };
+        if let Some(deadline) = deadline {
             tokio::time::sleep_until(deadline).await;
         }
-        // Mwmbl's anonymous tier allows one request per second.
-        *next = Some(Instant::now() + Duration::from_secs(1));
     }
     url.query_pairs_mut().append_pair("q", query);
     Ok(client
