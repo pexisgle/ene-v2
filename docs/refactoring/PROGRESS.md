@@ -142,7 +142,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 - [x] PR-4.1 `crates/ene-platform-os` 新設・`tray.rs` 移管（unsafe 84→29）
 - [x] PR-4.2 `window` / `capture` / `input` 移管（unsafe 29→6、長大ファイル 47→46）
 - [x] PR-4.3 `#![forbid(unsafe_code)]` 有効化（Rule 8: 84→0 達成）
-- [ ] PR-4.4 巨大 GPUI ビュー分割（bubble / row_editor / policy / editor / onboarding）
+- [ ] PR-4.4 巨大 GPUI ビュー分割（bubble.rs 931→526+423 のみ完了。row_editor / policy / editor / onboarding は未着手）
 - [ ] PR-4.5 `widgets/` プリミティブ分解
 - [ ] PR-4.6 `session/` 状態機械化・TaskTracker 統一
 
