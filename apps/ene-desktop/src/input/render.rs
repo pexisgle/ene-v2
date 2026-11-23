@@ -8,6 +8,9 @@ use gpui::{
 };
 use std::ops::Range;
 
+/// How many lines the chat field grows to before it scrolls instead.
+const MAX_INPUT_ROWS: f32 = 5.;
+
 pub(super) enum FieldLayout {
     Single(Box<ShapedLine>),
     Multiline(Vec<WrappedLine>, Pixels),
@@ -386,7 +389,14 @@ impl gpui::Element for FieldElement {
                         .map(|line| line.width())
                         .max()
                         .unwrap_or_default();
-                    size(width.unwrap_or(content_width), height.max(line_height * 3.))
+                    // One line when empty, growing with the text up to five.
+                    // Past that the field scrolls, so a long draft cannot push
+                    // the pod off the screen.
+                    let desired = height.max(line_height);
+                    size(
+                        width.unwrap_or(content_width),
+                        desired.min(line_height * MAX_INPUT_ROWS),
+                    )
                 }),
                 (),
             );
