@@ -139,6 +139,9 @@ impl Session {
                     .pump_lip(&self.transport, self.devices.avatar.as_mut(), &self.updates);
             }
             PeriodicTick::Sample => {
+                // Fire-and-forget reports are only reaped here; without this
+                // the set grew for the life of the session.
+                self.devices.reap_background();
                 self.devices.sample(
                     &self.transport,
                     host,

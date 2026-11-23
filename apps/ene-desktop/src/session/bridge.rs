@@ -1,7 +1,7 @@
 //! Avatar renderer, OS perception sensor, computer use, workspace, and plugin bridge.
 
 use super::transport::SessionTransport;
-use super::{SAMPLE, SCREEN_SAMPLE};
+use super::{BACKGROUND_DRAIN_TIMEOUT, SAMPLE, SCREEN_SAMPLE};
 use crate::{
     avatar::{self, Avatar},
     host::Host,
@@ -348,11 +348,47 @@ impl DeviceBridge {
         }
     }
 
-    /// Stops the renderer. Dropping the child kills it, so this is the whole of
-    /// the client's process ownership.
-    pub(super) fn shutdown(&mut self) {
+    /// Stops the renderer and drains the fire-and-forget work.
+    ///
+    /// Dropping the child kills it, so that is the whole of the client's
+    /// process ownership. The background tasks are the last perception and
+    /// speech reports; aborting them would drop a report the host is waiting
+    /// for, so they get a bounded chance to finish first.
+    pub(super) async fn shutdown(&mut self) {
         if let Some(avatar) = self.avatar.take() {
             avatar.shutdown();
+        }
+        // The set is moved out so the mutex guard is not held across an await.
+        let mut background = std::mem::take(&mut *match self.background.lock() {
+            Ok(background) => background,
+            Err(poison) => poison.into_inner(),
+        });
+        let drained = tokio::time::timeout(BACKGROUND_DRAIN_TIMEOUT, async {
+            while background.join_next().await.is_some() {}
+        })
+        .await;
+        if drained.is_err() {
+            tracing::debug!(
+                remaining = background.len(),
+                "background reports did not finish before shutdown"
+            );
+            background.abort_all();
+        }
+    }
+
+    /// Reaps finished background tasks so the set does not grow for the life
+    /// of the session.
+    pub(super) fn reap_background(&mut self) {
+        let mut background = match self.background.lock() {
+            Ok(background) => background,
+            Err(poison) => poison.into_inner(),
+        };
+        while let Some(result) = background.try_join_next() {
+            if let Err(error) = result
+                && error.is_panic()
+            {
+                tracing::warn!("a background report panicked: {error}");
+            }
         }
     }
 }

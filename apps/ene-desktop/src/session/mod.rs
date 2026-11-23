@@ -52,6 +52,8 @@ const MAX_RETRY: Duration = Duration::from_secs(30);
 /// How often the client samples the OS for perception.
 pub(super) const SAMPLE: Duration = Duration::from_secs(1);
 pub(super) const SCREEN_SAMPLE: Duration = Duration::from_secs(20);
+/// How long shutdown waits for the last background reports to land.
+pub(super) const BACKGROUND_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// How often captured audio goes to the host.
 pub(super) const CAPTURE: Duration = Duration::from_millis(100);
 /// How often the playback amplitude goes to the renderer (about 60 Hz).
@@ -272,7 +274,7 @@ impl Session {
                 break;
             }
         }
-        self.devices.shutdown();
+        self.devices.shutdown().await;
     }
 
     async fn handle_attempt_outcome(&mut self, outcome: Outcome, retry: &mut Duration) -> bool {
@@ -699,5 +701,51 @@ mod tests {
         assert_eq!(id_a1, id_a2);
         assert_ne!(id_a1, id_b);
         assert!(id_a1.starts_with("desktop-"));
+    }
+
+    #[tokio::test]
+    async fn finished_background_reports_are_reaped_and_the_rest_drained() {
+        // The bridge spawns fire-and-forget reports nobody awaits. Without
+        // reaping, the set grows for the life of the session; without a drain,
+        // shutdown drops reports the host is still waiting for. This covers the
+        // two methods themselves; that the frame loop calls `reap_background`
+        // each sample tick is a schedule detail pinned by the call site.
+        let mut devices = super::bridge::DeviceBridge::new();
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for _ in 0..8 {
+            let finished = std::sync::Arc::clone(&finished);
+            devices.background.lock().unwrap().spawn(async move {
+                finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+        // Let every task run to completion.
+        for _ in 0..50 {
+            if finished.load(std::sync::atomic::Ordering::SeqCst) == 8 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(finished.load(std::sync::atomic::Ordering::SeqCst), 8);
+
+        devices.reap_background();
+        assert_eq!(
+            devices.background.lock().unwrap().len(),
+            0,
+            "completed tasks must leave the set"
+        );
+
+        // A task that outlives its work must still be drained by shutdown.
+        let slow = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = std::sync::Arc::clone(&slow);
+        devices.background.lock().unwrap().spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        devices.shutdown().await;
+        assert_eq!(
+            slow.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "shutdown must let a short report finish rather than abort it"
+        );
     }
 }
