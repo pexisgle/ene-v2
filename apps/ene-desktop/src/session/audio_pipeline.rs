@@ -176,11 +176,14 @@ impl AudioPipeline {
             || speaking != prev_speaking
         {
             self.last_ui_audio = (level, input, speaking);
-            let _ = updates.send(Update::AudioLevel {
-                output: level,
-                input,
-                speaking,
-            });
+            super::notify_ui(
+                updates,
+                Update::AudioLevel {
+                    output: level,
+                    input,
+                    speaking,
+                },
+            );
         }
         let target = self
             .speaking_companion
@@ -221,10 +224,13 @@ impl AudioPipeline {
         if let Some(microphone) = self.microphone.as_ref() {
             microphone.set_muted(muted);
         }
-        let _ = updates.send(Update::AudioMute {
-            mic_muted: self.mic_muted,
-            output_muted: self.output_muted,
-        });
+        super::notify_ui(
+            updates,
+            Update::AudioMute {
+                mic_muted: self.mic_muted,
+                output_muted: self.output_muted,
+            },
+        );
     }
 
     pub(super) fn set_output_muted(&mut self, muted: bool, updates: &UnboundedSender<Update>) {
@@ -232,10 +238,13 @@ impl AudioPipeline {
         if let Some(player) = self.player.as_ref() {
             player.set_muted(muted);
         }
-        let _ = updates.send(Update::AudioMute {
-            mic_muted: self.mic_muted,
-            output_muted: self.output_muted,
-        });
+        super::notify_ui(
+            updates,
+            Update::AudioMute {
+                mic_muted: self.mic_muted,
+                output_muted: self.output_muted,
+            },
+        );
     }
 
     pub(super) fn set_capture_mode(
@@ -248,10 +257,13 @@ impl AudioPipeline {
         if let Some(microphone) = self.microphone.as_mut() {
             microphone.set_capture_mode(mode);
         }
-        let _ = updates.send(Update::CaptureModeChanged {
-            mode: self.capture_mode,
-            ptt_active: self.ptt_active,
-        });
+        super::notify_ui(
+            updates,
+            Update::CaptureModeChanged {
+                mode: self.capture_mode,
+                ptt_active: self.ptt_active,
+            },
+        );
     }
 
     pub(super) fn handle_ptt(&mut self, command: Command, updates: &UnboundedSender<Update>) {
@@ -280,10 +292,13 @@ impl AudioPipeline {
             _ => false,
         };
         if changed {
-            let _ = updates.send(Update::CaptureModeChanged {
-                mode: self.capture_mode,
-                ptt_active: self.ptt_active,
-            });
+            super::notify_ui(
+                updates,
+                Update::CaptureModeChanged {
+                    mode: self.capture_mode,
+                    ptt_active: self.ptt_active,
+                },
+            );
         }
     }
 

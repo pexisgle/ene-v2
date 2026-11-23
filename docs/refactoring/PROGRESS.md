@@ -153,7 +153,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 - [x] PR-4.6 `session/` 状態機械化（`ConnectionPhase` + `phase.rs`。TaskTracker 統一は未着手）
 
 ### Phase 5: 運用・テスト完成
-- [ ] PR-5.1 `let _ = ...` の系統的撲滅（platform crate 49→0、apps/* 208→151。client/mod.rs は複雑度上限のため未着手）
+- [ ] PR-5.1 `let _ = ...` の系統的撲滅（platform crate 49→0、apps/* 208→141。残り 141 は 40+ ファイルに分散し、大半は channel send ではなく fs/socket の結果。`let_underscore_must_use` の `deny` 化は未実施）
 - [x] PR-5.2 観測性標準化・`ErrorCode` 単一化（`is_retryable` は消費者不在のため削除、otel は未導入）
 - [x] PR-5.3 proptest 拡充（`ene-mind::fuse` 3 件、`ene-policy` canonical form 4 件、`rule_from` 契約テスト 3 件）。insta / E2E は未着手
 

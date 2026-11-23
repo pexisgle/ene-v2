@@ -388,7 +388,7 @@ impl Session {
 
     /// Reports the link state.
     async fn report(&self, link: Link) {
-        let _ = self.updates.send(Update::Link(Box::new(link)));
+        notify_ui(&self.updates, Update::Link(Box::new(link)));
     }
 
     pub(super) async fn open_devices(&mut self) {
@@ -425,27 +425,36 @@ impl Session {
 
     /// Replaces the output device in the footer.
     pub(super) async fn set_out(&mut self, state: Device) {
-        let _ = self.updates.send(Update::Devices(Box::new(Devices {
-            avatar: self.devices.avatar_state(&self.transport),
-            output: state,
-            input: self.audio.input_state(),
-        })));
+        notify_ui(
+            &self.updates,
+            Update::Devices(Box::new(Devices {
+                avatar: self.devices.avatar_state(&self.transport),
+                output: state,
+                input: self.audio.input_state(),
+            })),
+        );
     }
 
     pub(super) async fn set_in(&mut self, state: Device) {
-        let _ = self.updates.send(Update::Devices(Box::new(Devices {
-            avatar: self.devices.avatar_state(&self.transport),
-            output: self.audio.output_state(),
-            input: state,
-        })));
+        notify_ui(
+            &self.updates,
+            Update::Devices(Box::new(Devices {
+                avatar: self.devices.avatar_state(&self.transport),
+                output: self.audio.output_state(),
+                input: state,
+            })),
+        );
     }
 
     pub(super) async fn set_avatar(&mut self, state: Device) {
-        let _ = self.updates.send(Update::Devices(Box::new(Devices {
-            avatar: state,
-            output: self.audio.output_state(),
-            input: self.audio.input_state(),
-        })));
+        notify_ui(
+            &self.updates,
+            Update::Devices(Box::new(Devices {
+                avatar: state,
+                output: self.audio.output_state(),
+                input: self.audio.input_state(),
+            })),
+        );
     }
 
     /// Sends the current device states.
@@ -455,7 +464,7 @@ impl Session {
             output: self.audio.output_state(),
             input: self.audio.input_state(),
         };
-        let _ = self.updates.send(Update::Devices(Box::new(devices)));
+        notify_ui(&self.updates, Update::Devices(Box::new(devices)));
     }
 }
 
