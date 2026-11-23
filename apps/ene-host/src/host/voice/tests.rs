@@ -110,14 +110,14 @@ async fn a_flush_invalidates_the_older_generation() {
         w::FlushReason::BargeIn,
     )
     .unwrap();
-    match events.try_recv().expect("a flush reaches the client").event {
-        Some(w::audio_output_event::Event::Flush(flush)) => {
+    match events.try_recv().expect("a flush reaches the client") {
+        ene_voice::VoiceOutputEvent::Flush(flush) => {
             assert_eq!(flush.flush_generation_id, first);
-            assert_eq!(flush.reason, w::FlushReason::BargeIn);
+            assert_eq!(flush.reason, ene_voice::FlushReason::BargeIn);
         }
         other => panic!("expected a flush, got {other:?}"),
     }
-    let stale = ene_voice::audio_event(w::AudioChunkEnvelope {
+    let stale = ene_voice::VoiceOutputEvent::Chunk(ene_voice::AudioChunk {
         utterance_id: "one".into(),
         generation_id: first,
         ..Default::default()
@@ -130,7 +130,7 @@ async fn a_flush_invalidates_the_older_generation() {
     on_stream_text(&mut world, "ene", "ふたつめ。");
     let second = world.resource::<Voice>().generation_of("ene").unwrap();
     assert!(second > first);
-    let current = ene_voice::audio_event(w::AudioChunkEnvelope {
+    let current = ene_voice::VoiceOutputEvent::Chunk(ene_voice::AudioChunk {
         utterance_id: "two".into(),
         generation_id: second,
         ..Default::default()

@@ -13,7 +13,6 @@ workspace = true
 ene-catalog.workspace = true
 ene-domain.workspace = true
 ene-mind.workspace = true
-ene-rpc.workspace = true
 futures-util.workspace = true
 process-wrap.workspace = true
 pulldown-cmark.workspace = true

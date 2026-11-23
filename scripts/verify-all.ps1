@@ -134,7 +134,21 @@ if (-not $SkipTests) {
                 # Retry a few times before calling it a failure.
                 $passed = $false
                 foreach ($attempt in 1..3) {
-                    & $dest $t.Filter --test-threads=1
+                    # Run the child with its working directory already outside the
+                    # workspace (Push-Location above) *and* with TMP/TEMP pointing at
+                    # the system temp: the sandbox applies directory ACLs to the
+                    # whole process tree, and this script redirects TMP into the repo
+                    # for the build scratch.
+                    $savedTmp = $env:TMP
+                    $savedTemp = $env:TEMP
+                    $env:TMP = $stagingRoot
+                    $env:TEMP = $stagingRoot
+                    try {
+                        & $dest $t.Filter --test-threads=1
+                    } finally {
+                        $env:TMP = $savedTmp
+                        $env:TEMP = $savedTemp
+                    }
                     if ($LASTEXITCODE -eq 0) { $passed = $true; break }
                     Write-Host "attempt $attempt failed for $($t.Crate); retrying" -ForegroundColor Yellow
                     Start-Sleep -Milliseconds 500

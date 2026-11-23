@@ -7,7 +7,7 @@ use crate::{
 use ene_catalog::{is_sakura_connection, is_sakura_tts_model_id};
 use ene_domain::settings::{Connection, ConnectionConfig, ConnectionKind, Endpoint};
 use ene_mind::Companion;
-use ene_rpc as w;
+
 use serde::{Deserialize, de::DeserializeOwned};
 use std::{fmt, time::Duration};
 
@@ -189,7 +189,7 @@ impl HttpEngine {
         })
     }
 
-    pub fn with_binding(mut self, binding: &w::VoiceBinding) -> Self {
+    pub fn with_binding(mut self, binding: &crate::protocol::VoiceBinding) -> Self {
         if let Some(speed) = binding.speed
             && speed.is_finite()
         {
@@ -525,9 +525,10 @@ fn endpoint_path(value: Option<String>, default: &str) -> String {
     )
 }
 
-pub fn parse_binding(companion: &Companion) -> w::VoiceBinding {
+pub fn parse_binding(companion: &Companion) -> crate::protocol::VoiceBinding {
     let mut binding =
-        serde_json::from_value::<w::VoiceBinding>(companion.voice.json.clone()).unwrap_or_default();
+        serde_json::from_value::<crate::protocol::VoiceBinding>(companion.voice.json.clone())
+            .unwrap_or_default();
     if binding
         .voice_id
         .as_deref()

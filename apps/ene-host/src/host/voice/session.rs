@@ -267,13 +267,23 @@ pub(crate) fn on_turn_end(voice: Option<&Voice>, notifier: Option<&mut Notifier>
     );
 }
 
+/// Wire flush reason -> voice domain reason.
+fn flush_reason(reason: w::FlushReason) -> ene_voice::FlushReason {
+    match reason {
+        w::FlushReason::BargeIn => ene_voice::FlushReason::BargeIn,
+        w::FlushReason::Cancelled => ene_voice::FlushReason::Cancelled,
+        w::FlushReason::ClientMoved => ene_voice::FlushReason::ClientMoved,
+        w::FlushReason::Unspecified => ene_voice::FlushReason::Unspecified,
+    }
+}
+
 pub(crate) fn flush(voice: Option<&Voice>, companion: &str, reason: w::FlushReason) -> Result<()> {
     let Some(voice) = voice else {
         return Err(HostError::NotFound(
             ("no client owns this companion's audio output").into(),
         ));
     };
-    Ok(voice.flush(companion, reason)?)
+    Ok(voice.flush(companion, flush_reason(reason))?)
 }
 
 pub(crate) fn on_client_moved(voice: Option<&Voice>, companion: &str, client: &str) {

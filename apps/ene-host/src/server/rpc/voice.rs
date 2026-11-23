@@ -4,6 +4,7 @@
 //! the client that opened it and recognizes each finished utterance;
 //! `SubscribeAudioOutput` only pumps the host's generation-gated channel.
 use super::Services;
+use super::voice_convert::to_wire_event;
 use crate::host::{
     Runtime,
     db::Store,
@@ -185,7 +186,7 @@ impl w::VoiceService for Services {
                     event = receiver.recv() => event,
                 };
                 let Some(event) = event else { break };
-                yield Ok(event);
+                yield Ok(to_wire_event(event));
             }
             drop(guard);
         }

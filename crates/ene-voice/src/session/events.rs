@@ -1,11 +1,11 @@
-//! Constants, wire event builders, sentence splitting, and synthesis helpers.
+//! Constants, output event builders, sentence splitting, and synthesis helpers.
 
 use crate::{
     engine::TtsEngine,
     error::{HttpResult, VoiceHttpError},
     pcm::SAMPLE_RATE,
+    protocol::{AudioChunk, FlushControl, FlushReason, UtteranceFinished, VoiceOutputEvent},
 };
-use ene_rpc as w;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -40,8 +40,8 @@ impl InputBinding {
 #[derive(Debug)]
 pub struct AudioSubscription {
     pub subscription_id: String,
-    pub receiver: mpsc::Receiver<w::AudioOutputEvent>,
-    pub control: mpsc::UnboundedReceiver<w::AudioOutputEvent>,
+    pub receiver: mpsc::Receiver<VoiceOutputEvent>,
+    pub control: mpsc::UnboundedReceiver<VoiceOutputEvent>,
 }
 
 /// A finished utterance the host relays to the peers (voice-avatar.md §5.3).
@@ -105,7 +105,7 @@ pub fn audio_events(
     generation_id: u64,
     sequence_no: u32,
     pcm: &[u8],
-) -> Vec<w::AudioOutputEvent> {
+) -> Vec<VoiceOutputEvent> {
     if pcm.is_empty() {
         return Vec::new();
     }
@@ -113,7 +113,7 @@ pub fn audio_events(
     pcm.chunks(AUDIO_CHUNK_BYTES)
         .enumerate()
         .map(|(index, chunk)| {
-            audio_event(w::AudioChunkEnvelope {
+            VoiceOutputEvent::Chunk(AudioChunk {
                 utterance_id: utterance_id.to_owned(),
                 generation_id,
                 sequence_no,
@@ -121,7 +121,6 @@ pub fn audio_events(
                 sample_rate: SAMPLE_RATE,
                 is_final_chunk: index + 1 == total,
                 companion_id: companion.to_owned(),
-                ..Default::default()
             })
         })
         .collect()
@@ -132,13 +131,12 @@ pub fn finished_event(
     utterance_id: &str,
     generation_id: u64,
     total_sentences: u32,
-) -> w::AudioOutputEvent {
-    audio_event(w::UtteranceFinished {
+) -> VoiceOutputEvent {
+    VoiceOutputEvent::Finished(UtteranceFinished {
         utterance_id: utterance_id.to_owned(),
         generation_id,
         total_sentences,
         companion_id: companion.to_owned(),
-        ..Default::default()
     })
 }
 
@@ -146,22 +144,14 @@ pub fn flush_event(
     companion: &str,
     utterance_id: &str,
     flush_generation_id: u64,
-    reason: w::FlushReason,
-) -> w::AudioOutputEvent {
-    audio_event(w::FlushControl {
+    reason: FlushReason,
+) -> VoiceOutputEvent {
+    VoiceOutputEvent::Flush(FlushControl {
         utterance_id: utterance_id.to_owned(),
         flush_generation_id,
-        reason: reason.into(),
+        reason,
         companion_id: companion.to_owned(),
-        ..Default::default()
     })
-}
-
-pub fn audio_event(message: impl Into<w::audio_output_event::Event>) -> w::AudioOutputEvent {
-    w::AudioOutputEvent {
-        event: Some(message.into()),
-        ..Default::default()
-    }
 }
 
 pub async fn synthesize(

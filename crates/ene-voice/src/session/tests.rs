@@ -50,19 +50,19 @@ impl TtsEngine for BigTts {
     }
 }
 
-fn chunks(events: &[w::AudioOutputEvent]) -> Vec<u32> {
+fn chunks(events: &[VoiceOutputEvent]) -> Vec<u32> {
     events
         .iter()
-        .filter_map(|event| match &event.event {
-            Some(w::audio_output_event::Event::Chunk(chunk)) => Some(chunk.sequence_no),
+        .filter_map(|event| match event {
+            VoiceOutputEvent::Chunk(chunk) => Some(chunk.sequence_no),
             _ => None,
         })
         .collect()
 }
 
-fn finished(events: &[w::AudioOutputEvent]) -> Option<u32> {
-    events.iter().find_map(|event| match &event.event {
-        Some(w::audio_output_event::Event::Finished(finished)) => Some(finished.total_sentences),
+fn finished(events: &[VoiceOutputEvent]) -> Option<u32> {
+    events.iter().find_map(|event| match event {
+        VoiceOutputEvent::Finished(finished) => Some(finished.total_sentences),
         _ => None,
     })
 }
@@ -170,17 +170,12 @@ async fn the_finished_event_is_the_last_audio_event_of_the_utterance() {
     assert_eq!(finished(&collected), Some(2));
     let announces = collected
         .iter()
-        .filter(|event| {
-            matches!(
-                &event.event,
-                Some(w::audio_output_event::Event::Finished(_))
-            )
-        })
+        .filter(|event| matches!(event, VoiceOutputEvent::Finished(_)))
         .count();
     assert_eq!(announces, 1);
     assert!(matches!(
-        collected.last().map(|event| &event.event),
-        Some(Some(w::audio_output_event::Event::Finished(_)))
+        collected.last(),
+        Some(VoiceOutputEvent::Finished(_))
     ));
     settle(&voice).await;
     assert!(events.try_recv().is_err());
@@ -223,8 +218,8 @@ async fn a_failed_sentence_finishes_the_utterance_after_its_audio() {
     assert_eq!(chunks(&collected), [1]);
     assert_eq!(finished(&collected), Some(2));
     assert!(matches!(
-        collected.last().map(|event| &event.event),
-        Some(Some(w::audio_output_event::Event::Finished(_)))
+        collected.last(),
+        Some(VoiceOutputEvent::Finished(_))
     ));
     settle(&voice).await;
     assert!(events.try_recv().is_err());
@@ -306,7 +301,7 @@ async fn a_flushed_inflight_synthesis_cannot_emit_into_the_next_generation() {
     tokio::time::timeout(Duration::from_secs(5), engine.started.notified())
         .await
         .unwrap();
-    voice.flush("ene", w::FlushReason::BargeIn).unwrap();
+    voice.flush("ene", FlushReason::BargeIn).unwrap();
     voice.begin("ene", Arc::new(FakeTts { fail: false }), String::new());
     voice.speak("ene", "new。");
     voice.end_turn("ene");
@@ -325,8 +320,8 @@ async fn a_flushed_inflight_synthesis_cannot_emit_into_the_next_generation() {
     .unwrap();
     let audio: Vec<_> = collected
         .iter()
-        .filter_map(|event| match &event.event {
-            Some(w::audio_output_event::Event::Chunk(chunk)) => Some(chunk),
+        .filter_map(|event| match event {
+            VoiceOutputEvent::Chunk(chunk) => Some(chunk),
             _ => None,
         })
         .collect();
@@ -380,7 +375,7 @@ async fn the_worker_orders_audio_and_finishes_the_utterance() {
     assert_eq!(chunks(&collected), [0, 1]);
     assert_eq!(finished(&collected), Some(2));
     for event in &collected {
-        if let Some(w::audio_output_event::Event::Chunk(chunk)) = &event.event {
+        if let VoiceOutputEvent::Chunk(chunk) = event {
             let first = chunk.sequence_no == 0;
             let pcm = pcm_bytes((0..128).map(|index| if first { index * 97 } else { -index * 53 }));
             let rate = if first { 48_000 } else { 44_100 };
@@ -425,9 +420,8 @@ async fn a_stalled_owner_does_not_block_another() {
         .expect("the stalled owner is flushed")
         .expect("a flush event");
     assert!(matches!(
-        flush.event,
-        Some(w::audio_output_event::Event::Flush(flush))
-            if flush.reason == w::FlushReason::Cancelled
+        flush,
+        VoiceOutputEvent::Flush(flush) if flush.reason == FlushReason::Cancelled
     ));
     assert!(!voice.has_owner("ene"));
 }
@@ -451,11 +445,11 @@ async fn f01_audio_events_carry_owning_companion_id() {
         && (chunk_companion.is_none() || finished_companion.is_none())
     {
         if let Ok(event) = sub.receiver.try_recv() {
-            match event.event {
-                Some(w::audio_output_event::Event::Chunk(chunk)) => {
+            match event {
+                VoiceOutputEvent::Chunk(chunk) => {
                     chunk_companion = Some(chunk.companion_id);
                 }
-                Some(w::audio_output_event::Event::Finished(fin)) => {
+                VoiceOutputEvent::Finished(fin) => {
                     finished_companion = Some(fin.companion_id);
                 }
                 _ => {}

@@ -111,6 +111,7 @@ mod client;
 mod host;
 mod settings;
 mod voice;
+mod voice_convert;
 mod work;
 
 use super::auth;

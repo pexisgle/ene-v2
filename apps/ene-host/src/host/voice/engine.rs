@@ -10,7 +10,6 @@ use crate::host::{
     settings::{Connection, ConnectionKind},
 };
 use bevy_ecs::prelude::*;
-use ene_rpc as w;
 use std::sync::Arc;
 
 /// Engines a test injects to stand in for the plugin path.
@@ -69,7 +68,7 @@ fn http_engine(
     ctx: &VoiceEngineContext<'_>,
     connection: Connection,
     kind: ConnectionKind,
-    binding: Option<&w::VoiceBinding>,
+    binding: Option<&ene_voice::VoiceBinding>,
 ) -> std::result::Result<HttpEngine, SetupError> {
     let resolved_base = resolve_base(&connection, ctx.providers);
     let secret = load_connection_secret(&connection, ctx.credentials, ctx.providers)?;

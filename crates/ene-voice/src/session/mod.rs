@@ -5,16 +5,16 @@ pub mod events;
 pub use events::{
     AudioSubscription, Dispatch, EndedUtterance, InputBinding, MAX_PROBE_CHARS, MAX_SENTENCE_CHARS,
     MAX_STT_BYTES, MIN_STT_BYTES, MIN_STT_RMS, STT_SILENCE_WINDOW, STT_TIMEOUT, VOICE_UNAVAILABLE,
-    audio_event, audio_events, finished_event, flush_event, flush_sentences, split_sentences,
-    synthesize, synthesize_for_probe,
+    audio_events, finished_event, flush_event, flush_sentences, split_sentences, synthesize,
+    synthesize_for_probe,
 };
 
 use crate::{
     engine::TtsEngine,
     error::{BoxFuture, HttpResult, VoiceSessionError},
     pcm::{ResamplerCache, wire_pcm},
+    protocol::{FlushReason, VoiceOutputEvent},
 };
-use ene_rpc as w;
 use futures_util::{StreamExt, stream::FuturesOrdered};
 use std::{
     collections::{HashMap, VecDeque},
@@ -36,8 +36,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[derive(Clone)]
 struct Stream {
     subscription: String,
-    audio: mpsc::Sender<w::AudioOutputEvent>,
-    control: mpsc::UnboundedSender<w::AudioOutputEvent>,
+    audio: mpsc::Sender<VoiceOutputEvent>,
+    control: mpsc::UnboundedSender<VoiceOutputEvent>,
 }
 
 #[derive(Clone)]
@@ -216,7 +216,7 @@ impl VoicePipeline {
         if !state.owners.contains_key(companion) {
             return false;
         }
-        finish(&mut state, companion, Some(w::FlushReason::Cancelled));
+        finish(&mut state, companion, Some(FlushReason::Cancelled));
         state.next_generation += 1;
         let generation_id = state.next_generation;
         let id = uuid::Uuid::new_v4().to_string();
@@ -295,7 +295,7 @@ impl VoicePipeline {
             }
         }
         if overflow {
-            finish(&mut state, companion, Some(w::FlushReason::Cancelled));
+            finish(&mut state, companion, Some(FlushReason::Cancelled));
             return;
         }
         if let Some(work) = state.works.get_mut(&utterance_id) {
@@ -346,7 +346,7 @@ impl VoicePipeline {
             }
         }
         if overflow {
-            finish(&mut state, companion, Some(w::FlushReason::Cancelled));
+            finish(&mut state, companion, Some(FlushReason::Cancelled));
             return None;
         }
         let work = state.works.get_mut(&utterance_id)?;
@@ -400,7 +400,7 @@ impl VoicePipeline {
         );
     }
 
-    pub fn flush(&self, companion: &str, reason: w::FlushReason) -> Result<(), VoiceSessionError> {
+    pub fn flush(&self, companion: &str, reason: FlushReason) -> Result<(), VoiceSessionError> {
         let mut state = self.lock();
         if !state.owners.contains_key(companion) {
             return Err(VoiceSessionError::NoOwner);
@@ -418,7 +418,7 @@ impl VoicePipeline {
         if !owns {
             return;
         }
-        finish(&mut state, companion, Some(w::FlushReason::ClientMoved));
+        finish(&mut state, companion, Some(FlushReason::ClientMoved));
         state.owners.remove(companion);
     }
 
@@ -501,7 +501,7 @@ impl VoicePipeline {
         state: &mut State,
         companion: &str,
         generation_id: u64,
-        events: Vec<w::AudioOutputEvent>,
+        events: Vec<VoiceOutputEvent>,
         utterance_id: &str,
     ) {
         for event in events {
@@ -552,7 +552,7 @@ impl VoicePipeline {
         &self,
         companion: &str,
         generation_id: u64,
-        event: w::AudioOutputEvent,
+        event: VoiceOutputEvent,
     ) -> Dispatch {
         let mut state = self.lock();
         deliver_state(&mut state, companion, generation_id, event)
@@ -569,7 +569,7 @@ impl VoicePipeline {
     }
 }
 
-fn finish(state: &mut State, companion: &str, reason: Option<w::FlushReason>) {
+fn finish(state: &mut State, companion: &str, reason: Option<FlushReason>) {
     let Some(owner) = state.owners.get_mut(companion) else {
         return;
     };
@@ -594,7 +594,7 @@ fn finish(state: &mut State, companion: &str, reason: Option<w::FlushReason>) {
 }
 
 fn fail_owner(state: &mut State, companion: &str) {
-    finish(state, companion, Some(w::FlushReason::Cancelled));
+    finish(state, companion, Some(FlushReason::Cancelled));
     state.owners.remove(companion);
     if state.floor.as_deref() == Some(companion) {
         state.floor = None;
@@ -627,7 +627,7 @@ fn deliver_state(
     state: &mut State,
     companion: &str,
     generation_id: u64,
-    event: w::AudioOutputEvent,
+    event: VoiceOutputEvent,
 ) -> Dispatch {
     let Some(owner) = state.owners.get(companion) else {
         return Dispatch::Stale;
