@@ -187,7 +187,10 @@ impl w::SettingsService for Services {
                 if let Err(error) = crate::host::agent::sync_companion(app.world_mut(), &companion.id) {
                     tracing::warn!(%error, "could not rebind companion after connection removal");
                 }
-                crate::host::mind::notify(app.world_mut(), &companion);
+                crate::host::mind::notify(
+                    &mut app.world_mut().resource_mut::<crate::host::notify::Notifier>(),
+                    &companion,
+                );
             }
             Ok(view)
         }).await?;
