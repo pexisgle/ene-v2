@@ -4,10 +4,12 @@
 
 mod form;
 mod views;
+mod voice_view;
 
 pub(crate) use form::EditorContext;
 use form::*;
 use views::*;
+use voice_view::*;
 
 use super::{CompanionsPane, parse_voice_selection};
 use crate::ui::{CompanionProfilePatch, studio::labeled_field, theme::Theme};
