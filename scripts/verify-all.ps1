@@ -136,7 +136,7 @@ if (-not $SkipTests) {
                 # same binary passes on some runs and returns os error 5 on others.
                 # Retry a few times before calling it a failure.
                 $passed = $false
-                foreach ($attempt in 1..3) {
+                foreach ($attempt in 1..5) {
                     # Run the child with its working directory already outside the
                     # workspace (Push-Location above) *and* with TMP/TEMP pointing at
                     # the system temp: the sandbox applies directory ACLs to the

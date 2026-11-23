@@ -24,16 +24,26 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
 
-    #[derive(bevy_ecs::prelude::Resource)]
-    struct Observed(tokio::sync::oneshot::Sender<w::History>);
+    /// Captures the history an in-process RPC read produced, without registering
+    /// anything on the ECS world: the request path hands the value to this channel.
+    static OBSERVED: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<w::History>>> =
+        std::sync::Mutex::new(None);
 
     fn observed_history(
         world: &mut bevy_ecs::world::World,
         request: &w::HistoryRequestView<'_>,
     ) -> crate::host::error::Result<w::History> {
         let history = chat::history(world, request)?;
-        let observed = world.remove_resource::<Observed>().unwrap();
-        observed.0.send(history.clone()).unwrap();
+        // The test installs the sender before issuing the call; a missing sender
+        // means the test did not arm the probe, which is its own failure.
+        let sender = OBSERVED
+            .lock()
+            .expect("observed probe mutex is never poisoned")
+            .take()
+            .expect("the test arms the observed channel before calling");
+        sender
+            .send(history.clone())
+            .expect("test receiver is alive");
         Ok(history)
     }
 
@@ -62,11 +72,11 @@ mod tests {
                     .insert(Conversation(History::from_messages([Message::user(
                         "retained request reached the host",
                     )])));
-                app.insert_resource(Observed(observed));
                 Ok(companion)
             })
             .await
             .unwrap();
+        *OBSERVED.lock().expect("observed probe") = Some(observed);
         let (entered, blocked) = tokio::sync::oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
         let blocker = runtime.read(move |_| {

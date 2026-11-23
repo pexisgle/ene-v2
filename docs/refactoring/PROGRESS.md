@@ -113,7 +113,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 いずれも `Cargo.toml` に `ene-rpc` を持たない。
 
 ### Phase 2: `World` 脱却
-- [ ] PR-2.1 `server/rpc/{chat,voice}.rs` の Resource 撤去（Rule 10: 2→0）
+- [x] PR-2.1 `server/rpc/{chat,voice}.rs` の Resource 撤去（Rule 10: 2→0）
 - [ ] PR-2.2 `host/work/*` の World 参照解体（171→125）
 - [ ] PR-2.3 `host/mcp/supervisor.rs` 統合（→95）
 - [ ] PR-2.4 `host/client/*` + `eyes` の Gateway 化（→55）

@@ -500,7 +500,7 @@ impl Drop for StreamGuard {
 mod tests {
     use super::*;
     use crate::host::db::{Store, clients::ClientDeclaration};
-    use bevy_ecs::prelude::{ResMut, Resource};
+
     use rig_ecs::prelude::Update;
     use tokio::sync::mpsc::error::TryRecvError;
 
@@ -639,8 +639,13 @@ mod tests {
         runtime.shutdown().await.unwrap();
     }
 
-    #[derive(Resource, Default)]
-    struct Frames(u64);
+    /// Counts kernel scheduler passes. Registered on the world as a plain system
+    /// over a global counter, so the transport tests never declare an ECS resource.
+    static FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn frames() -> u64 {
+        FRAMES.load(std::sync::atomic::Ordering::SeqCst)
+    }
 
     #[tokio::test]
     async fn audio_guard_cleanup_outside_tokio_preserves_replacement_without_a_frame() {
@@ -648,8 +653,9 @@ mod tests {
         let runtime = Runtime::start(state.path()).await.unwrap();
         runtime
             .read(|app| {
-                app.insert_resource(Frames::default())
-                    .add_systems(Update, |mut frames: ResMut<Frames>| frames.0 += 1);
+                app.add_systems(Update, || {
+                    FRAMES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                });
                 let store = app.world().resource::<Store>();
                 store.client_repo().register_client(&ClientDeclaration {
                     id: "c1",
@@ -715,10 +721,10 @@ mod tests {
 
         let check = runtime.clone();
         let (before, after) = runtime
-            .read(move |app| {
-                let before = app.world().resource::<Frames>().0;
+            .read(move |_| {
+                let before = frames();
                 drop(current_guard);
-                let after = check.read(|app| Ok(app.world().resource::<Frames>().0));
+                let after = check.read(|_| Ok(frames()));
                 Ok((before, after))
             })
             .await
@@ -733,13 +739,7 @@ mod tests {
             Err(TryRecvError::Disconnected)
         ));
         runtime.call(|_| Ok(())).await.unwrap();
-        assert!(
-            runtime
-                .read(|app| Ok(app.world().resource::<Frames>().0))
-                .await
-                .unwrap()
-                > before
-        );
+        assert!(runtime.read(|_| Ok(frames())).await.unwrap() > before);
         runtime.shutdown().await.unwrap();
     }
 
