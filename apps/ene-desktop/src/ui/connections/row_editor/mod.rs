@@ -35,6 +35,7 @@ pub(super) fn render_connection_row(
     let badge = compute_connection_badge(conn, check, needs_key_flag, theme);
     let should_auto_probe = should_auto_probe_connection(conn, check, needs_key_flag);
     let header = render_row_header(
+        pane,
         conn,
         &badge,
         RowHeaderFlags {
@@ -61,6 +62,7 @@ pub(super) fn render_connection_row(
 }
 
 fn render_row_header(
+    pane: &ConnectionsPane,
     conn: &Connection,
     badge: &RowBadge,
     flags: RowHeaderFlags,
@@ -74,17 +76,10 @@ fn render_row_header(
     } = flags;
     let id = &conn.id;
     let kind = conn.kind;
-    let is_checking = cx
-        .entity()
-        .read(cx)
-        .hub
-        .read(cx)
-        .setup
-        .checking_connections
-        .contains(id);
+    let hub_check = pane.hub.clone();
+    let is_checking = hub_check.read(cx).setup.checking_connections.contains(id);
     let ep = conn.endpoint();
     let is_voicevox = is_voicevox_tts(conn, ep);
-    let hub_check = cx.entity().read(cx).hub.clone();
     let hub_expand_probe = hub_check.clone();
     let check_id = id.clone();
     let expand_id = id.clone();

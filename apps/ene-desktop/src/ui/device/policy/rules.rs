@@ -132,10 +132,10 @@ pub(super) fn render_confirmation_skip_row(
 ) -> AnyElement {
     let confirm_status = confirmation_status_pill(skip_tool_confirmation, skip_files_only, theme);
     let actions = render_confirmation_actions(
+        pane,
         live,
         skip_tool_confirmation,
         skip_files_only,
-        pane.form.skip_confirm_armed,
         theme,
         cx,
     );
@@ -177,15 +177,16 @@ pub(super) fn confirmation_status_pill(
     }
 }
 
-pub(super) fn render_confirmation_actions(
+fn render_confirmation_actions(
+    pane: &DevicePane,
     live: bool,
     skip_tool_confirmation: bool,
     skip_files_only: bool,
-    skip_armed: bool,
     theme: &Theme,
     cx: &mut Context<DevicePane>,
 ) -> gpui::Div {
-    let hub_confirmation = cx.entity().read(cx).hub.clone();
+    let skip_armed = pane.form.skip_confirm_armed;
+    let hub_confirmation = pane.hub.clone();
     let hub_revoke_legacy = hub_confirmation.clone();
     let pane_arm_skip = cx.entity();
     let pane_cancel_skip = cx.entity();
