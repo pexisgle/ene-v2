@@ -503,10 +503,13 @@ impl Session {
                     }
                 }
                 Err(error) => {
-                    let _ = self.updates.send(Update::Failed {
-                        context: "コンパニオンの有効化",
-                        message: error.to_string(),
-                    });
+                    super::notify_ui(
+                        &self.updates,
+                        Update::Failed {
+                            context: "コンパニオンの有効化",
+                            message: error.to_string(),
+                        },
+                    );
                 }
             }
         }
@@ -531,10 +534,13 @@ impl Session {
                     }
                 }
                 Err(error) => {
-                    let _ = self.updates.send(Update::Failed {
-                        context: "コンパニオンの常駐",
-                        message: error.to_string(),
-                    });
+                    super::notify_ui(
+                        &self.updates,
+                        Update::Failed {
+                            context: "コンパニオンの常駐",
+                            message: error.to_string(),
+                        },
+                    );
                 }
             }
         }
@@ -543,10 +549,13 @@ impl Session {
 
     async fn cmd_release_companion(&mut self, host: &Host, companion_id: String) -> Step {
         if let Err(error) = self.transport.release_one(host, &companion_id).await {
-            let _ = self.updates.send(Update::Failed {
-                context: "コンパニオンの常駐解除",
-                message: error.to_string(),
-            });
+            super::notify_ui(
+                &self.updates,
+                Update::Failed {
+                    context: "コンパニオンの常駐解除",
+                    message: error.to_string(),
+                },
+            );
             return Step::Continue;
         }
         self.transport.bindings.remove(&companion_id);
@@ -572,10 +581,13 @@ impl Session {
             .map(|id| vec![id.to_owned()])
             .unwrap_or_else(|| self.transport.bindings.keys().cloned().collect());
         if target_ids.is_empty() || self.devices.avatar.is_none() {
-            let _ = self.updates.send(Update::Failed {
-                context: "アバターのサイズ変更",
-                message: "アバター描画プロセスまたはコンパニオンが設定されていません".into(),
-            });
+            super::notify_ui(
+                &self.updates,
+                Update::Failed {
+                    context: "アバターのサイズ変更",
+                    message: "アバター描画プロセスまたはコンパニオンが設定されていません".into(),
+                },
+            );
             return Step::Continue;
         }
         let models: Vec<(String, Option<PathBuf>)> = target_ids
@@ -600,12 +612,15 @@ impl Session {
         if let Some(error) = last_err
             && !updated
         {
-            let _ = self.updates.send(Update::Failed {
-                context: "アバターのサイズ変更",
-                message: error.to_string(),
-            });
+            super::notify_ui(
+                &self.updates,
+                Update::Failed {
+                    context: "アバターのサイズ変更",
+                    message: error.to_string(),
+                },
+            );
         } else if updated {
-            let _ = self.updates.send(Update::AvatarScaleChanged(scale));
+            super::notify_ui(&self.updates, Update::AvatarScaleChanged(scale));
             self.report_devices().await;
         }
         Step::Continue
@@ -641,16 +656,22 @@ impl Session {
         let target = self.transport.focused_companion_id().map(str::to_owned);
         if let (Some(avatar), Some(target)) = (self.devices.avatar.as_mut(), target) {
             if let Err(error) = avatar.center(&target).await {
-                let _ = self.updates.send(Update::Failed {
-                    context: "アバターの中央移動",
-                    message: error.to_string(),
-                });
+                super::notify_ui(
+                    &self.updates,
+                    Update::Failed {
+                        context: "アバターの中央移動",
+                        message: error.to_string(),
+                    },
+                );
             }
         } else {
-            let _ = self.updates.send(Update::Failed {
-                context: "アバターの中央移動",
-                message: "アバター描画プロセスが起動していません".into(),
-            });
+            super::notify_ui(
+                &self.updates,
+                Update::Failed {
+                    context: "アバターの中央移動",
+                    message: "アバター描画プロセスが起動していません".into(),
+                },
+            );
         }
     }
 }

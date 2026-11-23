@@ -215,6 +215,16 @@ impl MotionPlan {
     }
 }
 
+/// Sends an update to the UI, noting when the UI has already stopped listening.
+///
+/// The channel closing is expected during shutdown, but dropping the failure
+/// silently is how a session that quietly stopped updating goes unnoticed.
+pub(crate) fn notify_ui(tx: &UnboundedSender<Update>, update: Update) {
+    if tx.send(update).is_err() {
+        tracing::debug!("the UI stopped listening; update dropped");
+    }
+}
+
 impl Session {
     pub fn new(
         path: PathBuf,

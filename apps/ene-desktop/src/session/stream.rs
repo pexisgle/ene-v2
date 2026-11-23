@@ -60,7 +60,7 @@ impl Session {
         {
             self.devices.computer_frame = None;
         }
-        let _ = self.updates.send(Update::EyesStatus(None));
+        super::notify_ui(&self.updates, Update::EyesStatus(None));
         if self.transport.options.renderer.is_some() && self.devices.avatar.is_none() {
             self.open_avatar().await;
         }
@@ -295,18 +295,24 @@ impl Session {
         match frame {
             Some(Ok(event)) => {
                 state.mic_error_reported = false;
-                let _ = self.updates.send(Update::Transcription {
-                    text: event.text,
-                    is_final: event.is_final,
-                    is_speaking: event.is_speaking,
-                });
+                super::notify_ui(
+                    &self.updates,
+                    Update::Transcription {
+                        text: event.text,
+                        is_final: event.is_final,
+                        is_speaking: event.is_speaking,
+                    },
+                );
             }
             Some(Err(error)) => {
-                let _ = self.updates.send(Update::Transcription {
-                    text: String::new(),
-                    is_final: true,
-                    is_speaking: false,
-                });
+                super::notify_ui(
+                    &self.updates,
+                    Update::Transcription {
+                        text: String::new(),
+                        is_final: true,
+                        is_speaking: false,
+                    },
+                );
                 if persistent(&error) {
                     tracing::info!("the host has no speech recognition: {error}");
                     state.mic_retry_at = None;
@@ -314,10 +320,13 @@ impl Session {
                     tracing::warn!("the transcription stream ended: {error}");
                     if !state.mic_error_reported {
                         state.mic_error_reported = true;
-                        let _ = self.updates.send(Update::Failed {
-                            context: "音声認識",
-                            message: error.to_string(),
-                        });
+                        super::notify_ui(
+                            &self.updates,
+                            Update::Failed {
+                                context: "音声認識",
+                                message: error.to_string(),
+                            },
+                        );
                     }
                     if !self.transport.bindings.is_empty() && self.audio.microphone.is_some() {
                         state.mic_retry_at =
@@ -328,11 +337,14 @@ impl Session {
                 state.mic_send = None;
             }
             None => {
-                let _ = self.updates.send(Update::Transcription {
-                    text: String::new(),
-                    is_final: true,
-                    is_speaking: false,
-                });
+                super::notify_ui(
+                    &self.updates,
+                    Update::Transcription {
+                        text: String::new(),
+                        is_final: true,
+                        is_speaking: false,
+                    },
+                );
                 if !self.transport.bindings.is_empty() && self.audio.microphone.is_some() {
                     state.mic_retry_at = Some(tokio::time::Instant::now() + Duration::from_secs(5));
                 }
@@ -397,11 +409,14 @@ impl Session {
                 sent += bytes;
             }
         }
-        let _ = self.updates.send(Update::Capture {
-            level: capture_state.level,
-            open: capture_state.open,
-            sent,
-        });
+        super::notify_ui(
+            &self.updates,
+            Update::Capture {
+                level: capture_state.level,
+                open: capture_state.open,
+                sent,
+            },
+        );
     }
 
     async fn handle_subscription_frame(
@@ -565,7 +580,7 @@ impl Session {
                         == Some(self.transport.subscription.as_str())
                 {
                     let status = value["status"].as_str().map(str::to_owned);
-                    let _ = self.updates.send(Update::EyesStatus(status));
+                    super::notify_ui(&self.updates, Update::EyesStatus(status));
                 }
             }
             _ => {}

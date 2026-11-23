@@ -24,6 +24,16 @@ pub(crate) enum RemoteHostError {
 }
 
 impl Hub {
+    /// Queues a command for the session, noting when it has stopped listening.
+    ///
+    /// The channel closing means the session thread ended, which is expected
+    /// during shutdown but worth seeing when it is not.
+    pub(super) fn command(&self, command: Command) {
+        if self.commands.send(command).is_err() {
+            tracing::debug!("the session stopped listening; command dropped");
+        }
+    }
+
     pub(crate) fn select_companion(&mut self, companion_id: &str, cx: &mut Context<Self>) {
         if self.model.companion_id() == Some(companion_id) {
             return;
@@ -36,7 +46,7 @@ impl Hub {
         };
         self.model.companions.streaming.clear();
         self.model.audio.transcription = None;
-        let _ = self.commands.send(Command::Serve(companion_id.to_owned()));
+        self.command(Command::Serve(companion_id.to_owned()));
         self.load_history(cx);
         self.load_mind(cx);
         self.windows.pod_scroll_ping = self.windows.pod_scroll_ping.saturating_add(1);
@@ -150,7 +160,7 @@ impl Hub {
     }
 
     pub(crate) fn stop(&mut self, cx: &mut Context<Self>) {
-        let _ = self.commands.send(Command::StopPlayback);
+        self.command(Command::StopPlayback);
         if let Some(companion) = self.model.companion_id().map(str::to_owned) {
             rpc::chat::stop(&self.rpc, self.model.connections.link_epoch, companion);
         }
@@ -164,7 +174,7 @@ impl Hub {
             self.model.audio.input_rms = 0.0;
             self.model.audio.transcription = None;
         }
-        let _ = self.commands.send(Command::SetMicMuted(next));
+        self.command(Command::SetMicMuted(next));
         self.sync_tray_state();
         cx.notify();
     }
@@ -176,34 +186,34 @@ impl Hub {
         };
         self.model.audio.capture_mode = next;
         self.model.audio.ptt_active = false;
-        let _ = self.commands.send(Command::SetCaptureMode(next));
+        self.command(Command::SetCaptureMode(next));
         cx.notify();
     }
 
     pub(crate) fn ptt_toggle(&mut self, cx: &mut Context<Self>) {
         if self.model.audio.ptt_active {
             self.model.audio.ptt_active = false;
-            let _ = self.commands.send(Command::PttCommit);
+            self.command(Command::PttCommit);
         } else {
             self.model.audio.ptt_active = true;
-            let _ = self.commands.send(Command::PttStart);
+            self.command(Command::PttStart);
         }
         cx.notify();
     }
 
     pub(crate) fn ptt_cancel(&mut self, cx: &mut Context<Self>) {
         self.model.audio.ptt_active = false;
-        let _ = self.commands.send(Command::PttCancel);
+        self.command(Command::PttCancel);
         cx.notify();
     }
 
     pub(crate) fn set_eyes_enabled(&self, enabled: bool) {
-        let _ = self.commands.send(Command::SetEyesEnabled(enabled));
+        self.command(Command::SetEyesEnabled(enabled));
     }
 
     #[cfg(windows)]
     pub(crate) fn set_computer_use_enabled(&self, enabled: bool) {
-        let _ = self.commands.send(Command::SetComputerUseEnabled(enabled));
+        self.command(Command::SetComputerUseEnabled(enabled));
     }
 
     pub(crate) fn toggle_output_mute(&mut self, cx: &mut Context<Self>) {
@@ -212,7 +222,7 @@ impl Hub {
         if next {
             self.model.audio.output_rms = 0.0;
         }
-        let _ = self.commands.send(Command::SetOutputMuted(next));
+        self.command(Command::SetOutputMuted(next));
         self.sync_tray_state();
         cx.notify();
     }
@@ -220,12 +230,12 @@ impl Hub {
     pub(crate) fn set_avatar_scale(&mut self, scale: f32, cx: &mut Context<Self>) {
         let clamped = scale.clamp(50., 200.);
         self.model.perception.avatar_scale = clamped;
-        let _ = self.commands.send(Command::SetAvatarScale(clamped));
+        self.command(Command::SetAvatarScale(clamped));
         cx.notify();
     }
 
     pub(crate) fn center_avatar(&self) {
-        let _ = self.commands.send(Command::CenterAvatar);
+        self.command(Command::CenterAvatar);
     }
 
     /// Speaks typed text through the host's TTS connection, outside any turn.
@@ -236,7 +246,7 @@ impl Hub {
         }
         self.model.audio.speech_report = None;
         let companion_id = self.model.companion_id().map(str::to_owned);
-        let _ = self.commands.send(Command::Speak { companion_id, text });
+        self.command(Command::Speak { companion_id, text });
         cx.notify();
     }
 
@@ -252,17 +262,17 @@ impl Hub {
             return;
         };
         self.model.companions.selected = Some(id.clone());
-        let _ = self.commands.send(Command::Serve(id));
+        self.command(Command::Serve(id));
         cx.notify();
     }
 
     pub(crate) fn activate_companion(&mut self, companion_id: String, cx: &mut Context<Self>) {
-        let _ = self.commands.send(Command::ActivateCompanion(companion_id));
+        self.command(Command::ActivateCompanion(companion_id));
         cx.notify();
     }
 
     pub(crate) fn release_companion(&mut self, companion_id: String, cx: &mut Context<Self>) {
-        let _ = self.commands.send(Command::ReleaseCompanion(companion_id));
+        self.command(Command::ReleaseCompanion(companion_id));
         cx.notify();
     }
 
