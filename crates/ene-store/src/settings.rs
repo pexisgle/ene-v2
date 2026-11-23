@@ -115,34 +115,34 @@ impl<'a> SettingsRepo<'a> {
         let stamp = now();
         let next = expected_revision + 1;
         self.0.write_tx(|transaction| {
-        for (input, expected) in inputs {
-            let existing = current
-                .connections
-                .iter()
-                .find(|existing| existing.id == input.id);
-            let revision = match existing {
-                Some(existing) if *expected == existing.revision => existing.revision + 1,
-                Some(_) => {
-                    return Err(StoreError::Conflict(format!(
-                        "connection `{}` changed since it was read",
-                        input.id
-                    )));
-                }
-                None if *expected == 0 => 1,
-                None => {
-                    return Err(StoreError::Conflict(format!(
-                        "connection `{}` does not exist",
-                        input.id
-                    )));
-                }
-            };
-            let reset_check = existing.is_some_and(|previous| {
-                (input.kind == ConnectionKind::Search && input.config != previous.config)
-                    || (input.endpoint().adapter == ene_catalog::GOOGLE_AGENT_PLATFORM
-                        && input.config != previous.config
-                        && !keeps_verified_model_list(previous, input))
-            });
-            let changed = transaction
+            for (input, expected) in inputs {
+                let existing = current
+                    .connections
+                    .iter()
+                    .find(|existing| existing.id == input.id);
+                let revision = match existing {
+                    Some(existing) if *expected == existing.revision => existing.revision + 1,
+                    Some(_) => {
+                        return Err(StoreError::Conflict(format!(
+                            "connection `{}` changed since it was read",
+                            input.id
+                        )));
+                    }
+                    None if *expected == 0 => 1,
+                    None => {
+                        return Err(StoreError::Conflict(format!(
+                            "connection `{}` does not exist",
+                            input.id
+                        )));
+                    }
+                };
+                let reset_check = existing.is_some_and(|previous| {
+                    (input.kind == ConnectionKind::Search && input.config != previous.config)
+                        || (input.endpoint().adapter == ene_catalog::GOOGLE_AGENT_PLATFORM
+                            && input.config != previous.config
+                            && !keeps_verified_model_list(previous, input))
+                });
+                let changed = transaction
                 .prepare_cached(
                     "INSERT INTO connections (id, name, enabled, kind, config, credential_state, \
                         last_check, revision, updated_at) \
@@ -165,25 +165,25 @@ impl<'a> SettingsRepo<'a> {
                     stamp,
                     reset_check,
                 ])?;
-            if changed == 0 {
-                return Err(StoreError::Conflict(format!(
-                    "connection `{}` changed since it was read",
-                    input.id
-                )));
+                if changed == 0 {
+                    return Err(StoreError::Conflict(format!(
+                        "connection `{}` changed since it was read",
+                        input.id
+                    )));
+                }
             }
-        }
-        let changed = transaction
-            .prepare_cached(
-                "UPDATE settings_state SET revision = ?2, updated_at = ?3 \
+            let changed = transaction
+                .prepare_cached(
+                    "UPDATE settings_state SET revision = ?2, updated_at = ?3 \
                  WHERE id = 1 AND revision = ?4",
-            )?
-            .execute(params![1, next, stamp, expected_revision])?;
-        if changed == 0 {
-            return Err(StoreError::Conflict(
-                "settings changed since they were read".into(),
-            ));
-        }
-        Ok(())
+                )?
+                .execute(params![1, next, stamp, expected_revision])?;
+            if changed == 0 {
+                return Err(StoreError::Conflict(
+                    "settings changed since they were read".into(),
+                ));
+            }
+            Ok(())
         })?;
         self.settings()
     }
