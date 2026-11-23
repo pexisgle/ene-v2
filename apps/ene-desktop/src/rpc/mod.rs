@@ -12,6 +12,12 @@ use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc::UnboundedSender;
 
+/// How long one RPC may take before the UI gives up on it.
+///
+/// Generous next to a loopback round trip: this exists to stop a wedged host
+/// from hanging the window, not to police normal latency.
+const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Dispatches asynchronous Connect RPC calls on the session Tokio runtime and routes scoped updates back to the UI.
 #[derive(Debug)]
 pub(crate) struct RpcDispatcher {
@@ -71,7 +77,16 @@ impl RpcDispatcher {
         let updates = self.updates.clone();
         let seq = self.request_seq.fetch_add(1, Ordering::Relaxed);
         self.runtime.spawn(async move {
-            let inner = match future.await {
+            // Without a deadline a request the host accepted but never answers
+            // leaves the UI waiting for the life of the process; the
+            // transport's timeout covers connection setup, not this.
+            let outcome = match tokio::time::timeout(RPC_TIMEOUT, future).await {
+                Ok(result) => result,
+                Err(_) => Err(connectrpc::ConnectError::deadline_exceeded(
+                    "the host did not answer in time",
+                )),
+            };
+            let inner = match outcome {
                 Ok(value) => done(value),
                 Err(failed) => error(context, failed),
             };
@@ -94,7 +109,13 @@ impl RpcDispatcher {
         let updates = self.updates.clone();
         let seq = self.request_seq.fetch_add(1, Ordering::Relaxed);
         self.runtime.spawn(async move {
-            let inner = future.await;
+            let inner = match tokio::time::timeout(RPC_TIMEOUT, future).await {
+                Ok(inner) => inner,
+                Err(_) => Update::Failed {
+                    context: "host request",
+                    message: "ホストが時間内に応答しませんでした。接続を確認してください。".into(),
+                },
+            };
             crate::session::notify_ui(
                 &updates,
                 Update::Scoped {
