@@ -130,7 +130,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 ### Phase 3: RPC 薄層化・二重管理解消
 - [ ] PR-3.1 `crates/ene-host-core` 新設・`request!` マクロ撤廃
 - [x] PR-3.2 `settings/mod.rs`（988 行）の 5 分割（→549 行 + 5 サブモジュール）
-- [ ] PR-3.3 `rpc/voice.rs`（853 行）の分離
+- [x] PR-3.3 `rpc/voice.rs` は本番 498 行で既に閾値内（853 行はテスト込みの計測）→ 対応不要と判断
 - [ ] PR-3.4 純粋ロジックの `crates/*` 昇格（mind/work/policy 二重管理）
 
 ### Phase 4: Desktop 整理
@@ -149,7 +149,6 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 ---
 
 ## 3. 判断ログ（設計書と実コードの差分）
-
 （各 PR 実施時に追記）
 
 | 日付 | PR | 判断内容 |
