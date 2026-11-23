@@ -1,7 +1,7 @@
 use super::{Observation, Window, parse_wm_class, wayland_state_is_activated};
 use std::{
     collections::HashMap,
-    sync::{Mutex, OnceLock},
+    sync::{LazyLock, Mutex},
     time::Instant,
 };
 use wayland_client::backend::ObjectId;
@@ -26,7 +26,7 @@ use x11rb::{
 
 const _: () = assert!(zwlr_foreign_toplevel_handle_v1::State::Activated as u32 == 2);
 
-static BACKEND: OnceLock<Mutex<LinuxBackend>> = OnceLock::new();
+static BACKEND: LazyLock<Mutex<LinuxBackend>> = LazyLock::new(|| Mutex::new(init()));
 
 enum LinuxBackend {
     Wayland(Box<WaylandBackend>),
@@ -35,14 +35,14 @@ enum LinuxBackend {
 }
 
 pub(super) fn supported() -> bool {
-    let Ok(backend) = BACKEND.get_or_init(|| Mutex::new(init())).lock() else {
+    let Ok(backend) = BACKEND.lock() else {
         return false;
     };
     !matches!(*backend, LinuxBackend::Unsupported)
 }
 
 pub(super) fn observe() -> Observation {
-    let Ok(mut backend) = BACKEND.get_or_init(|| Mutex::new(init())).lock() else {
+    let Ok(mut backend) = BACKEND.lock() else {
         return empty();
     };
     match &mut *backend {

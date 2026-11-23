@@ -55,6 +55,7 @@ ene-work = { path = "crates/ene-work" }
 agent-client-protocol-schema = { version = "1.15.1", default-features = false }
 process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
 pulldown-cmark = { version = "0.13", default-features = false }
+parking_lot = "0.12"
 regex = "1"
 globset = "0.4"
 cap-std = "4.0.3"

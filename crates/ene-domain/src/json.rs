@@ -2,8 +2,9 @@
 
 use crate::error::DomainError;
 use hashlink::LruCache;
+use parking_lot::Mutex;
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock};
 
 /// Parses an optional JSON object document, defaulting empty text to `{}`.
 pub fn parse_object(text: &str) -> Result<Value, DomainError> {
@@ -47,22 +48,22 @@ pub enum SchemaError {
 }
 
 fn validator(schema: &Value) -> std::result::Result<Arc<jsonschema::Validator>, SchemaError> {
-    static CACHE: OnceLock<Mutex<LruCache<String, Arc<jsonschema::Validator>>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(LruCache::new(256)));
+    static CACHE: LazyLock<Mutex<LruCache<String, Arc<jsonschema::Validator>>>> =
+        LazyLock::new(|| Mutex::new(LruCache::new(256)));
+    let cache = &*CACHE;
     let key = serde_json::to_string(schema)?;
-    if let Some(validator) = cache.lock().ok().and_then(|mut map| map.get(&key).cloned()) {
+    if let Some(validator) = cache.lock().get(&key).cloned() {
         return Ok(validator);
     }
     let validator = Arc::new(
         jsonschema::validator_for(schema)
             .map_err(|error| SchemaError::InvalidSchema(error.to_string()))?,
     );
-    if let Ok(mut map) = cache.lock() {
-        if let Some(cached) = map.get(&key) {
-            return Ok(Arc::clone(cached));
-        }
-        map.insert(key, Arc::clone(&validator));
+    let mut map = cache.lock();
+    if let Some(cached) = map.get(&key) {
+        return Ok(Arc::clone(cached));
     }
+    map.insert(key, Arc::clone(&validator));
     Ok(validator)
 }
 

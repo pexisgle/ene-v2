@@ -6,7 +6,7 @@
 //! builds model requests on, where the deadline can only sit on the client.
 //! They stay apart because the same [`client`] also carries an MCP stream,
 //! which is long-lived by design.
-use std::{sync::OnceLock, time::Duration};
+use std::{sync::LazyLock, time::Duration};
 
 /// How long one model call may take end to end.
 pub(crate) const MODEL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -36,16 +36,17 @@ fn build(timeout: Option<Duration>) -> Result<reqwest::Client, NetError> {
 /// bounce the request elsewhere. It sets no timeout of its own: callers that
 /// know their budget bound the request, and an MCP stream is not bounded.
 pub(crate) fn client() -> Result<reqwest::Client, NetError> {
-    static CLIENT: OnceLock<Result<reqwest::Client, NetError>> = OnceLock::new();
-    CLIENT.get_or_init(|| build(None)).clone()
+    static CLIENT: LazyLock<Result<reqwest::Client, NetError>> = LazyLock::new(|| build(None));
+    CLIENT.clone()
 }
 
 /// The client rig's model transports send through. Rig builds the requests,
 /// so the deadline has to be the client's; keeping it separate leaves
 /// [`client`]'s long-lived MCP stream unbounded.
 pub(crate) fn model_client() -> Result<reqwest::Client, NetError> {
-    static CLIENT: OnceLock<Result<reqwest::Client, NetError>> = OnceLock::new();
-    CLIENT.get_or_init(|| build(Some(MODEL_TIMEOUT))).clone()
+    static CLIENT: LazyLock<Result<reqwest::Client, NetError>> =
+        LazyLock::new(|| build(Some(MODEL_TIMEOUT)));
+    CLIENT.clone()
 }
 
 /// Reads a reply body, refusing one over `max_bytes`. Bounded by
