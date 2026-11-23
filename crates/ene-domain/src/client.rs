@@ -3,6 +3,7 @@
 use crate::Failure;
 use ene_policy::CapabilitySpec;
 use serde::{Deserialize, Serialize};
+use strum::{EnumString, IntoStaticStr};
 
 /// Registered client metadata and its granted capabilities.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,8 +49,11 @@ pub struct Activation {
 }
 
 /// Execution lifecycle status of a queued or dispatched device operation.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, EnumString, IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum DeviceStatus {
     #[default]
     Pending,
@@ -62,13 +66,7 @@ pub enum DeviceStatus {
 impl DeviceStatus {
     /// Returns the canonical snake-case wire/database representation.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Dispatched => "dispatched",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Uncertain => "uncertain",
-        }
+        self.into()
     }
 
     /// Returns `true` once the operation can no longer transition.
@@ -138,6 +136,7 @@ mod tests {
         for (status, expected_str, terminal) in cases {
             assert_eq!(status.as_str(), expected_str);
             assert_eq!(status.is_terminal(), terminal);
+            assert_eq!(expected_str.parse::<DeviceStatus>().unwrap(), status);
             let encoded = serde_json::to_string(&status).unwrap();
             assert_eq!(encoded, format!("\"{expected_str}\""));
             let decoded: DeviceStatus = serde_json::from_str(&encoded).unwrap();

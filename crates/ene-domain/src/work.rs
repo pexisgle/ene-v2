@@ -2,10 +2,12 @@
 
 use crate::Failure;
 use serde::{Deserialize, Serialize};
+use strum::{EnumString, IntoStaticStr};
 
 /// Overall lifecycle state of a work session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, EnumString, IntoStaticStr)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum WorkStatus {
     Idle,
     Active,
@@ -15,17 +17,14 @@ pub enum WorkStatus {
 impl WorkStatus {
     /// Returns the canonical snake-case wire/database representation.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Active => "active",
-            Self::Closed => "closed",
-        }
+        self.into()
     }
 }
 
 /// Execution state of an individual instruction run inside a work session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, EnumString, IntoStaticStr)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum RunState {
     Starting,
     Running,
@@ -41,14 +40,7 @@ pub enum RunState {
 impl RunState {
     /// Returns the canonical snake-case wire/database representation.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Starting => "starting",
-            Self::Running => "running",
-            Self::WaitingInput => "waiting_input",
-            Self::Completed => "completed",
-            Self::Cancelled => "cancelled",
-            Self::Failed => "failed",
-        }
+        self.into()
     }
 
     /// Returns `true` once the run has finished and emits no further events.
@@ -97,6 +89,7 @@ mod tests {
             (WorkStatus::Closed, "closed"),
         ] {
             assert_eq!(status.as_str(), name);
+            assert_eq!(name.parse::<WorkStatus>().unwrap(), status);
             let encoded = serde_json::to_string(&status).unwrap();
             assert_eq!(encoded, format!("\"{name}\""));
             assert_eq!(
@@ -115,6 +108,7 @@ mod tests {
         ];
         for (state, name, terminal) in cases {
             assert_eq!(state.as_str(), name);
+            assert_eq!(name.parse::<RunState>().unwrap(), state);
             assert_eq!(state.is_terminal(), terminal);
             let encoded = serde_json::to_string(&state).unwrap();
             assert_eq!(encoded, format!("\"{name}\""));

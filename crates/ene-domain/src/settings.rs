@@ -6,10 +6,12 @@ use ene_policy::PolicyText;
 use http::header::{HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use strum::{EnumString, IntoStaticStr};
 
 /// Supported categories of configured external connections.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, EnumString, IntoStaticStr)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ConnectionKind {
     Llm,
     Tts,
@@ -23,15 +25,7 @@ pub enum ConnectionKind {
 impl ConnectionKind {
     /// Returns the canonical snake-case wire/database representation.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Llm => "llm",
-            Self::Tts => "tts",
-            Self::Stt => "stt",
-            Self::Embedding => "embedding",
-            Self::Mcp => "mcp",
-            Self::Acp => "acp",
-            Self::Search => "search",
-        }
+        self.into()
     }
 }
 
@@ -352,8 +346,11 @@ pub struct Check {
 
 /// Whether a secret is stored. `registered` secrets live in the host's
 /// credential store and are not part of any connection read.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, EnumString, IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum CredentialState {
     #[default]
     Absent,
@@ -364,17 +361,12 @@ pub enum CredentialState {
 impl CredentialState {
     /// Returns the canonical snake-case wire/database representation.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Absent => "absent",
-            Self::Registered => "registered",
-            Self::Environment => "environment",
-        }
+        self.into()
     }
 
     /// Parses a stored credential state string, falling back to `Absent` for legacy unknown tags.
     pub fn parse(text: &str) -> Self {
-        Self::deserialize(serde::de::value::StrDeserializer::<serde::de::value::Error>::new(text))
-            .unwrap_or_default()
+        text.parse().unwrap_or_default()
     }
 }
 
@@ -449,6 +441,41 @@ mod tests {
             revision: 1,
             last_check: None,
         }
+    }
+
+    #[test]
+    fn connection_kinds_and_credential_states_keep_their_stored_spellings() {
+        // Stored in SQLite and sent on the RPC wire, so every spelling is pinned.
+        for (kind, text) in [
+            (ConnectionKind::Llm, "llm"),
+            (ConnectionKind::Tts, "tts"),
+            (ConnectionKind::Stt, "stt"),
+            (ConnectionKind::Embedding, "embedding"),
+            (ConnectionKind::Mcp, "mcp"),
+            (ConnectionKind::Acp, "acp"),
+            (ConnectionKind::Search, "search"),
+        ] {
+            assert_eq!(kind.as_str(), text);
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{text}\""));
+            assert_eq!(text.parse::<ConnectionKind>().unwrap(), kind);
+        }
+        for (state, text) in [
+            (CredentialState::Absent, "absent"),
+            (CredentialState::Registered, "registered"),
+            (CredentialState::Environment, "environment"),
+        ] {
+            assert_eq!(state.as_str(), text);
+            assert_eq!(
+                serde_json::to_string(&state).unwrap(),
+                format!("\"{text}\"")
+            );
+            assert_eq!(CredentialState::parse(text), state);
+        }
+        // A tag this build no longer knows still decodes, to `Absent`.
+        assert_eq!(
+            CredentialState::parse("legacy_unknown"),
+            CredentialState::Absent
+        );
     }
 
     #[test]
