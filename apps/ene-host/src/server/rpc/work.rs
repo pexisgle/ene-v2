@@ -4,7 +4,10 @@ use crate::host::{db::Store, work};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 use ene_rpc as w;
 
-#[allow(refining_impl_trait)]
+#[expect(
+    refining_impl_trait,
+    reason = "the Connect service trait returns boxed futures while each impl names its concrete future"
+)]
 impl w::WorkService for Services {
     #[tracing::instrument(
         name = "rpc",

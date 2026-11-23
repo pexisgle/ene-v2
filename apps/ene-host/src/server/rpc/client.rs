@@ -7,7 +7,10 @@ use connectrpc::{
 use ene_rpc as w;
 use futures_util::StreamExt;
 
-#[allow(refining_impl_trait)]
+#[expect(
+    refining_impl_trait,
+    reason = "the Connect service trait returns boxed futures while each impl names its concrete future"
+)]
 impl w::ClientService for Services {
     request!(
         register_client,

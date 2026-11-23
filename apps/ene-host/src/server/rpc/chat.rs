@@ -3,7 +3,10 @@ use super::Services;
 use crate::host::chat;
 use ene_rpc as w;
 
-#[allow(refining_impl_trait)]
+#[expect(
+    refining_impl_trait,
+    reason = "the Connect service trait returns boxed futures while each impl names its concrete future"
+)]
 impl w::ChatService for Services {
     request!(app send_message, w::SendMessageRequest, w::Acceptance, chat::accept);
     discard!(stop, w::StopRequest, chat::stop);
