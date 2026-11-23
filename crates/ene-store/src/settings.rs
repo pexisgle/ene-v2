@@ -145,11 +145,13 @@ impl<'a> SettingsRepo<'a> {
             let changed = transaction
                 .prepare_cached(
                     "INSERT INTO connections (id, name, enabled, kind, config, credential_state, \
-                     last_check, revision, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8) \
-                     ON CONFLICT(id) DO UPDATE SET name = excluded.name, enabled = excluded.enabled, \
-                     kind = excluded.kind, config = excluded.config, revision = excluded.revision, \
-                     updated_at = excluded.updated_at, \
-                     last_check = CASE WHEN ?9 THEN NULL ELSE connections.last_check END \
+                        last_check, revision, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8) \
+                     ON CONFLICT(id) DO UPDATE SET \
+                        name = excluded.name, enabled = excluded.enabled, kind = excluded.kind, \
+                        config = excluded.config, revision = excluded.revision, \
+                        updated_at = excluded.updated_at, \
+                        last_check = CASE WHEN ?9 THEN NULL ELSE connections.last_check END \
                      WHERE connections.revision = excluded.revision - 1",
                 )?
                 .execute(params![
