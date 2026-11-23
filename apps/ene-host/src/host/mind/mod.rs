@@ -285,11 +285,7 @@ pub(crate) fn control_memory(
     })
 }
 
-pub(crate) fn list_memories(
-    world: &mut World,
-    request: w::ListMemoriesRequest,
-) -> Result<w::Memories> {
-    let store = world.resource::<Store>().clone();
+pub(crate) fn list_memories(store: Store, request: w::ListMemoriesRequest) -> Result<w::Memories> {
     store
         .companion_repo()
         .companion(&request.companion_id)?
@@ -302,7 +298,6 @@ pub(crate) fn list_memories(
     let (items, next) = store
         .memory_repo()
         .list_memories(&request.companion_id, cursor, limit)?;
-    let _ = world;
     Ok(w::Memories {
         items: items.iter().map(wire::memory).collect(),
         next_cursor: next.map(|next| next.to_string()),

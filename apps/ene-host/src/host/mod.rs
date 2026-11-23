@@ -80,6 +80,9 @@ enum Step {
 pub(crate) struct Runtime {
     handle: Arc<Handle>,
     state_dir: std::path::PathBuf,
+    /// The relational store, held directly so an operation that needs only
+    /// storage does not have to reach through the world for it.
+    store: Store,
     credentials: Credentials,
     hub: DeviceHub,
     providers: providers::Providers,
@@ -146,6 +149,7 @@ impl Runtime {
             providers::extensions::discover_plugin_tools(&providers, &store),
             model::catalog::Refresh::initial()
         );
+        let store_for_runtime = store.clone();
         let thread = spawn_kernel_thread(KernelLaunch {
             resources: KernelResources {
                 store: store.clone(),
@@ -179,6 +183,7 @@ impl Runtime {
                 thread: Mutex::new(Some(thread)),
             }),
             state_dir: state.to_path_buf(),
+            store: store_for_runtime,
             credentials,
             hub,
             providers: runtime_providers,
@@ -192,6 +197,10 @@ impl Runtime {
 
     pub(crate) fn providers(&self) -> providers::Providers {
         self.providers.clone()
+    }
+
+    pub(crate) fn store(&self) -> Store {
+        self.store.clone()
     }
 
     pub(crate) fn credentials(&self) -> Credentials {

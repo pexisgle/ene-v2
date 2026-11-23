@@ -269,7 +269,7 @@ impl w::HostService for Services {
         w::MemoryControlResult,
         mind::control_memory
     );
-    request!(read list_memories, w::ListMemoriesRequest, w::Memories, mind::list_memories);
+    request!(store list_memories, w::ListMemoriesRequest, w::Memories, mind::list_memories);
 }
 
 /// How a subscription starts: replayed events, or a snapshot when resuming is

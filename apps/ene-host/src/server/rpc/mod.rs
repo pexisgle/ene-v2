@@ -27,6 +27,18 @@ macro_rules! request {
             self.read(move |app| $op(app.world_mut(), request)).await
         }
     };
+    (store $name:ident, $request:ty, $response:ty, $op:path) => {
+        #[tracing::instrument(name = "rpc", skip_all, fields(method = stringify!($name), companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+        async fn $name(
+            &self,
+            _: connectrpc::RequestContext,
+            request: connectrpc::ServiceRequest<'_, $request>,
+        ) -> connectrpc::ServiceResult<$response> {
+            let request = request.to_owned_message();
+            let store = self.store();
+            self.call(move |_| $op(store, request)).await
+        }
+    };
     (app $name:ident, $request:ty, $response:ty, $op:path) => {
         #[tracing::instrument(name = "rpc", skip_all, fields(method = stringify!($name), companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
         async fn $name(
@@ -133,6 +145,11 @@ pub(super) struct Services {
 }
 
 impl Services {
+    /// The store, held by the runtime, for operations that never need the world.
+    pub(super) fn store(&self) -> crate::host::db::Store {
+        self.runtime.store()
+    }
+
     pub(super) async fn call<T: Send + 'static>(
         &self,
         operation: impl FnOnce(&mut App) -> crate::host::error::Result<T> + Send + 'static,

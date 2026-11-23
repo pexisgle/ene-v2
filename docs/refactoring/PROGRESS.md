@@ -99,6 +99,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 | PR-4.6 完了 | 0 | 160 | 0 | 44 | 0 |
 | PR-4.5 完了 | 0 | 160 | 0 | 43 | 0 |
 | PR-4.4 完了 | 0 | 160 | 0 | 42 | 0 |
+| PR-3.1 (step 1) | 0 | 159 | 0 | 42 | 0 |
 | PR-4.4 (part 2) 後 | 0 | 160 | 0 | 45 | 0 |
 | PR-4.4 (part 3) 後 | 0 | 160 | 0 | 44 | 0 |
 
@@ -139,7 +140,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 - [x] PR-2.6 残存 World 参照の部分撤去（171→160、→0 は Phase 3 後に再評価）
 
 ### Phase 3: RPC 薄層化・二重管理解消
-- [ ] PR-3.1 `crates/ene-host-core` 新設・`request!` マクロ撤廃
+- [ ] PR-3.1 `crates/ene-host-core` 新設・`request!` マクロ撤廃（step 1 完了: `Runtime::store()` + `request!(store ...)` 形態、160→159。`ene-host-core` crate 新設は未着手）
 - [x] PR-3.2 `settings/mod.rs`（988 行）の 5 分割（→549 行 + 5 サブモジュール）
 - [x] PR-3.3 `rpc/voice.rs` は本番 498 行で既に閾値内（853 行はテスト込みの計測）→ 対応不要と判断
 - [x] PR-3.4 純粋ロジックの `crates/*` 昇格（`normalize` を ene-mind へ移動。他は orchestration で対象外）
