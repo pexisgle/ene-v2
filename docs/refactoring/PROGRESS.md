@@ -98,6 +98,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 | PR-4.3b 完了 | 0 | 160 | 0 | 44 | 0 |
 | PR-4.6 完了 | 0 | 160 | 0 | 44 | 0 |
 | PR-4.5 完了 | 0 | 160 | 0 | 43 | 0 |
+| PR-4.4 完了 | 0 | 160 | 0 | 42 | 0 |
 | PR-4.4 (part 2) 後 | 0 | 160 | 0 | 45 | 0 |
 | PR-4.4 (part 3) 後 | 0 | 160 | 0 | 44 | 0 |
 
@@ -147,7 +148,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 - [x] PR-4.1 `crates/ene-platform-os` 新設・`tray.rs` 移管（unsafe 84→29）
 - [x] PR-4.2 `window` / `capture` / `input` 移管（unsafe 29→6、長大ファイル 47→46）
 - [x] PR-4.3 `#![forbid(unsafe_code)]` 有効化（Rule 8: 84→0 達成）
-- [ ] PR-4.4 巨大 GPUI ビュー分割（bubble / row_editor / policy 完了。editor は 761→507+179+97 だが views が 507 で閾値上、onboarding 750 は未着手）
+- [x] PR-4.4 巨大 GPUI ビュー分割（bubble 931→526+423、row_editor 874→376+351+182、policy 805→381+265+163、editor 761→507+179+97、onboarding 750→368+206+170。`editor/views.rs` 507 は分割余地あり）
 - [x] PR-4.5 `widgets/` プリミティブ分解（742 → buttons 288 / dropdown 276 / pills 158 / mod 13）
 - [x] PR-4.6 `session/` 状態機械化（`ConnectionPhase` + `phase.rs`。TaskTracker 統一は未着手）
 
