@@ -68,6 +68,18 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 type StartError = Box<dyn Error + Send + Sync>;
 type Job = Box<dyn FnOnce(&mut App) + Send>;
 
+/// Runs `job` on the actor thread inside the span its caller was already in.
+///
+/// The actor thread is not the thread that made the request, so `Span::current()`
+/// there is empty. Capturing it at submit time and entering it here is what lets
+/// one trace connect an RPC to the actor work it caused.
+fn trace_job(span: tracing::Span, job: Job) -> Job {
+    Box::new(move |app| {
+        let _entered = span.enter();
+        job(app);
+    })
+}
+
 enum Step {
     Job(Job),
     Wake,
@@ -280,7 +292,7 @@ impl Runtime {
         let submitted = self
             .handle
             .commands
-            .try_send(job(reply))
+            .try_send(trace_job(tracing::Span::current(), job(reply)))
             .map_err(|_| HostError::Exhausted(("host command queue is full or closed").into()));
         async move {
             submitted?;
@@ -811,5 +823,49 @@ mod runtime_tests {
             "deleted initial companion must stay deleted after restart"
         );
         restarted.shutdown().await.unwrap();
+    }
+
+    /// Installs a real subscriber so spans have ids to compare.
+    ///
+    /// The default must be global, not thread-local: the actor runs jobs on its
+    /// own thread, where `with_default` is not in effect.
+    fn install_subscriber() {
+        static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        INSTALLED.get_or_init(|| {
+            // Another test may already have installed one; the assertion below
+            // holds under any registry that assigns span ids.
+            let _installed =
+                tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        });
+    }
+
+    #[tokio::test]
+    async fn a_job_runs_inside_the_callers_span() {
+        install_subscriber();
+        let state = tempfile::tempdir().unwrap();
+        let runtime = Runtime::start(state.path()).await.unwrap();
+
+        let caller = tracing::info_span!("rpc-caller");
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let slot = Arc::clone(&observed);
+        caller
+            .in_scope(|| {
+                runtime.read(move |_| {
+                    // The span the actor thread is running this job inside.
+                    *slot.lock().unwrap() = tracing::Span::current().id();
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let seen = observed.lock().unwrap().clone();
+        assert!(caller.id().is_some(), "the caller span must be enabled");
+        assert_eq!(
+            seen,
+            caller.id(),
+            "the job must run inside the caller's span, not a fresh one"
+        );
+        runtime.shutdown().await.unwrap();
     }
 }
