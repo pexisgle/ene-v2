@@ -23,9 +23,9 @@ MAX_HOST_WORLD_REFS = 160
 # Rule 7: domain crates that must not depend on the wire protocol crate.
 MAX_DOMAIN_RPC_DEPS = 0
 # Rule 8: production `unsafe` occurrences under apps/ene-desktop.
-MAX_DESKTOP_UNSAFE = 17
+MAX_DESKTOP_UNSAFE = 6
 # Rule 9: production files longer than PROD_FILE_LINE_LIMIT.
-MAX_LONG_PROD_FILES = 47
+MAX_LONG_PROD_FILES = 46
 # Rule 10: production `#[derive(Resource)]` items under the RPC transport layer.
 MAX_RPC_ECS_RESOURCES = 0
 DEFAULT_MAX_IMPL_FILES = 3

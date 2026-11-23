@@ -7,10 +7,18 @@
 //! Each module states the invariant its `unsafe` relies on in a `SAFETY:`
 //! comment, and exposes only safe methods over owned values.
 
+#[cfg(windows)]
+pub mod capture;
+#[cfg(windows)]
+pub mod input;
 pub mod tray;
 #[cfg(windows)]
 pub mod window;
 
+#[cfg(windows)]
+pub use capture::{CapturedFrame, Foreground, MAX_FRAME_EDGE, MAX_JPEG_BYTES};
+#[cfg(windows)]
+pub use input::{Desktop, Rect, UnsafeToSend, check_before_send, send_input};
 pub use tray::{Tray, TrayAction, TrayHandle, TrayMode, TraySection, TrayState};
 #[cfg(windows)]
 pub use window::PodWindow;

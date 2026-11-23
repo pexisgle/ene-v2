@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 use windows::Win32::{
-    Foundation::{HWND, POINT, RECT},
+    Foundation::{HWND, POINT},
     UI::{Input::KeyboardAndMouse as input, WindowsAndMessaging as window},
 };
 
@@ -142,52 +142,7 @@ keys! {
     Space => VK_SPACE,
 }
 
-#[derive(PartialEq)]
-struct Desktop {
-    window: isize,
-    window_bounds: RECT,
-    monitor: RECT,
-    virtual_screen: RECT,
-    last_input: u32,
-}
-
-impl Desktop {
-    /// Called in the same physical-pixel DPI context as screen capture.
-    fn read() -> Option<Self> {
-        if !screen::unlocked() {
-            return None;
-        }
-        let (window, monitor) = screen::foreground()?;
-        let mut window_bounds = RECT::default();
-        let mut activity = input::LASTINPUTINFO {
-            cbSize: size_of::<input::LASTINPUTINFO>() as u32,
-            ..Default::default()
-        };
-        // SAFETY: Win32 writes only the supplied, correctly sized structs.
-        unsafe {
-            window::GetWindowRect(window, &mut window_bounds).ok()?;
-            if !input::GetLastInputInfo(&mut activity).as_bool() {
-                return None;
-            }
-            let left = window::GetSystemMetrics(window::SM_XVIRTUALSCREEN);
-            let top = window::GetSystemMetrics(window::SM_YVIRTUALSCREEN);
-            let width = window::GetSystemMetrics(window::SM_CXVIRTUALSCREEN);
-            let height = window::GetSystemMetrics(window::SM_CYVIRTUALSCREEN);
-            (width > 0 && height > 0).then_some(Self {
-                window: window.0 as isize,
-                window_bounds,
-                monitor,
-                virtual_screen: RECT {
-                    left,
-                    top,
-                    right: left + width,
-                    bottom: top + height,
-                },
-                last_input: activity.dwTime,
-            })
-        }
-    }
-}
+use ene_platform_os::Desktop;
 
 pub(crate) struct Frame {
     id: String,
@@ -238,12 +193,12 @@ fn capture(run: String) -> Result<(Frame, Value), ComputerUseError> {
     let current = screen::physical(Desktop::read)
         .flatten()
         .ok_or("the interactive desktop is unavailable")?;
-    if frame.window != desktop.window
-        || frame.monitor != desktop.monitor
-        || current.window != desktop.window
-        || current.monitor != desktop.monitor
-        || current.window_bounds != desktop.window_bounds
-        || current.virtual_screen != desktop.virtual_screen
+    if frame.window != desktop.window()
+        || frame.monitor.left != desktop.monitor().left
+        || frame.monitor.top != desktop.monitor().top
+        || frame.monitor.right != desktop.monitor().right
+        || frame.monitor.bottom != desktop.monitor().bottom
+        || !desktop.still_matches(&current)
     {
         return Err(REFRESH.into());
     }
@@ -331,8 +286,7 @@ fn apply(
         Action::Screenshot => unreachable!("screenshot handled before input"),
     };
     verify_target(frame, point, check_focus, avatar_pid)?;
-    // SAFETY: all input records were initialized with their matching union member.
-    let sent = unsafe { input::SendInput(&events, size_of::<input::INPUT>() as i32) } as usize;
+    let sent = ene_platform_os::send_input(&events);
     if sent == events.len() {
         return Ok(json!({"applied":true}));
     }
@@ -341,13 +295,7 @@ fn apply(
     }
     // Each press is immediately paired with its release.
     if let Some(release) = events.get(sent).filter(|event| is_release(event)) {
-        // SAFETY: reuses an initialized release constructed for the preceding press.
-        unsafe {
-            input::SendInput(
-                std::slice::from_ref(release),
-                size_of::<input::INPUT>() as i32,
-            )
-        };
+        ene_platform_os::send_input(std::slice::from_ref(release));
     }
     Err(ComputerUseError::PartialInput)
 }
@@ -388,7 +336,7 @@ fn verify_target(
             );
         }
         window::GetGUIThreadInfo(0, &mut gui).map_err(|_| REFRESH)?;
-        if gui.hwndActive.0 as isize != frame.desktop.window || !gui.hwndCapture.is_invalid() {
+        if gui.hwndActive.0 as isize != frame.desktop.window() || !gui.hwndCapture.is_invalid() {
             return Err(REFRESH.into());
         }
         if !gui.hwndMenuOwner.is_invalid() {
@@ -430,7 +378,7 @@ fn point(frame: &Frame, x: u32, y: u32) -> Result<POINT, ComputerUseError> {
     if x >= frame.width || y >= frame.height {
         return Err("coordinates are outside the screenshot".into());
     }
-    let monitor = frame.desktop.monitor;
+    let monitor = frame.desktop.monitor();
     let axis = |pixel, image, start: i32, end: i32| -> i32 {
         let offset = (2 * i64::from(pixel) + 1) * i64::from(end - start) / (2 * i64::from(image));
         start + offset as i32
@@ -442,7 +390,7 @@ fn point(frame: &Frame, x: u32, y: u32) -> Result<POINT, ComputerUseError> {
 }
 
 fn movement(desktop: &Desktop, point: POINT) -> Result<input::INPUT, ComputerUseError> {
-    let screen = desktop.virtual_screen;
+    let screen = desktop.virtual_screen();
     let axis = |position, start, end| -> Result<i32, ComputerUseError> {
         if !(start..end).contains(&position) || end - start > 65536 {
             return Err("the pointer position cannot be addressed on the current desktop".into());
@@ -506,7 +454,7 @@ mod tests {
 
     #[test]
     fn scaled_image_coordinates_keep_the_negative_monitor_origin() {
-        let monitor = RECT {
+        let geometry = ene_platform_os::Rect {
             left: -1920,
             top: -30,
             right: 0,
@@ -518,13 +466,7 @@ mod tests {
             at: Instant::now(),
             width: 1280,
             height: 720,
-            desktop: Desktop {
-                window: 0,
-                window_bounds: monitor,
-                monitor,
-                virtual_screen: monitor,
-                last_input: 0,
-            },
+            desktop: Desktop::from_geometry(0, geometry, geometry),
         };
         assert_eq!(point(&frame, 0, 0).unwrap(), POINT { x: -1920, y: -30 });
         assert_eq!(point(&frame, 1279, 719).unwrap(), POINT { x: -1, y: 1049 });

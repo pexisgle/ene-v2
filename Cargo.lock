@@ -4060,7 +4060,6 @@ dependencies = [
  "ene-rpc",
  "globset",
  "gpui",
- "image",
  "libc",
  "process-wrap",
  "regex",
@@ -4185,6 +4184,7 @@ dependencies = [
 name = "ene-platform-os"
 version = "0.1.8"
 dependencies = [
+ "image",
  "tokio",
  "tracing",
  "windows 0.62.2",

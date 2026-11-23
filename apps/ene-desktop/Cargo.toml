@@ -55,7 +55,6 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 x11rb = { version = "0.13", features = ["screensaver"] }
 
 [target.'cfg(windows)'.dependencies]
-image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
