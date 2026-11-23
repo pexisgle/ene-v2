@@ -348,3 +348,18 @@ ow_editor.rs（874 行）は同じ手法で 3 分割まで到達したが、配�
 
 **次回の手順**: 可視性は型定義を直接編集して広げること。
 「フィールド宣言」と「フィールド初期化子」を区別できない置換は 874 行では必ず事故る。
+
+### PR-4.4 の続き（companions/editor.rs で判明した手順）
+
+`bubble` / `row_editor` / `policy` は分割完了。残りは `editor.rs`(761) と
+`onboarding.rs`(750)。
+
+`editor.rs` は分割自体は成功した（form 195 / mod 121 / views 507）が、
+`EditorContext` を `ui/companions/mod.rs`（親モジュール）が構築しているため、
+可視性の連鎖で 3 回失敗して revert した:
+
+  form が所有 -> views が import -> mod が再エクスポート -> companions が構築
+
+**次回は分割前にやること**: 親モジュールが構築している型を列挙し、
+先に `pub(crate)` にしてから分割する。コンパイルエラーを見ながら
+1 段ずつ直すと、連鎖の各リンクで 1 往復かかる。
