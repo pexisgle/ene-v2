@@ -22,10 +22,14 @@
 mod audio_pipeline;
 mod bridge;
 mod commands;
+mod phase;
 mod stream;
 mod transport;
 
-use self::{audio_pipeline::AudioPipeline, bridge::DeviceBridge, transport::SessionTransport};
+use self::{
+    audio_pipeline::AudioPipeline, bridge::DeviceBridge, phase::ConnectionPhase,
+    transport::SessionTransport,
+};
 use crate::{
     avatar, capabilities,
     host::{Connect, Discovery, Host},
@@ -285,7 +289,8 @@ impl Session {
                 let retry_in = *retry;
                 *retry = (*retry * 2).min(MAX_RETRY);
                 tracing::warn!("the link dropped: {reason}");
-                self.report(Link::Lost { reason, retry_in }).await;
+                self.report_phase(ConnectionPhase::Lost { reason, retry_in })
+                    .await;
                 self.wait_retry_or_control(retry_in).await
             }
         }
@@ -317,15 +322,12 @@ impl Session {
         let discovery = match Discovery::read(&self.transport.path) {
             Ok(discovery) => discovery,
             Err(Connect::Missing(path)) => {
-                self.report(Link::Unset {
-                    path,
-                    reason: "ホストがまだ接続情報を公開していません".into(),
-                })
-                .await;
+                self.report_phase(ConnectionPhase::AwaitingDiscovery { path })
+                    .await;
                 return Outcome::Dropped("接続情報がまだありません".into());
             }
             Err(Connect::Invalid(reason)) => {
-                self.report(Link::Unusable {
+                self.report_phase(ConnectionPhase::Unusable {
                     reason: reason.clone(),
                 })
                 .await;
@@ -336,7 +338,7 @@ impl Session {
         let host = match Host::connect(&discovery) {
             Ok(host) => host,
             Err(error) => {
-                self.report(Link::Unusable {
+                self.report_phase(ConnectionPhase::Unusable {
                     reason: error.to_string(),
                 })
                 .await;
@@ -344,7 +346,7 @@ impl Session {
             }
         };
         self.transport.set_connection(Some(host.clone()));
-        self.report(Link::Connecting {
+        self.report_phase(ConnectionPhase::Connecting {
             endpoint: discovery.endpoint.clone(),
             attempt: 1,
         })
@@ -370,13 +372,18 @@ impl Session {
         if changed {
             self.devices.sensor = Sensor::default();
         }
-        self.report(Link::Live {
+        self.report_phase(ConnectionPhase::Live {
             version: snapshot.server_version.clone(),
         })
         .await;
 
         self.open_devices().await;
         Box::pin(self.serve(host)).await
+    }
+
+    /// Reports the phase the session just moved into.
+    async fn report_phase(&mut self, phase: ConnectionPhase) {
+        self.report(phase.to_link()).await;
     }
 
     /// Reports the link state.
@@ -464,6 +471,79 @@ pub(super) fn persistent(error: &connectrpc::ConnectError) -> bool {
 mod tests {
     use super::stream::{Claim, admits};
     use super::*;
+
+    /// Every phase must map to the link state the window expects, and only
+    /// `Live` may claim the link works. Getting this wrong shows the user a
+    /// working connection while the session is still registering.
+    #[test]
+    fn each_phase_maps_to_the_link_state_the_window_shows() {
+        let cases = [
+            (
+                ConnectionPhase::AwaitingDiscovery {
+                    path: "/tmp/discovery.json".into(),
+                },
+                false,
+            ),
+            (
+                ConnectionPhase::Unusable {
+                    reason: "bad token".into(),
+                },
+                false,
+            ),
+            (
+                ConnectionPhase::Connecting {
+                    endpoint: "http://127.0.0.1:1".into(),
+                    attempt: 1,
+                },
+                false,
+            ),
+            (
+                ConnectionPhase::Live {
+                    version: "1.0.0".into(),
+                },
+                true,
+            ),
+            (
+                ConnectionPhase::Lost {
+                    reason: "reset".into(),
+                    retry_in: Duration::from_secs(1),
+                },
+                false,
+            ),
+        ];
+        for (phase, live) in cases {
+            let link = phase.to_link();
+            assert_eq!(
+                link.is_live(),
+                live,
+                "{} mapped to {link:?}",
+                match &phase {
+                    ConnectionPhase::AwaitingDiscovery { .. } => "AwaitingDiscovery",
+                    ConnectionPhase::Unusable { .. } => "Unusable",
+                    ConnectionPhase::Connecting { .. } => "Connecting",
+                    ConnectionPhase::Live { .. } => "Live",
+                    ConnectionPhase::Lost { .. } => "Lost",
+                }
+            );
+        }
+    }
+
+    /// A lost link keeps the retry delay it was given, so the window can count
+    /// down instead of guessing.
+    #[test]
+    fn a_lost_phase_carries_its_retry_delay() {
+        let phase = ConnectionPhase::Lost {
+            reason: "reset".into(),
+            retry_in: Duration::from_secs(7),
+        };
+        match phase.to_link() {
+            Link::Lost { retry_in, reason } => {
+                assert_eq!(retry_in, Duration::from_secs(7));
+                assert_eq!(reason, "reset");
+            }
+            other => panic!("expected Lost, got {other:?}"),
+        }
+    }
 
     fn held() -> Binding {
         Binding {
