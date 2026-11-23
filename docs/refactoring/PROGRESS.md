@@ -171,6 +171,46 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 
 ## 5. 次セッションへの引き継ぎ（PR-2.5 以降の設計メモ）
 
+### PR-3.2 の実装メモ（着手済み・未完了 / 次セッションはここから）
+
+`apps/ene-host/src/server/rpc/settings/mod.rs` は 988 行のまま。分割は試作して
+**破棄した**（未コミット、作業ツリーは clean・ゲート green）。
+
+**試作で判明した制約（再試行時に必ず読むこと）**:
+
+1. **Rust は同一型への同一トレイトの `impl` を複数書けない。**
+   設計書の「5 ファイルに分割」を素直に行うと
+   `E0119: conflicting implementations of trait SettingsService` で落ちる。
+   正しい形は「**1 つの impl は維持**し、各メソッド本体をサブモジュールの
+   自由関数へ移して impl から委譲する」。
+   ```rust
+   impl w::SettingsService for Services {
+       async fn get_settings(&self, ctx: RequestContext, request: ...) -> ... {
+           general::get_settings(self, ctx, request).await
+       }
+   }
+   ```
+2. メソッド境界は「`#[tracing::instrument` 行 〜 次の `#[tracing::instrument`
+   の直前」。実測値（元ファイルの 1 始まり行番号、`impl` は 20〜780 行）:
+
+   | メソッド | instrument | async fn | | メソッド | instrument | async fn |
+   | :--- | ---: | ---: | :--- | :--- | ---: | ---: |
+   | get_settings | 21 | 30 | | list_providers | 395 | 404 |
+   | update_settings | 43 | 52 | | list_models | 415 | 425 |
+   | list_pending_approvals | 132 | 141 | | register_credentials | 450 | 460 |
+   | delete_connection | 161 | 171 | | revoke_credentials | 490 | 500 |
+   | submit_approval | 217 | 226 | | check_connection | 523 | 533 |
+   | list_policy_rules | 253 | 262 | | list_plugins | 593 | 602 |
+   | update_policy_rules | 282 | 291 | | install_plugin | 662 | 671 |
+   | list_policy_texts | 324 | 333 | | set_plugin_enabled | 706 | 716 |
+   | update_policy_texts | 353 | 362 | | remove_plugin | 752 | 762 |
+
+3. ヘルパ（`notify_settings` / `is_builtin_voicevox` / `rule_from` /
+   `model_item` / `modality_names` / `run_connection_probe`）は 782 行目以降にあり、
+   サブモジュールから使うため `pub(super)` が必要。
+   `async` は `pub(super) async fn`（`async pub(super)` は構文エラー）。
+4. サブモジュール側は `use super::{...}` でヘルパを取り込む。
+
 ### 残り `&mut World` 関数の実測分類（PR-2.4 完了時点）
 
 `apps/ene-host/src/host/` のうち `World` を引数に取る本番関数 154 個を、
