@@ -122,7 +122,9 @@ pub fn setup(app: &mut App) {
     });
     std::thread::spawn(move || {
         let result = write_output(std::io::stdout().lock(), output_rx);
-        let _ = done.send(result);
+        // The receiver only closes when the app is already shutting down, so a
+        // failed send has nobody left to report to.
+        let _delivered = done.send(result);
     });
     app.insert_non_send(output_done)
         .insert_non_send(input)

@@ -147,8 +147,16 @@ fn reap(child: &mut Child, deadline: Instant) -> Option<std::process::ExitStatus
             Ok(Some(status)) => return Some(status),
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                // The child is already gone or exited on its own; `kill` then
+                // fails with "not running", which is the expected case here.
+                if let Err(err) = child.kill()
+                    && err.kind() != std::io::ErrorKind::InvalidInput
+                {
+                    eprintln!("example: could not kill the child: {err}");
+                }
+                if let Err(err) = child.wait() {
+                    eprintln!("example: could not reap the child: {err}");
+                }
                 return None;
             }
         }

@@ -104,6 +104,8 @@ fn hit_test(
 
 fn cursor_position() -> Option<Vec2> {
     let mut point = POINT::default();
+    // SAFETY: `point` is a valid, properly aligned `POINT` for the duration of
+    // the call and `GetCursorPos` only writes to it.
     unsafe { GetCursorPos(&mut point) }.ok()?;
     Some(Vec2::new(point.x as f32, point.y as f32))
 }
@@ -113,10 +115,13 @@ fn window_styles(windows: Query<&RawHandleWrapper, With<Output>>, _main_thread: 
     for handle in &windows {
         if let raw_window_handle::RawWindowHandle::Win32(handle) = handle.get_window_handle() {
             let hwnd = HWND(handle.hwnd.get() as *mut _);
-            unsafe {
-                let flags = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-                let needed = flags | WS_EX_NOACTIVATE.0;
-                if needed != flags {
+            // SAFETY: `hwnd` came from a live `RawWindowHandle`, so it stays a
+            // valid window handle while the window is alive.
+            let flags = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+            let needed = flags | WS_EX_NOACTIVATE.0;
+            if needed != flags {
+                // SAFETY: as above; `hwnd` is still the live window handle.
+                unsafe {
                     SetWindowLongPtrW(hwnd, GWL_EXSTYLE, needed as isize);
                 }
             }
@@ -141,10 +146,12 @@ fn cancel_lost_capture(
             return false;
         };
         let hwnd = HWND(handle.hwnd.get() as *mut _);
-        unsafe {
-            let thread = GetWindowThreadProcessId(hwnd, None);
-            GetGUIThreadInfo(thread, &mut info).is_ok() && info.hwndCapture == hwnd
-        }
+        // SAFETY: `hwnd` came from a live `RawWindowHandle`, so it is a valid
+        // window handle for the duration of the call.
+        let thread = unsafe { GetWindowThreadProcessId(hwnd, None) };
+        // SAFETY: `info` is a valid `GUITHREADINFO` sized by its `cbSize` above
+        // and outlives the call.
+        unsafe { GetGUIThreadInfo(thread, &mut info) }.is_ok() && info.hwndCapture == hwnd
     });
     if !captured {
         commands.queue(|world: &mut World| {

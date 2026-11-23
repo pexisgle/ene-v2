@@ -60,16 +60,29 @@ if (-not $SkipDeny) {
     Invoke-Gate "cargo machete" { cargo machete --with-metadata }
 }
 
+# These three lints are declared `warn` in `[workspace.lints.clippy]` so every
+# normal build already reports them. They are exempted from `-D warnings` only
+# because their clean-up is scheduled later by the refactoring plan:
+#   undocumented_unsafe_blocks / multiple_unsafe_ops_per_block -> PR-4.3
+#   let_underscore_must_use                                   -> PR-5.1
+# Each PR drops its own `-A` here (and flips the lint to `deny`) when the last
+# site is fixed. Never add a new exemption to this list.
+$stagedLints = @(
+    "-A", "clippy::undocumented_unsafe_blocks",
+    "-A", "clippy::multiple_unsafe_ops_per_block",
+    "-A", "clippy::let_underscore_must_use"
+)
+
 if (-not $SkipWasm) {
     Invoke-Gate "clippy wasm targets" {
         cargo clippy --profile ci --locked -p ene-plugin -p ene-openrouter-wasm -p ene-reference-wasm `
-            --target wasm32-unknown-unknown -- -D warnings
+            --target wasm32-unknown-unknown -- -D warnings @stagedLints
     }
 }
 
 if (-not $SkipClippy) {
     Invoke-Gate "clippy workspace" {
-        cargo clippy --profile ci --workspace --all-targets --all-features --locked -- -D warnings
+        cargo clippy --profile ci --workspace --all-targets --all-features --locked -- -D warnings @stagedLints
     }
 }
 

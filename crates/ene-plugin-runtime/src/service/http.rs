@@ -491,6 +491,10 @@ async fn bounded(response: reqwest::Response) -> Result<Vec<u8>, Failure> {
 }
 
 #[cfg(test)]
+// The fake servers below write replies to sockets the test is about to drop;
+// a broken pipe is the expected end of the exchange, not a failure to report.
+// Remove if the fixtures start asserting on write success.
+#[allow(clippy::let_underscore_must_use)]
 mod tests {
     use super::*;
 

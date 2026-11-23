@@ -19,11 +19,17 @@ extern "ExtismHost" {
 /// keeps the response in ManagedMemory until decoding finishes.
 pub fn service<T: DeserializeOwned>(request: ServiceRequest) -> Result<T, extism_pdk::Error> {
     let input = extism_pdk::ManagedMemory::from(extism_pdk::ToMemory::to_memory(&Json(request))?);
+    // SAFETY: `ene_service` is the Extism host function declared above; it takes the
+    // offset of memory the host owns and returns an offset it allocated, which
+    // `ManagedMemory::new` adopts and frees. `input` outlives the call, so the
+    // offset stays valid for its whole duration.
     let output = extism_pdk::ManagedMemory::new(unsafe { ene_service(input.offset()) }.into());
     let Json(result) = output.as_ref().to::<Json<Result<T, Failure>>>()?;
     Ok(result?)
 }
 pub fn emit(event: Event) -> Result<(), extism_pdk::Error> {
+    // SAFETY: `ene_emit` is the host function declared above. It reads the JSON it
+    // is handed and copies it before returning, so `event` need not outlive the call.
     unsafe { ene_emit(Json(event)) }
 }
 pub fn http_open(request: HttpRequest) -> Result<HttpChunk, extism_pdk::Error> {

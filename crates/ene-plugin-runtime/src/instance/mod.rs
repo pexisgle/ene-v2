@@ -211,7 +211,9 @@ impl Instance {
                 let result = plugin.call::<_, BoundedJson<T, MAX_CHUNK>>(function, input);
                 #[cfg(test)]
                 if let Some(native_exit) = native_exit {
-                    let _ = native_exit.send(lifecycle_tests::NativeExit {
+                    // The test channel outlives the call; a closed receiver means
+                    // the test already finished and has nothing left to assert.
+                    let _sent = native_exit.send(lifecycle_tests::NativeExit {
                         error: result.as_ref().err().map(ToString::to_string),
                         fuel_consumed: plugin.fuel_consumed(),
                     });

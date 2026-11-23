@@ -12,6 +12,8 @@ mod rendering;
 
 fn main() -> bevy::app::AppExit {
     // DXGI HWND swapchains do not support desktop alpha composition.
+    // SAFETY: `main` has not started any thread yet, so no other thread can
+    // observe `WGPU_DX12_PRESENTATION_SYSTEM` being mutated here.
     #[cfg(windows)]
     unsafe {
         std::env::set_var("WGPU_DX12_PRESENTATION_SYSTEM", "Visual");

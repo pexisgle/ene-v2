@@ -433,7 +433,8 @@ pub fn hex_digest(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        let _ = write!(out, "{byte:02x}");
+        // Writing into a `String` cannot fail; `write!` is infallible here.
+        let _written = write!(out, "{byte:02x}");
     }
     out
 }

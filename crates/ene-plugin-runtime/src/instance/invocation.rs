@@ -134,7 +134,9 @@ impl Drop for Cancellation {
     fn drop(&mut self) {
         self.token.cancel();
         if self.armed {
-            let _ = self.interrupt.cancel();
+            // `CancellationToken::cancel` only fails when no listeners remain,
+            // which is exactly the state `Drop` cannot act on.
+            let _cancelled = self.interrupt.cancel();
         }
     }
 }

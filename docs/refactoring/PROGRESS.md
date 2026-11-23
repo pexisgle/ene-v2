@@ -20,6 +20,24 @@
 | `cargo-nextest` | **未導入**（0 バイト shim のみ） | 設計書 3.1 の `--self-test` 等は `cargo test` で代替。nextest 必須要件は無い。 |
 | `sccache` | **無効化** | 0.19.0 に Rust コンパイルで `cache errors` を起こす不具合があり、`bevy_internal` のビルドが `sccache: encountered fatal error` で落ちる。リポジトリの `.cargo/config.toml` では無効のまま、`RUSTC_WRAPPER=""` で実行する。 |
 
+### 段階導入中の lint（PR-0.2）
+
+`[workspace.lints.clippy]` に 3 ルールを追加した。いずれも `warn` で全ビルドが報告するが、
+`-D warnings` との衝突を避けるため検証ゲートでは明示的に `-A` で除外している。
+**各 PR が自分の分の `-A` を外し、同時に `deny` へ引き上げる。**
+
+| lint | 残存箇所 | 解消する PR | 内容 |
+| :--- | ---: | :--- | :--- |
+| `undocumented_unsafe_blocks` | 63 | PR-4.3 | `// SAFETY:` コメント必須化 |
+| `multiple_unsafe_ops_per_block` | 20 | PR-4.3 | 1 ブロック 1 操作 |
+| `let_underscore_must_use` | 230 | PR-5.1 | `#[must_use]` の破棄検出 |
+
+> 63 + 20 の `unsafe` は全て `apps/ene-desktop`（`tray.rs` 53 件、`ui/pod/win32.rs` 9 件、
+> `ui/pod/mod.rs` 1 件）に集中しており、PR-4.1/PR-4.3 で `crates/ene-platform-os` へ移管する
+> 対象そのもの。先に移管してから `SAFETY:` を付けた方が二度手間にならないため、
+> Phase 0 では `warn` に留めた。
+> `crates/ene-plugin/src/sdk.rs` の 2 件は wasm ゲートが `-A` 対象外だったため PR-0.2 で修正済み。
+
 ### 既知の環境制約（コードの問題ではない）
 
 **`host::tests::f10_remote_host_target_enforces_https_and_roundtrips_config` は本ワークスペース配下では失敗する。**
@@ -76,8 +94,8 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 ## 2. PR チェックリスト
 
 ### Phase 0: ガードレール
-- [ ] PR-0.1 `check-architecture.py` に Rule 7〜10 を追加
-- [ ] PR-0.2 CI nextest / Clippy lint 厳格化 / AGENTS.md 追記
+- [x] PR-0.1 `check-architecture.py` に Rule 7〜10 を追加
+- [x] PR-0.2 CI nextest / Clippy lint 厳格化 / AGENTS.md 追記
 
 ### Phase 1: 依存方向の逆転解消
 - [ ] PR-1.1 `ene-policy` から `ene-rpc` 削除（Rule 7: 4→3）
@@ -122,3 +140,16 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 | 日付 | PR | 判断内容 |
 | :--- | :--- | :--- |
 | 2026-11-23 | — | `check-architecture.py` は既存 6 ルール。設計書の Rule 7〜10 は未実装。ベースライン値（4/171/84/43/2）は実測と一致した。 |
+| 2026-11-23 | PR-0.1 | Rule 7〜10 を実装。初期ラチェットを実測値で設定: `domain_no_rpc_dep=4`, `app_unsafe_count=84`, `max_prod_file_lines=47`, `rpc_no_ecs_resource=0`。Rule 10 のみ設計書の 2 ではなく 0 を採用（`Observed`/`Frames` はテスト専用のため本番 0 が正）。`--self-test` に 8 個のフィクスチャを追加し、各新ルールの検出とテストコード除外の両方を検証。 |
+| 2026-11-23 | PR-0.1 | `cargo deny` が既存の `RUSTSEC-2026-0592`（`url` 2.5.8 の `Url::origin()` スタックオーバーフロー）で失敗していたため、`url` を 2.5.9 へ更新。 |
+| 2026-11-23 | PR-0.1 | `cargo machete` の 4 件を精査: `serde_json_canonicalizer` は `ene-host` の未使用 dev-dependency なので削除。`buffa-build`/`connectrpc-build` は `build.rs` 専用で machete が走査しないため ignore に追加。`libc` は gpui の推移依存バージョン固定で直接参照が無いため ignore に追加（いずれも理由コメント付き）。 |
+| 2026-11-23 | PR-0.2 | `check-architecture.py` を再確認したところ `strip_cfg_test` は正常（`chat.rs`/`voice.rs` の `Observed`/`Frames` は本当に `#[cfg(test)]` 内）。Rule 10 の初期値 0 はこれで裏付け済み。 |
+| 2026-11-23 | PR-0.2 | 新 lint 3 つは `warn` で導入。`-D warnings` は `warn` を `deny` に昇格させるため、ゲートは `-A` を後置して除外する（clippy は後勝ち）。計画の「警告→段階的に deny」を満たしつつ、未処理 313 箇所で Phase 0 が止まらないようにした。各 PR が自分の `-A` を外す運用。 |
+| 2026-11-23 | PR-0.2 | CI を `cargo test` → `cargo nextest run --no-fail-fast` に切替（failed 時の全件報告とフレーク検出）。ローカルは nextest 未導入のため `cargo test` のまま。`scripts/verify-all.ps1` にゲート一式を集約。 |
+
+## 4. 再開手順
+
+1. `docs/refactoring/PROGRESS.md` のチェックリストで未完了の先頭 PR を確認する。
+2. `git log --oneline -n 10` で直近コミットが台帳と一致することを確認する。
+3. `pwsh -NoProfile -File scripts/verify-all.ps1` で現状の green を確認する。
+4. その PR を実装 → ゲート通過 → `PROGRESS.md` 更新 → コミット。

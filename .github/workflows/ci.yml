@@ -63,14 +63,24 @@ jobs:
           cargo deny check
           cargo machete
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
       - name: Build test Wasm plugin
         run: |
           cargo build --release --locked -p ene-openrouter-wasm -p ene-reference-wasm --target wasm32-unknown-unknown
 
       - name: Clippy and tests
         run: |
-          cargo clippy --profile ci --workspace --all-targets --all-features --locked -- -D warnings
-          cargo test --profile ci --workspace --all-features --locked
+          # The three staged lints are `warn` in [workspace.lints.clippy]; they are
+          # exempt from -D warnings until their scheduled clean-up (PR-4.3, PR-5.1).
+          cargo clippy --profile ci --workspace --all-targets --all-features --locked -- \
+            -D warnings \
+            -A clippy::undocumented_unsafe_blocks \
+            -A clippy::multiple_unsafe_ops_per_block \
+            -A clippy::let_underscore_must_use
+          cargo nextest run --profile ci --workspace --all-features --locked --no-fail-fast
 
       - name: Native Wasm tool-call regressions
         run: |

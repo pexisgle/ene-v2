@@ -40,7 +40,8 @@ pub fn space_id(
     let mut hash = String::with_capacity(16);
     for byte in digest.into_iter().take(8) {
         use std::fmt::Write as _;
-        let _ = write!(hash, "{byte:02x}");
+        // Writing into a `String` cannot fail; `write!` is infallible here.
+        let _written = write!(hash, "{byte:02x}");
     }
     format!("{}@{hash}:{dimensions}:{PREP_VERSION}", model.trim())
 }

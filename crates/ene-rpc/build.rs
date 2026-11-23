@@ -37,10 +37,17 @@ fn configure_build_env() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir: PathBuf = Path::new(&raw_out_dir).components().collect();
     std::fs::create_dir_all(&out_dir)?;
 
-    // SAFETY: `build.rs` is single-threaded here before spawning `buf`.
+    // SAFETY: `build.rs` is single-threaded here before spawning `buf`, so no
+    // other thread can observe a concurrently mutated environment.
     unsafe {
         std::env::set_var("TMP", &out_dir);
+    }
+    // SAFETY: as above; `build.rs` has not started any thread.
+    unsafe {
         std::env::set_var("TEMP", &out_dir);
+    }
+    // SAFETY: as above; `build.rs` has not started any thread.
+    unsafe {
         std::env::set_var("TMPDIR", &out_dir);
     }
 

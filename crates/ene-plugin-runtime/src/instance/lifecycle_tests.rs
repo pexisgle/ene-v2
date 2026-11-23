@@ -456,7 +456,8 @@ impl Services for BlockingServices {
 struct Unblock(std::sync::mpsc::Sender<()>);
 impl Drop for Unblock {
     fn drop(&mut self) {
-        let _ = self.0.send(());
+        // Dropping is the signal; a closed receiver means the test already ended.
+        let _released = self.0.send(());
     }
 }
 #[tokio::test]
