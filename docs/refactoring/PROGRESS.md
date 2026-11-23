@@ -144,7 +144,7 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 - [x] PR-4.1 `crates/ene-platform-os` 新設・`tray.rs` 移管（unsafe 84→29）
 - [x] PR-4.2 `window` / `capture` / `input` 移管（unsafe 29→6、長大ファイル 47→46）
 - [x] PR-4.3 `#![forbid(unsafe_code)]` 有効化（Rule 8: 84→0 達成）
-- [ ] PR-4.4 巨大 GPUI ビュー分割（bubble 931→526+423、row_editor 874→376+351+182、policy 805→381+265+163。editor / onboarding は未着手）
+- [ ] PR-4.4 巨大 GPUI ビュー分割（bubble / row_editor / policy 完了。editor は 761→507+179+97 だが views が 507 で閾値上、onboarding 750 は未着手）
 - [ ] PR-4.5 `widgets/` プリミティブ分解
 - [ ] PR-4.6 `session/` 状態機械化・TaskTracker 統一
 
@@ -363,3 +363,15 @@ ow_editor.rs（874 行）は同じ手法で 3 分割まで到達したが、配�
 **次回は分割前にやること**: 親モジュールが構築している型を列挙し、
 先に `pub(crate)` にしてから分割する。コンパイルエラーを見ながら
 1 段ずつ直すと、連鎖の各リンクで 1 往復かかる。
+
+### PR-4.4 で判明した「やってはいけないこと」
+
+`onboarding.rs`(750) は分割の算術は通ったが（setup 399 / views 316 / mod 25）、
+3 つの struct のうち 2 つが**関数の間**にあり、関数スライスに既に含まれていた。
+別途抽出すると重複し、そのまま通すと可視性の拡大が必要になり、
+その拡大処理が**複数行にまたがる関数引数**を構造体フィールドと誤認して壊した。
+
+これはこのプロジェクトで **3 回目**の「4 スペースインデントで一括拡大」による破損。
+
+**ルール**: インデントで可視性を広げない。`struct` 宣言を見つけ、
+ブレースを数えて閉じ `}` までを範囲確定し、**その範囲内の行だけ**を編集する。
