@@ -502,10 +502,12 @@ fn render_capture_controls(
         .child(control_button(
             ControlButtonSpec {
                 id: "pod-control-capture-mode",
+                // Plain words: "PTT" and "VAD" are names for how the mic
+                // decides when to listen, and the label says that instead.
                 label: if is_ptt {
-                    "PTT モード"
+                    "押している間だけ話す"
                 } else {
-                    "VAD モード"
+                    "自動で声を検出"
                 },
                 icon: Icon::Mic,
                 tone: if is_ptt { Tone::Primary } else { Tone::Ghost },

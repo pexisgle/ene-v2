@@ -11,7 +11,7 @@ use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button};
 use crate::ui::{PodMode, SettingsSection};
-use ene_client_core::domain::ApprovalRequest;
+use ene_client_core::domain::{ApprovalRequest, RiskLevel};
 use gpui::{AnyElement, Context, div, prelude::*, px};
 
 use render::*;
@@ -147,11 +147,19 @@ impl CompanionPod {
             .to_owned();
         let args = approval.normalized_arguments.trim().replace('\n', " ");
 
+        // The badge a person sees is the policy engine's own judgement of this
+        // action, not a guess made here.
+        let risk = RiskLevel::of(
+            approval.capability.as_deref(),
+            &approval.tool_name,
+            &approval.normalized_arguments,
+        );
+
         div()
             .flex()
             .flex_col()
             .gap(px(8.))
-            .child(render_approval_header(&what, total_pending, theme))
+            .child(render_approval_header(&what, total_pending, risk, theme))
             .when(!args.is_empty(), |this| {
                 this.child(render_approval_args(&args, theme))
             })

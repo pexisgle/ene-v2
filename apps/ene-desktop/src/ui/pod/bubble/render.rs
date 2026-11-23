@@ -9,6 +9,7 @@ use crate::ui::Hub;
 use crate::ui::icons::{Icon, icon};
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button, status_pill, window_drag_area};
+use ene_client_core::domain::RiskLevel;
 use ene_client_core::domain::{ApprovalDecision, MessageRole, TurnStatus};
 use gpui::{AnyElement, Entity, MouseButton, MouseDownEvent, SharedString, div, prelude::*, px};
 
@@ -180,18 +181,37 @@ pub(super) fn render_tail_dot(theme: &Theme) -> gpui::Div {
         )
 }
 
-pub(super) fn render_approval_header(what: &str, total_pending: usize, theme: &Theme) -> gpui::Div {
+pub(super) fn render_approval_header(
+    what: &str,
+    total_pending: usize,
+    risk: RiskLevel,
+    theme: &Theme,
+) -> gpui::Div {
+    let (label, soft, fg) = match risk {
+        RiskLevel::High => ("危険な操作", theme.danger_soft, theme.danger_fg),
+        RiskLevel::Moderate => ("ファイルを変更", theme.amber_soft, theme.amber_fg),
+        RiskLevel::Low => ("読み取りのみ", theme.bg_blush, theme.ink_muted),
+    };
     div()
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
+        .gap(px(8.))
         .child(
             div()
-                .text_sm()
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(theme.ink)
-                .child(format!("「{what}」の実行を許可しますか？")),
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.))
+                .child(status_pill(label, None, soft, fg))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(theme.ink)
+                        .child(format!("「{what}」の実行を許可しますか？")),
+                ),
         )
         .when(total_pending > 1, |this| {
             this.child(status_pill(
@@ -230,43 +250,59 @@ pub(super) fn render_approval_actions(
     let hub_c = hub.clone();
     div()
         .flex()
-        .flex_row()
-        .flex_wrap()
+        .flex_col()
         .gap(px(6.))
         .pt(px(2.))
-        .child(pill_button(
-            SharedString::from(format!("pod-approve-{request_id}")),
-            "許可",
-            Tone::Primary.icon(Icon::Check),
-            theme,
-            move |_, cx| {
-                hub_a.update(cx, |hub, cx| {
-                    hub.resolve_approval(&req_id_a, ApprovalDecision::Approve, cx);
-                });
-            },
-        ))
-        .child(pill_button(
-            SharedString::from(format!("pod-always-{request_id}")),
-            "常に許可",
-            Tone::Soft,
-            theme,
-            move |_, cx| {
-                hub_b.update(cx, |hub, cx| {
-                    hub.resolve_approval(&req_id_b, ApprovalDecision::AlwaysApprove, cx);
-                });
-            },
-        ))
-        .child(pill_button(
-            SharedString::from(format!("pod-deny-{request_id}")),
-            "拒否",
-            Tone::Danger.icon(Icon::Close),
-            theme,
-            move |_, cx| {
-                hub_c.update(cx, |hub, cx| {
-                    hub.resolve_approval(&req_id_c, ApprovalDecision::Deny, cx);
-                });
-            },
-        ))
+        // Deny and approve are the decision. "Always allow" is not next to
+        // them: a mis-click there grants permanent permission for this action,
+        // so it sits below, separated, and says what it does.
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(6.))
+                .child(pill_button(
+                    SharedString::from(format!("pod-approve-{request_id}")),
+                    "今回だけ許可",
+                    Tone::Primary.icon(Icon::Check),
+                    theme,
+                    move |_, cx| {
+                        hub_a.update(cx, |hub, cx| {
+                            hub.resolve_approval(&req_id_a, ApprovalDecision::Approve, cx);
+                        });
+                    },
+                ))
+                .child(pill_button(
+                    SharedString::from(format!("pod-deny-{request_id}")),
+                    "拒否",
+                    Tone::Danger.icon(Icon::Close),
+                    theme,
+                    move |_, cx| {
+                        hub_c.update(cx, |hub, cx| {
+                            hub.resolve_approval(&req_id_c, ApprovalDecision::Deny, cx);
+                        });
+                    },
+                )),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.))
+                .child(pill_button(
+                    SharedString::from(format!("pod-always-{request_id}")),
+                    "次回から常に許可",
+                    Tone::Ghost,
+                    theme,
+                    move |_, cx| {
+                        hub_b.update(cx, |hub, cx| {
+                            hub.resolve_approval(&req_id_b, ApprovalDecision::AlwaysApprove, cx);
+                        });
+                    },
+                )),
+        )
 }
 
 pub(super) fn failed_turn_message(model: &Model) -> Option<String> {
