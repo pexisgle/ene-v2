@@ -573,3 +573,59 @@ async fn probe_mcp_connection(
         }),
     }
 }
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    fn rule(effect: w::PolicyEffect) -> w::PolicyRule {
+        w::PolicyRule {
+            id: "rule-1".into(),
+            tool_name: "files".into(),
+            pattern: "**/*.md".into(),
+            effect: effect.into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            ..Default::default()
+        }
+    }
+
+    /// Every specified effect survives the conversion, so the host enforces
+    /// what the client asked for rather than a default.
+    #[test]
+    fn each_effect_maps_to_its_own_policy_effect() {
+        for (wire, expected) in [
+            (w::PolicyEffect::Allow, permission::PolicyEffect::Allow),
+            (w::PolicyEffect::Deny, permission::PolicyEffect::Deny),
+            (w::PolicyEffect::Confirm, permission::PolicyEffect::Confirm),
+            (w::PolicyEffect::AskLlm, permission::PolicyEffect::AskLlm),
+        ] {
+            let converted = rule_from(rule(wire)).expect("a specified effect converts");
+            assert_eq!(converted.effect, expected, "{wire:?}");
+        }
+    }
+
+    /// An unspecified effect is a client bug, not a request for the
+    /// permissive default. Rejecting it keeps a malformed request from
+    /// creating a rule that allows everything.
+    #[test]
+    fn an_unspecified_effect_is_rejected_rather_than_defaulted() {
+        let error = rule_from(rule(w::PolicyEffect::Unspecified))
+            .expect_err("Unspecified must not convert");
+        assert!(
+            matches!(error, HostError::Invalid(_)),
+            "expected Invalid, got {error:?}"
+        );
+    }
+
+    /// The identifying fields are carried across unchanged, since the rule is
+    /// later matched by them.
+    #[test]
+    fn identifying_fields_survive_the_conversion() {
+        let converted =
+            rule_from(rule(w::PolicyEffect::Allow)).expect("a specified effect converts");
+        assert_eq!(converted.id, "rule-1");
+        assert_eq!(converted.tool_name, "files");
+        assert_eq!(converted.pattern, "**/*.md");
+        assert_eq!(converted.created_at, "2026-01-01T00:00:00Z");
+    }
+}
