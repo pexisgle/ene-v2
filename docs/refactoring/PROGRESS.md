@@ -77,12 +77,14 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 
 | 時点 | domain_no_rpc_dep | host_world_refs | app_unsafe_count | max_prod_file_lines | rpc_no_ecs_resource |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **ベースライン (2026-11-23, commit c9f0758)** | 4 | 171 | 84 | 47 | 0 |
+| **ベースライン (2026-11-23, commit c9f0758)** | 4 | 171 | 84 | 47 | 1 |
 | PR-0.1 後 | 4 | 171 | 84 | 47 | 0 |
 | PR-1.1 後 | 3 | 171 | 84 | 47 | 0 |
 | PR-1.2 後 | 2 | 171 | 84 | 47 | 0 |
 | PR-1.3 後 | 1 | 171 | 84 | 47 | 0 |
 | PR-1.4 後 | 0 | 171 | 84 | 47 | 0 |
+| PR-1.5 後 | 0 | 171 | 84 | 47 | 0 |
+| PR-2.1 後 | 0 | 171 | 84 | 47 | 0 |
 
 > **設計書との差分（重要）**: 設計書 §3 は「本番 500 行超ファイル数 = 43」「`Resource` = 2」としているが、
 > 実測は **47** と **0** だった。
@@ -161,3 +163,38 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 2. `git log --oneline -n 10` で直近コミットが台帳と一致することを確認する。
 3. `pwsh -NoProfile -File scripts/verify-all.ps1` で現状の green を確認する。
 4. その PR を実装 → ゲート通過 → `PROGRESS.md` 更新 → コミット。
+
+## 5. 次セッションへの引き継ぎ（PR-2.2 の設計メモ）
+
+**現状**: Phase 0・Phase 1 完了、PR-2.1 完了。`host_world_refs = 171`（未着手）。
+
+**PR-2.2 で判明している構造的事実**（再調査不要）:
+
+- `host/work/` の `&mut World` は **2種類が混在**している。
+  1. **ただの状態コンテナ**（`World` から引く必要がない）:
+     `Hands`（`hand.rs:55`、`HashMap<String, Hand>`）、`Runs`（`mod.rs:34`、
+     `ene_work::RunTracker` の newtype）、`Receipts`（`mod.rs:53`、
+     `ene_work::WorkReceipts` の newtype）。この3つは引数注入
+     （`&mut Hands`, `&mut Runs`, `&mut Receipts`）へ置換可能。
+  2. **本物の ECS エンティティ操作**（ECS に残すべき）:
+     `World::query::<(Entity, &WorkAgent)>`（`mod.rs:71,112,129`）、
+     `world.get_mut::<WorkAgent>(entity)`（`mod.rs:94,455`）、
+     `world.get::<Conversation>(entity)`（`mod.rs:421`）、
+     `world.entity_mut(call).despawn()`（`hand.rs:307`）。
+- 外部呼び出し元は `server/rpc/work.rs` の `request!` マクロ
+  （`work::start` / `work::send` / `work::stop` / `work::close`）と
+  `host/agent/mod.rs:722` の `work::settle_run` の **5箇所のみ**。
+
+**PR-2.2 の推奨アプローチ**:
+`WorkOrchestrator` を新設し、`Hands`/`Runs`/`Receipts` を所有させる。
+`World` を取る公開関数は「orchestrator + `&mut World`（ECS操作のみ）」を
+受け取る形へ変える。`request!` マクロ側は PR-3.1 で
+`ene-host-core` を入れるときにまとめて変わるため、PR-2.2 では
+マクロの呼び出しシグネチャを壊さない範囲で内部実装を差し替えるのが安全。
+
+**注意**: `World` を完全に 0 にする（PR-2.6 の目標）には、`WorkAgent` /
+`Conversation` を ECS から追い出す設計判断が要る。設計書 §5.2 は
+「`Connections`, `WorkReports` は ECS に残留」としており、
+`WorkAgent`/`Conversation` の扱いは設計書に明記が無い。
+PR-2.6 着手時にこの点を判断し、ここへ記録すること。
+
