@@ -172,7 +172,38 @@ $py = "C:\Users\pexisgle\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pyth
 
 ## 5. 次セッションへの引き継ぎ（PR-2.5 以降の設計メモ）
 
-### PR-3.2 の実装メモ（着手済み・未完了 / 次セッションはここから）
+### PR-4.2 の実装メモ（次セッションはここから）
+
+**現状**: `app_unsafe_count = 29`（84 から削減済み、PR-4.1）。残りは 4 ファイル:
+
+| ファイル | unsafe 数 | 移管先（設計書 §7.1） |
+| :--- | ---: | :--- |
+| `apps/ene-desktop/src/ui/pod/win32.rs` | 11 | `ene-platform-os::window` |
+| `apps/ene-desktop/src/perception/screen.rs` | 8 | `ene-platform-os::capture` |
+| `apps/ene-desktop/src/computer.rs` | 6 | `ene-platform-os::input` |
+| `apps/ene-desktop/src/perception/platform_windows.rs` | 3 | `ene-platform-os::capture` |
+| `apps/ene-desktop/src/ui/pod/mod.rs` | 1 | `ene-platform-os::window` |
+
+**PR-4.1 で確立したパターン**（そのまま踏襲すればよい）:
+
+1. `crates/ene-platform-os/src/<module>.rs` へ**ファイルごと移す**（中身は変えない）。
+2. UI 型に依存していたら、プラットフォーム側に**ミラー enum** を定義し、
+   UI 側で変換関数を書く。依存の向きは必ず「app → platform」の一方向に保つ。
+   実例: `TrayMode` / `TraySection` と `ui/hub/windows.rs` の
+   `tray_mode()` / `settings_section()`。
+3. `ene-desktop` 側は `use ene_platform_os::...` へ差し替えるだけ。
+4. `apps/ene-desktop/Cargo.toml` の Windows 依存から不要になった
+   `windows` / `image` を外す（crate 側へ移す）。
+5. ラチェット `MAX_DESKTOP_UNSAFE` を**同じコミットで**下げる。
+
+**PR-4.3 の前提**: 4 ファイルすべてを移管し終えるまで
+`#![forbid(unsafe_code)]` は有効化できない（部分移管では残りが落ちる）。
+
+**注意**: `computer.rs` の `Desktop` 構造体は Win32 ハンドル
+（`window: isize`、`RECT`、`HWND`）を保持する不透明型なので `input` ごと移すのが自然。
+`Frame`（JPEG と寸法）は `capture` 側の型なので、`Desktop` と `Frame` の分割に注意。
+
+### PR-3.2 の実装メモ（完了済み / 制約の記録）
 
 `apps/ene-host/src/server/rpc/settings/mod.rs` は 988 行のまま。分割は試作して
 **破棄した**（未コミット、作業ツリーは clean・ゲート green）。
