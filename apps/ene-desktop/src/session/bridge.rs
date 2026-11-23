@@ -183,7 +183,7 @@ impl DeviceBridge {
             ..Default::default()
         };
         tokio::spawn(async move {
-            let _ = host.client.report_perception(event).await;
+            let _ignored = host.client.report_perception(event).await;
         });
     }
 
@@ -194,16 +194,19 @@ impl DeviceBridge {
                 if !enabled {
                     self.eyes_enabled = false;
                 }
-                let _ = updates.send(Update::Failed {
-                    context: "「目」の設定を保存",
-                    message: error.to_string(),
-                });
+                super::notify_ui(
+                    updates,
+                    Update::Failed {
+                        context: "「目」の設定を保存",
+                        message: error.to_string(),
+                    },
+                );
             }
         }
         if !self.eyes_enabled {
             self.sensor = Sensor::default();
         }
-        let _ = updates.send(Update::EyesEnabled(self.eyes_enabled));
+        super::notify_ui(updates, Update::EyesEnabled(self.eyes_enabled));
     }
 
     #[cfg(windows)]
@@ -219,13 +222,16 @@ impl DeviceBridge {
         match perception::save_preference(crate::computer::PREFERENCE, enabled) {
             Ok(()) => self.computer_enabled = enabled,
             Err(error) => {
-                let _ = updates.send(Update::Failed {
-                    context: "画面操作の設定を保存",
-                    message: error.to_string(),
-                });
+                super::notify_ui(
+                    updates,
+                    Update::Failed {
+                        context: "画面操作の設定を保存",
+                        message: error.to_string(),
+                    },
+                );
             }
         }
-        let _ = updates.send(Update::ComputerUseEnabled(self.computer_enabled));
+        super::notify_ui(updates, Update::ComputerUseEnabled(self.computer_enabled));
     }
 
     /// Keeps socket waits and screenshot encoding off the audio/device loop.

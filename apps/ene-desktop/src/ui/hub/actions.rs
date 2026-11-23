@@ -129,13 +129,18 @@ impl Hub {
             chars = text.chars().count(),
             "message sent"
         );
-        let _ = rpc::chat::send_message(
+        if !rpc::chat::send_message(
             &self.rpc,
             self.model.connections.link_epoch,
             companion,
             request_key,
             text,
-        );
+        ) {
+            // No host is bound, so nothing was queued; the composer keeps the
+            // text and the caller's `false` return tells the window to stay.
+            tracing::debug!("no host is connected; the message was not queued");
+            return false;
+        }
         self.windows.pod_scroll_ping = self.windows.pod_scroll_ping.saturating_add(1);
         cx.notify();
         true
@@ -478,8 +483,9 @@ impl Hub {
     pub(crate) fn clear_remote_host(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = Self::remote_host_config_path()
             && path.exists()
+            && let Err(error) = std::fs::remove_file(&path)
         {
-            let _ = std::fs::remove_file(path);
+            tracing::warn!(%error, "the remote host config could not be removed");
         }
         cx.notify();
     }
