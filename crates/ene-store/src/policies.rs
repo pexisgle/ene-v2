@@ -67,35 +67,34 @@ impl<'a> PolicyRepo<'a> {
             }
         }
         let stamp = now();
-        let mut connection = self.0.conn()?;
-        let transaction = connection.transaction()?;
-        for rule in add_or_update {
-            transaction
-                .prepare_cached(
-                    "INSERT INTO policy_rules (id, tool_name, pattern, effect, created_at) \
+        self.0.write_tx(|transaction| {
+            for rule in add_or_update {
+                transaction
+                    .prepare_cached(
+                        "INSERT INTO policy_rules (id, tool_name, pattern, effect, created_at) \
                      VALUES (?1, ?2, ?3, ?4, ?5) \
                      ON CONFLICT(id) DO UPDATE SET tool_name = excluded.tool_name, \
                      pattern = excluded.pattern, effect = excluded.effect",
-                )?
-                .execute(params![
-                    rule.id,
-                    rule.tool_name,
-                    rule.pattern,
-                    rule.effect.as_str(),
-                    if rule.created_at.is_empty() {
-                        stamp.clone()
-                    } else {
-                        rule.created_at.clone()
-                    }
-                ])?;
-        }
-        for id in removed {
-            transaction
-                .prepare_cached("DELETE FROM policy_rules WHERE id = ?1")?
-                .execute([id])?;
-        }
-        transaction.commit()?;
-        drop(connection);
+                    )?
+                    .execute(params![
+                        rule.id,
+                        rule.tool_name,
+                        rule.pattern,
+                        rule.effect.as_str(),
+                        if rule.created_at.is_empty() {
+                            stamp.clone()
+                        } else {
+                            rule.created_at.clone()
+                        }
+                    ])?;
+            }
+            for id in removed {
+                transaction
+                    .prepare_cached("DELETE FROM policy_rules WHERE id = ?1")?
+                    .execute([id])?;
+            }
+            Ok(())
+        })?;
         self.policy_rules()
     }
 
@@ -127,32 +126,31 @@ impl<'a> PolicyRepo<'a> {
             }
         }
         let stamp = now();
-        let mut connection = self.0.conn()?;
-        let transaction = connection.transaction()?;
-        for text in add_or_update {
-            transaction
-                .prepare_cached(
-                    "INSERT INTO policy_texts (id, text, created_at) \
+        self.0.write_tx(|transaction| {
+            for text in add_or_update {
+                transaction
+                    .prepare_cached(
+                        "INSERT INTO policy_texts (id, text, created_at) \
                      VALUES (?1, ?2, ?3) \
                      ON CONFLICT(id) DO UPDATE SET text = excluded.text",
-                )?
-                .execute(params![
-                    text.id,
-                    text.text,
-                    if text.created_at.is_empty() {
-                        stamp.clone()
-                    } else {
-                        text.created_at.clone()
-                    }
-                ])?;
-        }
-        for id in removed {
-            transaction
-                .prepare_cached("DELETE FROM policy_texts WHERE id = ?1")?
-                .execute([id])?;
-        }
-        transaction.commit()?;
-        drop(connection);
+                    )?
+                    .execute(params![
+                        text.id,
+                        text.text,
+                        if text.created_at.is_empty() {
+                            stamp.clone()
+                        } else {
+                            text.created_at.clone()
+                        }
+                    ])?;
+            }
+            for id in removed {
+                transaction
+                    .prepare_cached("DELETE FROM policy_texts WHERE id = ?1")?
+                    .execute([id])?;
+            }
+            Ok(())
+        })?;
         self.policy_texts()
     }
 }

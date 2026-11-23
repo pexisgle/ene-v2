@@ -214,6 +214,12 @@ CREATE TABLE IF NOT EXISTS work_sessions (
     updated_at TEXT NOT NULL
 );
 
+-- `WorkRepo::work_sessions` reads one companion's sessions newest first; this
+-- index column order matches its `WHERE` and `ORDER BY` exactly. It is also
+-- added by migration 8 so existing databases get it.
+CREATE INDEX IF NOT EXISTS idx_work_sessions_companion
+    ON work_sessions(companion_id, updated_at DESC, id);
+
 CREATE TABLE IF NOT EXISTS work_runs (
     run_id TEXT PRIMARY KEY,
     work_id TEXT NOT NULL,

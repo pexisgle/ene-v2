@@ -314,8 +314,7 @@ impl<'a> ScheduleRepo<'a> {
         ready_companions: &std::collections::HashSet<String>,
     ) -> Result<Vec<ScheduleOccurrence>> {
         let now_stamp = stamp(now);
-        let mut conn = self.0.conn()?;
-        let tx = conn.transaction()?;
+        self.0.write_tx(|tx| {
         let due = {
             let mut stmt = tx.prepare_cached(
                 "SELECT id, companion_id, title, instruction, run_at, cron_expr, enabled, \
@@ -386,8 +385,8 @@ impl<'a> ScheduleRepo<'a> {
             stmt.query_map([], row_to_occurrence)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
-        tx.commit()?;
         Ok(pending)
+        })
     }
 
     /// Pending schedule occurrences awaiting confirmed delivery.
@@ -428,19 +427,18 @@ impl<'a> ScheduleRepo<'a> {
     }
 
     pub fn cancel_schedule(&self, companion: &str, id: &str) -> Result<bool> {
-        let mut conn = self.0.conn()?;
-        let tx = conn.transaction()?;
-        let changed = tx
-            .prepare_cached("DELETE FROM schedules WHERE id = ?1 AND companion_id = ?2")?
-            .execute(params![id, companion])?;
-        if changed > 0 {
-            tx.prepare_cached(
-                "DELETE FROM schedule_occurrences WHERE schedule_id = ?1 AND status = 'pending'",
-            )?
-            .execute([id])?;
-        }
-        tx.commit()?;
-        Ok(changed > 0)
+        self.0.write_tx(|tx| {
+            let changed = tx
+                .prepare_cached("DELETE FROM schedules WHERE id = ?1 AND companion_id = ?2")?
+                .execute(params![id, companion])?;
+            if changed > 0 {
+                tx.prepare_cached(
+                    "DELETE FROM schedule_occurrences WHERE schedule_id = ?1 AND status = 'pending'",
+                )?
+                .execute([id])?;
+            }
+            Ok(changed > 0)
+        })
     }
 }
 

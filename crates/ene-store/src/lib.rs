@@ -29,7 +29,7 @@ pub use settings::SettingsRepo;
 pub use skills::{Skill, SkillRepo, validate_skill_name};
 pub use work::{WorkRepo, open_state};
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use std::{
     fmt,
     path::Path,
@@ -43,7 +43,16 @@ fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
 }
 
 fn configure_connection(connection: &Connection) -> rusqlite::Result<()> {
-    connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
+    // `foreign_keys` is per connection and off by default, so every connection
+    // that can write declares it here. `temp_store` and `cache_size` keep the
+    // sort buffers of the repository queries off disk.
+    connection.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA foreign_keys = ON;
+         PRAGMA temp_store = MEMORY;
+         PRAGMA cache_size = -16000;",
+    )
 }
 
 /// The relational state store shared across repositories and host systems.
@@ -164,6 +173,23 @@ impl Store {
         let connection = self.conn()?;
         let mut statement = connection.prepare_cached(sql)?;
         Ok(statement.query_row(params, map)?)
+    }
+
+    /// Runs `write` in one write transaction that takes the lock up front.
+    ///
+    /// `DEFERRED` (the default) starts as a reader and only upgrades on the
+    /// first write, so two concurrent writers can both begin and then one gets
+    /// `SQLITE_BUSY` that `busy_timeout` cannot retry. `Immediate` serialises
+    /// writers through the lock at `BEGIN`, which is what every write path wants.
+    pub(crate) fn write_tx<T>(
+        &self,
+        write: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let mut connection = self.conn()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let value = write(&transaction)?;
+        transaction.commit()?;
+        Ok(value)
     }
 
     pub(crate) fn fetch_all<T>(
@@ -455,6 +481,61 @@ mod tests {
             assert!(error.contains("stored config is corrupt"));
             assert!(!error.contains("private text"));
         }
+    }
+
+    #[test]
+    fn a_write_transaction_survives_a_read_then_write_with_a_competing_commit() {
+        // The repositories read and then write inside one transaction. With
+        // `DEFERRED` the transaction opens as a reader, so a commit by another
+        // connection lands between the read and the write; the upgrade then
+        // fails with SQLITE_BUSY_SNAPSHOT, which `busy_timeout` never retries.
+        // `Immediate` takes the write lock at `BEGIN`, so the competing writer
+        // waits instead of invalidating this transaction's snapshot.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("host.sqlite3");
+        let store = Store::open(&path).unwrap();
+        store
+            .conn()
+            .unwrap()
+            .execute_batch("CREATE TABLE busy_probe (id INTEGER PRIMARY KEY, who TEXT NOT NULL)")
+            .unwrap();
+
+        // Another connection commits inside the window this transaction leaves
+        // open between its read and its write.
+        let competitor_path = path.clone();
+        let competitor = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let mut connection = Connection::open(&competitor_path).unwrap();
+            connection
+                .busy_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute("INSERT INTO busy_probe (who) VALUES ('competitor')", [])
+                .unwrap();
+            tx.commit().unwrap();
+        });
+
+        let written = store.write_tx(|tx| {
+            // The read a repository does before it writes.
+            let existing: i64 =
+                tx.query_row("SELECT COUNT(*) FROM busy_probe", [], |row| row.get(0))?;
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            // The write that must still be allowed to land.
+            tx.execute("INSERT INTO busy_probe (who) VALUES ('reader-writer')", [])?;
+            Ok(existing)
+        });
+
+        competitor.join().unwrap();
+        let existing = written.expect("a read-then-write transaction must not fail busy");
+        assert_eq!(existing, 0, "the read ran before either write");
+        let total: i64 = store
+            .conn()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM busy_probe", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 2, "both the reader-writer and the competitor commit");
     }
 
     #[test]

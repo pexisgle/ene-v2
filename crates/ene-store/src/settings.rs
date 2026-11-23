@@ -114,8 +114,7 @@ impl<'a> SettingsRepo<'a> {
         }
         let stamp = now();
         let next = expected_revision + 1;
-        let mut connection = self.0.conn()?;
-        let transaction = connection.transaction()?;
+        self.0.write_tx(|transaction| {
         for (input, expected) in inputs {
             let existing = current
                 .connections
@@ -182,8 +181,8 @@ impl<'a> SettingsRepo<'a> {
                 "settings changed since they were read".into(),
             ));
         }
-        transaction.commit()?;
-        drop(connection);
+        Ok(())
+        })?;
         self.settings()
     }
 

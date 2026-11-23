@@ -8,7 +8,7 @@ use rusqlite::{Connection, params};
 pub const BASELINE_VERSION: i64 = 6;
 
 /// Latest database schema version managed by [`MIGRATIONS`].
-pub const VERSION: i64 = 7;
+pub const VERSION: i64 = 8;
 
 #[derive(Clone, Copy, Debug)]
 struct Migration {
@@ -17,15 +17,23 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 7,
-    name: "0007_schema_migrations_table",
-    sql: "CREATE TABLE IF NOT EXISTS schema_migrations (
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 7,
+        name: "0007_schema_migrations_table",
+        sql: "CREATE TABLE IF NOT EXISTS schema_migrations (
         version INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
         applied_at TEXT NOT NULL
     );",
-}];
+    },
+    Migration {
+        version: 8,
+        name: "0008_work_sessions_companion_index",
+        sql: "CREATE INDEX IF NOT EXISTS idx_work_sessions_companion
+            ON work_sessions(companion_id, updated_at DESC, id);",
+    },
+];
 
 /// Verifies `PRAGMA user_version` before mutating connection pragmas (such as WAL).
 pub(crate) fn validate_open_version(connection: &Connection) -> Result<i64> {
@@ -311,10 +319,39 @@ mod tests {
             .unwrap();
         assert_eq!(recorded, 1);
 
+        let indexed: i64 = store
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+                 AND name = 'idx_work_sessions_companion'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1, "the work-session index migration must run");
+
         drop(store);
         let reopened = Store::open(&path).unwrap();
         assert_eq!(reopened.settings_repo().settings().unwrap(), settings);
         assert_eq!(user_version(&reopened.conn().unwrap()), VERSION);
+    }
+
+    #[test]
+    fn a_fresh_database_also_has_the_work_session_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        let indexed: i64 = store
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+                 AND name = 'idx_work_sessions_companion'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1, "baseline schema and migrations must agree");
     }
 
     #[test]
@@ -362,7 +399,9 @@ mod tests {
         ];
         let result = apply_migrations_with(&mut conn, &bad_migrations);
         assert!(matches!(result, Err(StoreError::Storage(_))));
-        assert_eq!(user_version(&conn), VERSION);
+        // The rollback must leave the last good version from this fixture, not
+        // whatever the crate's global `VERSION` happens to be.
+        assert_eq!(user_version(&conn), MIGRATIONS[0].version);
         let leaked_table: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'should_roll_back'",
