@@ -310,11 +310,17 @@ pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> 
         Ok(view) => Ok(view),
         Err(error) => {
             if let Some(previous) = previous {
-                let _ = store.client_repo().restore_client(&previous);
+                super::util::log_if_err(
+                    store.client_repo().restore_client(&previous),
+                    "client declaration rollback",
+                );
             } else {
-                let _ = store.client_repo().delete_client(&request.id);
+                super::util::log_if_err(
+                    store.client_repo().delete_client(&request.id),
+                    "rejected client cleanup",
+                );
             }
-            let _ = dynamic::sync_tools(world);
+            super::util::log_if_err(dynamic::sync_tools(world), "tool resync");
             Err(error)
         }
     }
@@ -347,9 +353,12 @@ pub(crate) fn set_capabilities(
         Ok(view) => Ok(view),
         Err(error) => {
             if let Some(previous) = previous {
-                let _ = store.client_repo().restore_client(&previous);
+                super::util::log_if_err(
+                    store.client_repo().restore_client(&previous),
+                    "client declaration rollback",
+                );
             }
-            let _ = dynamic::sync_tools(world);
+            super::util::log_if_err(dynamic::sync_tools(world), "tool resync");
             Err(error)
         }
     }
@@ -392,11 +401,17 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
     // roll the move back before any notification is visible.
     if let Err(error) = dynamic::sync_tools(world) {
         if let Some(previous) = previous.as_ref() {
-            let _ = store.client_repo().restore_activation(previous);
+            super::util::log_if_err(
+                store.client_repo().restore_activation(previous),
+                "activation rollback",
+            );
         } else {
-            let _ = store.client_repo().delete_activation(&request.companion_id);
+            super::util::log_if_err(
+                store.client_repo().delete_activation(&request.companion_id),
+                "rejected activation cleanup",
+            );
         }
-        let _ = dynamic::sync_tools(world);
+        super::util::log_if_err(dynamic::sync_tools(world), "tool resync");
         return Err(error);
     }
     if let Some(previous) = previous.clone()

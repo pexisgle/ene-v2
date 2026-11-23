@@ -291,12 +291,17 @@ impl Runtime {
     }
 
     pub(crate) async fn begin_shutdown(&self) {
-        let _ = self
+        // A shutdown that cannot mark itself closing still proceeds; the
+        // failure is reported so a wedged kernel is visible rather than silent.
+        if let Err(error) = self
             .call(|app| {
                 app.world_mut().resource_mut::<HostState>().closing = true;
                 Ok(())
             })
-            .await;
+            .await
+        {
+            tracing::warn!(%error, "the host could not mark itself as closing");
+        }
     }
 
     pub(crate) async fn shutdown(&self) -> Result<()> {
