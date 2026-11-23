@@ -16,7 +16,15 @@ use gpui::{
 
 const MAX_INPUT: usize = 4000;
 
-actions!(ene_desktop, [Submit, CancelOrStop]);
+actions!(
+    ene_desktop,
+    [
+        Submit,
+        CancelOrStop,
+        ToggleMicShortcut,
+        OpenSettingsShortcut
+    ]
+);
 
 /// Compatibility alias expected by `lib.rs`.
 pub type Desktop = CompanionPod;
@@ -387,10 +395,14 @@ impl Render for CompanionPod {
 
 /// The pod's shortcuts. Every one is scoped to a key context: an unscoped
 /// `Escape` would also cancel a pod turn while `SettingsStudio` has focus.
-fn pod_key_bindings() -> [KeyBinding; 2] {
+fn pod_key_bindings() -> [KeyBinding; 4] {
     [
         KeyBinding::new("enter", Submit, Some("ChatInput")),
         KeyBinding::new("escape", CancelOrStop, Some(POD_KEY_CONTEXT)),
+        // Scoped to the pod, so Ctrl/Cmd+M types an "m" in a settings field
+        // rather than muting the microphone under it.
+        KeyBinding::new("secondary-m", ToggleMicShortcut, Some(POD_KEY_CONTEXT)),
+        KeyBinding::new("secondary-,", OpenSettingsShortcut, Some(POD_KEY_CONTEXT)),
     ]
 }
 
@@ -410,11 +422,23 @@ pub fn bind(cx: &mut App, hub: Entity<Hub>) {
         let _updated = view.update(cx, |this, cx| this.submit(cx));
     });
 
+    let escape_hub = hub.clone();
     cx.on_action(move |_: &CancelOrStop, cx: &mut App| {
-        let Some(view) = hub.read(cx).pod_view() else {
+        let Some(view) = escape_hub.read(cx).pod_view() else {
             return;
         };
         let _updated = view.update(cx, |this, cx| this.handle_escape(cx));
+    });
+
+    let mic_hub = hub.clone();
+    cx.on_action(move |_: &ToggleMicShortcut, cx: &mut App| {
+        mic_hub.update(cx, |hub, cx| hub.toggle_mic_mute(cx));
+    });
+
+    cx.on_action(move |_: &OpenSettingsShortcut, cx: &mut App| {
+        hub.update(cx, |hub, cx| {
+            hub.open_settings(crate::ui::SettingsSection::Companions, cx);
+        });
     });
 }
 
@@ -449,21 +473,25 @@ mod tests {
     #[test]
     fn pod_shortcuts_are_scoped_to_a_key_context() {
         let bindings = pod_key_bindings();
-        assert_eq!(bindings.len(), 2);
+        // No count: the point is that nothing is unscoped, and a count would
+        // have to be edited every time a shortcut is added.
         for binding in &bindings {
             assert!(
                 binding.predicate().is_some(),
                 "an unscoped binding fires everywhere: {binding:?}"
             );
         }
-        let scoped_to_pod = bindings.iter().any(|binding| {
-            binding
-                .predicate()
-                .is_some_and(|predicate| predicate.to_string().contains(POD_KEY_CONTEXT))
-        });
+        let scoped_to_pod = bindings
+            .iter()
+            .filter(|binding| {
+                binding
+                    .predicate()
+                    .is_some_and(|predicate| predicate.to_string().contains(POD_KEY_CONTEXT))
+            })
+            .count();
         assert!(
-            scoped_to_pod,
-            "a binding must be scoped to {POD_KEY_CONTEXT}: {bindings:?}"
+            scoped_to_pod >= 3,
+            "Escape, the mic toggle and settings are all pod-scoped, got {scoped_to_pod}: {bindings:?}"
         );
     }
 }
