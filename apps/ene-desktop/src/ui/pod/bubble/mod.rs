@@ -12,7 +12,7 @@ use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button};
 use crate::ui::{PodMode, SettingsSection};
 use ene_client_core::domain::{ApprovalRequest, RiskLevel};
-use gpui::{AnyElement, Context, div, prelude::*, px};
+use gpui::{AnyElement, Context, SharedString, div, prelude::*, px};
 
 use render::*;
 use text::*;
@@ -43,7 +43,7 @@ impl CompanionPod {
         let body: AnyElement = if !live {
             self.render_offline_body(&hub.model.connections.link, &theme)
         } else if let Some(approval) = approvals.first().cloned() {
-            self.render_approval_body(&approval, approvals.len(), &theme)
+            self.render_approval_body(&approval, approvals.len(), &theme, cx)
         } else if in_onboarding {
             super::onboarding::render_onboarding_body(self, self.needs_connection(cx), &theme, cx)
         } else if expanded {
@@ -138,6 +138,7 @@ impl CompanionPod {
         approval: &ApprovalRequest,
         total_pending: usize,
         theme: &Theme,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let what = approval
             .capability
@@ -161,7 +162,40 @@ impl CompanionPod {
             .gap(px(8.))
             .child(render_approval_header(&what, total_pending, risk, theme))
             .when(!args.is_empty(), |this| {
-                this.child(render_approval_args(&args, theme))
+                // Collapsed by default: the raw JSON is escaped and long, and
+                // the decision should not be buried under it.
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .child(pill_button(
+                            SharedString::from(format!(
+                                "pod-args-{}-{total_pending}",
+                                approval.request_id
+                            )),
+                            if self.approval_args_open {
+                                "引数の詳細を閉じる"
+                            } else {
+                                "引数の詳細を見る"
+                            },
+                            Tone::Ghost,
+                            theme,
+                            {
+                                let open = self.approval_args_open;
+                                let pod = cx.entity();
+                                move |_, cx| {
+                                    pod.update(cx, |this, cx| {
+                                        this.approval_args_open = !open;
+                                        cx.notify();
+                                    });
+                                }
+                            },
+                        ))
+                        .when(self.approval_args_open, |this| {
+                            this.child(render_approval_args(&args, theme))
+                        }),
+                )
             })
             .child(div().text_xs().child(if args.is_empty() {
                 "常に許可すると、次回からこの操作を引数にかかわらず許可します。"

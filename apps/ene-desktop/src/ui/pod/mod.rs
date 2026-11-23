@@ -56,6 +56,8 @@ pub struct CompanionPod {
     key_focused: bool,
     pub(super) roster_open: bool,
     pub(super) controls_open: bool,
+    /// Whether the approval card's raw arguments are expanded.
+    pub(super) approval_args_open: bool,
     last_size: Size<Pixels>,
     title_initialized: bool,
     pub(super) scroll: ScrollHandle,
@@ -104,6 +106,7 @@ impl CompanionPod {
             key_focused: false,
             roster_open: false,
             controls_open: false,
+            approval_args_open: false,
             last_size: PodMode::MiniVoice.size(),
             title_initialized: false,
             scroll: ScrollHandle::new(),
