@@ -62,7 +62,7 @@ pub(super) fn open_pod(hub: &mut Hub, mode: Option<PodMode>, cx: &mut Context<Hu
     cx.notify();
 
     cx.spawn(async move |this, cx| {
-        let _ = cx.update(|cx| {
+        let _ignored = cx.update(|cx| {
             let Some(hub) = this.upgrade() else {
                 return;
             };
@@ -199,7 +199,7 @@ pub(super) fn open_settings(hub: &mut Hub, section: SettingsSection, cx: &mut Co
     cx.notify();
 
     cx.spawn(async move |this, cx| {
-        let _ = cx.update(|cx| {
+        let _ignored = cx.update(|cx| {
             let Some(hub) = this.upgrade() else {
                 return;
             };
@@ -234,14 +234,14 @@ pub(super) fn open_settings(hub: &mut Hub, section: SettingsSection, cx: &mut Co
             );
             match opened {
                 Ok(handle) => {
-                    let _ = handle.update(cx, |_, window, _| window.activate_window());
-                    let _ = this.update(cx, |hub, cx| {
+                    let _ignored = handle.update(cx, |_, window, _| window.activate_window());
+                    let _ignored = this.update(cx, |hub, cx| {
                         hub.windows.settings_window = Some(handle);
                         cx.notify();
                     });
                 }
                 Err(error) => {
-                    let _ = this.update(cx, |hub, cx| {
+                    let _ignored = this.update(cx, |hub, cx| {
                         hub.model.notice(
                             NoticeKind::Failed,
                             "設定ウィンドウを開く",

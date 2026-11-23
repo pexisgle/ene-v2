@@ -196,7 +196,9 @@ impl Avatar {
                     .unwrap_or_else(|poison| poison.into_inner())
                     .remove(&id);
                 self.healthy = false;
-                let _ = self.child.kill();
+                if let Err(error) = self.child.kill() {
+                    tracing::debug!(%error, "the avatar child could not be killed");
+                }
                 Err(AvatarError::Timeout)
             }
         }
@@ -580,8 +582,12 @@ impl Avatar {
                     thread::sleep(Duration::from_millis(15));
                 }
                 _ => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
+                    if let Err(error) = self.child.kill() {
+                        tracing::debug!(%error, "the avatar child could not be killed");
+                    }
+                    if let Err(error) = self.child.wait() {
+                        tracing::debug!(%error, "the avatar child could not be reaped");
+                    }
                     return;
                 }
             }
@@ -592,8 +598,12 @@ impl Avatar {
 impl Drop for Avatar {
     fn drop(&mut self) {
         self.write_tx.take();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Err(error) = self.child.kill() {
+            tracing::debug!(%error, "the avatar child could not be killed");
+        }
+        if let Err(error) = self.child.wait() {
+            tracing::debug!(%error, "the avatar child could not be reaped");
+        }
     }
 }
 
