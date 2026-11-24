@@ -3,6 +3,7 @@
 //! and bottom collapsed disclosure for model-role & voice slot overrides.
 
 mod add_panel;
+mod kind_pickers;
 pub(crate) mod mcp_add;
 mod mcp_editor;
 mod pickers;

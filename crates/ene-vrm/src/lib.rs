@@ -4,6 +4,7 @@
 
 mod animation;
 mod expressions;
+mod extensions;
 mod loader;
 mod material;
 mod runtime;
