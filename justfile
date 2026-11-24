@@ -40,6 +40,10 @@ clippy:
 test: build-test-plugins
     cargo test {{cargo_wrapper}} --workspace --all-features --locked
 
+# Proves the last commit builds from a fresh checkout.
+committed-builds:
+    bash verification/committed-tree-builds/run.sh
+
 build:
     cargo build {{cargo_wrapper}} --workspace --all-targets --all-features --locked
 
