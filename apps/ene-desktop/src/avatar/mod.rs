@@ -11,6 +11,7 @@
 //! The renderer has no network and no host connection. It knows a character id,
 //! a model path and a motion path; everything else is this client's job.
 
+mod character;
 mod client;
 mod presets;
 #[cfg(test)]
