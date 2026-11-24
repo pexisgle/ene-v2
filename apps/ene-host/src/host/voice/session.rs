@@ -80,7 +80,7 @@ pub(crate) fn subscribe_audio(
         .activations()?
         .into_iter()
         .filter(|activation| activation.client_id.as_deref() == Some(client_id))
-        .map(|activation| activation.companion_id)
+        .map(|activation| activation.companion_id.as_str().to_owned())
         .collect();
     if owned.is_empty() {
         return Err(HostError::Conflict(

@@ -556,7 +556,7 @@ mod tests {
         ] {
             repo.insert_work_session(&WorkSession {
                 id: id.into(),
-                companion_id: companion.into(),
+                companion_id: ene_domain::CompanionId::parse(companion).unwrap(),
                 title: id.into(),
                 status: WorkStatus::Active,
                 client_id: None,
@@ -589,7 +589,7 @@ mod tests {
             let one = repo.work_sessions(companion).unwrap();
             let many: Vec<&str> = bulk
                 .iter()
-                .filter(|session| session.companion_id == companion)
+                .filter(|session| session.companion_id.as_str() == companion)
                 .map(|session| session.id.as_str())
                 .collect();
             let expected: Vec<&str> = one.iter().map(|session| session.id.as_str()).collect();

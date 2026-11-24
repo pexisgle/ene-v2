@@ -89,3 +89,28 @@ mod tests {
         assert!(CompanionId::parse("ene").is_ok());
     }
 }
+
+#[cfg(feature = "sqlite")]
+mod sqlite {
+    use super::CompanionId;
+    use rusqlite::{
+        Result as SqlResult, ToSql, types::FromSql, types::FromSqlResult, types::ToSqlOutput,
+        types::ValueRef,
+    };
+
+    impl ToSql for CompanionId {
+        fn to_sql(&self) -> SqlResult<ToSqlOutput<'_>> {
+            self.as_str().to_sql()
+        }
+    }
+
+    impl FromSql for CompanionId {
+        /// Reads the stored string and re-validates it, so a hand-edited row
+        /// cannot introduce an id the domain would refuse.
+        fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+            let id = String::column_result(value)?;
+            CompanionId::parse(id)
+                .map_err(|error| rusqlite::types::FromSqlError::Other(Box::new(error)))
+        }
+    }
+}

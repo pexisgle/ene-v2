@@ -12,7 +12,7 @@ workspace = true
 [dependencies]
 croner.workspace = true
 ene-catalog.workspace = true
-ene-domain.workspace = true
+ene-domain = { workspace = true, features = ["sqlite"] }
 ene-mind.workspace = true
 ene-policy.workspace = true
 jiff.workspace = true

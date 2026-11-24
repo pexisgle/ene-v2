@@ -68,7 +68,7 @@ pub(super) fn active(store: &Store, hub: &DeviceHub, pending: &Pending) -> bool 
                     session.client_id.as_deref() == Some(pending.client.as_str())
                         && store
                             .client_repo()
-                            .activation(&session.companion_id)
+                            .activation(session.companion_id.as_str())
                             .is_ok_and(|activation| {
                                 activation
                                     .and_then(|activation| activation.client_id)

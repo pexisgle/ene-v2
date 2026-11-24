@@ -17,7 +17,7 @@ pub(crate) fn snapshot(app: &mut App) -> Result<w::Snapshot> {
     let active_companion_id = activations
         .iter()
         .find(|activation| activation.client_id.is_some())
-        .map(|activation| activation.companion_id.clone());
+        .map(|activation| activation.companion_id.as_str().to_owned());
     // One query, then grouped back into the per-companion order this loop used
     // to produce: companions in snapshot order, each companion's sessions
     // newest first. The wire output stays identical, and a host with many
@@ -26,7 +26,7 @@ pub(crate) fn snapshot(app: &mut App) -> Result<w::Snapshot> {
         std::collections::HashMap::new();
     for session in store.work_repo().all_work_sessions()? {
         by_companion
-            .entry(session.companion_id.clone())
+            .entry(session.companion_id.as_str().to_owned())
             .or_default()
             .push(session);
     }

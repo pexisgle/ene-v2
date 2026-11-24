@@ -170,7 +170,7 @@ pub(crate) fn start_run(
         adapter.clone(),
         Hand {
             work_id: session.id.clone(),
-            companion_id: session.companion_id.clone(),
+            companion_id: session.companion_id.as_str().to_owned(),
             running,
             driver: None,
             events: Vec::new(),

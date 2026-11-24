@@ -1,6 +1,7 @@
 //! Work session and run lifecycle domain models.
 
 use crate::Failure;
+use crate::ids::CompanionId;
 use serde::{Deserialize, Serialize};
 use strum::{EnumString, IntoStaticStr};
 
@@ -53,7 +54,7 @@ impl RunState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkSession {
     pub id: String,
-    pub companion_id: String,
+    pub companion_id: CompanionId,
     pub title: String,
     pub status: WorkStatus,
     /// The client the work was commissioned from. Empty when no client was

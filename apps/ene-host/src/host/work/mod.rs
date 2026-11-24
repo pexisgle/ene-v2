@@ -125,7 +125,7 @@ pub(crate) fn start(world: &mut World, request: w::StartWorkRequest) -> Result<w
     let client_id = binding_for(&store, &request)?;
     let session = WorkSession {
         id: uuid::Uuid::new_v4().to_string(),
-        companion_id: companion.id.clone(),
+        companion_id: ene_domain::CompanionId::parse(companion.id.clone())?,
         title: if request.title.trim().is_empty() {
             super::util::truncate(&request.instruction, 80)
         } else {
@@ -166,7 +166,7 @@ pub(crate) fn start_run(
             active.run_id
         )));
     }
-    let companion = require_companion(&store, &session.companion_id)?;
+    let companion = require_companion(&store, session.companion_id.as_str())?;
     let run = new_run(
         uuid::Uuid::new_v4().to_string(),
         &session.id,

@@ -221,7 +221,7 @@ fn desired(store: &Store) -> Result<Vec<(String, CapabilityTool)>> {
             let name = spec.tool_name.clone();
             let parameters = json::parse_schema(&spec.input_schema)?;
             let binding = CapabilityBinding {
-                companion_id: activation.companion_id.clone(),
+                companion_id: activation.companion_id.as_str().to_owned(),
                 client_id: client_id.clone(),
                 capability: spec.name.clone(),
             };

@@ -384,7 +384,12 @@ impl<'a> ClientRepo<'a> {
                 [client],
                 row_to_activation,
             )
-            .map(|items| items.into_iter().map(|a| a.companion_id).collect())
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|a| a.companion_id.as_str().to_owned())
+                    .collect()
+            })
     }
 
     /// Restores a client row exactly as it was, for rolling back a declaration

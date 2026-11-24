@@ -50,7 +50,7 @@ fn notify_event(
     detail: w::work_event::Detail,
 ) {
     let event = wire::work_event(session, kind, detail);
-    push_event(notifier, &session.companion_id, event);
+    push_event(notifier, session.companion_id.as_str(), event);
 }
 
 pub(super) fn notify_run(
@@ -62,7 +62,7 @@ pub(super) fn notify_run(
 ) {
     let mut event = wire::work_event(session, kind, detail);
     event.run_id = run.run_id.clone();
-    push_event(notifier, &session.companion_id, event);
+    push_event(notifier, session.companion_id.as_str(), event);
 }
 
 fn push_event(notifier: &mut Notifier, companion: &str, event: w::WorkEvent) {

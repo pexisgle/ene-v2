@@ -1,6 +1,7 @@
 //! Client declarations, capability grants, and bound device operations.
 
 use crate::Failure;
+use crate::ids::CompanionId;
 use ene_policy::CapabilitySpec;
 use serde::{Deserialize, Serialize};
 use strum::{EnumString, IntoStaticStr};
@@ -42,9 +43,9 @@ impl Client {
 }
 
 /// Active client binding for one companion.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Activation {
-    pub companion_id: String,
+    pub companion_id: CompanionId,
     pub client_id: Option<String>,
 }
 

@@ -9,7 +9,7 @@ fn store() -> (tempfile::TempDir, Store) {
 fn session(store: &Store) -> WorkSession {
     let session = WorkSession {
         id: "w1".into(),
-        companion_id: "ene".into(),
+        companion_id: ene_domain::CompanionId::parse("ene").unwrap(),
         title: "task".into(),
         status: WorkStatus::Active,
         client_id: None,

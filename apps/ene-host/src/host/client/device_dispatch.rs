@@ -259,7 +259,7 @@ fn resolve_operation_companion(store: &Store, operation: &DeviceOperation) -> Re
     if let Some(work_id) = operation.work_id.as_deref()
         && let Some(session) = store.work_repo().work_session(work_id)?
     {
-        return Ok(session.companion_id);
+        return Ok(session.companion_id.as_str().to_owned());
     }
     Ok(store
         .client_repo()

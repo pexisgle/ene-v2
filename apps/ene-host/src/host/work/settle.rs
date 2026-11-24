@@ -91,7 +91,7 @@ pub(super) fn finish_run(world: &mut World, mut run: Run, state: RunState, text:
                 notify_status(&mut notifier, &session);
                 notify_finished(&mut notifier, &session, &run);
             }
-            if let Some(parent) = agent::agent_of(world, &session.companion_id) {
+            if let Some(parent) = agent::agent_of(world, session.companion_id.as_str()) {
                 let raw_report = text.unwrap_or_else(|| {
                     match state {
                         RunState::Cancelled => "作業を中断しました",

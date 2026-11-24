@@ -241,7 +241,7 @@ pub(crate) fn clients(store: &Store, hub: &DeviceHub) -> Result<Vec<w::Client>> 
             let active: Vec<String> = activations
                 .iter()
                 .filter(|activation| activation.client_id.as_deref() == Some(client.id.as_str()))
-                .map(|activation| activation.companion_id.clone())
+                .map(|activation| activation.companion_id.as_str().to_owned())
                 .collect();
             wire::client(&client, hub.connected(&client.id), active)
         })

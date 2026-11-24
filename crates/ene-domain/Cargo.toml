@@ -20,4 +20,11 @@ serde.workspace = true
 serde_json.workspace = true
 strum.workspace = true
 thiserror.workspace = true
+rusqlite = { workspace = true, optional = true }
 url.workspace = true
+
+[features]
+# `ene-store` needs `ToSql`/`FromSql` for the branded ids, and the orphan rule
+# puts those impls here. Off by default so the pure-domain build stays free of
+# rusqlite.
+sqlite = ["dep:rusqlite"]

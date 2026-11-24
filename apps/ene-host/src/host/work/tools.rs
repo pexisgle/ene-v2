@@ -93,7 +93,7 @@ fn own_session(store: &Store, work_id: &str, companion: &str) -> Result<WorkSess
         },
     }
     .ok_or_else(|| HostError::NotFound(("work session not found").into()))?;
-    if session.companion_id != companion {
+    if session.companion_id.as_str() != companion {
         return Err(HostError::Permission(
             ("this work session belongs to another companion").into(),
         ));
@@ -305,7 +305,7 @@ mod tests {
             .work_repo()
             .insert_work_session(&WorkSession {
                 id: "w1".into(),
-                companion_id: "ene".into(),
+                companion_id: ene_domain::CompanionId::parse("ene").unwrap(),
                 title: "task".into(),
                 status: WorkStatus::Active,
                 client_id: None,

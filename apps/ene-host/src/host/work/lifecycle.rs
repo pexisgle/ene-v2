@@ -172,7 +172,7 @@ pub(super) fn detect_stalls(world: &mut World) {
         if session.status == WorkStatus::Closed {
             continue;
         }
-        let Some(parent) = agent::agent_of(world, &session.companion_id) else {
+        let Some(parent) = agent::agent_of(world, session.companion_id.as_str()) else {
             continue;
         };
         let notice = format!(

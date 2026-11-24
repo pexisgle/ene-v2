@@ -53,7 +53,7 @@ fn bound_client(store: &Store, approval: &Approval) -> Result<Option<String>> {
         let Some(session) = store.work_repo().work_session(work_id)? else {
             return Ok(None);
         };
-        if session.companion_id != approval.session_id {
+        if session.companion_id.as_str() != approval.session_id {
             return Ok(None);
         }
         return Ok(session.client_id);
@@ -70,7 +70,7 @@ fn bound_client(store: &Store, approval: &Approval) -> Result<Option<String>> {
     let Some(session) = store.work_repo().work_session(&run.work_id)? else {
         return Ok(None);
     };
-    if session.companion_id != approval.session_id {
+    if session.companion_id.as_str() != approval.session_id {
         return Ok(None);
     }
     Ok(session.client_id)

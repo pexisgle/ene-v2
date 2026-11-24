@@ -232,7 +232,7 @@ pub(crate) fn capability_spec_from(value: &w::ClientCapabilitySpec) -> Capabilit
 
 pub(crate) fn activation(value: &ene_domain::Activation) -> w::Activation {
     w::Activation {
-        companion_id: value.companion_id.clone(),
+        companion_id: value.companion_id.as_str().to_owned(),
         client_id: value.client_id.clone(),
         ..Default::default()
     }
@@ -265,7 +265,7 @@ wire_enum!(run_state: RunState => w::RunStatus {
 pub(crate) fn work_session(value: &WorkSession) -> w::WorkSession {
     w::WorkSession {
         id: value.id.clone(),
-        companion_id: value.companion_id.clone(),
+        companion_id: value.companion_id.as_str().to_owned(),
         title: value.title.clone(),
         status: work_status(value.status).into(),
         created_at: value.created_at.clone(),
