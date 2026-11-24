@@ -4,6 +4,7 @@
 mod create;
 mod editor;
 pub(crate) mod voice;
+mod voice_stt;
 
 use super::icons::Icon;
 use super::theme::Theme;
