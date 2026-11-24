@@ -32,8 +32,13 @@ pub mod radius {
     }
 }
 
-/// Visual token table for `ene-desktop`, verified for >= 4.5:1 text contrast.
-#[derive(Clone, Copy, Debug)]
+/// Visual token table for `ene-desktop`.
+///
+/// [`Theme::strawberry_milk`] uses pastel tints on a near-white surface and
+/// [`Theme::midnight_berry`] the same roles on a near-black one.
+/// `midnight_berry_text_reaches_aa_contrast` asserts the dark palette's text
+/// pairs reach 4.5:1; the light palette's ratios were verified by hand.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Theme {
     pub bg_surface: Hsla,
     pub bg_milk: Hsla,
@@ -64,6 +69,7 @@ pub struct Theme {
 }
 
 impl Default for Theme {
+    /// The light palette, so an unwired caller keeps the pre-dark rendering.
     fn default() -> Self {
         Self::strawberry_milk()
     }
@@ -101,6 +107,47 @@ impl Theme {
         }
     }
 
+    /// Dark counterpart to [`Theme::strawberry_milk`], same roles and hues.
+    ///
+    /// The surfaces keep the strawberry hue as a low-saturation near-black
+    /// plum instead of neutral grey, so the pod still reads as the same
+    /// product. `accent` is `#bb2c5e`, the `--berry` hue from the website
+    /// (`#a82554`) lifted to 45% lightness: at the website's 40% it only
+    /// reaches 2.70:1 against `bg_surface`, and `accent` doubles as an icon
+    /// tint and focus border there, which needs 3:1.
+    // Remove this allow once `Hub::theme` or a settings toggle selects the palette.
+    #[allow(dead_code)]
+    pub fn midnight_berry() -> Self {
+        Self {
+            bg_surface: rgb(0x1a1114).into(),
+            bg_milk: rgb(0x2a1620).into(),
+            bg_blush: rgb(0x221419).into(),
+            bg_user_msg: rgb(0x2d1822).into(),
+            bg_input: rgb(0x241519).into(),
+            accent: rgb(0xbb2c5e).into(),
+            accent_hover: rgb(0xcc3a6b).into(),
+            accent_fg: rgb(0xffffff).into(),
+            accent_soft: rgb(0x38202c).into(),
+            accent_soft_fg: rgb(0xf0a3bf).into(),
+            mint: rgb(0x34c495).into(),
+            mint_soft: rgb(0x13312a).into(),
+            mint_fg: rgb(0x7ee0bd).into(),
+            amber: rgb(0xe8a33f).into(),
+            amber_soft: rgb(0x33260f).into(),
+            amber_fg: rgb(0xf0c684).into(),
+            danger: rgb(0xe2567c).into(),
+            danger_soft: rgb(0x3a1a24).into(),
+            danger_fg: rgb(0xf79bb0).into(),
+            ink: rgb(0xf6ecf0).into(),
+            ink_muted: rgb(0xc9aab6).into(),
+            ink_placeholder: rgb(0xab8b98).into(),
+            border: rgb(0x4a2f3a).into(),
+            border_title: rgb(0x50333f).into(),
+            border_float: rgb(0x6b4254).into(),
+            shadow_tint: hsla(340. / 360., 0.60, 0.04, 0.45),
+        }
+    }
+
     pub fn field_look(&self, pill: bool, borderless: bool) -> FieldLook {
         FieldLook {
             bg: self.bg_input,
@@ -122,6 +169,23 @@ impl Theme {
             blur_radius: px(10.),
             spread_radius: px(0.),
         }]
+    }
+}
+
+/// Picks a palette from an OS dark-mode flag.
+///
+/// The project has no OS-appearance signal yet: `ene-platform-os` exposes
+/// capture, input, tray and window control but nothing that reports the
+/// system colour scheme, and `gpui`'s `Window::appearance()` is unused here.
+/// Rather than invent a platform call, this maps the flag a caller would
+/// already have; wiring it into `Hub::theme` is a separate change.
+// Remove this allow once a caller supplies the OS dark-mode flag.
+#[allow(dead_code)]
+pub fn for_os_appearance(dark: bool) -> Theme {
+    if dark {
+        Theme::midnight_berry()
+    } else {
+        Theme::strawberry_milk()
     }
 }
 
@@ -206,6 +270,81 @@ mod tests {
     fn linux_font_picker_falls_back_to_installed_non_hidden_family() {
         let fonts = vec![".SystemUIFont".to_owned(), "Liberation Sans".to_owned()];
         assert_eq!(pick_linux_ui_font(&fonts), "Liberation Sans");
+    }
+
+    /// WCAG 2.1 relative luminance of an opaque colour.
+    fn relative_luminance(color: Hsla) -> f64 {
+        let rgba = gpui::Rgba::from(color);
+        let channel = |value: f32| {
+            let value = f64::from(value);
+            if value <= 0.040_45 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(rgba.r) + 0.7152 * channel(rgba.g) + 0.0722 * channel(rgba.b)
+    }
+
+    /// WCAG 2.1 contrast ratio, always >= 1 for two opaque colours.
+    fn contrast_ratio(a: Hsla, b: Hsla) -> f64 {
+        let (lighter, darker) = {
+            let (la, lb) = (relative_luminance(a), relative_luminance(b));
+            if la >= lb { (la, lb) } else { (lb, la) }
+        };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    #[test]
+    fn midnight_berry_text_reaches_aa_contrast() {
+        let theme = Theme::midnight_berry();
+        let pairs = [
+            ("ink on bg_surface", theme.ink, theme.bg_surface),
+            ("ink_muted on bg_surface", theme.ink_muted, theme.bg_surface),
+            (
+                "ink_placeholder on bg_input",
+                theme.ink_placeholder,
+                theme.bg_input,
+            ),
+            ("accent_fg on accent", theme.accent_fg, theme.accent),
+            (
+                "accent_fg on accent_hover",
+                theme.accent_fg,
+                theme.accent_hover,
+            ),
+            (
+                "accent_soft_fg on accent_soft",
+                theme.accent_soft_fg,
+                theme.accent_soft,
+            ),
+            ("mint_fg on mint_soft", theme.mint_fg, theme.mint_soft),
+            ("amber_fg on amber_soft", theme.amber_fg, theme.amber_soft),
+            (
+                "danger_fg on danger_soft",
+                theme.danger_fg,
+                theme.danger_soft,
+            ),
+            ("ink on bg_blush", theme.ink, theme.bg_blush),
+            ("ink_muted on bg_blush", theme.ink_muted, theme.bg_blush),
+            (
+                "ink_placeholder on bg_blush",
+                theme.ink_placeholder,
+                theme.bg_blush,
+            ),
+            ("ink on bg_user_msg", theme.ink, theme.bg_user_msg),
+            ("ink_muted on bg_milk", theme.ink_muted, theme.bg_milk),
+        ];
+        for (pair, fg, bg) in pairs {
+            let ratio = contrast_ratio(fg, bg);
+            assert!(ratio >= 4.5, "{pair} is {ratio:.2}:1, below 4.5:1");
+        }
+    }
+
+    #[test]
+    fn default_theme_stays_the_light_palette() {
+        assert_eq!(Theme::default(), Theme::strawberry_milk());
+        assert_eq!(for_os_appearance(false), Theme::strawberry_milk());
+        assert_eq!(for_os_appearance(true), Theme::midnight_berry());
     }
 }
 
