@@ -6,6 +6,10 @@
 //!   blocking verdicts.
 //! - `F20` (`Extension::Tool`): discovers plugin-declared tools via `ListTools`,
 //!   spawns them as ECS tools, and routes every call through `Stage::Gate`.
+mod hooks;
+
+pub(crate) use hooks::run_hooks;
+
 use super::{PluginServices, Providers};
 use crate::host::{
     client::device,
@@ -14,8 +18,8 @@ use crate::host::{
 };
 use bevy_ecs::prelude::*;
 use ene_plugin::{
-    CharacterAction, CharacterEvent, CharacterTarget, Event, Extension, HookDecision, HookEvent,
-    Operation, PluginToolDefinition, ToolInvokeRequest, ToolInvokeResult,
+    CharacterAction, CharacterEvent, CharacterTarget, Event, Extension, Operation,
+    PluginToolDefinition, ToolInvokeRequest, ToolInvokeResult,
 };
 use rig_core::{
     completion::ToolDefinition,
@@ -41,66 +45,6 @@ pub(crate) struct PluginTool {
 pub(crate) struct HookOutcome {
     pub(crate) blocked: Option<String>,
     pub(crate) injected_context: Vec<String>,
-}
-
-/// Runs all installed `Extension::Hook` plugins in sorted plugin-ID order (`F18`).
-pub(crate) async fn run_hooks(
-    providers: &Providers,
-    store: &Store,
-    event: HookEvent,
-) -> HookOutcome {
-    let mut outcome = HookOutcome::default();
-    for plugin_id in providers.with_extension(Extension::Hook) {
-        match invoke_hook_plugin(providers, store, &plugin_id, &event).await {
-            Some(HookDecision::Continue) | None => {}
-            Some(HookDecision::Block { reason }) => {
-                outcome.blocked = Some(if reason.trim().is_empty() {
-                    format!("blocked by hook plugin `{plugin_id}`")
-                } else {
-                    reason
-                });
-                return outcome;
-            }
-            Some(HookDecision::InjectContext { text }) => {
-                let trimmed = text.trim();
-                if !trimmed.is_empty() {
-                    outcome.injected_context.push(trimmed.to_owned());
-                }
-            }
-        }
-    }
-    outcome
-}
-
-async fn invoke_hook_plugin(
-    providers: &Providers,
-    store: &Store,
-    plugin_id: &str,
-    event: &HookEvent,
-) -> Option<HookDecision> {
-    let running = providers
-        .start(plugin_id, Extension::Hook)
-        .await
-        .map_err(|error| tracing::warn!(plugin = %plugin_id, %error, "hook plugin failed to start"))
-        .ok()?;
-    let services = PluginServices::new(plugin_id.to_owned(), store.clone());
-    let raw = running
-        .invoke(
-            Operation::Hook {
-                event: event.clone(),
-            },
-            services,
-        )
-        .await
-        .map_err(
-            |error| tracing::warn!(plugin = %plugin_id, %error, "hook plugin invocation failed"),
-        )
-        .ok()?;
-    serde_json::from_value::<HookDecision>(raw)
-        .map_err(|error| {
-            tracing::warn!(plugin = %plugin_id, %error, "hook plugin returned invalid decision")
-        })
-        .ok()
 }
 
 /// Dispatches one `CharacterEvent` to all installed `Extension::Character`
@@ -550,6 +494,7 @@ mod tests {
     use super::*;
     use crate::host::providers::{PLUGINS_DIR, Providers};
     use crate::host::tests::Harness;
+    use ene_plugin::HookEvent;
     use std::path::{Path, PathBuf};
 
     fn reference_wasm() -> PathBuf {
