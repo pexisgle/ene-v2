@@ -3,6 +3,7 @@
 
 mod bubble;
 mod controls;
+mod menu;
 mod onboarding;
 
 use crate::input::{self, Draft};
