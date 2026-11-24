@@ -1,13 +1,19 @@
-//! Event-stream multiplexing, audio/capture pumping, and notification handling for [`Session`].
+//! Event-stream multiplexing and notification handling for [`Session`].
+//!
+//! The audio and capture branches of the loop live in [`super::stream_audio`].
 
 use super::{
-    Binding, CAPTURE, LIP, Outcome, SAMPLE, Session, Step, commands::OperationError, persistent,
+    Binding, CAPTURE, LIP, Outcome, SAMPLE, Session, Step,
+    commands::OperationError,
+    stream_audio::{
+        AudioOutStream, MicRecvHalf, MicSendHalf, audio_message, handle_audio_frame,
+        handle_capture_tick, handle_mic_retry, handle_transcription_frame, open_audio_input_stream,
+        open_audio_output_stream, retry_wait, transcription_message,
+    },
 };
 use crate::{
-    audio::{self, Microphone, Player},
     host::Host,
     perception::Sensor,
-    state::Device,
     update::{Command, Update},
     work_tools,
 };
@@ -17,15 +23,6 @@ use std::time::Duration;
 type DeviceStream = connectrpc::client::ServerStream<
     <connectrpc::client::HttpClient as connectrpc::client::ClientTransport>::ResponseBody,
     w::__buffa::view::DeviceEventView<'static>,
->;
-type AudioOutStream = connectrpc::client::ServerStream<
-    <connectrpc::client::HttpClient as connectrpc::client::ClientTransport>::ResponseBody,
-    w::__buffa::view::AudioOutputEventView<'static>,
->;
-type MicSendHalf = connectrpc::client::BidiSendHalf<w::AudioInputChunk>;
-type MicRecvHalf = connectrpc::client::BidiRecvHalf<
-    <connectrpc::client::HttpClient as connectrpc::client::ClientTransport>::ResponseBody,
-    w::__buffa::view::TranscriptionEventView<'static>,
 >;
 type NotificationStream = connectrpc::client::ServerStream<
     <connectrpc::client::HttpClient as connectrpc::client::ClientTransport>::ResponseBody,
@@ -39,14 +36,14 @@ struct PeriodicTimers {
     observations: tokio::task::JoinSet<()>,
 }
 
-struct StreamLoopState {
+pub(super) struct StreamLoopState {
     device: DeviceStream,
     subscription: NotificationStream,
-    output: Option<AudioOutStream>,
-    mic_send: Option<MicSendHalf>,
-    mic_recv: Option<MicRecvHalf>,
-    mic_retry_at: Option<tokio::time::Instant>,
-    mic_error_reported: bool,
+    pub(super) output: Option<AudioOutStream>,
+    pub(super) mic_send: Option<MicSendHalf>,
+    pub(super) mic_recv: Option<MicRecvHalf>,
+    pub(super) mic_retry_at: Option<tokio::time::Instant>,
+    pub(super) mic_error_reported: bool,
     screen_at: tokio::time::Instant,
     eyes_open: bool,
     timers: PeriodicTimers,
@@ -98,14 +95,14 @@ impl Session {
                 None
             }
             frame = audio_message(&mut state.output) => {
-                self.handle_audio_frame(state, frame).await
+                handle_audio_frame(self, state, frame).await
             }
             frame = transcription_message(&mut state.mic_recv) => {
-                self.handle_transcription_frame(state, frame);
+                handle_transcription_frame(self, state, frame);
                 None
             }
             () = retry_wait(state.mic_retry_at) => {
-                self.handle_mic_retry(host, state).await;
+                handle_mic_retry(self, host, state).await;
                 None
             }
             tick = next_periodic_tick(&mut state.timers) => {
@@ -130,7 +127,7 @@ impl Session {
         tick: PeriodicTick,
     ) {
         match tick {
-            PeriodicTick::Capture => self.handle_capture_tick(state).await,
+            PeriodicTick::Capture => handle_capture_tick(self, state).await,
             PeriodicTick::Lip => {
                 if let Some(err_state) = self.devices.drain_renderer(&self.transport).await {
                     self.set_avatar(err_state).await;
@@ -171,8 +168,8 @@ impl Session {
         device: DeviceStream,
         subscription: NotificationStream,
     ) -> StreamLoopState {
-        let output = self.open_audio_output_stream(host).await;
-        let (mic_send, mic_recv) = self.open_audio_input_stream(host).await;
+        let output = open_audio_output_stream(self, host).await;
+        let (mic_send, mic_recv) = open_audio_input_stream(self, host).await;
         StreamLoopState {
             device,
             subscription,
@@ -189,52 +186,6 @@ impl Session {
                 lip: interval(LIP),
                 observations: tokio::task::JoinSet::new(),
             },
-        }
-    }
-
-    async fn open_audio_output_stream(&mut self, host: &Host) -> Option<AudioOutStream> {
-        if self.transport.bindings.is_empty() {
-            return None;
-        }
-        match host
-            .voice
-            .subscribe_audio_output(w::SubscribeAudioRequest {
-                client_id: self.transport.options.id.clone(),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(stream) => {
-                if let Some(player) = self.audio.player.as_mut() {
-                    player.reset_stream();
-                }
-                Some(stream)
-            }
-            Err(error) => {
-                tracing::info!("no audio output stream: {error}");
-                self.set_out(Device::Unavailable(error.to_string())).await;
-                None
-            }
-        }
-    }
-
-    async fn open_audio_input_stream(
-        &mut self,
-        host: &Host,
-    ) -> (Option<MicSendHalf>, Option<MicRecvHalf>) {
-        if self.transport.bindings.is_empty() {
-            return (None, None);
-        }
-        self.open_microphone().await;
-        match host.voice.stream_audio_input().await {
-            Ok(stream) => {
-                let (send, recv) = stream.into_split();
-                (Some(send), Some(recv))
-            }
-            Err(error) => {
-                tracing::info!("no microphone stream: {error}");
-                (None, None)
-            }
         }
     }
 
@@ -258,168 +209,6 @@ impl Session {
             Ok(None) => Some(Outcome::Dropped("the host closed the device stream".into())),
             Err(error) => Some(self.transport.classify(error)),
         }
-    }
-
-    async fn handle_audio_frame(
-        &mut self,
-        state: &mut StreamLoopState,
-        frame: Option<Result<w::audio_output_event::Event, connectrpc::ConnectError>>,
-    ) -> Option<Outcome> {
-        match frame {
-            Some(Ok(event)) => {
-                self.audio.play(event);
-                None
-            }
-            Some(Err(error)) => {
-                // A host without TTS answers `unimplemented` or
-                // `failed_precondition`; that is a client without audio,
-                // not a broken link.
-                if persistent(&error) {
-                    tracing::info!("the host has no audio output: {error}");
-                    self.set_out(Device::Unavailable(error.to_string())).await;
-                    state.output = None;
-                    None
-                } else {
-                    Some(self.transport.classify(error))
-                }
-            }
-            None => {
-                state.output = None;
-                None
-            }
-        }
-    }
-
-    fn handle_transcription_frame(
-        &mut self,
-        state: &mut StreamLoopState,
-        frame: Option<Result<w::TranscriptionEvent, connectrpc::ConnectError>>,
-    ) {
-        match frame {
-            Some(Ok(event)) => {
-                state.mic_error_reported = false;
-                super::notify_ui(
-                    &self.updates,
-                    Update::Transcription {
-                        text: event.text,
-                        is_final: event.is_final,
-                        is_speaking: event.is_speaking,
-                    },
-                );
-            }
-            Some(Err(error)) => {
-                super::notify_ui(
-                    &self.updates,
-                    Update::Transcription {
-                        text: String::new(),
-                        is_final: true,
-                        is_speaking: false,
-                    },
-                );
-                if persistent(&error) {
-                    tracing::info!("the host has no speech recognition: {error}");
-                    state.mic_retry_at = None;
-                } else {
-                    tracing::warn!("the transcription stream ended: {error}");
-                    if !state.mic_error_reported {
-                        state.mic_error_reported = true;
-                        super::notify_ui(
-                            &self.updates,
-                            Update::Failed {
-                                context: "音声認識",
-                                message: error.to_string(),
-                            },
-                        );
-                    }
-                    if !self.transport.bindings.is_empty() && self.audio.microphone.is_some() {
-                        state.mic_retry_at =
-                            Some(tokio::time::Instant::now() + Duration::from_secs(5));
-                    }
-                }
-                state.mic_recv = None;
-                state.mic_send = None;
-            }
-            None => {
-                super::notify_ui(
-                    &self.updates,
-                    Update::Transcription {
-                        text: String::new(),
-                        is_final: true,
-                        is_speaking: false,
-                    },
-                );
-                if !self.transport.bindings.is_empty() && self.audio.microphone.is_some() {
-                    state.mic_retry_at = Some(tokio::time::Instant::now() + Duration::from_secs(5));
-                }
-                state.mic_recv = None;
-                state.mic_send = None;
-            }
-        }
-    }
-
-    async fn handle_mic_retry(&mut self, host: &Host, state: &mut StreamLoopState) {
-        state.mic_retry_at = None;
-        if self.transport.bindings.is_empty() || state.mic_recv.is_some() {
-            return;
-        }
-        match host.voice.stream_audio_input().await {
-            Ok(stream) => {
-                let (send, recv) = stream.into_split();
-                state.mic_send = Some(send);
-                state.mic_recv = Some(recv);
-                state.mic_error_reported = false;
-            }
-            Err(error) => {
-                if !persistent(&error) {
-                    state.mic_retry_at =
-                        Some(tokio::time::Instant::now() + Duration::from_secs(10));
-                }
-            }
-        }
-    }
-
-    async fn handle_capture_tick(&mut self, state: &mut StreamLoopState) {
-        let speaking = self
-            .audio
-            .player
-            .as_ref()
-            .is_some_and(|player| player.playing() && !player.is_muted());
-        let far_end_level = self.audio.player.as_ref().map_or(0., Player::level);
-        let CaptureTick {
-            chunks,
-            state: capture_state,
-            barge_in,
-        } = capture_tick(
-            &mut self.audio.microphone,
-            !self.transport.bindings.is_empty(),
-            &self.transport.options.id,
-            speaking,
-            far_end_level,
-        );
-        if barge_in && let Some(player) = self.audio.player.as_mut() {
-            player.stop_current();
-            self.audio.speaking_companion = None;
-        }
-        let mut sent = 0;
-        if let Some(stream) = state.mic_send.as_mut() {
-            for chunk in chunks {
-                let bytes = chunk.pcm_data.len();
-                if let Err(error) = stream.send(chunk).await {
-                    tracing::info!("the microphone stream closed: {error}");
-                    state.mic_send = None;
-                    break;
-                }
-                sent += bytes;
-            }
-        }
-        super::notify_ui(
-            &self.updates,
-            Update::Capture {
-                level: capture_state.level,
-                open: capture_state.open,
-                sent,
-            },
-        );
     }
 
     async fn handle_subscription_frame(
@@ -659,120 +448,6 @@ fn interval(period: Duration) -> tokio::time::Interval {
     let mut interval = tokio::time::interval(period);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     interval
-}
-
-/// One frame from the audio stream. An absent stream parks this branch forever
-/// instead of returning at once, which would spin a core.
-async fn audio_message(
-    output: &mut Option<AudioOutStream>,
-) -> Option<Result<w::audio_output_event::Event, connectrpc::ConnectError>> {
-    let Some(stream) = output.as_mut() else {
-        return std::future::pending().await;
-    };
-    match stream.message().await {
-        Ok(Some(message)) => Some(
-            message
-                .to_owned_message()
-                .event
-                .ok_or_else(|| connectrpc::ConnectError::internal("an empty audio event")),
-        ),
-        Ok(None) => None,
-        Err(error) => Some(Err(error)),
-    }
-}
-
-/// One live transcription event from the bidirectional voice input stream.
-async fn transcription_message(
-    input: &mut Option<MicRecvHalf>,
-) -> Option<Result<w::TranscriptionEvent, connectrpc::ConnectError>> {
-    let Some(stream) = input.as_mut() else {
-        return std::future::pending().await;
-    };
-    match stream.message::<w::TranscriptionEvent>().await {
-        Ok(Some(message)) => Some(Ok(message.to_owned_message())),
-        Ok(None) => None,
-        Err(error) => Some(Err(error)),
-    }
-}
-
-async fn retry_wait(deadline: Option<tokio::time::Instant>) {
-    match deadline {
-        Some(at) => tokio::time::sleep_until(at).await,
-        None => std::future::pending().await,
-    }
-}
-
-/// What one capture tick produced, and what the settings probe displays.
-struct CaptureTick {
-    chunks: Vec<w::AudioInputChunk>,
-    state: CaptureState,
-    barge_in: bool,
-}
-
-#[derive(Clone, Copy, Default)]
-struct CaptureState {
-    level: f32,
-    open: bool,
-}
-
-/// Takes ordered PCM chunks and end markers from the microphone.
-fn capture_tick(
-    microphone: &mut Option<Microphone>,
-    active: bool,
-    client_id: &str,
-    speaking: bool,
-    far_end_level: f32,
-) -> CaptureTick {
-    let Some(microphone) = microphone.as_mut() else {
-        return CaptureTick {
-            chunks: Vec::new(),
-            state: CaptureState::default(),
-            barge_in: false,
-        };
-    };
-    // The level is read before the gate so the probe shows the microphone even
-    // while the gate is closed; that is the difference the test screen exists to
-    // make visible.
-    let level = microphone.level();
-    if !active {
-        return CaptureTick {
-            chunks: Vec::new(),
-            state: CaptureState { level, open: false },
-            barge_in: false,
-        };
-    }
-    let output = microphone.take(speaking, far_end_level);
-    let state = CaptureState {
-        level,
-        open: output.open,
-    };
-    let barge_in = output.barge_in;
-    let mut chunks: Vec<w::AudioInputChunk> = output
-        .chunks
-        .into_iter()
-        .enumerate()
-        .map(|(index, pcm_data)| w::AudioInputChunk {
-            client_id: client_id.to_owned(),
-            pcm_data,
-            sample_rate: audio::WIRE_RATE,
-            is_companion_speaking: speaking && !barge_in,
-            barge_in: barge_in && index == 0,
-            ..Default::default()
-        })
-        .collect();
-    if barge_in && chunks.is_empty() {
-        chunks.push(w::AudioInputChunk {
-            client_id: client_id.to_owned(),
-            sample_rate: audio::WIRE_RATE,
-            barge_in: true,
-            ..Default::default()
-        });
-    }
-    CaptureTick {
-        chunks,
-        state,
-        barge_in,
-    }
 }
 
 /// What one operation claims about the client it was sent to.

@@ -24,6 +24,7 @@ mod bridge;
 mod commands;
 mod phase;
 mod stream;
+mod stream_audio;
 mod transport;
 
 use self::{
