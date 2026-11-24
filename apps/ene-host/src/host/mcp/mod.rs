@@ -12,7 +12,9 @@
 //!
 //! A server that is disabled, deleted, re-configured or disconnected loses its
 //! tools: the connection closes and the tool entities despawn.
+mod failures;
 mod projection;
+mod settings;
 mod supervisor;
 
 pub(crate) use ene_work::mcp::{CheckState, is_npx_command};

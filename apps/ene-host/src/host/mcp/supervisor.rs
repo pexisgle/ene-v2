@@ -1,18 +1,16 @@
 //! MCP connection supervisor: settings/credential diffing, backoff, auth
 //! injection, stdio environment/cwd application, and background connection
 //! lifecycle management.
-use super::projection::{attach, project_servers, retire_one};
-use crate::host::{
-    db::Store,
-    model::Credentials,
-    providers::Providers,
-    resources::HostRuntime,
-    settings::{ConnectionConfig, ConnectionKind},
+use super::{
+    failures::{FailureKind, FailureReport, McpFailures, prune_failures, record_failure},
+    projection::{attach, project_servers, retire_one},
+    settings::{
+        McpSettings, ReloadOutcome, collect_retire_ids, prune_connecting, reload_desired_settings,
+    },
 };
+use crate::host::{db::Store, model::Credentials, resources::HostRuntime};
 use bevy_ecs::prelude::*;
-pub(super) use ene_work::mcp::{
-    CheckState, ConnectFailure, Desired, Launch, backoff_delay, is_config_error_message,
-};
+pub(super) use ene_work::mcp::{CheckState, ConnectFailure, Desired, Launch};
 use rig_agent::tool::server::{ToolServer, ToolServerHandle};
 use rig_ecs::prelude::*;
 use rig_rmcp::McpConnection;
@@ -49,26 +47,6 @@ pub(super) struct Pending {
     pub(super) _task: AbortOnDropHandle<()>,
 }
 
-pub(super) enum FailureKind {
-    Transient {
-        attempts: u32,
-        next_retry: Instant,
-        _wake_timer: Option<AbortOnDropHandle<()>>,
-    },
-    ConfigHold,
-}
-
-pub(super) struct FailureState {
-    pub(super) revision: u64,
-    pub(super) credential_generation: Option<u64>,
-    pub(super) reason: String,
-    pub(super) kind: FailureKind,
-}
-
-/// Backoff and configuration-hold tracking per failing MCP connection.
-#[derive(Default)]
-pub(super) struct McpFailures(pub(super) HashMap<String, FailureState>);
-
 pub(super) enum Event {
     Connected {
         id: String,
@@ -97,13 +75,6 @@ impl Default for EventChannel {
     }
 }
 
-#[derive(Default)]
-pub(super) struct McpSettings {
-    pub(super) revision: Option<u64>,
-    pub(super) credential_generation: Option<u64>,
-    pub(super) desired: Vec<(String, Desired)>,
-}
-
 /// Everything the MCP supervisor owns between frames.
 ///
 /// This is the single ECS resource the MCP layer declares: the server map, the
@@ -126,47 +97,6 @@ impl McpSupervisor {
     pub(super) fn sender(&self) -> mpsc::Sender<Event> {
         self.events.sender.clone()
     }
-}
-
-fn desired(
-    store: &Store,
-    credentials: Option<&Credentials>,
-    credential_generation: Option<u64>,
-) -> crate::host::db::Result<Vec<(String, Desired)>> {
-    let settings = store.settings_repo().settings()?;
-    let no_providers = Providers::none();
-    Ok(settings
-        .connections
-        .iter()
-        .filter(|connection| connection.enabled && connection.kind == ConnectionKind::Mcp)
-        .filter_map(|connection| {
-            let ConnectionConfig::Mcp(config) = &connection.config else {
-                return None;
-            };
-            let secret =
-                crate::host::model::connection_secret(connection, credentials, &no_providers)
-                    .ok()
-                    .flatten();
-            Some((
-                connection.id.clone(),
-                Desired {
-                    revision: connection.revision,
-                    credential_generation,
-                    name: connection.name.clone(),
-                    command: config.command.trim().to_owned(),
-                    args: config.args.clone(),
-                    cwd: config.cwd.trim().to_owned(),
-                    env: config.env.clone(),
-                    headers: config.headers.clone(),
-                    auth_header: config.auth_header.trim().to_owned(),
-                    secret_env_var: config.secret_env_var.trim().to_owned(),
-                    endpoint: config.endpoint.endpoint.trim().to_owned(),
-                    secret,
-                    allowed: config.allowed_tools.clone(),
-                },
-            ))
-        })
-        .collect())
 }
 
 /// Connects what the settings ask for, retires what they no longer do, and
@@ -259,84 +189,6 @@ fn handle_closing_servers(world: &mut World, supervisor: &mut McpSupervisor) {
             }
         }
     }
-}
-
-enum ReloadOutcome {
-    Ready,
-    Skip,
-    Fail(String),
-}
-
-fn reload_desired_settings(
-    settings: &mut McpSettings,
-    store: &Store,
-    credentials: Option<&Credentials>,
-    revision: u64,
-) -> ReloadOutcome {
-    let credential_generation = credentials.map(Credentials::generation);
-    let needs_reload = settings.revision != Some(revision)
-        || settings.credential_generation != credential_generation;
-    if !needs_reload {
-        return ReloadOutcome::Ready;
-    }
-    let desired = match desired(store, credentials, credential_generation) {
-        Ok(desired) => desired,
-        Err(error) => {
-            return if error.is_storage() {
-                ReloadOutcome::Fail(error.to_string())
-            } else {
-                ReloadOutcome::Skip
-            };
-        }
-    };
-    *settings = McpSettings {
-        revision: Some(revision),
-        credential_generation,
-        desired,
-    };
-    ReloadOutcome::Ready
-}
-
-fn prune_connecting(connecting: &mut Connecting, wanted: &[(String, Desired)]) {
-    // Cancel pending connect tasks whose revision or credentials changed.
-    connecting.0.retain(|id, pending| {
-        wanted.iter().any(|(wanted, want)| {
-            wanted == id
-                && want.revision == pending.launch.revision
-                && want.credential_generation == pending.launch.credential_generation
-        })
-    });
-}
-
-fn prune_failures(failures: &mut McpFailures, wanted: &[(String, Desired)]) {
-    // Clear failure holds/backoffs when connection config or credentials changed, or connection left wanted.
-    failures.0.retain(|id, failure| {
-        wanted.iter().any(|(wanted, want)| {
-            wanted == id
-                && want.revision == failure.revision
-                && want.credential_generation == failure.credential_generation
-        })
-    });
-}
-
-fn collect_retire_ids(servers: &McpServers, wanted: &[(String, Desired)]) -> Vec<String> {
-    let wanted_ids: HashSet<&str> = wanted.iter().map(|(id, _)| id.as_str()).collect();
-    servers
-        .0
-        .iter()
-        .filter(|(id, server)| {
-            server.connection.is_closed()
-                || !wanted_ids.contains(id.as_str())
-                || wanted
-                    .iter()
-                    .find(|(wanted, _)| wanted == *id)
-                    .is_some_and(|(_, want)| {
-                        want.revision != server.launch.revision
-                            || want.credential_generation != server.launch.credential_generation
-                    })
-        })
-        .map(|(id, _)| id.clone())
-        .collect()
 }
 
 fn plan_connect_targets(
@@ -499,87 +351,6 @@ pub(super) fn accept_event(
     }
 }
 
-struct FailureReport {
-    id: String,
-    launch: Launch,
-    reason: String,
-    config_error: bool,
-}
-
-/// Spreads a retry delay over the second half of its window.
-///
-/// Several MCP servers retry inside one host process on timers that start at
-/// the same moment, so a host restart makes them all come back together.
-/// Jitter is applied here, where the delay is scheduled, rather than inside
-/// `backoff_delay`, which stays a pure function a test can assert exactly.
-fn with_jitter(delay: std::time::Duration) -> std::time::Duration {
-    let window = delay.as_millis() as u64 / 2;
-    if window == 0 {
-        return delay;
-    }
-    let mut bytes = [0u8; 8];
-    // A failed entropy read falls back to no jitter: a slightly synchronised
-    // retry is not worth failing a reconnect over.
-    if getrandom::fill(&mut bytes).is_err() {
-        return delay;
-    }
-    let offset = u64::from_le_bytes(bytes) % window;
-    delay - std::time::Duration::from_millis(offset)
-}
-
-fn record_failure(
-    failures: &mut McpFailures,
-    report: FailureReport,
-    wake: Option<Wake>,
-    runtime: &tokio::runtime::Handle,
-) {
-    let FailureReport {
-        id,
-        launch,
-        reason,
-        config_error,
-    } = report;
-    let kind = if config_error || is_config_error_message(&reason) {
-        FailureKind::ConfigHold
-    } else {
-        let prev_attempts = match failures.0.get(&id) {
-            Some(prev)
-                if prev.revision == launch.revision
-                    && prev.credential_generation == launch.credential_generation =>
-            {
-                match prev.kind {
-                    FailureKind::Transient { attempts, .. } => attempts,
-                    FailureKind::ConfigHold => 0,
-                }
-            }
-            _ => 0,
-        };
-        let attempts = prev_attempts.saturating_add(1);
-        let delay = with_jitter(backoff_delay(attempts));
-        let next_retry = Instant::now() + delay;
-        let wake_timer = wake.map(|wake| {
-            AbortOnDropHandle::new(runtime.spawn(async move {
-                tokio::time::sleep(delay).await;
-                wake.wake();
-            }))
-        });
-        FailureKind::Transient {
-            attempts,
-            next_retry,
-            _wake_timer: wake_timer,
-        }
-    };
-    failures.0.insert(
-        id,
-        FailureState {
-            revision: launch.revision,
-            credential_generation: launch.credential_generation,
-            reason,
-            kind,
-        },
-    );
-}
-
 fn drain(events: &mut EventChannel) -> Vec<Event> {
     let mut out = Vec::new();
     while let Ok(event) = events.receiver.try_recv() {
@@ -661,38 +432,4 @@ fn check_state_from(ctx: &CheckContext<'_>, id: &str, revision: u64) -> CheckSta
         return CheckState::Failed(failure.reason.clone());
     }
     CheckState::Connecting
-}
-
-#[cfg(test)]
-mod jitter_tests {
-    use super::with_jitter;
-    use std::time::Duration;
-
-    /// Jitter must never extend a retry, and must stay inside the second half
-    /// of the window, so a delay of 32s lands somewhere in 16..=32s.
-    #[test]
-    fn jitter_stays_inside_the_lower_half_of_the_window() {
-        let delay = Duration::from_secs(32);
-        let floor = delay - Duration::from_secs(16);
-        for _ in 0..200 {
-            let jittered = with_jitter(delay);
-            assert!(
-                jittered <= delay,
-                "jitter must not extend the delay: {jittered:?} > {delay:?}"
-            );
-            assert!(
-                jittered >= floor,
-                "jitter must stay in the lower half: {jittered:?} < {floor:?}"
-            );
-        }
-    }
-
-    /// A delay too short to have a half-millisecond window is returned as-is
-    /// rather than divided down to zero.
-    #[test]
-    fn a_sub_millisecond_delay_is_unchanged() {
-        let delay = Duration::from_micros(500);
-        assert_eq!(with_jitter(delay), delay);
-        assert_eq!(with_jitter(Duration::ZERO), Duration::ZERO);
-    }
 }
