@@ -204,5 +204,3 @@ fn encode_tooltip(text: &str) -> [u16; 128] {
 
 #[cfg(windows)]
 mod windows_tray;
-#[cfg(windows)]
-use windows_tray::*;
