@@ -270,8 +270,7 @@ fn add_stt_preset_with_spec(hub: &mut Hub, spec: SttPresetSpec<'_>, cx: &mut Con
         let connections = hub
             .model
             .settings()
-            .map(|s| s.connections.as_slice())
-            .unwrap_or(&[]);
+            .map_or(&[][..], |s| s.connections.as_slice());
         build_stt_preset_input(connections, spec)
     };
     hub.upsert_connection("音声認識（STT）接続の追加", input, cx);
@@ -282,8 +281,7 @@ pub(super) fn add_sakura_tts_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
         let connections = hub
             .model
             .settings()
-            .map(|s| s.connections.as_slice())
-            .unwrap_or(&[]);
+            .map_or(&[][..], |s| s.connections.as_slice());
         build_sakura_tts_preset_input(connections)
     };
     hub.upsert_connection("さくらのAI Engine TTS接続の追加", input, cx);
@@ -346,8 +344,7 @@ fn add_embedding_preset(hub: &mut Hub, spec: EmbeddingPresetSpec<'_>, cx: &mut C
         let connections = hub
             .model
             .settings()
-            .map(|s| s.connections.as_slice())
-            .unwrap_or(&[]);
+            .map_or(&[][..], |s| s.connections.as_slice());
         build_embedding_preset_input(connections, spec)
     };
     hub.upsert_connection("埋め込み（Embedding）接続の追加", input, cx);

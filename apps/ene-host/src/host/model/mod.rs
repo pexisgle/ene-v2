@@ -492,8 +492,7 @@ pub(crate) fn models(connection: &Connection, catalog: &Catalog) -> Vec<(String,
     let resources = connection
         .last_check
         .as_ref()
-        .map(|check| check.resources.as_slice())
-        .unwrap_or(&[]);
+        .map_or(&[][..], |check| check.resources.as_slice());
 
     let mut ordered = Vec::new();
     fn push_unique_id(ordered: &mut Vec<String>, id: &str) {

@@ -33,6 +33,10 @@ multiple_unsafe_ops_per_block = "deny"
 # Surfaces discarded `#[must_use]` values that `let _ = ...` hides.
 # Every site now names its discard, so this is a hard error.
 let_underscore_must_use = "deny"
+# `pedantic` lints the workspace now satisfies everywhere, promoted out of the
+# group so a new site fails the build instead of waiting for another sweep.
+map_unwrap_or = "warn"
+assert_is_empty = "warn"
 
 [workspace.dependencies]
 ene-rpc = { path = "crates/ene-rpc" }
