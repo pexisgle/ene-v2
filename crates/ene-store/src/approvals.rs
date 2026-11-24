@@ -166,7 +166,7 @@ mod tests {
         assert!(resolved.resolved_at.is_some());
         assert!(repo.resolve_approval("a1", ApprovalStatus::Denied).is_err());
         assert_eq!(repo.expire_pending_approvals().unwrap(), 2);
-        assert!(repo.approvals(ApprovalStatus::Pending).unwrap().is_empty());
+        assert_eq!(repo.approvals(ApprovalStatus::Pending).unwrap().len(), 0);
         assert_eq!(repo.approvals(ApprovalStatus::Expired).unwrap().len(), 2);
     }
 }

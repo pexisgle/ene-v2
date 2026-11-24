@@ -253,7 +253,7 @@ mod tests {
         assert!(!repo.plugin_entries().unwrap()[0].enabled);
 
         assert!(repo.remove_plugin_entry("demo-tool").unwrap().is_some());
-        assert!(repo.plugin_entries().unwrap().is_empty());
+        assert_eq!(repo.plugin_entries().unwrap().len(), 0);
         assert_eq!(
             repo.plugin_config("demo-tool").unwrap(),
             serde_json::json!({})

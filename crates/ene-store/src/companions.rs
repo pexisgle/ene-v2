@@ -244,13 +244,13 @@ mod tests {
         assert_eq!(seeded.name, "ene");
         assert_eq!(seeded.body.schema, "ene.body.v1");
         assert_eq!(seeded.body.json["model"], "ENE.vrm");
-        assert!(!seeded.profile.facets.is_empty());
-        assert!(!seeded.profile.examples.is_empty());
+        assert_ne!(seeded.profile.facets.len(), 0);
+        assert_ne!(seeded.profile.examples.len(), 0);
 
         assert!(!repo.seed_initial_companion().unwrap());
         assert!(repo.delete_companion("ene").unwrap());
         assert!(!repo.seed_initial_companion().unwrap());
-        assert!(repo.companions().unwrap().is_empty());
+        assert_eq!(repo.companions().unwrap().len(), 0);
     }
 
     #[test]

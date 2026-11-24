@@ -189,7 +189,7 @@ fn hybrid_recall_fuses_and_forgetting_excludes_auto_but_keeps_explicit() {
     repo.control_memory(&lexical.id, MemoryActionKind::Forget, "ene")
         .unwrap();
     assert_eq!(repo.memory(&lexical.id).unwrap().unwrap().importance, 0);
-    assert!(
+    assert_eq!(
         repo.recall_hybrid(
             "ene",
             "紅茶",
@@ -199,7 +199,8 @@ fn hybrid_recall_fuses_and_forgetting_excludes_auto_but_keeps_explicit() {
         )
         .unwrap()
         .items
-        .is_empty()
+        .len(),
+        0
     );
     assert_eq!(
         repo.recall_hybrid("ene", "紅茶", RecallMode::Explicit, &[], 4)
@@ -344,7 +345,7 @@ fn another_companions_scope_is_private_and_sharing_moves_the_row_to_the_pool() {
             8,
         )
         .unwrap();
-    assert!(private.items.is_empty());
+    assert_eq!(private.items.len(), 0);
     let shared = repo
         .control_memory(&other.id, MemoryActionKind::Share, "other")
         .unwrap();
@@ -372,11 +373,12 @@ fn another_companions_scope_is_private_and_sharing_moves_the_row_to_the_pool() {
         .unwrap();
     assert_eq!(unshared.scope, "other");
     assert_eq!(unshared.memory_revision, 3);
-    assert!(
+    assert_eq!(
         repo.recall_hybrid("ene", "secret", RecallMode::Explicit, &[], 8)
             .unwrap()
             .items
-            .is_empty()
+            .len(),
+        0
     );
 }
 
@@ -388,7 +390,7 @@ fn a_shared_pinned_memory_is_injected_for_every_companion() {
         .insert_memory(new_memory("the user's name is A", 10))
         .unwrap();
     assert_eq!(repo.pinned("ene").unwrap().len(), 1);
-    assert!(repo.pinned("other").unwrap().is_empty());
+    assert_eq!(repo.pinned("other").unwrap().len(), 0);
     repo.control_memory(&memory.id, MemoryActionKind::Share, "ene")
         .unwrap();
     assert_eq!(repo.pinned("ene").unwrap().len(), 1);

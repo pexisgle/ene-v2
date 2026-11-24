@@ -165,8 +165,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
         let repo = store.policy_repo();
-        assert!(repo.policy_rules().unwrap().is_empty());
-        assert!(repo.policy_texts().unwrap().is_empty());
+        assert_eq!(repo.policy_rules().unwrap().len(), 0);
+        assert_eq!(repo.policy_texts().unwrap().len(), 0);
 
         let rule = PolicyRule {
             id: "r1".into(),
@@ -208,8 +208,8 @@ mod tests {
         let removed = repo
             .apply_policy_texts(&[], std::slice::from_ref(&rewritten.id))
             .unwrap();
-        assert!(removed.is_empty());
-        assert!(repo.policy_texts().unwrap().is_empty());
+        assert_eq!(removed.len(), 0);
+        assert_eq!(repo.policy_texts().unwrap().len(), 0);
 
         for invalid in ["", "   ", &"x".repeat(MAX_POLICY_TEXT_CHARS + 1)] {
             let error = repo

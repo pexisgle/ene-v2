@@ -183,6 +183,6 @@ mod tests {
             Some("1. check".into())
         );
         assert!(repo.read_skill("other", "release-check").unwrap().is_none());
-        assert!(repo.list_skills("other").unwrap().is_empty());
+        assert_eq!(repo.list_skills("other").unwrap().len(), 0);
     }
 }

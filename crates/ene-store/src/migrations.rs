@@ -269,8 +269,8 @@ mod tests {
             "every version above the baseline needs a step and an audit name"
         );
         for (name, sql) in STEPS_ABOVE_BASELINE {
-            assert!(!name.trim().is_empty());
-            assert!(!sql.trim().is_empty());
+            assert_ne!(name.trim().len(), 0);
+            assert_ne!(sql.trim().len(), 0);
         }
     }
 

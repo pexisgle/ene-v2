@@ -284,17 +284,16 @@ fn firing_a_row_advances_or_disables_it() {
     assert!(enabled, "a repeating row stays enabled");
     assert_eq!(last.as_deref(), Some("2026-11-14T00:00:00Z"));
     assert_eq!(next.as_deref(), Some("2026-11-15T00:00:00Z"));
-    assert!(repo.due_schedules(fired_at).unwrap().is_empty());
+    assert_eq!(repo.due_schedules(fired_at).unwrap().len(), 0);
     assert_eq!(
         repo.due_schedules(utc(2026, 11, 15, 0, 0)).unwrap().len(),
         1
     );
 
     assert!(repo.cancel_schedule("ene", &repeating.id).unwrap());
-    assert!(
-        repo.due_schedules(utc(2026, 11, 16, 0, 0))
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        repo.due_schedules(utc(2026, 11, 16, 0, 0)).unwrap().len(),
+        0
     );
 }
 
