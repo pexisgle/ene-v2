@@ -25,7 +25,7 @@ MAX_DOMAIN_RPC_DEPS = 0
 # Rule 8: production `unsafe` occurrences under apps/ene-desktop.
 MAX_DESKTOP_UNSAFE = 0
 # Rule 9: production files longer than PROD_FILE_LINE_LIMIT.
-MAX_LONG_PROD_FILES = 19
+MAX_LONG_PROD_FILES = 18
 # Rule 10: production `#[derive(Resource)]` items under the RPC transport layer.
 MAX_RPC_ECS_RESOURCES = 0
 # Rule 11: production `block_on`/`block_in_place` sites. A ratchet rather than
