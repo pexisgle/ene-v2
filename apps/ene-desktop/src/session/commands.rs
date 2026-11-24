@@ -1,18 +1,71 @@
-//! UI command execution and capability operation dispatch for [`Session`].
+//! Capability operation dispatch for [`Session`].
+//!
+//! The window-command handlers live in [`super::window_commands`].
 
+use super::Session;
 use super::stream::{AdmitError, Claim, admits};
-use super::{MotionPlan, MotionPlanError, Session, Step};
 #[cfg(windows)]
 use crate::avatar::Avatar;
 use crate::{
-    avatar,
+    avatar, capabilities,
     host::Host,
-    perception::{Sensor, Watch, WatchParseError},
-    update::{Command, Update},
+    perception::{Watch, WatchParseError},
 };
 use buffa::view::MessageView;
 use ene_rpc as w;
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
+
+/// One validated `body.motion` request, before anything is sent anywhere.
+#[derive(Debug, PartialEq)]
+pub(super) struct MotionPlan {
+    pub(super) motion: String,
+    /// The clip to show. `idle` can fall back to the rest pose.
+    pub(super) clip: Option<std::path::PathBuf>,
+    /// The face to hold, `neutral` to clear it, or nothing to leave it alone.
+    pub(super) expression: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum MotionPlanError {
+    #[error("body.motion requires a `motion` name")]
+    MissingMotion,
+    #[error("`{0}` is not a declared motion preset")]
+    UnknownPreset(String),
+    #[error("`{0}` is not a declared expression")]
+    UnknownExpression(String),
+    #[error("the motion asset for `{0}` is not installed, so nothing was shown")]
+    MissingMotionAsset(String),
+}
+
+impl MotionPlan {
+    pub(super) fn parse(input: &serde_json::Value) -> Result<Self, MotionPlanError> {
+        let motion = input
+            .get("motion")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(MotionPlanError::MissingMotion)?;
+        if !avatar::MOTIONS.iter().any(|(preset, _)| *preset == motion) {
+            return Err(MotionPlanError::UnknownPreset(motion.to_owned()));
+        }
+        let expression = input
+            .get("expression")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        if let Some(name) = &expression
+            && !capabilities::EXPRESSIONS.contains(&name.as_str())
+        {
+            return Err(MotionPlanError::UnknownExpression(name.clone()));
+        }
+        let clip = avatar::motion(motion);
+        if clip.is_none() && motion != "idle" {
+            return Err(MotionPlanError::MissingMotionAsset(motion.to_owned()));
+        }
+        Ok(Self {
+            motion: motion.to_owned(),
+            clip,
+            expression,
+        })
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum OperationError {
@@ -427,253 +480,5 @@ impl Session {
             .sensor
             .apply(if enabled { Some(watch) } else { None });
         Ok(serde_json::json!({"applied": true, "enabled": enabled}))
-    }
-
-    /// Handles one window command.
-    pub(super) async fn command(&mut self, host: &Host, command: Command) -> Step {
-        match command {
-            Command::Serve(companion_id) => self.cmd_serve(host, companion_id).await,
-            Command::ActivateCompanion(companion_id) => {
-                self.cmd_activate_companion(host, companion_id).await
-            }
-            Command::ReleaseCompanion(companion_id) => {
-                self.cmd_release_companion(host, companion_id).await
-            }
-            Command::StopPlayback => {
-                self.audio.stop_playback();
-                Step::Continue
-            }
-            Command::Refresh => {
-                self.transport.sync_capabilities(host, &self.devices).await;
-                Step::Continue
-            }
-            Command::SetEyesEnabled(enabled) => {
-                self.devices.set_eyes_enabled(enabled, &self.updates);
-                self.transport.sync_capabilities(host, &self.devices).await;
-                Step::Continue
-            }
-            #[cfg(windows)]
-            Command::SetComputerUseEnabled(enabled) => {
-                self.devices
-                    .set_computer_use_enabled(enabled, &self.updates);
-                self.transport.sync_capabilities(host, &self.devices).await;
-                Step::Continue
-            }
-            Command::SetMicMuted(muted) => {
-                self.audio.set_mic_muted(muted, &self.updates);
-                Step::Continue
-            }
-            Command::SetCaptureMode(mode) => {
-                self.audio.set_capture_mode(mode, &self.updates);
-                Step::Continue
-            }
-            Command::PttStart | Command::PttCommit | Command::PttCancel => {
-                self.audio.handle_ptt(command, &self.updates);
-                Step::Continue
-            }
-            Command::SetOutputMuted(muted) => {
-                self.audio.set_output_muted(muted, &self.updates);
-                Step::Continue
-            }
-            Command::SetAvatarScale(scale) => self.cmd_set_avatar_scale(scale).await,
-            Command::Speak { companion_id, text } => {
-                self.cmd_speak(host, companion_id, text);
-                Step::Continue
-            }
-            Command::CenterAvatar => {
-                self.cmd_center_avatar().await;
-                Step::Continue
-            }
-            Command::Quit => Step::Stop,
-        }
-    }
-
-    async fn cmd_serve(&mut self, host: &Host, companion_id: String) -> Step {
-        let was_empty = self.transport.bindings.is_empty();
-        self.transport.focused = Some(companion_id.clone());
-        if !self.transport.bindings.contains_key(&companion_id) {
-            match self.transport.activate_one(host, &companion_id).await {
-                Ok(binding) => {
-                    self.transport.bindings.insert(companion_id, binding);
-                    self.transport.may_activate = false;
-                    self.sync_avatars().await;
-                    if was_empty {
-                        return Step::Restart;
-                    }
-                }
-                Err(error) => {
-                    super::notify_ui(
-                        &self.updates,
-                        Update::Failed {
-                            context: "コンパニオンの有効化",
-                            message: error.to_string(),
-                        },
-                    );
-                }
-            }
-        }
-        Step::Continue
-    }
-
-    async fn cmd_activate_companion(&mut self, host: &Host, companion_id: String) -> Step {
-        let was_empty = self.transport.bindings.is_empty();
-        if !self.transport.bindings.contains_key(&companion_id) {
-            match self.transport.activate_one(host, &companion_id).await {
-                Ok(binding) => {
-                    self.transport
-                        .bindings
-                        .insert(companion_id.clone(), binding);
-                    if self.transport.focused.is_none() {
-                        self.transport.focused = Some(companion_id);
-                    }
-                    self.transport.may_activate = false;
-                    self.sync_avatars().await;
-                    if was_empty {
-                        return Step::Restart;
-                    }
-                }
-                Err(error) => {
-                    super::notify_ui(
-                        &self.updates,
-                        Update::Failed {
-                            context: "コンパニオンの常駐",
-                            message: error.to_string(),
-                        },
-                    );
-                }
-            }
-        }
-        Step::Continue
-    }
-
-    async fn cmd_release_companion(&mut self, host: &Host, companion_id: String) -> Step {
-        if let Err(error) = self.transport.release_one(host, &companion_id).await {
-            super::notify_ui(
-                &self.updates,
-                Update::Failed {
-                    context: "コンパニオンの常駐解除",
-                    message: error.to_string(),
-                },
-            );
-            return Step::Continue;
-        }
-        self.transport.bindings.remove(&companion_id);
-        self.audio.clear_speaking_if(&companion_id);
-        if self.transport.focused.as_deref() == Some(companion_id.as_str()) {
-            self.transport.focused = self.transport.bindings.keys().next().cloned();
-        }
-        self.sync_avatars().await;
-        if self.transport.bindings.is_empty() {
-            self.devices.sensor = Sensor::default();
-            Step::Restart
-        } else {
-            Step::Continue
-        }
-    }
-
-    async fn cmd_set_avatar_scale(&mut self, scale: f32) -> Step {
-        let scale = scale.clamp(50., 200.);
-        self.devices.avatar_scale = scale;
-        let target_ids: Vec<String> = self
-            .transport
-            .focused_companion_id()
-            .map(|id| vec![id.to_owned()])
-            .unwrap_or_else(|| self.transport.bindings.keys().cloned().collect());
-        if target_ids.is_empty() || self.devices.avatar.is_none() {
-            super::notify_ui(
-                &self.updates,
-                Update::Failed {
-                    context: "アバターのサイズ変更",
-                    message: "アバター描画プロセスまたはコンパニオンが設定されていません".into(),
-                },
-            );
-            return Step::Continue;
-        }
-        let models: Vec<(String, Option<PathBuf>)> = target_ids
-            .into_iter()
-            .map(|id| {
-                let model = self.transport.model_for(&id);
-                (id, model)
-            })
-            .collect();
-        let mut updated = false;
-        let mut last_err = None;
-        if let Some(avatar) = self.devices.avatar.as_mut() {
-            for (id, model) in models {
-                if let Some(model) = model {
-                    match avatar.set_scale(&id, &model, scale).await {
-                        Ok(()) => updated = true,
-                        Err(error) => last_err = Some(error),
-                    }
-                }
-            }
-        }
-        if let Some(error) = last_err
-            && !updated
-        {
-            super::notify_ui(
-                &self.updates,
-                Update::Failed {
-                    context: "アバターのサイズ変更",
-                    message: error.to_string(),
-                },
-            );
-        } else if updated {
-            super::notify_ui(&self.updates, Update::AvatarScaleChanged(scale));
-            self.report_devices().await;
-        }
-        Step::Continue
-    }
-
-    fn cmd_speak(&self, host: &Host, companion_id: Option<String>, text: String) {
-        let host = host.clone();
-        let updates = self.updates.clone();
-        let client_id = self.transport.options.id.clone();
-        // Synthesis is a network call; awaiting it here would stall the
-        // microphone and the playback this loop owns.
-        let Ok(mut background) = self.devices.background.lock() else {
-            return;
-        };
-        background.spawn(async move {
-            let update = match host
-                .voice
-                .speak(w::SpeakRequest {
-                    client_id,
-                    text,
-                    companion_id,
-                    ..Default::default()
-                })
-                .await
-            {
-                Ok(_) => Update::Spoke,
-                Err(error) => Update::SpokeFailed {
-                    message: error.to_string(),
-                },
-            };
-            super::notify_ui(&updates, update);
-        });
-    }
-
-    async fn cmd_center_avatar(&mut self) {
-        let target = self.transport.focused_companion_id().map(str::to_owned);
-        if let (Some(avatar), Some(target)) = (self.devices.avatar.as_mut(), target) {
-            if let Err(error) = avatar.center(&target).await {
-                super::notify_ui(
-                    &self.updates,
-                    Update::Failed {
-                        context: "アバターの中央移動",
-                        message: error.to_string(),
-                    },
-                );
-            }
-        } else {
-            super::notify_ui(
-                &self.updates,
-                Update::Failed {
-                    context: "アバターの中央移動",
-                    message: "アバター描画プロセスが起動していません".into(),
-                },
-            );
-        }
     }
 }

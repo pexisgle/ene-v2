@@ -245,7 +245,7 @@ impl Session {
                 .await;
             }
         }
-        match self.command(host, command).await {
+        match super::window_commands::command(self, host, command).await {
             Step::Continue => None,
             Step::Restart => Some(Outcome::Resync("the session settings changed".into())),
             Step::Stop => Some(Outcome::Closed),

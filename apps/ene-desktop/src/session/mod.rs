@@ -26,13 +26,14 @@ mod phase;
 mod stream;
 mod stream_audio;
 mod transport;
+mod window_commands;
 
 use self::{
     audio_pipeline::AudioPipeline, bridge::DeviceBridge, phase::ConnectionPhase,
     transport::SessionTransport,
 };
 use crate::{
-    avatar, capabilities,
+    avatar,
     host::{Connect, Discovery, Host},
     perception::Sensor,
     state::{Device, Devices, Link},
@@ -167,58 +168,6 @@ impl std::fmt::Debug for Session {
             .field("focused", &self.transport.focused)
             .field("subscription", &self.transport.subscription)
             .finish_non_exhaustive()
-    }
-}
-
-/// One validated `body.motion` request, before anything is sent anywhere.
-#[derive(Debug, PartialEq)]
-pub(super) struct MotionPlan {
-    pub(super) motion: String,
-    /// The clip to show. `idle` can fall back to the rest pose.
-    pub(super) clip: Option<std::path::PathBuf>,
-    /// The face to hold, `neutral` to clear it, or nothing to leave it alone.
-    pub(super) expression: Option<String>,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(super) enum MotionPlanError {
-    #[error("body.motion requires a `motion` name")]
-    MissingMotion,
-    #[error("`{0}` is not a declared motion preset")]
-    UnknownPreset(String),
-    #[error("`{0}` is not a declared expression")]
-    UnknownExpression(String),
-    #[error("the motion asset for `{0}` is not installed, so nothing was shown")]
-    MissingMotionAsset(String),
-}
-
-impl MotionPlan {
-    pub(super) fn parse(input: &serde_json::Value) -> Result<Self, MotionPlanError> {
-        let motion = input
-            .get("motion")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(MotionPlanError::MissingMotion)?;
-        if !avatar::MOTIONS.iter().any(|(preset, _)| *preset == motion) {
-            return Err(MotionPlanError::UnknownPreset(motion.to_owned()));
-        }
-        let expression = input
-            .get("expression")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
-        if let Some(name) = &expression
-            && !capabilities::EXPRESSIONS.contains(&name.as_str())
-        {
-            return Err(MotionPlanError::UnknownExpression(name.clone()));
-        }
-        let clip = avatar::motion(motion);
-        if clip.is_none() && motion != "idle" {
-            return Err(MotionPlanError::MissingMotionAsset(motion.to_owned()));
-        }
-        Ok(Self {
-            motion: motion.to_owned(),
-            clip,
-            expression,
-        })
     }
 }
 
@@ -500,6 +449,7 @@ pub(super) fn persistent(error: &connectrpc::ConnectError) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::commands::MotionPlan;
     use super::stream::{Claim, admits};
     use super::*;
 
