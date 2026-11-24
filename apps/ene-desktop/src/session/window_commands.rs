@@ -4,8 +4,8 @@
 //! spans three inherent `impl` files; each takes the session it acts on.
 
 use super::{Session, Step};
-use crate::{host::Host, perception::Sensor, update::Command};
 use crate::update::Update;
+use crate::{host::Host, perception::Sensor, update::Command};
 use ene_rpc as w;
 use std::path::PathBuf;
 
@@ -31,9 +31,7 @@ pub(super) async fn command(session: &mut Session, host: &Host, command: Command
             Step::Continue
         }
         Command::SetEyesEnabled(enabled) => {
-            session
-                .devices
-                .set_eyes_enabled(enabled, &session.updates);
+            session.devices.set_eyes_enabled(enabled, &session.updates);
             session
                 .transport
                 .sync_capabilities(host, &session.devices)
@@ -107,11 +105,7 @@ async fn cmd_serve(session: &mut Session, host: &Host, companion_id: String) -> 
     Step::Continue
 }
 
-async fn cmd_activate_companion(
-    session: &mut Session,
-    host: &Host,
-    companion_id: String,
-) -> Step {
+async fn cmd_activate_companion(session: &mut Session, host: &Host, companion_id: String) -> Step {
     let was_empty = session.transport.bindings.is_empty();
     if !session.transport.bindings.contains_key(&companion_id) {
         match session.transport.activate_one(host, &companion_id).await {
@@ -143,11 +137,7 @@ async fn cmd_activate_companion(
     Step::Continue
 }
 
-async fn cmd_release_companion(
-    session: &mut Session,
-    host: &Host,
-    companion_id: String,
-) -> Step {
+async fn cmd_release_companion(session: &mut Session, host: &Host, companion_id: String) -> Step {
     if let Err(error) = session.transport.release_one(host, &companion_id).await {
         super::notify_ui(
             &session.updates,
