@@ -72,7 +72,7 @@ fn voice_gate_stays_closed_on_fluctuating_room_noise() {
     ] {
         let mut gate = VoiceGate::new().unwrap();
         for block in input.chunks(729) {
-            assert!(gate.process(block).unwrap().is_empty());
+            assert_eq!(gate.process(block).unwrap(), [] as [std::vec::Vec<u8>; 0]);
         }
         assert!(!gate.active);
     }
@@ -110,9 +110,9 @@ fn voice_gate_keeps_preroll_and_separates_utterances_in_one_batch() {
     .concat();
     assert_eq!(chunks.len(), 4);
     assert_eq!(chunks[0], encode(&expected));
-    assert!(chunks[1].is_empty());
+    assert_eq!(chunks[1], [] as [u8; 0]);
     assert_eq!(chunks[2], encode(&expected[VAD_FRAME_SAMPLES..]));
-    assert!(chunks[3].is_empty());
+    assert_eq!(chunks[3], [] as [u8; 0]);
 }
 
 #[test]
@@ -408,7 +408,7 @@ fn f07_ptt_mode_gates_capture_until_active_and_cancel_discards() {
     let active = ptt.process(&[0.25; 64]);
     assert!(active.open);
     assert_eq!(active.chunks.len(), 1);
-    assert!(!active.chunks[0].is_empty());
+    assert_ne!(active.chunks[0], [] as [u8; 0]);
     ptt.commit();
     let committed = ptt.process(&[]);
     assert!(!committed.open);

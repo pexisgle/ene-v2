@@ -57,10 +57,9 @@ fn borrowed_cosine_matches_rig_scores_and_ranks() {
         let mut index = CompactVectorIndex::default();
         index.spaces.insert(("owner".into(), "space".into()), space);
         assert_eq!(index.ranked("owner", "space", &query, 9), expected);
-        assert!(
-            index
-                .ranked("owner", "space", &vec![0.0; dimensions + 1], 9)
-                .is_empty()
+        assert_eq!(
+            index.ranked("owner", "space", &vec![0.0; dimensions + 1], 9),
+            [] as [(std::string::String, f32); 0]
         );
     }
 }
@@ -328,7 +327,10 @@ fn the_index_mirrors_only_the_matching_space_and_revision() {
         index.ranked("ene", &three, &[0.0, 1.0, 0.0], 8)[0].0,
         second.id
     );
-    assert!(index.ranked("ene", &three, &[1.0, 0.0], 8).is_empty());
+    assert_eq!(
+        index.ranked("ene", &three, &[1.0, 0.0], 8),
+        [] as [(std::string::String, f32); 0]
+    );
 
     // A content change invalidates the vector; the next sync drops it.
     store
@@ -342,13 +344,19 @@ fn the_index_mirrors_only_the_matching_space_and_revision() {
         )
         .unwrap();
     index.sync(&store, "ene", &two).unwrap();
-    assert!(index.ranked("ene", &two, &[1.0, 0.1], 8).is_empty());
+    assert_eq!(
+        index.ranked("ene", &two, &[1.0, 0.1], 8),
+        [] as [(std::string::String, f32); 0]
+    );
 
     // A vector of another preprocessing version is a different space.
     let legacy = "fake:2:v0";
     embed(&store, &second, legacy, 2, &[1.0, 0.0]);
     index.sync(&store, "ene", legacy).unwrap();
-    assert!(index.ranked("ene", legacy, &[1.0, 0.0], 8).is_empty());
+    assert_eq!(
+        index.ranked("ene", legacy, &[1.0, 0.0], 8),
+        [] as [(std::string::String, f32); 0]
+    );
 }
 
 #[test]
@@ -408,7 +416,7 @@ fn ranking_keeps_database_order_for_ties_and_bounds_top_k() {
     let mut index = CompactVectorIndex::default();
     index.sync(&store, "ene", &space).unwrap();
     let rank = |limit| index.ranked("ene", &space, &[1.0, 0.0], limit);
-    assert!(rank(0).is_empty());
+    assert_eq!(rank(0), [] as [(std::string::String, f32); 0]);
     assert_eq!(rank(1), [(ids[0].clone(), 1.0)]);
     assert_eq!(rank(2), [(ids[0].clone(), 1.0), (ids[2].clone(), 1.0)]);
     assert_eq!(

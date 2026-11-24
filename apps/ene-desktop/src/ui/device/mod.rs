@@ -344,7 +344,10 @@ mod tests {
     fn tool_confirmation_updates_only_managed_rules() {
         let enabled = tool_confirmation_request(true);
         let disabled = tool_confirmation_request(false);
-        assert!(disabled.add_or_update.is_empty());
+        assert_eq!(
+            disabled.add_or_update,
+            [] as [ene_client_core::domain::PolicyRule; 0]
+        );
         let [rule] = enabled.add_or_update.as_slice() else {
             panic!("expected one global rule")
         };

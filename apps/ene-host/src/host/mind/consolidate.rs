@@ -887,12 +887,12 @@ mod tests {
         .extract("The user prefers tea.")
         .await
         .unwrap();
-        assert!(
+        assert_eq!(
             extract(&model, "The user prefers tea.".into())
                 .await
                 .unwrap()
-                .facts
-                .is_empty()
+                .facts,
+            [] as [ene_mind::Fact; 0]
         );
         let requests = mock.requests();
         assert_eq!(requests.len(), 2);

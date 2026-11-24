@@ -146,6 +146,6 @@ mod tests {
         let empty = read_response_body(response_with(b"").await, 0, "test")
             .await
             .expect("an empty body must be readable with a zero limit");
-        assert!(empty.is_empty());
+        assert_eq!(empty, [] as [u8; 0]);
     }
 }

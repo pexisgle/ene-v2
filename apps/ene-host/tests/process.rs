@@ -139,7 +139,7 @@ async fn process_publishes_private_discovery_authenticates_and_stops() {
         .get_snapshot(ene_rpc::Empty::default())
         .await
         .unwrap();
-    assert!(!snapshot.view().server_version.is_empty());
+    assert_ne!(snapshot.view().server_version, "");
     let (transport, config) = ene_rpc::connect(&endpoint, "wrong-token").unwrap();
     let wrong = ene_rpc::HostServiceClient::new(transport, config);
     assert!(wrong.get_snapshot(ene_rpc::Empty::default()).await.is_err());

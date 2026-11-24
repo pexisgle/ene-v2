@@ -197,7 +197,7 @@ fn messages_publish_once_oldest_first_across_additions_and_restores() {
     assert_eq!(messages[0].companion_id, "ene");
     assert_eq!(messages[0].work_id, "work-1");
     assert_eq!(messages[0].author, Author::user().label());
-    assert!(!messages[0].created_at.is_empty());
+    assert_ne!(messages[0].created_at, "");
 
     let mut restored = app.world().get::<Conversation>(entity).unwrap().0.view();
     restored.push(CompletionMessage::system("more hidden context"));

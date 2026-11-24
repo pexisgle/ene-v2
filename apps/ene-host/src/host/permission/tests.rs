@@ -856,13 +856,13 @@ fn always_approve_persists_allow_rule_and_skips_second_prompt() {
             .values()
             .any(|wait| wait.call == call2)
     );
-    assert!(
+    assert_eq!(
         world
             .store()
             .approval_repo()
             .approvals(ApprovalStatus::Pending)
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [ene_policy::Approval; 0]
     );
     assert_eq!(provider.bodies.lock().unwrap().len(), calls_before);
     world.gated_call("/tmp/b");
@@ -994,13 +994,13 @@ fn b18_large_always_approve_persists_exact_digest_rule_and_skips_second_prompt()
             .values()
             .any(|wait| wait.call == call2)
     );
-    assert!(
+    assert_eq!(
         world
             .store()
             .approval_repo()
             .approvals(ApprovalStatus::Pending)
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [ene_policy::Approval; 0]
     );
     provider.task.abort();
 }

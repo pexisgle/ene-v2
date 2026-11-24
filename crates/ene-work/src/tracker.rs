@@ -106,12 +106,21 @@ mod tests {
         tracker.begin("r1");
         let later = Instant::now() + Duration::from_secs(100);
         assert_eq!(tracker.stalled(later, STALL_TIMEOUT), vec!["r1"]);
-        assert!(tracker.stalled(later, STALL_TIMEOUT).is_empty());
+        assert_eq!(
+            tracker.stalled(later, STALL_TIMEOUT),
+            [] as [std::string::String; 0]
+        );
 
         tracker.touch("r1");
-        assert!(tracker.stalled(Instant::now(), STALL_TIMEOUT).is_empty());
+        assert_eq!(
+            tracker.stalled(Instant::now(), STALL_TIMEOUT),
+            [] as [std::string::String; 0]
+        );
         tracker.forget("r1");
-        assert!(tracker.stalled(later, STALL_TIMEOUT).is_empty());
+        assert_eq!(
+            tracker.stalled(later, STALL_TIMEOUT),
+            [] as [std::string::String; 0]
+        );
 
         let mut receipts = WorkReceipts::default();
         receipts.put("w1", "k1", &[1, 2, 3], "req-1");

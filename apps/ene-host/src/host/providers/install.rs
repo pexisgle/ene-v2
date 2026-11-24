@@ -148,7 +148,10 @@ mod tests {
         assert!(!store.plugin_repo().plugin_entries().unwrap()[0].enabled);
 
         assert!(remove_local_package(&store, state.path(), "demo-tool").unwrap());
-        assert!(store.plugin_repo().plugin_entries().unwrap().is_empty());
+        assert_eq!(
+            store.plugin_repo().plugin_entries().unwrap(),
+            [] as [ene_store::PluginEntry; 0]
+        );
         assert!(!plugins_dir(state.path()).join("demo-tool").exists());
     }
 }

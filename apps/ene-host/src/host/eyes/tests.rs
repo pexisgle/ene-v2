@@ -180,9 +180,15 @@ fn assert_initial_image_assessment(
     ready_to_evaluate(harness);
     let id = harness.companion.clone();
     harness.run_until(|world| world.resource::<Eyes>().sessions[&id].previous == "操作中");
-    assert!(head.requests().is_empty());
+    assert_eq!(
+        head.requests(),
+        [] as [rig_core::completion::CompletionRequest; 0]
+    );
     let request = &eye.requests()[0];
-    assert!(request.tools.is_empty());
+    assert_eq!(
+        request.tools,
+        [] as [std::sync::Arc<rig_core::completion::ToolDefinition>; 0]
+    );
     assert!(request.chat_history.iter().any(|message| {
         matches!(message.as_ref(), Message::User { content } if content.iter().any(|item| matches!(item, UserContent::Image(_))))
     }));

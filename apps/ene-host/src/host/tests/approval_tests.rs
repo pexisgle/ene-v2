@@ -117,13 +117,13 @@ fn the_gate_refuses_a_reply_over_the_call_count_limit() {
         let report = decision.get().expect("a decision").0.as_ref().unwrap_err();
         assert!(report.to_string().contains("tool-call count"), "{report}");
     }
-    assert!(
+    assert_eq!(
         harness
             .store()
             .approval_repo()
             .approvals(permission::ApprovalStatus::Pending)
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [ene_policy::Approval; 0]
     );
 }
 
@@ -160,13 +160,13 @@ fn the_gate_refuses_an_identifier_over_the_length_limit() {
         .expect("the gate decided");
     let report = decision.get().expect("a decision").0.as_ref().unwrap_err();
     assert!(report.to_string().contains("identifier length"), "{report}");
-    assert!(
+    assert_eq!(
         harness
             .store()
             .approval_repo()
             .approvals(permission::ApprovalStatus::Pending)
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [ene_policy::Approval; 0]
     );
 }
 
@@ -593,13 +593,13 @@ fn a_moved_client_keeps_a_held_approval_and_serves_the_new_active_client() {
             .unwrap()
             .is_empty()
     });
-    assert!(
+    assert_eq!(
         harness
             .store()
             .client_repo()
             .outstanding_operations("c1")
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [ene_domain::DeviceOperation; 0]
     );
     harness.run_until_text("書いたよ");
 }

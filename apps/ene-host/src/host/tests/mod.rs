@@ -411,7 +411,7 @@ pub(super) fn activate(world: &mut World, companion: &str, client: &str) -> w::A
 fn a_turn_is_accepted_once_and_answered() {
     let mut harness = Harness::new([text_turn("こんにちは")]);
     let first = harness.accept("key-1", "hi").unwrap();
-    assert!(!first.is_empty());
+    assert_ne!(first, "");
     assert_eq!(harness.accept("key-1", "hi").unwrap(), first);
     assert!(harness.accept("key-1", "different").is_err());
     harness.run_until(answered);

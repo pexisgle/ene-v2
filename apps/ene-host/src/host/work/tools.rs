@@ -435,7 +435,10 @@ mod tests {
         let second = super::start(&mut world, kuro, args()).unwrap();
         assert!(second.contains("\"claimed\":false"), "{second}");
         assert!(second.contains("another companion"), "{second}");
-        assert!(store.work_repo().work_sessions("kuro").unwrap().is_empty());
+        assert_eq!(
+            store.work_repo().work_sessions("kuro").unwrap(),
+            [] as [ene_domain::WorkSession; 0]
+        );
     }
 
     #[test]

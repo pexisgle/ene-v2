@@ -102,9 +102,15 @@ fn a_stall_is_warned_once_and_reset_by_activity() {
         runs.stalled(first_due, STALL_TIMEOUT),
         vec!["run-a".to_owned()]
     );
-    assert!(runs.stalled(first_due, STALL_TIMEOUT).is_empty());
+    assert_eq!(
+        runs.stalled(first_due, STALL_TIMEOUT),
+        [] as [std::string::String; 0]
+    );
     runs.touch("run-a");
-    assert!(runs.stalled(Instant::now(), STALL_TIMEOUT).is_empty());
+    assert_eq!(
+        runs.stalled(Instant::now(), STALL_TIMEOUT),
+        [] as [std::string::String; 0]
+    );
     assert_eq!(
         runs.stalled(
             Instant::now() + STALL_TIMEOUT + Duration::from_secs(1),

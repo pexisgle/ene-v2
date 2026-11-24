@@ -597,7 +597,10 @@ fn computer_use_respects_the_client_declaration_model_and_host_denial() {
                 .unwrap()
                 .is_none()
         });
-        assert!(!model.requests().is_empty());
+        assert_ne!(
+            model.requests(),
+            [] as [rig_core::completion::CompletionRequest; 0]
+        );
         let tools = &model.requests()[0].tools;
         let presented = tools.iter().any(|tool| {
             tool.name.as_str() == "device_request"
@@ -605,13 +608,13 @@ fn computer_use_respects_the_client_declaration_model_and_host_denial() {
         });
         assert_eq!(presented, declared && image);
         assert!(stream.try_recv().is_err());
-        assert!(
+        assert_eq!(
             harness
                 .store()
                 .client_repo()
                 .outstanding_operations("desk")
-                .unwrap()
-                .is_empty()
+                .unwrap(),
+            [] as [ene_domain::DeviceOperation; 0]
         );
     }
 }
