@@ -50,8 +50,7 @@ pub(crate) async fn build_command(
     let appdata = effective_env(&want.env, "APPDATA");
     let path_dirs: Vec<PathBuf> = path_var
         .as_deref()
-        .map(|val| std::env::split_paths(val).collect())
-        .unwrap_or_default();
+        .map_or_else(Vec::new, |val| std::env::split_paths(val).collect());
 
     let launch = resolve_launch(
         &want.command,
