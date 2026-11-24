@@ -6,6 +6,7 @@
 //! `examples/input.rs`, and it is the only reason composition (Japanese IME)
 //! works.
 
+mod prepaint;
 mod render;
 mod selection;
 #[cfg(test)]
