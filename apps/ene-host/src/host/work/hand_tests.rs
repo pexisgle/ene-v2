@@ -188,7 +188,7 @@ impl HandWorld {
         };
         world
             .get::<Conversation>(parent)
-            .map(|conversation| {
+            .map_or_default(|conversation| {
                 conversation
                     .entries()
                     .filter(|entry| {
@@ -199,7 +199,6 @@ impl HandWorld {
                     .filter_map(|entry| agent::entry_text(&entry))
                     .collect()
             })
-            .unwrap_or_default()
     }
 
     fn pending(&self) -> permission::Approval {

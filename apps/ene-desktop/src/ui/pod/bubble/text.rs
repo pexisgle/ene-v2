@@ -38,8 +38,10 @@ pub(crate) fn active_mini_speech_text(model: &Model) -> String {
         .iter()
         .rev()
         .find(|m| m.role != MessageRole::User)
-        .map(|m| m.text.clone())
-        .unwrap_or_else(|| "こんにちは。まずはひとこと送ってみてください。".to_owned())
+        .map_or_else(
+            || "こんにちは。まずはひとこと送ってみてください。".to_owned(),
+            |m| m.text.clone(),
+        )
 }
 
 fn is_motion_leak_line(line: &str) -> bool {

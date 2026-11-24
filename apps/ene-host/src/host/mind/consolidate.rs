@@ -306,8 +306,7 @@ pub(crate) fn prompt(
 async fn extract(model: &DynModel<Completion>, prompt: String) -> Result<Extraction> {
     let options = model
         .spec()
-        .map(|spec| spec.default_options(None))
-        .unwrap_or_default();
+        .map_or_default(|spec| spec.default_options(None));
     let extraction = ExtractorBuilder::<Extraction>::new(model.clone())
         .append_preamble(SYSTEM_PROMPT)
         .retries(0)

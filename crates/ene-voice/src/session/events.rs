@@ -82,8 +82,7 @@ pub fn split_sentences(buffer: &mut String) -> Vec<String> {
         let cut = buffer
             .char_indices()
             .nth(MAX_SENTENCE_CHARS)
-            .map(|(index, _)| index)
-            .unwrap_or(buffer.len());
+            .map_or(buffer.len(), |(index, _)| index);
         let sentence = buffer[..cut].trim().to_owned();
         buffer.drain(..cut);
         if !sentence.is_empty() {

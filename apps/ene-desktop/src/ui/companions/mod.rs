@@ -61,24 +61,19 @@ pub(super) struct CompanionsSnapshot {
 
 impl CompanionsSnapshot {
     fn capture(hub: &Hub) -> Self {
-        let tts_conn_ids: Vec<String> = hub
-            .model
-            .settings()
-            .map(|s| {
-                s.connections
-                    .iter()
-                    .filter(|c| c.kind == ConnectionKind::Tts && c.enabled)
-                    .map(|c| c.id.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let tts_conn_ids: Vec<String> = hub.model.settings().map_or_default(|s| {
+            s.connections
+                .iter()
+                .filter(|c| c.kind == ConnectionKind::Tts && c.enabled)
+                .map(|c| c.id.clone())
+                .collect()
+        });
         Self {
             live: hub.live(),
             companions: hub
                 .model
                 .snapshot()
-                .map(|s| s.companions.clone())
-                .unwrap_or_default(),
+                .map_or_default(|s| s.companions.clone()),
             active_id: hub.model.companion_id().map(str::to_owned),
             resident_ids: hub.model.resident_companions(&hub.options.id),
             has_models: !hub.model_choices().is_empty(),

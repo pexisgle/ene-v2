@@ -359,10 +359,10 @@ pub(crate) fn connect_assignment(
         Ok(resolved) => resolved.shared(),
         Err(_) if endpoint.adapter == agent_platform::ADAPTER => catalog
             .resolve(&format!("gcp.gemini/{}", assignment.model_id))
-            .map(|resolved| resolved.shared())
-            .unwrap_or_else(|_| {
-                Arc::new(ModelSpec::new(provider, &assignment.model_id).with_tools(true))
-            }),
+            .map_or_else(
+                |_| Arc::new(ModelSpec::new(provider, &assignment.model_id).with_tools(true)),
+                |resolved| resolved.shared(),
+            ),
         Err(_) => {
             let mut spec = ModelSpec::new(provider, &assignment.model_id).with_tools(true);
             if endpoint.adapter == "openrouter" {
@@ -537,9 +537,10 @@ pub(crate) fn models(connection: &Connection, catalog: &Catalog) -> Vec<(String,
                         .then(|| catalog.resolve(&format!("gcp.gemini/{model}")).ok())
                         .flatten()
                 });
-                resolved
-                    .map(|resolved| resolved.spec.clone())
-                    .unwrap_or_else(|| ModelSpec::new(provider, &model).with_tools(true))
+                resolved.map_or_else(
+                    || ModelSpec::new(provider, &model).with_tools(true),
+                    |resolved| resolved.spec.clone(),
+                )
             };
             Some((model, spec))
         })

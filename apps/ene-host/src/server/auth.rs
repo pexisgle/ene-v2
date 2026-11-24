@@ -20,9 +20,8 @@ pub(super) struct Guard {
 
 impl Guard {
     pub(super) fn new(token: String) -> Self {
-        let allowed = std::env::var("ENE_HOST_ALLOWED_HOSTS")
-            .map(|value| authority_list(&value))
-            .unwrap_or_default();
+        let allowed =
+            std::env::var("ENE_HOST_ALLOWED_HOSTS").map_or_default(|value| authority_list(&value));
         Self { token, allowed }
     }
 

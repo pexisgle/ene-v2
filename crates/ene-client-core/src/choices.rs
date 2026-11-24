@@ -115,8 +115,7 @@ fn llm_config_parts(connection: &Connection) -> (Vec<String>, &str) {
             llm.model_ids.clone(),
             llm.endpoint
                 .as_ref()
-                .map(|ep| ep.adapter.as_str())
-                .unwrap_or_default(),
+                .map_or_default(|ep| ep.adapter.as_str()),
         ),
         _ => (Vec::new(), ""),
     }
@@ -318,15 +317,13 @@ impl Model {
             connection
                 .last_check
                 .as_ref()
-                .map(|check| check.resources.clone())
-                .unwrap_or_default()
+                .map_or_default(|check| check.resources.clone())
         } else {
             self.connections
                 .checks
                 .get(&connection.id)
                 .or(connection.last_check.as_ref())
-                .map(|check| check.resources.clone())
-                .unwrap_or_default()
+                .map_or_default(|check| check.resources.clone())
         };
         let mut list = Vec::new();
         for id in &configured {

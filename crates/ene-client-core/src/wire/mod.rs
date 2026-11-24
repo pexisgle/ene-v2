@@ -111,7 +111,7 @@ impl From<w::WorkSession> for domain::WorkSession {
             id: value.id,
             companion_id: value.companion_id,
             title: value.title,
-            status: value.status.as_known().map(Into::into).unwrap_or_default(),
+            status: value.status.as_known().map_or_default(Into::into),
             created_at: value.created_at,
             updated_at: value.updated_at,
             client_id: value.client_id,
@@ -124,20 +124,12 @@ impl From<w::WorkEvent> for domain::WorkEvent {
         let detail = value.detail.map(|detail| match detail {
             w::work_event::Detail::StatusChanged(changed) => {
                 domain::WorkEventDetail::StatusChanged(
-                    changed
-                        .status
-                        .as_known()
-                        .map(Into::into)
-                        .unwrap_or_default(),
+                    changed.status.as_known().map_or_default(Into::into),
                 )
             }
             w::work_event::Detail::RunStarted(_) => domain::WorkEventDetail::RunStarted,
             w::work_event::Detail::RunFinished(finished) => domain::WorkEventDetail::RunFinished {
-                state: finished
-                    .state
-                    .as_known()
-                    .map(Into::into)
-                    .unwrap_or_default(),
+                state: finished.state.as_known().map_or_default(Into::into),
                 failure: finished.failure.into_option().map(Into::into),
                 pending_request_id: finished.pending_request_id,
             },

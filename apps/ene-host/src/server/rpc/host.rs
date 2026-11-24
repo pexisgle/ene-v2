@@ -210,14 +210,10 @@ impl w::HostService for Services {
     ) -> ServiceResult<w::PreviewCompanionResponse> {
         let req = request.to_owned_message();
         let system_prompt = mind::preview_system_prompt(&req).map_err(ConnectError::from)?;
-        let requested_model = req
-            .model
-            .as_option()
-            .map(|m| mind::Assignment {
-                connection_id: m.connection_id.clone(),
-                model_id: m.model_id.clone(),
-            })
-            .unwrap_or_default();
+        let requested_model = req.model.as_option().map_or_default(|m| mind::Assignment {
+            connection_id: m.connection_id.clone(),
+            model_id: m.model_id.clone(),
+        });
         let user_message = req.user_message;
         let model = self
             .runtime

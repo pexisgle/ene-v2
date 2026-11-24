@@ -117,16 +117,18 @@ fn render_model_role_row(
         live,
     } = row;
     let current = slot.current(assignments);
-    let current_text = current
-        .as_ref()
-        .map(|m| {
+    let current_text = current.as_ref().map_or_else(
+        || slot.fallback_hint().to_owned(),
+        |m| {
             slot_models
                 .iter()
                 .find(|(cid, mid, _)| cid == &m.connection_id && mid == &m.model_id)
-                .map(|(_, _, label)| label.clone())
-                .unwrap_or_else(|| format!("{} / {}", m.connection_id, m.model_id))
-        })
-        .unwrap_or_else(|| slot.fallback_hint().to_owned());
+                .map_or_else(
+                    || format!("{} / {}", m.connection_id, m.model_id),
+                    |(_, _, label)| label.clone(),
+                )
+        },
+    );
 
     let dd_key = format!("adv-role:{slot:?}");
     let dd_open = pane.open_dropdown.as_deref() == Some(dd_key.as_str());

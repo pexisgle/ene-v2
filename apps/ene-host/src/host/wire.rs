@@ -341,11 +341,7 @@ pub(crate) fn device_result(value: &DeviceOperation) -> w::DeviceOperationResult
         client_id: value.client_id.clone(),
         operation_id: value.id.clone(),
         success: value.status == DeviceStatus::Completed,
-        output: value
-            .output
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_default(),
+        output: value.output.as_ref().map_or_default(ToString::to_string),
         failure: value.failure.as_ref().map(failure).into(),
         ..Default::default()
     }

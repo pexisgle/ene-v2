@@ -331,8 +331,7 @@ pub(super) fn published_bindings(
     query
         .iter(world)
         .find(|(definition, _)| definition.0.name.as_str() == tool)
-        .map(|(_, published)| published.bindings.clone())
-        .unwrap_or_default()
+        .map_or_default(|(_, published)| published.bindings.clone())
 }
 
 /// A model turn that calls `tool` and ends the model call.

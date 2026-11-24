@@ -229,7 +229,7 @@ impl From<w::Message> for domain::Message {
             id: value.id,
             companion_id: value.companion_id,
             work_id: value.work_id,
-            role: value.role.as_known().map(Into::into).unwrap_or_default(),
+            role: value.role.as_known().map_or_default(Into::into),
             text: value.text,
             created_at: value.created_at,
             sequence: value.sequence,
@@ -256,7 +256,7 @@ impl From<w::TurnEvent> for domain::TurnEvent {
         Self {
             companion_id: value.companion_id,
             turn_id: value.turn_id,
-            status: value.status.as_known().map(Into::into).unwrap_or_default(),
+            status: value.status.as_known().map_or_default(Into::into),
             failure: value.failure.into_option().map(Into::into),
         }
     }

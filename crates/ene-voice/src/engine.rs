@@ -160,8 +160,7 @@ impl HttpEngine {
             ),
             speaker: options
                 .speaker
-                .map(|s| s.min(u64::from(u32::MAX)) as u32)
-                .unwrap_or(default_speaker),
+                .map_or(default_speaker, |s| s.min(u64::from(u32::MAX)) as u32),
             speed: options.speed.map(|speed| speed as f32),
             pitch: None,
             style: None,

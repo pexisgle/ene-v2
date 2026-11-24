@@ -74,8 +74,7 @@ impl ClientPlugins {
             Err(_) => tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map(|rt| rt.block_on(Self::load_from(&root)))
-                .unwrap_or_default(),
+                .map_or_default(|rt| rt.block_on(Self::load_from(&root))),
         }
     }
 

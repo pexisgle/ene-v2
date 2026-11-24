@@ -59,8 +59,7 @@ pub fn companion_badge(
     let initial: String = name
         .chars()
         .next()
-        .map(|ch| ch.to_uppercase().collect())
-        .unwrap_or_else(|| "e".to_owned());
+        .map_or_else(|| "e".to_owned(), |ch| ch.to_uppercase().collect());
     let font_px = (badge_size * 0.44).max(11.);
     let dot_px = (badge_size * 0.28).clamp(7., 10.);
     div()

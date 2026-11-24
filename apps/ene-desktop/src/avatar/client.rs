@@ -247,8 +247,7 @@ impl Avatar {
                         AvatarStatus::Error => {
                             let err = error
                                 .clone()
-                                .map(AvatarError::Renderer)
-                                .unwrap_or(AvatarError::ModelLoadFailed);
+                                .map_or(AvatarError::ModelLoadFailed, AvatarError::Renderer);
                             self.push_event(event);
                             return Err(err);
                         }
@@ -287,8 +286,7 @@ impl Avatar {
                 ..
             } => Some(Err(error
                 .clone()
-                .map(AvatarError::Renderer)
-                .unwrap_or(AvatarError::ModelLoadFailed))),
+                .map_or(AvatarError::ModelLoadFailed, AvatarError::Renderer))),
             _ => None,
         }
     }

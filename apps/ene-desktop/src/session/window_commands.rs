@@ -165,11 +165,10 @@ async fn cmd_release_companion(session: &mut Session, host: &Host, companion_id:
 async fn cmd_set_avatar_scale(session: &mut Session, scale: f32) -> Step {
     let scale = scale.clamp(50., 200.);
     session.devices.avatar_scale = scale;
-    let target_ids: Vec<String> = session
-        .transport
-        .focused_companion_id()
-        .map(|id| vec![id.to_owned()])
-        .unwrap_or_else(|| session.transport.bindings.keys().cloned().collect());
+    let target_ids: Vec<String> = session.transport.focused_companion_id().map_or_else(
+        || session.transport.bindings.keys().cloned().collect(),
+        |id| vec![id.to_owned()],
+    );
     if target_ids.is_empty() || session.devices.avatar.is_none() {
         super::notify_ui(
             &session.updates,

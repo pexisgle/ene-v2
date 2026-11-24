@@ -110,9 +110,7 @@ pub(super) fn turn_settled(
     if let Some(companion) = companion {
         let companion_id = companion.companion_id.clone();
         let turn = params.turns.get(turn_entity).ok();
-        let turn_id = turn
-            .map(|(turn, _)| turn.start.get().to_string())
-            .unwrap_or_else(|| id.0.clone());
+        let turn_id = turn.map_or_else(|| id.0.clone(), |(turn, _)| turn.start.get().to_string());
         let (status, failure) = match outcome {
             TurnOutcome::Answered(_) => (w::TurnStatus::Answered, None),
             TurnOutcome::Stopped(_) => (w::TurnStatus::Stopped, None),

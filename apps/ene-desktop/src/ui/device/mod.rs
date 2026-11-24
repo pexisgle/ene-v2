@@ -125,10 +125,9 @@ impl DeviceSnapshot {
             rules: hub
                 .model
                 .snapshot()
-                .map(|s| s.policy_rules.clone())
-                .unwrap_or_default(),
+                .map_or_default(|s| s.policy_rules.clone()),
             policy_texts: hub.model.policy_texts().to_vec(),
-            client_caps: client.map(|c| c.capabilities.clone()).unwrap_or_default(),
+            client_caps: client.map_or_default(|c| c.capabilities.clone()),
             plugins: hub.model.connections.plugins.clone(),
             tray_resident: hub.is_tray_resident(),
             pod_visible: hub.is_pod_visible(),

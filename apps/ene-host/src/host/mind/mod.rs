@@ -51,9 +51,7 @@ pub(crate) fn get(store: &Store, id: &str) -> Result<w::Companion> {
 }
 
 fn document_field(field: Option<&w::JsonDocument>) -> JsonDoc {
-    field
-        .map(wire::document_from)
-        .unwrap_or_else(JsonDoc::empty)
+    field.map_or_else(JsonDoc::empty, wire::document_from)
 }
 
 pub(crate) fn create(
@@ -67,13 +65,11 @@ pub(crate) fn create(
     let profile = request
         .profile
         .as_option()
-        .map(wire::profile_from)
-        .unwrap_or_default();
+        .map_or_default(wire::profile_from);
     let assignments = request
         .assignments
         .as_option()
-        .map(wire::assignments_from)
-        .unwrap_or_default();
+        .map_or_default(wire::assignments_from);
     let companion = Companion {
         id: uuid::Uuid::new_v4().to_string(),
         name: request.name.clone(),
@@ -237,8 +233,7 @@ pub(crate) fn update_profile(
     let profile = request
         .profile
         .as_option()
-        .map(wire::profile_from)
-        .unwrap_or_default();
+        .map_or_default(wire::profile_from);
     store.companion_repo().update_mind_profile(
         &request.companion_id,
         request.expected_revision,
@@ -313,13 +308,11 @@ fn notify_mind(world: &mut World, companion: &str) {
     let profile = view
         .profile
         .as_option()
-        .map(|profile| profile.revision)
-        .unwrap_or_default();
+        .map_or_default(|profile| profile.revision);
     let state = view
         .state
         .as_option()
-        .map(|state| state.revision)
-        .unwrap_or_default();
+        .map_or_default(|state| state.revision);
     let mut notifier = world.resource_mut::<Notifier>();
     notifier.push(
         Some(companion),

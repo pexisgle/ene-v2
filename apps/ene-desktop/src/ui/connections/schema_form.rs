@@ -138,8 +138,7 @@ fn render_schema_enum_field(
     let init = ctx
         .current_val
         .and_then(|v| v.as_str())
-        .map(str::to_owned)
-        .unwrap_or_default();
+        .map_or_default(str::to_owned);
     let d = pane.drafts.draft(cx, ctx.d_key, "", Some(&init), theme);
     let active_val = d.read(cx).text().to_owned();
     if !active_val.is_empty() {
@@ -198,8 +197,7 @@ fn render_schema_bool_field(
     let init = ctx
         .current_val
         .and_then(|v| v.as_bool())
-        .map(|b| if b { "true" } else { "false" })
-        .unwrap_or("false");
+        .map_or("false", |b| if b { "true" } else { "false" });
     let d = pane.drafts.draft(cx, ctx.d_key, "", Some(init), theme);
     let checked = d.read(cx).text() == "true";
     ctx.opts
@@ -288,16 +286,18 @@ fn parse_schema_properties(raw_schema: &str) -> Option<serde_json::Map<String, s
 
 fn parse_scalar_value(prop_type: &str, txt: &str) -> serde_json::Value {
     match prop_type {
-        "integer" => txt
-            .parse::<i64>()
-            .map(|n| serde_json::Value::Number(n.into()))
-            .unwrap_or_else(|_| serde_json::Value::String(txt.to_owned())),
+        "integer" => txt.parse::<i64>().map_or_else(
+            |_| serde_json::Value::String(txt.to_owned()),
+            |n| serde_json::Value::Number(n.into()),
+        ),
         "number" => txt
             .parse::<f64>()
             .ok()
             .and_then(serde_json::Number::from_f64)
-            .map(serde_json::Value::Number)
-            .unwrap_or_else(|| serde_json::Value::String(txt.to_owned())),
+            .map_or_else(
+                || serde_json::Value::String(txt.to_owned()),
+                serde_json::Value::Number,
+            ),
         _ => serde_json::Value::String(txt.to_owned()),
     }
 }

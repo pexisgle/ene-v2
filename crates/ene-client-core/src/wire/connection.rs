@@ -203,7 +203,7 @@ impl From<w::Connection> for domain::Connection {
             enabled: value.enabled,
             credential_state: value.credential_state,
             revision: value.revision,
-            kind: value.kind.as_known().map(Into::into).unwrap_or_default(),
+            kind: value.kind.as_known().map_or_default(Into::into),
             last_check: value.last_check.into_option().map(Into::into),
             config: value
                 .config

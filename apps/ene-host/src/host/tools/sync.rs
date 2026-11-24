@@ -82,8 +82,7 @@ fn host_tool_names(world: &mut World) -> HashSet<String> {
 pub(crate) fn sync_access(world: &mut World) {
     let granted = world
         .get_resource::<GrantedCompanionTools>()
-        .map(|res| res.0.clone())
-        .unwrap_or_default();
+        .map_or_default(|res| res.0.clone());
     let parents: Vec<(Entity, String)> = {
         let mut query = world.query::<(Entity, &CompanionAgent)>();
         query

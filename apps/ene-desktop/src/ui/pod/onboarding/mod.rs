@@ -79,8 +79,7 @@ pub(super) fn render_connection_onboarding(
     let err_detail = hub.setup.error_detail.clone();
     let name = picked
         .as_ref()
-        .map(|p| p.name.clone())
-        .unwrap_or_else(|| "AIサービス".to_owned());
+        .map_or_else(|| "AIサービス".to_owned(), |p| p.name.clone());
     let is_agent_platform = picked
         .as_ref()
         .is_some_and(|p| p.adapter == GOOGLE_AGENT_PLATFORM);

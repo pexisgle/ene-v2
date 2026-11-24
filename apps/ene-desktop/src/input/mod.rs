@@ -272,17 +272,17 @@ impl EntityInputHandler for Draft {
             self.content[0..range.start].to_owned() + &new_text + &self.content[range.end..],
         );
         self.marked = (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
-        let selected = new_selected_range_utf16
-            .as_ref()
-            .map(|selection| {
+        let selected = new_selected_range_utf16.as_ref().map_or_else(
+            || {
+                let caret = range.start + new_text.len();
+                caret..caret
+            },
+            |selection| {
                 let start = offset_from_utf16_in(&new_text, selection.start);
                 let end = offset_from_utf16_in(&new_text, selection.end);
                 range.start + start..range.start + end
-            })
-            .unwrap_or_else(|| {
-                let caret = range.start + new_text.len();
-                caret..caret
-            });
+            },
+        );
         self.selected = clamp_range(&self.content, selected);
         self.reversed = false;
         cx.notify();

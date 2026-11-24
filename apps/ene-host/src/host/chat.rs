@@ -283,10 +283,7 @@ pub(crate) fn message(
             .author
             .and_then(|author| author.request.as_ref())
             .map(|request| request.0.clone()),
-        author: entry
-            .author
-            .map(|author| author.label())
-            .unwrap_or_default(),
+        author: entry.author.map_or_default(|author| author.label()),
         ..Default::default()
     }
 }

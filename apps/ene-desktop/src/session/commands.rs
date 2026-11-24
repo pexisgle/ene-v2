@@ -355,13 +355,11 @@ impl Session {
             let yaw = input
                 .get("yaw_deg")
                 .and_then(serde_json::Value::as_f64)
-                .map(|v| v as f32)
-                .unwrap_or(0.);
+                .map_or(0., |v| v as f32);
             let pitch = input
                 .get("pitch_deg")
                 .and_then(serde_json::Value::as_f64)
-                .map(|v| v as f32)
-                .unwrap_or(0.);
+                .map_or(0., |v| v as f32);
             if !yaw.is_finite() || !pitch.is_finite() || yaw.abs() > 90. || pitch.abs() > 60. {
                 return Err(OperationError::InvalidLookAtAngles);
             }

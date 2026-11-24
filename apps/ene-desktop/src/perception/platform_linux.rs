@@ -63,14 +63,14 @@ fn init() -> LinuxBackend {
     // Under Wayland, never fall back to XWayland's `_NET_ACTIVE_WINDOW`:
     // it cannot observe native Wayland surfaces.
     if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|val| !val.is_empty()) {
-        return WaylandBackend::connect()
-            .map(|backend| LinuxBackend::Wayland(Box::new(backend)))
-            .unwrap_or(LinuxBackend::Unsupported);
+        return WaylandBackend::connect().map_or(LinuxBackend::Unsupported, |backend| {
+            LinuxBackend::Wayland(Box::new(backend))
+        });
     }
     if std::env::var_os("DISPLAY").is_some_and(|val| !val.is_empty()) {
-        return X11Backend::connect()
-            .map(|backend| LinuxBackend::X11(Box::new(backend)))
-            .unwrap_or(LinuxBackend::Unsupported);
+        return X11Backend::connect().map_or(LinuxBackend::Unsupported, |backend| {
+            LinuxBackend::X11(Box::new(backend))
+        });
     }
     LinuxBackend::Unsupported
 }

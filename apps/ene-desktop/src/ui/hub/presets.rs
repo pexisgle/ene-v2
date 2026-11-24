@@ -127,9 +127,7 @@ pub(super) fn quick_connect_llm(
     }
     // Reuse a failed attempt only at the exact catalog endpoint.
     let existing = find_reusable_quick_connect_connection(&settings.connections, &provider);
-    let id = existing
-        .map(|c| c.id.clone())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let id = existing.map_or_else(|| uuid::Uuid::new_v4().to_string(), |c| c.id.clone());
     let revision = settings.revision;
     let create = existing.is_none();
     let input = build_llm_provider_input(id.clone(), provider, Vec::new());
@@ -217,8 +215,7 @@ pub(super) fn add_voicevox_preset(
         .connections
         .iter()
         .find(|c| c.id == "voicevox")
-        .map(|c| c.revision)
-        .unwrap_or(0);
+        .map_or(0, |c| c.revision);
     let input = build_voicevox_preset_input(existing_rev, speaker, speed);
     hub.setup.checking_connections.insert("voicevox".into());
     rpc::connections::update_settings_and_probe(

@@ -134,10 +134,10 @@ fn install_panic_hook() {
         } else {
             "unknown panic payload"
         };
-        let location = info
-            .location()
-            .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
-            .unwrap_or_else(|| "unknown location".to_owned());
+        let location = info.location().map_or_else(
+            || "unknown location".to_owned(),
+            |loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()),
+        );
         tracing::error!(location = %location, payload = %payload, "ene-desktop panicked");
         // architecture:allow-stderr: panic fallback stderr output if the tracing subscriber is unavailable
         eprintln!("ene-desktop panic at {location}: {payload}");

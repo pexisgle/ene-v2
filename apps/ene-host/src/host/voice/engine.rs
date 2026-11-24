@@ -95,7 +95,7 @@ pub(crate) fn companion_tts_source(
         return Ok(Arc::clone(engine));
     }
     let ctx = VoiceEngineContext::from_world(world);
-    let binding = companion.map(parse_binding).unwrap_or_default();
+    let binding = companion.map_or_default(parse_binding);
     let connection = match binding
         .connection_id
         .as_deref()

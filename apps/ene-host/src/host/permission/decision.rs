@@ -223,7 +223,7 @@ pub(super) fn request_context(
     {
         return truncate(&run.instruction, DECISION_REQUEST_CHARS);
     }
-    conversation.map(latest_user_text).unwrap_or_default()
+    conversation.map_or_default(latest_user_text)
 }
 
 /// The newest non-empty user message of a conversation.
@@ -233,8 +233,7 @@ fn latest_user_text(conversation: &Conversation) -> String {
         .rev()
         .filter(|entry| matches!(entry.message, CompletionMessage::User { .. }))
         .find_map(|entry| entry_text(&entry))
-        .map(|text| truncate(&text, DECISION_REQUEST_CHARS))
-        .unwrap_or_default()
+        .map_or_default(|text| truncate(&text, DECISION_REQUEST_CHARS))
 }
 
 /// Starts the background decision for a fresh pending approval, or shows the card straight away.
@@ -326,7 +325,7 @@ fn prepare_decision_task(
             return DecisionSpawn::FallbackToCard;
         }
     };
-    let engine = model.spec().map(|spec| spec.id.clone()).unwrap_or_default();
+    let engine = model.spec().map_or_default(|spec| spec.id.clone());
     let task = background::spawn(runtime, ctx.wake, run_decision(model, inputs));
     ctx.decisions.start(
         Pending {

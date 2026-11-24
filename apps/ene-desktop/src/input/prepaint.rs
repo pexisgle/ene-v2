@@ -22,8 +22,7 @@ pub(super) fn shape_wrapped(
     window
         .text_system()
         .shape_text(text, font_size, runs, width, None)
-        .map(|lines| lines.into_vec())
-        .unwrap_or_default()
+        .map_or_default(|lines| lines.into_vec())
 }
 
 pub(super) struct Prepaint {

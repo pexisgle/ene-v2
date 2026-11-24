@@ -390,12 +390,7 @@ fn fit(
     mut commands: Commands,
 ) {
     for (mut call, adapted, mut decision, of) in &mut calls {
-        let limit = adapted
-            .0
-            .spec
-            .input_limit()
-            .map(u64::from)
-            .unwrap_or(128_000);
+        let limit = adapted.0.spec.input_limit().map_or(128_000, u64::from);
         let reserve = u64::from(adapted.0.spec.max_output_tokens.unwrap_or(4_096)) + limit / 10;
         // The request's parts are borrowed apart so the history can be
         // edited while the system prompt and tool schemas are weighed.

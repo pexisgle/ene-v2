@@ -18,11 +18,7 @@ pub(super) fn compute_badge_label(
     streaming_preview: &str,
     in_onboarding: bool,
 ) -> String {
-    let companion_name = hub
-        .model
-        .companion()
-        .map(|c| c.name.as_str())
-        .unwrap_or("ene");
+    let companion_name = hub.model.companion().map_or("ene", |c| c.name.as_str());
     let status_word = compute_status_word(&hub.model, streaming_preview, in_onboarding);
     format!("{companion_name} ・ {status_word}")
 }

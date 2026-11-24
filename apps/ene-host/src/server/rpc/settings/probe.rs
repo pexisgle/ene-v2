@@ -59,16 +59,14 @@ pub(super) async fn probe_voicevox_tts(
                     let speaker_name = speaker
                         .get("name")
                         .and_then(|v| v.as_str())
-                        .map(str::trim)
-                        .unwrap_or("");
+                        .map_or("", str::trim);
                     if let Some(styles) = speaker.get("styles").and_then(|s| s.as_array()) {
                         for style in styles {
                             if let Some(id) = style.get("id").and_then(|v| v.as_u64()) {
                                 let style_name = style
                                     .get("name")
                                     .and_then(|v| v.as_str())
-                                    .map(str::trim)
-                                    .unwrap_or("");
+                                    .map_or("", str::trim);
                                 let entry = match (speaker_name.is_empty(), style_name.is_empty()) {
                                     (false, false) => {
                                         format!("{id}:{speaker_name}（{style_name}）")
@@ -272,7 +270,7 @@ async fn try_loopback_speech_health(
         "{}://{}{}",
         parsed.scheme(),
         parsed.host_str().unwrap_or("127.0.0.1"),
-        parsed.port().map(|p| format!(":{p}")).unwrap_or_default()
+        parsed.port().map_or_default(|p| format!(":{p}"))
     );
     for path in ["/health", "/"] {
         let mut fallback = client.get(format!("{origin}{path}"));

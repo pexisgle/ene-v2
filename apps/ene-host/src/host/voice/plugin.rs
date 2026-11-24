@@ -222,7 +222,6 @@ fn model_of(options: &serde_json::Value) -> String {
     options
         .get("model")
         .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default()
+        .map_or_default(str::trim)
         .to_owned()
 }

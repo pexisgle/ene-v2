@@ -28,53 +28,47 @@ pub(super) struct RolesContext {
 
 pub(super) fn collect_roles_context(hub: &Hub) -> RolesContext {
     let settings = hub.model.settings();
-    let refresh_ids = settings
-        .map(|s| {
-            s.connections
-                .iter()
-                .filter(|c| {
-                    c.enabled
-                        && matches!(
-                            c.kind,
-                            ConnectionKind::Llm
-                                | ConnectionKind::Embedding
-                                | ConnectionKind::Stt
-                                | ConnectionKind::Tts
-                        )
-                })
-                .map(|c| c.id.clone())
-                .collect()
-        })
-        .unwrap_or_default();
-    let conn_names = settings
-        .map(|s| {
-            s.connections
-                .iter()
-                .map(|c| (c.id.clone(), c.name.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let search_conns = settings
-        .map(|s| {
-            s.connections
-                .iter()
-                .filter(|c| c.kind == ConnectionKind::Search)
-                .map(|c| {
-                    let adapter = c
-                        .config
-                        .as_ref()
-                        .and_then(|cfg| match cfg {
-                            ConnectionConfig::Search(sc) => {
-                                sc.endpoint.as_ref().map(|e| e.adapter.clone())
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| "search".into());
-                    (c.id.clone(), c.name.clone(), adapter)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let refresh_ids = settings.map_or_default(|s| {
+        s.connections
+            .iter()
+            .filter(|c| {
+                c.enabled
+                    && matches!(
+                        c.kind,
+                        ConnectionKind::Llm
+                            | ConnectionKind::Embedding
+                            | ConnectionKind::Stt
+                            | ConnectionKind::Tts
+                    )
+            })
+            .map(|c| c.id.clone())
+            .collect()
+    });
+    let conn_names = settings.map_or_default(|s| {
+        s.connections
+            .iter()
+            .map(|c| (c.id.clone(), c.name.clone()))
+            .collect()
+    });
+    let search_conns = settings.map_or_default(|s| {
+        s.connections
+            .iter()
+            .filter(|c| c.kind == ConnectionKind::Search)
+            .map(|c| {
+                let adapter = c
+                    .config
+                    .as_ref()
+                    .and_then(|cfg| match cfg {
+                        ConnectionConfig::Search(sc) => {
+                            sc.endpoint.as_ref().map(|e| e.adapter.clone())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "search".into());
+                (c.id.clone(), c.name.clone(), adapter)
+            })
+            .collect()
+    });
     let active_search_id = settings.and_then(|s| {
         s.connections
             .iter()
@@ -128,11 +122,10 @@ pub(super) fn render_voice_role_row(
     );
     let filter_txt = filter_d.read(cx).text().to_owned();
     let options = build_voice_role_options(&spec);
-    let current_value = spec
-        .active
-        .as_ref()
-        .map(|(cid, vid)| encode_model_choice(cid, vid))
-        .unwrap_or_else(|| "__off__".to_owned());
+    let current_value = spec.active.as_ref().map_or_else(
+        || "__off__".to_owned(),
+        |(cid, vid)| encode_model_choice(cid, vid),
+    );
     let no_choices = spec.choices.is_empty();
     let assign_fn = spec.assign;
     let pane_toggle = cx.entity();
@@ -297,22 +290,21 @@ pub(super) fn voice_role_specs(ctx: &RolesContext) -> [VoiceRoleSpec; 2] {
 }
 
 fn resolve_voice_label(spec: &VoiceRoleSpec, conn_names: &BTreeMap<String, String>) -> String {
-    spec.active
-        .as_ref()
-        .map(|(cid, vid)| {
+    spec.active.as_ref().map_or_else(
+        || spec.off_label.to_owned(),
+        |(cid, vid)| {
             spec.choices
                 .iter()
                 .find(|(c, v, _)| c == cid && v == vid)
-                .map(|(_, _, label)| label.clone())
-                .unwrap_or_else(|| {
-                    let cname = conn_names
-                        .get(cid)
-                        .map(String::as_str)
-                        .unwrap_or(cid.as_str());
-                    format!("{cname} / {vid}")
-                })
-        })
-        .unwrap_or_else(|| spec.off_label.to_owned())
+                .map_or_else(
+                    || {
+                        let cname = conn_names.get(cid).map_or(cid.as_str(), String::as_str);
+                        format!("{cname} / {vid}")
+                    },
+                    |(_, _, label)| label.clone(),
+                )
+        },
+    )
 }
 
 fn build_voice_role_options(spec: &VoiceRoleSpec) -> Vec<DropdownOption> {

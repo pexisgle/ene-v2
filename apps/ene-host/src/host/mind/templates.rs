@@ -183,8 +183,7 @@ pub(crate) fn preview_system_prompt(request: &w::PreviewCompanionRequest) -> Res
     let profile = request
         .profile
         .as_option()
-        .map(wire::profile_from)
-        .unwrap_or_default();
+        .map_or_default(wire::profile_from);
     let companion = Companion {
         id: "preview".into(),
         name: request.name.trim().to_owned(),

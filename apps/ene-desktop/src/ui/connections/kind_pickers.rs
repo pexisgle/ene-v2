@@ -108,11 +108,10 @@ pub(super) fn build_voicevox_picker(
         })
         .collect();
     let selected_label = current_selected.as_deref().map(|sel| {
-        options
-            .iter()
-            .find(|o| o.value == sel)
-            .map(|o| format!("{} (ID: {})", o.label, o.value))
-            .unwrap_or_else(|| sel.to_owned())
+        options.iter().find(|o| o.value == sel).map_or_else(
+            || sel.to_owned(),
+            |o| format!("{} (ID: {})", o.label, o.value),
+        )
     });
     let list_d_pick = list_d.clone();
     let cid = id.to_owned();
@@ -366,7 +365,6 @@ fn find_selected_label(options: &[DropdownOption], selected: Option<&str>) -> Op
         options
             .iter()
             .find(|o| o.value == sel)
-            .map(|o| o.label.clone())
-            .unwrap_or_else(|| sel.to_owned())
+            .map_or_else(|| sel.to_owned(), |o| o.label.clone())
     })
 }

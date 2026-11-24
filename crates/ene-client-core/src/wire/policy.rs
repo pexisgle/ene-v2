@@ -35,7 +35,7 @@ impl From<w::ApprovalRequest> for domain::ApprovalRequest {
             action_payload_hash: value.action_payload_hash,
             tool_name: value.tool_name,
             normalized_arguments: value.normalized_arguments,
-            status: value.status.as_known().map(Into::into).unwrap_or_default(),
+            status: value.status.as_known().map_or_default(Into::into),
             created_at: value.created_at,
             client_id: value.client_id,
             capability: value.capability,
@@ -73,7 +73,7 @@ impl From<w::PolicyRule> for domain::PolicyRule {
             id: value.id,
             tool_name: value.tool_name,
             pattern: value.pattern,
-            effect: value.effect.as_known().map(Into::into).unwrap_or_default(),
+            effect: value.effect.as_known().map_or_default(Into::into),
             created_at: value.created_at,
         }
     }

@@ -360,10 +360,7 @@ pub(crate) fn quick_connect_llm(rpc: &RpcDispatcher, epoch: u64, req: QuickConne
                 .map_err(decode)?;
             let check = probe.check.into_option();
             let healthy = check.as_ref().is_some_and(|c| c.healthy);
-            let models = check
-                .as_ref()
-                .map(|c| c.resources.clone())
-                .unwrap_or_default();
+            let models = check.as_ref().map_or_default(|c| c.resources.clone());
             let error = check
                 .as_ref()
                 .and_then(|c| c.failure.as_option())

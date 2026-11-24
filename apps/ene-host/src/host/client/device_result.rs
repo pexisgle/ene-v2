@@ -90,10 +90,10 @@ pub(crate) fn complete(
             let outcome = build_waiter_outcome(&operation, output.as_ref());
             permission::decide(world, waiter.call, outcome);
         } else {
-            let reason = failure
-                .as_ref()
-                .map(|failure| failure.message.clone())
-                .unwrap_or_else(|| "the operation failed".into());
+            let reason = failure.as_ref().map_or_else(
+                || "the operation failed".into(),
+                |failure| failure.message.clone(),
+            );
             permission::refuse(world, waiter.call, &reason);
         }
     }

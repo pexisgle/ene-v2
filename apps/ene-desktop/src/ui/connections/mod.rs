@@ -177,8 +177,7 @@ impl gpui::Render for ConnectionsPane {
                 hub.live(),
                 hub.model
                     .settings()
-                    .map(|s| s.connections.clone())
-                    .unwrap_or_default(),
+                    .map_or_default(|s| s.connections.clone()),
                 hub.model.connections.providers.clone().unwrap_or_default(),
                 hub.model.connections.checks.clone(),
                 hub.model.companion().cloned(),

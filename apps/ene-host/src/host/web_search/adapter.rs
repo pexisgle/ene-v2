@@ -286,8 +286,7 @@ pub(super) fn parse_adapter_results(
                 .map_err(|_| ToolExecutionError::other("Brave returned invalid search results"))?;
             parsed
                 .web
-                .map(|web| web.results)
-                .unwrap_or_default()
+                .map_or_default(|web| web.results)
                 .into_iter()
                 .map(|hit| (hit.url, hit.title, hit.description))
                 .collect()

@@ -97,8 +97,7 @@ where
     let display_label = spec
         .selected_label
         .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| spec.placeholder.to_owned());
+        .map_or_else(|| spec.placeholder.to_owned(), str::to_owned);
     let has_selection = spec.selected_label.is_some_and(|s| !s.is_empty());
     let trigger_bg = if spec.enabled {
         theme.bg_input

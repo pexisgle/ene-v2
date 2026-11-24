@@ -95,9 +95,7 @@ pub fn build_search_preset_inputs(
                 .search_adapter()
                 .is_some_and(|existing| existing.eq_ignore_ascii_case(spec.adapter))
     });
-    let target_id = existing
-        .map(|conn| conn.id.clone())
-        .unwrap_or_else(|| spec.preset_id.to_owned());
+    let target_id = existing.map_or_else(|| spec.preset_id.to_owned(), |conn| conn.id.clone());
     let has_enabled_other = connections
         .iter()
         .any(|conn| conn.kind == ConnectionKind::Search && conn.enabled && conn.id != target_id);
@@ -294,8 +292,7 @@ pub fn build_stt_preset_input(
     ConnectionInput {
         id: spec
             .fixed_id
-            .map(str::to_owned)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            .map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned),
         name: spec.name,
         enabled: true,
         expected_revision: existing_rev,
@@ -317,8 +314,7 @@ pub fn build_sakura_tts_preset_input(connections: &[Connection]) -> ConnectionIn
     let existing_rev = connections
         .iter()
         .find(|c| c.id == "sakura-tts")
-        .map(|c| c.revision)
-        .unwrap_or(0);
+        .map_or(0, |c| c.revision);
     let options = serde_json::json!({
         "protocol": "sakura",
         "model": "zundamon",
@@ -352,8 +348,7 @@ pub fn build_embedding_preset_input(
     let existing_rev = connections
         .iter()
         .find(|c| c.id == spec.id)
-        .map(|c| c.revision)
-        .unwrap_or(0);
+        .map_or(0, |c| c.revision);
     ConnectionInput {
         id: spec.id.into(),
         name: spec.name.into(),

@@ -72,10 +72,10 @@ pub(crate) async fn read_response_body(
             if error.is::<http_body_util::LengthLimitError>() {
                 return NetError::ResponseTooLarge(label.to_owned());
             }
-            let error = error
-                .downcast::<reqwest::Error>()
-                .map(|error| error.without_url().to_string())
-                .unwrap_or_else(|error| error.to_string());
+            let error = error.downcast::<reqwest::Error>().map_or_else(
+                |error| error.to_string(),
+                |error| error.without_url().to_string(),
+            );
             NetError::ResponseRead {
                 label: label.to_owned(),
                 error,

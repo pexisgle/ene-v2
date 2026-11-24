@@ -380,14 +380,11 @@ pub(super) fn collect_sakura_conn_ids(conn: &Connection, hub: &Hub) -> Vec<Strin
     if !conn.is_sakura() {
         return Vec::new();
     }
-    hub.model
-        .settings()
-        .map(|s| {
-            s.connections
-                .iter()
-                .filter(|c| c.is_sakura())
-                .map(|c| c.id.clone())
-                .collect()
-        })
-        .unwrap_or_default()
+    hub.model.settings().map_or_default(|s| {
+        s.connections
+            .iter()
+            .filter(|c| c.is_sakura())
+            .map(|c| c.id.clone())
+            .collect()
+    })
 }

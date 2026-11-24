@@ -74,7 +74,7 @@ pub(crate) fn publish_messages(
         let Some(companion_id) = companion_of(companion, work) else {
             continue;
         };
-        let work_id = work.map(|agent| agent.work_id.as_str()).unwrap_or_default();
+        let work_id = work.map_or_default(|agent| agent.work_id.as_str());
         let start = conversation
             .entries()
             .rposition(|entry| published.0.is_some_and(|last| entry.id.get() <= last))

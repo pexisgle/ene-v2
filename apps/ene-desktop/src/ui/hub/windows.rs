@@ -126,11 +126,7 @@ pub(super) fn sync_tray_state(hub: &Hub) {
     let Some(tray) = &hub.windows.tray else {
         return;
     };
-    let name = hub
-        .model
-        .companion()
-        .map(|c| c.name.as_str())
-        .unwrap_or("ene");
+    let name = hub.model.companion().map_or("ene", |c| c.name.as_str());
     let status = match &hub.model.connections.link {
         Link::Live { .. } if !hub.model.approvals().is_empty() => "確認待ち",
         Link::Live { .. } if hub.model.companions.work_active => "作業中",

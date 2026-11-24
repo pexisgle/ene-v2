@@ -189,8 +189,7 @@ impl Instance {
         let mut plugin = self.plugin.take().ok_or(Error::Unavailable)?;
         let token = invocation
             .as_ref()
-            .map(|c| c.cancel.clone())
-            .unwrap_or_else(|| cancel.child_token());
+            .map_or_else(|| cancel.child_token(), |c| c.cancel.clone());
         let mut guard = Cancellation {
             token: token.clone(),
             interrupt: plugin.cancel_handle(),
@@ -207,7 +206,7 @@ impl Instance {
                     return Err(Error::Cancelled);
                 }
                 *context.lock().map_err(|_| Error::Unavailable)? =
-                    invocation.as_ref().map(Arc::downgrade).unwrap_or_default();
+                    invocation.as_ref().map_or_default(Arc::downgrade);
                 let result = plugin.call::<_, BoundedJson<T, MAX_CHUNK>>(function, input);
                 #[cfg(test)]
                 if let Some(native_exit) = native_exit {

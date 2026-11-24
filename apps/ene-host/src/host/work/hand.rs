@@ -332,9 +332,7 @@ fn edit_hand<R>(hands: &mut Hands, work_id: &str, edit: impl FnOnce(&mut Hand) -
 }
 
 fn cwd() -> String {
-    std::env::current_dir()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default()
+    std::env::current_dir().map_or_default(|path| path.display().to_string())
 }
 
 pub(super) fn dispatch_to_hand(

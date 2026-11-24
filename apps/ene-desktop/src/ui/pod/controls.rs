@@ -156,8 +156,7 @@ pub(super) fn render_roster_popover(
     let companions = hub
         .model
         .snapshot()
-        .map(|s| s.companions.clone())
-        .unwrap_or_default();
+        .map_or_default(|s| s.companions.clone());
     let active_id = hub.model.companion_id().map(str::to_owned);
     let client_id = hub.options.id.clone();
 

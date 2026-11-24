@@ -290,8 +290,7 @@ impl Player {
         self.queue
             .deck
             .lock()
-            .map(|deck| !deck.pending.is_empty())
-            .unwrap_or(false)
+            .is_ok_and(|deck| !deck.pending.is_empty())
     }
 
     pub fn rate(&self) -> u32 {

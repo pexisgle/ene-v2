@@ -86,9 +86,8 @@ pub fn score(
     let decay = (importance / 0.3).min(1.0);
     let relevance = relevance.clamp(0.0, 1.0);
     let touched = last_touched.or(occurred_at).unwrap_or(recorded_at);
-    let days = parse_epoch(touched)
-        .map(|then| ((now_epoch - then) as f64 / 86_400.0).max(0.0))
-        .unwrap_or(0.0);
+    let days =
+        parse_epoch(touched).map_or(0.0, |then| ((now_epoch - then) as f64 / 86_400.0).max(0.0));
     let recency = (-0.05 * days).exp();
     decay * (0.5 * relevance + 0.3 * importance + 0.2 * recency)
 }

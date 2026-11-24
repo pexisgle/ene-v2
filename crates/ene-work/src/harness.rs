@@ -98,17 +98,13 @@ impl HarnessBuffer {
                     .clone()
                     .or_else(|| self.names.get(&update.tool_call_id.to_string()).cloned())
                     .unwrap_or_else(|| update.tool_call_id.to_string());
-                let status = update
-                    .fields
-                    .status
-                    .map(|status| match status {
-                        ToolCallStatus::Pending => "準備中",
-                        ToolCallStatus::InProgress => "実行中",
-                        ToolCallStatus::Completed => "完了",
-                        ToolCallStatus::Failed => "失敗",
-                        _ => "更新",
-                    })
-                    .unwrap_or("更新");
+                let status = update.fields.status.map_or("更新", |status| match status {
+                    ToolCallStatus::Pending => "準備中",
+                    ToolCallStatus::InProgress => "実行中",
+                    ToolCallStatus::Completed => "完了",
+                    ToolCallStatus::Failed => "失敗",
+                    _ => "更新",
+                });
                 Some(format!("[作業報告] ツール {name}: {status}"))
             }
             SessionUpdate::Plan(plan) => {
