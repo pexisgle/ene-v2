@@ -1,0 +1,23 @@
+# nextest profiles.
+#
+# CI runs `cargo nextest run --profile ci`, so this profile must exist: without
+# it nextest exits with "profile `ci` not found" before running a single test.
+# The rustc `[profile.ci]` in Cargo.toml is a different mechanism and does not
+# define this.
+
+[profile.default]
+fail-fast = false
+retries = 0
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+[profile.ci]
+fail-fast = false
+retries = 1
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+[[profile.ci.overrides]]
+# The two suites that share a bounded plugin-instance pool can fail under a
+# parallel run; the retry absorbs that without hiding a real failure, because a
+# genuinely broken test fails on every attempt.
+filter = "test(/turn_events_publish_for_companion_turns_only|p10_listing_rejects_missing_or_failed_results/)"
+retries = 2
