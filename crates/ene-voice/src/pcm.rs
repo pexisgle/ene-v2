@@ -182,10 +182,11 @@ mod tests {
                 }
             }
         }
-        assert!(
+        assert_eq!(
             resample_mono(&[0, 0], 96_000, SAMPLE_RATE, &mut None)
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
         assert!(wire_pcm(vec![0], SAMPLE_RATE, &mut None).is_err());
         assert!(wire_pcm(Vec::new(), 0, &mut None).is_err());
@@ -210,7 +211,7 @@ mod tests {
                 }
                 let identity = wire_pcm(signal.clone(), SAMPLE_RATE, &mut cache).unwrap();
                 assert_eq!(identity, signal);
-                assert!(wire_pcm(Vec::new(), from, &mut cache).unwrap().is_empty());
+                assert_eq!(wire_pcm(Vec::new(), from, &mut cache).unwrap().len(), 0);
             }
         }
         let pcm = pcm_bytes([i16::MIN, i16::MAX, 0, -123, 123]);

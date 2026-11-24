@@ -147,8 +147,8 @@ mod tests {
 
     #[test]
     fn empty_and_oversized_facts_never_reach_the_store() {
-        assert!(normalize(vec![fact("   ")]).is_empty());
-        assert!(normalize(vec![fact(&"x".repeat(4_001))]).is_empty());
+        assert_eq!(normalize(vec![fact("   ")]).len(), 0);
+        assert_eq!(normalize(vec![fact(&"x".repeat(4_001))]).len(), 0);
         assert_eq!(normalize(vec![fact(&"x".repeat(4_000))]).len(), 1);
     }
 

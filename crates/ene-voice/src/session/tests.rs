@@ -84,10 +84,10 @@ fn sentences_split_on_the_design_terminators() {
         split_sentences(&mut buffer),
         vec!["おはよう。", "今日はいい天気ですね！", "明日は？"]
     );
-    assert!(buffer.is_empty());
+    assert_eq!(buffer.len(), 0);
 
     let mut buffer = String::from("まだ終わっていない");
-    assert!(split_sentences(&mut buffer).is_empty());
+    assert_eq!(split_sentences(&mut buffer).len(), 0);
     assert_eq!(
         flush_sentences(&mut buffer).as_deref(),
         Some("まだ終わっていない")
