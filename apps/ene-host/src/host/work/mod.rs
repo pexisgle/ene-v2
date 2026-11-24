@@ -6,6 +6,7 @@
 //! agent to its run id. Only a closed session, a failed start, or a restart
 //! retires the agent, never an ordinary run end.
 mod hand;
+mod hand_collect;
 #[cfg(test)]
 mod hand_tests;
 mod lifecycle;
@@ -94,7 +95,9 @@ impl Plugin for WorkPlugin {
             .add_systems(Startup, restore)
             .add_systems(
                 Update,
-                (hand::collect, detect_stalls).chain().after(AgentLoop),
+                (hand_collect::collect, detect_stalls)
+                    .chain()
+                    .after(AgentLoop),
             );
     }
 }
