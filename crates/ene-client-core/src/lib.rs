@@ -10,6 +10,8 @@ pub mod templates;
 pub mod update;
 pub mod wire;
 
+mod notifications;
+
 #[cfg(test)]
 mod choices_tests;
 #[cfg(test)]
