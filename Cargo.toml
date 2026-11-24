@@ -92,6 +92,9 @@ rig-rmcp = "=0.46.0"
 rmcp = { version = "3.5", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "which-command"] }
 rig-reqwest = { version = "=0.46.0", features = ["rustls"] }
 rusqlite = { version = "0.42", features = ["bundled", "fallible_uint"] }
+# `rusqlite_migration` must share `rusqlite`'s `Connection` type, so this is held
+# at the last release built on rusqlite 0.42 (2.9 needs 0.43) and moves with it.
+rusqlite-migration = { package = "rusqlite_migration", version = "=2.8.0" }
 rustix = { version = "1", features = ["fs", "process"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

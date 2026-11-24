@@ -17,6 +17,7 @@ ene-mind.workspace = true
 ene-policy.workspace = true
 jiff.workspace = true
 rusqlite.workspace = true
+rusqlite-migration.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

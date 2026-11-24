@@ -1,39 +1,89 @@
 //! Forward-only SQLite schema initialization and incremental migrations.
+//!
+//! [`Migrations`] owns the forward ladder. It reads `PRAGMA user_version`, runs
+//! only the pending steps, wraps a run in a transaction, and rolls that
+//! transaction back when a step fails. Three things stay in this module because
+//! the crate has no concept of them.
+//!
+//! - The baseline is a schema *file* rather than a step, so `schema.sql` is step
+//!   0 and the crate's own accounting stamps version 6 once the padding steps
+//!   after it have run.
+//! - The `schema_migrations` audit rows are host bookkeeping, written from an
+//!   `up` hook so each lands in the same transaction as the step it describes.
+//! - The pre-baseline refusal is a safety rule about versions *below* the
+//!   ladder, so it runs before the crate is allowed to touch the file.
+//!
+//! The crate names a version after the number of steps applied, so step `n`
+//! (0-based) produces version `n + 1` and version `v` lives at index `v - 1`.
+//! That is why steps 2..=6 exist but are empty. `schema.sql` already carries the
+//! tables those versions describe, yet the crate needs one entry per version for
+//! its index arithmetic to keep matching `user_version`.
 
 use crate::{StoreError, error::Result, util::now};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, Transaction, params};
+use rusqlite_migration::{HookResult, M, Migrations};
 
 /// Baseline schema version for `schema.sql`. Databases older than this baseline
 /// (version 1..=5, or unversioned non-empty version 0 databases) are refused.
 pub const BASELINE_VERSION: i64 = 6;
 
-/// Latest database schema version managed by [`MIGRATIONS`].
+/// Latest database schema version managed by [`ladder_steps`].
 pub const VERSION: i64 = 8;
 
-#[derive(Clone, Copy, Debug)]
-struct Migration {
-    version: i64,
-    name: &'static str,
-    sql: &'static str,
-}
-
-const MIGRATIONS: &[Migration] = &[
-    Migration {
-        version: 7,
-        name: "0007_schema_migrations_table",
-        sql: "CREATE TABLE IF NOT EXISTS schema_migrations (
+/// Every version this host applies above the baseline, in order. The position
+/// in this table is the version, so adding a row is the only way to add a
+/// version and the step and its audit name cannot drift apart.
+const STEPS_ABOVE_BASELINE: &[(&str, &str)] = &[
+    (
+        "0007_schema_migrations_table",
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
         version INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
         applied_at TEXT NOT NULL
     );",
-    },
-    Migration {
-        version: 8,
-        name: "0008_work_sessions_companion_index",
-        sql: "CREATE INDEX IF NOT EXISTS idx_work_sessions_companion
+    ),
+    (
+        "0008_work_sessions_companion_index",
+        "CREATE INDEX IF NOT EXISTS idx_work_sessions_companion
             ON work_sessions(companion_id, updated_at DESC, id);",
-    },
+    ),
 ];
+
+/// The version a step at `index` produces.
+fn version_of(index: usize) -> i64 {
+    BASELINE_VERSION + 1 + index as i64
+}
+
+/// The forward ladder, one entry per version from 1 to [`VERSION`].
+///
+/// Built per call rather than held in a `const` because the audited steps carry
+/// hooks, which the crate only accepts at runtime.
+fn ladder_steps() -> Vec<M<'static>> {
+    let mut steps = Vec::with_capacity(VERSION as usize);
+    // Step 0 carries `schema.sql`, and steps 1..=5 stay empty. The baseline is a
+    // file, so versions 2..=6 have no DDL of their own, yet the crate counts
+    // steps to name a version and needs one entry each.
+    steps.push(M::up(include_str!("schema.sql")));
+    steps.resize_with(BASELINE_VERSION as usize, || M::up(""));
+    steps.extend(
+        STEPS_ABOVE_BASELINE
+            .iter()
+            .enumerate()
+            .map(|(index, (name, sql))| {
+                M::up_with_hook(sql, move |tx| record(tx, version_of(index), name))
+            }),
+    );
+    steps
+}
+
+/// Records one step in `schema_migrations`, inside that step's transaction.
+fn record(tx: &Transaction<'_>, version: i64, name: &str) -> HookResult {
+    tx.execute(
+        "INSERT OR REPLACE INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![version, name, now()],
+    )?;
+    Ok(())
+}
 
 /// Verifies `PRAGMA user_version` before mutating connection pragmas (such as WAL).
 pub(crate) fn validate_open_version(connection: &Connection) -> Result<i64> {
@@ -65,52 +115,35 @@ fn validate_version_for(connection: &Connection, latest: i64) -> Result<i64> {
 
 /// Initializes an empty DB from baseline v6 and applies all pending forward migrations.
 pub(crate) fn apply_migrations(connection: &mut Connection) -> Result<()> {
-    apply_migrations_with(connection, MIGRATIONS)
+    apply_ladder(connection, ladder_steps())
 }
 
-fn apply_migrations_with(connection: &mut Connection, migrations: &[Migration]) -> Result<()> {
-    let latest = migrations
-        .last()
-        .map_or(BASELINE_VERSION, |migration| migration.version);
-    let mut current = validate_version_for(connection, latest)?;
-
-    if current == 0 {
-        let transaction = connection.transaction()?;
-        transaction.execute_batch(include_str!("schema.sql"))?;
-        transaction.pragma_update(None, "user_version", BASELINE_VERSION)?;
-        transaction.commit()?;
-        current = BASELINE_VERSION;
+fn apply_ladder(connection: &mut Connection, steps: Vec<M<'static>>) -> Result<()> {
+    let latest = steps.len() as i64;
+    let migrations = Migrations::new(steps);
+    let current = validate_version_for(connection, latest)?;
+    let current = if current == 0 {
+        // Versions 1..=6 are the baseline: `schema.sql` plus the empty padding
+        // versions. One call, so the whole baseline commits or rolls back as a
+        // unit and leaves `user_version` at `BASELINE_VERSION`.
+        run(&migrations, connection, BASELINE_VERSION)?;
+        BASELINE_VERSION
+    } else {
+        current
+    };
+    // Then one call per version rather than a single `to_latest`, so each
+    // migration commits on its own and a late failure leaves `user_version` at
+    // the last step that really succeeded instead of discarding the whole run.
+    for version in current + 1..=latest {
+        run(&migrations, connection, version)?;
     }
-
-    for &migration in migrations {
-        if migration.version <= current {
-            continue;
-        }
-        if migration.version != current + 1 {
-            return Err(StoreError::Storage(format!(
-                "non-contiguous database migration: expected version {}, got {} (`{}`)",
-                current + 1,
-                migration.version,
-                migration.name
-            )));
-        }
-        apply_single_migration(connection, migration)?;
-        current = migration.version;
-    }
-
     Ok(())
 }
 
-fn apply_single_migration(connection: &mut Connection, migration: Migration) -> Result<()> {
-    let transaction = connection.transaction()?;
-    transaction.execute_batch(migration.sql)?;
-    transaction.execute(
-        "INSERT OR REPLACE INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![migration.version, migration.name, now()],
-    )?;
-    transaction.pragma_update(None, "user_version", migration.version)?;
-    transaction.commit()?;
-    Ok(())
+fn run(migrations: &Migrations<'_>, connection: &mut Connection, version: i64) -> Result<()> {
+    migrations
+        .to_version(connection, version as usize)
+        .map_err(|error| StoreError::Storage(error.to_string()))
 }
 
 #[cfg(test)]
@@ -221,17 +254,24 @@ mod tests {
 
     #[test]
     fn migration_definitions_are_sequential_and_match_version() {
-        for (expected, migration) in (BASELINE_VERSION + 1..).zip(MIGRATIONS.iter()) {
-            assert_eq!(migration.version, expected);
-            assert!(!migration.name.trim().is_empty());
-            assert!(!migration.sql.trim().is_empty());
-        }
+        // Replays every step against an in-memory database, so a malformed ladder
+        // fails here in CI instead of at a user's startup.
+        Migrations::new(ladder_steps()).validate().unwrap();
         assert_eq!(
-            MIGRATIONS
-                .last()
-                .map_or(BASELINE_VERSION, |migration| migration.version),
-            VERSION
+            ladder_steps().len(),
+            VERSION as usize,
+            "the crate indexes a version by step count, so the ladder needs one \
+             step per version or `user_version` stops matching the schema"
         );
+        assert_eq!(
+            BASELINE_VERSION + STEPS_ABOVE_BASELINE.len() as i64,
+            VERSION,
+            "every version above the baseline needs a step and an audit name"
+        );
+        for (name, sql) in STEPS_ABOVE_BASELINE {
+            assert!(!name.trim().is_empty());
+            assert!(!sql.trim().is_empty());
+        }
     }
 
     #[test]
@@ -389,19 +429,15 @@ mod tests {
     #[test]
     fn failed_migration_rolls_back_ddl_and_user_version() {
         let mut conn = Connection::open_in_memory().unwrap();
-        let bad_migrations = [
-            MIGRATIONS[0],
-            Migration {
-                version: 8,
-                name: "0008_broken_migration",
-                sql: "CREATE TABLE should_roll_back (id INTEGER PRIMARY KEY); THIS IS INVALID SQL;",
-            },
-        ];
-        let result = apply_migrations_with(&mut conn, &bad_migrations);
+        // A ladder that is well formed up to version 7 and broken at 8.
+        let mut steps = ladder_steps();
+        steps[VERSION as usize - 1] =
+            M::up("CREATE TABLE should_roll_back (id INTEGER PRIMARY KEY); THIS IS INVALID SQL;");
+        let result = apply_ladder(&mut conn, steps);
         assert!(matches!(result, Err(StoreError::Storage(_))));
         // The rollback must leave the last good version from this fixture, not
         // whatever the crate's global `VERSION` happens to be.
-        assert_eq!(user_version(&conn), MIGRATIONS[0].version);
+        assert_eq!(user_version(&conn), VERSION - 1);
         let leaked_table: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'should_roll_back'",
