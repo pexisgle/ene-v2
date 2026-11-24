@@ -3,6 +3,7 @@
 mod approval;
 mod decision;
 mod gate;
+mod resolve;
 #[cfg(test)]
 mod tests;
 
