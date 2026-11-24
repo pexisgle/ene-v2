@@ -35,6 +35,8 @@ pub(crate) fn validate_output(spec: &CapabilitySpec, output: &serde_json::Value)
 // as a `DeviceOperation`.
 pub(crate) mod computer;
 pub(crate) mod device;
+pub(crate) mod device_dispatch;
+pub(crate) mod device_result;
 pub(crate) mod dynamic;
 
 use super::{
