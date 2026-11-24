@@ -2,6 +2,8 @@
 //! HTTP TTS/STT engines, and the ECS-free speech floor & sentence synthesis pipeline.
 
 pub mod engine;
+mod engine_config;
+mod engine_http;
 pub mod error;
 pub mod pcm;
 pub mod protocol;

@@ -1,6 +1,11 @@
 //! Speech synthesis and recognition engine traits, selection helpers, and `HttpEngine`.
 
 use crate::{
+    engine_config::{
+        Protocol, SpeechOptions, default_engine_model, endpoint_path, nonempty, resolve_protocol,
+        split_sakura_voice_defaults,
+    },
+    engine_http::{post, read_response_body},
     error::{BoxFuture, HttpResult, SetupError, VoiceHttpError},
     pcm::{SAMPLE_RATE, parse_wav, resample_mono, wav_wrap},
 };
@@ -8,7 +13,7 @@ use ene_catalog::{is_sakura_connection, is_sakura_tts_model_id};
 use ene_domain::settings::{Connection, ConnectionConfig, ConnectionKind, Endpoint};
 use ene_mind::Companion;
 
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use std::{fmt, time::Duration};
 
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -27,29 +32,6 @@ pub trait SttEngine: Send + Sync + 'static {
         pcm: Vec<u8>,
         sample_rate: u32,
     ) -> BoxFuture<'a, HttpResult<String>>;
-}
-
-#[derive(Deserialize, Default)]
-struct SpeechOptions {
-    protocol: Option<String>,
-    model: Option<String>,
-    voice: Option<String>,
-    language: Option<String>,
-    response_format: Option<String>,
-    path: Option<String>,
-    audio_query_path: Option<String>,
-    synthesis_path: Option<String>,
-    speaker: Option<u64>,
-    speed: Option<f64>,
-    timeout_ms: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Protocol {
-    OpenAiTts,
-    Voicevox,
-    OpenAiStt,
-    Raw,
 }
 
 /// Built-in HTTP engine supporting OpenAI TTS/STT, VOICEVOX, Sakura AI Engine, and raw STT.
@@ -387,113 +369,6 @@ impl SttEngine for HttpEngine {
     }
 }
 
-async fn read_response_body(
-    mut response: reqwest::Response,
-    max_bytes: usize,
-    label: &str,
-) -> HttpResult<Vec<u8>> {
-    let mut out = Vec::new();
-    while let Some(chunk) =
-        response
-            .chunk()
-            .await
-            .map_err(|error| VoiceHttpError::ResponseRead {
-                label: label.to_owned(),
-                error: error.without_url().to_string(),
-            })?
-    {
-        if out.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(VoiceHttpError::ResponseTooLarge(label.to_owned()));
-        }
-        out.extend_from_slice(&chunk);
-    }
-    Ok(out)
-}
-
-async fn post(
-    call: reqwest::RequestBuilder,
-    secret: Option<&str>,
-    label: &str,
-) -> HttpResult<reqwest::Response> {
-    let call = match secret {
-        Some(secret) => call.bearer_auth(secret),
-        None => call,
-    };
-    let response = call
-        .send()
-        .await
-        .map_err(|error| VoiceHttpError::EndpointUnreachable {
-            label: label.to_owned(),
-            error: error.to_string(),
-        })?;
-    if response.status().is_success() {
-        Ok(response)
-    } else {
-        Err(VoiceHttpError::EndpointStatus {
-            label: label.to_owned(),
-            status: response.status().as_u16(),
-        })
-    }
-}
-
-fn resolve_protocol(
-    tts: bool,
-    adapter: &str,
-    protocol_opt: Option<&str>,
-    label: &str,
-) -> Result<Protocol, SetupError> {
-    let trimmed = protocol_opt.map(str::trim).filter(|s| !s.is_empty());
-    match (tts, trimmed) {
-        (true, None) if adapter == "voicevox" => Ok(Protocol::Voicevox),
-        (true, None | Some("openai" | "sakura")) => Ok(Protocol::OpenAiTts),
-        (true, Some("voicevox")) => Ok(Protocol::Voicevox),
-        (false, None | Some("openai" | "sakura")) => Ok(Protocol::OpenAiStt),
-        (false, Some("raw")) => Ok(Protocol::Raw),
-        (_, Some(other)) => Err(SetupError::Unsupported(format!(
-            "the {label} adapter protocol `{other}` is not supported"
-        ))),
-    }
-}
-
-fn split_sakura_voice_defaults(
-    default_voice: Option<&str>,
-    sakura: bool,
-) -> (Option<String>, Option<String>) {
-    match default_voice {
-        Some(raw) if sakura => {
-            let trimmed = raw.trim();
-            if let Some((m, v)) = trimmed.split_once('/') {
-                let m = m.trim();
-                let v = v.trim();
-                (
-                    (!m.is_empty()).then(|| m.to_owned()),
-                    (!v.is_empty()).then(|| v.to_owned()),
-                )
-            } else if !trimmed.is_empty() && is_sakura_tts_model_id(trimmed) {
-                (Some(trimmed.to_owned()), None)
-            } else {
-                (None, (!trimmed.is_empty()).then(|| trimmed.to_owned()))
-            }
-        }
-        _ => (None, default_voice.map(str::to_owned)),
-    }
-}
-
-fn default_engine_model(tts: bool, sakura: bool) -> String {
-    if !tts {
-        if sakura {
-            "whisper-large-v3-turbo"
-        } else {
-            "whisper-1"
-        }
-    } else if sakura {
-        "zundamon"
-    } else {
-        "tts-1"
-    }
-    .into()
-}
-
 fn parse_options<T: DeserializeOwned + Default>(
     endpoint: &Endpoint,
     label: &str,
@@ -506,23 +381,6 @@ fn parse_options<T: DeserializeOwned + Default>(
             "the {label} connection options are not JSON: {error}"
         ))
     })
-}
-
-fn nonempty(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.is_empty())
-}
-
-fn endpoint_path(value: Option<String>, default: &str) -> String {
-    nonempty(value).map_or_else(
-        || default.to_owned(),
-        |path| {
-            if path.starts_with('/') {
-                path
-            } else {
-                format!("/{path}")
-            }
-        },
-    )
 }
 
 pub fn parse_binding(companion: &Companion) -> crate::protocol::VoiceBinding {
