@@ -1,6 +1,7 @@
 //! Wire conversions for companion, mind, chat message, and turn types.
 
 use crate::domain;
+use ene_domain::CompanionId;
 use ene_rpc as w;
 
 impl From<w::ModelAssignment> for domain::ModelAssignment {
@@ -223,11 +224,13 @@ impl From<w::MessageRole> for domain::MessageRole {
     }
 }
 
-impl From<w::Message> for domain::Message {
-    fn from(value: w::Message) -> Self {
-        Self {
+impl TryFrom<w::Message> for domain::Message {
+    type Error = ene_domain::DomainError;
+
+    fn try_from(value: w::Message) -> Result<Self, Self::Error> {
+        Ok(Self {
             id: value.id,
-            companion_id: value.companion_id,
+            companion_id: Some(CompanionId::parse(value.companion_id)?),
             work_id: value.work_id,
             role: value.role.as_known().map_or_default(Into::into),
             text: value.text,
@@ -235,7 +238,7 @@ impl From<w::Message> for domain::Message {
             sequence: value.sequence,
             request_id: value.request_id,
             author: value.author,
-        }
+        })
     }
 }
 
@@ -251,14 +254,16 @@ impl From<w::TurnStatus> for domain::TurnStatus {
     }
 }
 
-impl From<w::TurnEvent> for domain::TurnEvent {
-    fn from(value: w::TurnEvent) -> Self {
-        Self {
-            companion_id: value.companion_id,
+impl TryFrom<w::TurnEvent> for domain::TurnEvent {
+    type Error = ene_domain::DomainError;
+
+    fn try_from(value: w::TurnEvent) -> Result<Self, Self::Error> {
+        Ok(Self {
+            companion_id: Some(CompanionId::parse(value.companion_id)?),
             turn_id: value.turn_id,
             status: value.status.as_known().map_or_default(Into::into),
             failure: value.failure.into_option().map(Into::into),
-        }
+        })
     }
 }
 

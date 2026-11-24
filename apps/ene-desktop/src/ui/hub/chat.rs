@@ -14,7 +14,7 @@ pub(super) fn select_companion(hub: &mut Hub, companion_id: &str, cx: &mut Conte
     }
     hub.model.companions.selected = Some(companion_id.to_owned());
     hub.model.companions.chat = Chat {
-        companion_id: companion_id.to_owned(),
+        companion_id: rpc::chat::parse_companion_id(companion_id),
         loading: true,
         ..Default::default()
     };
@@ -42,9 +42,17 @@ pub(super) fn load_history(hub: &mut Hub, _cx: &mut Context<Hub>) {
     ) {
         return;
     }
-    if hub.model.companions.chat.companion_id != companion_id {
+    let target = rpc::chat::parse_companion_id(&companion_id);
+    if hub
+        .model
+        .companions
+        .chat
+        .companion_id
+        .as_ref()
+        .is_none_or(|id| id.as_str() != companion_id.as_str())
+    {
         hub.model.companions.chat = Chat {
-            companion_id,
+            companion_id: target,
             loading: true,
             ..Default::default()
         };

@@ -15,7 +15,14 @@ pub(crate) fn active_mini_speech_text(model: &Model) -> String {
         .companions
         .streaming
         .iter()
-        .filter(|((c, _), _)| c == &model.companions.chat.companion_id)
+        .filter(|((c, _), _)| {
+            model
+                .companions
+                .chat
+                .companion_id
+                .as_ref()
+                .is_some_and(|id| c == id.as_str())
+        })
         .map(|(_, text)| text.as_str())
         .collect();
     if !streaming.is_empty() {

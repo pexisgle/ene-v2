@@ -216,20 +216,21 @@ impl From<w::Notification> for domain::HostNotification {
             w::notification::Event::MindUpdated(updated) => {
                 domain::NotificationEvent::MindUpdated((*updated).into())
             }
-            w::notification::Event::MessageCreated(created) => {
-                match created.message.into_option() {
-                    Some(message) => {
-                        domain::NotificationEvent::MessageCreated(Box::new(message.into()))
-                    }
-                    None => domain::NotificationEvent::Other,
-                }
-            }
+            w::notification::Event::MessageCreated(created) => match created
+                .message
+                .into_option()
+                .and_then(|message| domain::Message::try_from(message).ok())
+            {
+                Some(message) => domain::NotificationEvent::MessageCreated(Box::new(message)),
+                None => domain::NotificationEvent::Other,
+            },
             w::notification::Event::MessageDelta(delta) => {
                 domain::NotificationEvent::MessageDelta((*delta).into())
             }
-            w::notification::Event::TurnEvent(turn) => {
-                domain::NotificationEvent::TurnEvent(Box::new((*turn).into()))
-            }
+            w::notification::Event::TurnEvent(turn) => match domain::TurnEvent::try_from(*turn) {
+                Ok(turn) => domain::NotificationEvent::TurnEvent(Box::new(turn)),
+                Err(_) => domain::NotificationEvent::Other,
+            },
             w::notification::Event::WorkEvent(work) => {
                 domain::NotificationEvent::WorkEvent((*work).into())
             }

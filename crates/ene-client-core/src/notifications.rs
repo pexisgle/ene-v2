@@ -41,9 +41,15 @@ pub(crate) fn merge_notification(
         Some(NotificationEvent::WorkEvent(work)) => merge_work_event(model, &work),
         Some(NotificationEvent::Generic(event)) => merge_generic_notice(model, &event),
         Some(NotificationEvent::MindUpdated(updated)) => {
+            // `updated.companion_id` is a CompanionId, so it is never empty and
+            // the emptiness guard this used to carry is dead.
             effects.mind |= model.companion_id() == Some(updated.companion_id.as_str())
-                || (!updated.companion_id.is_empty()
-                    && model.companions.chat.companion_id == updated.companion_id);
+                || model
+                    .companions
+                    .chat
+                    .companion_id
+                    .as_ref()
+                    .is_some_and(|id| id.as_str() == updated.companion_id);
         }
         Some(NotificationEvent::Other) | None => {}
     }
@@ -113,20 +119,29 @@ fn merge_chat_event(model: &mut Model, event: NotificationEvent) {
     let companions = &mut model.companions;
     match event {
         NotificationEvent::MessageCreated(message) => {
-            if message.companion_id == companions.chat.companion_id
+            if message.companion_id.is_some()
+                && companions.chat.companion_id == message.companion_id
                 && is_user_facing_message(&message)
             {
-                companions
-                    .streaming
-                    .retain(|(companion, _), _| companion != &message.companion_id);
+                companions.streaming.retain(|(companion, _), _| {
+                    message
+                        .companion_id
+                        .as_ref()
+                        .is_none_or(|id| companion != id.as_str())
+                });
                 merge_message(&mut companions.chat.messages, *message);
             }
         }
         NotificationEvent::MessageDelta(delta) => {
-            if delta.companion_id == companions.chat.companion_id {
+            if companions
+                .chat
+                .companion_id
+                .as_ref()
+                .is_some_and(|id| id.as_str() == delta.companion_id)
+            {
                 let text = companions
                     .streaming
-                    .entry((delta.companion_id, delta.stream_id))
+                    .entry((delta.companion_id.as_str().to_owned(), delta.stream_id))
                     .or_default();
                 text.push_str(&delta.delta);
             }
@@ -139,7 +154,7 @@ fn merge_chat_event(model: &mut Model, event: NotificationEvent) {
 
 fn merge_turn_event(model: &mut Model, turn: TurnEvent) {
     let companions = &mut model.companions;
-    if turn.companion_id != companions.chat.companion_id {
+    if turn.companion_id.is_none() || companions.chat.companion_id != turn.companion_id {
         return;
     }
     let terminal = matches!(

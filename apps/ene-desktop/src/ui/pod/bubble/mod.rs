@@ -31,7 +31,14 @@ impl CompanionPod {
             .companions
             .streaming
             .iter()
-            .filter(|((c, _), _)| c == &hub.model.companions.chat.companion_id)
+            .filter(|((c, _), _)| {
+                hub.model
+                    .companions
+                    .chat
+                    .companion_id
+                    .as_ref()
+                    .is_some_and(|id| c == id.as_str())
+            })
             .map(|(_, text)| text.as_str())
             .collect();
         let speaking = hub.model.audio.companion_speaking;

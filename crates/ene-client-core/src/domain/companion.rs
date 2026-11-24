@@ -1,6 +1,7 @@
 //! Pure companion, mind, chat message, turn, and binding domain types.
 
 use super::{Failure, JsonDocument};
+use ene_domain::CompanionId;
 
 /// Binding from a companion role slot to a connection and model identifier.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -158,7 +159,7 @@ pub enum MessageRole {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Message {
     pub id: String,
-    pub companion_id: String,
+    pub companion_id: Option<CompanionId>,
     pub work_id: String,
     pub role: MessageRole,
     pub text: String,
@@ -182,7 +183,7 @@ pub enum TurnStatus {
 /// Turn status notification payload.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TurnEvent {
-    pub companion_id: String,
+    pub companion_id: Option<CompanionId>,
     pub turn_id: String,
     pub status: TurnStatus,
     pub failure: Option<Failure>,

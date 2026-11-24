@@ -8,6 +8,7 @@ use crate::{
     state::{Link, Model, Sending},
     update::Update,
 };
+use ene_domain::CompanionId;
 use std::time::Duration;
 
 fn model() -> Model {
@@ -31,7 +32,7 @@ fn notification(event: NotificationEvent) -> HostNotification {
 fn message(id: &str, sequence: u64, role: MessageRole, text: &str) -> Message {
     Message {
         id: id.into(),
-        companion_id: "ene".into(),
+        companion_id: Some(CompanionId::parse("ene").unwrap()),
         role,
         text: text.into(),
         sequence,
@@ -41,7 +42,7 @@ fn message(id: &str, sequence: u64, role: MessageRole, text: &str) -> Message {
 
 fn with_chat() -> Model {
     let mut model = model();
-    model.companions.chat.companion_id = "ene".into();
+    model.companions.chat.companion_id = Some(CompanionId::parse("ene").unwrap());
     model
 }
 
@@ -50,7 +51,7 @@ fn a_delta_is_a_preview_until_the_host_records_the_message() {
     let mut model = with_chat();
     model.apply(Update::Notification(Box::new(notification(
         NotificationEvent::MessageDelta(MessageDelta {
-            companion_id: "ene".into(),
+            companion_id: "ene".to_owned(),
             stream_id: "stream".into(),
             delta: "こん".into(),
         }),
@@ -61,7 +62,7 @@ fn a_delta_is_a_preview_until_the_host_records_the_message() {
     );
     model.apply(Update::Notification(Box::new(notification(
         NotificationEvent::MessageDelta(MessageDelta {
-            companion_id: "ene".into(),
+            companion_id: "ene".to_owned(),
             stream_id: "stream".into(),
             delta: "にちは".into(),
         }),
@@ -119,7 +120,7 @@ fn a_turn_event_for_another_companion_does_not_touch_the_shown_chat() {
     let mut model = with_chat();
     model.apply(Update::Notification(Box::new(notification(
         NotificationEvent::TurnEvent(Box::new(TurnEvent {
-            companion_id: "other".into(),
+            companion_id: Some(CompanionId::parse("other").unwrap()),
             turn_id: "1".into(),
             status: TurnStatus::Failed,
             ..Default::default()
@@ -137,7 +138,7 @@ fn a_terminal_turn_drops_the_preview() {
         .insert(("ene".into(), "stream".into()), "半分".into());
     model.apply(Update::Notification(Box::new(notification(
         NotificationEvent::TurnEvent(Box::new(TurnEvent {
-            companion_id: "ene".into(),
+            companion_id: Some(CompanionId::parse("ene").unwrap()),
             turn_id: "1".into(),
             status: TurnStatus::Stopped,
             ..Default::default()
@@ -289,7 +290,7 @@ fn a_recorded_user_message_closes_its_pending_row() {
         text: "こんにちは".into(),
     });
     model.apply(Update::History {
-        companion_id: "ene".into(),
+        companion_id: "ene".to_owned(),
         messages: vec![message("a", 1, MessageRole::User, "こんにちは")],
     });
     assert!(
@@ -347,7 +348,7 @@ fn mind_updated_requests_refresh_only_for_active_companion() {
     let mut model = with_chat();
     let other = model.apply(Update::Notification(Box::new(notification(
         NotificationEvent::MindUpdated(MindUpdated {
-            companion_id: "other".into(),
+            companion_id: "other".to_owned(),
             ..Default::default()
         }),
     ))));
@@ -355,7 +356,7 @@ fn mind_updated_requests_refresh_only_for_active_companion() {
 
     let mine = model.apply(Update::Notification(Box::new(notification(
         NotificationEvent::MindUpdated(MindUpdated {
-            companion_id: "ene".into(),
+            companion_id: "ene".to_owned(),
             ..Default::default()
         }),
     ))));
@@ -367,7 +368,7 @@ fn internal_work_messages_are_hidden_and_work_event_tracks_active_status() {
     let mut model = with_chat();
     let internal = Message {
         id: "w1".into(),
-        companion_id: "ene".into(),
+        companion_id: Some(CompanionId::parse("ene").unwrap()),
         work_id: "work-1".into(),
         role: MessageRole::Agent,
         text: "[作業報告 (work_id: work-1)] ...".into(),
@@ -376,7 +377,7 @@ fn internal_work_messages_are_hidden_and_work_event_tracks_active_status() {
     };
     assert!(!is_user_facing_message(&internal));
     model.apply(Update::History {
-        companion_id: "ene".into(),
+        companion_id: "ene".to_owned(),
         messages: vec![internal, message("u1", 2, MessageRole::User, "調べて")],
     });
     assert_eq!(model.companions.chat.messages.len(), 1);
@@ -455,7 +456,7 @@ fn f01_r03_resident_companions_queries_multiple_activations_on_one_client() {
     let mut snap = snapshot();
     snap.activations = vec![
         Activation {
-            companion_id: "ene".into(),
+            companion_id: "ene".to_owned(),
             client_id: Some("desk-a".into()),
         },
         Activation {

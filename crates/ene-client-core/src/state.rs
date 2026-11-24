@@ -5,6 +5,7 @@ use crate::domain::{
     Message, MindView, ModelInfo, PluginInfo, PolicyText, Settings, Snapshot, TurnEvent,
 };
 use crate::update::CaptureMode;
+use ene_domain::CompanionId;
 use std::{collections::BTreeMap, time::Duration};
 
 /// The link to the host, in the states the window must tell apart.
@@ -85,8 +86,8 @@ pub struct Unsent {
 /// The selected companion's conversation.
 #[derive(Clone, Debug, Default)]
 pub struct Chat {
-    /// The companion these messages belong to.
-    pub companion_id: String,
+    /// The companion these messages belong to; `None` until one is selected.
+    pub companion_id: Option<CompanionId>,
     /// What the host recorded, oldest first.
     pub messages: Vec<Message>,
     pub loading: bool,

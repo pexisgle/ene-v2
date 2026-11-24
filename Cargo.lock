@@ -4066,6 +4066,7 @@ name = "ene-client-core"
 version = "0.1.8"
 dependencies = [
  "ene-catalog",
+ "ene-domain",
  "ene-rpc",
  "proptest",
  "serde",
@@ -4088,6 +4089,7 @@ dependencies = [
  "earshot",
  "ene-avatar-ipc",
  "ene-client-core",
+ "ene-domain",
  "ene-platform-os",
  "ene-plugin",
  "ene-plugin-runtime",

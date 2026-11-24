@@ -164,13 +164,23 @@ fn apply_companion_update(model: &mut Model, update: Update) {
             companion_id,
             message,
         } => {
-            if companions.chat.companion_id == companion_id {
+            if companions
+                .chat
+                .companion_id
+                .as_ref()
+                .is_some_and(|id| id.as_str() == companion_id)
+            {
                 companions.chat.loading = false;
                 companions.chat.error = Some(message);
             }
         }
         Update::StopRequested { companion_id } => {
-            if companions.chat.companion_id == companion_id {
+            if companions
+                .chat
+                .companion_id
+                .as_ref()
+                .is_some_and(|id| id.as_str() == companion_id)
+            {
                 companions.chat.stop_requested = true;
             }
         }
@@ -195,7 +205,11 @@ fn apply_companion_update(model: &mut Model, update: Update) {
 }
 
 fn apply_history(chat: &mut Chat, companion_id: &str, messages: Vec<Message>) {
-    if chat.companion_id != companion_id {
+    if chat
+        .companion_id
+        .as_ref()
+        .is_none_or(|id| id.as_str() != companion_id)
+    {
         return;
     }
     chat.messages = messages
@@ -387,9 +401,14 @@ mod reducer_property_tests {
     fn any_message() -> impl Strategy<Value = Message> {
         (any_id(), "[ -~]{0,32}", any::<u64>()).prop_map(|(id, text, sequence)| Message {
             id,
+            companion_id: Some(ene_domain::CompanionId::parse("ene").unwrap()),
+            work_id: String::new(),
+            role: crate::domain::MessageRole::default(),
             text,
+            created_at: String::new(),
             sequence,
-            ..Default::default()
+            request_id: None,
+            author: String::new(),
         })
     }
 
