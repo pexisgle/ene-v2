@@ -1,6 +1,7 @@
 //! Memory persistence: insertion, CAS updates, sharing, hybrid recall,
 //! consolidation commits and the user profile.
 
+mod consolidate;
 mod ops;
 #[cfg(test)]
 mod tests;
