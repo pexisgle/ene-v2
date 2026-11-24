@@ -1,7 +1,8 @@
 //! Settings service.
 
 use super::super::Services;
-use super::{is_builtin_voicevox, notify_settings, run_connection_probe};
+use super::connection_probe::run_connection_probe;
+use super::{is_builtin_voicevox, notify_settings};
 use crate::host::db::Store;
 use crate::host::error::HostError;
 use crate::host::model;
