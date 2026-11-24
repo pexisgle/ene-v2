@@ -2,6 +2,7 @@
 pub mod client;
 pub mod error;
 pub mod failure;
+pub mod ids;
 pub mod json;
 pub mod settings;
 pub mod work;
@@ -9,6 +10,7 @@ pub mod work;
 pub use client::{Activation, Client, DeviceOperation, DeviceStatus};
 pub use error::{DomainError, validate_id};
 pub use failure::Failure;
+pub use ids::CompanionId;
 pub use settings::{
     AcpConnection, Check, Connection, ConnectionConfig, ConnectionKind, CredentialState,
     EmbeddingConnection, Endpoint, LlmConnection, McpConnection, SearchConnection, Settings,
