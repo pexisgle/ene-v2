@@ -1,10 +1,10 @@
-use super::capture::{
-    CaptureSink, EchoSuppressor, PttController, VAD_FRAME_SAMPLES, VAD_HANGOVER_FRAMES,
-    VAD_MAX_ACTIVE_FRAMES, VAD_START_FRAMES, VoiceGate, push_captured_with,
-};
+use super::capture::{CaptureSink, EchoSuppressor, PttController, push_captured_with};
 use super::playback::{Deck, PlaybackSink, PlayerQueue, fill_with};
 use super::resampler::{
     CHUNK, Filter, WIRE_RATE, decode, encode, f32_to_i16, i16_to_f32, pick_config_from_ranges,
+};
+use super::vad::{
+    VAD_FRAME_SAMPLES, VAD_HANGOVER_FRAMES, VAD_MAX_ACTIVE_FRAMES, VAD_START_FRAMES, VoiceGate,
 };
 use std::{
     collections::VecDeque,

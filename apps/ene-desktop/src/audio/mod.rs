@@ -10,6 +10,7 @@ mod playback;
 mod resampler;
 #[cfg(test)]
 mod tests;
+mod vad;
 
 pub use capture::Microphone;
 pub use ene_client_core::CaptureMode;
