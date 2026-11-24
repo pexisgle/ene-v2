@@ -7,6 +7,7 @@ mod expressions;
 mod extensions;
 mod loader;
 mod material;
+mod retarget;
 mod runtime;
 mod schema;
 

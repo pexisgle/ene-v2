@@ -144,7 +144,7 @@ impl AssetLoader for VrmLoader {
             .find_map(|e| Some((e.id(), e.get::<VrmScene>()?)))
             .ok_or_else(|| invalid("VRMC scene data unavailable"))?;
         if let Some(motion) = result.0.as_ref().map_err(|e| invalid(e.to_string()))? {
-            for (label, clip) in crate::animation::retarget_motion(
+            for (label, clip) in crate::retarget::retarget_motion(
                 &motion.source,
                 &source.document,
                 &motion.nodes,
