@@ -1,11 +1,7 @@
 //! Chat, audio, device, approval, policy, plugin, remote-host, and companion actions on [`Hub`].
 
-use super::{Hub, companions};
-use crate::{
-    rpc,
-    state::{Chat, NoticeKind},
-    update::Command,
-};
+use super::{Hub, chat, companions};
+use crate::{rpc, state::NoticeKind, update::Command};
 use ene_client_core::{
     ModelRoleSlot,
     domain::{
@@ -35,53 +31,15 @@ impl Hub {
     }
 
     pub(crate) fn select_companion(&mut self, companion_id: &str, cx: &mut Context<Self>) {
-        if self.model.companion_id() == Some(companion_id) {
-            return;
-        }
-        self.model.companions.selected = Some(companion_id.to_owned());
-        self.model.companions.chat = Chat {
-            companion_id: companion_id.to_owned(),
-            loading: true,
-            ..Default::default()
-        };
-        self.model.companions.streaming.clear();
-        self.model.audio.transcription = None;
-        self.command(Command::Serve(companion_id.to_owned()));
-        self.load_history(cx);
-        self.load_mind(cx);
-        self.windows.pod_scroll_ping = self.windows.pod_scroll_ping.saturating_add(1);
-        cx.notify();
+        chat::select_companion(self, companion_id, cx);
     }
 
-    pub(crate) fn load_history(&mut self, _cx: &mut Context<Self>) {
-        let Some(companion_id) = self.model.companion_id().map(str::to_owned) else {
-            return;
-        };
-        if !self.live() {
-            self.model.companions.chat.loading = false;
-            return;
-        }
-        if !rpc::chat::load_history(
-            &self.rpc,
-            self.model.connections.link_epoch,
-            companion_id.clone(),
-        ) {
-            return;
-        }
-        if self.model.companions.chat.companion_id != companion_id {
-            self.model.companions.chat = Chat {
-                companion_id,
-                loading: true,
-                ..Default::default()
-            };
-        } else {
-            self.model.companions.chat.loading = true;
-        }
+    pub(crate) fn load_history(&mut self, cx: &mut Context<Self>) {
+        chat::load_history(self, cx);
     }
 
     pub(crate) fn send(&mut self, text: String, cx: &mut Context<Self>) -> bool {
-        let request_key = uuid::Uuid::new_v4().to_string();
-        self.send_keyed(text, request_key, cx)
+        chat::send(self, text, cx)
     }
 
     pub(crate) fn send_keyed(
@@ -90,86 +48,19 @@ impl Hub {
         request_key: String,
         cx: &mut Context<Self>,
     ) -> bool {
-        let text = text.trim().to_owned();
-        if text.is_empty() {
-            return false;
-        }
-        if !self.live() {
-            self.model.notice(
-                NoticeKind::Failed,
-                "メッセージの送信",
-                "ホストにまだ接続されていません。",
-            );
-            cx.notify();
-            return false;
-        }
-        let Some(companion) = self.model.companion_id().map(str::to_owned) else {
-            self.model.notice(
-                NoticeKind::Failed,
-                "メッセージの送信",
-                "会話するコンパニオンが選択されていません。",
-            );
-            cx.notify();
-            return false;
-        };
-        if self.rpc.host().is_none() {
-            return false;
-        }
-        self.model
-            .companions
-            .chat
-            .sending
-            .push(crate::state::Sending {
-                request_key: request_key.clone(),
-                text: text.clone(),
-            });
-        tracing::info!(
-            companion = %companion,
-            key = %request_key,
-            chars = text.chars().count(),
-            "message sent"
-        );
-        if !rpc::chat::send_message(
-            &self.rpc,
-            self.model.connections.link_epoch,
-            companion,
-            request_key,
-            text,
-        ) {
-            // No host is bound, so nothing was queued; the composer keeps the
-            // text and the caller's `false` return tells the window to stay.
-            tracing::debug!("no host is connected; the message was not queued");
-            return false;
-        }
-        self.windows.pod_scroll_ping = self.windows.pod_scroll_ping.saturating_add(1);
-        cx.notify();
-        true
+        chat::send_keyed(self, text, request_key, cx)
     }
 
     pub(crate) fn retry_unsent(&mut self, request_key: &str, text: &str, cx: &mut Context<Self>) {
-        self.model
-            .companions
-            .chat
-            .unsent
-            .retain(|item| item.request_key != request_key);
-        let _discarded = self.send_keyed(text.to_owned(), request_key.to_owned(), cx);
+        chat::retry_unsent(self, request_key, text, cx);
     }
 
     pub(crate) fn dismiss_unsent(&mut self, request_key: &str, cx: &mut Context<Self>) {
-        self.model
-            .companions
-            .chat
-            .unsent
-            .retain(|item| item.request_key != request_key);
-        cx.notify();
+        chat::dismiss_unsent(self, request_key, cx);
     }
 
     pub(crate) fn stop(&mut self, cx: &mut Context<Self>) {
-        self.command(Command::StopPlayback);
-        if let Some(companion) = self.model.companion_id().map(str::to_owned) {
-            rpc::chat::stop(&self.rpc, self.model.connections.link_epoch, companion);
-        }
-        cx.notify();
+        chat::stop(self, cx);
     }
 
     pub(crate) fn toggle_mic_mute(&mut self, cx: &mut Context<Self>) {

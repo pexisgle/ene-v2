@@ -1,6 +1,7 @@
 //! Shared UI state hub, lifecycle state grouping, and host update dispatch.
 
 mod actions;
+mod chat;
 mod companions;
 mod connections;
 mod presets;
