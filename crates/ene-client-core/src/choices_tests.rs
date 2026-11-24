@@ -262,8 +262,8 @@ fn enabled_and_all_choice_collectors_distinguish_enabled_connections() {
     );
 
     for slot in ModelRoleSlot::ALL {
-        assert!(!slot.label().is_empty());
-        assert!(!slot.fallback_hint().is_empty());
+        assert_ne!(slot.label().len(), 0);
+        assert_ne!(slot.fallback_hint().len(), 0);
         assert!(slot.current(&ModelAssignments::default()).is_none());
     }
 }

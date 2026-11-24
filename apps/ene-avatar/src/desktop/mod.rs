@@ -414,7 +414,7 @@ mod tests {
         );
         app.world_mut().get_mut::<Character>(actor).unwrap().state = AvatarState::Suspended;
         app.update();
-        assert!(app.world().get::<HitRegions>(screen).unwrap().0.is_empty());
+        assert_eq!(app.world().get::<HitRegions>(screen).unwrap().0.len(), 0);
         assert!(
             app.world().get::<Camera>(screen).unwrap().is_active,
             "clear the previous image once"
@@ -424,7 +424,7 @@ mod tests {
         app.world_mut().get_mut::<Character>(actor).unwrap().state = AvatarState::Ready;
         app.update();
         assert!(app.world().get::<Camera>(screen).unwrap().is_active);
-        assert!(!app.world().get::<HitRegions>(screen).unwrap().0.is_empty());
+        assert_ne!(app.world().get::<HitRegions>(screen).unwrap().0.len(), 0);
     }
 
     #[test]
@@ -453,7 +453,7 @@ mod tests {
             .entity_mut(mesh)
             .insert(InheritedVisibility::HIDDEN);
         app.update();
-        assert!(app.world().get::<HitRegions>(screen).unwrap().0.is_empty());
+        assert_eq!(app.world().get::<HitRegions>(screen).unwrap().0.len(), 0);
     }
 
     #[test]
@@ -557,8 +557,8 @@ mod tests {
             .resource::<PointerState>()
             .get(PointerId::Mouse, PointerButton::Primary)
         {
-            assert!(state.pressing.is_empty());
-            assert!(state.dragging.is_empty());
+            assert_eq!(state.pressing.len(), 0);
+            assert_eq!(state.dragging.len(), 0);
         }
     }
 
@@ -597,7 +597,7 @@ mod tests {
                 send(&mut app, screen, press, PRESS);
                 if separate_updates {
                     app.update();
-                    assert!(notifications(&mut app).is_empty());
+                    assert_eq!(notifications(&mut app).len(), 0);
                     assert!(
                         app.world()
                             .resource::<PointerCaptureMap>()
@@ -653,7 +653,7 @@ mod tests {
                 app.world().get::<Character>(actor).unwrap().config.position,
                 Some(positions.last().unwrap().to_array())
             );
-            assert!(notifications(&mut app).is_empty());
+            assert_eq!(notifications(&mut app).len(), 0);
             assert_released(&app);
         }
     }
@@ -670,7 +670,7 @@ mod tests {
             send(&mut app, screen, position, action);
             app.update();
         }
-        assert!(notifications(&mut app).is_empty());
+        assert_eq!(notifications(&mut app).len(), 0);
         for action in [PRESS, RELEASE] {
             send(&mut app, screen, Vec2::splat(50.), action);
         }
@@ -710,7 +710,7 @@ mod tests {
                 .position,
             Some([50., 50.])
         );
-        assert!(notifications(&mut app).is_empty());
+        assert_eq!(notifications(&mut app).len(), 0);
         assert_released(&app);
     }
 
@@ -765,7 +765,7 @@ mod tests {
         let config = &app.world().get::<Character>(actor).unwrap().config;
         assert_eq!(config.monitor.as_deref(), Some("right"));
         assert_eq!(config.position, Some([50., 50.]));
-        assert!(notifications(&mut app).is_empty());
+        assert_eq!(notifications(&mut app).len(), 0);
         assert_released(&app);
     }
 
@@ -809,7 +809,7 @@ mod tests {
                     .map(|character| character.config.position),
                 position
             );
-            assert!(notifications(&mut app).is_empty());
+            assert_eq!(notifications(&mut app).len(), 0);
             assert_released(&app);
         }
     }
@@ -821,7 +821,7 @@ mod tests {
         cancel_pointer(app.world_mut());
         send(&mut app, screen, Vec2::splat(50.), RELEASE);
         app.update();
-        assert!(notifications(&mut app).is_empty());
+        assert_eq!(notifications(&mut app).len(), 0);
         assert_released(&app);
     }
 
@@ -842,7 +842,7 @@ mod tests {
             send(&mut app, screen, Vec2::splat(50.), action);
         }
         app.update();
-        assert!(notifications(&mut app).is_empty());
+        assert_eq!(notifications(&mut app).len(), 0);
         assert_released(&app);
     }
 

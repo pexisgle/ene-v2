@@ -327,7 +327,7 @@ mod tests {
             "https://example.com/mcp"
         );
         assert_eq!(name, "example.com");
-        assert!(remote.command.is_empty());
+        assert_eq!(remote.command.len(), 0);
         assert!(mcp_http_target("file:///tmp/mcp").is_err());
         let (local, _) = mcp_local_target("node", r#"["C:/My Tools/mcp.js","--stdio"]"#)
             .unwrap()

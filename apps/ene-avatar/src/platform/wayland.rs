@@ -514,7 +514,7 @@ mod tests {
             pointer(&mut app, output, Vec2::splat(50.), RELEASE, false);
             desktop::cancel_pointer(app.world_mut());
             app.update();
-            assert!(notifications(&mut app).is_empty());
+            assert_eq!(notifications(&mut app).len(), 0);
             assert_released(&app);
 
             pointer(
@@ -526,7 +526,7 @@ mod tests {
             );
             pointer(&mut app, output, Vec2::splat(80.), RELEASE, true);
             app.update();
-            assert!(notifications(&mut app).is_empty());
+            assert_eq!(notifications(&mut app).len(), 0);
             assert_eq!(
                 app.world().get::<Character>(actor).unwrap().config.position,
                 Some([50., 50.])

@@ -250,7 +250,7 @@ fn losing_the_link_keeps_the_data_but_moves_in_flight_sends_to_unsent() {
         retry_in: Duration::from_secs(1),
     })));
     assert!(!model.connections.link.is_live());
-    assert!(model.companions.chat.sending.is_empty());
+    assert_eq!(model.companions.chat.sending.len(), 0);
     assert_eq!(model.companions.chat.unsent.len(), 1);
     assert_eq!(
         model.companions.chat.unsent[0].request_key, "key",
@@ -278,7 +278,7 @@ fn a_late_failure_does_not_clobber_new_text() {
             .iter()
             .any(|unsent| unsent.text == "前の入力")
     );
-    assert!(model.companions.chat.sending.is_empty());
+    assert_eq!(model.companions.chat.sending.len(), 0);
 }
 
 #[test]
