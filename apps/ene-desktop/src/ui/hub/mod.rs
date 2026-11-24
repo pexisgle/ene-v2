@@ -5,6 +5,7 @@ mod chat;
 mod companions;
 mod connections;
 mod presets;
+mod voice_roles;
 mod windows;
 
 pub use windows::open_pod_window;
