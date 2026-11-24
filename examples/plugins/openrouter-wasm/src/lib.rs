@@ -43,7 +43,7 @@ mod guest {
             mut self,
             result: Result<(), extism_pdk::Error>,
         ) -> Result<(), extism_pdk::Error> {
-            let closed = self.handle.take().map(http_close).unwrap_or(Ok(()));
+            let closed = self.handle.take().map_or(Ok(()), http_close);
             result.and(closed)
         }
     }
