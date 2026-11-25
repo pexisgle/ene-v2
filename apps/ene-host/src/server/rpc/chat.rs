@@ -218,7 +218,7 @@ mod tests {
         let companion = seed_reader_companion(&runtime).await;
         let router = super::super::router(
             runtime.clone(),
-            crate::server::auth::Guard::new("owner".into()),
+            crate::server::auth::Guard::with_allowed_hosts("owner".into(), ""),
             CancellationToken::new(),
         );
         let request = w::HistoryRequest {

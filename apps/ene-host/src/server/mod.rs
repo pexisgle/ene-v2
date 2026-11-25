@@ -11,14 +11,17 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 pub fn reset_history() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let (state, runtime) = crate::paths()?;
-    let _access = access::Access::acquire(&state, &runtime)?;
-    history::reset(&state, true)
+    let config = crate::config::HostConfig::from_env()?;
+    let _access = access::Access::acquire(&config.state_dir, &config.runtime_dir)?;
+    history::reset(&config.state_dir, true)
 }
 
 #[tokio::main(flavor = "multi_thread")]
 pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let (state, runtime_path) = crate::paths()?;
+    // Every setting is read and validated here, once, before anything runs.
+    let config = crate::config::HostConfig::from_env()?;
+    let state = config.state_dir.clone();
+    let runtime_path = config.runtime_dir.clone();
     // The host runs for one desktop: its log goes to stderr, warnings and
     // above unless `RUST_LOG` asks for more.
     tracing_subscriber::fmt()
@@ -43,8 +46,7 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     // Access control is delegated to the OS or a fronting service
     // (docs/design/host-access.md): the bind address is explicit, and the
     // Owner Bearer stays mandatory even on a non-loopback listener.
-    let bind = std::env::var("ENE_HOST_BIND").unwrap_or_else(|_| "127.0.0.1:0".into());
-    let listener = TcpListener::bind(&bind).await?;
+    let listener = TcpListener::bind(config.bind).await?;
     let local = listener.local_addr()?;
     if !local.ip().is_loopback() {
         tracing::warn!(
@@ -54,7 +56,7 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         );
     }
     access.publish(&format!("http://{local}/rpc"))?;
-    let guard = auth::Guard::new(access.token.clone());
+    let guard = auth::Guard::with_allowed_hosts(access.token.clone(), &config.allowed_hosts);
     if !guard.allowed().is_empty() {
         let allowed = guard
             .allowed()
@@ -78,7 +80,7 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     // listener to HTTP/1.1.
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            wait_for_shutdown().await;
+            wait_for_shutdown(config.exit_on_stdin_eof).await;
             shutdown.cancel();
             running.begin_shutdown().await;
         })
@@ -88,8 +90,8 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     result.map_err(Into::into)
 }
 
-async fn wait_for_shutdown() {
-    if std::env::var_os("ENE_HOST_EXIT_ON_STDIN_EOF").is_none() {
+async fn wait_for_shutdown(exit_on_stdin_eof: bool) {
+    if !exit_on_stdin_eof {
         wait_for_signal().await;
         return;
     }
