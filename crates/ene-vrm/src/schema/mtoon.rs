@@ -185,7 +185,7 @@ impl UvTransform {
         }
     }
 
-    pub fn from_gltf(transform: gltf::texture::TextureTransform<'_>) -> Self {
+    pub fn from_gltf(transform: &gltf::texture::TextureTransform<'_>) -> Self {
         Self {
             scale: Vec2::from(transform.scale()),
             rotation: -transform.rotation(),

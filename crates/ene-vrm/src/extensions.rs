@@ -323,7 +323,10 @@ impl GltfExtensionHandler for VrmExtensions {
             let base_uv = source
                 .pbr_metallic_roughness()
                 .base_color_texture()
-                .and_then(|info| info.texture_transform().map(schema::UvTransform::from_gltf))
+                .and_then(|info| {
+                    info.texture_transform()
+                        .map(|t| schema::UvTransform::from_gltf(&t))
+                })
                 .unwrap_or_default();
             entity.insert((
                 material::MaterialSlot(index),
