@@ -35,8 +35,8 @@ macro_rules! request {
             request: connectrpc::ServiceRequest<'_, $request>,
         ) -> connectrpc::ServiceResult<$response> {
             let request = request.to_owned_message();
-            let store = self.store();
-            self.call(move |_| $op(store, request)).await
+            // `$op` takes only the store, so this never needs the actor thread.
+            self.with_store(move |store| $op(store, request)).await
         }
     };
     (app $name:ident, $request:ty, $response:ty, $op:path) => {
@@ -93,8 +93,8 @@ macro_rules! read_id {
             request: connectrpc::ServiceRequest<'_, ene_rpc::Id>,
         ) -> connectrpc::ServiceResult<$response> {
             let id = request.id.to_owned();
-            self.read(move |app| $op(app.world().resource::<crate::host::db::Store>(), &id))
-                .await
+            // `$op` takes only the store, so this never needs the actor thread.
+            self.with_store(move |store| $op(&store, &id)).await
         }
     };
 }
@@ -193,6 +193,21 @@ impl Services {
                 .await
                 .map_err(ConnectError::from)?,
         )
+    }
+
+    /// Runs an operation that touches only the store, off the ECS thread.
+    ///
+    /// The actor thread also drives every queued command and the ready check,
+    /// so a handler that only reads SQLite has no reason to queue behind it.
+    /// Readiness is still checked first, because a host that has failed must
+    /// not answer reads either.
+    pub(super) async fn with_store<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(crate::host::db::Store) -> crate::host::error::Result<T> + Send + 'static,
+    ) -> ServiceResult<T> {
+        self.runtime.ready().await.map_err(ConnectError::from)?;
+        let store = self.store();
+        Response::ok(operation(store).map_err(ConnectError::from)?)
     }
 }
 
