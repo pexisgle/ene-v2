@@ -20,7 +20,7 @@ jobs:
   verify:
     name: Verify (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -71,12 +71,18 @@ jobs:
         run: |
           cargo build --release --locked -p ene-openrouter-wasm -p ene-reference-wasm --target wasm32-unknown-unknown
 
-      - name: Clippy and tests
+      - name: Clippy
         run: |
           # The workspace denies these lints in Cargo.toml, so CI must not
           # re-enable them with a later `-A` flag.
           cargo clippy --profile ci --workspace --all-targets --all-features --locked -- \
             -D warnings
+
+      # Windows spent 42 minutes inside one combined clippy-and-test step and hit
+      # the 45 minute job limit, so these are separate steps now: the failure
+      # says which half ran out of time, and the job can be re-run from Clippy.
+      - name: Tests
+        run: |
           cargo nextest run --profile ci --workspace --all-features --locked --no-fail-fast
 
       - name: Native Wasm tool-call regressions
