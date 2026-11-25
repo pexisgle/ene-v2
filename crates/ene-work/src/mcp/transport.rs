@@ -14,6 +14,9 @@ use rmcp::{
 };
 use std::{collections::BTreeMap, time::Duration};
 
+#[cfg(windows)]
+use super::npx::CREATE_NO_WINDOW;
+
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
@@ -133,7 +136,16 @@ async fn open_stdio(
     #[cfg(unix)]
     wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
     #[cfg(windows)]
-    wrap.wrap(process_wrap::tokio::JobObject);
+    {
+        // JobObject::pre_spawn sets the process creation flags from whatever
+        // `CreationFlags` wrapper is registered, and zero when none is. The raw
+        // `Command::creation_flags` a caller set would be overwritten, so the
+        // suppression has to be registered here to survive.
+        wrap.wrap(process_wrap::tokio::CreationFlags(
+            windows::Win32::System::Threading::PROCESS_CREATION_FLAGS(CREATE_NO_WINDOW),
+        ));
+        wrap.wrap(process_wrap::tokio::JobObject);
+    }
     wrap.wrap(process_wrap::tokio::KillOnDrop);
     let transport = TokioChildProcess::new(wrap).map_err(|error| ConnectFailure {
         config_error: error.kind() == std::io::ErrorKind::NotFound,

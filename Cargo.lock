@@ -4152,6 +4152,7 @@ dependencies = [
  "directories",
  "ene-catalog",
  "ene-domain",
+ "ene-host-core",
  "ene-mind",
  "ene-platform-os",
  "ene-plugin",
@@ -4203,6 +4204,16 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "ene-host-core"
+version = "0.1.8"
+dependencies = [
+ "ene-domain",
+ "jiff 0.2.46",
+ "sha2 0.11.1",
+ "tracing",
 ]
 
 [[package]]
@@ -4393,6 +4404,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "windows 0.62.2",
 ]
 
 [[package]]

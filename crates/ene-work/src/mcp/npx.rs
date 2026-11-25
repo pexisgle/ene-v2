@@ -11,7 +11,8 @@ use std::{
 };
 
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// Suppresses the console window a Windows child process would otherwise open.
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(windows)]
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(windows)]

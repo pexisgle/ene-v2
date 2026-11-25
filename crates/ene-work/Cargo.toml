@@ -25,3 +25,10 @@ tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "process"]
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(windows)'.dependencies]
+# `process_wrap::tokio::CreationFlags` takes `PROCESS_CREATION_FLAGS`, which
+# process-wrap does not re-export. The suppression has to be registered as a
+# wrapper, because `JobObject::pre_spawn` overwrites whatever raw flags a
+# `Command` carried.
+windows = { version = "0.62", features = ["Win32_System_Threading"] }
