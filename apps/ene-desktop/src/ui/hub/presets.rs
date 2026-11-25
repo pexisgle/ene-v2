@@ -42,7 +42,7 @@ pub(super) fn assign_search_connection(
 
 pub(super) fn add_search_preset(
     hub: &mut Hub,
-    spec: SearchPresetSpec<'_>,
+    spec: &SearchPresetSpec<'_>,
     cx: &mut Context<Hub>,
 ) -> String {
     let Some(settings) = hub.model.settings().cloned() else {
@@ -51,7 +51,7 @@ pub(super) fn add_search_preset(
     if hub.rpc.host().is_none() {
         return spec.preset_id.to_owned();
     }
-    let (target_id, inputs) = build_search_preset_inputs(&settings.connections, &spec, true);
+    let (target_id, inputs) = build_search_preset_inputs(&settings.connections, spec, true);
     rpc::connections::update_settings(
         &hub.rpc,
         hub.model.connections.link_epoch,

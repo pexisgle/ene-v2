@@ -201,7 +201,7 @@ pub(super) fn build_search_preset_chips(
                     move |_, cx| {
                         let target_id = hub_s.update(cx, |hub, cx| {
                             hub.add_search_preset(
-                                SearchPresetSpec {
+                                &SearchPresetSpec {
                                     preset_id,
                                     name: conn_name,
                                     adapter,

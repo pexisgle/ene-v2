@@ -269,7 +269,7 @@ impl Hub {
 
     pub(crate) fn add_search_preset(
         &mut self,
-        spec: SearchPresetSpec<'_>,
+        spec: &SearchPresetSpec<'_>,
         cx: &mut Context<Self>,
     ) -> String {
         presets::add_search_preset(self, spec, cx)
