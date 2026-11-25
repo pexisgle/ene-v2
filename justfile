@@ -9,27 +9,11 @@ cargo_wrapper := if os_family() == "windows" { "--config \"build.rustc-wrapper='
 default:
     @just --list
 
-[windows]
-observe:
-    if (Get-Command uv -ErrorAction SilentlyContinue) { uv run python scripts/observe.py } elseif (Get-Command py -ErrorAction SilentlyContinue) { py -3 scripts/observe.py } else { python scripts/observe.py }
-
-[unix]
-observe:
-    python3 scripts/observe.py
-
 fmt:
     cargo fmt --all
 
 fmt-check:
     cargo fmt --all -- --check
-
-[windows]
-check-arch:
-    if (Get-Command uv -ErrorAction SilentlyContinue) { uv run python scripts/check-architecture.py } elseif (Get-Command py -ErrorAction SilentlyContinue) { py -3 scripts/check-architecture.py } else { python scripts/check-architecture.py }
-
-[unix]
-check-arch:
-    python3 scripts/check-architecture.py
 
 check:
     cargo check {{cargo_wrapper}} --workspace --all-targets --all-features --locked
@@ -40,34 +24,18 @@ clippy:
 test: build-test-plugins
     cargo test {{cargo_wrapper}} --workspace --all-features --locked
 
-# Proves the last commit builds from a fresh checkout.
-committed-builds:
-    bash verification/committed-tree-builds/run.sh
-
 build:
     cargo build {{cargo_wrapper}} --workspace --all-targets --all-features --locked
-
-[windows]
-installer-windows:
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-installer.ps1
-
-[windows]
-fetch-assets asset="all":
-    if (Get-Command uv -ErrorAction SilentlyContinue) { uv run python scripts/fetch-assets.py "{{asset}}" } elseif (Get-Command py -ErrorAction SilentlyContinue) { py -3 scripts/fetch-assets.py "{{asset}}" } else { python scripts/fetch-assets.py "{{asset}}" }
-
-[unix]
-fetch-assets asset="all":
-    python3 scripts/fetch-assets.py "{{asset}}"
-
-# Re-run tests only when the behavior under test changes.
-verify: fmt-check check-arch clippy
 
 build-test-plugins:
     cargo build {{cargo_wrapper}} --release --locked -p ene-reference-wasm -p ene-openrouter-wasm --target wasm32-unknown-unknown
 
-# The build scratch lives in target/tmp: sccache puts its per-compile directory
-# under the system temp, and when Windows cleanup removes one mid-build rustc
-# fails to write its dep-info. A workspace path is not cleaned by anything.
+# Re-run tests only when the behavior under test changes.
+verify: fmt-check clippy
+
+[windows]
+installer-windows:
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File packaging/windows/build-windows-installer.ps1
 
 # Start the host and desktop client together for local interactive testing.
 [unix]

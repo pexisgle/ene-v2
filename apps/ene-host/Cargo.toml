@@ -70,7 +70,14 @@ uuid.workspace = true
 bevy_time = "=0.20.0"
 ene-rpc = { workspace = true, features = ["client"] }
 process-wrap.workspace = true
+# `span-locations` lets the architecture test read the line span of a parsed
+# item; without it `Span::start`/`end` are unavailable outside a proc macro.
+proc-macro2 = { version = "1", features = ["span-locations"] }
+regex.workspace = true
 rig-core = { workspace = true, features = ["test-utils"] }
+# Parses each workspace file so the architecture test can blank `#[cfg(test)]`
+# spans by real syntax instead of counting braces.
+syn = { version = "2", features = ["full", "parsing", "printing", "extra-traits"] }
 tempfile.workspace = true
 # `start_paused` lets the decision-timeout test fire the 15s deadline
 # without waiting it out.

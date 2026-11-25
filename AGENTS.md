@@ -41,22 +41,25 @@ the UI need is a domain rule and must not be re-implemented in the app.
 
 ## Architecture Ratchets
 
-`scripts/check-architecture.py` enforces ten rules and fails the build when a
-count rises above its baseline. Never raise a baseline to get a change through;
-lower it in the same commit that removes the last violation.
+`apps/ene-host/tests/architecture.rs` enforces the rules below and fails the
+build when a count rises above its baseline. Never raise a baseline to get a
+change through; lower it in the same commit that removes the last violation.
+Run it with `cargo test -p ene-host --test architecture`, which `just test` and
+CI already cover.
 
 | Rule | Metric | Baseline |
 | :--- | :--- | ---: |
 | 1 | `ui_rpc_leak` wire refs under `apps/ene-desktop/src/ui/` | 0 |
 | 2 | `db_upward_imports` from `apps/ene-host/src/host/db/` | 0 |
-| 3 | `impl_file_spread` (inherent `impl` blocks per type across files) | 3 |
-| 4 | `no_prod_println` `println!`/`eprintln!` in production | 0 |
-| 5 | `providers_no_model_import` | 0 |
-| 6 | `host_world_refs` `&World`/`&mut World` in `apps/ene-host` | 171 |
-| 7 | `domain_no_rpc_dep` L0 crates depending on `ene-rpc` | 4 |
-| 8 | `app_unsafe_count` production `unsafe` in `apps/ene-desktop` | 84 |
-| 9 | `max_prod_file_lines` production files over 500 lines | 47 |
-| 10 | `rpc_no_ecs_resource` `#[derive(Resource)]` under `server/rpc/` | 0 |
+| 3 | `impl_file_spread` (inherent `impl` blocks per type across files) | 1 |
+| 4 | `providers_no_model_import` | 0 |
+| 5 | `host_world_refs` `&World`/`&mut World` in `apps/ene-host` | 159 |
+| 6 | `max_prod_file_lines` production files over 500 lines | 4 |
+| 7 | `rpc_no_ecs_resource` `#[derive(Resource)]` under `server/rpc/` | 0 |
+| 8 | `prod_block_on` `block_on`/`block_in_place` in production | 7 |
 
-Run `python3 scripts/check-architecture.py --self-test` after changing the
-script, and `python3 scripts/check-architecture.py` before committing.
+Two former rules are now enforced by the compiler, so there is no second copy
+to drift: no `println!`/`eprintln!` in production (`clippy::print_stdout`,
+`clippy::print_stderr`), and no `unsafe` in `apps/ene-desktop`
+(`#![forbid(unsafe_code)]`). A third, `domain_no_rpc_dep`, is a `[[bans.deny]]`
+entry in `deny.toml`, which reads the resolved dependency graph.

@@ -19,7 +19,7 @@ if (-not $crt) {
     throw 'Install the x64 MSVC C++ build tools and Visual C++ Redistributable files through Visual Studio Installer.'
 }
 
-Push-Location (Join-Path $PSScriptRoot '..')
+Push-Location (Join-Path $PSScriptRoot '../..')
 try {
     $metadataJson = cargo.exe metadata --locked --no-deps --format-version 1
     if ($LASTEXITCODE) { throw "cargo metadata failed ($LASTEXITCODE)." }

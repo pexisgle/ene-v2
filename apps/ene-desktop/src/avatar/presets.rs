@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
-/// Where the development assets live, matching `scripts/fetch-assets.py`.
+/// The per-user directory where downloaded model and motion assets are cached.
 pub fn asset_cache() -> Option<PathBuf> {
-    // The script writes `%LOCALAPPDATA%\ene\cache` on Windows and
-    // `$XDG_CACHE_HOME/ene` (no extra level) elsewhere.
+    // `%LOCALAPPDATA%\ene\cache` on Windows and `$XDG_CACHE_HOME/ene` (no
+    // extra level) elsewhere.
     #[cfg(windows)]
     {
         let root = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;

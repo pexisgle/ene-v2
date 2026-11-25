@@ -47,8 +47,6 @@ jobs:
           # libasound2-dev is required by cpal, which ene-desktop uses for audio.
           sudo apt-get install -y clang lld pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libfontconfig1-dev libvulkan-dev mesa-vulkan-drivers libvulkan1 libasound2-dev
           cargo fmt --all -- --check
-          python3 scripts/check-architecture.py --self-test
-          python3 scripts/check-architecture.py
           cargo clippy --profile ci --locked -p ene-plugin -p ene-openrouter-wasm -p ene-reference-wasm --target wasm32-unknown-unknown -- -D warnings
           cargo check --profile ci --locked -p ene-rpc --target wasm32-unknown-unknown --all-features
 

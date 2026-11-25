@@ -200,7 +200,7 @@ fn default_motion() -> Result<String, CliError> {
     absolute(path)
 }
 
-// Keep the cache layout in sync with scripts/fetch-assets.py.
+// Keep the cache layout in sync with `ene_desktop::avatar::presets::asset_cache`.
 fn cached_model() -> Result<String, CliError> {
     #[cfg(windows)]
     let cache = PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?)
@@ -214,7 +214,7 @@ fn cached_model() -> Result<String, CliError> {
     let path = cache.join("models/Seed-san.vrm");
     if !path.is_file() {
         return Err(CliError::Message(format!(
-            "default model not found: {}; run `just fetch-assets`",
+            "default model not found: {}; pass `model <path>` instead",
             path.display()
         )));
     }

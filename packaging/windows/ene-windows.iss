@@ -9,7 +9,7 @@ PrivilegesRequired=lowest
 DefaultDirName={userpf}\ene
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\ene-desktop.exe
-OutputDir=..\target\installer
+OutputDir=..\..\target\installer
 OutputBaseFilename=ene-{#AppVersion}-windows-x64-setup
 WizardStyle=modern
 Compression=lzma2
@@ -24,10 +24,10 @@ Source: "{#BuildDir}\ene-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\ene-host.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\ene-avatar.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#CrtDir}\*.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\assets\ENE.vrm"; DestDir: "{app}\assets"; Flags: ignoreversion
-Source: "..\assets\vrma\*.vrma"; DestDir: "{app}\assets\vrma"; Flags: ignoreversion
-Source: "..\THIRD_PARTY_NOTICES"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion
+Source: "..\..\assets\ENE.vrm"; DestDir: "{app}\assets"; Flags: ignoreversion
+Source: "..\..\assets\vrma\*.vrma"; DestDir: "{app}\assets\vrma"; Flags: ignoreversion
+Source: "..\..\THIRD_PARTY_NOTICES"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\ene"; Filename: "{app}\ene-desktop.exe"; WorkingDir: "{app}"

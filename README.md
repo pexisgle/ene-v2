@@ -18,7 +18,7 @@
 | [`ene-plugin`](crates/ene-plugin/) | プラグイン作者向けの型定義とRust SDK |
 | [`ene-plugin-runtime`](crates/ene-plugin-runtime/) | ホストに組み込まれたExtism実行、検証、実行制限 |
 
-ホストのアプリケーション処理、許可付きHTTP通信、Connect API、SQLite保存は `ene-host` にまとめています。起動・接続方法と内部構成は [ene-host のREADME](apps/ene-host/README.md) を参照してください。Wasmプラグインは `ene-plugin-runtime` がExtismを直接呼び出します。専用runner・自己再起動・Luau実行はありません。`ene-host` はこの実行基盤をリンクし、有効なプロバイダーを起動してLLM・TTS・STT接続に使用します。型とSDKは `ene-plugin` が提供します。
+ホストのアプリケーション処理、許可付きHTTP通信、Connect API、SQLite保存は `ene-host` にまとめています。起動・接続方法と内部構成は [ene-host のクレートドキュメント](apps/ene-host/src/lib.rs) を参照してください。Wasmプラグインは `ene-plugin-runtime` がExtismを直接呼び出します。専用runner・自己再起動・Luau実行はありません。`ene-host` はこの実行基盤をリンクし、有効なプロバイダーを起動してLLM・TTS・STT接続に使用します。型とSDKは `ene-plugin` が提供します。
 
 ## Nixで開発する
 
@@ -103,9 +103,7 @@ Wasmプラグイン用の `wasm32-unknown-unknown` ターゲットも共通設�
 | `just build-test-plugins` | 結合テスト用の参照Wasmをビルド |
 | `just run` | ホストとデスクトップクライアント（アバター描画付き）を同時に起動 |
 | `just run-host` | 認証付きホストAPIを起動 |
-| `just observe` | 目・手・頭のアクティビティをブラウザーで開く |
-| `just run-desktop` | [ホストへ接続するデスクトップクライアント](apps/ene-desktop/README.md)を起動 |
-| `just run-avatar` | [JSON Linesで操作する透過描画プロセス](apps/ene-avatar/README.md)を起動 |
+| `just run-desktop` | [ホストへ接続するデスクトップクライアント](apps/ene-desktop/src/lib.rs)を起動 |
+| `just run-avatar` | [JSON Linesで操作する透過描画プロセス](apps/ene-avatar/src/main.rs)を起動 |
 | `just run-avatar-cli` | 本体をビルドし、対話式 CLI からアバターを操作 |
 
-`just observe` はローカルのホストに接続する読み取り専用ビューアです。「頭に報告」の行では目の報告本文と、頭が静観したか返答したかを確認できます。頭の行にはその返答本文も表示されます。画面の受信とモデルでの評価はそれぞれ表示され、対応する行を開くと最近の画像を確認できます。ホストは直近8枚の受信画像と最後に評価した画像を、取得から最大3分間メモリに保持します。ホスト直近の通知を読み込み、その後は最新300件を表示します。新しい診断イベントを見るには、変更後の `ene-host` とビューアーを起動してください。接続情報ファイルを指定する場合は `python scripts/observe.py --connection <connection.json>` を使います。
