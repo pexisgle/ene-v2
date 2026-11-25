@@ -1,5 +1,6 @@
 use super::*;
-use crate::host::settings::{Endpoint, LlmConnection};
+use crate::host::settings::{CredentialState, Endpoint, LlmConnection};
+use rig_core::providers::openai::wire::DimensionsField;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn llm_connection(adapter: &str, endpoint: &str, models: &[&str]) -> Connection {
