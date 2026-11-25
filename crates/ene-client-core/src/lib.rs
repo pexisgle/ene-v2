@@ -1,4 +1,5 @@
 //! Headless client state, domain ACL, reducer, command protocol, and connection helpers.
+#![warn(missing_docs)]
 
 pub mod choices;
 pub mod connections;

@@ -27,17 +27,21 @@ pub fn service<T: DeserializeOwned>(request: ServiceRequest) -> Result<T, extism
     let Json(result) = output.as_ref().to::<Json<Result<T, Failure>>>()?;
     Ok(result?)
 }
+/// Reports an event to the host without expecting a reply.
 pub fn emit(event: Event) -> Result<(), extism_pdk::Error> {
     // SAFETY: `ene_emit` is the host function declared above. It reads the JSON it
     // is handed and copies it before returning, so `event` need not outlive the call.
     unsafe { ene_emit(Json(event)) }
 }
+/// Starts an HTTP exchange through the host broker.
 pub fn http_open(request: HttpRequest) -> Result<HttpChunk, extism_pdk::Error> {
     service(ServiceRequest::HttpOpen { request })
 }
+/// Reads the next chunk of a brokered response.
 pub fn http_read(handle: String) -> Result<HttpChunk, extism_pdk::Error> {
     service(ServiceRequest::HttpRead { handle })
 }
+/// Releases a brokered response.
 pub fn http_close(handle: String) -> Result<(), extism_pdk::Error> {
     service(ServiceRequest::HttpClose { handle })
 }

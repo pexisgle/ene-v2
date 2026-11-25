@@ -7,10 +7,15 @@ use crate::domain::{
 /// Advanced MCP server fields captured separately from the primary target input.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct McpExtraConfig {
+    /// Working directory for the server command; empty inherits the host's.
     pub cwd: String,
+    /// Environment variable holding the secret, read at connect time.
     pub secret_env_var: String,
+    /// Header name the stored secret is sent in.
     pub auth_header: String,
+    /// Environment variables added to the command.
     pub env: Vec<(String, String)>,
+    /// HTTP headers sent to a remote server.
     pub headers: Vec<(String, String)>,
 }
 

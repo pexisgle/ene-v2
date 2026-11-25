@@ -7,10 +7,20 @@ use crate::rules::CandidateAction;
 /// Typed target extracted from a `CandidateAction` at the permission boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActionTarget {
+    /// A filesystem path, normalised to forward slashes.
     Path(String),
+    /// A shell command the action would run.
     Command(String),
-    Url { url: String, host: Option<String> },
+    /// A URL, with its lowercased host when one parsed.
+    Url {
+        /// The URL as the action supplied it.
+        url: String,
+        /// The parsed host, lowercased, when the URL had one.
+        host: Option<String>,
+    },
+    /// A free-form subject matched as a pattern, such as a motion name.
     Pattern(String),
+    /// Nothing addressable was found in the arguments.
     None,
 }
 
@@ -114,6 +124,7 @@ fn first_string_field(object: &Value, keys: &[&str]) -> Option<String> {
     })
 }
 
+/// Reads the typed target out of an action's arguments, for rule matching.
 pub fn extract_target(action: &CandidateAction) -> ActionTarget {
     match action {
         CandidateAction::DeviceCapability {

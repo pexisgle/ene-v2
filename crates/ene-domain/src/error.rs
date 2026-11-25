@@ -1,6 +1,7 @@
 //! Shared validation and invariant errors for pure domain models.
 
 /// Error raised when a pure domain value violates structural or format constraints.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DomainError {
     /// The input fails domain validation rules.

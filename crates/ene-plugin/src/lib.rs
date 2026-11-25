@@ -1,4 +1,5 @@
 //! Plugin manifests, typed extension APIs and the Extism guest SDK.
+#![warn(missing_docs)]
 //! Native execution and application authorization live outside this crate.
 //!
 //! プラグイン作者向けの型定義とRust SDKをまとめています。manifest、拡張API、ホストサービスの契約に加え、WasmビルドではExtism PDKと `emit` / `service` / HTTPヘルパーを提供します。

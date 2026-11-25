@@ -17,16 +17,24 @@ use std::collections::{BTreeMap, HashSet};
 /// Internal host model role slots, exposed only inside progressive disclosure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelRoleSlot {
+    /// The model that speaks as the companion.
     Companion,
+    /// The model that runs commissioned work.
     Task,
+    /// The model that reads screens and other perception input.
     Perception,
+    /// The model that condenses long history.
     Compaction,
+    /// The model that folds history into memory.
     Consolidation,
+    /// The model that rules on policy decisions.
     Decision,
+    /// The model that produces embeddings.
     Embedding,
 }
 
 impl ModelRoleSlot {
+    /// Every role slot, in the order the editor lists them.
     pub const ALL: [ModelRoleSlot; 7] = [
         ModelRoleSlot::Companion,
         ModelRoleSlot::Task,
@@ -37,6 +45,7 @@ impl ModelRoleSlot {
         ModelRoleSlot::Embedding,
     ];
 
+    /// Japanese display label for this role slot.
     pub fn label(self) -> &'static str {
         match self {
             Self::Companion => "会話モデル（主要）",
@@ -49,6 +58,7 @@ impl ModelRoleSlot {
         }
     }
 
+    /// What the slot falls back to when the operator sets nothing.
     pub fn fallback_hint(self) -> &'static str {
         match self {
             Self::Companion => "自動（接続先から割当）",
@@ -59,6 +69,7 @@ impl ModelRoleSlot {
         }
     }
 
+    /// The assignment in force for this slot, when one is set.
     pub fn current(self, assignments: &ModelAssignments) -> Option<ModelAssignment> {
         let picked = match self {
             Self::Companion => assignments.companion.as_ref(),
@@ -215,6 +226,7 @@ impl Model {
         voices
     }
 
+    /// Model choices for one speech-to-text connection.
     pub fn stt_model_choices_for_connection(&self, conn_id: &str) -> Vec<(String, String)> {
         let Some(conn) = self
             .settings()
@@ -255,6 +267,7 @@ impl Model {
         models
     }
 
+    /// Model choices for one embedding connection.
     pub fn embedding_model_choices_for_connection(&self, conn_id: &str) -> Vec<(String, String)> {
         let Some(conn) = self
             .settings()
@@ -368,14 +381,12 @@ impl Model {
         choices
     }
 
-    pub fn collect_connection_choices<F>(
+    /// Gathers `(connection, value, label)` choices across every connection of one kind.
+    pub fn collect_connection_choices<F: Fn(&Self, &str) -> Vec<(String, String)>>(
         &self,
         kind: ConnectionKind,
         choices_for: F,
-    ) -> Vec<(String, String, String)>
-    where
-        F: Fn(&Self, &str) -> Vec<(String, String)>,
-    {
+    ) -> Vec<(String, String, String)> {
         let Some(settings) = self.settings() else {
             return Vec::new();
         };
@@ -395,10 +406,12 @@ impl Model {
         choices
     }
 
+    /// Every model offered by every LLM connection, with its connection.
     pub fn all_llm_models(&self) -> Vec<(String, String, String)> {
         self.collect_connection_choices(ConnectionKind::Llm, Self::available_models_for_connection)
     }
 
+    /// Every embedding model offered by every embedding connection.
     pub fn all_embedding_models(&self) -> Vec<(String, String, String)> {
         self.collect_connection_choices(
             ConnectionKind::Embedding,
@@ -406,18 +419,22 @@ impl Model {
         )
     }
 
+    /// Every speech-to-text model offered by every such connection.
     pub fn all_stt_models(&self) -> Vec<(String, String, String)> {
         self.collect_connection_choices(ConnectionKind::Stt, Self::stt_model_choices_for_connection)
     }
 
+    /// The speech-to-text connection and model currently in force.
     pub fn active_stt_selection(&self) -> Option<(String, String)> {
         active_stt_in_connections(&self.settings()?.connections)
     }
 
+    /// Every voice offered by every text-to-speech connection.
     pub fn all_tts_voices(&self) -> Vec<(String, String, String)> {
         self.collect_connection_choices(ConnectionKind::Tts, Self::voice_choices_for_connection)
     }
 
+    /// The text-to-speech connection and voice currently in force.
     pub fn active_tts_selection(&self) -> Option<(String, String)> {
         active_tts_in_connections(&self.settings()?.connections)
     }

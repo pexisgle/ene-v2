@@ -37,12 +37,16 @@ pub fn parse_schema(text: &str) -> Result<Value, DomainError> {
 }
 
 /// Error returned while compiling a JSON Schema or validating an instance against it.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaError {
+    /// The schema could not be serialised, so it cannot be cached or compiled.
     #[error("input: schema is not serializable: {0}")]
     SchemaSerialize(#[from] serde_json::Error),
+    /// The schema is valid JSON but not a usable JSON Schema.
     #[error("input: schema is not valid: {0}")]
     InvalidSchema(String),
+    /// The instance does not satisfy the schema.
     #[error("input: {0}")]
     Validation(String),
 }

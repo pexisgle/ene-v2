@@ -12,18 +12,24 @@ use crate::targets::{ActionTarget, extract_target};
 
 pub(crate) const WEB_SEARCH_TOOL: &str = "web_search";
 
+/// What a saved rule decides when it matches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, EnumString, IntoStaticStr)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum PolicyEffect {
+    /// Let the operation run without prompting.
     Allow,
+    /// Block the operation.
     Deny,
+    /// Require a human approval before the operation runs.
     Confirm,
+    /// Ask the model to decide before falling back to a human.
     AskLlm,
 }
 
 /// The spelling stored in policy rules.
 impl PolicyEffect {
+    /// Returns the spelling stored in policy rules.
     pub fn as_str(self) -> &'static str {
         self.into()
     }
@@ -32,11 +38,17 @@ impl PolicyEffect {
 /// A saved rule (`AlwaysApprove` saves an exact-invocation allow rule).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyRule {
+    /// Id of this rule.
+    /// Id of this policy text.
     pub id: String,
+    /// The tool the approved call would invoke.
+    /// Tool or capability the rule applies to; `*` matches any, a trailing `*` is a prefix.
     pub tool_name: String,
     /// `*`, an exact canonical JSON invocation, `exact_sha256:<hex>`, or a typed target pattern.
     pub pattern: String,
+    /// What the rule decides when it matches.
     pub effect: PolicyEffect,
+    /// Creation time, UTC RFC 3339 at whole-second precision.
     pub created_at: String,
 }
 
@@ -46,22 +58,31 @@ pub const MAX_POLICY_TEXT_CHARS: usize = 500;
 /// A free-text policy the decision engine reads (`docs/design/permissions.md`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyText {
+    /// Id of this policy text.
     pub id: String,
+    /// The prose itself, at most [`MAX_POLICY_TEXT_CHARS`] characters.
     pub text: String,
+    /// Creation time, UTC RFC 3339 at whole-second precision.
     pub created_at: String,
 }
 
+/// Lifecycle of an approval request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, EnumString, IntoStaticStr)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ApprovalStatus {
+    /// Waiting on a person to answer.
     Pending,
+    /// A person allowed the operation.
     Approved,
+    /// A person refused the operation.
     Denied,
+    /// Nobody answered in time, so the operation did not run.
     Expired,
 }
 
 impl ApprovalStatus {
+    /// Returns the spelling stored in approval rows.
     pub fn as_str(self) -> &'static str {
         self.into()
     }
@@ -70,52 +91,95 @@ impl ApprovalStatus {
 /// An approval request, immutable in the parts that identify the operation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Approval {
+    /// Id of this approval request.
     pub request_id: String,
+    /// The agent session that raised the request.
     pub session_id: String,
+    /// The run that is waiting on it.
     pub run_id: String,
+    /// The work session the run belongs to, if any.
     pub work_id: Option<String>,
+    /// SHA-256 of the action payload the person is approving.
     pub action_payload_hash: Vec<u8>,
+    /// The tool the approved call would invoke.
     pub tool_name: String,
+    /// Canonical JSON arguments, pinned so the approval cannot be widened.
     pub normalized_arguments: String,
+    /// Where the request is in its lifecycle.
     pub status: ApprovalStatus,
+    /// Creation time, UTC RFC 3339 at whole-second precision.
     pub created_at: String,
+    /// When a person answered, if they have.
     pub resolved_at: Option<String>,
+    /// The client the action targets, when the action is a device operation.
     pub client_id: Option<String>,
+    /// The capability the action invokes, when it names one.
     pub capability: Option<String>,
 }
 
 /// What the Gate should do with a tool call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
+    /// Runs without prompting.
     Allow,
-    HumanRequired { target: String },
-    NeedsDecision { target: String },
-    Deny { reason: String },
+    /// A person must approve before it runs.
+    HumanRequired {
+        /// Summary of what the person is approving.
+        target: String,
+    },
+    /// The decision engine must rule before anything runs.
+    NeedsDecision {
+        /// Summary of what is being decided.
+        target: String,
+    },
+    /// Blocked outright.
+    Deny {
+        /// Why the action is blocked.
+        reason: String,
+    },
 }
 
 /// Canonical external action evaluated by `Stage::Gate`.
 #[derive(Clone, Debug)]
 pub enum CandidateAction {
+    /// An operation on a client device capability.
     DeviceCapability {
+        /// The capability being invoked.
         capability: String,
+        /// The client declaration for it, when one is on record.
         spec: Option<Box<CapabilitySpec>>,
+        /// The tool that wraps the capability.
         tool_name: String,
+        /// The arguments addressed to the capability itself.
         input: Value,
+        /// The arguments as the model sent them, before any unwrapping.
         raw_arguments: Value,
     },
+    /// A tool call routed to an MCP server.
     McpTool {
+        /// Id of the configured MCP connection.
         server_id: String,
+        /// The tool the server exposes.
         tool_name: String,
+        /// Arguments for the tool.
         input: Value,
     },
+    /// A tool call routed to a plugin.
     PluginTool {
+        /// Id of the plugin providing the tool.
         plugin_id: String,
+        /// The tool the plugin exposes.
         tool_name: String,
+        /// Arguments for the tool.
         input: Value,
     },
+    /// An outbound web search.
     WebSearch {
+        /// The search endpoint the request goes to.
         endpoint: String,
+        /// The query text.
         query: String,
+        /// The full arguments sent to the search adapter.
         input: Value,
     },
 }
@@ -132,6 +196,7 @@ pub fn canonicalise(tool_name: &str, arguments: &Value) -> (String, Vec<u8>) {
     (normalized, hash)
 }
 
+/// Lowercase hex of a digest, as stored in rule patterns.
 pub fn hex_digest(bytes: &[u8]) -> String {
     hex::encode(bytes)
 }
@@ -286,6 +351,7 @@ pub fn decide_action(rules: &[PolicyRule], action: &CandidateAction) -> Verdict 
 }
 
 /// The decision for a capability operation before the card is shown.
+/// Decides a capability operation raised through `device_request`.
 pub fn decide_capability(
     rules: &[PolicyRule],
     spec: Option<&CapabilitySpec>,
@@ -354,12 +420,16 @@ fn target(spec: Option<&CapabilitySpec>, capability: &str, arguments: &Value) ->
     }
 }
 
+/// What a person answered on an approval card.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
+    /// No answer arrived.
     Unspecified,
+    /// Allow this one call.
     Approve,
     /// Persists an exact-invocation allow rule for future matching calls.
     AlwaysApprove,
+    /// Refuse this call.
     Deny,
 }

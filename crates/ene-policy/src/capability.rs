@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
+/// Prefix every workspace file capability shares.
 pub const WORKSPACE_CAPABILITY_PREFIX: &str = "work.";
 
 /// Desktop capability executed by a work agent on its bound client.
@@ -31,6 +32,7 @@ pub const BUILTIN_TOOLS: &[&str] = &[
     "skill_save",
 ];
 
+/// How much approval an operation on a capability needs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityApproval {
@@ -47,19 +49,27 @@ pub enum CapabilityApproval {
 /// operations against.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilitySpec {
+    /// Capability name, such as `body.motion`; unique per client.
     pub name: String,
+    /// Model-facing tool name; empty when the capability exposes no tool.
     #[serde(default)]
     pub tool_name: String,
+    /// Model-facing prose describing what the tool does.
     #[serde(default)]
     pub description: String,
+    /// JSON Schema object text the host validates each call against.
     #[serde(default = "default_schema")]
     pub input_schema: String,
+    /// Named argument presets appended to the description.
     #[serde(default)]
     pub presets: Vec<String>,
+    /// Default approval level for operations on this capability.
     #[serde(default)]
     pub approval: CapabilityApproval,
+    /// Template for the approval card target, with `{field}` slots.
     #[serde(default)]
     pub approval_target: String,
+    /// JSON Schema object text for the result; empty skips validation.
     #[serde(default)]
     pub output_schema: String,
 }
@@ -87,6 +97,10 @@ pub(crate) fn truncate(value: &str, limit: usize) -> String {
 }
 
 impl CapabilitySpec {
+    /// Checks the name, tool name, schemas and presets this spec declares.
+    ///
+    /// # Errors
+    /// Returns [`PolicyError::Invalid`] naming the first field that breaks a rule.
     pub fn validate(&self) -> Result<()> {
         let name = self.name.trim();
         if name.is_empty() || name.chars().count() > 64 || name.contains(char::is_whitespace) {

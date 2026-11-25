@@ -1,10 +1,13 @@
 //! LLM capabilities.
 use serde::{Deserialize, Serialize};
 
+/// What an LLM provider supports beyond the request/response base.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LlmCapabilities {
+    /// Whether the provider streams its reply as it generates.
     pub streaming_text: bool,
+    /// Whether the provider can list the models it serves.
     #[serde(default)]
     pub model_list: bool,
     /// Whether the plugin can ask for tool calls. A plugin that cannot is

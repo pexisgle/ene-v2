@@ -1,4 +1,6 @@
 //! Pure domain data types shared across persistence and host modules.
+#![warn(missing_docs)]
+
 pub mod client;
 pub mod error;
 pub mod failure;

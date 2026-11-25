@@ -30,84 +30,117 @@ pub enum Update {
     Devices(Box<Devices>),
     /// An action the operator asked for did not happen.
     Failed {
+        /// The action that failed, in the user's words.
         context: &'static str,
+        /// What happened, written for the operator.
         message: String,
     },
     /// A revision the window used was stale; the window refetches the authority.
     Conflict {
+        /// The action that failed, in the user's words.
         context: &'static str,
+        /// What happened, written for the operator.
         message: String,
     },
     /// The host refused the owner credential or the endpoint.
     Denied {
+        /// The action that failed, in the user's words.
         context: &'static str,
+        /// What happened, written for the operator.
         message: String,
     },
     /// A message was accepted into the conversation.
     Accepted {
+        /// Client-side key that makes a retry idempotent.
         request_key: String,
+        /// The approval that was answered.
         request_id: String,
     },
     /// A message was not accepted; the text stays with the operator.
     SendFailed {
+        /// Client-side key that makes a retry idempotent.
         request_key: String,
+        /// The text that was not accepted.
         text: String,
+        /// Why the host refused it.
         reason: String,
     },
     /// The host accepted a stop request.
     StopRequested {
+        /// The companion this report is about.
         companion_id: String,
     },
     /// The host synthesized and dispatched a probe utterance.
     Spoke,
     /// The probe could not be synthesized or dispatched.
     SpokeFailed {
+        /// What happened, written for the operator.
         message: String,
     },
     /// The conversation the window asked for.
     History {
+        /// The companion this report is about.
         companion_id: String,
+        /// The conversation, oldest first.
         messages: Vec<Message>,
     },
+    /// The conversation fetch failed.
     HistoryFailed {
+        /// The companion the history fetch was for.
         companion_id: String,
+        /// Why the fetch failed.
         message: String,
     },
     /// The provider catalog.
     Providers(Vec<LlmProvider>),
+    /// Setup finished for one connection.
     SetupFinished {
+        /// Whether the setup completed.
         ok: bool,
+        /// The connection that was set up, when one was.
         connection_id: Option<String>,
+        /// Models the new connection reported.
         models: Vec<String>,
+        /// Why setup failed, when it did.
+        /// Why the preview failed, when it did.
         error: Option<String>,
     },
     /// The declared models of one connection.
     Models {
+        /// The connection the models belong to.
         connection_id: String,
+        /// The models the connection declares.
         models: Vec<ModelInfo>,
     },
     /// The result of a connection probe.
     Checked {
+        /// The connection that was probed.
         connection_id: String,
+        /// The probe result.
         check: ConnectionCheck,
     },
     /// The host's pending approvals, as refetched.
     Approvals(Vec<ApprovalRequest>),
     /// An approval is no longer pending.
     ApprovalStale {
+        /// What happened, written for the operator.
         message: String,
     },
     /// An approval was resolved by this window.
     Resolved {
+        /// Host id the accepted message was recorded under.
         request_id: String,
+        /// A warning about the saved rule, when one is worth saying.
         rule_warning: Option<String>,
     },
     /// A companion no longer exists on the host.
     Gone {
+        /// The companion this report is about.
         companion_id: String,
     },
     /// A connection's credential is registered; the field that held it clears.
     CredentialRegistered {
+        /// The connection whose credential was registered.
         connection_id: String,
     },
     /// The window should refetch the host's whole state.
@@ -116,34 +149,49 @@ pub enum Update {
     Created(String),
     /// Current audio amplitudes for UI meters.
     AudioLevel {
+        /// Output level, normalised.
         output: f32,
+        /// Input level, normalised.
         input: f32,
+        /// Whether the companion is talking right now.
         speaking: bool,
     },
     /// Local capture state for voice probes.
     Capture {
+        /// Current input level, normalised.
         level: f32,
+        /// Whether the capture device is open.
         open: bool,
+        /// How many samples have been sent.
         sent: usize,
     },
     /// Current local mute flags.
     AudioMute {
+        /// Whether the microphone is muted.
         mic_muted: bool,
+        /// Whether the audio output is muted.
         output_muted: bool,
     },
+    /// Whether screen perception is now on.
     EyesEnabled(bool),
+    /// The perception status line, when the host reported one.
     EyesStatus(Option<String>),
     #[cfg(windows)]
     ComputerUseEnabled(bool),
     /// Live STT recognition status from `StreamAudioInput`.
     Transcription {
+        /// The text that was not accepted.
         text: String,
+        /// Whether the provider considers this the final transcript.
         is_final: bool,
+        /// Whether the person is speaking right now.
         is_speaking: bool,
     },
     /// A companion's `MindView` loaded from `HostService.GetMind`.
     MindLoaded {
+        /// The companion this report is about.
         companion_id: String,
+        /// The mind view that was loaded.
         view: Box<MindView>,
     },
     /// The host's permission policy rules, refetched or updated.
@@ -154,25 +202,34 @@ pub enum Update {
     AvatarScaleChanged(f32),
     /// Epoch- and sequence-tagged RPC response so stale replies after reconnect drop.
     Scoped {
+        /// Which link the response belongs to.
         epoch: u64,
+        /// Order of the response within that link.
         seq: u64,
+        /// The wrapped report.
         inner: Box<Update>,
     },
     /// Built-in starter companion templates from the host.
     CompanionTemplates(Vec<CompanionTemplate>),
     /// Sanitized JSON template exported for one companion.
     CompanionExported {
+        /// The companion this report is about.
         companion_id: String,
+        /// The exported template JSON.
         json: String,
     },
     /// Ephemeral preview reply before saving a companion.
     CompanionPreview {
+        /// The preview reply, when it succeeded.
         reply: Option<String>,
+        /// Why the preview failed, when it did.
         error: Option<String>,
     },
     /// Microphone capture mode / PTT state confirmed by the session (`F07`).
     CaptureModeChanged {
+        /// The capture mode now in force.
         mode: CaptureMode,
+        /// Whether push-to-talk is holding the microphone open.
         ptt_active: bool,
     },
     /// Installed host plugins from `SettingsService.ListPlugins` (`F12`).
@@ -205,7 +262,9 @@ pub enum Command {
     PttCancel,
     /// Mute or unmute local speaker playback.
     SetOutputMuted(bool),
+    /// Turn screen perception on or off.
     SetEyesEnabled(bool),
+    /// Allow or forbid the host driving the desktop.
     #[cfg(windows)]
     SetComputerUseEnabled(bool),
     /// Adjust avatar size percentage (50..=200).
@@ -214,7 +273,9 @@ pub enum Command {
     CenterAvatar,
     /// Speak `text` through the host's TTS connection, optionally naming the companion.
     Speak {
+        /// The companion whose voice to use, when one is named.
         companion_id: Option<String>,
+        /// The words to speak.
         text: String,
     },
     /// Stop serving and exit. Sent when the window closes.

@@ -9,13 +9,21 @@ use strum::{EnumString, IntoStaticStr};
 /// Registered client metadata and its granted capabilities.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Client {
+    /// Client-assigned id, unique across registered clients.
     pub id: String,
+    /// Display name shown to the operator.
     pub name: String,
+    /// Platform the client runs on, as the client reports it.
     pub platform: String,
+    /// Capabilities the client declared at registration.
     pub capabilities: Vec<String>,
+    /// Declared capabilities the host has since granted.
     pub granted_capabilities: Vec<String>,
+    /// Schema and approval policy for each declared capability.
     pub capability_specs: Vec<CapabilitySpec>,
+    /// Optimistic-concurrency counter, bumped on every write.
     pub revision: u64,
+    /// Last contact, UTC RFC 3339 at whole-second precision.
     pub last_seen: String,
 }
 
@@ -45,7 +53,9 @@ impl Client {
 /// Active client binding for one companion.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Activation {
+    /// The companion the client is bound to.
     pub companion_id: CompanionId,
+    /// The bound client, or `None` when no client is active.
     pub client_id: Option<String>,
 }
 
@@ -56,11 +66,16 @@ pub struct Activation {
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum DeviceStatus {
+    /// Queued, not yet sent to the client.
     #[default]
     Pending,
+    /// Sent to the client, outcome unknown.
     Dispatched,
+    /// The client reported success.
     Completed,
+    /// The operation failed, or the client reported a failure.
     Failed,
+    /// Dispatch may have reached the client but no result came back.
     Uncertain,
 }
 
@@ -79,16 +94,25 @@ impl DeviceStatus {
 /// Persisted record of a capability operation dispatched to a client.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceOperation {
+    /// Row id of this operation.
     pub id: String,
     /// The client the host dispatched to, kept for the record.
     pub client_id: String,
+    /// The capability the operation invokes.
     pub capability: String,
+    /// Arguments the host validated and sent.
     pub input: serde_json::Value,
+    /// The work session the operation belongs to, if any.
     pub work_id: Option<String>,
+    /// Where the operation is in its lifecycle.
     pub status: DeviceStatus,
+    /// The client result, once it reported success.
     pub output: Option<serde_json::Value>,
+    /// Why the operation failed, when it did.
     pub failure: Option<Failure>,
+    /// Creation time, UTC RFC 3339 at whole-second precision.
     pub created_at: String,
+    /// Last update, UTC RFC 3339 at whole-second precision.
     pub updated_at: String,
 }
 

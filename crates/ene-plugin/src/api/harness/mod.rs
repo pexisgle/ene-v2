@@ -21,8 +21,11 @@ pub fn text_block(text: impl Into<String>) -> ContentBlock {
     ContentBlock::Text(TextContent::new(text))
 }
 
+/// Identifier the host assigns to one `request_permission`.
 pub type RequestId = String;
 
+/// A request from the host that advances the harness turn.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HarnessInput {
@@ -31,6 +34,7 @@ pub enum HarnessInput {
     ///
     /// Equivalent to ACP `session/new` followed by `session/prompt`.
     Start {
+        /// The turn's initial content.
         prompt: Vec<ContentBlock>,
         /// The host's own working directory, as ACP `session/new` carries it.
         cwd: String,
@@ -40,10 +44,15 @@ pub enum HarnessInput {
     /// Equivalent to an ACP `session/prompt` after the first turn ended. Only
     /// the host knows whether a session is live, so a guest that receives
     /// this input owns whatever per-session state it needs to keep it true.
-    Prompt { prompt: Vec<ContentBlock> },
+    Prompt {
+        /// The turn's content.
+        prompt: Vec<ContentBlock>,
+    },
     /// Resumes a turn that yielded on [`HarnessEvent::RequestPermission`].
     Respond {
+        /// The request being answered.
         request_id: RequestId,
+        /// What the person chose.
         outcome: RequestPermissionOutcome,
     },
     /// Equivalent to the ACP `session/cancel` notification. A turn that is
@@ -53,21 +62,29 @@ pub enum HarnessInput {
     Cancel,
 }
 
+/// A step of the harness turn reported by the guest.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HarnessEvent {
     /// Equivalent to the `update` field of an ACP `session/update` notification.
-    Update { update: SessionUpdate },
+    Update {
+        /// The update to report.
+        update: SessionUpdate,
+    },
     /// Equivalent to an ACP `session/request_permission` request. Must be the
     /// last event of an invocation; the host answers through `Respond`.
     RequestPermission {
+        /// Id the host answers this request with.
         request_id: RequestId,
+        /// The tool call the person is being asked about.
         #[serde(rename = "toolCall")]
         tool_call: ToolCallUpdate,
+        /// The choices to offer.
         options: Vec<PermissionOption>,
     },
     /// Equivalent to the ACP `session/prompt` response.
     Stop {
+        /// Why the turn ended.
         #[serde(rename = "stopReason")]
         stop_reason: StopReason,
     },

@@ -42,6 +42,7 @@ pub fn is_host_tool(tool_name: &str) -> bool {
     !matches!(tool_name, "device_request" | WEB_SEARCH_TOOL) && BUILTIN_TOOLS.contains(&tool_name)
 }
 
+/// Returns the matching hard-denied prefix, when the capability starts with one.
 pub fn hard_denied(capability: &str) -> Option<&'static str> {
     HARD_DENIED
         .iter()
@@ -49,6 +50,10 @@ pub fn hard_denied(capability: &str) -> Option<&'static str> {
         .copied()
 }
 
+/// The reason the host blocks this action outright, bypassing saved rules.
+///
+/// A `None` means the action is still subject to the rule engine; it does not
+/// mean the action is allowed.
 pub fn hard_denied_action(action: &CandidateAction, target: &ActionTarget) -> Option<String> {
     if let CandidateAction::DeviceCapability { capability, .. } = action
         && let Some(prefix) = hard_denied(capability)

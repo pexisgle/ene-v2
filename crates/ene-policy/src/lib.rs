@@ -1,4 +1,6 @@
 //! Pure client capability and tool permission policy domain types and evaluation.
+#![warn(missing_docs)]
+
 pub mod capability;
 pub mod error;
 mod hard_deny;

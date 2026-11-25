@@ -13,12 +13,19 @@ use strum::{EnumString, IntoStaticStr};
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ConnectionKind {
+    /// Chat and other text generation.
     Llm,
+    /// Text to speech.
     Tts,
+    /// Speech to text.
     Stt,
+    /// Vector embeddings.
     Embedding,
+    /// A Model Context Protocol server.
     Mcp,
+    /// An external Agent Client Protocol agent.
     Acp,
+    /// A web search backend.
     Search,
 }
 
@@ -32,7 +39,9 @@ impl ConnectionKind {
 /// The common part of every connection config.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Endpoint {
+    /// Adapter name that selects the transport, such as `openai`.
     pub adapter: String,
+    /// Base URL, empty when the adapter derives one.
     pub endpoint: String,
     /// JSON Schema object text for `options`.
     #[serde(default)]
@@ -41,7 +50,6 @@ pub struct Endpoint {
     #[serde(default)]
     pub options: String,
 }
-
 impl Endpoint {
     /// Validates adapter name, URL syntax, and schema-checked options.
     pub fn validate(&self) -> Result<(), DomainError> {
@@ -75,12 +83,20 @@ impl Endpoint {
 /// The kind-specific connection bodies: an endpoint plus the fields the
 /// kind adds. The oneof, its kind, and its endpoint come from the same list.
 macro_rules! connection_bodies {
-    ($($variant:ident($name:ident) { $($field:ident: $ty:ty),* $(,)? }),+ $(,)?) => {
+    ($($variant:ident($name:ident) = $variant_doc:literal {
+        $($field:ident: $ty:ty = $field_doc:literal),* $(,)?
+    }),+ $(,)?) => {
         $(
             #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+            #[doc = $variant_doc]
             pub struct $name {
+                /// The shared adapter, URL and options block.
                 pub endpoint: Endpoint,
-                $(#[serde(default)] pub $field: $ty,)*
+                $(
+                    #[serde(default)]
+                    #[doc = $field_doc]
+                    pub $field: $ty,
+                )*
             }
         )+
 
@@ -89,7 +105,10 @@ macro_rules! connection_bodies {
         #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(tag = "config", rename_all = "snake_case")]
         pub enum ConnectionConfig {
-            $($variant($name)),+
+            $(
+                #[doc = $variant_doc]
+                $variant($name),
+            )+
         }
 
         impl ConnectionConfig {
@@ -111,22 +130,36 @@ macro_rules! connection_bodies {
 }
 
 connection_bodies! {
-    Llm(LlmConnection) { model_ids: Vec<String> },
-    Tts(TtsConnection) { voice_ids: Vec<String> },
-    Stt(SttConnection) { language_hints: Vec<String> },
-    Embedding(EmbeddingConnection) { model_id: String, dimensions: u32 },
-    Mcp(McpConnection) {
-        allowed_tools: Vec<String>,
-        command: String,
-        args: Vec<String>,
-        cwd: String,
-        env: BTreeMap<String, String>,
-        headers: BTreeMap<String, String>,
-        auth_header: String,
-        secret_env_var: String,
+    Llm(LlmConnection) = "Chat and other text generation." {
+        model_ids: Vec<String> = "Model ids this endpoint serves.",
     },
-    Acp(AcpConnection) { command: String, args: Vec<String> },
-    Search(SearchConnection) { max_results: u32 },
+    Tts(TtsConnection) = "Text to speech." {
+        voice_ids: Vec<String> = "Voice ids this endpoint can synthesise.",
+    },
+    Stt(SttConnection) = "Speech to text." {
+        language_hints: Vec<String> = "Language hints for recognition; empty lets the service detect.",
+    },
+    Embedding(EmbeddingConnection) = "Vector embeddings." {
+        model_id: String = "Embedding model to call.",
+        dimensions: u32 = "Width of the returned vector, checked against the model.",
+    },
+    Mcp(McpConnection) = "A Model Context Protocol server." {
+        allowed_tools: Vec<String> = "Tools the host may call; empty allows every tool the server lists.",
+        command: String = "Executable launched for a stdio server; empty for a remote one.",
+        args: Vec<String> = "Arguments passed to `command`, never a shell string.",
+        cwd: String = "Working directory for `command`; empty inherits the host's.",
+        env: BTreeMap<String, String> = "Environment variables added to `command`.",
+        headers: BTreeMap<String, String> = "HTTP headers sent to a remote server.",
+        auth_header: String = "Header name the stored secret is sent in.",
+        secret_env_var: String = "Environment variable holding the secret, read at connect time.",
+    },
+    Acp(AcpConnection) = "An external Agent Client Protocol agent." {
+        command: String = "Executable launched for the agent.",
+        args: Vec<String> = "Arguments passed to `command`.",
+    },
+    Search(SearchConnection) = "A web search backend." {
+        max_results: u32 = "Result cap per query, at most 20.",
+    },
 }
 
 fn is_valid_env_name(name: &str) -> bool {
@@ -334,12 +367,17 @@ fn validate_search(config: &SearchConnection) -> Result<(), DomainError> {
 /// Recorded result of the last connectivity or capability check for a connection.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Check {
+    /// Whether the last check reached the service and passed.
     pub healthy: bool,
+    /// When the check ran, UTC RFC 3339 at whole-second precision.
     pub checked_at: String,
+    /// Why the check failed, when it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<Failure>,
+    /// Capabilities the service advertised, such as streaming or tool calls.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Resources the service listed, such as models or voices.
     #[serde(default)]
     pub resources: Vec<String>,
 }
@@ -352,9 +390,12 @@ pub struct Check {
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum CredentialState {
+    /// No secret is stored, so the connection cannot authenticate.
     #[default]
     Absent,
+    /// A secret is held in the host credential store.
     Registered,
+    /// The secret comes from an environment variable named by the config.
     Environment,
 }
 
@@ -373,13 +414,21 @@ impl CredentialState {
 /// Persisted external service connection configuration and health state.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Connection {
+    /// Id of this connection, validated on write.
     pub id: String,
+    /// Display name shown to the operator.
     pub name: String,
+    /// Whether the host may use the connection.
     pub enabled: bool,
+    /// Which kind of service this connection reaches.
     pub kind: ConnectionKind,
+    /// Adapter, URL and kind-specific fields. Must match `kind`.
     pub config: ConnectionConfig,
+    /// Whether a secret is stored for this connection.
     pub credential_state: CredentialState,
+    /// Optimistic-concurrency counter, bumped on every write.
     pub revision: u64,
+    /// Result of the most recent health check, when one has run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_check: Option<Check>,
 }
@@ -410,8 +459,11 @@ impl Connection {
 /// Top-level persisted settings view combining connections and free-text policies.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
+    /// Optimistic-concurrency counter for the settings view.
     pub revision: u64,
+    /// Every configured external connection.
     pub connections: Vec<Connection>,
+    /// When the view last changed, UTC RFC 3339 at whole-second precision.
     pub updated_at: String,
     /// Free-text policies: settings prose the decision engine reads, never a
     /// mechanical gate. They ride the settings view, not its revision.

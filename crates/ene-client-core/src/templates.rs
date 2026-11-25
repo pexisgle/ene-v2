@@ -6,16 +6,22 @@ use crate::domain::{CompanionTemplate, VoiceBinding};
 pub const TEMPLATE_FORMAT_VERSION: u32 = 1;
 
 /// Failures when exporting or importing companion JSON templates.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum TemplateError {
+    /// The template could not be written out.
     #[error("テンプレートの書き出しに失敗しました: {0}")]
     Export(serde_json::Error),
+    /// The person submitted an empty document.
     #[error("テンプレート JSON を入力してください")]
     EmptyInput,
+    /// The document is not a template this build can read.
     #[error("テンプレート JSON の形式が正しくありません: {0}")]
     InvalidJson(#[from] serde_json::Error),
+    /// The template targets a format version this build does not know.
     #[error("未対応のテンプレート形式バージョン ({0}) です")]
     UnsupportedVersion(u32),
+    /// The template carries no companion name.
     #[error("テンプレートにコンパニオン名が含まれていません")]
     MissingName,
 }

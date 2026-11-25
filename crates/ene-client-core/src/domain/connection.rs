@@ -6,14 +6,22 @@ use std::collections::BTreeMap;
 /// Kind of host-managed external connection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ConnectionKind {
+    /// The host did not report a kind.
     #[default]
     Unspecified,
+    /// Chat and other text generation.
     Llm,
+    /// Text to speech.
     Tts,
+    /// Speech to text.
     Stt,
+    /// Vector embeddings.
     Embedding,
+    /// A Model Context Protocol server.
     Mcp,
+    /// An external Agent Client Protocol agent.
     Acp,
+    /// A web search backend.
     Search,
 }
 
@@ -61,79 +69,113 @@ impl ConnectionKind {
 /// Endpoint adapter, URL, and JSON options schema/payload for a connection.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConnectionEndpoint {
+    /// Adapter name that selects the transport, such as `openai`.
     pub adapter: String,
+    /// Base URL, empty when the adapter derives one.
     pub endpoint: String,
+    /// JSON Schema object text for `options`.
     pub options_schema: String,
+    /// JSON object text conforming to `options_schema`.
     pub options: String,
 }
 
 /// LLM connection settings.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LlmConnection {
+    /// The shared adapter, URL and options block.
     pub endpoint: Option<ConnectionEndpoint>,
+    /// Model ids this endpoint serves.
     pub model_ids: Vec<String>,
 }
 
 /// Text-to-speech connection settings.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TtsConnection {
+    /// The shared adapter, URL and options block.
     pub endpoint: Option<ConnectionEndpoint>,
+    /// Voice ids this endpoint can synthesise.
     pub voice_ids: Vec<String>,
 }
 
 /// Speech-to-text connection settings.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SttConnection {
+    /// The shared adapter, URL and options block.
     pub endpoint: Option<ConnectionEndpoint>,
+    /// Language hints for recognition; empty lets the service detect.
     pub language_hints: Vec<String>,
 }
 
 /// Text embedding connection settings.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EmbeddingConnection {
+    /// The shared adapter, URL and options block.
     pub endpoint: Option<ConnectionEndpoint>,
+    /// Embedding model to call.
     pub model_id: String,
+    /// Width of the returned vector, checked against the model.
     pub dimensions: u32,
 }
 
 /// Model Context Protocol (MCP) server connection settings.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct McpConnection {
+    /// The shared adapter, URL and options block.
     pub endpoint: Option<ConnectionEndpoint>,
+    /// Tools the host may call; empty allows every tool the server lists.
     pub allowed_tools: Vec<String>,
+    /// Executable launched for a stdio server; empty for a remote one.
     pub command: String,
+    /// Arguments passed to `command`, never a shell string.
     pub args: Vec<String>,
+    /// Working directory for `command`; empty inherits the host's.
     pub cwd: String,
+    /// Environment variables added to `command`.
     pub env: BTreeMap<String, String>,
+    /// HTTP headers sent to a remote server.
     pub headers: BTreeMap<String, String>,
+    /// Header name the stored secret is sent in.
     pub auth_header: String,
+    /// Environment variable holding the secret, read at connect time.
     pub secret_env_var: String,
 }
 
 /// Agent Client Protocol (ACP) harness connection settings.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AcpConnection {
+    /// The shared adapter, URL and options block.
     pub endpoint: Option<ConnectionEndpoint>,
+    /// Executable launched for the agent.
     pub command: String,
+    /// Arguments passed to `command`.
     pub args: Vec<String>,
 }
 
 /// Web search provider connection settings.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchConnection {
+    /// The shared adapter, URL and options block.
     pub endpoint: Option<ConnectionEndpoint>,
+    /// Result cap per query, at most 20.
     pub max_results: u32,
 }
 
 /// Kind-specific connection configuration payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionConfig {
+    /// Chat and other text generation.
     Llm(LlmConnection),
+    /// Text to speech.
     Tts(TtsConnection),
+    /// Speech to text.
     Stt(SttConnection),
+    /// Vector embeddings.
     Embedding(EmbeddingConnection),
+    /// A Model Context Protocol server.
     Mcp(McpConnection),
+    /// An external Agent Client Protocol agent.
     Acp(AcpConnection),
+    /// A web search backend.
     Search(SearchConnection),
 }
 
@@ -168,23 +210,36 @@ impl ConnectionConfig {
 /// Result of probing a connection.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConnectionCheck {
+    /// Whether the probe reached the service and passed.
     pub healthy: bool,
+    /// When the probe ran, as the host stamped it.
     pub checked_at: String,
+    /// Why the probe failed, when it did.
     pub failure: Option<Failure>,
+    /// Capabilities the service advertised, such as streaming or tool calls.
     pub capabilities: Vec<String>,
+    /// Resources the service listed, such as models or voices.
     pub resources: Vec<String>,
 }
 
 /// Saved host connection entry.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Connection {
+    /// Id of this connection.
     pub id: String,
+    /// Display name shown to the operator.
     pub name: String,
+    /// Whether the host may use the connection.
     pub enabled: bool,
+    /// Whether a secret is stored, in the host's own spelling.
     pub credential_state: String,
+    /// Optimistic-concurrency counter, bumped on every write.
     pub revision: u64,
+    /// Which kind of service this connection reaches.
     pub kind: ConnectionKind,
+    /// Result of the most recent probe, when one has run.
     pub last_check: Option<ConnectionCheck>,
+    /// Adapter, URL and kind-specific fields. Must match `kind`.
     pub config: Option<ConnectionConfig>,
 }
 
@@ -283,52 +338,80 @@ impl Connection {
 /// Connection creation/update payload passed to settings mutations.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConnectionInput {
+    /// Id to create or update.
     pub id: String,
+    /// Display name shown to the operator.
     pub name: String,
+    /// Whether the host may use the connection.
     pub enabled: bool,
+    /// The revision the edit was based on, so a stale write is refused.
     pub expected_revision: u64,
+    /// Which kind of service the connection reaches.
     pub kind: ConnectionKind,
+    /// Adapter, URL and kind-specific fields.
     pub config: Option<ConnectionConfig>,
 }
 
 /// Provider setting schema field descriptor.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SettingField {
+    /// Key the field's value is stored under.
     pub key: String,
+    /// Label the host shows for the field.
     pub label: String,
+    /// Input kind the host renders, such as `text` or `select`.
     pub kind: String,
+    /// Whether the field must be filled in.
     pub required: bool,
+    /// Allowed values, for a `select` field.
     pub choices: Vec<String>,
 }
 
 /// Host-advertised LLM provider catalog item.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LlmProvider {
+    /// Provider id, unique in the catalog.
     pub id: String,
+    /// Display name shown to the operator.
     pub name: String,
+    /// Adapter name the driver selects on.
     pub adapter: String,
+    /// Default base URL for the provider.
     pub endpoint: String,
+    /// Configuration fields the host renders for this provider.
     pub settings: Vec<SettingField>,
+    /// Whether the provider needs a credential before it can be used.
     pub requires_credentials: bool,
+    /// Environment variable the credential may be read from instead.
     pub environment_variable: Option<String>,
 }
 
 /// Model metadata entry returned by a connection's model listing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ModelInfo {
+    /// Model id passed to the provider.
     pub id: String,
+    /// Model name shown to the operator.
     pub name: String,
 }
 
 /// Installed host Wasm plugin descriptor.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PluginInfo {
+    /// Package id, unique among installed plugins.
     pub id: String,
+    /// Display name shown to the operator.
     pub name: String,
+    /// Release version of the plugin.
     pub version: String,
+    /// Operator-facing summary.
     pub description: String,
+    /// Whether the host may run the plugin.
     pub enabled: bool,
+    /// Extensions the plugin provides, in the host's own spelling.
     pub extensions: Vec<String>,
+    /// Where the verified plugin snapshot lives on disk.
     pub path: String,
+    /// When the plugin was installed, as the host stamped it.
     pub installed_at: String,
 }

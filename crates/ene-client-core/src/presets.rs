@@ -9,32 +9,49 @@ use crate::domain::{
 /// Parameters for creating or enabling a search provider preset.
 #[derive(Debug)]
 pub struct SearchPresetSpec<'a> {
+    /// Id the preset is stored under.
     pub preset_id: &'a str,
+    /// Display name shown to the operator.
     pub name: &'a str,
+    /// Adapter name the driver selects on.
     pub adapter: &'a str,
+    /// Base URL of the provider.
     pub endpoint: &'a str,
+    /// Whether the preset becomes the active connection.
     pub activate: bool,
 }
 
 /// Parameters for creating or updating an STT preset connection.
 #[derive(Debug)]
 pub struct SttPresetSpec<'a> {
+    /// Id to store the connection under, when it must be stable.
     pub fixed_id: Option<&'a str>,
+    /// Adapter name the driver selects on.
     pub adapter: &'a str,
+    /// Display name shown to the operator.
     pub name: String,
+    /// Base URL of the provider.
     pub endpoint: String,
+    /// Model to call for this preset.
     pub model: String,
+    /// Language hint passed with each request.
     pub language: String,
 }
 
 /// Parameters for creating or updating an embedding preset connection.
 #[derive(Debug)]
 pub struct EmbeddingPresetSpec<'a> {
+    /// Id the connection is stored under.
     pub id: &'a str,
+    /// Display name shown to the operator.
     pub name: &'a str,
+    /// Adapter name the driver selects on.
     pub adapter: &'a str,
+    /// Base URL of the provider.
     pub endpoint: &'a str,
+    /// Embedding model to call.
     pub model_id: &'a str,
+    /// Width of the returned vector.
     pub dimensions: u32,
 }
 

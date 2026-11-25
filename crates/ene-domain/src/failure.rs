@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 /// A user-visible failure: a stable code and a short, non-secret message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Failure {
+    /// Stable machine-readable code, safe to branch on.
     pub code: String,
+    /// Short human-readable message carrying no secret.
     pub message: String,
 }
 

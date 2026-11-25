@@ -11,11 +11,17 @@ use std::collections::BTreeMap;
 /// Input fields captured when saving edits to an existing connection row.
 #[derive(Debug)]
 pub struct ConnectionEditSpec<'a> {
+    /// Display name shown to the operator.
     pub name: &'a str,
+    /// Base URL as the operator typed it.
     pub endpoint_url: &'a str,
+    /// Command and arguments, for a process-backed connection.
     pub process: Option<(&'a str, &'a [String])>,
+    /// Comma-separated model or voice ids as typed.
     pub list_raw: &'a str,
+    /// Embedding width as typed, for an embedding connection.
     pub dimensions_raw: Option<&'a str>,
+    /// Adapter options JSON as typed.
     pub options_json: Option<&'a str>,
 }
 

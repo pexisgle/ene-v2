@@ -5,10 +5,13 @@ use serde::{Deserialize, Serialize};
 #[error("{code}: {message}")]
 #[serde(deny_unknown_fields)]
 pub struct Failure {
+    /// Stable machine-readable code the host branches on.
     pub code: String,
+    /// Short human-readable message carrying no secret.
     pub message: String,
 }
 impl Failure {
+    /// Creates a failure whose message is the code, for a code that speaks for itself.
     pub fn new(code: &str) -> Self {
         Self {
             code: code.into(),
