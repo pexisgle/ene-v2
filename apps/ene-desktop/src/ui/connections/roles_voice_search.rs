@@ -11,7 +11,7 @@ use ene_client_core::domain::{ConnectionConfig, ConnectionKind};
 use gpui::{AnyElement, Context, div, prelude::*, px};
 use std::collections::BTreeMap;
 
-type VoiceAssignFn = fn(&mut Hub, Option<(String, String)>, &mut Context<Hub>);
+type VoiceAssignFn = fn(&mut Hub, Option<(&str, &str)>, &mut Context<Hub>);
 
 /// Connection-derived inputs shared by the STT, TTS and web-search rows.
 pub(super) struct RolesContext {
@@ -161,7 +161,9 @@ pub(super) fn render_voice_role_row(
                 if picked == "__off__" {
                     hub_assign.update(cx, |hub, cx| assign_fn(hub, None, cx));
                 } else if let Some((cid, vid)) = decode_model_choice(&picked) {
-                    hub_assign.update(cx, |hub, cx| assign_fn(hub, Some((cid, vid)), cx));
+                    hub_assign.update(cx, |hub, cx| {
+                        assign_fn(hub, Some((cid.as_str(), vid.as_str())), cx)
+                    });
                 }
                 close_pane_dropdown(&pane_pick, cx);
             },

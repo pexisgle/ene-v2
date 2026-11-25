@@ -147,28 +147,20 @@ impl Hub {
     /// Assigns the active STT connection and model atomically across all STT connections.
     pub(crate) fn assign_stt_model(
         &mut self,
-        selection: Option<(String, String)>,
+        selection: Option<(&str, &str)>,
         cx: &mut Context<Self>,
     ) {
-        voice_roles::assign_stt_model(
-            self,
-            selection.as_ref().map(|(a, b)| (a.as_str(), b.as_str())),
-            cx,
-        );
+        voice_roles::assign_stt_model(self, selection, cx);
     }
 
     /// Assigns the active TTS connection and voice atomically across all TTS connections,
     /// probing local VOICEVOX when newly enabled and syncing companion `voice_identifier`.
     pub(crate) fn assign_tts_voice(
         &mut self,
-        selection: Option<(String, String)>,
+        selection: Option<(&str, &str)>,
         cx: &mut Context<Self>,
     ) {
-        voice_roles::assign_tts_voice(
-            self,
-            selection.as_ref().map(|(a, b)| (a.as_str(), b.as_str())),
-            cx,
-        );
+        voice_roles::assign_tts_voice(self, selection, cx);
     }
 
     pub(crate) fn select_embedding_model(
@@ -242,10 +234,10 @@ impl Hub {
     pub(crate) fn register_secret_for_connections(
         &mut self,
         connection_ids: Vec<String>,
-        secret: String,
+        secret: &str,
         cx: &mut Context<Self>,
     ) {
-        let secret = secret.trim().to_owned();
+        let secret = secret.trim();
         if secret.is_empty() || connection_ids.is_empty() {
             return;
         }
@@ -253,7 +245,7 @@ impl Hub {
             &self.rpc,
             self.model.connections.link_epoch,
             connection_ids,
-            secret,
+            secret.to_owned(),
         );
         cx.notify();
     }

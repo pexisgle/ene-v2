@@ -278,7 +278,7 @@ pub(super) fn render_cred_secret_row(
                 theme,
                 move |_, cx| {
                     hub_all.update(cx, |hub, cx| {
-                        hub.register_secret_for_connections(ids_all.clone(), sec_all.clone(), cx);
+                        hub.register_secret_for_connections(ids_all.clone(), &sec_all, cx);
                     });
                 },
             ))
