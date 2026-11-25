@@ -2,7 +2,9 @@
 use super::helpers::image;
 use super::{SHELL, workspace::Workspace};
 use serde_json::{Value, json};
-use std::{path::Path, sync::Arc};
+#[cfg(unix)]
+use std::path::Path;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn workspace_tools_read_search_and_edit_only_the_bound_workspace() {
