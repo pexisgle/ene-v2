@@ -442,7 +442,7 @@ mod tests {
         let store = store();
         let memory = store
             .memory_repo()
-            .insert_memory(new_memory("m1", "tea"))
+            .insert_memory(&new_memory("m1", "tea"))
             .unwrap();
         let batch = batch(9, vec![context(&memory)]);
         // A concurrent correction moves the revision the pass captured.
@@ -484,7 +484,7 @@ mod tests {
         let store = store();
         let memory = store
             .memory_repo()
-            .insert_memory(new_memory("m2", "coffee"))
+            .insert_memory(&new_memory("m2", "coffee"))
             .unwrap();
         let mut batch = batch(8, vec![context(&memory)]);
         batch.injected = vec!["m2".into()];
@@ -721,7 +721,7 @@ mod tests {
         let existing = setup
             .store
             .memory_repo()
-            .insert_memory(new_memory("m1", "東京都の紅茶の店"))
+            .insert_memory(&new_memory("m1", "東京都の紅茶の店"))
             .unwrap();
         let mut conversation = CoreConversation::new();
         answer(&mut conversation, "紅茶の店はどこ", "新宿にある");

@@ -318,7 +318,7 @@ mod tests {
         adapter: &str,
         ep: &str,
         voices: Vec<&str>,
-        options: serde_json::Value,
+        options: &serde_json::Value,
     ) -> Connection {
         Connection {
             id: id.into(),
@@ -359,7 +359,7 @@ mod tests {
                 "voicevox",
                 "http://127.0.0.1:50021",
                 vec![],
-                serde_json::json!({ "speaker": 3 }),
+                &serde_json::json!({ "speaker": 3 }),
             ),
             tts_conn(
                 "tts-sakura",
@@ -367,7 +367,7 @@ mod tests {
                 "sakura",
                 sakura,
                 vec!["zundamon/amaama"],
-                serde_json::json!({ "protocol": "sakura", "model": "zundamon", "voice": "amaama" }),
+                &serde_json::json!({ "protocol": "sakura", "model": "zundamon", "voice": "amaama" }),
             ),
         ];
         assert_eq!(
@@ -439,7 +439,7 @@ mod tests {
                 "voicevox",
                 "http://127.0.0.1:50021",
                 vec!["3"],
-                serde_json::json!({ "speaker": 3 }),
+                &serde_json::json!({ "speaker": 3 }),
             ),
             tts_conn(
                 "tts-sakura",
@@ -447,7 +447,7 @@ mod tests {
                 "sakura",
                 sakura,
                 vec!["zundamon/normal"],
-                serde_json::json!({ "protocol": "sakura", "model": "zundamon", "voice": "normal" }),
+                &serde_json::json!({ "protocol": "sakura", "model": "zundamon", "voice": "normal" }),
             ),
         ];
 

@@ -157,7 +157,7 @@ mod tests {
         let store = harness.store();
         store
             .memory_repo()
-            .insert_memory(MemoryRecord {
+            .insert_memory(&MemoryRecord {
                 id: "m-release".into(),
                 scope: harness.companion.clone(),
                 content: "リリース手順 は必ず verify を通す".into(),

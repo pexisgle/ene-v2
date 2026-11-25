@@ -241,7 +241,7 @@ async fn embedding_credentials_rotate_and_revoke_across_clones() {
     for index in 0..pending {
         let mut record = memory(&format!("memory {index}"));
         record.scope = companion.id.clone();
-        store.memory_repo().insert_memory(record).unwrap();
+        store.memory_repo().insert_memory(&record).unwrap();
     }
     assert_eq!(
         fill(
@@ -307,8 +307,11 @@ fn embed(store: &Store, memory: &Memory, space: &str, dimensions: usize, vector:
 #[test]
 fn the_index_mirrors_only_the_matching_space_and_revision() {
     let store = store();
-    let first = store.memory_repo().insert_memory(memory("tea")).unwrap();
-    let second = store.memory_repo().insert_memory(memory("coffee")).unwrap();
+    let first = store.memory_repo().insert_memory(&memory("tea")).unwrap();
+    let second = store
+        .memory_repo()
+        .insert_memory(&memory("coffee"))
+        .unwrap();
     let two = test_space("fake", 2);
     let three = test_space("other", 3);
     embed(&store, &first, &two, 2, &[1.0, 0.0]);
@@ -363,14 +366,14 @@ fn the_index_mirrors_only_the_matching_space_and_revision() {
 fn another_companions_vectors_cannot_take_the_companions_top_k() {
     let store = store();
     let space = test_space("fake", 2);
-    let mine = store.memory_repo().insert_memory(memory("mine")).unwrap();
+    let mine = store.memory_repo().insert_memory(&memory("mine")).unwrap();
     embed(&store, &mine, &space, 2, &[1.0, 0.0]);
     // Other companions hold equally close vectors for the same query.
     let mut others = Vec::new();
     for index in 0..5 {
         let mut other = memory(&format!("other {index}"));
         other.scope = format!("other-{index}");
-        let other = store.memory_repo().insert_memory(other).unwrap();
+        let other = store.memory_repo().insert_memory(&other).unwrap();
         embed(&store, &other, &space, 2, &[1.0, 0.0]);
         others.push(other);
     }
@@ -409,7 +412,7 @@ fn ranking_keeps_database_order_for_ties_and_bounds_top_k() {
     ] {
         let mut record = memory(id);
         record.id = id.into();
-        let memory = store.memory_repo().insert_memory(record).unwrap();
+        let memory = store.memory_repo().insert_memory(&record).unwrap();
         embed(&store, &memory, &space, 2, &vector);
         ids.push(memory.id);
     }
@@ -446,7 +449,10 @@ fn invalid_comparisons_stay_finite_zero_evidence() {
         [f32::INFINITY, 0.0],
         [-1.0, 0.0],
     ] {
-        let memory = store.memory_repo().insert_memory(memory("vector")).unwrap();
+        let memory = store
+            .memory_repo()
+            .insert_memory(&memory("vector"))
+            .unwrap();
         embed(&store, &memory, &space, 2, &vector);
         ids.push(memory.id);
     }
@@ -620,11 +626,11 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
 
     let mut mem_a = memory("alpha private memory");
     mem_a.scope = comp_a.id.clone();
-    let mem_a = store.memory_repo().insert_memory(mem_a).unwrap();
+    let mem_a = store.memory_repo().insert_memory(&mem_a).unwrap();
 
     let mut mem_b = memory("beta private memory");
     mem_b.scope = comp_b.id.clone();
-    let mem_b = store.memory_repo().insert_memory(mem_b).unwrap();
+    let mem_b = store.memory_repo().insert_memory(&mem_b).unwrap();
 
     let embeddings = Embeddings::default();
     let target_a = target(&store, None, &comp_a, &embeddings).unwrap().unwrap();

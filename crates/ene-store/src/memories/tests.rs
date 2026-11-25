@@ -47,8 +47,8 @@ fn recurring_cached_embedding_writes_keep_bindings_and_revision_guards() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
     let repo = store.memory_repo();
-    let first = repo.insert_memory(new_memory("first", 3)).unwrap();
-    let second = repo.insert_memory(new_memory("second", 4)).unwrap();
+    let first = repo.insert_memory(&new_memory("first", 3)).unwrap();
+    let second = repo.insert_memory(&new_memory("second", 4)).unwrap();
     let connection = store.open_secondary().unwrap();
     let a = 1.0_f32.to_le_bytes();
     let b = 2.0_f32.to_le_bytes();
@@ -158,10 +158,10 @@ fn hybrid_recall_fuses_and_forgetting_excludes_auto_but_keeps_explicit() {
     let store = store();
     let repo = store.memory_repo();
     let lexical = repo
-        .insert_memory(new_memory("東京都の紅茶の店", 6))
+        .insert_memory(&new_memory("東京都の紅茶の店", 6))
         .unwrap();
     let semantic_only = repo
-        .insert_memory(new_memory("a favourite drink", 5))
+        .insert_memory(&new_memory("a favourite drink", 5))
         .unwrap();
     let outcome = repo
         .recall_hybrid(
@@ -335,7 +335,7 @@ fn another_companions_scope_is_private_and_sharing_moves_the_row_to_the_pool() {
     let repo = store.memory_repo();
     let mut other = new_memory("other companion's secret", 8);
     other.scope = "other".into();
-    let other = repo.insert_memory(other).unwrap();
+    let other = repo.insert_memory(&other).unwrap();
     let private = repo
         .recall_hybrid(
             "ene",
@@ -387,7 +387,7 @@ fn a_shared_pinned_memory_is_injected_for_every_companion() {
     let store = store();
     let repo = store.memory_repo();
     let memory = repo
-        .insert_memory(new_memory("the user's name is A", 10))
+        .insert_memory(&new_memory("the user's name is A", 10))
         .unwrap();
     assert_eq!(repo.pinned("ene").unwrap().len(), 1);
     assert_eq!(repo.pinned("other").unwrap().len(), 0);
@@ -412,13 +412,13 @@ fn consolidation_context_retrieves_instead_of_ranking_importance() {
     let store = store();
     let repo = store.memory_repo();
     let relevant = repo
-        .insert_memory(new_memory("東京都の紅茶の店", 6))
+        .insert_memory(&new_memory("東京都の紅茶の店", 6))
         .unwrap();
     let important = repo
-        .insert_memory(new_memory("unrelated pinned fact", 10))
+        .insert_memory(&new_memory("unrelated pinned fact", 10))
         .unwrap();
     let forgotten = repo
-        .insert_memory(new_memory("紅茶はもう忘れて", 1))
+        .insert_memory(&new_memory("紅茶はもう忘れて", 1))
         .unwrap();
     let contexts = repo.consolidation_context("ene", "紅茶", &[], 2).unwrap();
     let ids: Vec<&str> = contexts.iter().map(|context| context.id.as_str()).collect();
@@ -439,7 +439,7 @@ fn consolidation_context_retrieves_instead_of_ranking_importance() {
 fn consolidation_does_not_resurrect_a_forgotten_memory() {
     let store = store();
     let repo = store.memory_repo();
-    let memory = repo.insert_memory(new_memory("coffee", 5)).unwrap();
+    let memory = repo.insert_memory(&new_memory("coffee", 5)).unwrap();
     repo.control_memory(&memory.id, MemoryActionKind::Forget, "ene")
         .unwrap();
     let forgotten = repo.memory(&memory.id).unwrap().unwrap();

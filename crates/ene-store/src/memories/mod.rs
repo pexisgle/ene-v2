@@ -119,9 +119,9 @@ impl<'a> MemoryRepo<'a> {
         Self(store)
     }
 
-    pub fn insert_memory(&self, memory: MemoryRecord) -> Result<Memory> {
+    pub fn insert_memory(&self, memory: &MemoryRecord) -> Result<Memory> {
         let connection = self.0.conn()?;
-        insert_row(&connection, &memory, &now())
+        insert_row(&connection, memory, &now())
     }
 
     pub fn memory(&self, id: &str) -> Result<Option<Memory>> {

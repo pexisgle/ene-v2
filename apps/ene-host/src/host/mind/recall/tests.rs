@@ -148,7 +148,7 @@ async fn work_agent_recall_keeps_the_tail_without_polluting_companion_injections
         let store = harness.store();
         store
             .memory_repo()
-            .insert_memory(MemoryRecord {
+            .insert_memory(&MemoryRecord {
                 id: "m-head".into(),
                 scope: harness.companion.clone(),
                 content: "コンパニオン用の紅茶の記憶".into(),
@@ -159,7 +159,7 @@ async fn work_agent_recall_keeps_the_tail_without_polluting_companion_injections
             .unwrap();
         store
             .memory_repo()
-            .insert_memory(MemoryRecord {
+            .insert_memory(&MemoryRecord {
                 id: "m-work".into(),
                 scope: harness.companion.clone(),
                 content: "作業エージェント用のフォルダ整理手順".into(),
@@ -268,7 +268,7 @@ async fn b13_turn_cause_uses_schedule_instruction_instead_of_stale_user_chat() {
     let store = harness.store();
     store
         .memory_repo()
-        .insert_memory(MemoryRecord {
+        .insert_memory(&MemoryRecord {
             id: "m-tea".into(),
             scope: harness.companion.clone(),
             content: "ユーザーは アールグレイ紅茶 が大好き".into(),
@@ -279,7 +279,7 @@ async fn b13_turn_cause_uses_schedule_instruction_instead_of_stale_user_chat() {
         .unwrap();
     store
         .memory_repo()
-        .insert_memory(MemoryRecord {
+        .insert_memory(&MemoryRecord {
             id: "m-standup".into(),
             scope: harness.companion.clone(),
             content: "月曜の 定例朝会 は議事録係を毎回交代する".into(),
@@ -359,7 +359,7 @@ fn b14_context_builder_records_only_recalled_memories_that_fit_budget() {
     let second_content = format!("予算テスト記憶B {}", "い".repeat(300));
     store
         .memory_repo()
-        .insert_memory(MemoryRecord {
+        .insert_memory(&MemoryRecord {
             id: "m-fit".into(),
             scope: harness.companion.clone(),
             content: first_content.clone(),
@@ -370,7 +370,7 @@ fn b14_context_builder_records_only_recalled_memories_that_fit_budget() {
         .unwrap();
     store
         .memory_repo()
-        .insert_memory(MemoryRecord {
+        .insert_memory(&MemoryRecord {
             id: "m-dropped".into(),
             scope: harness.companion.clone(),
             content: second_content.clone(),
