@@ -136,7 +136,28 @@ use connectrpc::{ConnectError, Response, Router, ServiceResult};
 use ene_rpc as w;
 use rig_ecs::prelude::App;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use tower_http::{
+    catch_panic::CatchPanicLayer, limit::RequestBodyLimitLayer, timeout::TimeoutLayer,
+    trace::TraceLayer,
+};
+
+/// Largest request body the Connect surface accepts.
+///
+/// The biggest legitimate body is a perception frame: a JPEG capped at 512 KiB
+/// by `docs/api.md` §知覚. 8 MiB leaves room for a batch of frames plus
+/// protobuf overhead while still refusing a malformed or hostile body before it
+/// is buffered in memory.
+const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// How long one RPC may run before the layer answers 408.
+///
+/// Generous on purpose: `SettingsService` probes a provider connection and
+/// `WorkService` starts a session, and both legitimately wait on a remote model.
+/// The per-call deadlines that matter are set inside those handlers; this is
+/// only a backstop for a handler that never returns at all.
+const RPC_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Clone)]
 pub(super) struct Services {
@@ -241,4 +262,19 @@ pub(super) fn router(
         .route("/readyz", axum::routing::get(readyz))
         .with_state(services)
         .merge(authenticated)
+        // A panic in one handler must not take the process down; the layer
+        // turns it into a 500 and leaves the actor thread intact.
+        .layer(CatchPanicLayer::new())
+        // A Connect request larger than this is refused before it is buffered.
+        // Perception frames are capped well below it by the client's own JPEG
+        // limit, so this only stops a malformed or hostile body.
+        .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BODY_BYTES))
+        // A handler that never returns must not pin a connection forever.
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::GATEWAY_TIMEOUT,
+            RPC_TIMEOUT,
+        ))
+        // Emits one span per request, which the per-method `#[instrument]`
+        // spans then nest inside.
+        .layer(TraceLayer::new_for_http())
 }

@@ -61,6 +61,10 @@ subtle = "2"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "io-util", "process"] }
 tokio-util = { workspace = true, features = ["rt", "compat", "codec"] }
+# Request tracing, a body ceiling, a response deadline and panic isolation for
+# the Connect surface; `TraceLayer` emits the same `tracing` spans the RPC
+# handlers already use.
+tower-http = { version = "0.6", features = ["trace", "timeout", "limit", "catch-panic"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url.workspace = true
