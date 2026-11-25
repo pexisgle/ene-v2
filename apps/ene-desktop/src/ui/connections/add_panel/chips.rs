@@ -45,12 +45,7 @@ pub(super) fn build_voice_embedding_chips(
             style: Tone::Ghost.icon(Icon::Volume).enabled(live),
             expand_id: None,
             action: |hub, cx| {
-                hub.add_openai_tts_preset(
-                    "https://api.openai.com/v1".into(),
-                    "tts-1".into(),
-                    "alloy".into(),
-                    cx,
-                );
+                hub.add_openai_tts_preset("https://api.openai.com/v1", "tts-1", "alloy", cx);
             },
         },
         PresetChipSpec {

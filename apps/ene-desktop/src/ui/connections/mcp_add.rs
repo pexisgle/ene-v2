@@ -412,7 +412,7 @@ fn render_mcp_submit(
             hub.update(cx, |hub, cx| {
                 hub.upsert_connection("MCP の追加", input, cx);
                 if !secret.is_empty() {
-                    hub.register_secret(id.clone(), secret, cx);
+                    hub.register_secret(&id, &secret, cx);
                 }
             });
             submit.update(cx, |this, cx| {

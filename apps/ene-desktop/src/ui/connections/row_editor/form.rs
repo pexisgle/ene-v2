@@ -292,7 +292,7 @@ pub(super) fn render_cred_secret_row(
             theme,
             move |_, cx| {
                 hub_reg.update(cx, |hub, cx| {
-                    hub.register_secret(reg_id.clone(), secret_save.clone(), cx);
+                    hub.register_secret(&reg_id, &secret_save, cx);
                 });
             },
         ))

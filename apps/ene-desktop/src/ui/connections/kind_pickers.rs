@@ -214,7 +214,7 @@ pub(super) fn build_sakura_tts_picker(
         cx,
         move |hub, picked, cx| {
             list_d_pick.update(cx, |d, cx| d.set(picked.clone(), cx));
-            hub.select_tts_voice(cid.clone(), picked, cx);
+            hub.select_tts_voice(&cid, &picked, cx);
         },
     )
 }
@@ -284,7 +284,7 @@ pub(super) fn build_stt_picker(
         id,
         theme,
         cx,
-        move |hub, picked, cx| hub.select_stt_model(cid.clone(), picked, cx),
+        move |hub, picked, cx| hub.select_stt_model(&cid, &picked, cx),
     )
 }
 

@@ -128,20 +128,20 @@ impl Hub {
 
     pub(crate) fn select_tts_voice(
         &mut self,
-        connection_id: String,
-        voice_id: String,
+        connection_id: &str,
+        voice_id: &str,
         cx: &mut Context<Self>,
     ) {
-        voice_roles::select_tts_voice(self, &connection_id, &voice_id, cx);
+        voice_roles::select_tts_voice(self, connection_id, voice_id, cx);
     }
 
     pub(crate) fn select_stt_model(
         &mut self,
-        connection_id: String,
-        model_id: String,
+        connection_id: &str,
+        model_id: &str,
         cx: &mut Context<Self>,
     ) {
-        voice_roles::select_stt_model(self, &connection_id, &model_id, cx);
+        voice_roles::select_stt_model(self, connection_id, model_id, cx);
     }
 
     /// Assigns the active STT connection and model atomically across all STT connections.
@@ -211,11 +211,11 @@ impl Hub {
 
     pub(crate) fn register_secret(
         &mut self,
-        connection_id: String,
-        secret: String,
+        connection_id: &str,
+        secret: &str,
         cx: &mut Context<Self>,
     ) {
-        let secret = secret.trim().to_owned();
+        let secret = secret.trim();
         if secret.is_empty() || self.rpc.host().is_none() {
             return;
         }
@@ -227,13 +227,13 @@ impl Hub {
         if is_search {
             self.setup
                 .checking_connections
-                .insert(connection_id.clone());
+                .insert(connection_id.to_owned());
         }
         rpc::connections::register_secret(
             &self.rpc,
             self.model.connections.link_epoch,
-            connection_id,
-            secret,
+            connection_id.to_owned(),
+            secret.to_owned(),
             is_search,
         );
         cx.notify();
@@ -340,12 +340,12 @@ impl Hub {
 
     pub(crate) fn add_openai_tts_preset(
         &mut self,
-        endpoint: String,
-        model: String,
-        voice: String,
+        endpoint: &str,
+        model: &str,
+        voice: &str,
         cx: &mut Context<Self>,
     ) {
-        presets::add_openai_tts_preset(self, &endpoint, &model, &voice, cx);
+        presets::add_openai_tts_preset(self, endpoint, model, voice, cx);
     }
 
     pub(crate) fn add_stt_preset(
