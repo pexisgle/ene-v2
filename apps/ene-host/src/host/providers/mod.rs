@@ -29,6 +29,7 @@ pub(crate) use services::{PluginServices, ProviderInvocationContext};
 
 use ene_plugin::{Extension, ProviderConfiguration};
 use ene_plugin_runtime::{Package, instance::Instance};
+use parking_lot::Mutex;
 use rig_core::providers::registry::ProviderId;
 /// Startup cells, keyed by the adapter and extension they serve.
 type RunningMap = HashMap<(String, Extension), Arc<tokio::sync::OnceCell<Arc<Running>>>>;
@@ -37,7 +38,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -167,9 +168,7 @@ impl Providers {
             HostError::Unavailable(format!("no plugin is installed as `{adapter}`"))
         })?;
         let cell = {
-            let mut running = self.running.lock().map_err(|_| {
-                HostError::Unavailable(("the provider registry is poisoned").into())
-            })?;
+            let mut running = self.running.lock();
             Arc::clone(
                 running
                     .entry((adapter.to_owned(), extension))
@@ -190,7 +189,6 @@ impl Providers {
     pub(crate) fn running(&self, adapter: &str, extension: Extension) -> Option<Arc<Running>> {
         self.running
             .lock()
-            .ok()?
             .get(&(adapter.to_owned(), extension))?
             .get()
             .map(Arc::clone)

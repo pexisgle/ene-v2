@@ -4174,6 +4174,7 @@ dependencies = [
  "itertools 0.15.0",
  "jiff 0.2.46",
  "keyring",
+ "parking_lot",
  "private-fs",
  "proc-macro2",
  "process-wrap",

@@ -73,7 +73,7 @@ async fn p10_listing_uses_authorized_http_and_connection_credentials() {
         assert!(check.resources.contains(&"plugin-http-model".into()));
         assert!(!check.resources.contains(&"native-model".into()));
         assert_eq!(
-            upstream.headers.lock().unwrap().last().unwrap()["authorization"]
+            upstream.headers.lock().last().unwrap()["authorization"]
                 .to_str()
                 .unwrap(),
             format!("Bearer {key}")
@@ -408,7 +408,7 @@ async fn p08_actual_grant_enforces_transport_policy_and_snapshots_credentials() 
         assert!(!chunk.headers.contains_key("authorization"));
         assert!(!chunk.headers.contains_key("set-cookie"));
         assert_eq!(
-            upstream.headers.lock().unwrap().last().unwrap()["authorization"],
+            upstream.headers.lock().last().unwrap()["authorization"],
             "Bearer original-secret"
         );
     }
@@ -421,13 +421,13 @@ async fn p08_actual_grant_enforces_transport_policy_and_snapshots_credentials() 
     .unwrap();
     fresh.open("owner", request(&upstream.base)).await.unwrap();
     assert_eq!(
-        upstream.headers.lock().unwrap().last().unwrap()["authorization"],
+        upstream.headers.lock().last().unwrap()["authorization"],
         "Bearer replacement-secret"
     );
     model::delete_secret(&credentials, &connection.id).unwrap();
     broker.open("owner", request(&upstream.base)).await.unwrap();
     assert_eq!(
-        upstream.headers.lock().unwrap().last().unwrap()["authorization"],
+        upstream.headers.lock().last().unwrap()["authorization"],
         "Bearer original-secret"
     );
     upstream.assert_requests(4);
@@ -458,7 +458,7 @@ async fn p08_actual_grant_overwrites_guest_auth_and_refuses_invalid_auth() {
         .insert("X-Api-Key".into(), "guest-secret".into());
     broker.open("foreign-provider", call).await.unwrap();
     assert_eq!(
-        upstream.headers.lock().unwrap().last().unwrap()["x-api-key"],
+        upstream.headers.lock().last().unwrap()["x-api-key"],
         "host-secret"
     );
     for (auth, expected) in [
@@ -752,11 +752,11 @@ async fn b07_embedding_plugin_uses_provider_context_and_broker() {
     upstream_a.assert_requests(1);
     upstream_b.assert_requests(1);
     assert_eq!(
-        upstream_a.headers.lock().unwrap()[0]["authorization"],
+        upstream_a.headers.lock()[0]["authorization"],
         "Bearer secret-a"
     );
     assert_eq!(
-        upstream_b.headers.lock().unwrap()[0]["authorization"],
+        upstream_b.headers.lock()[0]["authorization"],
         "Bearer secret-b"
     );
 }

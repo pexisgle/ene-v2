@@ -33,7 +33,7 @@ impl NativeEndpoint {
         let observed = Arc::clone(&headers);
         let app = axum::Router::new().fallback(move |uri: axum::http::Uri, headers: axum::http::HeaderMap| {
             count.fetch_add(1, Ordering::SeqCst);
-            observed.lock().unwrap().push(headers);
+            observed.lock().push(headers);
             async move {
                 let body = match uri.path() {
                     "/audio/speech" => vec![7, 0],

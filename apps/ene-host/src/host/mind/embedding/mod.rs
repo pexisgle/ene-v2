@@ -27,13 +27,10 @@ use crate::host::{
     settings::{Connection, ConnectionConfig, ConnectionKind},
 };
 use bevy_ecs::prelude::*;
+use parking_lot::Mutex;
 use rig_core::{driver::DynModel, operation::Embedding, providers::registry::ProviderConfig};
 use rig_ecs::prelude::*;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 pub(crate) use ene_mind::{dimensions_of_space, space_id};
 
@@ -327,7 +324,7 @@ fn target(
     };
     let revision = store.settings_repo().settings_revision()?;
     let key = (connection.id.clone(), model_id.to_owned());
-    let mut models = crate::host::lock(&embeddings.models);
+    let mut models = embeddings.models.lock();
     let credential_generation = credentials.map(Credentials::generation);
     if models.revision != revision || models.credential_generation != credential_generation {
         models.targets.clear();
@@ -380,7 +377,7 @@ pub(crate) async fn semantic_ids(
     let Some(vector) = vectors.pop() else {
         return Vec::new();
     };
-    let mut index = crate::host::lock(&embeddings.index);
+    let mut index = embeddings.index.lock();
     if index.sync(store, companion, &target.space).is_err() {
         return Vec::new();
     }

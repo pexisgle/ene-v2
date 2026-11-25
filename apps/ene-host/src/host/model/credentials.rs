@@ -7,10 +7,11 @@
 use crate::host::db::Result;
 use crate::host::error::HostError;
 use crate::host::settings::{Connection, CredentialState};
+use parking_lot::{Mutex, MutexGuard};
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -37,7 +38,7 @@ impl Credentials {
     }
 
     fn session_secrets(&self) -> MutexGuard<'_, HashMap<String, String>> {
-        crate::host::lock(&self.session_secrets)
+        self.session_secrets.lock()
     }
 
     pub(crate) fn generation(&self) -> u64 {
