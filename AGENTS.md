@@ -67,6 +67,16 @@ those regresses.
 
 A crate cannot add the lint to `[lints]` while `workspace = true` — cargo rejects the override — so the inner attribute is the only per-crate form. Add it to one of those four only once `cargo clippy -p <crate>` reports zero for it, never as an `#[allow]`.
 
+## GPUI components
+
+`gpui-component` 0.5.1 is compatible with the pinned `gpui =0.2.2` and was
+verified to resolve and compile alongside it in a scratch crate. The only
+obstacle was `xattr 0.2.3` needing `libc::ENOATTR`, which the existing
+`libc = ">=0.2.186, <0.2.190"` pin in `apps/ene-desktop` already solves. Its
+transitive licences are all in `deny.toml`'s allow list. Adopting it is a
+feature change, not a refactor: it replaces `src/input/` and `src/ui/widgets/`
+with library widgets and needs a GUI harness to verify.
+
 ## OS perception on Linux
 
 `apps/ene-desktop/src/perception/platform_linux.rs` uses `zwlr_foreign_toplevel`
