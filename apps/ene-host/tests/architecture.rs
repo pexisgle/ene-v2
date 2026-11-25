@@ -62,7 +62,7 @@ const BASELINES: Baselines = Baselines {
     providers_model_refs: 0,
     host_world_refs: 159,
     impl_over_default: 1,
-    long_prod_files: 1,
+    long_prod_files: 0,
     rpc_ecs_resources: 0,
     prod_block_on: 7,
     impl_spread_allowlist: &[("crates/ene-plugin-runtime", "Events", 4)],

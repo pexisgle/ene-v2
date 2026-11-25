@@ -54,7 +54,7 @@ CI already cover.
 | 3 | `impl_file_spread` (inherent `impl` blocks per type across files) | 1 |
 | 4 | `providers_no_model_import` | 0 |
 | 5 | `host_world_refs` `&World`/`&mut World` in `apps/ene-host` | 159 |
-| 6 | `max_prod_file_lines` production files over 500 lines | 1 |
+| 6 | `max_prod_file_lines` production files over 500 lines | 0 |
 | 7 | `rpc_no_ecs_resource` `#[derive(Resource)]` under `server/rpc/` | 0 |
 | 8 | `prod_block_on` `block_on`/`block_in_place` in production | 7 |
 

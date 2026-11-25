@@ -38,11 +38,13 @@ pub(crate) mod device;
 pub(crate) mod device_dispatch;
 pub(crate) mod device_result;
 pub(crate) mod dynamic;
+mod perception;
+mod policy;
 
 use super::{
     db::Store,
     notify::Notifier,
-    resources::{DeviceHub, Perception, PerceptionEvent},
+    resources::{DeviceHub, Perception},
     wire,
 };
 use bevy_ecs::prelude::*;
@@ -50,138 +52,9 @@ use ene_rpc as w;
 use rig_ecs::prelude::*;
 use serde_json::Value;
 
-/// The environment variable that decides which declared capabilities the host
-/// grants: a comma list of names, or `*` for every declaration. It is read
-/// once when the app is built; an unset or empty value grants nothing.
-pub(crate) const ALLOWED_CAPABILITIES_ENV: &str = "ENE_HOST_ALLOWED_CAPABILITIES";
-
-/// What the host is willing to grant a client. A declaration alone grants
-/// nothing: the policy is the host-side decision, and the operation-level
-/// gate still decides every call.
-#[derive(Resource, Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CapabilityPolicy {
-    pub(crate) allowed: Vec<String>,
-    /// `*` in the environment: grant whatever a client declares.
-    pub(crate) all: bool,
-}
-
-impl CapabilityPolicy {
-    /// Nothing is granted: the default when the environment names no policy.
-    pub(crate) fn none() -> Self {
-        Self {
-            allowed: Vec::new(),
-            all: false,
-        }
-    }
-
-    pub(crate) fn parse(text: &str) -> Self {
-        let mut policy = Self::none();
-        for capability in text
-            .split(',')
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-        {
-            if capability == "*" {
-                policy.all = true;
-            } else if !policy.allowed.iter().any(|allowed| allowed == capability) {
-                policy.allowed.push(capability.to_owned());
-            }
-        }
-        policy
-    }
-
-    pub(crate) fn allows(&self, capability: &str) -> bool {
-        self.all
-            || self.allowed.iter().any(|allowed| {
-                allowed == capability
-                    || allowed
-                        .strip_suffix('*')
-                        .is_some_and(|prefix| !prefix.is_empty() && capability.starts_with(prefix))
-            })
-    }
-
-    /// Dynamically allows a capability pattern (`exact` or `prefix.*`) at runtime (`F11`).
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn allow_pattern(&mut self, pattern: impl Into<String>) {
-        let pattern = pattern.into();
-        let trimmed = pattern.trim();
-        if trimmed == "*" {
-            self.all = true;
-        } else if !trimmed.is_empty() && !self.allowed.iter().any(|p| p == trimmed) {
-            self.allowed.push(trimmed.to_owned());
-        }
-    }
-
-    /// Dynamically revokes a capability pattern at runtime (`F11`).
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn revoke_pattern(&mut self, pattern: &str) {
-        let trimmed = pattern.trim();
-        if trimmed == "*" {
-            self.all = false;
-        } else {
-            self.allowed.retain(|p| p != trimmed);
-        }
-    }
-
-    /// The declared capabilities this policy grants, in declaration order.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn grants(&self, declared: &[String]) -> Vec<String> {
-        declared
-            .iter()
-            .filter(|capability| self.allows(capability))
-            .cloned()
-            .collect()
-    }
-
-    /// Grants declared capabilities allowed by either the static env policy or
-    /// saved `PolicyRule`s targeting `client_capability` (`F11`).
-    pub(crate) fn grants_with_rules(
-        &self,
-        declared: &[String],
-        rules: &[super::permission::PolicyRule],
-    ) -> Vec<String> {
-        use super::permission::PolicyEffect;
-        declared
-            .iter()
-            .filter(|capability| {
-                let mut denied = false;
-                let mut rule_allowed = false;
-                for rule in rules
-                    .iter()
-                    .filter(|r| r.tool_name == "client_capability" || r.tool_name == "*")
-                {
-                    let matches = rule.pattern == "*"
-                        || rule.pattern == **capability
-                        || rule.pattern.strip_suffix('*').is_some_and(|prefix| {
-                            !prefix.is_empty() && capability.starts_with(prefix)
-                        });
-                    if !matches {
-                        continue;
-                    }
-                    match rule.effect {
-                        PolicyEffect::Deny => {
-                            denied = true;
-                            break;
-                        }
-                        PolicyEffect::Allow => rule_allowed = true,
-                        PolicyEffect::Confirm | PolicyEffect::AskLlm => {}
-                    }
-                }
-                !denied && (self.allows(capability) || rule_allowed)
-            })
-            .cloned()
-            .collect()
-    }
-}
-
-impl FromWorld for CapabilityPolicy {
-    fn from_world(_world: &mut World) -> Self {
-        std::env::var(ALLOWED_CAPABILITIES_ENV)
-            .map_or_else(|_| Self::none(), |text| Self::parse(&text))
-    }
-}
-
 pub(crate) use dynamic::CapabilityTools;
+pub(crate) use perception::report_perception;
+pub(crate) use policy::CapabilityPolicy;
 
 #[derive(Clone, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct DeviceRequestArgs {
@@ -457,125 +330,6 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
         w::notification::Event::ActivationUpdated(Box::new(wire::activation(&activation))),
     );
     Ok(wire::activation(&activation))
-}
-
-/// Routes live observations to the eyes and supports legacy passive summaries.
-pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) -> Result<()> {
-    let store = world.resource::<Store>().clone();
-    super::util::validate_id(&event.client_id)?;
-    let client = store
-        .client_repo()
-        .client(&event.client_id)?
-        .ok_or_else(|| HostError::NotFound(("client not found").into()))?;
-    let active_companions = store
-        .client_repo()
-        .active_companions_for_client(&event.client_id)?;
-    if active_companions.is_empty() {
-        // A connected client that is not active produces nothing the head may
-        // act on. Not an error: the event is simply discarded.
-        return Ok(());
-    }
-    let targets: Vec<String> = match event.companion_id.as_deref().filter(|id| !id.is_empty()) {
-        Some(target) => {
-            if !active_companions.iter().any(|id| id == target) {
-                return Ok(());
-            }
-            vec![target.to_owned()]
-        }
-        None => active_companions,
-    };
-    if !event.subscription_id.is_empty() {
-        if matches!(
-            &event.event,
-            Some(w::perception_event::Event::WatchMatch(_))
-        ) && !client.is_granted("eye.watch")
-        {
-            return Ok(());
-        }
-        for companion_id in targets {
-            super::eyes::report_with(world, companion_id, event.clone())?;
-        }
-        return Ok(());
-    }
-    let Some(summary) = perception_summary(&event) else {
-        return Ok(());
-    };
-    let avatar_interaction = match &event.event {
-        Some(w::perception_event::Event::AvatarInteraction(interaction)) => Some((
-            format!("{:?}", interaction.kind),
-            interaction.character_id.clone(),
-            interaction.region.clone(),
-        )),
-        _ => None,
-    };
-    {
-        let mut perception = world.resource_mut::<Perception>();
-        for companion_id in &targets {
-            perception.events.insert(
-                companion_id.clone(),
-                PerceptionEvent {
-                    summary: summary.clone(),
-                },
-            );
-        }
-    }
-    if let Some((kind, character_id, region)) = avatar_interaction {
-        for companion_id in targets {
-            world.trigger(super::resources::TriggerCharacterEvent {
-                companion_id,
-                event: ene_plugin::CharacterEvent::Custom {
-                    name: "avatar_interaction".into(),
-                    data: serde_json::json!({
-                        "kind": kind,
-                        "character_id": character_id,
-                        "region": region,
-                    }),
-                },
-            });
-        }
-    }
-    Ok(())
-}
-
-fn perception_summary(event: &w::PerceptionEvent) -> Option<String> {
-    let summary = match event.event.as_ref()? {
-        w::perception_event::Event::ActiveWindow(active) => {
-            if active.title.is_empty() && active.app_id.is_empty() {
-                return None;
-            }
-            format!("アクティブウィンドウ: {} ({})", active.title, active.app_id)
-        }
-        w::perception_event::Event::UserActivity(state) => {
-            if state.is_active {
-                "ユーザーは操作中です".to_owned()
-            } else {
-                format!("ユーザーは離席中です (idle {} 秒)", state.idle_seconds)
-            }
-        }
-        w::perception_event::Event::PerceptionSummary(summary) => {
-            if summary.summary.trim().is_empty() {
-                return None;
-            }
-            summary.summary.clone()
-        }
-        w::perception_event::Event::AvatarInteraction(interaction) => {
-            let kind_label = match interaction.kind.as_known() {
-                Some(w::AvatarInteractionKind::DoubleClick) => "ダブルクリック",
-                Some(w::AvatarInteractionKind::Drag) => "ドラッグ",
-                _ => "クリック",
-            };
-            if interaction.region.trim().is_empty() {
-                format!("ユーザーがアバターを{kind_label}しました")
-            } else {
-                format!(
-                    "ユーザーがアバター({})を{kind_label}しました",
-                    interaction.region.trim()
-                )
-            }
-        }
-        _ => return None,
-    };
-    Some(super::util::truncate(&summary, 1_000))
 }
 
 #[cfg(test)]
