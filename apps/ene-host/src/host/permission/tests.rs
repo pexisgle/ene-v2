@@ -387,9 +387,8 @@ fn cards(events: &[w::Notification]) -> Vec<String> {
     events
         .iter()
         .filter_map(|event| {
-            let request = match event.event.as_ref()? {
-                w::notification::Event::ApprovalRequested(request) => request,
-                _ => return None,
+            let w::notification::Event::ApprovalRequested(request) = event.event.as_ref()? else {
+                return None;
             };
             request
                 .request

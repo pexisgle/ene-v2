@@ -317,9 +317,8 @@ fn b11_companion_voice_binding_selects_bound_tts_connection_without_silent_fallb
     );
     world.insert_resource(store);
 
-    let err = match companion_tts_source(&world, Some(&comp)) {
-        Err(err) => err,
-        Ok(_) => panic!("bound disabled TTS connection must not fall back to another connection"),
+    let Err(err) = companion_tts_source(&world, Some(&comp)) else {
+        panic!("bound disabled TTS connection must not fall back to another connection");
     };
     assert!(matches!(err, SetupError::Disabled(_)), "{err:?}");
 

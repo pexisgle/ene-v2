@@ -74,10 +74,12 @@ fn motion_targets(
             .and_then(|asset| asset.get::<WorldAsset>())
             .ok_or_else(|| invalid("VRMA native scene unavailable"))?
             .world;
-        let root = world
+        let Some(root) = world
             .iter_entities()
-            .find(|entity| entity.contains::<NativeSceneRoot>())
-            .ok_or_else(|| invalid("VRMA native scene root unavailable"))?;
+            .find(bevy::ecs::world::EntityRef::contains::<NativeSceneRoot>)
+        else {
+            return Err(invalid("VRMA native scene root unavailable"));
+        };
         if let Some(children) = root.get::<Children>() {
             // Native curves use first-visited descendants per source root and
             // last-root/last-scene overwrite. ECS iteration order cannot decide it.

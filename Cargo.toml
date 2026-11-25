@@ -37,6 +37,11 @@ let_underscore_must_use = "deny"
 # group so a new site fails the build instead of waiting for another sweep.
 map_unwrap_or = "warn"
 assert_is_empty = "warn"
+implicit_clone = "warn"
+cloned_instead_of_copied = "warn"
+redundant_closure_for_method_calls = "warn"
+manual_let_else = "warn"
+inefficient_to_string = "warn"
 
 [workspace.dependencies]
 ene-rpc = { path = "crates/ene-rpc" }

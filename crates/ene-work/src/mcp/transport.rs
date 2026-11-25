@@ -336,15 +336,14 @@ mod tests {
     #[tokio::test]
     async fn open_rejects_empty_command_and_endpoint_as_config_error() {
         let d = empty_desired();
-        let err = match open(
+        let Err(err) = open(
             &d,
             rig_agent::tool::server::ToolServer::new().run(),
             reqwest::Client::new(),
         )
         .await
-        {
-            Err(err) => err,
-            Ok(_) => panic!("expected empty command and endpoint to fail"),
+        else {
+            panic!("expected empty command and endpoint to fail");
         };
         assert!(err.config_error);
         assert!(err.reason.contains("neither a command nor an endpoint"));

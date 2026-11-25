@@ -434,9 +434,8 @@ mod tests {
                 aim: None,
             },
         };
-        let error = match compile_constraints(&[(2, both)], app.world_mut(), &nodes) {
-            Err(error) => error,
-            Ok(_) => panic!("two constraint kinds must be rejected"),
+        let Err(error) = compile_constraints(&[(2, both)], app.world_mut(), &nodes) else {
+            panic!("two constraint kinds must be rejected");
         };
         assert!(error.to_string().contains("exactly one"));
 
