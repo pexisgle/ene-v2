@@ -56,7 +56,6 @@ rusqlite.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 strum.workspace = true
 subtle = "2"
 thiserror.workspace = true
@@ -94,4 +93,5 @@ rustix.workspace = true
 
 # Pinned exact versions for `axum::serve` h2c / HTTP2 connection handling.
 [package.metadata.cargo-machete]
-ignored = ["hyper", "hyper-util"]
+# `hyper-util` is still only reached through `axum::serve`, so it stays ignored.
+ignored = ["hyper-util"]

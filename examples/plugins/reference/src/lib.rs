@@ -155,6 +155,13 @@ mod guest {
                     stop_reason: StopReason::Cancelled,
                 }
             }
+            // `HarnessInput` is `#[non_exhaustive]`, so a plugin built against
+            // this SDK must tolerate a host that sends a kind it does not know.
+            // Ending the turn is the safe default: staying live would leave the
+            // host waiting on an event that never arrives.
+            _ => HarnessEvent::Stop {
+                stop_reason: StopReason::Refusal,
+            },
         })
     }
 
