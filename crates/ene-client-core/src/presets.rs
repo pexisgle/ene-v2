@@ -360,7 +360,7 @@ pub fn build_sakura_tts_preset_input(connections: &[Connection]) -> ConnectionIn
 /// Builds the preset input for an embedding provider connection.
 pub fn build_embedding_preset_input(
     connections: &[Connection],
-    spec: EmbeddingPresetSpec<'_>,
+    spec: &EmbeddingPresetSpec<'_>,
 ) -> ConnectionInput {
     let existing_rev = connections
         .iter()

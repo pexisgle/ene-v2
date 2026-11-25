@@ -345,7 +345,7 @@ fn add_embedding_preset(hub: &mut Hub, spec: EmbeddingPresetSpec<'_>, cx: &mut C
             .model
             .settings()
             .map_or(&[][..], |s| s.connections.as_slice());
-        build_embedding_preset_input(connections, spec)
+        build_embedding_preset_input(connections, &spec)
     };
     hub.upsert_connection("埋め込み（Embedding）接続の追加", input, cx);
     if should_assign {

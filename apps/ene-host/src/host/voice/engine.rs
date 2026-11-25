@@ -73,7 +73,7 @@ fn http_engine(
     let resolved_base = resolve_base(&connection, ctx.providers);
     let secret = load_connection_secret(&connection, ctx.credentials, ctx.providers)?;
     let client = net::client().map_err(|error| SetupError::Broken(error.to_string()))?;
-    let engine = HttpEngine::new(connection, resolved_base, secret, kind, client)?;
+    let engine = HttpEngine::new(&connection, &resolved_base, secret, kind, client)?;
     Ok(match binding {
         Some(binding) => engine.with_binding(binding),
         None => engine,

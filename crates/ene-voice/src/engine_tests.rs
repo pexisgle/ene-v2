@@ -132,8 +132,8 @@ async fn sakura_tts_sends_wav_request_and_decodes_wav_response() {
         last_check: None,
     };
     let engine = HttpEngine::new(
-        conn,
-        base,
+        &conn,
+        &base,
         Some("uuid:secret".into()),
         ConnectionKind::Tts,
         reqwest::Client::new(),
@@ -215,8 +215,8 @@ async fn sakura_tts_voicevox_protocol_uses_tts_v1_paths() {
         last_check: None,
     };
     let engine = HttpEngine::new(
-        conn,
-        base,
+        &conn,
+        &base,
         Some("uuid:secret".into()),
         ConnectionKind::Tts,
         reqwest::Client::new(),
@@ -300,8 +300,8 @@ async fn sakura_stt_uses_whisper_turbo_and_omits_response_format() {
         last_check: None,
     };
     let engine = HttpEngine::new(
-        conn,
-        base,
+        &conn,
+        &base,
         Some("uuid:secret".into()),
         ConnectionKind::Stt,
         reqwest::Client::new(),

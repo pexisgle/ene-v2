@@ -72,8 +72,8 @@ impl fmt::Debug for HttpEngine {
 impl HttpEngine {
     /// Constructs a built-in HTTP TTS or STT engine from resolved endpoint URL, secret, and client.
     pub fn new(
-        connection: Connection,
-        resolved_base: String,
+        connection: &Connection,
+        resolved_base: &str,
         secret: Option<String>,
         kind: ConnectionKind,
         client: reqwest::Client,
