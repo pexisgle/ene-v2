@@ -1,17 +1,5 @@
 use super::*;
 
-#[test]
-fn both_roles_follow_the_same_spoken_response_rules() {
-    let companion = crate::host::mind::default_ene_companion("");
-    for prompt in [
-        system_prompt(&companion),
-        work_prompt(&companion, "資料をまとめる"),
-    ] {
-        assert!(prompt.contains(SPOKEN_RESPONSE));
-        assert!(!prompt.contains("参考URLも"));
-        assert!(!prompt.contains("URLをそのまま添えます"));
-    }
-}
 use rig_core::conversation::{Conversation as History, Entry, RequestId};
 
 #[test]

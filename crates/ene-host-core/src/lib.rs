@@ -5,4 +5,5 @@
 //! each module here under its old `host::` path, so moving one in is a change
 //! of address with no change at the call site.
 pub mod json;
+pub mod prompt;
 pub mod util;

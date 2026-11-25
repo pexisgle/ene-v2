@@ -37,8 +37,6 @@ use super::{model::Credentials, notify::Notifier};
 #[cfg(test)]
 use ene_rpc as w;
 #[cfg(test)]
-use prompt::{SPOKEN_RESPONSE, work_prompt};
-#[cfg(test)]
 use rig_core::completion::Message as CompletionMessage;
 #[cfg(test)]
 use rig_core::conversation::Author;
