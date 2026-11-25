@@ -11,7 +11,6 @@ ignore = [
     # advisory; each needs an upstream release to clear. Ignoring them is what
     # lets `cargo deny check` keep gating the yanked and vulnerable cases that
     # do matter. Remove an entry once its crate leaves the tree.
-    "RUSTSEC-2024-0370",  # proc-macro-error2
     "RUSTSEC-2024-0384",  # instant
     "RUSTSEC-2024-0436",  # paste
     "RUSTSEC-2025-0052",  # async-std
