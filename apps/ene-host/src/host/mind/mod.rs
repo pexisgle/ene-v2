@@ -280,7 +280,10 @@ pub(crate) fn control_memory(
     })
 }
 
-pub(crate) fn list_memories(store: Store, request: w::ListMemoriesRequest) -> Result<w::Memories> {
+pub(crate) fn list_memories(
+    store: &Store,
+    request: &w::ListMemoriesRequest,
+) -> Result<w::Memories> {
     store
         .companion_repo()
         .companion(&request.companion_id)?

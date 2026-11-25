@@ -36,7 +36,7 @@ macro_rules! request {
         ) -> connectrpc::ServiceResult<$response> {
             let request = request.to_owned_message();
             // `$op` takes only the store, so this never needs the actor thread.
-            self.with_store(move |store| $op(store, request)).await
+            self.with_store(move |store| $op(&store, &request)).await
         }
     };
     (app $name:ident, $request:ty, $response:ty, $op:path) => {
