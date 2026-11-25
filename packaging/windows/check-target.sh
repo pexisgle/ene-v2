@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Build the Windows-only code from a Linux host.
+# Type-check the Windows-only code from a Linux host.
 #
-# `cargo check` on a Linux host never sees a `#[cfg(windows)]` module, so a
-# change to a Windows path would pass every other gate and still not compile on
-# Windows. This drops in a `x86_64-pc-windows-gnu` standard library plus a mingw
-# linker so those modules are type-checked.
+# CI runs its own matrix leg on `windows-latest`, so this is NOT a CI gate. It
+# exists so a contributor on Linux can check `#[cfg(windows)]` code before
+# pushing, because a plain `cargo check` on Linux never parses those modules and
+# a Windows-only break would otherwise only surface after pushing.
+#
+# It drops in an `x86_64-pc-windows-gnu` standard library plus a mingw linker so
+# those modules are type-checked.
 #
 # This host has no rustup and its flake pins one target (`wasm32-unknown-unknown`),
 # so the Windows std is built with the repo's own flake inputs. A plain

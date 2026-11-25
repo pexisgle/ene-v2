@@ -60,9 +60,11 @@ CI already cover.
 
 `needless_pass_by_value` is enforced per crate, not workspace-wide: every crate
 except `ene-vrm` and the three apps carries
-`#![warn(clippy::needless_pass_by_value)]`, so CI fails if one of those
-regresses. `ene-vrm` (5 sites), `apps/ene-host` (55), `apps/ene-desktop` (50)
-and `apps/ene-avatar` (10) still have sites and are not covered yet. A crate
+`#![warn(clippy::needless_pass_by_value)]`, so the CI clippy step fails if one of
+those regresses. `ene-vrm` (4 sites) is the one library crate that cannot carry
+it: three are Bevy `SystemParam` types that have no `&` form, and one
+(`HipsRetarget`) is captured by a closure that outlives the call. The three apps
+(`ene-host` 55, `ene-desktop` 50, `ene-avatar` 10) still have sites. A crate
 cannot add the lint to `[lints]` while `workspace = true` — cargo rejects the
 override — so the inner attribute is the only per-crate form. Add it to one of
 those four only once `cargo clippy -p <crate>` reports zero for it, never as an
