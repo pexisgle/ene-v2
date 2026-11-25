@@ -4210,7 +4210,9 @@ name = "ene-host-core"
 version = "0.1.8"
 dependencies = [
  "ene-domain",
+ "ene-mind",
  "jiff 0.2.46",
+ "serde_json",
  "sha2 0.11.1",
  "tracing",
 ]

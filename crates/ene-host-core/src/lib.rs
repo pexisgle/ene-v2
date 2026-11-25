@@ -4,4 +4,5 @@
 //! test can exercise them without a running host. `apps/ene-host` re-exports
 //! each module here under its old `host::` path, so moving one in is a change
 //! of address with no change at the call site.
+pub mod json;
 pub mod util;
