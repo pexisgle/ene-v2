@@ -245,7 +245,7 @@ fn render_tts_card(
                             Tone::Primary.icon(Icon::Volume).enabled(can_speak),
                             theme,
                             move |_, cx| {
-                                hub_speak.update(cx, |hub, cx| hub.speak_probe(text.clone(), cx));
+                                hub_speak.update(cx, |hub, cx| hub.speak_probe(&text, cx));
                             },
                         )),
                 ),

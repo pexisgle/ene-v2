@@ -305,7 +305,7 @@ pub(super) fn add_sakura_stt_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
 pub(super) fn add_sakura_embedding_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
     add_embedding_preset(
         hub,
-        EmbeddingPresetSpec {
+        &EmbeddingPresetSpec {
             id: "sakura-embedding",
             name: "さくらのAI Engine Embedding",
             adapter: "sakura",
@@ -320,7 +320,7 @@ pub(super) fn add_sakura_embedding_preset(hub: &mut Hub, cx: &mut Context<Hub>) 
 pub(super) fn add_openai_embedding_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
     add_embedding_preset(
         hub,
-        EmbeddingPresetSpec {
+        &EmbeddingPresetSpec {
             id: "openai-embedding",
             name: "OpenAI Embedding",
             adapter: "openai",
@@ -332,7 +332,7 @@ pub(super) fn add_openai_embedding_preset(hub: &mut Hub, cx: &mut Context<Hub>) 
     );
 }
 
-fn add_embedding_preset(hub: &mut Hub, spec: EmbeddingPresetSpec<'_>, cx: &mut Context<Hub>) {
+fn add_embedding_preset(hub: &mut Hub, spec: &EmbeddingPresetSpec<'_>, cx: &mut Context<Hub>) {
     let should_assign = hub.model.companion().is_some_and(|c| {
         c.assignments
             .as_ref()
@@ -345,7 +345,7 @@ fn add_embedding_preset(hub: &mut Hub, spec: EmbeddingPresetSpec<'_>, cx: &mut C
             .model
             .settings()
             .map_or(&[][..], |s| s.connections.as_slice());
-        build_embedding_preset_input(connections, &spec)
+        build_embedding_preset_input(connections, spec)
     };
     hub.upsert_connection("埋め込み（Embedding）接続の追加", input, cx);
     if should_assign {

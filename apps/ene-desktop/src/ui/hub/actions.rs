@@ -135,14 +135,17 @@ impl Hub {
     }
 
     /// Speaks typed text through the host's TTS connection, outside any turn.
-    pub(crate) fn speak_probe(&mut self, text: String, cx: &mut Context<Self>) {
-        let text = text.trim().to_owned();
+    pub(crate) fn speak_probe(&mut self, text: &str, cx: &mut Context<Self>) {
+        let text = text.trim();
         if text.is_empty() {
             return;
         }
         self.model.audio.speech_report = None;
         let companion_id = self.model.companion_id().map(str::to_owned);
-        self.command(Command::Speak { companion_id, text });
+        self.command(Command::Speak {
+            companion_id,
+            text: text.to_owned(),
+        });
         cx.notify();
     }
 
