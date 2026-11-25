@@ -241,7 +241,9 @@ pub(super) fn render_search_role_row(
             move |_, cx| toggle_pane_dropdown(&pane_toggle, dd_key, cx),
             move |picked, _, cx| {
                 let target = (picked != "__off__").then_some(picked);
-                hub_assign.update(cx, |hub, cx| hub.assign_search_connection(target, cx));
+                hub_assign.update(cx, |hub, cx| {
+                    hub.assign_search_connection(target.as_deref(), cx)
+                });
                 close_pane_dropdown(&pane_pick, cx);
             },
         ))

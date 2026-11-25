@@ -309,7 +309,7 @@ fn render_provider_header(
                             theme,
                             move |_, cx| {
                                 hub_use.update(cx, |hub, cx| {
-                                    hub.assign_search_connection(Some(cid.clone()), cx);
+                                    hub.assign_search_connection(Some(&cid), cx);
                                 });
                             },
                         ))
@@ -421,9 +421,7 @@ fn render_search_switcher(
                     .enabled(live),
                 theme,
                 move |_, cx| {
-                    hub_sw.update(cx, |hub, cx| {
-                        hub.assign_search_connection(Some(cid.clone()), cx)
-                    });
+                    hub_sw.update(cx, |hub, cx| hub.assign_search_connection(Some(&cid), cx));
                 },
             )
         })

@@ -269,7 +269,7 @@ impl Hub {
 
     pub(crate) fn assign_search_connection(
         &mut self,
-        connection_id: Option<String>,
+        connection_id: Option<&str>,
         cx: &mut Context<Self>,
     ) {
         presets::assign_search_connection(self, connection_id, cx);

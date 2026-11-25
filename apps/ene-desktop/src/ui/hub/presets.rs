@@ -20,13 +20,13 @@ use gpui::Context;
 
 pub(super) fn assign_search_connection(
     hub: &mut Hub,
-    connection_id: Option<String>,
+    connection_id: Option<&str>,
     cx: &mut Context<Hub>,
 ) {
     let Some(settings) = hub.model.settings().cloned() else {
         return;
     };
-    let inputs = build_search_assignment_inputs(&settings.connections, connection_id.as_deref());
+    let inputs = build_search_assignment_inputs(&settings.connections, connection_id);
     if inputs.is_empty() {
         return;
     }
