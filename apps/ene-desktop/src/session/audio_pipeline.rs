@@ -85,17 +85,17 @@ impl AudioPipeline {
     }
 
     /// Plays one audio event. Only one utterance is audible at a time.
-    pub(super) fn play(&mut self, event: w::audio_output_event::Event) {
+    pub(super) fn play(&mut self, event: &w::audio_output_event::Event) {
         match event {
-            w::audio_output_event::Event::Chunk(chunk) => self.play_audio_chunk(*chunk),
-            w::audio_output_event::Event::Flush(flush) => self.play_audio_flush(*flush),
+            w::audio_output_event::Event::Chunk(chunk) => self.play_audio_chunk(chunk),
+            w::audio_output_event::Event::Flush(flush) => self.play_audio_flush(flush),
             w::audio_output_event::Event::Finished(finished) => {
-                self.play_audio_finished(*finished);
+                self.play_audio_finished(finished);
             }
         }
     }
 
-    fn play_audio_chunk(&mut self, chunk: w::AudioChunkEnvelope) {
+    fn play_audio_chunk(&mut self, chunk: &w::AudioChunkEnvelope) {
         tracing::debug!(
             utterance = %chunk.utterance_id,
             generation = chunk.generation_id,
@@ -114,7 +114,7 @@ impl AudioPipeline {
         }
     }
 
-    fn play_audio_flush(&mut self, flush: w::FlushControl) {
+    fn play_audio_flush(&mut self, flush: &w::FlushControl) {
         if let Some(player) = self.player.as_mut() {
             player.flush(flush.flush_generation_id);
         }
@@ -126,7 +126,7 @@ impl AudioPipeline {
         tracing::info!(reason = ?flush.reason, "the host flushed playback");
     }
 
-    fn play_audio_finished(&mut self, finished: w::UtteranceFinished) {
+    fn play_audio_finished(&mut self, finished: &w::UtteranceFinished) {
         if let Some(player) = self.player.as_mut()
             && let Err(error) =
                 player.finish_utterance(&finished.utterance_id, finished.generation_id)

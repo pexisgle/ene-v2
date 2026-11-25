@@ -81,7 +81,7 @@ pub(super) async fn handle_audio_frame(
 ) -> Option<Outcome> {
     match frame {
         Some(Ok(event)) => {
-            session.audio.play(event);
+            session.audio.play(&event);
             None
         }
         Some(Err(error)) => {
