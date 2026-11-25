@@ -1,5 +1,10 @@
 //! Plugin manifests, typed extension APIs and the Extism guest SDK.
 #![warn(missing_docs)]
+// Enforced here first: this crate is free of the lint while the app crates still
+// have sites. Add this attribute to a crate only once `cargo clippy -p <crate>`
+// reports zero for it. The workspace cannot enable it centrally yet, because a
+// crate cannot override `[lints] workspace = true`.
+#![warn(clippy::needless_pass_by_value)]
 //! Native execution and application authorization live outside this crate.
 //!
 //! プラグイン作者向けの型定義とRust SDKをまとめています。manifest、拡張API、ホストサービスの契約に加え、WasmビルドではExtism PDKと `emit` / `service` / HTTPヘルパーを提供します。

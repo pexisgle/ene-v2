@@ -7,6 +7,11 @@
 //! Each module states the invariant its `unsafe` relies on in a `SAFETY:`
 //! comment, and exposes only safe methods over owned values.
 
+// Enforced here first: this crate is free of the lint while the app crates still
+// have sites. Add this attribute to a crate only once `cargo clippy -p <crate>`
+// reports zero for it. The workspace cannot enable it centrally yet, because a
+// crate cannot override `[lints] workspace = true`.
+#![warn(clippy::needless_pass_by_value)]
 pub mod best_effort;
 #[cfg(windows)]
 pub mod capture;

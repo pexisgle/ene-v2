@@ -1,6 +1,10 @@
 //! Pure domain data types shared across persistence and host modules.
 #![warn(missing_docs)]
-
+// Enforced here first: this crate is free of the lint while the app crates still
+// have sites. Add this attribute to a crate only once `cargo clippy -p <crate>`
+// reports zero for it. The workspace cannot enable it centrally yet, because a
+// crate cannot override `[lints] workspace = true`.
+#![warn(clippy::needless_pass_by_value)]
 pub mod client;
 pub mod error;
 pub mod failure;

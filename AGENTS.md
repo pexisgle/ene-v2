@@ -58,12 +58,15 @@ CI already cover.
 | 7 | `rpc_no_ecs_resource` `#[derive(Resource)]` under `server/rpc/` | 0 |
 | 8 | `prod_block_on` `block_on`/`block_in_place` in production | 7 |
 
-`needless_pass_by_value` is enforced per crate rather than workspace-wide, and
-only for crates that are already free of it: `ene-store`, `ene-voice` and
-`ene-client-core` carry `#![warn(clippy::needless_pass_by_value)]`. A crate
-cannot add it to `[lints]` while `workspace = true`, so the attribute is the
-only per-crate form. Add it to another crate only once
-`cargo clippy -p <crate>` reports zero for it; never as an `#[allow]`.
+`needless_pass_by_value` is enforced per crate, not workspace-wide: every crate
+except `ene-vrm` and the three apps carries
+`#![warn(clippy::needless_pass_by_value)]`, so CI fails if one of those
+regresses. `ene-vrm` (5 sites), `apps/ene-host` (55), `apps/ene-desktop` (50)
+and `apps/ene-avatar` (10) still have sites and are not covered yet. A crate
+cannot add the lint to `[lints]` while `workspace = true` — cargo rejects the
+override — so the inner attribute is the only per-crate form. Add it to one of
+those four only once `cargo clippy -p <crate>` reports zero for it, never as an
+`#[allow]`.
 
 Two former rules are now enforced by the compiler, so there is no second copy
 to drift: no `println!`/`eprintln!` in production (`clippy::print_stdout`,
