@@ -17,10 +17,7 @@
       rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
       desktopLibraries = with pkgs; [
         alsa-lib
-        dbus
         fontconfig
-        libX11
-        libXScrnSaver
         libxcb
         libxkbcommon
         wayland
