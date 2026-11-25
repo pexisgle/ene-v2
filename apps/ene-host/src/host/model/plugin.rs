@@ -243,7 +243,7 @@ impl GuestClient {
         clippy::result_large_err,
         reason = "rig-core's HttpError exceeds clippy's threshold and cannot be boxed here"
     )]
-    fn exchange(&self, parts: &http::request::Parts, body: Bytes) -> Result<Exchange, HttpError> {
+    fn exchange(&self, parts: &http::request::Parts, body: &Bytes) -> Result<Exchange, HttpError> {
         let url = if parts.uri.scheme().is_some() {
             parts.uri.to_string()
         } else {
@@ -266,7 +266,7 @@ impl GuestClient {
             method: parts.method.as_str().to_owned(),
             url,
             headers,
-            body_base64: Some(STANDARD.encode(&body)),
+            body_base64: Some(STANDARD.encode(body)),
             stream: true,
         };
         let (sender, events) = mpsc::channel(64);
@@ -311,7 +311,7 @@ impl HttpClientExt for GuestClient {
     {
         let (parts, body) = req.into_parts();
         let body: Bytes = body.into();
-        let exchange = self.exchange(&parts, body);
+        let exchange = self.exchange(&parts, &body);
         async move {
             let mut exchange = exchange?;
             let (status, headers) = exchange.start().await?;
@@ -354,7 +354,7 @@ impl HttpClientExt for GuestClient {
     {
         let (parts, body) = req.into_parts();
         let body: Bytes = body.into();
-        let exchange = self.exchange(&parts, body);
+        let exchange = self.exchange(&parts, &body);
         async move {
             let mut exchange = exchange?;
             let (status, headers) = exchange.start().await?;
