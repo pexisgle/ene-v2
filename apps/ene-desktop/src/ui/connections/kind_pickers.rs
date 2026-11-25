@@ -69,7 +69,7 @@ pub(super) fn build_llm_picker(
         cx,
         move |hub, picked, cx| {
             list_d_pick.update(cx, |d, cx| d.set(picked.clone(), cx));
-            hub.select_connection_model(cid.clone(), picked, cx);
+            hub.select_connection_model(&cid, &picked, cx);
         },
     )
 }
@@ -355,7 +355,7 @@ pub(super) fn build_embedding_picker(
                 let dims = default_embedding_dimensions(&picked);
                 dim_draft.update(cx, |d, cx| d.set(dims.to_string(), cx));
             }
-            hub.select_embedding_model(cid.clone(), picked, cx);
+            hub.select_embedding_model(&cid, &picked, cx);
         },
     )
 }

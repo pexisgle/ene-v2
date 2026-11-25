@@ -110,11 +110,11 @@ impl Hub {
 
     pub(crate) fn select_connection_model(
         &mut self,
-        connection_id: String,
-        model_id: String,
+        connection_id: &str,
+        model_id: &str,
         cx: &mut Context<Self>,
     ) {
-        voice_roles::select_connection_model(self, &connection_id, &model_id, cx);
+        voice_roles::select_connection_model(self, connection_id, model_id, cx);
     }
 
     pub(crate) fn select_voicevox_speaker(
@@ -173,8 +173,8 @@ impl Hub {
 
     pub(crate) fn select_embedding_model(
         &mut self,
-        connection_id: String,
-        model_id: String,
+        connection_id: &str,
+        model_id: &str,
         cx: &mut Context<Self>,
     ) {
         let Some(conn) = self.model.settings().and_then(|s| {
@@ -185,13 +185,13 @@ impl Hub {
         }) else {
             return;
         };
-        let model_clean = model_id.trim().to_owned();
+        let model_clean = model_id.trim();
         if model_clean.is_empty() {
             return;
         }
         self.upsert_connection(
             "埋め込みモデルの変更",
-            build_embedding_model_input(&conn, &model_clean),
+            build_embedding_model_input(&conn, model_clean),
             cx,
         );
         if let Some(comp) = self.model.companion()
@@ -203,7 +203,7 @@ impl Hub {
         {
             self.assign_model(
                 ModelRoleSlot::Embedding,
-                Some((connection_id, model_clean)),
+                Some((connection_id.to_owned(), model_clean.to_owned())),
                 cx,
             );
         }
