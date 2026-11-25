@@ -315,7 +315,10 @@ pub(crate) fn poll(world: &mut World) {
             {
                 session.last_evaluated = None;
             }
-            if session.task.as_ref().is_some_and(|task| task.is_finished())
+            if session
+                .task
+                .as_ref()
+                .is_some_and(tokio_util::task::AbortOnDropHandle::is_finished)
                 && let Some(result) = session.task.take().and_then(background::take)
             {
                 publish_status(world, companion_id, session, result.status);

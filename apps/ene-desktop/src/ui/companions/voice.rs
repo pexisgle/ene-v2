@@ -235,7 +235,9 @@ fn render_tts_card(
                                 })
                                 .enabled(matches!(snap.devices.output, Device::Ready(_))),
                             theme,
-                            move |_, cx| hub_out.update(cx, |hub, cx| hub.toggle_output_mute(cx)),
+                            move |_, cx| {
+                                hub_out.update(cx, super::super::hub::Hub::toggle_output_mute)
+                            },
                         ))
                         .child(pill_button(
                             "voice-speak",

@@ -73,7 +73,7 @@ pub(super) fn render_web_search_card(
                 .text_color(theme.ink_muted)
                 .child("Exa や Tavily の API キーを登録して使用する検索サービスを選べます（Mwmbl・SearXNG・Brave は「接続を追加」からも設定できます）。"),
         )
-        .when_some(switcher, |this, sw| this.child(sw))
+        .when_some(switcher, gpui::ParentElement::child)
         .children(provider_rows)
         .into_any_element()
 }

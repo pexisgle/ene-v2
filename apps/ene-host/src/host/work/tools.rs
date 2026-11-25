@@ -160,7 +160,7 @@ fn transcription_id(conversation: Option<&Conversation>) -> Option<String> {
     conversation?
         .entries()
         .rev()
-        .find(|entry| entry.is_users_own())?
+        .find(rig_core::conversation::EntryRef::is_users_own)?
         .author?
         .request
         .as_ref()

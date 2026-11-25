@@ -397,8 +397,8 @@ pub(super) fn render_message_bubble(
         .w_full()
         .flex()
         .flex_col()
-        .when(is_user, |this| this.items_end())
-        .when(!is_user, |this| this.items_start())
+        .when(is_user, gpui::Styled::items_end)
+        .when(!is_user, gpui::Styled::items_start)
         .child(
             div()
                 .max_w(px(300.))
@@ -419,7 +419,7 @@ pub(super) fn render_message_bubble(
                 .flex_col()
                 .gap(px(6.))
                 .child(div().text_sm().child(SharedString::from(body_text)))
-                .when_some(url_pills, |this, pills| this.child(pills)),
+                .when_some(url_pills, gpui::ParentElement::child),
         )
         .into_any_element()
 }
@@ -474,7 +474,7 @@ pub(super) fn render_stop_button(
         Tone::Danger.icon(Icon::Stop).enabled(!stop_requested),
         theme,
         move |_, cx| {
-            hub_stop.update(cx, |hub, cx| hub.stop(cx));
+            hub_stop.update(cx, crate::ui::hub::Hub::stop);
         },
     ))
 }

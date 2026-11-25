@@ -174,7 +174,7 @@ impl Avatar {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.pending
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(id, reply_tx);
         if write_tx
             .send(WriteItem::Request { id, line })
@@ -183,7 +183,7 @@ impl Avatar {
         {
             self.pending
                 .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&id);
             self.healthy.store(false, Ordering::Release);
             return Err(AvatarError::InputClosed);
@@ -197,7 +197,7 @@ impl Avatar {
             Err(_) => {
                 self.pending
                     .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&id);
                 self.healthy.store(false, Ordering::Release);
                 if let Some(child) = self.child.as_mut()
@@ -406,7 +406,7 @@ fn write_loop(
             if let Some(id) = id
                 && let Some(tx) = pending
                     .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&id)
             {
                 let _replied = tx.send(Err(reason));
@@ -437,7 +437,7 @@ pub(super) fn read_loop(
                 Ok(AvatarMessage::Reply { id, ok, error }) => {
                     if let Some(tx) = pending
                         .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .remove(&id)
                     {
                         let _discarded = tx.send(match error {
@@ -462,7 +462,7 @@ pub(super) fn read_loop(
     }
     let waiters: Vec<_> = pending
         .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .drain()
         .map(|(_, tx)| tx)
         .collect();

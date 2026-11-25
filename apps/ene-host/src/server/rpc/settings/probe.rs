@@ -62,7 +62,7 @@ pub(super) async fn probe_voicevox_tts(
                         .map_or("", str::trim);
                     if let Some(styles) = speaker.get("styles").and_then(|s| s.as_array()) {
                         for style in styles {
-                            if let Some(id) = style.get("id").and_then(|v| v.as_u64()) {
+                            if let Some(id) = style.get("id").and_then(serde_json::Value::as_u64) {
                                 let style_name = style
                                     .get("name")
                                     .and_then(|v| v.as_str())

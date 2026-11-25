@@ -199,7 +199,7 @@ pub(super) fn render_create_panel(
         .when_some(snap.preview_reply.as_ref().cloned(), |this, outcome| {
             this.child(render_preview_outcome(outcome, theme))
         })
-        .when_some(no_models_banner, |this, banner| this.child(banner))
+        .when_some(no_models_banner, gpui::ParentElement::child)
         .child(actions)
         .into_any_element()
 }

@@ -261,7 +261,8 @@ impl CompanionPod {
         let sent = self.hub.update(cx, |hub, cx| hub.send(text, cx));
         if sent {
             self.controls_open = false;
-            self.chat_input.update(cx, |draft, cx| draft.clear(cx));
+            self.chat_input
+                .update(cx, super::super::input::Draft::clear);
         }
     }
 
@@ -286,7 +287,7 @@ impl CompanionPod {
         let busy = hub.model.audio.companion_speaking || !hub.model.companions.streaming.is_empty();
         let expanded = hub.windows.pod_mode == PodMode::ExpandedChat;
         if busy {
-            self.hub.update(cx, |hub, cx| hub.stop(cx));
+            self.hub.update(cx, super::hub::Hub::stop);
         } else if expanded {
             self.hub
                 .update(cx, |hub, cx| hub.set_pod_mode(PodMode::MiniVoice, cx));
@@ -420,7 +421,7 @@ pub fn bind(cx: &mut App, hub: Entity<Hub>) {
         let Some(view) = submit_hub.read(cx).pod_view() else {
             return;
         };
-        let _updated = view.update(cx, |this, cx| this.submit(cx));
+        let _updated = view.update(cx, CompanionPod::submit);
     });
 
     let escape_hub = hub.clone();
@@ -428,12 +429,12 @@ pub fn bind(cx: &mut App, hub: Entity<Hub>) {
         let Some(view) = escape_hub.read(cx).pod_view() else {
             return;
         };
-        let _updated = view.update(cx, |this, cx| this.handle_escape(cx));
+        let _updated = view.update(cx, CompanionPod::handle_escape);
     });
 
     let mic_hub = hub.clone();
     cx.on_action(move |_: &ToggleMicShortcut, cx: &mut App| {
-        mic_hub.update(cx, |hub, cx| hub.toggle_mic_mute(cx));
+        mic_hub.update(cx, super::hub::Hub::toggle_mic_mute);
     });
 
     cx.on_action(move |_: &OpenSettingsShortcut, cx: &mut App| {

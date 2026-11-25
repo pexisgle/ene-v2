@@ -96,7 +96,7 @@ pub(super) fn build_voicevox_picker(
         .or_else(|| {
             endpoint
                 .and_then(|ep| serde_json::from_str::<serde_json::Value>(&ep.options).ok())
-                .and_then(|v| v.get("speaker").and_then(|s| s.as_u64()))
+                .and_then(|v| v.get("speaker").and_then(serde_json::Value::as_u64))
                 .map(|n| n.to_string())
         });
     let options: Vec<DropdownOption> = choices

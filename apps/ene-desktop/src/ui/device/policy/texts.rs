@@ -258,7 +258,7 @@ pub(super) fn render_add_policy_text_panel(
                         hub_add.update(cx, |hub, cx| {
                             hub.upsert_policy_text(None, val, cx);
                         });
-                        draft_clear.update(cx, |draft, cx| draft.clear(cx));
+                        draft_clear.update(cx, crate::input::Draft::clear);
                         pane_clear.update(cx, |this, cx| {
                             this.form.adding_policy_text_open = false;
                             cx.notify();

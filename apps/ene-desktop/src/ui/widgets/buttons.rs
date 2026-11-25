@@ -284,8 +284,8 @@ where
         })
         .flex()
         .items_center()
-        .when(checked, |this| this.justify_end())
-        .when(!checked, |this| this.justify_start())
+        .when(checked, gpui::Styled::justify_end)
+        .when(!checked, gpui::Styled::justify_start)
         .child(thumb);
     if enabled {
         track = track

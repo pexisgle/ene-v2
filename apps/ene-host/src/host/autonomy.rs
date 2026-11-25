@@ -61,7 +61,7 @@ fn is_eyes_silent_turn(turn: Option<&Turn>, conversation: Option<&Conversation>)
         .any(|entry| entry.is_users_own())
         && conversation
             .asked(turn.start)
-            .filter(|entry| entry.is_request())
+            .filter(rig_core::conversation::EntryRef::is_request)
             .last()
             .is_some_and(|entry| entry.author.is_some_and(super::eyes::is_eyes))
 }

@@ -196,7 +196,7 @@ fn render_schema_bool_field(
 ) -> AnyElement {
     let init = ctx
         .current_val
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .map_or("false", |b| if b { "true" } else { "false" });
     let d = pane.drafts.draft(cx, ctx.d_key, "", Some(init), theme);
     let checked = d.read(cx).text() == "true";

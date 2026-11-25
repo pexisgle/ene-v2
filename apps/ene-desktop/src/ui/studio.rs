@@ -319,7 +319,7 @@ impl Render for SettingsStudio {
                             .bg(theme.bg_surface)
                             .flex()
                             .flex_col()
-                            .when_some(notice_block, |this, n| this.child(n))
+                            .when_some(notice_block, gpui::ParentElement::child)
                             .child(
                                 div()
                                     .id(SharedString::from(format!(

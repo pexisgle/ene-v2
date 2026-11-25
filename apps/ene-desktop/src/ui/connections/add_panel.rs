@@ -60,7 +60,7 @@ pub(super) fn render_add_connection_panel(
                 });
             },
         ))
-        .when_some(custom_section, |panel, section| panel.child(section))
+        .when_some(custom_section, gpui::ParentElement::child)
         .into_any_element()
 }
 

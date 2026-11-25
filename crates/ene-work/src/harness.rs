@@ -62,7 +62,10 @@ impl HarnessBuffer {
                 let ContentBlock::Text(text) = &chunk.content else {
                     return None;
                 };
-                let id = chunk.message_id.as_ref().map(|id| id.to_string());
+                let id = chunk
+                    .message_id
+                    .as_ref()
+                    .map(std::string::ToString::to_string);
                 let held = if self
                     .message
                     .as_ref()

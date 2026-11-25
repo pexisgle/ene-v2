@@ -30,12 +30,20 @@
 
 /// Generated v1 contract, available in every build.
 // Suppresses style and size lints inside generated `_connectrpc.rs`; remove when codegen complies.
+// `redundant_closure_for_method_calls` and `needless_pass_by_value` are
+// pedantic, so `clippy::all` does not cover them and the generator trips both.
 #[allow(
     missing_debug_implementations,
     clippy::all,
     clippy::too_many_lines,
     clippy::cognitive_complexity,
-    clippy::large_futures
+    clippy::large_futures,
+    clippy::redundant_closure_for_method_calls,
+    clippy::needless_pass_by_value,
+    clippy::cloned_instead_of_copied,
+    clippy::implicit_clone,
+    clippy::inefficient_to_string,
+    clippy::manual_let_else
 )]
 pub mod rpc {
     include!(concat!(env!("OUT_DIR"), "/_connectrpc.rs"));

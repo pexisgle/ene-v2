@@ -175,7 +175,7 @@ fn cut(history: &History, budget: u64, head: usize) -> Option<MessageId> {
     let at = history
         .entries()
         .skip(start)
-        .find(|entry| entry.is_request())
+        .find(rig_core::conversation::EntryRef::is_request)
         .map_or(start, |entry| entry.index)
         .min(last_turn(history))
         .max(head);
@@ -185,7 +185,10 @@ fn cut(history: &History, budget: u64, head: usize) -> Option<MessageId> {
 /// The index of the newest message that asks something: the turn the model is
 /// answering, which a window may never cut.
 fn last_turn(history: &History) -> usize {
-    let newest = history.entries().rev().find(|entry| entry.is_request());
+    let newest = history
+        .entries()
+        .rev()
+        .find(rig_core::conversation::EntryRef::is_request);
     newest.map_or(history.messages().len().saturating_sub(1), |entry| {
         entry.index
     })

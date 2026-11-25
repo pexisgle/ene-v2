@@ -26,7 +26,7 @@ pub fn space_id(
     let parsed_options: serde_json::Value =
         serde_json::from_str::<serde_json::Value>(options_raw.trim())
             .ok()
-            .filter(|value| value.is_object())
+            .filter(serde_json::Value::is_object)
             .unwrap_or_else(|| serde_json::json!({}));
     let canonical_value = serde_json::json!({
         "adapter": adapter.trim(),

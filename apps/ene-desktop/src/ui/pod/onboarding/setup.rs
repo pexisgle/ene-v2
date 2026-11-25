@@ -139,7 +139,8 @@ pub(super) fn append_setup_model_section(
             pod_model_select.update(cx, |this, cx| {
                 this.setup_model_id = Some(val.clone());
                 this.setup_model_dropdown_open = false;
-                this.setup_model_filter.update(cx, |d, cx| d.clear(cx));
+                this.setup_model_filter
+                    .update(cx, crate::input::Draft::clear);
                 cx.notify();
             });
         },
@@ -227,7 +228,8 @@ pub(super) fn append_setup_voice_section(
             pod_voice_select.update(cx, |this, cx| {
                 this.setup_voice_speaker_id = Some(val.clone());
                 this.setup_voice_dropdown_open = false;
-                this.setup_voice_filter.update(cx, |d, cx| d.clear(cx));
+                this.setup_voice_filter
+                    .update(cx, crate::input::Draft::clear);
                 cx.notify();
             });
         },
@@ -276,7 +278,7 @@ pub(super) fn build_provider_chips(
             move |_, cx| {
                 pod.update(cx, |this, cx| {
                     if !active {
-                        this.onboard_key.update(cx, |d, cx| d.clear(cx));
+                        this.onboard_key.update(cx, crate::input::Draft::clear);
                     }
                     this.choosing_provider = false;
                     this.selected_provider_id = Some(pid.clone());

@@ -74,7 +74,7 @@ pub(super) fn evaluate(
             conversation
                 .entries()
                 .rev()
-                .find(|entry| entry.is_users_own())
+                .find(rig_core::conversation::EntryRef::is_users_own)
         })
         .map(|entry| {
             SystemTime::now()

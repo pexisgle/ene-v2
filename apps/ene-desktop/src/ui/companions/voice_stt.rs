@@ -163,7 +163,7 @@ fn render_stt_mic_row(
                     .icon(if mic_muted { Icon::Mic } else { Icon::MicOff })
                     .enabled(mic_ready),
                 theme,
-                move |_, cx| hub_mic.update(cx, |hub, cx| hub.toggle_mic_mute(cx)),
+                move |_, cx| hub_mic.update(cx, super::super::hub::Hub::toggle_mic_mute),
             ))
             .into_any_element(),
         theme,
@@ -274,7 +274,7 @@ fn render_capture_mode_controls(
                     .icon(Icon::Mic)
                     .enabled(can_toggle),
                 theme,
-                move |_, cx| hub_ptt_toggle.update(cx, |hub, cx| hub.ptt_toggle(cx)),
+                move |_, cx| hub_ptt_toggle.update(cx, super::super::hub::Hub::ptt_toggle),
             ))
             .when(ptt_active, |row| {
                 row.child(pill_button(
@@ -282,7 +282,7 @@ fn render_capture_mode_controls(
                     "キャンセル",
                     Tone::Danger.icon(Icon::Close),
                     theme,
-                    move |_, cx| hub_ptt_cancel.update(cx, |hub, cx| hub.ptt_cancel(cx)),
+                    move |_, cx| hub_ptt_cancel.update(cx, super::super::hub::Hub::ptt_cancel),
                 ))
             })
         })
@@ -315,7 +315,7 @@ fn render_recognized_header(recognized: &[String], hub: &Entity<Hub>, theme: &Th
                 .icon(Icon::Trash)
                 .enabled(!recognized.is_empty()),
             theme,
-            move |_, cx| hub_clear.update(cx, |hub, cx| hub.clear_voice_probe(cx)),
+            move |_, cx| hub_clear.update(cx, super::super::hub::Hub::clear_voice_probe),
         ))
 }
 

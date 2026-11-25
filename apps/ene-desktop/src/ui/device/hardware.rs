@@ -84,7 +84,7 @@ fn render_active_client_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Th
                     .icon(Icon::Check)
                     .enabled(snap.live && snap.has_companion),
                 theme,
-                move |_, cx| hub_activate.update(cx, |hub, cx| hub.activate_this_client(cx)),
+                move |_, cx| hub_activate.update(cx, super::super::hub::Hub::activate_this_client),
             )
         },
         theme,
@@ -113,7 +113,7 @@ fn render_mic_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Theme) -> An
             mic_ready,
             theme,
             move |_, cx| {
-                hub_mic.update(cx, |hub, cx| hub.toggle_mic_mute(cx));
+                hub_mic.update(cx, super::super::hub::Hub::toggle_mic_mute);
             },
         ),
         theme,
@@ -142,7 +142,7 @@ fn render_output_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Theme) ->
             output_ready,
             theme,
             move |_, cx| {
-                hub_out.update(cx, |hub, cx| hub.toggle_output_mute(cx));
+                hub_out.update(cx, super::super::hub::Hub::toggle_output_mute);
             },
         ),
         theme,

@@ -53,7 +53,7 @@ pub(super) fn render_plugins_section(
                 .gap(px(6.))
                 .child(pill_button("dev-plugins-refresh", "更新", Tone::Ghost.icon(Icon::Refresh).enabled(snap.live), theme, {
                         let hub = pane.hub.clone();
-                        move |_, cx| hub.update(cx, |h, cx| h.load_plugins(cx))
+                        move |_, cx| hub.update(cx, super::super::hub::Hub::load_plugins)
                     }))
                 .child(pill_button("dev-plugins-toggle-add", if adding_plugin { "閉じる" } else { "追加" }, ButtonStyle::new(if adding_plugin { Tone::Ghost } else { Tone::Primary }).maybe_icon((!adding_plugin).then_some(Icon::Plus)).enabled(snap.live), theme, move |_, cx| {
                         pane_add_plugin.update(cx, |this, cx| {
@@ -145,7 +145,7 @@ fn render_add_plugin_panel(
                     move |_, cx| {
                         let path = path_val.clone();
                         hub_install.update(cx, |h, cx| h.install_plugin(path, cx));
-                        draft_clear.update(cx, |d, cx| d.clear(cx));
+                        draft_clear.update(cx, crate::input::Draft::clear);
                         pane_close.update(cx, |this, cx| {
                             this.form.adding_plugin_open = false;
                             cx.notify();
@@ -229,7 +229,7 @@ pub(super) fn render_remote_host_section(
             ),
             theme,
         ))
-        .when_some(form, |card, panel| card.child(panel))
+        .when_some(form, gpui::ParentElement::child)
         .into_any_element();
 
     (remote_heading, remote_card)
@@ -298,9 +298,9 @@ fn render_remote_host_form(
                     Tone::Ghost.enabled(has_current),
                     theme,
                     move |_, cx| {
-                        hub_clear_remote.update(cx, |h, cx| h.clear_remote_host(cx));
-                        ep_clear.update(cx, |d, cx| d.clear(cx));
-                        tok_clear.update(cx, |d, cx| d.clear(cx));
+                        hub_clear_remote.update(cx, super::super::hub::Hub::clear_remote_host);
+                        ep_clear.update(cx, crate::input::Draft::clear);
+                        tok_clear.update(cx, crate::input::Draft::clear);
                     },
                 ))
                 .child(pill_button(

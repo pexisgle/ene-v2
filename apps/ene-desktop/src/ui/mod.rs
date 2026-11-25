@@ -186,7 +186,7 @@ impl DraftStore {
     ) {
         for key in keys {
             if let Some(d) = self.drafts.get(key).cloned() {
-                d.update(cx, |draft, cx| draft.clear(cx));
+                d.update(cx, super::input::Draft::clear);
             }
         }
     }

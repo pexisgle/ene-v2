@@ -297,7 +297,7 @@ fn take_driver_failures(hands: &mut Hands, store: &Store) -> Vec<(Run, String)> 
         if !hand
             .driver
             .as_ref()
-            .is_some_and(|driver| driver.is_finished())
+            .is_some_and(tokio_util::task::AbortOnDropHandle::is_finished)
         {
             continue;
         }

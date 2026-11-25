@@ -79,7 +79,7 @@ pub(super) fn render_connection_editor(
         .flex_col()
         .gap(px(12.))
         .child(render_enable_row(conn, live, &pane.hub, theme))
-        .when_some(error_banner(check, theme), |this, strip| this.child(strip))
+        .when_some(error_banner(check, theme), gpui::ParentElement::child)
         .child(cred_strip)
         .child(labeled_field("表示名", drafts.name_d, theme))
         .when_some(drafts.cmd_d, |this, cd| {
@@ -94,7 +94,7 @@ pub(super) fn render_connection_editor(
         .when(!agent_platform, |this| {
             this.child(labeled_field("エンドポイント URL", drafts.ep_d, theme))
         })
-        .when_some(dropdown_picker, |this, picker| this.child(picker))
+        .when_some(dropdown_picker, gpui::ParentElement::child)
         .when_some(drafts.dim_d, |this, dd| {
             this.child(labeled_field("次元数 (dimensions)", dd, theme))
         })
@@ -105,7 +105,7 @@ pub(super) fn render_connection_editor(
                 theme,
             ))
         })
-        .when_some(mcp_tools_strip, |this, strip| this.child(strip))
+        .when_some(mcp_tools_strip, gpui::ParentElement::child)
         .when(!schema_controls.is_empty(), |this| {
             this.child(render_schema_box(schema_controls, theme))
         })

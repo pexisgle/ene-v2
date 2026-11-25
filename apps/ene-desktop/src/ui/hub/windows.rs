@@ -312,7 +312,7 @@ pub fn open_pod_window(cx: &mut App, hub: Entity<Hub>) -> Option<WindowHandle<Co
                     let should_hide = hub_close.read(cx).is_tray_resident()
                         || hub_close.read(cx).windows.settings_window.is_some();
                     if should_hide {
-                        hub_close.update(cx, |hub, cx| hub.hide_pod(cx));
+                        hub_close.update(cx, super::Hub::hide_pod);
                         false
                     } else {
                         true

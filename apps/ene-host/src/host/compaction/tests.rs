@@ -68,7 +68,7 @@ fn every_cut_budget_keeps_a_complete_newest_request() {
     let latest = history
         .entries()
         .rev()
-        .find(|entry| entry.is_request())
+        .find(rig_core::conversation::EntryRef::is_request)
         .unwrap()
         .id;
     for budget in 0..=estimate_tokens(history.messages()) {

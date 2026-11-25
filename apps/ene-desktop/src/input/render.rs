@@ -273,8 +273,8 @@ impl Render for Draft {
                 this.px_3()
                     .py(px(7.))
                     .bg(look.bg)
-                    .when(look.pill, |this| this.rounded_full())
-                    .when(!look.pill, |this| this.rounded_xl())
+                    .when(look.pill, gpui::Styled::rounded_full)
+                    .when(!look.pill, gpui::Styled::rounded_xl)
                     .border_2()
                     .border_color(if focused {
                         look.border_focused

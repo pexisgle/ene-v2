@@ -97,7 +97,9 @@ fn through_message_id(history: &History, keep_from: Option<MessageId>) -> Option
         Some(id) => history.index_of(id)?,
         None => history.messages().len(),
     };
-    history.id(at.checked_sub(1)?).map(|id| id.get())
+    history
+        .id(at.checked_sub(1)?)
+        .map(rig_core::conversation::MessageId::get)
 }
 
 /// The summarizer policy: prompts written for a companion conversation.

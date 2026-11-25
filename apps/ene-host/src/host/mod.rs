@@ -76,7 +76,9 @@ const MAX_COMPANIONS: usize = 16;
 /// unwound while a lock was held leaves the guarded value whole, so the host
 /// recovers the lock instead of failing every later access to it.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 type StartError = Box<dyn Error + Send + Sync>;

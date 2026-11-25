@@ -258,12 +258,12 @@ fn fake_renderer(
             };
             recorded
                 .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(request.command.clone());
             let reply = respond(&request.command);
             let waiter = pending
                 .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&id);
             if let Some(tx) = waiter {
                 let _replied = tx.send(Ok(reply));
@@ -331,7 +331,9 @@ async fn an_explicit_body_placement_beats_the_renderer_snapshot() {
         .await
         .expect("the renderer accepts the update");
 
-    let sent = sent.lock().unwrap_or_else(|poison| poison.into_inner());
+    let sent = sent
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let config = sent
         .iter()
         .find_map(|command| match command {

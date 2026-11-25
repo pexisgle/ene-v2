@@ -111,7 +111,7 @@ impl ConnectionsPane {
                     .iter()
                     .find(|c| c.id == conn_id)
                     .and_then(|c| c.search_adapter())
-                    .map(|a| a.to_ascii_lowercase())
+                    .map(str::to_ascii_lowercase)
             });
             let mut keys = vec![format!("conn:secret:{conn_id}")];
             if let Some(adapter) = adapter {
@@ -214,7 +214,7 @@ impl gpui::Render for ConnectionsPane {
             .flex_col()
             .gap(px(16.))
             .child(render_connections_header(adding, &theme, cx))
-            .when_some(add_panel, |this, p| this.child(p))
+            .when_some(add_panel, gpui::ParentElement::child)
             .child(search_card)
             .when(!rows.is_empty(), |this| {
                 this.child(div().w_full().flex().flex_col().gap(px(10.)).children(rows))
@@ -226,7 +226,7 @@ impl gpui::Render for ConnectionsPane {
                     .flex_col()
                     .gap(px(8.))
                     .child(render_advanced_roles_toggle(adv_open, &theme, cx))
-                    .when_some(adv_panel, |this, p| this.child(p)),
+                    .when_some(adv_panel, gpui::ParentElement::child),
             )
     }
 }

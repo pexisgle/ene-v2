@@ -78,7 +78,7 @@ impl CompanionPod {
             .flex_col()
             .gap(px(6.))
             .child(render_drag_strip(expanded_chat, &theme))
-            .when_some(notice_strip, |this, strip| this.child(strip))
+            .when_some(notice_strip, gpui::ParentElement::child)
             .child(body);
 
         div()
@@ -292,7 +292,7 @@ impl CompanionPod {
                     },
                 ))
             })
-            .when_some(url_pills, |this, pills| this.child(pills))
+            .when_some(url_pills, gpui::ParentElement::child)
             .when_some(failed_turn, |this, reason| {
                 this.child(render_mini_error_banner(&reason, theme))
             })

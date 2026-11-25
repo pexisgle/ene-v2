@@ -242,7 +242,7 @@ where
                 }
             }
         })
-        .when_some(search_bar, |this, bar| this.child(bar))
+        .when_some(search_bar, gpui::ParentElement::child)
         .child(
             div()
                 .id(SharedString::from(format!("{}-scroll", spec.id)))

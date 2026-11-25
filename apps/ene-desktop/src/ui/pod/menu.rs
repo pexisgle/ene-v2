@@ -99,9 +99,11 @@ fn use_control(
                 hub.open_settings(SettingsSection::Device, cx)
             }
         }),
-        ChatControl::CaptureMode => pod.hub.update(cx, |hub, cx| hub.toggle_capture_mode(cx)),
-        ChatControl::PttToggle => pod.hub.update(cx, |hub, cx| hub.ptt_toggle(cx)),
-        ChatControl::PttCancel => pod.hub.update(cx, |hub, cx| hub.ptt_cancel(cx)),
+        ChatControl::CaptureMode => pod
+            .hub
+            .update(cx, super::super::hub::Hub::toggle_capture_mode),
+        ChatControl::PttToggle => pod.hub.update(cx, super::super::hub::Hub::ptt_toggle),
+        ChatControl::PttCancel => pod.hub.update(cx, super::super::hub::Hub::ptt_cancel),
         ChatControl::Speaker { ready } => pod.hub.update(cx, |hub, cx| {
             if ready {
                 hub.toggle_output_mute(cx)
@@ -112,7 +114,7 @@ fn use_control(
         ChatControl::Close => {
             let hub = pod.hub.read(cx);
             if hub.is_tray_resident() || hub.windows.settings_window.is_some() {
-                pod.hub.update(cx, |hub, cx| hub.hide_pod(cx));
+                pod.hub.update(cx, super::super::hub::Hub::hide_pod);
             } else {
                 cx.quit();
             }

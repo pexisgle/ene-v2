@@ -43,7 +43,7 @@ pub(super) fn render_connect_submit_row(
                     hub.quick_connect_llm(provider, secret.clone(), cx)
                 });
                 pod.update(cx, |this, cx| {
-                    this.onboard_key.update(cx, |d, cx| d.clear(cx));
+                    this.onboard_key.update(cx, crate::input::Draft::clear);
                     cx.notify();
                 });
             }

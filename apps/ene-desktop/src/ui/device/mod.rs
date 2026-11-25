@@ -182,17 +182,17 @@ impl gpui::Render for DevicePane {
             .child(policy_heading)
             .child(policy_card)
             .child(add_toggle)
-            .when_some(add_panel, |this, panel| this.child(panel))
+            .when_some(add_panel, gpui::ParentElement::child)
             .child(policy_text_heading)
             .child(policy_text_card)
             .child(add_txt_toggle)
-            .when_some(add_txt_panel, |this, panel| this.child(panel))
+            .when_some(add_txt_panel, gpui::ParentElement::child)
             .child(plugins_heading)
-            .when_some(add_plugin_panel, |this, panel| this.child(panel))
+            .when_some(add_plugin_panel, gpui::ParentElement::child)
             .child(plugins_card)
             .child(remote_heading)
             .child(remote_card)
-            .when_some(reset_history, |this, card| this.child(card))
+            .when_some(reset_history, gpui::ParentElement::child)
     }
 }
 
@@ -303,7 +303,7 @@ pub(super) fn row_frame(
                         .text_color(theme.ink)
                         .child(title),
                 )
-                .when_some(status, |this, s| this.child(s)),
+                .when_some(status, gpui::ParentElement::child),
         )
         .child(control)
         .into_any_element()

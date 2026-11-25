@@ -57,7 +57,7 @@ pub(super) fn render_connection_row(
         .flex()
         .flex_col()
         .child(header)
-        .when_some(detail, |this, d| this.child(d))
+        .when_some(detail, gpui::ParentElement::child)
         .into_any_element()
 }
 

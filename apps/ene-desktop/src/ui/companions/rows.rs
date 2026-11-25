@@ -68,7 +68,7 @@ impl CompanionsPane {
             .flex()
             .flex_col()
             .child(row_header)
-            .when_some(editor, |this, ed| this.child(ed))
+            .when_some(editor, gpui::ParentElement::child)
             .into_any_element()
     }
 

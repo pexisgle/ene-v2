@@ -163,8 +163,8 @@ impl gpui::Render for CompanionsPane {
             .flex_col()
             .gap(px(16.))
             .child(header)
-            .when_some(import_panel, |this, p| this.child(p))
-            .when_some(create_panel, |this, p| this.child(p))
+            .when_some(import_panel, gpui::ParentElement::child)
+            .when_some(create_panel, gpui::ParentElement::child)
             .child(div().w_full().flex().flex_col().gap(px(10.)).children(rows))
     }
 }

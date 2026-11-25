@@ -89,7 +89,7 @@ impl SessionTransport {
         *self
             .connection
             .write()
-            .unwrap_or_else(|poison| poison.into_inner()) = host;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = host;
     }
 
     pub(super) fn current_host(&self) -> Option<Host> {

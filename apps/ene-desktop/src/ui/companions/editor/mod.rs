@@ -93,7 +93,7 @@ pub(super) fn render_companion_editor(
         .child(model_field)
         .child(voice_selector)
         .child(disclosure)
-        .when_some(mind_strip, |this, strip| this.child(strip))
+        .when_some(mind_strip, gpui::ParentElement::child)
         .when_some(ctx.exported_json, |this, json| {
             this.child(render_exported_template_box(&id, json, theme))
         })

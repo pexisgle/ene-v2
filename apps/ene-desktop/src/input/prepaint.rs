@@ -22,7 +22,7 @@ pub(super) fn shape_wrapped(
     window
         .text_system()
         .shape_text(text, font_size, runs, width, None)
-        .map_or_default(|lines| lines.into_vec())
+        .map_or_default(wayland_client::backend::smallvec::SmallVec::into_vec)
 }
 
 pub(super) struct Prepaint {
