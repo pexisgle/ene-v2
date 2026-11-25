@@ -1,12 +1,9 @@
 use super::*;
+use super::{icon::load_or_create_tray_icon, menu};
 use std::{cell::Cell, ffi::c_void};
 use windows::{
     Win32::{
-        Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
-        Graphics::Gdi::{
-            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
-            DeleteObject,
-        },
+        Foundation::{HWND, LPARAM, LRESULT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             Shell::{
@@ -14,23 +11,17 @@ use windows::{
                 Shell_NotifyIconW,
             },
             WindowsAndMessaging::{
-                AppendMenuW, CW_USEDEFAULT, ChangeWindowMessageFilterEx, CreateIconIndirect,
-                CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-                DestroyWindow, DispatchMessageW, GWL_USERDATA, GetCursorPos, GetMessageW,
-                GetSystemMetrics, GetWindowLongPtrW, HICON, HMENU, ICONINFO, IMAGE_FLAGS,
-                IMAGE_ICON, KillTimer, LoadIconW, LoadImageW, MENU_ITEM_FLAGS, MF_CHECKED,
-                MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, MSGFLT_ALLOW, PostMessageW,
-                PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON,
-                SetForegroundWindow, SetMenuDefaultItem, SetTimer, SetWindowLongPtrW,
-                TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-                TranslateMessage, USER_DEFAULT_SCREEN_DPI, WM_APP, WM_CLOSE, WM_CONTEXTMENU,
-                WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NCCREATE, WM_NCDESTROY, WM_NULL,
-                WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-                WS_OVERLAPPED,
+                CW_USEDEFAULT, ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW,
+                DestroyIcon, DestroyWindow, DispatchMessageW, GWL_USERDATA, GetMessageW,
+                GetWindowLongPtrW, HICON, KillTimer, MSG, MSGFLT_ALLOW, PostMessageW,
+                PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer,
+                SetWindowLongPtrW, TranslateMessage, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
+                WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NCCREATE, WM_NCDESTROY, WM_RBUTTONUP, WM_TIMER,
+                WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_OVERLAPPED,
             },
         },
     },
-    core::{PCWSTR, w},
+    core::w,
 };
 
 const TRAY_ICON_ID: u32 = 1;
@@ -49,9 +40,9 @@ unsafe extern "system" {
     fn CoUninitialize();
 }
 
-struct WindowContext {
+pub(super) struct WindowContext {
     shared: Arc<RwLock<TrayState>>,
-    tx: UnboundedSender<TrayAction>,
+    pub(super) tx: UnboundedSender<TrayAction>,
     icon: HICON,
     icon_owned: bool,
     taskbar_created_msg: u32,
@@ -244,7 +235,7 @@ fn run_thread(
     }
 }
 
-fn current_state(ctx: &WindowContext) -> TrayState {
+pub(super) fn current_state(ctx: &WindowContext) -> TrayState {
     match ctx.shared.read() {
         Ok(guard) => guard.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),
@@ -434,7 +425,7 @@ unsafe extern "system" fn wnd_proc(
                     let _discarded = ctx.tx.send(TrayAction::OpenChat);
                 }
                 WM_RBUTTONUP | WM_CONTEXTMENU => {
-                    show_context_menu(hwnd, ctx);
+                    menu::show_context_menu(hwnd, ctx);
                 }
                 _ => {}
             }
@@ -485,263 +476,6 @@ unsafe extern "system" fn wnd_proc(
         // SAFETY: default handling for any message this procedure ignores.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
-}
-
-fn show_context_menu(hwnd: HWND, ctx: &WindowContext) {
-    let state = current_state(ctx);
-    // SAFETY: creates a new popup menu owned by this thread; the handle
-    // is destroyed at the end of this function.
-    let Ok(menu) = (unsafe { CreatePopupMenu() }) else {
-        return;
-    };
-
-    let chat_flags = if state.pod_open && state.pod_mode == TrayMode::ExpandedChat {
-        MF_STRING | MF_CHECKED
-    } else {
-        MF_STRING
-    };
-    let mini_flags = if state.pod_open && state.pod_mode == TrayMode::MiniVoice {
-        MF_STRING | MF_CHECKED
-    } else {
-        MF_STRING
-    };
-    let hide_flags = if state.pod_open {
-        MF_STRING
-    } else {
-        MF_STRING | MF_GRAYED
-    };
-    let avatar_flags = if state.avatar_ready {
-        MF_STRING
-    } else {
-        MF_STRING | MF_GRAYED
-    };
-    let mic_label = if state.mic_muted {
-        w!("マイクのミュートを解除")
-    } else {
-        w!("マイクをミュート")
-    };
-
-    append_item(menu, chat_flags, CMD_OPEN_CHAT, w!("チャット画面を開く"));
-    append_item(menu, mini_flags, CMD_OPEN_MINI, w!("ミニ対話ポッドを表示"));
-    append_item(menu, hide_flags, CMD_HIDE_POD, w!("対話ポッドを隠す"));
-    append_separator(menu);
-    append_item(
-        menu,
-        MF_STRING,
-        CMD_SETTINGS_COMPANIONS,
-        w!("設定画面を開く"),
-    );
-    append_item(
-        menu,
-        MF_STRING,
-        CMD_SETTINGS_CONNECTIONS,
-        w!("AI・音声の接続設定"),
-    );
-    append_item(menu, MF_STRING, CMD_SETTINGS_DEVICE, w!("この端末の設定"));
-    append_separator(menu);
-    append_item(
-        menu,
-        avatar_flags,
-        CMD_CENTER_AVATAR,
-        w!("アバターを中央に戻す"),
-    );
-    append_item(menu, MF_STRING, CMD_TOGGLE_MIC, mic_label);
-    append_separator(menu);
-    append_item(menu, MF_STRING, CMD_QUIT, w!("終了"));
-
-    if !state.pod_open {
-        // SAFETY: `menu` is the live popup built above; the call only
-        // marks which entry is the default.
-        unsafe {
-            let _discarded = SetMenuDefaultItem(menu, CMD_OPEN_CHAT, 0);
-        }
-    }
-
-    let mut pt = POINT::default();
-    // SAFETY: `pt` is a live local the call only writes into.
-    unsafe {
-        let _discarded = GetCursorPos(&mut pt);
-    }
-    // SAFETY: bringing our own window to the foreground is required before
-    // `TrackPopupMenu`, or the menu is dismissed by the next click.
-    unsafe {
-        let _discarded = SetForegroundWindow(hwnd);
-    }
-    // SAFETY: `menu` is live and `hwnd` owns it; the call reads `pt` by
-    // value and returns the chosen id without retaining anything.
-    let picked = unsafe {
-        TrackPopupMenu(
-            menu,
-            TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
-            pt.x,
-            pt.y,
-            None,
-            hwnd,
-            None,
-        )
-    };
-    // SAFETY: the documented workaround for the first-click bug — a
-    // posted `WM_NULL` lets the menu close cleanly on our own window.
-    unsafe {
-        ignore_teardown(PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0)));
-    }
-    // SAFETY: `menu` was created in this function and is not used again.
-    unsafe {
-        ignore_teardown(DestroyMenu(menu));
-    }
-    if picked.0 > 0
-        && let Some(action) = action_for_command(picked.0 as u32)
-    {
-        let _discarded = ctx.tx.send(action);
-    }
-}
-
-fn append_item(menu: HMENU, flags: MENU_ITEM_FLAGS, id: u32, label: PCWSTR) {
-    // SAFETY: `menu` is the live popup owned by the caller and `label` is a
-    // `w!` literal with static lifetime.
-    unsafe {
-        let _discarded = AppendMenuW(menu, flags, id as usize, label);
-    }
-}
-
-fn append_separator(menu: HMENU) {
-    // SAFETY: same live popup; a separator takes a null label by contract.
-    unsafe {
-        let _discarded = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-    }
-}
-
-fn load_or_create_tray_icon() -> (HICON, bool) {
-    // SAFETY: reads a metric index; takes no pointer and cannot fail.
-    let cx = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
-    // SAFETY: as above, for the vertical metric.
-    let cy = unsafe { GetSystemMetrics(SM_CYSMICON) }.max(16);
-    // SAFETY: `None` names this process's own module, alive throughout.
-    if let Ok(module) = unsafe { GetModuleHandleW(None) } {
-        // SAFETY: the module handle is live; the resource id is the
-        // process's own embedded icon and the sizes came from the metrics
-        // above. The returned handle is checked before use.
-        if let Ok(handle) = unsafe {
-            LoadImageW(
-                Some(module.into()),
-                PCWSTR(std::ptr::without_provenance(1)),
-                IMAGE_ICON,
-                cx,
-                cy,
-                IMAGE_FLAGS(0),
-            )
-        } && !handle.is_invalid()
-        {
-            return (HICON(handle.0), true);
-        }
-        // SAFETY: same live module and its own embedded icon resource; the
-        // returned handle is checked for validity before it is used.
-        let icon =
-            unsafe { LoadIconW(Some(module.into()), PCWSTR(std::ptr::without_provenance(1))) };
-        if let Ok(icon) = icon
-            && !icon.is_invalid()
-        {
-            return (icon, false);
-        }
-    }
-    (
-        create_fallback_icon(cx.min(64) as u32).unwrap_or_default(),
-        true,
-    )
-}
-
-fn create_fallback_icon(size: u32) -> Option<HICON> {
-    let size = size.max(16);
-    let stride = (size * 4) as usize;
-    let bmi = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: size as i32,
-            biHeight: -(size as i32), // top-down
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let mut bits: *mut c_void = std::ptr::null_mut();
-    // SAFETY: `bmi` describes a top-down 32bpp DIB and `bits` is a live
-    // local the call points at the new pixel buffer through.
-    let color = unsafe { CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) }.ok()?;
-    if bits.is_null() {
-        // SAFETY: the section was created but produced no pixels, so it
-        // is released here instead of being handed out.
-        unsafe {
-            let _discarded = DeleteObject(color.into());
-        }
-        return None;
-    }
-    // SAFETY: `bits` points at `stride * size` bytes of a top-down
-    // 32bpp DIB created above, which the loop below writes within.
-    let pixels =
-        unsafe { std::slice::from_raw_parts_mut(bits.cast::<u8>(), stride * (size as usize)) };
-    let s = size as f32;
-    let c = (s - 1.0) * 0.5;
-    let r = s * 0.45;
-    let _discarded = USER_DEFAULT_SCREEN_DPI;
-    for y in 0..size {
-        for x in 0..size {
-            let dx = (x as f32 - c) / r;
-            let dy = (y as f32 - c) / r;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let off = ((y * size + x) * 4) as usize;
-            if dist <= 1.0 {
-                let star = dx.abs().sqrt() + dy.abs().sqrt() <= 0.85;
-                let (pr, pg, pb) = if star {
-                    (255, 253, 253)
-                } else {
-                    (207, 46, 104)
-                };
-                pixels[off] = pb;
-                pixels[off + 1] = pg;
-                pixels[off + 2] = pr;
-                pixels[off + 3] = 255;
-            } else {
-                pixels[off..off + 4].fill(0);
-            }
-        }
-    }
-    let mask_stride = (size.div_ceil(16) * 2) as usize;
-    let mask_bytes = vec![0u8; mask_stride * (size as usize)];
-    // SAFETY: `mask_bytes` is a live 1bpp buffer of exactly the size the
-    // dimensions describe; `CreateBitmap` copies it.
-    let mask = unsafe {
-        CreateBitmap(
-            size as i32,
-            size as i32,
-            1,
-            1,
-            Some(mask_bytes.as_ptr().cast()),
-        )
-    };
-    let info = ICONINFO {
-        fIcon: true.into(),
-        xHotspot: 0,
-        yHotspot: 0,
-        hbmMask: mask,
-        hbmColor: color,
-    };
-    // SAFETY: `info` names the two bitmaps just created; the call reads
-    // them and returns an independent icon handle.
-    let icon = unsafe { CreateIconIndirect(&info) }.ok();
-    // SAFETY: `CreateIconIndirect` copied the bitmaps, so both handles
-    // are ours to release; the mask is skipped when creation failed.
-    unsafe {
-        if !mask.is_invalid() {
-            let _discarded = DeleteObject(mask.into());
-        }
-    }
-    // SAFETY: the colour bitmap is always created before this point.
-    unsafe {
-        let _discarded = DeleteObject(color.into());
-    }
-    icon
 }
 
 #[cfg(test)]
