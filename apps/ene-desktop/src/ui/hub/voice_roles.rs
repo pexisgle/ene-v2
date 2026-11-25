@@ -61,8 +61,8 @@ pub(super) fn select_connection_model(
 
 pub(super) fn select_voicevox_speaker(
     hub: &mut Hub,
-    connection_id: String,
-    speaker_id: String,
+    connection_id: &str,
+    speaker_id: &str,
     cx: &mut Context<Hub>,
 ) {
     select_tts_voice(hub, connection_id, speaker_id, cx);
@@ -70,8 +70,8 @@ pub(super) fn select_voicevox_speaker(
 
 pub(super) fn select_tts_voice(
     hub: &mut Hub,
-    connection_id: String,
-    voice_id: String,
+    connection_id: &str,
+    voice_id: &str,
     cx: &mut Context<Hub>,
 ) {
     let Some(conn) = hub.model.settings().and_then(|s| {
@@ -96,8 +96,8 @@ pub(super) fn select_tts_voice(
 
 pub(super) fn select_stt_model(
     hub: &mut Hub,
-    connection_id: String,
-    model_id: String,
+    connection_id: &str,
+    model_id: &str,
     cx: &mut Context<Hub>,
 ) {
     let Some(conn) = hub.model.settings().and_then(|s| {
@@ -121,18 +121,13 @@ pub(super) fn select_stt_model(
 
 pub(super) fn assign_stt_model(
     hub: &mut Hub,
-    selection: Option<(String, String)>,
+    selection: Option<(&str, &str)>,
     cx: &mut Context<Hub>,
 ) {
     let Some(settings) = hub.model.settings() else {
         return;
     };
-    let inputs = build_stt_assignment_inputs(
-        &settings.connections,
-        selection
-            .as_ref()
-            .map(|(cid, mid)| (cid.as_str(), mid.as_str())),
-    );
+    let inputs = build_stt_assignment_inputs(&settings.connections, selection);
     if inputs.is_empty() {
         return;
     }
@@ -148,7 +143,7 @@ pub(super) fn assign_stt_model(
 
 pub(super) fn assign_tts_voice(
     hub: &mut Hub,
-    selection: Option<(String, String)>,
+    selection: Option<(&str, &str)>,
     cx: &mut Context<Hub>,
 ) {
     let Some(settings) = hub.model.settings() else {
@@ -157,12 +152,7 @@ pub(super) fn assign_tts_voice(
     if hub.rpc.host().is_none() {
         return;
     }
-    let inputs = build_tts_assignment_inputs(
-        &settings.connections,
-        selection
-            .as_ref()
-            .map(|(cid, vid)| (cid.as_str(), vid.as_str())),
-    );
+    let inputs = build_tts_assignment_inputs(&settings.connections, selection);
     if inputs.is_empty() {
         return;
     }

@@ -119,8 +119,8 @@ impl Hub {
 
     pub(crate) fn select_voicevox_speaker(
         &mut self,
-        connection_id: String,
-        speaker_id: String,
+        connection_id: &str,
+        speaker_id: &str,
         cx: &mut Context<Self>,
     ) {
         voice_roles::select_voicevox_speaker(self, connection_id, speaker_id, cx);
@@ -132,7 +132,7 @@ impl Hub {
         voice_id: String,
         cx: &mut Context<Self>,
     ) {
-        voice_roles::select_tts_voice(self, connection_id, voice_id, cx);
+        voice_roles::select_tts_voice(self, &connection_id, &voice_id, cx);
     }
 
     pub(crate) fn select_stt_model(
@@ -141,7 +141,7 @@ impl Hub {
         model_id: String,
         cx: &mut Context<Self>,
     ) {
-        voice_roles::select_stt_model(self, connection_id, model_id, cx);
+        voice_roles::select_stt_model(self, &connection_id, &model_id, cx);
     }
 
     /// Assigns the active STT connection and model atomically across all STT connections.
@@ -150,7 +150,11 @@ impl Hub {
         selection: Option<(String, String)>,
         cx: &mut Context<Self>,
     ) {
-        voice_roles::assign_stt_model(self, selection, cx);
+        voice_roles::assign_stt_model(
+            self,
+            selection.as_ref().map(|(a, b)| (a.as_str(), b.as_str())),
+            cx,
+        );
     }
 
     /// Assigns the active TTS connection and voice atomically across all TTS connections,
@@ -160,7 +164,11 @@ impl Hub {
         selection: Option<(String, String)>,
         cx: &mut Context<Self>,
     ) {
-        voice_roles::assign_tts_voice(self, selection, cx);
+        voice_roles::assign_tts_voice(
+            self,
+            selection.as_ref().map(|(a, b)| (a.as_str(), b.as_str())),
+            cx,
+        );
     }
 
     pub(crate) fn select_embedding_model(

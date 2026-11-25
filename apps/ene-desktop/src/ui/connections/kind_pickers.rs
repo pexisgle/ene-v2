@@ -145,7 +145,7 @@ pub(super) fn build_voicevox_picker(
         cx,
         move |hub, picked, cx| {
             list_d_pick.update(cx, |d, cx| d.set(picked.clone(), cx));
-            hub.select_voicevox_speaker(cid.clone(), picked, cx);
+            hub.select_voicevox_speaker(&cid, &picked, cx);
         },
     )
 }
