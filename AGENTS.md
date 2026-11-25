@@ -70,6 +70,16 @@ override — so the inner attribute is the only per-crate form. Add it to one of
 those four only once `cargo clippy -p <crate>` reports zero for it, never as an
 `#[allow]`.
 
+## OS perception on Linux
+
+`apps/ene-desktop/src/perception/platform_linux.rs` uses `zwlr_foreign_toplevel`
+directly, so it observes the active window on **any** wlroots compositor. Do not
+replace it with `active-win-pos-rs`: that crate's Wayland support is
+`try_kwin().or_else(try_hyprland)` and returns nothing anywhere else (verified on
+a non-KWin, non-Hyprland session). It also would not reduce `unsafe`, because
+this file contains none — the workspace's `unsafe` is Win32 FFI inside
+`ene-platform-os`.
+
 Two former rules are now enforced by the compiler, so there is no second copy
 to drift: no `println!`/`eprintln!` in production (`clippy::print_stdout`,
 `clippy::print_stderr`), and no `unsafe` in `apps/ene-desktop`
