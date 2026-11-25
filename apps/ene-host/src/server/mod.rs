@@ -96,13 +96,23 @@ async fn wait_for_shutdown() {
 
     // The desktop holds the write end until it exits, including on a crash.
     let (closed, wait) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        // Draining stdin blocks until the desktop closes the pipe; the byte count
-        // and any I/O error are both expected to be uninteresting.
-        let _drained = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
-        // The receiver stops listening once the host is already closing.
-        let _signalled = closed.send(());
-    });
+    // Named so a thread dump during a hung shutdown points at this wait. If the
+    // OS refuses the thread, the host falls back to signal shutdown rather than
+    // hanging forever on a wait nothing will satisfy.
+    let spawned = std::thread::Builder::new()
+        .name("ene-host-stdin-eof".into())
+        .spawn(move || {
+            // Draining stdin blocks until the desktop closes the pipe; the byte
+            // count and any I/O error are both expected to be uninteresting.
+            let _drained = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+            // The receiver stops listening once the host is already closing.
+            let _signalled = closed.send(());
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "cannot watch stdin; falling back to signal shutdown");
+        wait_for_signal().await;
+        return;
+    }
     // This wait ends by design when the pipe closes.
     let _closed = wait.await;
 }
