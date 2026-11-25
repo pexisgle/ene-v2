@@ -39,7 +39,6 @@ rubato.workspace = true
 regex = "1"
 unicode-segmentation = "1"
 uuid.workspace = true
-which.workspace = true
 image.workspace = true
 
 # gpui's Linux backends are features, and the workspace pins the crate with
@@ -56,6 +55,10 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 x11rb = { version = "0.13", features = ["screensaver"] }
+
+# Workspace::open finds bash with which on every non-Windows platform.
+[target.'cfg(not(windows))'.dependencies]
+which.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
