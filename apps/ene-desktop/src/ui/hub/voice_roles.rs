@@ -13,8 +13,8 @@ use gpui::Context;
 
 pub(super) fn select_connection_model(
     hub: &mut Hub,
-    connection_id: String,
-    model_id: String,
+    connection_id: &str,
+    model_id: &str,
     cx: &mut Context<Hub>,
 ) {
     let Some(conn) = hub.model.settings().and_then(|s| {
@@ -25,13 +25,13 @@ pub(super) fn select_connection_model(
     }) else {
         return;
     };
-    let model_id = model_id.trim().to_owned();
+    let model_id = model_id.trim();
     if model_id.is_empty() {
         return;
     }
     hub.upsert_connection(
         "使用モデルの変更",
-        build_connection_model_input(&conn, &model_id),
+        build_connection_model_input(&conn, model_id),
         cx,
     );
     if let Some(comp) = hub.model.companion().cloned() {
@@ -45,12 +45,16 @@ pub(super) fn select_connection_model(
         if comp_uses_conn {
             hub.assign_model(
                 ModelRoleSlot::Companion,
-                Some((connection_id.clone(), model_id.clone())),
+                Some((connection_id.to_owned(), model_id.to_owned())),
                 cx,
             );
         }
         if task_uses_conn {
-            hub.assign_model(ModelRoleSlot::Task, Some((connection_id, model_id)), cx);
+            hub.assign_model(
+                ModelRoleSlot::Task,
+                Some((connection_id.to_owned(), model_id.to_owned())),
+                cx,
+            );
         }
     }
 }

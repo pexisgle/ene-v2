@@ -231,14 +231,14 @@ pub(super) fn add_voicevox_preset(
 
 pub(super) fn add_openai_tts_preset(
     hub: &mut Hub,
-    endpoint: String,
-    model: String,
-    voice: String,
+    endpoint: &str,
+    model: &str,
+    voice: &str,
     cx: &mut Context<Hub>,
 ) {
     hub.upsert_connection(
         "TTS接続の追加",
-        build_openai_tts_preset_input(&endpoint, &model, &voice),
+        build_openai_tts_preset_input(endpoint, model, voice),
         cx,
     );
 }

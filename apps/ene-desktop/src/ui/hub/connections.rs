@@ -114,7 +114,7 @@ impl Hub {
         model_id: String,
         cx: &mut Context<Self>,
     ) {
-        voice_roles::select_connection_model(self, connection_id, model_id, cx);
+        voice_roles::select_connection_model(self, &connection_id, &model_id, cx);
     }
 
     pub(crate) fn select_voicevox_speaker(
@@ -337,7 +337,7 @@ impl Hub {
         voice: String,
         cx: &mut Context<Self>,
     ) {
-        presets::add_openai_tts_preset(self, endpoint, model, voice, cx);
+        presets::add_openai_tts_preset(self, &endpoint, &model, &voice, cx);
     }
 
     pub(crate) fn add_stt_preset(
