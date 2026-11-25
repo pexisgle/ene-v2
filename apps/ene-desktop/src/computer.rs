@@ -37,8 +37,7 @@ pub(crate) fn spec() -> ene_rpc::ClientCapabilitySpec {
         }
         let required: Vec<_> = properties
             .as_object()
-            .map(|object| object.keys().collect())
-            .unwrap_or_default();
+            .map_or_else(Vec::new, |object| object.keys().collect());
         json!({
             "type": "object", "properties": properties, "required": required,
             "additionalProperties": false

@@ -1,4 +1,6 @@
-use super::{SHELL, helpers::image, workspace::Workspace};
+#[cfg(unix)]
+use super::helpers::image;
+use super::{SHELL, workspace::Workspace};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
@@ -131,6 +133,7 @@ fn only_the_four_supported_images_are_treated_as_images() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn file_operations_cannot_follow_a_link_out_of_the_workspace() {
     let directory = tempfile::tempdir().unwrap();
