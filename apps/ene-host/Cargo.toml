@@ -37,8 +37,10 @@ getrandom = "0.4"
 hashlink.workspace = true
 http.workspace = true
 http-body-util.workspace = true
-hyper = { version = "=1.12.0", features = ["client", "server", "http1"] }
-hyper-util = { version = "=0.1.21", features = ["tokio"] }
+# `hyper` is used directly for `hyper::body::Frame`; the version is left
+# to `axum`, which pins it, so a patch bump does not need editing here.
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 io-lifetimes = "3"
 image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 itertools = "0.15"
@@ -94,7 +96,7 @@ tower = { version = "0.5", features = ["util"] }
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 
-# Pinned exact versions for `axum::serve` h2c / HTTP2 connection handling.
+# `hyper-util` is reached only through `axum::serve`'s h2c handling, never named
+# in this crate's source, so machete cannot see it. Keep the ignore.
 [package.metadata.cargo-machete]
-# `hyper-util` is still only reached through `axum::serve`, so it stays ignored.
 ignored = ["hyper-util"]
