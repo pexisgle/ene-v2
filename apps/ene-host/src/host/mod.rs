@@ -61,7 +61,6 @@ use ene_rpc as w;
 use rig_ecs::{prelude::*, session_log::SessionLog, session_log::SessionStore};
 use rig_memory::DirStore;
 use std::{
-    error::Error,
     path::Path,
     sync::{Arc, Mutex, mpsc},
     thread::JoinHandle,
@@ -81,7 +80,34 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-type StartError = Box<dyn Error + Send + Sync>;
+/// Why the host could not come up.
+///
+/// A caller can match on this instead of downcasting a `Box<dyn Error>`, and the
+/// `thiserror` messages name the step that failed rather than repeating the
+/// whole chain as one opaque string.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum StartError {
+    /// Opening or migrating the SQLite store failed.
+    #[error("cannot prepare the store: {0}")]
+    Store(#[from] HostError),
+    /// A repository read or write during startup failed.
+    #[error("cannot seed the store: {0}")]
+    Seed(#[from] ene_store::StoreError),
+    /// Opening the Rig session-log directory failed.
+    ///
+    /// The source is boxed because `rig-memory` does not re-export its
+    /// `SessionError`, so naming the concrete type here would need a private path.
+    #[error("cannot open the session log at {path}: {source}")]
+    SessionLog {
+        path: std::path::PathBuf,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// The kernel thread never reported ready.
+    #[error("the agent kernel did not start")]
+    Kernel,
+}
+
 type Job = Box<dyn FnOnce(&mut App) + Send>;
 
 /// Runs `job` on the actor thread inside the span its caller was already in.
@@ -333,10 +359,6 @@ fn restore_after_first_frame(world: &mut World) -> Result<()> {
     // first turn.
     client::dynamic::init(world);
     Ok(())
-}
-
-fn boxed(error: impl std::fmt::Display) -> StartError {
-    std::io::Error::other(error.to_string()).into()
 }
 
 /// The whole public state, used for `GetSnapshot` and `Subscribe`.

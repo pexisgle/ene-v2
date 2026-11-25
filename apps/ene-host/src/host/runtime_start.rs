@@ -13,18 +13,19 @@ impl Runtime {
         state: &Path,
         options: Options,
     ) -> std::result::Result<Self, StartError> {
-        let store = Store::open(&state.join("host.sqlite3")).map_err(boxed)?;
-        store
-            .companion_repo()
-            .seed_initial_companion()
-            .map_err(boxed)?;
+        let store = Store::open(&state.join("host.sqlite3"))?;
+        store.companion_repo().seed_initial_companion()?;
         // A unit test has no operator to ask for a keyring, and the machine it
         // runs on may have none. Keeping the store in memory there makes the
         // tests independent of the platform backend; the binary still reads
         // the environment.
         let session_only = cfg!(test) || std::env::var_os("ENE_HOST_SESSION_CREDENTIALS").is_some();
         let credentials = Credentials::new(session_only);
-        let logs = DirStore::open(state.join("rig")).map_err(boxed)?;
+        let log_path = state.join("rig");
+        let logs = DirStore::open(&log_path).map_err(|source| StartError::SessionLog {
+            path: log_path,
+            source: Box::new(source),
+        })?;
         let (commands, command_rx) = crossbeam_channel::bounded::<Job>(QUEUE);
         let (wake_tx, wake_rx) = crossbeam_channel::bounded::<()>(1);
         let (shutdown, shutdown_rx) = crossbeam_channel::bounded::<()>(1);
@@ -67,11 +68,11 @@ impl Runtime {
             wake_rx,
             shutdown_rx,
         })
-        .map_err(boxed)?;
+        .map_err(|_| StartError::Kernel)?;
         ready_rx
             .recv()
-            .map_err(|_| boxed("Rig kernel did not start"))?
-            .map_err(boxed)?;
+            .map_err(|_| StartError::Kernel)?
+            .map_err(|_| StartError::Kernel)?;
         let voicevox = voice::voicevox::VoicevoxManager::with_auto_start(!cfg!(test));
         maybe_auto_start_voicevox(&store, &runtime_providers, &voicevox);
         Ok(Self {
