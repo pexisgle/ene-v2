@@ -24,7 +24,7 @@ macro_rules! request {
             request: connectrpc::ServiceRequest<'_, $request>,
         ) -> connectrpc::ServiceResult<$response> {
             let request = request.to_owned_message();
-            self.read(move |app| $op(app.world_mut(), request)).await
+            self.read(move |app| $op(app.world_mut(), &request)).await
         }
     };
     (store $name:ident, $request:ty, $response:ty, $op:path) => {

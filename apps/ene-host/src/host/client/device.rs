@@ -221,7 +221,7 @@ fn get_state(
 }
 
 /// Reads the current state of one operation.
-pub(crate) fn get(world: &mut World, request: w::Id) -> Result<w::DeviceOperationState> {
+pub(crate) fn get(world: &mut World, request: &w::Id) -> Result<w::DeviceOperationState> {
     get_state(
         world.resource::<Store>(),
         world.get_resource::<ComputerUse>(),

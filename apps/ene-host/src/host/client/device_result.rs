@@ -57,7 +57,7 @@ pub(crate) fn complete(
             );
             return get(
                 world,
-                w::Id {
+                &w::Id {
                     id: operation.id.clone(),
                     ..Default::default()
                 },
