@@ -100,7 +100,7 @@ impl SnapshotReader<'_> {
                 ..Default::default()
             }
             .into(),
-            settings: Some(wire::settings(&store.settings_repo().settings()?)).into(),
+            settings: Some(w::Settings::from(&store.settings_repo().settings()?)).into(),
             companions,
             work_sessions,
             active_companion_id,

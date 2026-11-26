@@ -6,7 +6,7 @@ use crate::host::error::HostError;
 use crate::host::model;
 use crate::host::settings;
 use crate::host::settings::CredentialState;
-use crate::host::wire;
+
 use connectrpc::ConnectError;
 use connectrpc::RequestContext;
 use connectrpc::Response;
@@ -74,7 +74,7 @@ pub(super) async fn register_credentials(
                 .set_credential_state(&id, CredentialState::Registered)?;
             notify_settings(
                 &services.notifier,
-                wire::settings(&store.settings_repo().settings()?),
+                w::Settings::from(&store.settings_repo().settings()?),
             );
             Ok(w::CredentialResult {
                 credential_state: CredentialState::Registered.as_str().into(),
@@ -103,7 +103,7 @@ pub(super) async fn revoke_credentials(
             store.settings_repo().set_credential_state(&id, state)?;
             notify_settings(
                 &services.notifier,
-                wire::settings(&store.settings_repo().settings()?),
+                w::Settings::from(&store.settings_repo().settings()?),
             );
             Ok(w::Empty::default())
         })

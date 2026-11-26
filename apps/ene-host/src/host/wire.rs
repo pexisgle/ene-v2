@@ -10,10 +10,6 @@ use ene_mind::Memory;
 use ene_rpc as w;
 use serde_json::Value;
 
-// What the RPC layer still calls: these moved to `wire_settings` with the
-// connection conversions.
-pub(crate) use super::wire_settings::{connection_from, settings};
-
 /// Maps an enum whose variants the contract carries under the same names.
 macro_rules! wire_enum {
     ($name:ident: $from:ty => $to:ty { $($variant:ident),+ $(,)? }) => {
@@ -24,7 +20,6 @@ macro_rules! wire_enum {
         }
     };
 }
-pub(crate) use wire_enum;
 
 /// Copies the listed fields into the target type, cloning each.
 macro_rules! wire_copy {

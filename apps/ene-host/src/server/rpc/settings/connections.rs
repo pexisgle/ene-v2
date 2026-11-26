@@ -29,7 +29,7 @@ pub(super) async fn delete_connection(
                 store.settings_repo().delete_connection(&id, revision, || {
                     crate::host::model::delete_secret(&dependencies.credentials, &id)
                 })?;
-            let view = wire::settings(&settings);
+            let view = w::Settings::from(&settings);
             notify_settings(&dependencies.notifier, view.clone());
             for companion in companions {
                 if let Err(error) = kernel.rebind_companion(&companion.id) {
@@ -107,7 +107,7 @@ pub(super) async fn check_connection(
             if checked_revision.is_some() {
                 notify_settings(
                     &services.notifier,
-                    wire::settings(&store.settings_repo().settings()?),
+                    w::Settings::from(&store.settings_repo().settings()?),
                 );
             }
             Ok(w::CheckResult {

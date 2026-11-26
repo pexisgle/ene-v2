@@ -212,6 +212,18 @@ macro_rules! state_conversion {
 }
 
 state_conversion!(
+    wire::ConnectionKind,
+    domain::ConnectionKind,
+    "connection kind is required",
+    Llm,
+    Tts,
+    Stt,
+    Embedding,
+    Mcp,
+    Acp,
+    Search,
+);
+state_conversion!(
     wire::ApprovalStatus,
     ene_policy::ApprovalStatus,
     "an approval status is required",

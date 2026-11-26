@@ -4,10 +4,13 @@
 use super::model::agent_platform;
 use crate::host::providers::Providers;
 pub(crate) use ene_catalog::{SAKURA_AI_API_KEY_ENV, SAKURA_AI_ENDPOINT};
+#[cfg(test)]
 pub(crate) use ene_domain::settings::{
-    AcpConnection, Check, Connection, ConnectionConfig, ConnectionKind, CredentialState,
-    EmbeddingConnection, Endpoint, LlmConnection, McpConnection, SearchConnection, Settings,
+    AcpConnection, EmbeddingConnection, LlmConnection, McpConnection, SearchConnection,
     SttConnection, TtsConnection,
+};
+pub(crate) use ene_domain::settings::{
+    Check, Connection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint,
 };
 use ene_plugin::{Extension, provider::AuthProfile};
 use ene_rpc as w;

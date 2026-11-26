@@ -2,7 +2,7 @@
 
 use super::super::Services;
 use super::{is_builtin_voicevox, notify_settings};
-use crate::host::wire;
+use crate::host::error::HostError;
 use connectrpc::RequestContext;
 use connectrpc::ServiceRequest;
 use connectrpc::ServiceResult;
@@ -14,7 +14,7 @@ pub(super) async fn get_settings(
     _arg2: ServiceRequest<'_, w::Empty>,
 ) -> ServiceResult<w::Settings> {
     services
-        .with_store(|store| Ok(wire::settings(&store.settings_repo().settings()?)))
+        .with_store(|store| Ok(w::Settings::from(&store.settings_repo().settings()?)))
         .await
 }
 
@@ -28,7 +28,10 @@ pub(super) async fn update_settings(
     let mut inputs = Vec::with_capacity(request.connections.len());
     for input in request.connections {
         let expected = input.expected_revision;
-        inputs.push((wire::connection_from(input)?, expected));
+        inputs.push((
+            ene_domain::Connection::try_from(input).map_err(HostError::from)?,
+            expected,
+        ));
     }
     // Pre-start enabled plugins referenced in `inputs` so that when
     // `SettingsUpdated` fires on reload inside `services.call`, newly enabled
@@ -62,7 +65,7 @@ pub(super) async fn update_settings(
             let settings = store
                 .settings_repo()
                 .update_settings(expected_revision, &inputs)?;
-            let view = wire::settings(&settings);
+            let view = w::Settings::from(&settings);
             notify_settings(&services.notifier, view.clone());
             Ok(view)
         })

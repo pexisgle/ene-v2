@@ -32,7 +32,6 @@ pub(crate) mod tests;
 pub(crate) mod wire;
 // Split out of `wire` when it outgrew 500 lines; `wire` re-exports its
 // `settings`, `check` and `connection_from` so `host::wire::` paths hold.
-mod wire_settings;
 pub(crate) mod work;
 
 // Split out of this file when it outgrew 500 lines. `snapshot` and `subscribe`
