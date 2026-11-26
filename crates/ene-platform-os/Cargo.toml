@@ -17,6 +17,9 @@ tokio.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tray-icon.workspace = true
+winit.workspace = true
+xcap.workspace = true
 # JPEG encoding for screen capture; the desktop crate no longer needs it.
 image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 windows = { version = "0.62", features = [
@@ -31,3 +34,9 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+x11rb = { version = "0.13", features = ["screensaver"] }

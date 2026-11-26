@@ -20,6 +20,8 @@ pub mod capture;
 pub mod input;
 #[cfg(windows)]
 pub mod observe;
+#[cfg(target_os = "linux")]
+mod observe_linux;
 pub mod observe_types;
 pub mod tray;
 #[cfg(windows)]
@@ -31,6 +33,8 @@ pub use capture::{CapturedFrame, Foreground, MAX_FRAME_EDGE, MAX_JPEG_BYTES};
 pub use input::{Desktop, Point, Rect};
 #[cfg(windows)]
 pub use observe::observe;
+#[cfg(target_os = "linux")]
+pub use observe_linux::{observe, supported as observation_supported};
 pub use observe_types::{Observation, Window};
 pub use tray::{Tray, TrayAction, TrayHandle, TrayMode, TraySection, TrayState};
 #[cfg(windows)]

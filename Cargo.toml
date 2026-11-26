@@ -124,6 +124,9 @@ strum = { version = "0.28", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 which = "8"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+tray-icon = { version = "0.26.1", default-features = false }
+winit = { version = "0.30.13", default-features = false }
+xcap = { version = "0.9.10", default-features = false }
 
 [profile.dev]
 opt-level = 1

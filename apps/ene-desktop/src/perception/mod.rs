@@ -5,8 +5,6 @@ use std::{
     path::PathBuf,
 };
 
-#[cfg(target_os = "linux")]
-mod platform_linux;
 mod rules;
 #[cfg(windows)]
 pub(crate) mod screen;
@@ -62,7 +60,7 @@ pub fn supported() -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        platform_linux::supported()
+        ene_platform_os::observation_supported()
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
@@ -70,17 +68,10 @@ pub fn supported() -> bool {
     }
 }
 
-/// Samples the OS once.
-#[cfg(windows)]
+/// Samples the current foreground window and idle time.
+#[cfg(any(windows, target_os = "linux"))]
 pub fn observe() -> Observation {
     ene_platform_os::observe()
-}
-
-/// Samples the OS once on Linux (Wayland `wlr-foreign-toplevel-management`
-/// or X11 `_NET_ACTIVE_WINDOW`), falling back safely when unavailable.
-#[cfg(target_os = "linux")]
-pub fn observe() -> Observation {
-    platform_linux::observe()
 }
 
 /// A platform without a window hook reports no window, and says so by
@@ -91,23 +82,4 @@ pub fn observe() -> Observation {
         window: None,
         idle_seconds: 0,
     }
-}
-
-#[cfg(any(target_os = "linux", test))]
-pub(super) fn parse_wm_class(bytes: &[u8]) -> String {
-    let mut parts = bytes
-        .split(|&byte| byte == 0)
-        .map(|part| String::from_utf8_lossy(part).into_owned());
-    let instance = parts.next().unwrap_or_default();
-    let class = parts.next().unwrap_or_default();
-    if !class.is_empty() { class } else { instance }
-}
-
-#[cfg(any(target_os = "linux", test))]
-pub(super) fn wayland_state_is_activated(bytes: &[u8]) -> bool {
-    const ACTIVATED: u32 = 2;
-    let (chunks, _) = bytes.as_chunks::<4>();
-    chunks
-        .iter()
-        .any(|chunk| u32::from_ne_bytes(*chunk) == ACTIVATED)
 }

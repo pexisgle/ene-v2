@@ -51,12 +51,6 @@ gpui = { workspace = true, features = ["wayland", "x11"] }
 # removed on Linux in libc 0.2.190.
 libc = ">=0.2.186, <0.2.190"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = ["client", "staging"] }
-wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-x11rb = { version = "0.13", features = ["screensaver"] }
-
 # Workspace::open finds bash with which on every non-Windows platform.
 [target.'cfg(not(windows))'.dependencies]
 which.workspace = true

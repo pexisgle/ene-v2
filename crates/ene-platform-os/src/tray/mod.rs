@@ -23,7 +23,6 @@ pub enum TraySection {
     Device,
 }
 #[cfg(windows)]
-use crate::best_effort::ignore_teardown;
 use parking_lot::RwLock;
 use std::sync::{
     Arc,
@@ -69,9 +68,10 @@ impl Default for TrayState {
 /// Cloneable UI-side handle to refresh tray state and check residency.
 #[derive(Clone, Debug)]
 pub struct TrayHandle {
+    #[cfg(windows)]
     shared: Arc<RwLock<TrayState>>,
     #[cfg(windows)]
-    hwnd_raw: isize,
+    events: winit::event_loop::EventLoopProxy<windows_tray::Event>,
     resident: Arc<AtomicBool>,
 }
 
@@ -81,18 +81,17 @@ impl TrayHandle {
     }
 
     pub fn update(&self, next: TrayState) {
-        let tip_changed = {
-            let mut guard = self.shared.write();
-            let changed = guard.tooltip != next.tooltip;
-            *guard = next;
-            changed
-        };
         #[cfg(windows)]
-        if self.is_resident() && tip_changed {
-            windows_tray::request_tip_refresh(self.hwnd_raw);
+        {
+            let mut current = self.shared.write();
+            if *current != next {
+                *current = next;
+                drop(current);
+                drop(self.events.send_event(windows_tray::Event::Refresh));
+            }
         }
         #[cfg(not(windows))]
-        let _discarded = tip_changed;
+        drop(next);
     }
 }
 
@@ -127,11 +126,9 @@ impl Tray {
 
     fn stop(&mut self) {
         #[cfg(windows)]
-        {
-            windows_tray::request_close(self.handle.hwnd_raw);
-            if let Some(thread) = self.thread.take() {
-                let _discarded = thread.join();
-            }
+        if let Some(thread) = self.thread.take() {
+            drop(self.handle.events.send_event(windows_tray::Event::Quit));
+            drop(thread.join());
         }
     }
 }
@@ -142,62 +139,6 @@ impl Drop for Tray {
     }
 }
 
-#[cfg(windows)]
-const CMD_OPEN_CHAT: u32 = 1;
-#[cfg(windows)]
-const CMD_OPEN_MINI: u32 = 2;
-#[cfg(windows)]
-const CMD_HIDE_POD: u32 = 3;
-#[cfg(windows)]
-const CMD_SETTINGS_COMPANIONS: u32 = 4;
-#[cfg(windows)]
-const CMD_SETTINGS_CONNECTIONS: u32 = 5;
-#[cfg(windows)]
-const CMD_SETTINGS_DEVICE: u32 = 6;
-#[cfg(windows)]
-const CMD_CENTER_AVATAR: u32 = 7;
-#[cfg(windows)]
-const CMD_TOGGLE_MIC: u32 = 8;
-#[cfg(windows)]
-const CMD_QUIT: u32 = 9;
-
-#[cfg(windows)]
-fn action_for_command(id: u32) -> Option<TrayAction> {
-    match id {
-        CMD_OPEN_CHAT => Some(TrayAction::OpenChat),
-        CMD_OPEN_MINI => Some(TrayAction::OpenMiniPod),
-        CMD_HIDE_POD => Some(TrayAction::HidePod),
-        CMD_SETTINGS_COMPANIONS => Some(TrayAction::OpenSettings(TraySection::Companions)),
-        CMD_SETTINGS_CONNECTIONS => Some(TrayAction::OpenSettings(TraySection::Connections)),
-        CMD_SETTINGS_DEVICE => Some(TrayAction::OpenSettings(TraySection::Device)),
-        CMD_CENTER_AVATAR => Some(TrayAction::CenterAvatar),
-        CMD_TOGGLE_MIC => Some(TrayAction::ToggleMicMute),
-        CMD_QUIT => Some(TrayAction::Quit),
-        _ => None,
-    }
-}
-
-/// Encodes `text` as a NUL-terminated UTF-16 buffer fitting `NOTIFYICONDATAW::szTip`
-/// (`[u16; 128]`), stopping cleanly before splitting a surrogate pair.
-#[cfg(windows)]
-fn encode_tooltip(text: &str) -> [u16; 128] {
-    let mut buf = [0u16; 128];
-    let limit = buf.len() - 1;
-    let mut len = 0usize;
-    for ch in text.chars() {
-        let mut units = [0u16; 2];
-        let encoded = ch.encode_utf16(&mut units);
-        if len + encoded.len() > limit {
-            break;
-        }
-        buf[len..len + encoded.len()].copy_from_slice(encoded);
-        len += encoded.len();
-    }
-    buf
-}
-
-#[cfg(windows)]
-mod icon;
 #[cfg(windows)]
 mod menu;
 #[cfg(windows)]
