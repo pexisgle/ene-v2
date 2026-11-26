@@ -9,7 +9,10 @@ mod hooks;
 pub(crate) use hooks::run_hooks;
 
 use super::{PluginServices, Providers};
-use crate::host::{db::Store, resources::HostRuntime};
+use crate::host::{
+    db::Store,
+    resources::{HostExternalTool, HostRuntime},
+};
 use bevy_ecs::prelude::*;
 use ene_plugin::{Extension, Operation, PluginToolDefinition, ToolInvokeRequest, ToolInvokeResult};
 use rig_core::{
@@ -22,13 +25,7 @@ use rig_core::{
 };
 use rig_ecs::prelude::*;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
-
-/// Marks an ECS tool entity owned by an `Extension::Tool` plugin.
-#[derive(Component, Clone, Debug)]
-pub(crate) struct PluginTool {
-    pub(crate) plugin_id: String,
-}
+use std::collections::HashSet;
 
 /// Aggregated result from invoking all installed `Extension::Hook` plugins.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -208,16 +205,16 @@ pub(crate) fn register_plugin_tools(world: &mut World, tools: Vec<(String, Plugi
         .unwrap_or_default();
     let store = world.resource::<Store>().clone();
     // Despawn any stale plugin tools before spawning the refreshed set.
-    let existing: Vec<Entity> = {
-        let mut query = world.query_filtered::<Entity, With<PluginTool>>();
-        query.iter(world).collect()
-    };
+    let existing: Vec<_> = world
+        .query::<(Entity, &HostExternalTool)>()
+        .iter(world)
+        .filter(|(_, owner)| matches!(owner, HostExternalTool::Plugin(_)))
+        .map(|(entity, _)| entity)
+        .collect();
+    let mut changed = !existing.is_empty();
     for entity in existing {
-        if let Ok(entity) = world.get_entity_mut(entity) {
-            entity.despawn();
-        }
+        let _despawned = world.try_despawn(entity);
     }
-    let mut changed = !tools.is_empty();
     for (plugin_id, def) in tools {
         let Ok(name) = ToolName::new(def.name.clone()) else {
             continue;
@@ -239,25 +236,15 @@ pub(crate) fn register_plugin_tools(world: &mut World, tools: Vec<(String, Plugi
             runtime: runtime.clone(),
         });
         if let Some(entity) = world.spawn_tool(tool_def, handler, ToolOptions::default()) {
-            world.entity_mut(entity).insert((
-                PluginTool { plugin_id },
-                crate::host::resources::HostExternalTool,
-            ));
+            world
+                .entity_mut(entity)
+                .insert(HostExternalTool::Plugin(plugin_id));
             changed = true;
         }
     }
     if changed {
         crate::host::tools::sync::sync_access(world);
     }
-}
-
-/// Maps each registered plugin tool name to its owning `plugin_id`.
-pub(crate) fn tool_owners(world: &mut World) -> HashMap<String, String> {
-    let mut query = world.query::<(&ToolDef, &PluginTool)>();
-    query
-        .iter(world)
-        .map(|(def, owner)| (def.0.name.as_str().to_owned(), owner.plugin_id.clone()))
-        .collect()
 }
 
 #[cfg(test)]
@@ -537,5 +524,25 @@ mod tests {
                     })
                 })
         });
+
+        let world = harness.app.world_mut();
+        let agent = world
+            .query_filtered::<Entity, With<WorkAgent>>()
+            .iter(world)
+            .next()
+            .unwrap();
+        assert!(
+            world
+                .get::<ToolAccess>(agent)
+                .unwrap()
+                .allows("reference_echo")
+        );
+        register_plugin_tools(world, Vec::new());
+        assert!(
+            !world
+                .get::<ToolAccess>(agent)
+                .unwrap()
+                .allows("reference_echo")
+        );
     }
 }

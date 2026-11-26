@@ -3,7 +3,7 @@
 //! lifecycle management.
 use super::{
     failures::{FailureKind, FailureReport, McpFailures, prune_failures, record_failure},
-    projection::project_servers,
+    projection::{project_servers, snapshot_tools},
     settings::{McpSettings, collect_retire_ids, prune_connecting, reload_desired_settings},
 };
 use crate::host::{db::Store, model::Credentials, resources::HostRuntime};
@@ -120,28 +120,35 @@ pub(crate) struct McpSupervisor {
 
 /// Reconcile transports first, then publish their tool registries to Rig.
 pub(super) fn sync(world: &mut World) {
-    let mcp = world.resource::<Mcp>().clone();
-    let mut supervisor = mcp.lock();
-    let runtime = world
-        .get_resource::<HostRuntime>()
-        .map(|runtime| &runtime.0);
-    if world
-        .get_resource::<crate::host::resources::HostState>()
-        .is_some_and(|state| state.ready().is_err())
-    {
-        supervisor.close(runtime);
-        project_servers(world, &supervisor.servers, &[]);
-    } else if let Some(runtime) = runtime {
-        match supervisor.reconcile(
-            world.resource::<Store>(),
-            world.get_resource::<Credentials>(),
-            world.get_resource::<Wake>(),
-            runtime,
-        ) {
-            Ok(retired) => project_servers(world, &supervisor.servers, &retired),
-            Err(error) if error.is_storage() => crate::host::fail(world, &error.to_string()),
-            Err(_) => {}
+    let projection: Option<crate::host::db::Result<_>> = {
+        let mut supervisor = world.resource::<Mcp>().lock();
+        let runtime = world
+            .get_resource::<HostRuntime>()
+            .map(|runtime| &runtime.0);
+        if world
+            .get_resource::<crate::host::resources::HostState>()
+            .is_some_and(|state| state.ready().is_err())
+        {
+            supervisor.close(runtime);
+            Some(Ok(snapshot_tools(&supervisor.servers)))
+        } else {
+            runtime.map(|runtime| {
+                supervisor.reconcile(
+                    world.resource::<Store>(),
+                    world.get_resource::<Credentials>(),
+                    world.get_resource::<Wake>(),
+                    runtime,
+                )?;
+                Ok(snapshot_tools(&supervisor.servers))
+            })
         }
+    };
+    match projection {
+        Some(Ok(tools)) => {
+            project_servers(world, tools);
+        }
+        Some(Err(error)) if error.is_storage() => crate::host::fail(world, &error.to_string()),
+        _ => {}
     }
 }
 
@@ -152,14 +159,13 @@ impl McpSupervisor {
         credentials: Option<&Credentials>,
         wake: Option<&Wake>,
         runtime: &tokio::runtime::Handle,
-    ) -> crate::host::db::Result<Vec<String>> {
+    ) -> crate::host::db::Result<()> {
         reload_desired_settings(&mut self.settings, store, credentials)?;
         let wanted = self.settings.desired.clone();
         prune_connecting(&mut self.connecting, &wanted);
         prune_failures(&mut self.failures, &wanted);
-        let mut retired = Vec::new();
         while let Ok(event) = self.events.receiver.try_recv() {
-            retired.extend(accept_event(self, &wanted, event, runtime));
+            accept_event(self, &wanted, event, runtime);
         }
         for id in collect_retire_ids(&self.servers, &wanted) {
             if let Some(server) = self.servers.0.remove(&id) {
@@ -179,7 +185,7 @@ impl McpSupervisor {
             wake,
             runtime,
         ));
-        Ok(retired)
+        Ok(())
     }
 
     fn close(&mut self, runtime: Option<&tokio::runtime::Handle>) {
@@ -294,7 +300,7 @@ pub(super) fn accept_event(
     wanted: &[(String, Desired)],
     event: Event,
     runtime: &tokio::runtime::Handle,
-) -> Option<String> {
+) {
     let (id, launch) = match &event {
         Event::Connected { id, launch, .. } | Event::Failed { id, launch, .. } => (id, launch),
     };
@@ -312,7 +318,7 @@ pub(super) fn accept_event(
         if let Event::Connected { connection, .. } = event {
             close_connection(connection, runtime);
         }
-        return None;
+        return;
     };
     supervisor.connecting.0.remove(id);
     match event {
@@ -324,7 +330,7 @@ pub(super) fn accept_event(
         } => {
             supervisor.failures.0.remove(&id);
             let previous = supervisor.servers.0.insert(
-                id.clone(),
+                id,
                 Server {
                     connection,
                     launch,
@@ -332,9 +338,10 @@ pub(super) fn accept_event(
                     label: want.name.clone(),
                     allowed: want.allowed.clone(),
                 },
-            )?;
-            close_connection(previous.connection, runtime);
-            Some(id)
+            );
+            if let Some(previous) = previous {
+                close_connection(previous.connection, runtime);
+            }
         }
         Event::Failed {
             id,
@@ -354,7 +361,6 @@ pub(super) fn accept_event(
                 supervisor.wake.clone(),
                 runtime,
             );
-            None
         }
     }
 }
@@ -388,14 +394,13 @@ fn check_state(
         && server.launch.credential_generation == credential_generation
         && !server.connection.is_closed()
     {
-        let catalog = server.registry.snapshot();
-        let mut names: Vec<String> = catalog
-            .definitions()
-            .iter()
-            .map(|def| def.name.as_str().to_owned())
+        let mut names: Vec<_> = server
+            .registry
+            .snapshot()
+            .names()
+            .map(str::to_owned)
             .collect();
-        names.sort();
-        names.dedup();
+        names.sort_unstable();
         return CheckState::Connected(names);
     }
     if let Some(failure) = supervisor.failures.0.get(id)

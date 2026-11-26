@@ -8,6 +8,7 @@ use crate::host::{
     db::Store,
     error::{HostError, Result},
     providers::extensions::run_hooks,
+    resources::HostExternalTool,
 };
 use bevy_ecs::prelude::*;
 use ene_policy::{CandidateAction, CapabilitySpec, PolicyRule};
@@ -103,27 +104,22 @@ pub(super) enum CandidateOutcome {
 }
 
 pub(super) fn build_candidate_action(ctx: &GateContext, item: &GateCall) -> CandidateOutcome {
-    if let Some(server_id) = ctx.mcp_tools.get(&item.tool_name) {
-        return CandidateOutcome::Resolved(Box::new((
-            CandidateAction::McpTool {
-                server_id: server_id.clone(),
-                tool_name: item.tool_name.clone(),
-                input: item.arguments.clone(),
+    if let Some(owner) = ctx.external_tools.get(&item.tool_name) {
+        let tool_name = item.tool_name.clone();
+        let input = item.arguments.clone();
+        let action = match owner {
+            HostExternalTool::Mcp { server, .. } => CandidateAction::McpTool {
+                server_id: server.clone(),
+                tool_name,
+                input,
             },
-            None,
-            None,
-        )));
-    }
-    if let Some(plugin_id) = ctx.plugin_tools.get(&item.tool_name) {
-        return CandidateOutcome::Resolved(Box::new((
-            CandidateAction::PluginTool {
-                plugin_id: plugin_id.clone(),
-                tool_name: item.tool_name.clone(),
-                input: item.arguments.clone(),
+            HostExternalTool::Plugin(plugin) => CandidateAction::PluginTool {
+                plugin_id: plugin.clone(),
+                tool_name,
+                input,
             },
-            None,
-            None,
-        )));
+        };
+        return CandidateOutcome::Resolved(Box::new((action, None, None)));
     }
     if item.tool_name == crate::host::web_search::NAME {
         let providers = ctx.providers.clone().unwrap_or_default();

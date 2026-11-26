@@ -12,7 +12,7 @@ use crate::host::{
     db::Store,
     error::Result,
     notify::Notifier,
-    resources::{CompanionAgent, WorkAgent},
+    resources::{CompanionAgent, HostExternalTool, WorkAgent},
     tools::run_tool,
 };
 use bevy_ecs::prelude::*;
@@ -118,8 +118,7 @@ pub(super) struct GateCall {
 
 pub(super) struct GateContext {
     pub(super) store: Store,
-    pub(super) mcp_tools: HashMap<String, String>,
-    pub(super) plugin_tools: HashMap<String, String>,
+    pub(super) external_tools: HashMap<String, HostExternalTool>,
     pub(super) providers: Option<crate::host::providers::Providers>,
     pub(super) credentials: Option<crate::host::model::Credentials>,
     pub(super) runtime: Option<tokio::runtime::Handle>,
@@ -144,8 +143,11 @@ fn gate(world: &mut World) {
     }
     let mut ctx = GateContext {
         store: world.resource::<Store>().clone(),
-        mcp_tools: crate::host::mcp::tool_servers(world),
-        plugin_tools: crate::host::providers::extensions::tool_owners(world),
+        external_tools: world
+            .query::<(&ToolDef, &HostExternalTool)>()
+            .iter(world)
+            .map(|(definition, owner)| (definition.0.name.as_str().to_owned(), owner.clone()))
+            .collect(),
         providers: world
             .get_resource::<crate::host::providers::Providers>()
             .cloned(),

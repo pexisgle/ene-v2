@@ -220,9 +220,15 @@ pub(crate) struct WorkAgent {
     pub(crate) companion_id: String,
 }
 
-/// Marks an ECS tool entity contributed by an MCP server or plugin extension.
-#[derive(Component, Clone, Copy, Debug, Default)]
-pub(crate) struct HostExternalTool;
+/// Identifies the source of an external tool for permission checks and refreshes.
+#[derive(Component, Clone, Debug)]
+pub(crate) enum HostExternalTool {
+    Mcp {
+        server: String,
+        key: rig_core::effect::Key<rig_core::effect::family::Tool>,
+    },
+    Plugin(String),
+}
 
 /// Capability tool names currently granted to each active companion.
 #[derive(Resource, Clone, Debug, Default)]

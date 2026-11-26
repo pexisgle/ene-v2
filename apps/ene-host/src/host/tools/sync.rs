@@ -3,10 +3,10 @@ use crate::host::{
     resources::{CompanionAgent, GrantedCompanionTools, HostExternalTool, WorkAgent},
     web_search,
 };
-use bevy_ecs::prelude::*;
+use bevy_ecs::{prelude::*, schedule::common_conditions::any_match_filter};
 use ene_rpc::BUILTIN_TOOLS;
 use rig_ecs::prelude::*;
-use std::collections::HashSet;
+use std::borrow::Cow;
 
 const WORK_AGENT_TOOLS: &[&str] = &[
     "device_request",
@@ -24,106 +24,90 @@ pub(crate) struct ToolsSyncPlugin;
 
 impl Plugin for ToolsSyncPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<GrantedCompanionTools>()
-            .add_systems(Update, refresh.before(AgentLoop));
+        app.init_resource::<GrantedCompanionTools>().add_systems(
+            Update,
+            update_access
+                .run_if(any_match_filter::<Or<(Added<CompanionAgent>, Added<WorkAgent>)>>)
+                .before(AgentLoop),
+        );
     }
 }
 
-/// The tools a parent agent is offered: its built-ins and the capability
-/// tools its active client granted.
-fn parent_names(granted: &[String]) -> Vec<String> {
-    let mut names: Vec<String> = BUILTIN_TOOLS
-        .iter()
-        .copied()
-        .filter(|name| !matches!(*name, "report" | web_search::NAME))
-        .map(str::to_owned)
-        .collect();
-    names.extend(granted.iter().cloned());
-    names.sort();
-    names.dedup();
-    names
+fn sorted_access<'a>(names: impl Iterator<Item = &'a str>) -> ToolAccess {
+    let mut names: Vec<_> = names.collect();
+    names.sort_unstable();
+    ToolAccess::only(names)
 }
 
-/// The tools a work agent ("hand") is offered: its built-ins plus external tools.
-fn hand_names(host: &HashSet<String>) -> Vec<String> {
-    let mut names: Vec<String> = WORK_AGENT_TOOLS
+fn parent_access(granted: &[String]) -> ToolAccess {
+    let builtins = BUILTIN_TOOLS
         .iter()
         .copied()
-        .map(str::to_owned)
-        .collect();
-    names.extend(host.iter().cloned());
-    names.sort();
-    names.dedup();
-    names
+        .filter(|name| !matches!(*name, "report" | web_search::NAME));
+    sorted_access(builtins.chain(granted.iter().map(String::as_str)))
 }
 
-/// The tools a parent agent can use before any capability tool is published.
-/// Capability tools are added by [`sync_access`]; a work agent uses its
-/// own allow-list.
+fn hand_access<'a>(external: impl Iterator<Item = &'a ToolDef>) -> ToolAccess {
+    sorted_access(
+        WORK_AGENT_TOOLS
+            .iter()
+            .copied()
+            .chain(external.map(|tool| tool.0.name.as_str())),
+    )
+}
+
+/// Initial access for a companion before it has an active client.
 pub(crate) fn parent_tool_access() -> ToolAccess {
-    ToolAccess::only(parent_names(&[]).iter().map(String::as_str))
+    parent_access(&[])
 }
 
-/// Initial `ToolAccess` for a newly spawned or restored work agent.
+/// Initial access for a newly spawned or restored work agent.
 pub(crate) fn hand_tool_access(world: &mut World) -> ToolAccess {
-    let host = host_tool_names(world);
-    ToolAccess::only(hand_names(&host).iter().map(String::as_str))
+    hand_access(
+        world
+            .query_filtered::<&ToolDef, With<HostExternalTool>>()
+            .iter(world),
+    )
 }
 
-fn host_tool_names(world: &mut World) -> HashSet<String> {
-    let mut query = world.query::<(&ToolDef, &HostExternalTool)>();
-    query
-        .iter(world)
-        .map(|(definition, _)| definition.0.name.as_str().to_owned())
-        .collect()
-}
-
-/// Refreshes `ToolAccess` for both parent companions and work agents.
+/// Refresh access in the same actor step that updates the tool registrations.
 pub(crate) fn sync_access(world: &mut World) {
-    let granted = world
-        .get_resource::<GrantedCompanionTools>()
-        .map_or_default(|res| res.0.clone());
-    let parents: Vec<(Entity, String)> = {
-        let mut query = world.query::<(Entity, &CompanionAgent)>();
-        query
-            .iter(world)
-            .map(|(entity, agent)| (entity, agent.companion_id.clone()))
-            .collect()
-    };
-    let host = host_tool_names(world);
-    for (entity, companion) in parents {
-        let granted: &[String] = granted.get(&companion).map_or(&[], Vec::as_slice);
-        let names = parent_names(granted);
-        set_access(world, entity, &names);
-    }
-    let hands: Vec<Entity> = {
-        let mut query = world.query_filtered::<Entity, With<WorkAgent>>();
-        query.iter(world).collect()
-    };
-    let hand_tools = hand_names(&host);
-    for entity in hands {
-        set_access(world, entity, &hand_tools);
+    if let Err(error) = world.run_system_cached(update_access) {
+        crate::host::fail(world, &error.to_string());
     }
 }
 
-fn set_access(world: &mut World, entity: Entity, names: &[String]) {
-    let current = world.get::<ToolAccess>(entity);
-    if current.and_then(ToolAccess::names) == Some(names) {
-        return;
-    }
-    world
-        .entity_mut(entity)
-        .insert(ToolAccess::only(names.iter().map(String::as_str)));
-}
+type ToolAgents<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        Option<&'static CompanionAgent>,
+        Option<&'static ToolAccess>,
+    ),
+    Or<(With<CompanionAgent>, With<WorkAgent>)>,
+>;
 
-/// Corrects the tools a newly spawned agent may use before its first turn.
-fn refresh(world: &mut World) {
-    let added = {
-        let mut query =
-            world.query_filtered::<Entity, Or<(Added<CompanionAgent>, Added<WorkAgent>)>>();
-        query.iter(world).next().is_some()
-    };
-    if added {
-        sync_access(world);
+fn update_access(
+    grants: Option<Res<GrantedCompanionTools>>,
+    external: Query<&ToolDef, With<HostExternalTool>>,
+    agents: ToolAgents<'_, '_>,
+    mut commands: Commands,
+) {
+    let hand = hand_access(external.iter());
+    let grants = grants.map(Res::into_inner);
+    for (entity, companion, current) in &agents {
+        let access = match companion {
+            Some(companion) => Cow::Owned(parent_access(
+                grants
+                    .as_ref()
+                    .and_then(|grants| grants.0.get(&companion.companion_id))
+                    .map_or(&[], Vec::as_slice),
+            )),
+            None => Cow::Borrowed(&hand),
+        };
+        if current.and_then(ToolAccess::names) != access.names() {
+            commands.entity(entity).insert(access.into_owned());
+        }
     }
 }

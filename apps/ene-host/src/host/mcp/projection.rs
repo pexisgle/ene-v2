@@ -1,128 +1,112 @@
 //! ECS tool projection for connected MCP servers.
 use super::supervisor::{McpServers, Server};
+use crate::host::resources::HostExternalTool;
 use bevy_ecs::prelude::*;
-use rig_agent::tool::ToolCatalog;
-use rig_core::{
-    effect::{Key, family},
-    message::ToolName,
-};
+use rig_agent::tool::{RegisteredTool, ToolCatalog};
+use rig_core::{completion::ToolDefinition, message::ToolName};
 use rig_ecs::prelude::*;
-use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::HashSet;
+use std::{collections::HashMap, sync::Arc};
 
-/// The registration an MCP tool entity came from: the library generation that
-/// keeps a stale refresh from replacing a newer handler, and the server that
-/// owns it. The entity carries this, so no side map has to stay in step.
-#[derive(Component)]
-pub(super) struct McpTool {
-    pub(super) server: String,
-    pub(super) key: Key<family::Tool>,
+type ServerTools = HashMap<ToolName, (Arc<ToolDefinition>, RegisteredTool)>;
+pub(super) type ToolSnapshot = HashMap<String, ServerTools>;
+
+pub(super) fn snapshot_tools(servers: &McpServers) -> ToolSnapshot {
+    servers
+        .0
+        .iter()
+        .map(|(id, server)| {
+            (
+                id.clone(),
+                collect_server_tools(id, server, &server.registry.snapshot()),
+            )
+        })
+        .collect()
 }
 
-/// Retire old owners before publishing any new tools. This keeps a retired
-/// server from blocking another server that now owns the same exposed name.
-pub(super) fn project_servers(world: &mut World, servers: &McpServers, retired: &[String]) {
+pub(super) fn collect_server_tools(
+    id: &str,
+    server: &Server,
+    catalog: &ToolCatalog,
+) -> ServerTools {
+    catalog
+        .definitions()
+        .iter()
+        .filter_map(|definition| {
+            let raw = definition.name.as_str();
+            if !server.allowed.is_empty() && !server.allowed.iter().any(|name| name == raw) {
+                return None;
+            }
+            let name = ene_work::mcp::exposed_name(&server.label, id, raw)?;
+            let tool = catalog.get(raw)?;
+            Some((
+                ToolName::new(name).ok()?,
+                (Arc::clone(definition), tool.clone()),
+            ))
+        })
+        .collect()
+}
+
+/// Keep current registrations by key and remove every obsolete owner before
+/// publishing tools. A replacement can then claim the name on the same frame.
+pub(super) fn project_servers(world: &mut World, mut desired: ToolSnapshot) -> bool {
+    let mut replacements = Vec::new();
     let obsolete: Vec<_> = world
-        .query::<(Entity, &McpTool)>()
+        .query::<(Entity, &ToolDef, &HostExternalTool)>()
         .iter(world)
-        .filter(|(_, tool)| !servers.0.contains_key(&tool.server) || retired.contains(&tool.server))
-        .map(|(entity, _)| entity)
+        .filter_map(|(entity, definition, owner)| {
+            let HostExternalTool::Mcp { server, key } = owner else {
+                return None;
+            };
+
+            let name = &definition.0.name;
+            if let Some((definition, tool)) =
+                desired.get_mut(server).and_then(|tools| tools.remove(name))
+            {
+                if tool.key() == key {
+                    return None;
+                }
+                replacements.push((server.clone(), name.clone(), (definition, tool)));
+            }
+            Some(entity)
+        })
         .collect();
     let mut changed = !obsolete.is_empty();
     for entity in obsolete {
-        if let Ok(entity) = world.get_entity_mut(entity) {
-            entity.despawn();
-        }
+        let _despawned = world.try_despawn(entity);
     }
-    for (id, server) in &servers.0 {
-        changed |= project(world, id, server, &server.registry.snapshot());
-    }
-    if changed {
-        crate::host::tools::sync::sync_access(world);
-    }
-}
-
-pub(super) fn project(world: &mut World, id: &str, server: &Server, catalog: &ToolCatalog) -> bool {
-    let mut desired = HashMap::new();
-    for definition in catalog.definitions() {
-        let raw = definition.name.as_str();
-        if !server.allowed.is_empty() && !server.allowed.iter().any(|name| name == raw) {
-            continue;
-        }
-        let Some(exposed) = ene_work::mcp::exposed_name(&server.label, id, raw) else {
-            continue;
-        };
-        let Ok(name) = ToolName::new(exposed.clone()) else {
-            continue;
-        };
-        let Some(registration) = catalog.get(raw) else {
-            continue;
-        };
-        let mut definition = (**definition).clone();
+    let added = desired.into_iter().flat_map(|(server, tools)| {
+        tools
+            .into_iter()
+            .map(move |(name, tool)| (server.clone(), name, tool))
+    });
+    // A refresh can reclaim its name before a colliding server is considered.
+    for (server, name, (definition, tool)) in replacements.into_iter().chain(added) {
+        let mut definition = Arc::unwrap_or_clone(definition);
         definition.name = name;
-        desired.insert(exposed, (definition, registration));
-    }
-    let mut current: HashMap<String, (Entity, Key<family::Tool>)> = {
-        let mut query = world.query::<(Entity, &ToolDef, &McpTool)>();
-        query
-            .iter(world)
-            .filter(|(_, _, tool)| tool.server == id)
-            .map(|(entity, definition, tool)| {
-                (
-                    definition.0.name.as_str().to_owned(),
-                    (entity, tool.key.clone()),
-                )
-            })
-            .collect()
-    };
-    let mut changed = false;
-    for (name, (definition, tool)) in desired {
-        let existing = current.remove(&name);
-        if existing.as_ref().is_some_and(|(_, key)| key == tool.key()) {
-            continue;
-        }
-        if let Some((entity, _)) = existing {
-            if let Ok(entity) = world.get_entity_mut(entity) {
-                entity.despawn();
-            }
-            changed = true;
-        }
         if let Some(entity) =
             world.spawn_tool(definition, tool.handler().clone(), ToolOptions::default())
         {
-            world.entity_mut(entity).insert((
-                McpTool {
-                    server: id.to_owned(),
-                    key: tool.key().clone(),
-                },
-                crate::host::resources::HostExternalTool,
-            ));
+            world.entity_mut(entity).insert(HostExternalTool::Mcp {
+                server,
+                key: tool.key().clone(),
+            });
             changed = true;
         }
     }
-    for (_, (entity, _)) in current {
-        if let Ok(entity) = world.get_entity_mut(entity) {
-            entity.despawn();
-            changed = true;
-        }
+    if changed {
+        crate::host::tools::sync::sync_access(world);
     }
     changed
 }
 
 #[cfg(test)]
 pub(super) fn tool_names(world: &mut World) -> HashSet<String> {
-    let mut query = world.query::<(&ToolDef, &McpTool)>();
+    let mut query = world.query::<(&ToolDef, &HostExternalTool)>();
     query
         .iter(world)
+        .filter(|(_, owner)| matches!(owner, HostExternalTool::Mcp { .. }))
         .map(|(definition, _)| definition.0.name.as_str().to_owned())
-        .collect()
-}
-
-pub(crate) fn tool_servers(world: &mut World) -> HashMap<String, String> {
-    let mut query = world.query::<(&ToolDef, &McpTool)>();
-    query
-        .iter(world)
-        .map(|(definition, tool)| (definition.0.name.as_str().to_owned(), tool.server.clone()))
         .collect()
 }

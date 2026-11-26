@@ -2,9 +2,9 @@
 mod pending_tests;
 mod supervisor_tests;
 
-use super::projection::*;
 use super::supervisor::*;
 use super::*;
+use crate::host::resources::HostExternalTool;
 use rig_agent::tool::server::{ToolServer, ToolServerHandle};
 use rig_core::message::ToolName;
 use rig_core::tool::{DynamicTool, ToolContext, ToolOutput};
@@ -214,6 +214,9 @@ pub(super) fn tool_entity(world: &mut World, name: &str) -> Option<Entity> {
 }
 
 pub(super) fn server_tools(world: &mut World, id: &str) -> usize {
-    let mut query = world.query::<&McpTool>();
-    query.iter(world).filter(|tool| tool.server == id).count()
+    world
+        .query::<&HostExternalTool>()
+        .iter(world)
+        .filter(|tool| matches!(tool, HostExternalTool::Mcp { server, .. } if server == id))
+        .count()
 }

@@ -5,7 +5,7 @@ use crate::host::mcp::*;
 use crate::host::{
     db::Store,
     model::Credentials,
-    resources::HostRuntime,
+    resources::{HostRuntime, WorkAgent},
     settings::{Connection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint},
 };
 use rig_core::tool::{ManagedToolSink, ToolContext};
@@ -54,7 +54,20 @@ fn retire_one_now(world: &mut World, id: &str) {
 
 fn project_servers_now(world: &mut World) {
     let mcp = world.resource::<Mcp>().clone();
-    project_servers(world, &mcp.lock().servers, &[]);
+    let snapshot = snapshot_tools(&mcp.lock().servers);
+    project_servers(world, snapshot);
+}
+
+fn project(
+    world: &mut World,
+    id: &str,
+    server: &Server,
+    catalog: &rig_agent::tool::ToolCatalog,
+) -> bool {
+    project_servers(
+        world,
+        [(id.to_owned(), collect_server_tools(id, server, catalog))].into(),
+    )
 }
 
 #[tokio::test]
@@ -156,7 +169,7 @@ async fn projection_refuses_collisions_and_retires_only_owned_entities() {
             owner: registry.owner(),
         },
         first.clone(),
-        registry,
+        registry.clone(),
         &desired,
     );
     project_servers_now(world);
@@ -182,11 +195,17 @@ async fn projection_refuses_collisions_and_retires_only_owned_entities() {
     );
     project_servers_now(world);
     assert_eq!(server_tools(world, "c2"), 0);
-    retire_one_now(world, "c2");
-    assert!(world.get_entity(entity).is_ok());
-    assert!(tool_names(world).contains("mcp_notes_echo"));
-    retire_one_now(world, "c1");
+    registry.add_managed_tools(vec![local_tool("echo", 3)]);
+    project_servers_now(world);
     assert!(world.get_entity(entity).is_err());
+    let refreshed = tool_entity(world, "mcp_notes_echo").unwrap();
+    assert_eq!(server_tools(world, "c1"), 1);
+    assert_eq!(server_tools(world, "c2"), 0);
+
+    retire_one_now(world, "c1");
+    assert!(world.get_entity(refreshed).is_err());
+    assert_eq!(server_tools(world, "c2"), 1);
+    retire_one_now(world, "c2");
     assert!(tool_names(world).is_empty());
     first.closed().await;
     second.closed().await;
@@ -226,7 +245,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
         },
     );
     let wanted = vec![("c1".into(), want("notes"))];
-    let _retired = accept_event(
+    accept_event(
         &mut supervisor,
         &wanted,
         Event::Failed {
@@ -240,7 +259,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
     assert_pending_launch(&supervisor, &new_launch);
     let mut changed_revision = wanted.clone();
     changed_revision[0].1.revision = 2;
-    let _retired = accept_event(
+    accept_event(
         &mut supervisor,
         &changed_revision,
         Event::Failed {
@@ -252,7 +271,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
         &runtime,
     );
     assert_pending_launch(&supervisor, &new_launch);
-    let _retired = accept_event(
+    accept_event(
         &mut supervisor,
         &wanted,
         Event::Connected {
@@ -280,7 +299,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
     })
     .await
     .expect("the old launch processed its late notification");
-    let _retired = accept_event(
+    accept_event(
         &mut supervisor,
         &wanted,
         Event::Connected {
@@ -359,7 +378,6 @@ fn setup_gate_mcp_harness(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_mcp_tool_runs_through_the_gate() {
-    use crate::host::agent::WorkAgent;
     use rig_core::completion::Message;
     use rig_core::message::{ToolResultContent, UserContent};
     let echo = Echo::new();
@@ -483,6 +501,13 @@ async fn assert_echo_refresh_and_removal(
     })
     .await
     .expect("list_changed removes the tool from the host");
+    let world = harness.app.world_mut();
+    assert!(
+        world
+            .query_filtered::<&ToolAccess, With<WorkAgent>>()
+            .iter(world)
+            .all(|access| !access.allows("mcp_notes_echo"))
+    );
 }
 
 #[tokio::test]

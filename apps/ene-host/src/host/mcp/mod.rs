@@ -5,10 +5,8 @@
 //! other tool, so the agent does not care whether a tool is built in, served by
 //! a client or served by an MCP process.
 //!
-//! The tools belong to the operator's own configuration rather than to a
-//! client's declaration, so they run without an approval card: the gate passes
-//! them the same way it passes the built-in host tools, and stays in charge of
-//! what a *client* may ask the host to do.
+//! MCP tools are offered to work agents. The gate uses the owning server to
+//! evaluate the saved policy and requests approval when required.
 //!
 //! A server that is disabled, deleted, re-configured or disconnected loses its
 //! tools: the connection closes and the tool entities despawn.
@@ -20,7 +18,6 @@ mod supervisor;
 pub(crate) use ene_work::mcp::{CheckState, is_npx_command};
 #[cfg(test)]
 use projection::tool_names;
-pub(crate) use projection::tool_servers;
 pub(crate) use supervisor::Mcp;
 
 use bevy_ecs::prelude::*;
