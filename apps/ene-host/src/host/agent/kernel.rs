@@ -2,12 +2,13 @@
 
 use crate::host::{
     HostServices, chat, client,
+    delegation::{self, DeliveredClaims},
     error::{HostError, Result},
     eyes, mind, permission, voice, work,
 };
 use ene_rpc as w;
 use rig_core::catalog::Catalog;
-use rig_ecs::prelude::App;
+use rig_ecs::prelude::{App, Aside, Author, Conversation, DeliveryMode, RequestId};
 
 /// The RPC boundary for operations that touch live agents or their tools.
 pub(crate) struct AgentKernel<'a> {
@@ -159,7 +160,45 @@ impl<'a> AgentKernel<'a> {
         text: &str,
         binding: &voice::InputBinding,
     ) -> Result<bool> {
-        voice::accept_transcription(self.app.world_mut(), id, text, binding)
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(false);
+        }
+        let companions = self
+            .services
+            .store
+            .client_repo()
+            .active_companions_for_client(&binding.client_id)?;
+        if companions.is_empty() || !self.services.voice.accept_transcription(id) {
+            return Ok(false);
+        }
+        let world = self.app.world_mut();
+        delegation::record(&mut world.resource_mut::<DeliveredClaims>(), id);
+        let author = Author {
+            request: Some(RequestId(id.to_owned())),
+            ..Author::user()
+        };
+        for companion in companions {
+            let Some(agent) = super::agent_of(world, &companion) else {
+                continue;
+            };
+            if let Some(mut conversation) = world.get_mut::<Conversation>(agent) {
+                conversation.add_aside(Aside::new(
+                    "ene.transcription",
+                    Author::plugin("ene-host"),
+                    serde_json::json!({"transcription_id": id, "client_id": binding.client_id}),
+                ));
+            }
+            super::deliver(
+                world,
+                agent,
+                &companion,
+                text.to_owned(),
+                DeliveryMode::Steer,
+                author.clone(),
+            );
+        }
+        Ok(true)
     }
 
     pub(crate) fn submit_approval(

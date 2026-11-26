@@ -102,11 +102,9 @@ pub(crate) fn publish_messages(
                     // Without this the host never sends `UtteranceFinished`, the
                     // window never reports playback, and the speech floor stays
                     // held until the next turn flushes it as cancelled.
-                    let voice = world.get_resource::<crate::host::voice::Voice>().cloned();
-                    let mut notifier = world.get_resource_mut::<Notifier>();
                     crate::host::voice::on_turn_end(
-                        voice.as_ref(),
-                        notifier.as_deref_mut(),
+                        world.get_resource::<crate::host::voice::Voice>(),
+                        world.get_resource::<Notifier>(),
                         &voice_companion,
                     );
                     world.trigger(crate::host::resources::TriggerCharacterEvent {

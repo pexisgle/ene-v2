@@ -144,15 +144,44 @@ async fn a_flush_invalidates_the_older_generation() {
 }
 
 #[test]
+fn a_peer_holding_the_floor_stops_the_waiting_companions_turn() {
+    use bevy_ecs::prelude::On;
+    use rig_ecs::prelude::StopTurn;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let mut world = test_world();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&stopped);
+    world
+        .spawn(crate::host::resources::CompanionAgent {
+            companion_id: "ene".into(),
+        })
+        .observe(move |_: On<StopTurn>| observed.store(true, Ordering::Relaxed));
+    let voice = world.resource::<Voice>();
+    voice.publish("ene", "c1");
+    voice.publish("peer", "c1");
+    assert!(voice.begin("peer", Arc::new(FakeTts { fail: false }), String::new()));
+
+    on_stream_text(&mut world, "ene", "こんにちは。");
+
+    let voice = world.resource::<Voice>();
+    assert!(stopped.load(Ordering::Relaxed));
+    assert_eq!(voice.floor_holder().as_deref(), Some("peer"));
+    assert!(!voice.streaming("ene"));
+}
+
+#[test]
 fn turn_end_releases_the_floor_and_relays_the_utterance() {
     let (_root, store) = store_with_client();
     let mut world = voice_world(&store);
     world.resource::<Voice>().publish("ene", "c1");
     let mut events = world.resource::<Notifier>().subscribe();
     on_stream_text(&mut world, "ene", "こんにちは。");
-    let voice = world.get_resource::<Voice>().cloned();
-    let mut notifier = world.get_resource_mut::<Notifier>();
-    on_turn_end(voice.as_ref(), notifier.as_deref_mut(), "ene");
+    on_turn_end(
+        world.get_resource::<Voice>(),
+        world.get_resource::<Notifier>(),
+        "ene",
+    );
     assert!(world.resource::<Voice>().floor_holder().is_none());
     world.resource_mut::<Notifier>().flush();
     let notification = events.try_recv().expect("speech_completed is broadcast");

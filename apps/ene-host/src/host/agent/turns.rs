@@ -149,11 +149,9 @@ pub(super) fn turn_settled(
         let answered = matches!(outcome, TurnOutcome::Answered(_));
         commands.queue(move |world: &mut World| {
             if answered {
-                let voice = world.get_resource::<crate::host::voice::Voice>().cloned();
-                let mut notifier = world.get_resource_mut::<Notifier>();
                 crate::host::voice::on_turn_end(
-                    voice.as_ref(),
-                    notifier.as_deref_mut(),
+                    world.get_resource::<crate::host::voice::Voice>(),
+                    world.get_resource::<Notifier>(),
                     &companion_id,
                 );
             } else {

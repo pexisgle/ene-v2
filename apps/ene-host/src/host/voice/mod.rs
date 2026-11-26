@@ -15,8 +15,8 @@ pub(crate) use ene_voice::{
 pub(crate) use engine::{Engines, VoiceEngineContext};
 pub(crate) use engine::{companion_tts_source, stt_source, tts_source};
 pub(crate) use session::{
-    VoicePlugin, accept_transcription, bind_input, flush, is_still_active, on_client_activated,
-    on_client_moved, on_stream_text, on_turn_end, play_once, subscribe_audio,
+    VoicePlugin, bind_input, flush, is_still_active, on_client_activated, on_client_moved,
+    on_stream_text, on_turn_end, play_once, subscribe_audio,
 };
 
 /// Bevy ECS resource wrapper over [`ene_voice::VoicePipeline`].

@@ -83,6 +83,7 @@ fn build_kernel_app(res: KernelResources) -> App {
         .insert_resource(Waiting::default())
         .insert_resource(Perception::default())
         .insert_resource(Approvals::default())
+        .init_resource::<delegation::DeliveredClaims>()
         .insert_resource(DeviceTimeout(res.device_timeout))
         .insert_resource(rig_ecs::tasks::Wake::new(move || {
             let _wake = res.wake.try_send(());

@@ -4,7 +4,6 @@ use super::{AudioSubscription, InputBinding, Voice, companion_tts_source, parse_
 use crate::host::{
     agent,
     db::{Result, Store},
-    delegation,
     error::HostError,
     notify::Notifier,
 };
@@ -88,86 +87,17 @@ pub(crate) fn play_once(voice: &Voice, companion: &str, pcm: Vec<u8>, rate: u32)
     Ok(voice.play(companion, &pcm)?)
 }
 
-pub(crate) fn accept_transcription(
-    world: &mut World,
-    transcription_id: &str,
-    text: &str,
-    binding: &InputBinding,
-) -> Result<bool> {
-    let text = text.trim();
-    let Some(store) = world.get_resource::<Store>() else {
-        return Ok(false);
-    };
-    if text.is_empty() {
-        return Ok(false);
-    }
-    let companions = store
-        .client_repo()
-        .active_companions_for_client(&binding.client_id)?;
-    if companions.is_empty() {
-        return Ok(false);
-    }
-    if let Some(voice) = world.get_resource::<Voice>()
-        && !voice.accept_transcription(transcription_id)
-    {
-        return Ok(false);
-    }
-    {
-        let mut claims =
-            world.get_resource_or_insert_with(crate::host::delegation::DeliveredClaims::default);
-        delegation::record(&mut claims, transcription_id);
-    }
-    let author = Author {
-        request: Some(RequestId(transcription_id.to_owned())),
-        ..Author::user()
-    };
-    for companion in companions {
-        let Some(agent) = agent::agent_of(world, &companion) else {
-            continue;
-        };
-        if let Some(mut conversation) = world.get_mut::<Conversation>(agent) {
-            conversation.add_aside(Aside::new(
-                "ene.transcription",
-                Author::plugin("ene-host"),
-                serde_json::json!({
-                    "transcription_id": transcription_id,
-                    "client_id": binding.client_id,
-                }),
-            ));
-        }
-        agent::deliver(
-            world,
-            agent,
-            &companion,
-            text.to_owned(),
-            DeliveryMode::Steer,
-            author.clone(),
-        );
-    }
-    Ok(true)
-}
-
 pub(crate) fn on_stream_text(world: &mut World, companion: &str, text: &str) {
-    if text.is_empty() {
-        return;
-    }
-    let Some(voice) = world.get_resource::<Voice>().cloned() else {
+    let Some(voice) = world.get_resource::<Voice>() else {
         return;
     };
-    if !voice.owns(companion) {
-        tracing::debug!(
-            companion,
-            "speech skipped: no client has subscribed to this companion's audio"
-        );
+    if text.is_empty() || !voice.owns(companion) {
         return;
     }
-    if !voice.streaming(companion) && !try_begin_utterance(world, &voice, companion) {
+    if voice.streaming(companion) {
+        voice.speak(companion, text);
         return;
     }
-    voice.speak(companion, text);
-}
-
-fn try_begin_utterance(world: &mut World, voice: &Voice, companion: &str) -> bool {
     let context = super::VoiceEngineContext {
         store: world.get_resource::<Store>(),
         credentials: world.get_resource::<crate::host::model::Credentials>(),
@@ -177,44 +107,56 @@ fn try_begin_utterance(world: &mut World, voice: &Voice, companion: &str) -> boo
             .cloned()
             .unwrap_or_default(),
     };
-    let companion_record = context
+    if let SpeechEffect::StopTurn = speak_new_utterance(&context, voice, companion, text)
+        && let Some(agent) = agent::agent_of(world, companion)
+    {
+        world.trigger(StopTurn::plugin_alone(
+            agent,
+            "ene-host",
+            "speech floor was taken by a peer",
+        ));
+    }
+}
+
+enum SpeechEffect {
+    ContinueTurn,
+    StopTurn,
+}
+
+fn speak_new_utterance(
+    context: &super::VoiceEngineContext<'_>,
+    voice: &Voice,
+    companion: &str,
+    text: &str,
+) -> SpeechEffect {
+    let record = context
         .store
         .and_then(|store| store.companion_repo().companion(companion).ok().flatten());
-    let Ok(source) = companion_tts_source(&context, companion_record.as_ref()) else {
-        tracing::debug!(companion, "speech skipped: no TTS engine is configured");
-        return false;
+    let Ok(source) = companion_tts_source(context, record.as_ref()) else {
+        return SpeechEffect::ContinueTurn;
     };
     if voice
         .floor_holder()
         .is_some_and(|holder| holder != companion)
     {
-        if let Some(agent) = agent::agent_of(world, companion) {
-            world.trigger(StopTurn::plugin_alone(
-                agent,
-                "ene-host",
-                "speech floor was taken by a peer",
-            ));
-        }
-        return false;
+        return SpeechEffect::StopTurn;
     }
-    let voice_name = companion_record
+    let voice_name = record
         .as_ref()
         .and_then(|record| parse_binding(record).voice_id)
         .unwrap_or_default();
-    let opened = voice.begin(companion, source, voice_name);
-    if !opened {
-        tracing::debug!(companion, "speech skipped: the utterance was not opened");
+    if voice.begin(companion, source, voice_name) {
+        voice.speak(companion, text);
     }
-    opened
+    SpeechEffect::ContinueTurn
 }
 
 /// Ends the speaking turn and announces it, so a peer can pick up the
 /// conversation without a new user input (voice-avatar.md §5.3).
-pub(crate) fn on_turn_end(voice: Option<&Voice>, notifier: Option<&mut Notifier>, companion: &str) {
-    let Some(voice) = voice else {
-        return;
-    };
-    let Some(ended) = voice.end_turn(companion) else {
+pub(crate) fn on_turn_end(voice: Option<&Voice>, notifier: Option<&Notifier>, companion: &str) {
+    let (Some(ended), Some(notifier)) =
+        (voice.and_then(|voice| voice.end_turn(companion)), notifier)
+    else {
         return;
     };
     let document = w::JsonDocument {
@@ -228,9 +170,6 @@ pub(crate) fn on_turn_end(voice: Option<&Voice>, notifier: Option<&mut Notifier>
         })
         .to_string(),
         ..Default::default()
-    };
-    let Some(notifier) = notifier else {
-        return;
     };
     notifier.push(
         Some(companion),
@@ -278,16 +217,18 @@ fn observe_speak_character_text(
     event: &crate::host::resources::SpeakCharacterText,
     mut commands: Commands,
 ) {
-    let companion_id = event.companion_id.clone();
-    let text = event.text.clone();
+    let spoken = speech::for_speech(&event.text);
+    if spoken.is_empty() {
+        return;
+    }
+    let companion = event.companion_id.clone();
     commands.queue(move |world: &mut World| {
-        let spoken = speech::for_speech(&text);
-        if !spoken.is_empty() {
-            on_stream_text(world, &companion_id, &spoken);
-            let voice = world.get_resource::<Voice>().cloned();
-            let mut notifier = world.get_resource_mut::<Notifier>();
-            on_turn_end(voice.as_ref(), notifier.as_deref_mut(), &companion_id);
-        }
+        on_stream_text(world, &companion, &spoken);
+        on_turn_end(
+            world.get_resource::<Voice>(),
+            world.get_resource::<Notifier>(),
+            &companion,
+        );
     });
 }
 
@@ -295,11 +236,10 @@ pub(crate) struct VoicePlugin;
 
 impl Plugin for VoicePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<delegation::DeliveredClaims>()
-            .add_observer(
-                |trigger: On<crate::host::resources::SpeakCharacterText>, commands: Commands| {
-                    observe_speak_character_text(trigger.event(), commands);
-                },
-            );
+        app.add_observer(
+            |trigger: On<crate::host::resources::SpeakCharacterText>, commands: Commands| {
+                observe_speak_character_text(trigger.event(), commands);
+            },
+        );
     }
 }

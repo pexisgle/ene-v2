@@ -279,7 +279,7 @@ pub(crate) fn enum_name_column<T: serde::de::DeserializeOwned>(
         .map_err(|_| corrupt(index, what))
 }
 
-pub(crate) fn to_json(value: &impl serde::Serialize) -> Result<String> {
+pub(crate) fn to_json(value: &(impl serde::Serialize + ?Sized)) -> Result<String> {
     serde_json::to_string(value).map_err(|error| StoreError::Storage(error.to_string()))
 }
 
