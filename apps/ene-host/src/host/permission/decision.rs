@@ -50,6 +50,7 @@ pub(super) struct DecisionInputs {
 
 /// One decision the gate asked for: the approval it decides and the card
 /// context it fails safe to.
+#[derive(Clone)]
 pub(super) struct Pending {
     pub(super) request: String,
     pub(super) companion: String,
@@ -61,6 +62,8 @@ pub(super) struct InFlight {
     pending: Pending,
     task: AbortOnDropHandle<DecisionOutcome>,
     engine: String,
+    policies: Vec<PolicyText>,
+    rules: Vec<PolicyRule>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -100,24 +103,12 @@ impl Decisions {
         self.running.len()
     }
 
-    fn start(
-        &mut self,
-        pending: Pending,
-        task: AbortOnDropHandle<DecisionOutcome>,
-        engine: String,
-    ) {
+    fn start(&mut self, flight: InFlight) {
         debug_assert!(
-            !self.is_running(&pending.request),
+            !self.is_running(&flight.pending.request),
             "one decision per request"
         );
-        self.running.insert(
-            pending.request.clone(),
-            InFlight {
-                pending,
-                task,
-                engine,
-            },
-        );
+        self.running.insert(flight.pending.request.clone(), flight);
     }
 
     /// Takes the one finished task, with the approval it decides.
@@ -189,11 +180,8 @@ struct DecisionReply {
 }
 
 /// Asks the decision model one question and parses its strict JSON reply.
-pub(super) async fn run_decision(
-    model: DynModel<Completion>,
-    inputs: DecisionInputs,
-) -> DecisionOutcome {
-    let request = CompletionRequest::new(decision_prompt(&inputs)).preamble(DECISION_SYSTEM_PROMPT);
+pub(super) async fn run_decision(model: DynModel<Completion>, prompt: String) -> DecisionOutcome {
+    let request = CompletionRequest::new(prompt).preamble(DECISION_SYSTEM_PROMPT);
     let response = tokio::time::timeout(DECISION_TIMEOUT, model.call(request))
         .await
         .map_err(|_| DecisionError::Timeout)?
@@ -326,16 +314,18 @@ fn prepare_decision_task(
         }
     };
     let engine = model.spec().map_or_default(|spec| spec.id.clone());
-    let task = background::spawn(runtime, ctx.wake, run_decision(model, inputs));
-    ctx.decisions.start(
-        Pending {
-            request: pending.request.clone(),
-            companion: pending.companion.clone(),
-            target: pending.target.clone(),
-        },
+    let task = background::spawn(
+        runtime,
+        ctx.wake,
+        run_decision(model, decision_prompt(&inputs)),
+    );
+    ctx.decisions.start(InFlight {
+        pending: pending.clone(),
         task,
         engine,
-    );
+        policies: inputs.policies,
+        rules: inputs.rules,
+    });
     DecisionSpawn::Spawned
 }
 
@@ -347,17 +337,26 @@ pub(super) fn collect_decisions(world: &mut World) {
     };
     let pending = &flight.pending;
     let outcome = background::take(flight.task).unwrap_or(Err(DecisionError::TaskMissingResult));
+    let store = world.resource::<Store>().clone();
     if let Ok(decision) = &outcome
         && decision.allow
     {
-        let result = submit_with_outcome(
-            world,
-            ApprovalRequest::DecisionModel {
-                request: &pending.request,
-                companion: &pending.companion,
-            },
-            ApprovalDecision::Approve,
-        );
+        let repo = store.policy_repo();
+        let result = (|| {
+            if flight.policies != repo.policy_texts()? || flight.rules != repo.policy_rules()? {
+                return Err(crate::host::error::HostError::Conflict(
+                    "the user changed the policy during evaluation".into(),
+                ));
+            }
+            submit_with_outcome(
+                world,
+                ApprovalRequest::DecisionModel {
+                    request: &pending.request,
+                    companion: &pending.companion,
+                },
+                ApprovalDecision::Approve,
+            )
+        })();
         if let Err(error) = &result
             && error.is_storage()
         {
@@ -373,7 +372,6 @@ pub(super) fn collect_decisions(world: &mut World) {
     if let Err(why) = outcome {
         tracing::warn!(%why, request = %pending.request, "the decision failed");
     }
-    let store = world.resource::<Store>().clone();
     if let Some(fatal) = push_card(&store, &mut world.resource_mut::<Notifier>(), pending) {
         crate::host::fail(world, &fatal);
     }

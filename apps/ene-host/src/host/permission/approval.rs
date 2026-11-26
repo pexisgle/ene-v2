@@ -9,9 +9,8 @@ use crate::host::{
 };
 use bevy_ecs::prelude::*;
 use ene_policy::{
-    Approval, ApprovalDecision, ApprovalStatus, CandidateAction, PolicyEffect, PolicyRule, Verdict,
-    approved_search_pattern, canonicalise, decide_action, extract_target, hard_denied_action,
-    hex_digest,
+    Approval, ApprovalDecision, ApprovalStatus, PolicyEffect, PolicyRule, Verdict,
+    approved_search_pattern, canonicalise, decide_action, decide_capability, hex_digest,
 };
 use ene_rpc as w;
 use rig_ecs::prelude::*;
@@ -108,6 +107,7 @@ pub(crate) fn submit(
 enum BoundClientCheck {
     Allowed(Option<String>),
     Denied(String),
+    RequiresUser,
 }
 
 fn validate_bound_approval_client(
@@ -115,7 +115,8 @@ fn validate_bound_approval_client(
     approval: &Approval,
     binding: Option<&CallBinding>,
     tool_name: &str,
-    raw_arguments: Value,
+    raw_arguments: &Value,
+    automated: bool,
 ) -> Result<BoundClientCheck> {
     let Some(binding) = binding else {
         return Ok(BoundClientCheck::Allowed(None));
@@ -131,31 +132,18 @@ fn validate_bound_approval_client(
             binding.capability
         )));
     }
-    let input = if tool_name == "device_request" {
-        raw_arguments
-            .get("input")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({}))
-    } else {
-        raw_arguments.clone()
-    };
-    let action = CandidateAction::DeviceCapability {
-        capability: binding.capability.clone(),
-        spec: client.spec(&binding.capability).cloned().map(Box::new),
-        tool_name: tool_name.to_owned(),
-        input,
+    let verdict = decide_capability(
+        &store.policy_repo().policy_rules()?,
+        client.spec(&binding.capability),
+        &binding.capability,
+        tool_name,
         raw_arguments,
-    };
-    if let Some(reason) = hard_denied_action(&action, &extract_target(&action)) {
-        return Ok(BoundClientCheck::Denied(reason));
-    }
-    if approval.client_id.as_deref() != Some(target_id.as_str())
-        && let Verdict::Deny { reason } =
-            decide_action(&store.policy_repo().policy_rules()?, &action)
-    {
-        return Ok(BoundClientCheck::Denied(reason));
-    }
-    Ok(BoundClientCheck::Allowed(Some(target_id)))
+    );
+    Ok(match verdict {
+        Verdict::Deny { reason } => BoundClientCheck::Denied(reason),
+        Verdict::HumanRequired { .. } if automated => BoundClientCheck::RequiresUser,
+        _ => BoundClientCheck::Allowed(Some(target_id)),
+    })
 }
 
 fn persist_always_allow_rule(
@@ -224,7 +212,7 @@ fn approve_call(
     store: &Store,
     approval: &Approval,
     call: Entity,
-    arguments: Value,
+    arguments: &Value,
     automated: bool,
 ) -> Result<(Approval, Option<String>)> {
     let name = approval.tool_name.as_str();
@@ -237,7 +225,7 @@ fn approve_call(
             store,
             world.get_resource(),
             world.get_resource().unwrap_or(&fallback),
-            &arguments,
+            arguments,
             automated,
         ) {
             Ok(Some(pattern)) => Some(pattern),
@@ -252,9 +240,10 @@ fn approve_call(
                     HostError::Permission(_) => ApprovalStatus::Denied,
                     _ => return Err(error),
                 };
-                repo.resolve_approval(request_id, status)?;
+                let resolved = repo.resolve_approval(request_id, status)?;
                 release(world, request_id);
                 refuse(world, call, &error.to_string());
+                notify_resolved(&mut world.resource_mut::<Notifier>(), &resolved);
                 return Err(error);
             }
         }
@@ -262,15 +251,23 @@ fn approve_call(
         None
     };
     let binding = world.get::<CallBinding>(call);
-    let rebound = match validate_bound_approval_client(store, approval, binding, name, arguments)? {
-        BoundClientCheck::Allowed(client) => client,
-        BoundClientCheck::Denied(reason) => {
-            repo.resolve_approval(request_id, ApprovalStatus::Denied)?;
-            release(world, request_id);
-            refuse(world, call, &reason);
-            return Err(HostError::Permission(reason));
-        }
-    };
+    let rebound =
+        match validate_bound_approval_client(store, approval, binding, name, arguments, automated)?
+        {
+            BoundClientCheck::Allowed(client) => client,
+            BoundClientCheck::Denied(reason) => {
+                let denied = repo.resolve_approval(request_id, ApprovalStatus::Denied)?;
+                release(world, request_id);
+                refuse(world, call, &reason);
+                notify_resolved(&mut world.resource_mut::<Notifier>(), &denied);
+                return Err(HostError::Permission(reason));
+            }
+            BoundClientCheck::RequiresUser => {
+                return Err(HostError::Permission(
+                    "this operation now requires user confirmation".into(),
+                ));
+            }
+        };
     let resolved = repo.resolve_approval_with_client(
         request_id,
         ApprovalStatus::Approved,
@@ -338,7 +335,7 @@ pub(crate) fn submit_with_outcome(
 
     let (approval, saved_pattern) = match decision {
         ApprovalDecision::Approve | ApprovalDecision::AlwaysApprove => {
-            approve_call(world, &store, &approval, hold.call, args, automated)?
+            approve_call(world, &store, &approval, hold.call, &args, automated)?
         }
         ApprovalDecision::Deny | ApprovalDecision::Unspecified => {
             let approval = repo.resolve_approval(request_id, ApprovalStatus::Denied)?;

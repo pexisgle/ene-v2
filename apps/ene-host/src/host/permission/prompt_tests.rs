@@ -45,7 +45,7 @@ fn the_reply_is_strict_json() {
         ("はい、いいですよ", None),
     ] {
         let model: DynModel<Completion> = MockCompletionModel::text(reply).into();
-        let decision = runtime.block_on(run_decision(model, inputs()));
+        let decision = runtime.block_on(run_decision(model, decision_prompt(&inputs())));
         match allow {
             Some(allow) => {
                 let decision = decision.expect(reply);
