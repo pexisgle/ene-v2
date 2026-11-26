@@ -258,15 +258,22 @@ impl<'a> SettingsRepo<'a> {
         Ok((self.settings()?, companions))
     }
 
-    pub fn set_check(&self, id: &str, check: &Check) -> Result<()> {
+    /// Saves a probe only while the checked connection revision still exists.
+    pub fn set_check(&self, id: &str, revision: u64, check: &Check) -> Result<()> {
         let changed = self
             .0
             .conn()
             .prepare_cached(
-                "UPDATE connections SET last_check = ?2, updated_at = ?3 WHERE id = ?1",
+                "UPDATE connections SET last_check = ?3, updated_at = ?4
+                 WHERE id = ?1 AND revision = ?2",
             )?
-            .execute(params![id, to_json(check)?, now()])?;
-        require_found(changed, "connection not found")
+            .execute(params![id, revision, to_json(check)?, now()])?;
+        if changed == 0 {
+            return Err(StoreError::Conflict(
+                "connection changed during the check".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -369,8 +376,8 @@ mod tests {
             Err(StoreError::NotFound(_))
         ));
         assert!(matches!(
-            repo.set_check("missing", &Check::default()),
-            Err(StoreError::NotFound(_))
+            repo.set_check("missing", 1, &Check::default()),
+            Err(StoreError::Conflict(_))
         ));
         for id in ["c2", "c1", "c2"] {
             let mut changed = repo.connection(id).unwrap().unwrap();
@@ -382,7 +389,22 @@ mod tests {
             let stored = repo.connection(id).unwrap().unwrap();
             assert_eq!(stored.name, changed.name);
             assert_eq!(stored.revision, expected + 1);
+            assert!(matches!(
+                repo.set_check(id, expected, &Check::default()),
+                Err(StoreError::Conflict(_))
+            ));
+            assert!(repo.connection(id).unwrap().unwrap().last_check.is_none());
         }
+        let check = Check {
+            healthy: true,
+            ..Default::default()
+        };
+        let current = repo.connection("c1").unwrap().unwrap();
+        repo.set_check("c1", current.revision, &check).unwrap();
+        assert_eq!(
+            repo.connection("c1").unwrap().unwrap().last_check,
+            Some(check)
+        );
     }
 
     #[test]

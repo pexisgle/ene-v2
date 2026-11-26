@@ -293,10 +293,9 @@ async fn p08_listing_construction_failure_never_selects_native() {
     let native = NativeEndpoint::start().await;
     let root = tempfile::tempdir().unwrap();
     let connection = connection(ConnectionKind::Llm, &native.base);
-    let store = store(root.path(), &connection);
     let providers = providers(root.path(), Extension::Llm, &reply("{}"), &native.base).await;
     let _failure = construction_failure::Guard::enter();
-    let check = model::probe(&store, &Credentials::new(true), &connection, &providers).await;
+    let check = model::probe(&Credentials::new(true), &connection, &providers).await;
     assert!(!check.healthy);
     let failure = check.failure.unwrap();
     assert_eq!(failure.code, "connection_check");
@@ -325,9 +324,8 @@ async fn p10_listing_rejects_missing_or_failed_results() {
         let native = NativeEndpoint::start().await;
         let root = tempfile::tempdir().unwrap();
         let connection = connection(ConnectionKind::Llm, &native.base);
-        let store = store(root.path(), &connection);
         let providers = providers(root.path(), Extension::Llm, &body, &native.base).await;
-        let check = model::probe(&store, &Credentials::new(true), &connection, &providers).await;
+        let check = model::probe(&Credentials::new(true), &connection, &providers).await;
         if check.healthy {
             incorrectly_healthy.push(case);
         } else {
@@ -346,7 +344,6 @@ async fn p10_listing_starts_installed_plugins_and_accepts_empty_models() {
     let native = NativeEndpoint::start().await;
     let root = tempfile::tempdir().unwrap();
     let connection = connection(ConnectionKind::Llm, &native.base);
-    let store = store(root.path(), &connection);
     let providers = installed_providers(
         root.path(),
         Extension::Llm,
@@ -360,7 +357,7 @@ async fn p10_listing_starts_installed_plugins_and_accepts_empty_models() {
     );
     assert!(providers.running("openrouter", Extension::Llm).is_none());
     for _ in 0..2 {
-        let check = model::probe(&store, &Credentials::new(true), &connection, &providers).await;
+        let check = model::probe(&Credentials::new(true), &connection, &providers).await;
         assert!(check.healthy, "{:?}", check.failure);
         assert_eq!(check.resources, ["m"]);
     }
@@ -380,7 +377,6 @@ fn p10_concurrent_cold_probes_share_startup_without_admission_failures() {
         let native = NativeEndpoint::start().await;
         let root = tempfile::tempdir().unwrap();
         let connection = connection(ConnectionKind::Llm, &native.base);
-        let store = store(root.path(), &connection);
         let credentials = Credentials::new(true);
         let providers = installed_providers(
             root.path(),
@@ -403,7 +399,7 @@ fn p10_concurrent_cold_probes_share_startup_without_admission_failures() {
         });
         ready.await.unwrap();
         let mut probes: Vec<_> = (0..17)
-            .map(|_| Box::pin(model::probe(&store, &credentials, &connection, &providers)))
+            .map(|_| Box::pin(model::probe(&credentials, &connection, &providers)))
             .collect();
         let mut checks: Vec<_> = (0..probes.len()).map(|_| None).collect();
         std::future::poll_fn(|cx| {
@@ -457,7 +453,6 @@ fn p10_cold_probe_deadline_includes_queued_startup_and_allows_retry() {
         let native = NativeEndpoint::start().await;
         let root = tempfile::tempdir().unwrap();
         let connection = connection(ConnectionKind::Llm, &native.base);
-        let store = store(root.path(), &connection);
         let credentials = Credentials::new(true);
         let providers = installed_providers(
             root.path(),
@@ -480,7 +475,7 @@ fn p10_cold_probe_deadline_includes_queued_startup_and_allows_retry() {
         let started = Instant::now();
         let result = tokio::time::timeout(
             Duration::from_secs(18),
-            model::probe(&store, &credentials, &connection, &providers),
+            model::probe(&credentials, &connection, &providers),
         )
         .await;
         let elapsed = started.elapsed();
@@ -499,7 +494,7 @@ fn p10_cold_probe_deadline_includes_queued_startup_and_allows_retry() {
         assert!(providers.running("openrouter", Extension::Llm).is_none());
         let retry = tokio::time::timeout(
             Duration::from_secs(5),
-            model::probe(&store, &credentials, &connection, &providers),
+            model::probe(&credentials, &connection, &providers),
         )
         .await
         .expect("cancelled startup poisoned the next probe");
@@ -513,7 +508,6 @@ async fn p10_listing_initialization_failure_never_selects_native() {
     let native = NativeEndpoint::start().await;
     let root = tempfile::tempdir().unwrap();
     let connection = connection(ConnectionKind::Llm, &native.base);
-    let store = store(root.path(), &connection);
     installed_providers(
         root.path(),
         Extension::Llm,
@@ -529,7 +523,7 @@ async fn p10_listing_initialization_failure_never_selects_native() {
     super::tests::write(path, wasm);
     let providers = Providers::load(root.path());
     assert!(providers.get("openrouter").is_some());
-    let check = model::probe(&store, &Credentials::new(true), &connection, &providers).await;
+    let check = model::probe(&Credentials::new(true), &connection, &providers).await;
     assert!(!check.healthy);
     let failure = check.failure.unwrap();
     assert_eq!(failure.code, "connection_check");

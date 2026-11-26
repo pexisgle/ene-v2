@@ -30,7 +30,6 @@ async fn p10_listing_uses_authorized_http_and_connection_credentials() {
     let upstream = NativeEndpoint::start().await;
     let root = tempfile::tempdir().unwrap();
     let connection = connection(ConnectionKind::Llm, &native.base);
-    let store = store(root.path(), &connection);
     let secret = "listing-host-secret";
     let credentials = Credentials::new(true);
     credentials.remember("another-connection", "wrong-secret".into());
@@ -68,7 +67,7 @@ async fn p10_listing_uses_authorized_http_and_connection_credentials() {
     );
     for key in [secret, "replacement-secret"] {
         credentials.remember(&connection.id, key.into());
-        let check = model::probe(&store, &credentials, &connection, &providers).await;
+        let check = model::probe(&credentials, &connection, &providers).await;
         assert!(check.healthy, "{:?}", check.failure);
         assert!(check.resources.contains(&"plugin-http-model".into()));
         assert!(!check.resources.contains(&"native-model".into()));
@@ -92,7 +91,6 @@ async fn p10_listing_http_failures_never_select_native_or_expand_origins() {
         drop(listener);
         let root = tempfile::tempdir().unwrap();
         let connection = connection(ConnectionKind::Llm, &native.base);
-        let store = store(root.path(), &connection);
         let destination = if denied { &native.base } else { &approved };
         let body = format!(
             "{} local.get $p call $error i32.const 1 return",
@@ -101,7 +99,7 @@ async fn p10_listing_http_failures_never_select_native_or_expand_origins() {
             }}))
         );
         let providers = providers(root.path(), Extension::Llm, &body, &approved).await;
-        let check = model::probe(&store, &Credentials::new(true), &connection, &providers).await;
+        let check = model::probe(&Credentials::new(true), &connection, &providers).await;
         assert!(!check.healthy);
         let failure = check.failure.unwrap();
         assert_eq!(failure.code, "connection_check");
@@ -174,7 +172,7 @@ async fn p08_absent_plugin_keeps_native_completion_and_listing() {
             .text(),
         "native completion"
     );
-    let check = model::probe(&store, &credentials, &connection, &providers).await;
+    let check = model::probe(&credentials, &connection, &providers).await;
     assert!(check.healthy, "{:?}", check.failure);
     assert!(check.resources.contains(&"native-model".into()));
     native.assert_requests(2);

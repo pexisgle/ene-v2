@@ -64,47 +64,42 @@ pub(super) async fn check_connection(
     request: ServiceRequest<'_, w::CheckRequest>,
 ) -> ServiceResult<w::CheckResult> {
     let id = request.id.to_owned();
-    let (connection, store) = services
+    let (connection, credentials, generation) = services
         .runtime
         .inspect(move |services| {
-            let store = services.store.clone();
-            let connection = store
+            let connection = services
+                .store
                 .settings_repo()
                 .connection(&id)?
                 .ok_or_else(|| HostError::NotFound(("connection not found").into()))?;
-            Ok((connection, store))
+            Ok((
+                connection,
+                services.credentials.clone(),
+                services.credentials.generation(),
+            ))
         })
         .await
         .map_err(ConnectError::from)?;
-    let credentials = services.runtime.credentials();
-    let agent_platform = connection.endpoint().adapter == model::agent_platform::ADAPTER;
-    let is_mcp = connection.kind == settings::ConnectionKind::Mcp;
-    let is_search = connection.kind == settings::ConnectionKind::Search;
-    let checked_revision = (agent_platform || is_mcp || is_search).then_some(connection.revision);
-    let checked_credentials = (agent_platform || is_search).then(|| credentials.generation());
-    // The probe performs a network request, so it must not run on the ECS
-    // thread; the connection was captured above.
-    let check = run_connection_probe(services, &store, &credentials, &connection).await?;
+    let notify = connection.endpoint().adapter == model::agent_platform::ADAPTER
+        || matches!(
+            connection.kind,
+            settings::ConnectionKind::Mcp | settings::ConnectionKind::Search
+        );
+    let revision = connection.revision;
+    let check = run_connection_probe(services, &credentials, &connection).await?;
     let request_id = request.request_key.to_owned();
     let resource_id = request.resource_id.map(str::to_owned);
     let id = connection.id;
     services
         .change(move |services| {
-            let store = &services.store;
-            if let Some(revision) = checked_revision
-                && (checked_credentials
-                    .is_some_and(|generation| credentials.generation() != generation)
-                    || store
-                        .settings_repo()
-                        .connection(&id)?
-                        .is_some_and(|current| current.revision != revision))
-            {
+            if services.credentials.generation() != generation {
                 return Err(HostError::Conflict(
-                    "connection changed during the check".into(),
+                    "credentials changed during the check".into(),
                 ));
             }
-            store.settings_repo().set_check(&id, &check)?;
-            if checked_revision.is_some() {
+            let store = &services.store;
+            store.settings_repo().set_check(&id, revision, &check)?;
+            if notify {
                 notify_settings(
                     &services.notifier,
                     w::Settings::from(&store.settings_repo().settings()?),

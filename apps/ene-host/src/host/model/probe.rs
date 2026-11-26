@@ -6,7 +6,6 @@
 use super::*;
 
 pub(crate) async fn probe(
-    _store: &Store,
     credentials: &Credentials,
     connection: &Connection,
     providers: &crate::host::providers::Providers,

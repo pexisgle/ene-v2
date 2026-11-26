@@ -513,8 +513,6 @@ fn session_secrets_are_shared_by_clones_but_isolated_between_instances() {
 #[tokio::test]
 async fn the_probe_lists_models_for_any_adapter() {
     let (address, mut requests) = models_endpoint().await;
-    let temp = tempfile::tempdir().unwrap();
-    let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
     let credentials = Credentials::new(true);
     credentials.remember("c1", "explicit-key".into());
     for (adapter, model, path, authentication) in [
@@ -552,7 +550,6 @@ async fn the_probe_lists_models_for_any_adapter() {
         let endpoint = format!("http://{address}");
         let connection = connection_for(adapter, &endpoint);
         let check = probe(
-            &store,
             &credentials,
             &connection,
             &super::super::providers::Providers::none(),
@@ -642,13 +639,10 @@ async fn sakura_probe_filters_non_chat_models_from_llm_list() {
         let _discarded = stream.write_all(reply.as_bytes()).await;
     });
 
-    let root = tempfile::tempdir().unwrap();
-    let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
     let credentials = Credentials::new(true);
     credentials.remember("c1", "uuid:secret".into());
     let conn = llm_connection("sakura", &format!("http://{addr}/v1"), &[]);
     let check = probe(
-        &store,
         &credentials,
         &conn,
         &super::super::providers::Providers::none(),

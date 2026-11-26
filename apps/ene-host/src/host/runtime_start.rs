@@ -105,10 +105,6 @@ impl Runtime {
         self.services.store.clone()
     }
 
-    pub(crate) fn credentials(&self) -> Credentials {
-        self.services.credentials.clone()
-    }
-
     pub(crate) fn voicevox(&self) -> voice::voicevox::VoicevoxManager {
         self.services.voicevox.clone()
     }

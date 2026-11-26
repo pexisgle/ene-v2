@@ -1,82 +1,78 @@
 //! Which probe a connection gets, plus the MCP probe that polls for tools.
 
 use super::super::Services;
-use super::probe::probe_embedding;
-use super::probe::probe_openai_speech;
-use super::probe::probe_voicevox_tts;
-use crate::host::db::Store;
-use crate::host::error::HostError;
-use crate::host::model;
-use crate::host::settings;
-use crate::host::settings::Connection;
-use connectrpc::ConnectError;
+use super::probe::{failed, healthy, probe_embedding, probe_openai_speech, probe_voicevox_tts};
+use crate::host::{
+    error::{HostError, Result},
+    mcp::CheckState,
+    model,
+    settings::{Check, Connection, ConnectionConfig},
+};
+use ene_store::util::now;
+use std::time::Duration;
 
 pub(super) async fn run_connection_probe(
     services: &Services,
-    store: &Store,
     credentials: &model::Credentials,
     connection: &Connection,
-) -> std::result::Result<settings::Check, ConnectError> {
+) -> Result<Check> {
     let providers = services.runtime.providers();
-    if connection.kind == settings::ConnectionKind::Mcp {
-        return probe_mcp_connection(services, connection).await;
-    }
-    if connection.kind == settings::ConnectionKind::Tts
-        && connection
-            .endpoint()
-            .adapter
-            .eq_ignore_ascii_case("voicevox")
-        && !model::is_sakura_endpoint(&connection.endpoint().endpoint)
-        && providers.get("voicevox").is_none()
-    {
-        let voicevox = services.runtime.voicevox();
-        return Ok(probe_voicevox_tts(connection, &voicevox).await);
-    }
-    if matches!(
-        connection.kind,
-        settings::ConnectionKind::Stt | settings::ConnectionKind::Tts
-    ) {
-        return Ok(probe_openai_speech(connection, credentials, &providers).await);
-    }
-    if connection.kind == settings::ConnectionKind::Embedding {
-        return Ok(probe_embedding(connection, credentials, &providers).await);
-    }
-    if connection.kind == settings::ConnectionKind::Search {
-        return Ok(crate::host::web_search::probe(connection, credentials, &providers).await);
-    }
-    Ok(model::probe(store, credentials, connection, &providers).await)
+    Ok(match &connection.config {
+        ConnectionConfig::Mcp(config) => {
+            return probe_mcp_connection(services, connection, &config.command).await;
+        }
+        ConnectionConfig::Tts(_)
+            if connection
+                .endpoint()
+                .adapter
+                .eq_ignore_ascii_case("voicevox")
+                && !model::is_sakura_endpoint(&connection.endpoint().endpoint)
+                && providers.get("voicevox").is_none() =>
+        {
+            probe_voicevox_tts(connection, &services.runtime.voicevox()).await
+        }
+        ConnectionConfig::Stt(_) | ConnectionConfig::Tts(_) => {
+            probe_openai_speech(connection, credentials, &providers).await
+        }
+        ConnectionConfig::Embedding(config) => {
+            probe_embedding(connection, credentials, &providers, config.dimensions).await
+        }
+        ConnectionConfig::Search(_) => {
+            crate::host::web_search::probe(connection, credentials, &providers).await
+        }
+        _ => model::probe(credentials, connection, &providers).await,
+    })
 }
 
 async fn probe_mcp_connection(
     services: &Services,
     connection: &Connection,
-) -> std::result::Result<settings::Check, ConnectError> {
+    command: &str,
+) -> Result<Check> {
     if !connection.enabled {
-        return Ok(settings::Check {
-            healthy: false,
-            checked_at: ene_store::util::now(),
-            failure: Some(crate::host::error::Failure::new(
-                "connection_check",
-                "MCP 接続が無効化されています。",
-            )),
-            capabilities: Vec::new(),
-            resources: Vec::new(),
-        });
+        return Ok(failed(now(), "MCP 接続が無効化されています。"));
     }
     let reconnect_id = connection.id.clone();
     services
+        .runtime
         .change(move |services| {
             services.mcp.request_reconnect(&reconnect_id);
             Ok(())
         })
         .await?;
-    let uses_npx = matches!(
-        &connection.config,
-        settings::ConnectionConfig::Mcp(config) if crate::host::mcp::is_npx_command(&config.command)
-    );
-    // npm may have to download a package before the server can list tools.
-    let timeout = std::time::Duration::from_secs(if uses_npx { 60 } else { 20 });
-    let outcome = tokio::time::timeout(timeout, async {
+    // npm may need to download the package before the server can list tools.
+    let (timeout, message) = if crate::host::mcp::is_npx_command(command) {
+        (
+            60,
+            "MCP に接続できませんでした。ホストで Node.js と npm が使えること、起動コマンドと通信環境を確認してください。",
+        )
+    } else {
+        (
+            20,
+            "MCP に接続できませんでした。サーバー URL または起動コマンドを確認してください。",
+        )
+    };
+    tokio::time::timeout(Duration::from_secs(timeout), async {
         loop {
             let id = connection.id.clone();
             let revision = connection.revision;
@@ -99,51 +95,14 @@ async fn probe_mcp_connection(
                 })
                 .await?;
             match state {
-                crate::host::mcp::CheckState::Connected(tools) => {
-                    return Ok::<_, HostError>(Ok(tools));
+                CheckState::Connected(tools) => return Ok(healthy(now(), tools)),
+                CheckState::Failed(reason) => {
+                    return Ok(failed(now(), format!("{message} ({reason})")));
                 }
-                crate::host::mcp::CheckState::Failed(reason) => {
-                    return Ok::<_, HostError>(Err(reason));
-                }
-                crate::host::mcp::CheckState::Connecting => {}
+                CheckState::Connecting => tokio::time::sleep(Duration::from_millis(100)).await,
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     })
-    .await;
-    let default_message = if uses_npx {
-        "MCP に接続できませんでした。ホストで Node.js と npm が使えること、起動コマンドと通信環境を確認してください。"
-    } else {
-        "MCP に接続できませんでした。サーバー URL または起動コマンドを確認してください。"
-    };
-    match outcome {
-        Ok(Ok(Ok(tools))) => Ok(settings::Check {
-            healthy: true,
-            checked_at: ene_store::util::now(),
-            failure: None,
-            capabilities: Vec::new(),
-            resources: tools,
-        }),
-        Ok(Ok(Err(reason))) => Ok(settings::Check {
-            healthy: false,
-            checked_at: ene_store::util::now(),
-            failure: Some(crate::host::error::Failure::new(
-                "connection_check",
-                format!("{default_message} ({reason})"),
-            )),
-            capabilities: Vec::new(),
-            resources: Vec::new(),
-        }),
-        Ok(Err(error)) => Err(error.into()),
-        Err(_) => Ok(settings::Check {
-            healthy: false,
-            checked_at: ene_store::util::now(),
-            failure: Some(crate::host::error::Failure::new(
-                "connection_check",
-                default_message,
-            )),
-            capabilities: Vec::new(),
-            resources: Vec::new(),
-        }),
-    }
+    .await
+    .unwrap_or_else(|_| Ok(failed(now(), message)))
 }
