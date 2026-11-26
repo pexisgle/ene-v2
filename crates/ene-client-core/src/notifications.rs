@@ -6,7 +6,7 @@
 use crate::{
     domain::{
         Activation, ApprovalRequest, ApprovalStatus, ConnectionKind, HostEvent, HostNotification,
-        Message, NotificationEvent, RunStatus, TurnEvent, TurnStatus, WorkEvent, WorkEventDetail,
+        Message, NotificationEvent, RunState, TurnEvent, TurnStatus, WorkEvent, WorkEventDetail,
         WorkStatus,
     },
     reducer::is_user_facing_message,
@@ -211,7 +211,7 @@ fn merge_work_event(model: &mut Model, work: &WorkEvent) {
         Some(WorkEventDetail::StatusChanged(status)) => *status == WorkStatus::Active,
         Some(WorkEventDetail::RunFinished { state, .. }) => matches!(
             state,
-            RunStatus::Starting | RunStatus::Running | RunStatus::WaitingInput
+            Some(RunState::Starting | RunState::Running | RunState::WaitingInput)
         ),
         None => false,
     };

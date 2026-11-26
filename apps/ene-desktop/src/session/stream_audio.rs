@@ -96,7 +96,7 @@ pub(super) async fn handle_audio_frame(
                 state.output = None;
                 None
             } else {
-                Some(session.transport.classify(error))
+                Some(session.transport.classify(&error))
             }
         }
         None => {

@@ -63,13 +63,13 @@ fn a_rule_parses_only_from_a_complete_declaration() {
         "notify_on": "focus",
         "enabled": true,
     });
-    assert!(Watch::parse(&complete).is_ok());
+    assert!(serde_json::from_value::<Watch>(complete.clone()).is_ok());
     let mut incomplete = complete.clone();
     incomplete.as_object_mut().unwrap().remove("notify_on");
-    assert!(Watch::parse(&incomplete).is_err());
+    assert!(serde_json::from_value::<Watch>(incomplete).is_err());
     let mut unknown = complete;
     unknown["extra"] = serde_json::json!(1);
-    assert!(Watch::parse(&unknown).is_err());
+    assert!(serde_json::from_value::<Watch>(unknown).is_err());
 }
 
 /// The parent must be woken on the transition into a match, not on every
@@ -170,30 +170,4 @@ fn an_idle_observation_reports_the_activity_state() {
             ..
         }]
     ));
-}
-
-#[test]
-fn x11_wm_class_prefers_class_and_falls_back_to_instance() {
-    assert_eq!(parse_wm_class(b"kitty\0kitty\0"), "kitty");
-    assert_eq!(parse_wm_class(b"navigator\0firefox\0"), "firefox");
-    assert_eq!(parse_wm_class(b"only-instance\0\0"), "only-instance");
-    assert_eq!(parse_wm_class(b""), "");
-}
-
-#[test]
-fn wayland_toplevel_state_detects_activated_entry() {
-    let inactive = [0u32, 1u32]
-        .into_iter()
-        .flat_map(u32::to_ne_bytes)
-        .collect::<Vec<_>>();
-    assert!(!wayland_state_is_activated(&inactive));
-
-    let active = [0u32, 2u32, 3u32]
-        .into_iter()
-        .flat_map(u32::to_ne_bytes)
-        .collect::<Vec<_>>();
-    assert!(wayland_state_is_activated(&active));
-
-    // Truncated trailing bytes never trigger false activation or panic.
-    assert!(!wayland_state_is_activated(&[2, 0, 0]));
 }

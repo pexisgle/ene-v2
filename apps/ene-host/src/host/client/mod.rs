@@ -2,7 +2,7 @@
 //! and device operations.
 
 use super::error::{HostError, Result};
-use super::json;
+use ene_domain::json;
 
 pub(crate) use ene_domain::{Client, DeviceOperation, DeviceStatus};
 #[cfg(test)]
@@ -53,6 +53,8 @@ use rig_ecs::prelude::*;
 use serde_json::Value;
 
 pub(crate) use dynamic::CapabilityTools;
+pub(crate) use perception::ingest_perception;
+#[cfg(test)]
 pub(crate) use perception::report_perception;
 pub(crate) use policy::CapabilityPolicy;
 
@@ -82,7 +84,9 @@ impl Plugin for ClientPlugin {
             "Run a listed capability on the bound client. Use its declared JSON input schema. \
              The tool waits for the client's validated result.",
             ToolOptions::default(),
-            device::on_device_request,
+            |called: On<ToolCalled<DeviceRequestArgs>>, commands: Commands| {
+                device::on_device_request(called.event(), commands);
+            },
         )
         .add_systems(
             AgentPass,
@@ -162,7 +166,7 @@ fn publish(world: &mut World, client: &Client) -> Result<w::Client> {
 /// Registers or refreshes a client declaration. A client never sends grants:
 /// the host's [`CapabilityPolicy`] decides them, and the operation-level gate
 /// still decides every call.
-pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> Result<w::Client> {
+pub(crate) fn register(world: &mut World, request: &w::RegisterClientRequest) -> Result<w::Client> {
     let store = world.resource::<Store>().clone();
     let specs = declarations(&request.capability_specs, &request.capabilities)?;
     let rules = store.policy_repo().policy_rules()?;
@@ -185,17 +189,17 @@ pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> 
         Ok(view) => Ok(view),
         Err(error) => {
             if let Some(previous) = previous {
-                ene_platform_os::warn_if_err(
+                ene_domain::warn_if_err(
                     store.client_repo().restore_client(&previous),
                     "client declaration rollback",
                 );
             } else {
-                ene_platform_os::warn_if_err(
+                ene_domain::warn_if_err(
                     store.client_repo().delete_client(&request.id),
                     "rejected client cleanup",
                 );
             }
-            super::util::log_if_err(dynamic::sync_tools(world), "tool resync");
+            ene_domain::warn_if_err(dynamic::sync_tools(world), "tool resync");
             Err(error)
         }
     }
@@ -203,7 +207,7 @@ pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> 
 
 pub(crate) fn set_capabilities(
     world: &mut World,
-    request: w::SetCapabilitiesRequest,
+    request: &w::SetCapabilitiesRequest,
 ) -> Result<w::Client> {
     let store = world.resource::<Store>().clone();
     let specs = declarations(&request.capability_specs, &request.capabilities)?;
@@ -228,12 +232,12 @@ pub(crate) fn set_capabilities(
         Ok(view) => Ok(view),
         Err(error) => {
             if let Some(previous) = previous {
-                ene_platform_os::warn_if_err(
+                ene_domain::warn_if_err(
                     store.client_repo().restore_client(&previous),
                     "client declaration rollback",
                 );
             }
-            super::util::log_if_err(dynamic::sync_tools(world), "tool resync");
+            ene_domain::warn_if_err(dynamic::sync_tools(world), "tool resync");
             Err(error)
         }
     }
@@ -254,14 +258,14 @@ fn notify_client(notifier: &mut Notifier, client: &w::Client) {
 /// client is the active one, and work already accepted by the old client keeps
 /// running there. Its audio output is flushed, its perception summary is
 /// dropped and its tools are unpublished.
-pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Result<w::Activation> {
+pub(crate) fn activate(world: &mut World, request: &w::ActivationRequest) -> Result<w::Activation> {
     let store = world.resource::<Store>().clone();
     store
         .companion_repo()
         .companion(&request.companion_id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     if !request.release {
-        super::util::validate_id(&request.client_id)?;
+        ene_domain::validate_id(&request.client_id)?;
         store
             .client_repo()
             .client(&request.client_id)?
@@ -276,17 +280,17 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
     // roll the move back before any notification is visible.
     if let Err(error) = dynamic::sync_tools(world) {
         if let Some(previous) = previous.as_ref() {
-            super::util::log_if_err(
+            ene_domain::warn_if_err(
                 store.client_repo().restore_activation(previous),
                 "activation rollback",
             );
         } else {
-            super::util::log_if_err(
+            ene_domain::warn_if_err(
                 store.client_repo().delete_activation(&request.companion_id),
                 "rejected activation cleanup",
             );
         }
-        super::util::log_if_err(dynamic::sync_tools(world), "tool resync");
+        ene_domain::warn_if_err(dynamic::sync_tools(world), "tool resync");
         return Err(error);
     }
     if let Some(previous) = previous.clone()
@@ -327,9 +331,9 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
     world.resource_mut::<Notifier>().push(
         Some(&request.companion_id),
         None,
-        w::notification::Event::ActivationUpdated(Box::new(wire::activation(&activation))),
+        w::notification::Event::ActivationUpdated(Box::new((&activation).into())),
     );
-    Ok(wire::activation(&activation))
+    Ok((&activation).into())
 }
 
 #[cfg(test)]

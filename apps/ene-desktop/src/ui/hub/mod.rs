@@ -21,7 +21,7 @@ use crate::{
 };
 use ene_client_core::domain::ConnectionKind;
 use ene_platform_os::TrayAction;
-use gpui::{App, Context, Task, WeakEntity, WindowHandle};
+use gpui::{AnyWindowHandle, App, Context, Task, WeakEntity};
 use state::ApplyFlags;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -115,7 +115,7 @@ impl Hub {
         let had_companion = self.model.companion_id().is_some();
         let had_approvals = self.model.approvals().len();
         let effects = self.model.apply(update);
-        self.dispatch_apply_effects(flags, effects, had_companion, had_approvals, cx);
+        self.dispatch_apply_effects(&flags, effects, had_companion, had_approvals, cx);
     }
 
     fn pre_apply_hub_state(&mut self, update: &Update, cx: &mut Context<Self>) -> ApplyFlags {
@@ -203,7 +203,7 @@ impl Hub {
 
     fn dispatch_apply_effects(
         &mut self,
-        flags: ApplyFlags,
+        flags: &ApplyFlags,
         effects: Effects,
         had_companion: bool,
         had_approvals: usize,
@@ -299,7 +299,7 @@ impl Hub {
 
     pub(crate) fn register_pod_window(
         &mut self,
-        handle: WindowHandle<CompanionPod>,
+        handle: AnyWindowHandle,
         view: WeakEntity<CompanionPod>,
         cx: &mut Context<Self>,
     ) {

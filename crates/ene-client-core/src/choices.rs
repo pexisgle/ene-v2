@@ -72,15 +72,15 @@ impl ModelRoleSlot {
     /// The assignment in force for this slot, when one is set.
     pub fn current(self, assignments: &ModelAssignments) -> Option<ModelAssignment> {
         let picked = match self {
-            Self::Companion => assignments.companion.as_ref(),
-            Self::Task => assignments.task.as_ref(),
+            Self::Companion => Some(&assignments.companion),
+            Self::Task => Some(&assignments.task),
             Self::Perception => assignments.perception.as_ref(),
             Self::Compaction => assignments.compaction.as_ref(),
             Self::Consolidation => assignments.consolidation.as_ref(),
             Self::Decision => assignments.decision.as_ref(),
             Self::Embedding => assignments.embedding.as_ref(),
         }?;
-        (!picked.connection_id.is_empty() && !picked.model_id.is_empty()).then(|| picked.clone())
+        picked.is_set().then(|| picked.clone())
     }
 }
 
@@ -471,14 +471,12 @@ impl Model {
             assignments
                 .and_then(|a| slot.current(a))
                 .is_some_and(|assigned| {
-                    !assigned.connection_id.is_empty()
-                        && !assigned.model_id.is_empty()
-                        && settings.connections.iter().any(|c| {
-                            c.id == assigned.connection_id
-                                && c.enabled
-                                && c.kind == ConnectionKind::Llm
-                                && !c.needs_key(providers)
-                        })
+                    settings.connections.iter().any(|c| {
+                        c.id == assigned.connection_id
+                            && c.enabled
+                            && c.kind == ConnectionKind::Llm
+                            && !c.needs_key(providers)
+                    })
                 })
         };
         let assign_companion = !is_valid(ModelRoleSlot::Companion);

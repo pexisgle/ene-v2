@@ -1,14 +1,51 @@
 //! Chat service: message acceptance, history and turns.
 use super::Services;
-use crate::host::chat;
 use ene_rpc as w;
 
 #[expect(refining_impl_trait, reason = "Connect boxes futures")]
 impl w::ChatService for Services {
-    request!(app send_message, w::SendMessageRequest, w::Acceptance, chat::accept);
-    discard!(stop, w::StopRequest, chat::stop);
-    request!(read_view get_history, w::HistoryRequest, w::History, chat::history);
-    request!(read_view get_message, w::MessageRequest, w::Message, chat::message_by_id);
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "send_message", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn send_message(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::SendMessageRequest>,
+    ) -> connectrpc::ServiceResult<w::Acceptance> {
+        let request = request.to_owned_message();
+        self.call(move |kernel| kernel.accept(&request)).await
+    }
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "stop", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn stop(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::StopRequest>,
+    ) -> connectrpc::ServiceResult<ene_rpc::Empty> {
+        let request = request.to_owned_message();
+        self.call(move |kernel| {
+            kernel.stop_turn(&request)?;
+            Ok(ene_rpc::Empty::default())
+        })
+        .await
+    }
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "get_history", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn get_history(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::HistoryRequest>,
+    ) -> connectrpc::ServiceResult<w::History> {
+        let request = request.to_owned_view();
+        self.read(move |kernel| kernel.history(request.reborrow()))
+            .await
+    }
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "get_message", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn get_message(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::MessageRequest>,
+    ) -> connectrpc::ServiceResult<w::Message> {
+        let request = request.to_owned_view();
+        self.read(move |kernel| kernel.message(request.reborrow()))
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -26,19 +63,18 @@ mod tests {
 
     /// Captures the history an in-process RPC read produced, without registering
     /// anything on the ECS world: the request path hands the value to this channel.
-    static OBSERVED: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<w::History>>> =
-        std::sync::Mutex::new(None);
+    static OBSERVED: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<w::History>>> =
+        parking_lot::Mutex::new(None);
 
     fn observed_history(
-        world: &mut bevy_ecs::world::World,
+        kernel: &mut crate::host::agent::AgentKernel<'_>,
         request: &w::HistoryRequestView<'_>,
     ) -> crate::host::error::Result<w::History> {
-        let history = chat::history(world, request)?;
+        let history = kernel.history(request)?;
         // The test installs the sender before issuing the call; a missing sender
         // means the test did not arm the probe, which is its own failure.
         let sender = OBSERVED
             .lock()
-            .expect("observed probe mutex is never poisoned")
             .take()
             .expect("the test arms the observed channel before calling");
         sender
@@ -48,7 +84,16 @@ mod tests {
     }
 
     impl Services {
-        request!(read_view observed_history, w::HistoryRequest, w::History, observed_history);
+        #[tracing::instrument(name = "rpc", skip_all, fields(method = "observed_history", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+        async fn observed_history(
+            &self,
+            _: connectrpc::RequestContext,
+            request: connectrpc::ServiceRequest<'_, w::HistoryRequest>,
+        ) -> connectrpc::ServiceResult<w::History> {
+            let request = request.to_owned_view();
+            self.read(move |kernel| observed_history(kernel, request.reborrow()))
+                .await
+        }
     }
 
     #[tokio::test]
@@ -76,7 +121,7 @@ mod tests {
             })
             .await
             .unwrap();
-        *OBSERVED.lock().expect("observed probe") = Some(observed);
+        *OBSERVED.lock() = Some(observed);
         let (entered, blocked) = tokio::sync::oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
         let blocker = runtime.read(move |_| {

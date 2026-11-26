@@ -1,83 +1,9 @@
 //! Companion identity, author profile, mind state, and model role assignments.
-use crate::{
-    error::{MindError, Result},
-    json::JsonDoc,
-};
+use crate::{Result, json::JsonDoc};
+use ene_domain::DomainError;
+pub use ene_domain::validate_id;
+use ene_domain::{ModelAssignment, ModelAssignments};
 use serde::{Deserialize, Serialize};
-
-/// Checks that an opaque identifier is 1..=128 printable ASCII characters.
-pub fn validate_id(id: &str) -> Result<()> {
-    if id.is_empty()
-        || id.chars().count() > 128
-        || id.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
-    {
-        return Err(MindError::Invalid(
-            "id must be 1-128 printable ASCII characters".into(),
-        ));
-    }
-    Ok(())
-}
-
-/// The seven model roles from the contract. `companion` and `task` are
-/// required to run anything; the rest fall back as documented.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Assignments {
-    pub companion: Assignment,
-    pub task: Assignment,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub perception: Option<Assignment>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction: Option<Assignment>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub consolidation: Option<Assignment>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decision: Option<Assignment>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub embedding: Option<Assignment>,
-}
-
-impl Assignments {
-    /// Clears any role referencing `id` and returns whether any assignment changed.
-    pub fn remove_connection(&mut self, id: &str) -> bool {
-        let mut changed = false;
-        for assignment in [&mut self.companion, &mut self.task] {
-            if assignment.connection_id == id {
-                *assignment = Assignment::default();
-                changed = true;
-            }
-        }
-        for assignment in [
-            &mut self.perception,
-            &mut self.compaction,
-            &mut self.consolidation,
-            &mut self.decision,
-            &mut self.embedding,
-        ] {
-            if assignment
-                .as_ref()
-                .is_some_and(|value| value.connection_id == id)
-            {
-                *assignment = None;
-                changed = true;
-            }
-        }
-        changed
-    }
-}
-
-/// One model assignment pointing to a connection and model ID.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Assignment {
-    pub connection_id: String,
-    pub model_id: String,
-}
-
-impl Assignment {
-    /// Returns whether both connection and model IDs are non-empty.
-    pub fn is_set(&self) -> bool {
-        !self.connection_id.is_empty() && !self.model_id.is_empty()
-    }
-}
 
 /// The profile material the author edits apart from the immutable core.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,7 +71,7 @@ pub fn default_ene_companion(stamp: &str) -> Companion {
         state_revision: 1,
         body: JsonDoc::new("ene.body.v1", serde_json::json!({"model": "ENE.vrm"})),
         voice: JsonDoc::new("ene.voice.v1", serde_json::json!({})),
-        assignments: Assignments::default(),
+        assignments: ModelAssignments::default(),
         persona: Some(
             "一人称は「私」。相手は「マスター」と呼び、希望する呼び方があればそれに合わせる。明るく親しみのある敬語で、場に合う軽口や茶目っ気を添える。雑談はテンポよく、説明の詳しさは相手の知りたいことに合わせる。".into(),
         ),
@@ -169,7 +95,7 @@ pub struct Companion {
     pub state_revision: u64,
     pub body: JsonDoc,
     pub voice: JsonDoc,
-    pub assignments: Assignments,
+    pub assignments: ModelAssignments,
     pub persona: Option<String>,
     pub voice_identifier: Option<String>,
     /// Optimistic concurrency for edits of the author's settings.
@@ -183,26 +109,26 @@ impl Companion {
     pub fn validate(&self) -> Result<()> {
         validate_id(&self.id)?;
         if self.name.trim().is_empty() || self.name.chars().count() > 128 {
-            return Err(MindError::Invalid(
+            return Err(DomainError::Invalid(
                 "companion name must be 1-128 characters".into(),
             ));
         }
         if self.mind.chars().count() > 8_000 {
-            return Err(MindError::Invalid("companion mind is too long".into()));
+            return Err(DomainError::Invalid("companion mind is too long".into()));
         }
         if self
             .persona
             .as_ref()
             .is_some_and(|text| text.chars().count() > 8_000)
         {
-            return Err(MindError::Invalid("companion persona is too long".into()));
+            return Err(DomainError::Invalid("companion persona is too long".into()));
         }
         if self
             .voice_identifier
             .as_ref()
             .is_some_and(|text| text.chars().count() > 128)
         {
-            return Err(MindError::Invalid("voice identifier is too long".into()));
+            return Err(DomainError::Invalid("voice identifier is too long".into()));
         }
         self.body.validate()?;
         self.voice.validate()?;
@@ -216,14 +142,14 @@ impl Companion {
         .flatten()
         {
             if text.chars().count() > 4_000 {
-                return Err(MindError::Invalid("profile entry is too long".into()));
+                return Err(DomainError::Invalid("profile entry is too long".into()));
             }
         }
         Ok(())
     }
 
     /// The model assignment for one role, with the documented fallbacks.
-    pub fn model(&self, role: Role) -> Option<&Assignment> {
+    pub fn model(&self, role: Role) -> Option<&ModelAssignment> {
         let assignments = &self.assignments;
         let chosen = match role {
             Role::Companion => Some(&assignments.companion),

@@ -12,8 +12,7 @@ pub(crate) use ene_voice::{
     STT_TIMEOUT, SetupError, SttEngine, TtsEngine, VOICE_UNAVAILABLE, VoiceHttpError,
     parse_binding, speech, synthesize_for_probe, voicevox,
 };
-#[cfg(test)]
-pub(crate) use engine::Engines;
+pub(crate) use engine::{Engines, VoiceEngineContext};
 pub(crate) use engine::{companion_tts_source, stt_source, tts_source};
 pub(crate) use session::{
     VoicePlugin, accept_transcription, bind_input, flush, is_still_active, on_client_activated,

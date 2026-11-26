@@ -1,5 +1,6 @@
 //! Settings and connections persistence.
 
+use crate::row::FromRow;
 use crate::{
     Store, StoreError, corrupt, enum_name_column, error::Result, json_column, optional_json_column,
     require_found, to_json, util::now,
@@ -9,26 +10,32 @@ use ene_mind::Companion;
 use rusqlite::{Row, params};
 use std::collections::HashSet;
 
-fn row_to_connection(row: &Row<'_>) -> rusqlite::Result<Connection> {
-    let kind = enum_name_column(row, "kind", "unknown connection kind")?;
-    let config: ConnectionConfig =
-        json_column(row, "config", "stored connection config is corrupt")?;
-    if config.kind() != kind {
-        return Err(corrupt(
-            row.as_ref().column_index("config")?,
-            "stored connection kind and config disagree",
-        ));
+impl FromRow for Connection {
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        let kind = enum_name_column(row, "kind", "unknown connection kind")?;
+        let config: ConnectionConfig =
+            json_column(row, "config", "stored connection config is corrupt")?;
+        if config.kind() != kind {
+            return Err(corrupt(
+                row.as_ref().column_index("config")?,
+                "stored connection kind and config disagree",
+            ));
+        }
+        Ok(Connection {
+            id: row.get("id")?,
+            name: row.get("name")?,
+            enabled: row.get("enabled")?,
+            kind,
+            config,
+            credential_state: CredentialState::parse(&row.get::<_, String>("credential_state")?),
+            revision: row.get::<_, u64>("revision")?,
+            last_check: optional_json_column(
+                row,
+                "last_check",
+                "stored connection check is corrupt",
+            )?,
+        })
     }
-    Ok(Connection {
-        id: row.get("id")?,
-        name: row.get("name")?,
-        enabled: row.get("enabled")?,
-        kind,
-        config,
-        credential_state: CredentialState::parse(&row.get::<_, String>("credential_state")?),
-        revision: row.get::<_, u64>("revision")?,
-        last_check: optional_json_column(row, "last_check", "stored connection check is corrupt")?,
-    })
 }
 
 const COLUMNS: &str = "id, name, enabled, kind, config, credential_state, last_check, revision";
@@ -52,7 +59,7 @@ impl<'a> SettingsRepo<'a> {
             None => {
                 let stamp = now();
                 self.0
-                    .conn()?
+                    .conn()
                     .prepare_cached(
                         "INSERT INTO settings_state (id, revision, updated_at) VALUES (1, 1, ?1)",
                     )?
@@ -63,7 +70,7 @@ impl<'a> SettingsRepo<'a> {
         let connections = self.0.fetch_all(
             &format!("SELECT {COLUMNS} FROM connections ORDER BY id"),
             [],
-            row_to_connection,
+            Connection::from_row,
         )?;
         Ok(Settings {
             revision,
@@ -88,7 +95,7 @@ impl<'a> SettingsRepo<'a> {
         self.0.fetch(
             &format!("SELECT {COLUMNS} FROM connections WHERE id = ?1"),
             [id],
-            row_to_connection,
+            Connection::from_row,
         )
     }
 
@@ -195,7 +202,7 @@ impl<'a> SettingsRepo<'a> {
         });
         let changed = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE connections SET credential_state = ?2, updated_at = ?3,
                  last_check = CASE WHEN ?4 THEN NULL ELSE last_check END WHERE id = ?1",
@@ -214,7 +221,7 @@ impl<'a> SettingsRepo<'a> {
         E: From<StoreError>,
     {
         let mut companions = self.0.companion_repo().companions()?;
-        let mut db = self.0.conn()?;
+        let mut db = self.0.conn();
         let tx = db.transaction().map_err(StoreError::from)?;
         let deleted = tx
             .execute(
@@ -254,7 +261,7 @@ impl<'a> SettingsRepo<'a> {
     pub fn set_check(&self, id: &str, check: &Check) -> Result<()> {
         let changed = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE connections SET last_check = ?2, updated_at = ?3 WHERE id = ?1",
             )?
@@ -321,7 +328,6 @@ mod tests {
         ] {
             store
                 .conn()
-                .unwrap()
                 .execute(
                     "UPDATE connections SET credential_state = ?1 WHERE id = 'c1'",
                     [stored],
@@ -335,7 +341,6 @@ mod tests {
         for invalid_kind in ["unknown", ""] {
             store
                 .conn()
-                .unwrap()
                 .execute(
                     "UPDATE connections SET kind = ?1 WHERE id = 'c1'",
                     [invalid_kind],
@@ -345,7 +350,6 @@ mod tests {
         }
         store
             .conn()
-            .unwrap()
             .execute("UPDATE connections SET kind = 'tts' WHERE id = 'c1'", [])
             .unwrap();
         assert!(matches!(repo.connection("c1"), Err(StoreError::Storage(_))));
@@ -383,7 +387,7 @@ mod tests {
 
     #[test]
     fn removing_a_connection_checks_revision_and_clears_only_its_bindings_and_secret() {
-        use ene_mind::{Assignment, default_ene_companion};
+        use ene_mind::{ModelAssignment, default_ene_companion};
         use std::collections::HashMap;
 
         let dir = tempfile::tempdir().unwrap();
@@ -398,7 +402,7 @@ mod tests {
             ("keep".to_owned(), "preserved".to_owned()),
         ]);
         let mut companion = default_ene_companion(&now());
-        let assignment = |id: &str| Assignment {
+        let assignment = |id: &str| ModelAssignment {
             connection_id: id.into(),
             model_id: "gpt-5".into(),
         };

@@ -1,54 +1,31 @@
 //! Snapshot, chat history, message sending, and turn cancellation RPCs.
 
-use super::{RpcDispatcher, decode};
+use super::RpcDispatcher;
 use crate::update::Update;
-use buffa::view::MessageView;
 use ene_client_core::domain::{HostNotification, Message};
-use ene_domain::CompanionId;
 use ene_rpc as w;
 
-/// The typed form of a companion id the window selected.
-///
-/// The window holds the id as a `String` its dropdowns already carry, so the
-/// parse happens here, at the boundary, rather than in `ui/`.
-pub(crate) fn parse_companion_id(id: &str) -> Option<CompanionId> {
-    CompanionId::parse(id).ok()
-}
-
-pub(crate) fn resnapshot(rpc: &RpcDispatcher, epoch: u64) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
-    rpc.spawn(
-        epoch,
-        "ホスト状態の取得",
-        async move {
-            let response = host.host.get_snapshot(w::Empty::default()).await?;
-            response.view().to_owned_message().map_err(decode)
-        },
-        |snapshot| Update::Notification(Box::new(HostNotification::initial_state(snapshot.into()))),
-    );
+load! {
+    resnapshot: host.get_snapshot("ホスト状態の取得") =>
+        |snapshot| Update::Notification(Box::new(HostNotification::initial_state(snapshot.into())));
 }
 
 pub(crate) fn load_history(rpc: &RpcDispatcher, epoch: u64, companion_id: String) -> bool {
-    let Some(host) = rpc.host() else {
-        return false;
-    };
     let target = companion_id.clone();
     let failed_target = companion_id.clone();
-    rpc.spawn_with(
+    rpc.call_with(
         epoch,
         "会話履歴の取得",
-        async move {
-            let response = host
+        |host| async move {
+            let history = host
                 .chat
                 .get_history(w::HistoryRequest {
                     companion_id,
                     limit: Some(100),
                     ..Default::default()
                 })
-                .await?;
-            let history = response.view().to_owned_message().map_err(decode)?;
+                .await?
+                .into_owned();
             history
                 .items
                 .into_iter()
@@ -64,8 +41,7 @@ pub(crate) fn load_history(rpc: &RpcDispatcher, epoch: u64, companion_id: String
             companion_id: failed_target,
             message: error.to_string(),
         },
-    );
-    true
+    )
 }
 
 pub(crate) fn send_message(
@@ -75,11 +51,8 @@ pub(crate) fn send_message(
     request_key: String,
     text: String,
 ) -> bool {
-    let Some(host) = rpc.host() else {
-        return false;
-    };
-    rpc.spawn_update(epoch, async move {
-        let outcome = match host
+    rpc.call_update(epoch, |host| async move {
+        match host
             .chat
             .send_message(w::SendMessageRequest {
                 companion_id,
@@ -90,44 +63,28 @@ pub(crate) fn send_message(
             })
             .await
         {
-            Ok(response) => response
-                .view()
-                .to_owned_message()
-                .map(|acceptance| acceptance.request_id)
-                .map_err(|error| error.to_string()),
-            Err(error) => Err(error.to_string()),
-        };
-        match outcome {
-            Ok(request_id) => Update::Accepted {
+            Ok(response) => Update::Accepted {
                 request_key,
-                request_id,
+                request_id: response.view().request_id.to_owned(),
             },
-            Err(reason) => Update::SendFailed {
+            Err(error) => Update::SendFailed {
                 request_key,
                 text,
-                reason,
+                reason: error.to_string(),
             },
         }
-    });
-    true
+    })
 }
 
 pub(crate) fn stop(rpc: &RpcDispatcher, epoch: u64, companion_id: String) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
     let stopping = companion_id.clone();
-    rpc.spawn(
+    rpc.call(
         epoch,
         "発話・生成の停止",
-        async move {
-            host.chat
-                .stop(w::StopRequest {
-                    companion_id,
-                    ..Default::default()
-                })
-                .await
-        },
+        request!(chat.stop(w::StopRequest {
+            companion_id,
+            ..Default::default()
+        })),
         move |_| Update::StopRequested {
             companion_id: stopping,
         },

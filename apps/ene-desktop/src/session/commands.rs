@@ -3,14 +3,11 @@
 //! The window-command handlers live in [`super::window_commands`].
 
 use super::Session;
+use super::device_commands::{LookAtInput, MotionInput, OperationOutput, PerchInput};
 use super::stream::{AdmitError, Claim, admits};
 #[cfg(windows)]
 use crate::avatar::Avatar;
-use crate::{
-    avatar, capabilities,
-    host::Host,
-    perception::{Watch, WatchParseError},
-};
+use crate::{avatar, capabilities, host::Host, perception::Watch};
 use buffa::view::MessageView;
 use ene_rpc as w;
 use std::time::Duration;
@@ -27,8 +24,6 @@ pub(super) struct MotionPlan {
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum MotionPlanError {
-    #[error("body.motion requires a `motion` name")]
-    MissingMotion,
     #[error("`{0}` is not a declared motion preset")]
     UnknownPreset(String),
     #[error("`{0}` is not a declared expression")]
@@ -38,29 +33,22 @@ pub(super) enum MotionPlanError {
 }
 
 impl MotionPlan {
-    pub(super) fn parse(input: &serde_json::Value) -> Result<Self, MotionPlanError> {
-        let motion = input
-            .get("motion")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(MotionPlanError::MissingMotion)?;
+    pub(super) fn parse(input: MotionInput) -> Result<Self, MotionPlanError> {
+        let MotionInput { motion, expression } = input;
         if !avatar::MOTIONS.iter().any(|(preset, _)| *preset == motion) {
-            return Err(MotionPlanError::UnknownPreset(motion.to_owned()));
+            return Err(MotionPlanError::UnknownPreset(motion));
         }
-        let expression = input
-            .get("expression")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
         if let Some(name) = &expression
             && !capabilities::EXPRESSIONS.contains(&name.as_str())
         {
             return Err(MotionPlanError::UnknownExpression(name.clone()));
         }
-        let clip = avatar::motion(motion);
+        let clip = avatar::motion(&motion);
         if clip.is_none() && motion != "idle" {
-            return Err(MotionPlanError::MissingMotionAsset(motion.to_owned()));
+            return Err(MotionPlanError::MissingMotionAsset(motion));
         }
         Ok(Self {
-            motion: motion.to_owned(),
+            motion,
             clip,
             expression,
         })
@@ -82,10 +70,10 @@ pub(super) enum OperationError {
     Avatar(#[from] avatar::AvatarError),
     #[error(transparent)]
     MotionPlan(#[from] MotionPlanError),
-    #[error(transparent)]
-    Watch(#[from] WatchParseError),
-    #[error("the operation input is not JSON: {0}")]
+    #[error("invalid operation input: {0}")]
     InvalidInputJson(#[from] serde_json::Error),
+    #[error("could not encode the operation output: {0}")]
+    OutputJson(serde_json::Error),
     #[error("this client is not serving any companion")]
     NoCompanionServed,
     #[error("this client does not implement `{0}`")]
@@ -115,8 +103,6 @@ pub(super) enum OperationError {
     InvalidLookAtAngles,
     #[error("no renderer is configured, so gaze was not updated")]
     NoRendererForLookAt,
-    #[error("body.perch requires numeric `{0}`")]
-    MissingPerchCoord(&'static str),
     #[error("body.perch coordinates must be finite")]
     NonFinitePerchCoord,
     #[error("no renderer is configured, so the avatar could not perch")]
@@ -214,8 +200,10 @@ impl Session {
     pub(super) fn operation_result(
         client_id: &str,
         operation: &w::DeviceOperation,
-        outcome: Result<serde_json::Value, OperationError>,
+        outcome: Result<OperationOutput, OperationError>,
     ) -> w::DeviceOperationResult {
+        let outcome = outcome
+            .and_then(|value| serde_json::to_string(&value).map_err(OperationError::OutputJson));
         match &outcome {
             Ok(_) => tracing::info!(
                 operation = %operation.operation_id,
@@ -230,7 +218,7 @@ impl Session {
             ),
         }
         let (success, output, failure) = match outcome {
-            Ok(output) => (true, output.to_string(), None),
+            Ok(output) => (true, output, None),
             Err(reason) => (
                 false,
                 String::new(),
@@ -241,7 +229,9 @@ impl Session {
                             && matches!(
                                 reason,
                                 OperationError::ComputerUse(
-                                    crate::computer::ComputerUseError::PartialInput,
+                                    crate::computer::ComputerUseError::Input(
+                                        ene_platform_os::input::InputError::Partial,
+                                    ),
                                 )
                             )
                         {
@@ -289,14 +279,15 @@ impl Session {
         .err()
     }
 
-    pub(super) fn operation_input(
+    pub(super) fn operation_input<T: serde::de::DeserializeOwned>(
         operation: &w::DeviceOperation,
-    ) -> Result<serde_json::Value, OperationError> {
-        if operation.input.trim().is_empty() {
-            Ok(serde_json::json!({}))
+    ) -> Result<T, OperationError> {
+        let input = if operation.input.trim().is_empty() {
+            "{}"
         } else {
-            Ok(serde_json::from_str(&operation.input)?)
-        }
+            &operation.input
+        };
+        Ok(serde_json::from_str(input)?)
     }
 
     fn target_companion_id(
@@ -317,24 +308,28 @@ impl Session {
     pub(super) async fn execute(
         &mut self,
         operation: &w::DeviceOperation,
-    ) -> Result<serde_json::Value, OperationError> {
-        let input = Self::operation_input(operation)?;
+    ) -> Result<OperationOutput, OperationError> {
         match operation.capability.as_str() {
             "body.motion" => {
                 let target = self.target_companion_id(operation)?;
-                self.motion(&target, &input).await
+                self.motion(&target, Self::operation_input(operation)?)
+                    .await
             }
             "body.look_at" => {
                 let target = self.target_companion_id(operation)?;
-                self.look_at(&target, &input).await
+                self.look_at(&target, Self::operation_input(operation)?)
+                    .await
             }
             "body.perch" => {
                 let target = self.target_companion_id(operation)?;
-                self.perch(&target, &input).await
+                self.perch(&target, Self::operation_input(operation)?).await
             }
-            "eye.watch" => self.watch(&input),
+            "eye.watch" => self.watch(Self::operation_input(operation)?),
             other if other.starts_with("plugin.") => {
-                Ok(self.devices.client_plugins.execute(other, input).await?)
+                let input = Self::operation_input(operation)?;
+                Ok(OperationOutput::External(
+                    self.devices.client_plugins.execute(other, input).await?,
+                ))
             }
             other => Err(OperationError::UnimplementedCapability(other.to_owned())),
         }
@@ -343,23 +338,16 @@ impl Session {
     async fn look_at(
         &mut self,
         companion_id: &str,
-        input: &serde_json::Value,
-    ) -> Result<serde_json::Value, OperationError> {
-        let reset = input
-            .get("reset")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        input: LookAtInput,
+    ) -> Result<OperationOutput, OperationError> {
+        let LookAtInput {
+            yaw_deg: yaw,
+            pitch_deg: pitch,
+            reset,
+        } = input;
         let (yaw_deg, pitch_deg) = if reset {
             (None, None)
         } else {
-            let yaw = input
-                .get("yaw_deg")
-                .and_then(serde_json::Value::as_f64)
-                .map_or(0., |v| v as f32);
-            let pitch = input
-                .get("pitch_deg")
-                .and_then(serde_json::Value::as_f64)
-                .map_or(0., |v| v as f32);
             if !yaw.is_finite() || !pitch.is_finite() || yaw.abs() > 90. || pitch.abs() > 60. {
                 return Err(OperationError::InvalidLookAtAngles);
             }
@@ -371,50 +359,35 @@ impl Session {
             .as_mut()
             .ok_or(OperationError::NoRendererForLookAt)?;
         avatar.look_at(companion_id, yaw_deg, pitch_deg).await?;
-        Ok(serde_json::json!({
-            "reset": reset,
-            "yaw_deg": yaw_deg,
-            "pitch_deg": pitch_deg,
-        }))
+        Ok(OperationOutput::LookAt {
+            reset,
+            yaw_deg,
+            pitch_deg,
+        })
     }
 
     async fn perch(
         &mut self,
         companion_id: &str,
-        input: &serde_json::Value,
-    ) -> Result<serde_json::Value, OperationError> {
-        let x = input
-            .get("x")
-            .and_then(serde_json::Value::as_f64)
-            .map(|v| v as f32)
-            .ok_or(OperationError::MissingPerchCoord("x"))?;
-        let y = input
-            .get("y")
-            .and_then(serde_json::Value::as_f64)
-            .map(|v| v as f32)
-            .ok_or(OperationError::MissingPerchCoord("y"))?;
+        input: PerchInput,
+    ) -> Result<OperationOutput, OperationError> {
+        let PerchInput { x, y, .. } = input;
         if !x.is_finite() || !y.is_finite() || x.abs() > 1_000_000. || y.abs() > 1_000_000. {
             return Err(OperationError::NonFinitePerchCoord);
         }
-        let monitor = input
-            .get("monitor")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
-        let posture = input
-            .get("posture")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
         let model = self.transport.model_for(companion_id);
         let avatar = self
             .devices
             .avatar
             .as_mut()
             .ok_or(OperationError::NoRendererForPerch)?;
-        avatar.place(companion_id, monitor.clone(), [x, y]).await?;
-        if let Some(posture_name) = posture.as_deref()
-            && matches!(posture_name, "sit_idle" | "sit_swing_legs" | "idle")
+        avatar
+            .place(companion_id, input.monitor.clone(), [x, y])
+            .await?;
+        if let Some(posture) = input.posture
             && let Some(model_path) = model
         {
+            let posture_name = posture.preset();
             let clip = avatar::motion(posture_name);
             if clip.is_some() || posture_name == "idle" {
                 let _spawned = avatar
@@ -422,20 +395,15 @@ impl Session {
                     .await;
             }
         }
-        Ok(serde_json::json!({
-            "x": x,
-            "y": y,
-            "monitor": monitor,
-            "posture": posture,
-        }))
+        Ok(OperationOutput::Perch(input))
     }
 
     /// Shows a motion on `companion_id`. Without a renderer the operation fails.
     async fn motion(
         &mut self,
         companion_id: &str,
-        input: &serde_json::Value,
-    ) -> Result<serde_json::Value, OperationError> {
+        input: MotionInput,
+    ) -> Result<OperationOutput, OperationError> {
         let plan = MotionPlan::parse(input)?;
         let model = self
             .transport
@@ -460,23 +428,25 @@ impl Session {
             let face = (name != "neutral").then_some(name.as_str());
             avatar.expression(companion_id, face).await?;
         }
-        Ok(serde_json::json!({
-            "applied": true,
-            "motion": plan.motion,
-            "expression": plan.expression,
-        }))
+        Ok(OperationOutput::Motion {
+            applied: true,
+            motion: plan.motion,
+            expression: plan.expression,
+        })
     }
 
     /// Applies or clears a watch rule.
-    fn watch(&mut self, input: &serde_json::Value) -> Result<serde_json::Value, OperationError> {
+    fn watch(&mut self, watch: Watch) -> Result<OperationOutput, OperationError> {
         if !self.devices.eyes_enabled {
             return Err(OperationError::EyesDisabled);
         }
-        let watch = Watch::parse(input)?;
         let enabled = watch.enabled;
         self.devices
             .sensor
             .apply(if enabled { Some(watch) } else { None });
-        Ok(serde_json::json!({"applied": true, "enabled": enabled}))
+        Ok(OperationOutput::Watch {
+            applied: true,
+            enabled,
+        })
     }
 }

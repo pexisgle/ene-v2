@@ -13,7 +13,7 @@ use bevy_ecs::prelude::*;
 use std::sync::Arc;
 
 /// Engines a test injects to stand in for the plugin path.
-#[derive(Resource, Default)]
+#[derive(Resource, Clone, Default)]
 pub(crate) struct Engines {
     pub(crate) tts: Option<Arc<dyn TtsEngine>>,
     pub(crate) stt: Option<Arc<dyn SttEngine>>,
@@ -48,53 +48,54 @@ fn resolve_base(connection: &Connection, providers: Option<&Providers>) -> Strin
     })
 }
 
-struct VoiceEngineContext<'a> {
-    store: Option<&'a Store>,
-    credentials: Option<&'a Credentials>,
-    providers: Option<&'a Providers>,
+pub(crate) struct VoiceEngineContext<'a> {
+    pub(crate) store: Option<&'a Store>,
+    pub(crate) credentials: Option<&'a Credentials>,
+    pub(crate) providers: Option<&'a Providers>,
+    pub(crate) engines: Engines,
 }
 
+#[cfg(test)]
 impl<'a> VoiceEngineContext<'a> {
-    fn from_world(world: &'a World) -> Self {
+    pub(crate) fn for_test(world: &'a World) -> Self {
         Self {
             store: world.get_resource::<Store>(),
             credentials: world.get_resource::<Credentials>(),
             providers: world.get_resource::<Providers>(),
+            engines: world.get_resource::<Engines>().cloned().unwrap_or_default(),
         }
     }
 }
 
 fn http_engine(
     ctx: &VoiceEngineContext<'_>,
-    connection: Connection,
+    connection: &Connection,
     kind: ConnectionKind,
-    binding: Option<&ene_voice::VoiceBinding>,
+    binding: Option<&ene_domain::VoiceBinding>,
 ) -> std::result::Result<HttpEngine, SetupError> {
-    let resolved_base = resolve_base(&connection, ctx.providers);
-    let secret = load_connection_secret(&connection, ctx.credentials, ctx.providers)?;
+    let resolved_base = resolve_base(connection, ctx.providers);
+    let secret = load_connection_secret(connection, ctx.credentials, ctx.providers)?;
     let client = net::client().map_err(|error| SetupError::Broken(error.to_string()))?;
-    let engine = HttpEngine::new(&connection, &resolved_base, secret, kind, client)?;
+    let engine = HttpEngine::new(connection, &resolved_base, secret, kind, client)?;
     Ok(match binding {
         Some(binding) => engine.with_binding(binding),
         None => engine,
     })
 }
 
-pub(crate) fn tts_source(world: &World) -> std::result::Result<Arc<dyn TtsEngine>, SetupError> {
-    companion_tts_source(world, None)
+pub(crate) fn tts_source(
+    ctx: &VoiceEngineContext<'_>,
+) -> std::result::Result<Arc<dyn TtsEngine>, SetupError> {
+    companion_tts_source(ctx, None)
 }
 
 pub(crate) fn companion_tts_source(
-    world: &World,
+    ctx: &VoiceEngineContext<'_>,
     companion: Option<&Companion>,
 ) -> std::result::Result<Arc<dyn TtsEngine>, SetupError> {
-    if let Some(engine) = world
-        .get_resource::<Engines>()
-        .and_then(|test| test.tts.as_ref())
-    {
+    if let Some(engine) = &ctx.engines.tts {
         return Ok(Arc::clone(engine));
     }
-    let ctx = VoiceEngineContext::from_world(world);
     let binding = companion.map_or_default(parse_binding);
     let connection = match binding
         .connection_id
@@ -107,14 +108,14 @@ pub(crate) fn companion_tts_source(
         }
         None => voice_connection(ctx.store, ConnectionKind::Tts)?,
     };
-    if let Some(engine) = plugin_engine(&ctx, &connection, ConnectionKind::Tts)? {
+    if let Some(engine) = plugin_engine(ctx, &connection, ConnectionKind::Tts)? {
         return Ok(Arc::new(engine));
     }
     if matches!(
         connection.endpoint().adapter.as_str(),
         "voicevox" | "openai" | "sakura"
     ) {
-        let engine = http_engine(&ctx, connection, ConnectionKind::Tts, Some(&binding))?;
+        let engine = http_engine(ctx, &connection, ConnectionKind::Tts, Some(&binding))?;
         return Ok(Arc::new(engine));
     }
     Err(SetupError::Unsupported(format!(
@@ -123,20 +124,18 @@ pub(crate) fn companion_tts_source(
     )))
 }
 
-pub(crate) fn stt_source(world: &World) -> std::result::Result<Arc<dyn SttEngine>, SetupError> {
-    if let Some(engine) = world
-        .get_resource::<Engines>()
-        .and_then(|test| test.stt.as_ref())
-    {
+pub(crate) fn stt_source(
+    ctx: &VoiceEngineContext<'_>,
+) -> std::result::Result<Arc<dyn SttEngine>, SetupError> {
+    if let Some(engine) = &ctx.engines.stt {
         return Ok(Arc::clone(engine));
     }
-    let ctx = VoiceEngineContext::from_world(world);
     let connection = voice_connection(ctx.store, ConnectionKind::Stt)?;
-    if let Some(engine) = plugin_engine(&ctx, &connection, ConnectionKind::Stt)? {
+    if let Some(engine) = plugin_engine(ctx, &connection, ConnectionKind::Stt)? {
         return Ok(Arc::new(engine));
     }
     if matches!(connection.endpoint().adapter.as_str(), "openai" | "sakura") {
-        let engine = http_engine(&ctx, connection, ConnectionKind::Stt, None)?;
+        let engine = http_engine(ctx, &connection, ConnectionKind::Stt, None)?;
         return Ok(Arc::new(engine));
     }
     Err(SetupError::Unsupported(format!(

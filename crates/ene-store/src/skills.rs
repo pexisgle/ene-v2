@@ -100,7 +100,7 @@ impl<'a> SkillRepo<'a> {
                 "skill instructions must be 1-16000 characters".into(),
             ));
         }
-        let conn = self.0.conn()?;
+        let conn = self.0.conn();
         let exists = conn
             .prepare_cached("SELECT 1 FROM skills WHERE companion_id = ?1 AND name = ?2")?
             .query_row(params![companion_id, &name], |_| Ok(()))

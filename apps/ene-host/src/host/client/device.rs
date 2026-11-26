@@ -26,12 +26,13 @@ use rig_ecs::prelude::*;
 use serde_json::json;
 use std::{fmt::Write as _, sync::Arc, time::Instant};
 
-pub(crate) use super::device_dispatch::{accept, disconnected, dispatch_direct, resend};
+pub(crate) use super::device_dispatch::{
+    DeviceDispatchContext, accept, disconnected, dispatch_direct, resend,
+};
 pub(crate) use super::device_result::complete;
 
 /// A generic `device_request` call. The tool waits for the client's result.
-pub(crate) fn on_device_request(called: On<ToolCalled<DeviceRequestArgs>>, mut commands: Commands) {
-    let called = called.event();
+pub(crate) fn on_device_request(called: &ToolCalled<DeviceRequestArgs>, mut commands: Commands) {
     let (call, agent, args) = (called.call, called.agent, called.args.clone());
     commands.queue(move |world: &mut World| {
         let store = world.resource::<Store>().clone();
@@ -75,6 +76,11 @@ pub(super) fn describe_device_request(
     computer_use: Res<ComputerUse>,
     mut commands: Commands,
 ) {
+    let (store, hub, computer_use) = (
+        store.into_inner(),
+        hub.into_inner(),
+        computer_use.into_inner(),
+    );
     for (mut call, agent) in &mut calls {
         let Some(index) = call
             .request
@@ -101,16 +107,14 @@ pub(super) fn describe_device_request(
         };
         let computer_model = computer::model_supported(call.connection.as_ref().or(connection));
         if computer_model && let Some(work) = work {
-            computer_use.attach_frame(&mut call, work, &store, &hub);
+            computer_use.attach_frame(&mut call, work, store, hub);
         }
         let target_id = match target {
             Ok(id) => id,
             Err(error) => {
                 if error.is_storage() {
                     let message = error.to_string();
-                    commands.queue(move |world: &mut World| {
-                        crate::host::fail(world, message);
-                    });
+                    commands.run_system_cached_with(crate::host::stop_on_failure, message);
                     return;
                 }
                 None
@@ -122,9 +126,7 @@ pub(super) fn describe_device_request(
                 Err(error) => {
                     if error.is_storage() {
                         let message = error.to_string();
-                        commands.queue(move |world: &mut World| {
-                            crate::host::fail(world, message);
-                        });
+                        commands.run_system_cached_with(crate::host::stop_on_failure, message);
                         return;
                     }
                     None
@@ -145,7 +147,7 @@ pub(super) fn describe_device_request(
                 }
                 names.push(name.clone());
                 if let Some(spec) = client.spec(name)
-                    && let Ok(schema) = super::json::parse_schema(&spec.input_schema)
+                    && let Ok(schema) = ene_domain::json::parse_schema(&spec.input_schema)
                 {
                     let _discarded = write!(
                         inputs,
@@ -196,10 +198,10 @@ fn refuse_error(world: &mut World, call: Entity, error: HostError) {
     }
 }
 
-fn get_state(
+pub(crate) fn get_state(
     store: &Store,
     computer_use: Option<&ComputerUse>,
-    hub: Option<&DeviceHub>,
+    hub: &DeviceHub,
     id: &str,
 ) -> Result<w::DeviceOperationState> {
     let mut operation = store
@@ -212,22 +214,12 @@ fn get_state(
             state
                 .operations
                 .get(&operation.id)
-                .is_some_and(|pending| hub.is_some_and(|hub| computer::active(store, hub, pending)))
+                .is_some_and(|pending| computer::active(store, hub, pending))
         })
     {
         operation.status = DeviceStatus::Uncertain;
     }
     Ok(wire::device_state(&operation))
-}
-
-/// Reads the current state of one operation.
-pub(crate) fn get(world: &mut World, request: &w::Id) -> Result<w::DeviceOperationState> {
-    get_state(
-        world.resource::<Store>(),
-        world.get_resource::<ComputerUse>(),
-        world.get_resource::<DeviceHub>(),
-        &request.id,
-    )
 }
 
 /// The waiting deadline expired: the operation is uncertain, never a success.

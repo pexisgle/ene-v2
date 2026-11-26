@@ -7,8 +7,6 @@ use crate::host::{
     delegation,
     error::HostError,
     notify::Notifier,
-    resources::HostRuntime,
-    util,
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
@@ -23,7 +21,7 @@ pub(crate) fn bind_input(store: Option<&Store>, client_id: &str) -> Result<Input
             ("client_id is required for audio input").into(),
         ));
     }
-    util::validate_id(client_id)?;
+    ene_domain::validate_id(client_id)?;
     let Some(store) = store else {
         return Err(HostError::Unavailable(
             "the host state is not available".into(),
@@ -66,7 +64,7 @@ pub(crate) fn subscribe_audio(
     if client_id.is_empty() {
         return Err(HostError::Invalid(("client_id is required").into()));
     }
-    util::validate_id(client_id)?;
+    ene_domain::validate_id(client_id)?;
     let Some(store) = store else {
         return Err(HostError::Unavailable(
             "the host state is not available".into(),
@@ -206,10 +204,19 @@ pub(crate) fn on_stream_text(world: &mut World, companion: &str, text: &str) {
 }
 
 fn try_begin_utterance(world: &mut World, voice: &Voice, companion: &str) -> bool {
-    let companion_record = world
-        .get_resource::<Store>()
+    let context = super::VoiceEngineContext {
+        store: world.get_resource::<Store>(),
+        credentials: world.get_resource::<crate::host::model::Credentials>(),
+        providers: world.get_resource::<crate::host::providers::Providers>(),
+        engines: world
+            .get_resource::<super::Engines>()
+            .cloned()
+            .unwrap_or_default(),
+    };
+    let companion_record = context
+        .store
         .and_then(|store| store.companion_repo().companion(companion).ok().flatten());
-    let Ok(source) = companion_tts_source(world, companion_record.as_ref()) else {
+    let Ok(source) = companion_tts_source(&context, companion_record.as_ref()) else {
         tracing::debug!(companion, "speech skipped: no TTS engine is configured");
         return false;
     };
@@ -218,10 +225,11 @@ fn try_begin_utterance(world: &mut World, voice: &Voice, companion: &str) -> boo
         .is_some_and(|holder| holder != companion)
     {
         if let Some(agent) = agent::agent_of(world, companion) {
-            world.trigger(StopTurn {
-                entity: agent,
-                reason: Some("speech floor was taken by a peer".to_owned()),
-            });
+            world.trigger(StopTurn::plugin_alone(
+                agent,
+                "ene-host",
+                "speech floor was taken by a peer",
+            ));
         }
         return false;
     }
@@ -303,10 +311,9 @@ pub(crate) fn on_client_activated(voice: Option<&Voice>, companion: &str, client
 }
 
 fn observe_speak_character_text(
-    trigger: On<crate::host::resources::SpeakCharacterText>,
+    event: &crate::host::resources::SpeakCharacterText,
     mut commands: Commands,
 ) {
-    let event = trigger.event();
     let companion_id = event.companion_id.clone();
     let text = event.text.clone();
     commands.queue(move |world: &mut World| {
@@ -324,9 +331,11 @@ pub(crate) struct VoicePlugin;
 
 impl Plugin for VoicePlugin {
     fn build(&self, app: &mut App) {
-        let runtime = app.world().resource::<HostRuntime>().0.clone();
         app.init_resource::<delegation::DeliveredClaims>()
-            .insert_resource(Voice::new(runtime))
-            .add_observer(observe_speak_character_text);
+            .add_observer(
+                |trigger: On<crate::host::resources::SpeakCharacterText>, commands: Commands| {
+                    observe_speak_character_text(trigger.event(), commands);
+                },
+            );
     }
 }

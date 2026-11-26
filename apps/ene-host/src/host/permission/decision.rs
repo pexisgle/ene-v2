@@ -10,10 +10,10 @@ use crate::host::{
     model::{self, Credentials},
     providers::Providers,
     resources::HostRuntime,
-    util::truncate,
 };
 use bevy_ecs::prelude::*;
 use ene_policy::{ApprovalDecision, ApprovalStatus, MAX_POLICY_TEXT_CHARS, PolicyRule, PolicyText};
+use ene_store::util::truncate;
 use rig_core::{
     DynModel,
     completion::{CompletionRequest, Message as CompletionMessage},
@@ -240,7 +240,7 @@ fn latest_user_text(conversation: &Conversation) -> String {
 pub(super) fn start_decision(
     world: &mut World,
     store: &Store,
-    pending: Pending,
+    pending: &Pending,
     inputs: DecisionInputs,
 ) {
     let runtime = world.get_resource::<HostRuntime>().map(|r| r.0.clone());
@@ -253,7 +253,7 @@ pub(super) fn start_decision(
     let wake = world.get_resource::<Wake>().cloned();
     let fatal = {
         let mut decisions = world.resource_mut::<Decisions>();
-        let ctx = DecisionSpawnContext {
+        let mut ctx = DecisionSpawnContext {
             store,
             runtime: runtime.as_ref(),
             credentials: credentials.as_ref(),
@@ -262,15 +262,15 @@ pub(super) fn start_decision(
             wake: wake.as_ref(),
             decisions: &mut decisions,
         };
-        match prepare_decision_task(ctx, &pending, inputs) {
+        match prepare_decision_task(&mut ctx, pending, inputs) {
             DecisionSpawn::Spawned => None,
             DecisionSpawn::FallbackToCard => {
-                push_card(store, &mut world.resource_mut::<Notifier>(), &pending)
+                push_card(store, &mut world.resource_mut::<Notifier>(), pending)
             }
         }
     };
     if let Some(error) = fatal {
-        crate::host::fail(world, error);
+        crate::host::fail(world, &error);
     }
 }
 
@@ -290,7 +290,7 @@ enum DecisionSpawn {
 }
 
 fn prepare_decision_task(
-    ctx: DecisionSpawnContext<'_>,
+    ctx: &mut DecisionSpawnContext<'_>,
     pending: &Pending,
     inputs: DecisionInputs,
 ) -> DecisionSpawn {
@@ -444,7 +444,7 @@ pub(super) fn collect_decisions(world: &mut World) {
                 &flight.pending,
                 &error,
             ) {
-                crate::host::fail(world, fatal);
+                crate::host::fail(world, &fatal);
             }
             return;
         }
@@ -464,7 +464,7 @@ pub(super) fn collect_decisions(world: &mut World) {
         &flight.engine,
         outcome,
     ) {
-        crate::host::fail(world, fatal);
+        crate::host::fail(world, &fatal);
     }
 }
 

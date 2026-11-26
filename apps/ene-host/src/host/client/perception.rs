@@ -4,17 +4,38 @@
 use super::super::error::{HostError, Result};
 use super::super::{
     db::Store,
-    eyes,
-    resources::{Perception, PerceptionEvent},
-    util,
+    eyes::{self, Eyes},
+    notify::Notifier,
+    resources::{DeviceHub, Perception, PerceptionEvent, TriggerCharacterEvent},
 };
-use bevy_ecs::prelude::*;
+use bevy_ecs::{prelude::*, system::SystemParam};
 use ene_rpc as w;
+use ene_store::util;
+
+#[derive(SystemParam)]
+pub(crate) struct PerceptionInputs<'w> {
+    store: Res<'w, Store>,
+    hub: Res<'w, DeviceHub>,
+    eyes: ResMut<'w, Eyes>,
+    perception: ResMut<'w, Perception>,
+    notifier: Option<Res<'w, Notifier>>,
+}
 
 /// Routes live observations to the eyes and supports legacy passive summaries.
-pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) -> Result<()> {
-    let store = world.resource::<Store>().clone();
-    util::validate_id(&event.client_id)?;
+pub(crate) fn ingest_perception(
+    InRef(event): InRef<w::PerceptionEvent>,
+    inputs: PerceptionInputs<'_>,
+    mut commands: Commands,
+) -> Result<()> {
+    let PerceptionInputs {
+        store,
+        hub,
+        mut eyes,
+        mut perception,
+        notifier,
+    } = inputs;
+    let store = store.into_inner();
+    ene_domain::validate_id(&event.client_id)?;
     let client = store
         .client_repo()
         .client(&event.client_id)?
@@ -44,12 +65,23 @@ pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) ->
         {
             return Ok(());
         }
-        for companion_id in targets {
-            eyes::report_with(world, companion_id, event.clone())?;
+        if hub.into_inner().subscription(&event.client_id).as_deref()
+            == Some(event.subscription_id.as_str())
+        {
+            let notifier = notifier.map(Res::into_inner);
+            for companion_id in targets {
+                eyes::apply_report(
+                    &mut eyes,
+                    &mut perception,
+                    notifier,
+                    &companion_id,
+                    event.clone(),
+                )?;
+            }
         }
         return Ok(());
     }
-    let Some(summary) = perception_summary(&event) else {
+    let Some(summary) = perception_summary(event) else {
         return Ok(());
     };
     let avatar_interaction = match &event.event {
@@ -60,20 +92,17 @@ pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) ->
         )),
         _ => None,
     };
-    {
-        let mut perception = world.resource_mut::<Perception>();
-        for companion_id in &targets {
-            perception.events.insert(
-                companion_id.clone(),
-                PerceptionEvent {
-                    summary: summary.clone(),
-                },
-            );
-        }
+    for companion_id in &targets {
+        perception.events.insert(
+            companion_id.clone(),
+            PerceptionEvent {
+                summary: summary.clone(),
+            },
+        );
     }
     if let Some((kind, character_id, region)) = avatar_interaction {
         for companion_id in targets {
-            world.trigger(super::super::resources::TriggerCharacterEvent {
+            commands.trigger(TriggerCharacterEvent {
                 companion_id,
                 event: ene_plugin::CharacterEvent::Custom {
                     name: "avatar_interaction".into(),
@@ -87,6 +116,13 @@ pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) ->
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn report_perception(world: &mut World, event: &w::PerceptionEvent) -> Result<()> {
+    world
+        .run_system_cached_with(ingest_perception, event)
+        .unwrap()
 }
 
 fn perception_summary(event: &w::PerceptionEvent) -> Option<String> {

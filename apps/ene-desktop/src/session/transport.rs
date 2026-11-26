@@ -72,11 +72,11 @@ impl SessionTransport {
             .and_then(|id| self.bindings.get(id))
     }
 
-    pub(super) fn body_binding_for(&self, companion_id: &str) -> w::BodyBinding {
+    pub(super) fn body_binding_for(&self, companion_id: &str) -> ene_domain::BodyBinding {
         self.companions
             .get(companion_id)
             .and_then(|companion| companion.body.as_option())
-            .and_then(|doc| serde_json::from_str::<w::BodyBinding>(&doc.json).ok())
+            .and_then(|doc| serde_json::from_str::<ene_domain::BodyBinding>(&doc.json).ok())
             .unwrap_or_default()
     }
 
@@ -86,14 +86,11 @@ impl SessionTransport {
     }
 
     pub(super) fn set_connection(&self, host: Option<Host>) {
-        *self
-            .connection
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = host;
+        *self.connection.write() = host;
     }
 
     pub(super) fn current_host(&self) -> Option<Host> {
-        self.connection.read().ok().and_then(|guard| guard.clone())
+        self.connection.read().clone()
     }
 
     pub(super) fn rebuild_specs(
@@ -244,7 +241,7 @@ impl SessionTransport {
                 self.pending = None;
                 Ok(previous != self.bindings)
             }
-            Err(error) => Err(self.classify(error)),
+            Err(error) => Err(self.classify(&error)),
         }
     }
 
@@ -259,7 +256,7 @@ impl SessionTransport {
                     Ok(binding) => {
                         self.bindings.insert(target.clone(), binding);
                     }
-                    Err(error) => return Err(self.classify(error)),
+                    Err(error) => return Err(self.classify(&error)),
                 }
             }
             if self.bindings.contains_key(&target) {
@@ -327,7 +324,7 @@ impl SessionTransport {
     }
 
     /// Turns an RPC error into what the window must show.
-    pub(super) fn classify(&self, error: connectrpc::ConnectError) -> Outcome {
+    pub(super) fn classify(&self, error: &connectrpc::ConnectError) -> Outcome {
         match error.code {
             // The endpoint or token is stale: the next attempt re-reads the file.
             connectrpc::ErrorCode::Unauthenticated | connectrpc::ErrorCode::PermissionDenied => {

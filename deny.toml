@@ -13,15 +13,12 @@ ignore = [
     # do matter. Remove an entry once its crate leaves the tree.
     "RUSTSEC-2024-0384",  # instant
     "RUSTSEC-2024-0436",  # paste
-    "RUSTSEC-2025-0052",  # async-std
     "RUSTSEC-2025-0134",  # rustls-pemfile
-    "RUSTSEC-2026-0173",  # ttf-parser
     "RUSTSEC-2026-0192",  # rustybuzz
     "RUSTSEC-2026-0206",  # zvariant
     "RUSTSEC-2026-0370",  # zbus_names
     "RUSTSEC-2026-0371",  # zvariant_derive
     "RUSTSEC-2026-0372",  # pin-utils
-    "RUSTSEC-2026-0441",  # chrono
     "RUSTSEC-2026-0543",  # ttf-parser, second path
 ]
 

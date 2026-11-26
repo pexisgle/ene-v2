@@ -14,6 +14,9 @@ use windows::Win32::{
 
 use crate::capture;
 
+mod actions;
+pub use actions::{Button, Input, InputError, Key, Point, apply_input};
+
 /// A snapshot of the interactive desktop a capture was taken against.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Desktop {
@@ -136,37 +139,23 @@ impl From<RECT> for Rect {
 ///
 /// Returns how many events the OS accepted; a value below `events.len()`
 /// means the input was partially applied and the outcome is unknown.
-pub fn send_input(events: &[input::INPUT]) -> usize {
+fn send_input(events: &[input::INPUT]) -> usize {
     // SAFETY: `events` is a live slice and its length is passed in bytes as
     // `SendInput` requires; the OS copies the events before returning.
     unsafe { input::SendInput(events, std::mem::size_of::<input::INPUT>() as i32) as usize }
 }
 
 /// Why an input batch must not be sent.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum UnsafeToSend {
-    /// A modifier or pointer button is held down.
+    #[error("a modifier or pointer button is held; take a new screenshot after releasing it")]
     KeyHeld,
-    /// The desktop changed since the capture was taken.
+    #[error("the screen or user input changed; take a new screenshot")]
     DesktopChanged,
-    /// The input target is owned by this process or the avatar.
+    #[error("Computer Use cannot send input to ene windows")]
     EneWindow,
-    /// The target window could not be inspected.
+    #[error("the input target is unavailable")]
     NoTarget,
-}
-
-impl UnsafeToSend {
-    /// The message shown to the model for this refusal.
-    pub fn message(self) -> &'static str {
-        match self {
-            Self::KeyHeld => {
-                "a modifier or pointer button is held; take a new screenshot after releasing it"
-            }
-            Self::DesktopChanged => "the screen or user input changed; take a new screenshot",
-            Self::EneWindow => "Computer Use cannot send input to ene windows",
-            Self::NoTarget => "the input target is unavailable",
-        }
-    }
 }
 
 /// Checks that an input batch may be sent to the window a capture was taken
@@ -174,9 +163,9 @@ impl UnsafeToSend {
 ///
 /// `target` is the point about to be clicked, when the action has one; the
 /// window under it is rejected if it belongs to this process or the avatar.
-pub fn check_before_send(
+fn check_before_send(
     captured: &Desktop,
-    target: Option<(i32, i32)>,
+    target: Option<Point>,
     check_focus: bool,
     avatar_pid: Option<u32>,
 ) -> Result<(), UnsafeToSend> {
@@ -224,7 +213,7 @@ pub fn check_before_send(
             check_window(gui.hwndFocus, avatar_pid)?;
         }
     }
-    if let Some((x, y)) = target {
+    if let Some(Point { x, y }) = target {
         let point = windows::Win32::Foundation::POINT { x, y };
         // SAFETY: maps a point to the window under it; takes the point by value.
         let window_under = unsafe { window::WindowFromPoint(point) };
@@ -260,7 +249,7 @@ fn check_window(
 }
 
 /// Whether an event is a release of the press before it.
-pub fn is_release(event: &input::INPUT) -> bool {
+fn is_release(event: &input::INPUT) -> bool {
     match event.r#type {
         // SAFETY: the event's type tag selects the `ki` member, which is the
         // invariant `INPUT` requires of any correctly constructed value.

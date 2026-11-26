@@ -6,7 +6,8 @@
 //! dictates otherwise, so the differences sit in one `match` on
 //! [`SearchAdapter`] instead of a trait with five implementors.
 use super::{ResolvedSearch, SearchAdapter};
-use crate::host::{net, util::truncate};
+use crate::host::net;
+use ene_store::util::truncate;
 use rig_core::tool::ToolExecutionError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

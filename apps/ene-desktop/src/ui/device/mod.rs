@@ -250,7 +250,7 @@ fn render_history_reset_card(
                         cx.spawn(async move |cx| {
                             if answer.await == Ok(1) {
                                 requested.store(true, std::sync::atomic::Ordering::Relaxed);
-                                let _discarded =  cx.update(|cx| cx.quit());
+                                cx.update(|cx| cx.quit());
                             }
                         })
                         .detach();
@@ -362,7 +362,7 @@ mod tests {
                 .iter()
                 .all(|id| is_file_confirmation_rule(&PolicyRule {
                     id: id.clone(),
-                    ..Default::default()
+                    ..rule.clone()
                 }))
         );
         assert_eq!(
@@ -376,7 +376,7 @@ mod tests {
         assert!(!is_file_confirmation_rule(&PolicyRule {
             id: "manual-write-rule".into(),
             tool_name: "work.write".into(),
-            ..Default::default()
+            ..rule.clone()
         }));
     }
 }

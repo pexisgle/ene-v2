@@ -118,7 +118,7 @@ pub(super) fn resolve_device_candidate(
     store: &Store,
     companion_id: &str,
     work_id: Option<&str>,
-    agent_ctx: AgentCapabilityContext,
+    agent_ctx: &AgentCapabilityContext,
     item: &GateCall,
 ) -> Option<CandidateResolution> {
     let client_id = match store.client_repo().target(companion_id, work_id) {
@@ -133,7 +133,7 @@ pub(super) fn resolve_device_candidate(
         }
         Err(error) => {
             if error.is_storage() {
-                crate::host::fail(world, error.to_string());
+                crate::host::fail(world, &error.to_string());
             } else {
                 refuse(
                     world,
@@ -152,7 +152,7 @@ pub(super) fn resolve_device_candidate(
         }
         Err(error) => {
             if error.is_storage() {
-                crate::host::fail(world, error.to_string());
+                crate::host::fail(world, &error.to_string());
             } else {
                 refuse(
                     world,
@@ -237,7 +237,7 @@ pub(super) struct AgentCapabilityContext {
 
 /// The capability a device tool call names, with its declaration.
 fn resolve_capability(
-    agent_ctx: AgentCapabilityContext,
+    agent_ctx: &AgentCapabilityContext,
     dynamic_spec: Option<CapabilitySpec>,
     client: &Client,
     tool_name: &str,

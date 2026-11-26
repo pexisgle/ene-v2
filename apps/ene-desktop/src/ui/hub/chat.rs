@@ -6,6 +6,7 @@ use crate::{
     state::{Chat, NoticeKind},
     update::Command,
 };
+use ene_domain::CompanionId;
 use gpui::Context;
 
 pub(super) fn select_companion(hub: &mut Hub, companion_id: &str, cx: &mut Context<Hub>) {
@@ -14,7 +15,7 @@ pub(super) fn select_companion(hub: &mut Hub, companion_id: &str, cx: &mut Conte
     }
     hub.model.companions.selected = Some(companion_id.to_owned());
     hub.model.companions.chat = Chat {
-        companion_id: rpc::chat::parse_companion_id(companion_id),
+        companion_id: CompanionId::parse(companion_id).ok(),
         loading: true,
         ..Default::default()
     };
@@ -42,7 +43,7 @@ pub(super) fn load_history(hub: &mut Hub, _cx: &mut Context<Hub>) {
     ) {
         return;
     }
-    let target = rpc::chat::parse_companion_id(&companion_id);
+    let target = CompanionId::parse(&companion_id).ok();
     if hub
         .model
         .companions
@@ -61,14 +62,14 @@ pub(super) fn load_history(hub: &mut Hub, _cx: &mut Context<Hub>) {
     }
 }
 
-pub(super) fn send(hub: &mut Hub, text: String, cx: &mut Context<Hub>) -> bool {
+pub(super) fn send(hub: &mut Hub, text: &str, cx: &mut Context<Hub>) -> bool {
     let request_key = uuid::Uuid::new_v4().to_string();
     hub.send_keyed(text, request_key, cx)
 }
 
 pub(super) fn send_keyed(
     hub: &mut Hub,
-    text: String,
+    text: &str,
     request_key: String,
     cx: &mut Context<Hub>,
 ) -> bool {
@@ -134,7 +135,7 @@ pub(super) fn retry_unsent(hub: &mut Hub, request_key: &str, text: &str, cx: &mu
         .chat
         .unsent
         .retain(|item| item.request_key != request_key);
-    let _discarded = hub.send_keyed(text.to_owned(), request_key.to_owned(), cx);
+    let _discarded = hub.send_keyed(text, request_key.to_owned(), cx);
 }
 
 pub(super) fn dismiss_unsent(hub: &mut Hub, request_key: &str, cx: &mut Context<Hub>) {

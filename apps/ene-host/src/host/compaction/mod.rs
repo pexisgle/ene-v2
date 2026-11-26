@@ -10,15 +10,11 @@ use super::{
 };
 use bevy_ecs::prelude::*;
 use job::{CompactionError, Outcome, run};
-use rig_core::completion::{Message, ToolDefinition};
+use rig_core::completion::Message;
 use rig_core::conversation::{
-    Aside, Author, AuthorKind, Conversation as History, Entry, EntryRef, MessageId, pairing,
+    Aside, Author, AuthorKind, Conversation as History, Entry, EntryRef, pairing,
 };
 use rig_ecs::prelude::*;
-use rig_memory::recent::{TokenBudget, view};
-use rig_memory::{
-    Anchor, ClearToolOutputs, Prepared, RequestStart, estimate_tokens, next_request_tokens,
-};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
@@ -30,7 +26,11 @@ use rig_core::{DynModel, operation::Completion};
 #[cfg(test)]
 use std::time::Duration;
 
+mod budget;
 mod job;
+
+use budget::message_tokens;
+pub(crate) use budget::{FitRequest, RequestStart, fit};
 
 /// The share of its model's input limit a conversation may reach before a turn
 /// boundary starts a rolling summary (doc §3.1). It is the only trigger: no
@@ -89,108 +89,6 @@ fn is_summary_entry(entry: Option<EntryRef<'_>>) -> bool {
     entry.is_some_and(|entry| {
         matches!(entry.author.map(|author| &author.kind), Some(AuthorKind::Plugin(name)) if name == "ene-host")
             && matches!(entry.message, Message::System { content } if content.starts_with(SUMMARY_HEAD))
-    })
-}
-
-/// The tokens a cut injects in front of the kept messages: the summary block
-/// when the head holds one, plus the system notice.
-fn injected_tokens(history: &History) -> u64 {
-    let head = history
-        .entries()
-        .next()
-        .filter(|entry| is_summary_entry(Some(*entry)))
-        .map_or(0, |entry| estimate_tokens(&[entry.message]));
-    head.saturating_add(estimate_tokens(&[Message::system(NOTICE)]))
-}
-
-pub(crate) struct FitRequest<'a> {
-    pub(crate) model: &'a str,
-    pub(crate) prompt: Option<&'a str>,
-    pub(crate) tools: &'a [Arc<ToolDefinition>],
-    pub(crate) anchor: Option<&'a Anchor>,
-    pub(crate) sent: Option<RequestStart>,
-    pub(crate) budget: u64,
-}
-
-pub(crate) fn fit(history: &mut History, request: &FitRequest<'_>) -> bool {
-    let FitRequest {
-        model,
-        prompt,
-        tools,
-        anchor,
-        sent,
-        budget,
-    } = *request;
-    let tokens = |history: &History| {
-        next_request_tokens(
-            anchor,
-            sent,
-            &Prepared {
-                model,
-                prompt,
-                tools,
-                history,
-            },
-        )
-    };
-    if tokens(history) <= budget {
-        return true;
-    }
-    let cleared = ClearToolOutputs::new(0).clear_conversation(history, Author::plugin("ene-host"));
-    if cleared.results > 0 && tokens(history) <= budget {
-        return true;
-    }
-    let whole = Prepared {
-        model,
-        prompt,
-        tools,
-        history,
-    }
-    .whole_tokens();
-    let head = usize::from(is_summary_entry(history.entries().next()));
-    // The fixed prompt and tool weight is the whole request minus its messages.
-    let fixed = whole.saturating_sub(estimate_tokens(history.messages()));
-    let keep = budget
-        .saturating_sub(fixed)
-        .saturating_sub(injected_tokens(history));
-    if let Some(at) = cut(history, keep, head).and_then(|id| history.index_of(id)) {
-        let by = Author::plugin("ene-host");
-        let notice = Entry::new(Message::system(NOTICE)).by(by.clone());
-        history.splice(head..at, [notice], by);
-    }
-    tokens(history) <= budget
-}
-
-/// The id of the first message of the newest window whose messages fit
-/// `budget`: a request boundary, never before `head`, never after the newest
-/// request.
-fn cut(history: &History, budget: u64, head: usize) -> Option<MessageId> {
-    let messages = history.messages();
-    let kept = view(
-        messages,
-        &TokenBudget::new(usize::try_from(budget).unwrap_or(usize::MAX)),
-    )
-    .len();
-    let start = messages.len() - kept;
-    let at = history
-        .entries()
-        .skip(start)
-        .find(rig_core::conversation::EntryRef::is_request)
-        .map_or(start, |entry| entry.index)
-        .min(last_turn(history))
-        .max(head);
-    if at > head { history.id(at) } else { None }
-}
-
-/// The index of the newest message that asks something: the turn the model is
-/// answering, which a window may never cut.
-fn last_turn(history: &History) -> usize {
-    let newest = history
-        .entries()
-        .rev()
-        .find(rig_core::conversation::EntryRef::is_request);
-    newest.map_or(history.messages().len().saturating_sub(1), |entry| {
-        entry.index
     })
 }
 
@@ -314,7 +212,7 @@ fn summarize_at_turn_boundary(
         wake,
         providers,
     } = resources;
-    if state.is_running() || host.is_some_and(|host| host.failed.is_some() || host.closing) {
+    if state.is_running() || host.is_some_and(|host| host.ready().is_err()) {
         return;
     }
     let (Some(store), Some(credentials), Some(models), Some(embeddings), Some(runtime)) =
@@ -344,7 +242,7 @@ fn summarize_at_turn_boundary(
         };
         let tokens = usage
             .and_then(LastUsage::context)
-            .unwrap_or_else(|| estimate_tokens(conversation.messages()));
+            .unwrap_or_else(|| message_tokens(conversation.messages().iter().map(Arc::as_ref)));
         let ratio = tokens as f64 / f64::from(limit);
         let newest = conversation
             .entries()

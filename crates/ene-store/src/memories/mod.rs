@@ -7,9 +7,10 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-pub use ops::{detail, missing_embeddings_on, profile_lines, write_embedding_on};
-pub(crate) use store::{add_edge, check_content, check_importance, insert_row, row_to_memory};
+pub use ops::{detail, profile_lines};
+pub(crate) use store::{add_edge, check_content, check_importance, insert_row};
 
+use crate::row::FromRow;
 use crate::{
     Store, StoreError,
     error::Result,
@@ -120,15 +121,15 @@ impl<'a> MemoryRepo<'a> {
     }
 
     pub fn insert_memory(&self, memory: &MemoryRecord) -> Result<Memory> {
-        let connection = self.0.conn()?;
+        let connection = self.0.conn();
         insert_row(&connection, memory, &now())
     }
 
     pub fn memory(&self, id: &str) -> Result<Option<Memory>> {
-        let connection = self.0.conn()?;
+        let connection = self.0.conn();
         let memory = connection
             .prepare_cached(&format!("SELECT {COLUMNS} FROM memories WHERE id = ?1"))?
-            .query_row([id], row_to_memory)
+            .query_row([id], Memory::from_row)
             .optional()?;
         Ok(memory)
     }
@@ -153,7 +154,7 @@ impl<'a> MemoryRepo<'a> {
         }
         let updated = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(&format!(
                 "UPDATE memories SET importance = ?2, scope = ?3, \
                  memory_revision = memory_revision + 1 \
@@ -161,14 +162,14 @@ impl<'a> MemoryRepo<'a> {
             ))?
             .query_row(
                 params![id, importance, scope, memory.memory_revision],
-                row_to_memory,
+                Memory::from_row,
             )
             .optional()?;
         updated.ok_or_else(|| StoreError::Conflict("memory changed since it was read".into()))
     }
 
     pub fn cite_memory(&self, id: &str, turn_id: &str, estimated: bool) -> Result<()> {
-        let connection = self.0.conn()?;
+        let connection = self.0.conn();
         connection
             .prepare_cached("UPDATE memories SET last_accessed_at = ?2 WHERE id = ?1")?
             .execute(params![id, now()])?;
@@ -268,13 +269,15 @@ impl<'a> MemoryRepo<'a> {
             return Ok(Vec::new());
         }
         let minimum = mode.minimum_importance();
-        let connection = self.0.conn()?;
+        let connection = self.0.conn();
         let mut statement = connection.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance >= ?2 \
              AND m.id IN (SELECT value FROM json_each(?3))"
         ))?;
-        let rows =
-            statement.query_map(params![companion, minimum, to_json(&ids)?], row_to_memory)?;
+        let rows = statement.query_map(
+            params![companion, minimum, to_json(&ids)?],
+            Memory::from_row,
+        )?;
         let mut found: HashMap<String, Memory> = HashMap::new();
         for memory in rows {
             let memory = memory?;
@@ -287,12 +290,12 @@ impl<'a> MemoryRepo<'a> {
     }
 
     pub fn pinned(&self, companion: &str) -> Result<Vec<Memory>> {
-        let connection = self.0.conn()?;
+        let connection = self.0.conn();
         let mut statement = connection.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance = 10 \
              ORDER BY COALESCE(m.last_accessed_at, m.recorded_at) DESC, m.rowid DESC"
         ))?;
-        let rows = statement.query_map([companion], row_to_memory)?;
+        let rows = statement.query_map([companion], Memory::from_row)?;
         let mut budget = PINNED_BUDGET_CHARS;
         let mut pinned = Vec::new();
         for memory in rows {
@@ -313,14 +316,14 @@ impl<'a> MemoryRepo<'a> {
         cursor: Option<i64>,
         limit: usize,
     ) -> Result<(Vec<Memory>, Option<i64>)> {
-        let connection = self.0.conn()?;
+        let connection = self.0.conn();
         let mut statement = connection.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.rowid > ?2 \
              ORDER BY m.rowid LIMIT ?3"
         ))?;
         let rows = statement.query_map(
             params![companion, cursor.unwrap_or(0), (limit + 1) as i64],
-            |row| Ok((row.get::<_, i64>("rowid")?, row_to_memory(row)?)),
+            |row| Ok((row.get::<_, i64>("rowid")?, Memory::from_row(row)?)),
         )?;
         let mut items = Vec::new();
         let mut next = None;
@@ -342,7 +345,7 @@ impl<'a> MemoryRepo<'a> {
         mode: RecallMode,
     ) -> Result<Vec<Memory>> {
         let minimum = mode.minimum_importance();
-        let connection = self.0.conn()?;
+        let connection = self.0.conn();
         let terms = tokens(query);
         let mut memories = Vec::new();
         if terms.is_empty() {
@@ -358,7 +361,8 @@ impl<'a> MemoryRepo<'a> {
                  AND m.content LIKE ?3 ESCAPE '\\' ORDER BY m.importance DESC, m.rowid DESC \
                  LIMIT 20"
             ))?;
-            let rows = statement.query_map(params![companion, minimum, pattern], row_to_memory)?;
+            let rows =
+                statement.query_map(params![companion, minimum, pattern], Memory::from_row)?;
             for row in rows {
                 memories.push(row?);
             }
@@ -370,7 +374,8 @@ impl<'a> MemoryRepo<'a> {
              WHERE {VISIBLE} AND m.importance >= ?2 AND memories_fts MATCH ?3 \
              ORDER BY bm25(memories_fts) ASC LIMIT 20"
         ))?;
-        let rows = statement.query_map(params![companion, minimum, expression], row_to_memory)?;
+        let rows =
+            statement.query_map(params![companion, minimum, expression], Memory::from_row)?;
         for row in rows {
             memories.push(row?);
         }
@@ -378,7 +383,7 @@ impl<'a> MemoryRepo<'a> {
     }
 
     pub fn record_injections(&self, companion: &str, turn_id: &str, ids: &[String]) -> Result<()> {
-        let mut connection = self.0.conn()?;
+        let mut connection = self.0.conn();
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         for id in ids.iter().filter(|id| !id.is_empty()).take(MAX_INJECTED) {
@@ -406,7 +411,7 @@ impl<'a> MemoryRepo<'a> {
         after: Option<u64>,
         through: u64,
     ) -> Result<Vec<String>> {
-        let connection = self.0.conn()?;
+        let connection = self.0.conn();
         let mut statement = connection.prepare_cached(
             "SELECT turn_id, memory_id FROM memory_injections \
              WHERE companion_id = ?1 ORDER BY rowid",

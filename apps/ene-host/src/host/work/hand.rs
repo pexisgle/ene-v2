@@ -138,8 +138,8 @@ pub(crate) struct RunStart<'a> {
 pub(crate) fn start_run(
     world: &mut World,
     hands: &mut Hands,
-    start: RunStart<'_>,
-    adapter: String,
+    start: &RunStart<'_>,
+    adapter: &str,
     running: Arc<Running>,
 ) -> Result<()> {
     let RunStart {
@@ -147,7 +147,7 @@ pub(crate) fn start_run(
         run,
         instruction,
     } = start;
-    if let Some(owner) = hands.by_adapter.get(&adapter)
+    if let Some(owner) = hands.by_adapter.get(adapter)
         && owner.work_id != session.id
     {
         return Err(HostError::Unavailable(format!(
@@ -155,7 +155,7 @@ pub(crate) fn start_run(
             owner.work_id
         )));
     }
-    let claimed = hands.by_adapter.contains_key(&adapter);
+    let claimed = hands.by_adapter.contains_key(adapter);
     let input = if claimed {
         HarnessInput::Prompt {
             prompt: prompt_of(instruction),
@@ -167,7 +167,7 @@ pub(crate) fn start_run(
         }
     };
     hands.by_adapter.insert(
-        adapter.clone(),
+        adapter.to_string(),
         Hand {
             work_id: session.id.clone(),
             companion_id: session.companion_id.as_str().to_owned(),
@@ -182,7 +182,7 @@ pub(crate) fn start_run(
     super::note_activity(&mut world.resource_mut(), &run.run_id);
     let runtime = world.resource::<HostRuntime>().0.clone();
     let wake = world.get_resource::<rig_ecs::tasks::Wake>().cloned();
-    dispatch_to_hand(hands, &runtime, wake.as_ref(), &adapter, input);
+    dispatch_to_hand(hands, &runtime, wake.as_ref(), adapter, input);
     Ok(())
 }
 

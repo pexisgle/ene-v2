@@ -27,10 +27,8 @@ try {
     $version = ($metadata.packages | Where-Object name -eq 'ene-desktop').version
     $winTarget = 'x86_64-pc-windows-msvc'
     $buildDir = Join-Path $metadata.target_directory "$winTarget\release"
-    $env:TMP = (New-Item -ItemType Directory -Force 'target/tmp').FullName
-    $env:TEMP = $env:TMP
 
-    cargo.exe build --config "build.rustc-wrapper=''" --release --locked --target $winTarget -p ene-host -p ene-desktop -p ene-avatar
+    cargo.exe build --release --locked --target $winTarget -p ene-host -p ene-desktop -p ene-avatar
     if ($LASTEXITCODE) { throw "cargo build failed ($LASTEXITCODE)." }
 
     & $iscc "/DAppVersion=$version" "/DBuildDir=$buildDir" "/DCrtDir=$(Split-Path -Parent $crt)" "$PSScriptRoot\ene-windows.iss"

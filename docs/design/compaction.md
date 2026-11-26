@@ -23,14 +23,14 @@
 
 ## 2. 会話ログの構造（Rig の会話管理と rig-memory の活用）
 
-独自の会話ログ型や同期用の中間構造体を新設して変換オーバーヘッドを作るのではなく、**`rig-ecs` のセッションログ機構（`SessionLogPlugin` + `DirStore`）と `rig-memory` の標準ユーティリティ（`recent::view` / `Summarizer` / `Anchor`）**を採用する。
+独自の会話ログ型や同期用の中間構造体を新設して変換オーバーヘッドを作るのではなく、**`rig-ecs` のセッションログ機構（`SessionLogPlugin` + `DirStore`）と `rig-memory` の標準ユーティリティ（`recent::view` / `summarization_request` / `Anchor`）**を採用する。
 
 ### 2.1 正本と責務の明確な分離（View専用ローリング要約方式への一本化）
 - **Rig（`rig-ecs` / `rig-memory`）が所有する正本**:
   - **会話履歴の追記型正本（完全無圧縮）**: `rig_memory::DirStore`（`rig-memory` feature `fs`）により、会話ログ（`SessionLog`）のメッセージ列をディスク（`<state_dir>/rig/`）上に**完全無圧縮・不変の追記型（Append-only）生ログとして保持**する。
   - **View専用ローリング要約（View-Only Rolling Summary）の採用とAside永続化**:
     - 会話ログ正本をインプレースに書き換える方式（`apply_summary` による splice 置換や undo 復元）は採用せず、**ディスク上の生ログは一切改変しない**。
-    - コンテキスト圧縮は、LLMへ送信するアクティブプロンプト窓（View）の構築時（`PrepareSystems::Fit`）に、`recent::view` で溢れた古いメッセージ群に対して `rig_memory::Summarizer` が生成した要約テキストスナップショット（要約本文 `text: String` と要約対象終端 `through_message_id: u64`）を、`ModelRequest.history` の先頭に `<summary>` としてインメモリ注入する方式に一本化する。
+    - コンテキスト圧縮は、LLMへ送信するアクティブプロンプト窓（View）の構築時（`PrepareSystems::Fit`）に、`recent::view` で溢れた古いメッセージ群に対して `rig_memory::summarization_request` を使って生成した要約テキストスナップショット（要約本文 `text: String` と要約対象終端 `through_message_id: u64`）を、`ModelRequest.history` の先頭に `<summary>` としてインメモリ注入する方式に一本化する。
     - **再起動耐性の担保（Aside永続化）**: 要約スナップショットは、受理レシートと同じく `Conversation::add_aside(Aside::new("ene.summary", snapshot_json))` として `SessionLog` 内に Aside レコードとして追記永続化する。ホスト起動時は最後の `"ene.summary"` Aside を読み込んで `current_summary_snapshot` を復元する。これにより、生ログ不変・SQLiteとの2相コミット不要・再起動耐性のすべてを完全同期で達成する。
     - これにより、ディスク上のログ破損や要約差分の不整合、ログ巻き戻し処理の複雑さを根本から排除し、最小で堅牢な実装を実現する。
   - **受理レシート（冪等性）の記録**: クライアントからのメッセージ受付キー（`request_key`）のレシートは、`Conversation::add_aside` を用いて `SessionLog` 内の Aside レコードとして記録する。これにより、SQLite とファイルシステム間の 2相コミットやクラッシュ時の不整合復旧問題が原理的に発生しない。
@@ -66,9 +66,9 @@
 
 $$\text{next\_request\_tokens} + \text{OUTPUT\_MARGIN} \le \text{Model Context Limit}$$
 
-- **`Anchor` / `RequestStart`**: 前回応答でプロバイダーが報告した実トークン使用量（Usage）と対象メッセージ位置を `Anchor` として保持し、`RequestStart` からの差分計算の起点として `next_request_tokens` を正確に評価する。
+- **`Anchor` とリクエストの同一性**: 前回応答の実トークン使用量を、新旧リクエストでモデル・固定プロンプト・ツール定義・履歴の共通部分が一致する場合に再利用する。変更があれば `HeuristicTokenCounter` でリクエスト全体を推定する。
 - **`OUTPUT_MARGIN`**: モデルの最大出力長（例: 4,096トークン）に安全マージン（10%）を加算した予約枠。
-- **`ClearToolOutputs`**: コンテキスト圧迫時、過去ターンの肥大化した巨大ツール出力（長大なファイル全文等）を安全に省略プレースホルダーへ置換し、会話の骨格を破壊せずにトークンを削減。
+- **ツール出力の一時省略**: コンテキスト圧迫時、過去ターンの肥大化した巨大ツール出力（長大なファイル全文等）を安全に省略プレースホルダーへ置換し、会話の骨格を破壊せずにトークンを削減。
 - **`recent::view`**: それでも上限を超える場合、最古の完全ターン単位（User ＋ Assistant または ToolCall ＋ ToolResult の完全な往復）でアクティブプロンプト窓から一時除外（ToolCallとToolResultを分断する切り詰めは禁止）。プロンプトのContext枠に `[System Notice: 過去の一部ログを一時的に省略して対話を継続しています]` を付与する。
 - **履歴全除外でも収まらない場合の明示的失敗（ContextExceededError）**:
   - 削れる過去履歴をすべて除外してもなお、「固定部分（ツール定義＋ペルソナ）＋ 今回の入力 ＋ OUTPUT_MARGIN」がモデルのコンテキスト制限を超過している場合、**上限に収まらない要求をモデルへ送信せず、直ちに `ContextExceededError`（文脈上限超過エラー）を返す**。

@@ -37,7 +37,7 @@ pub(super) fn notify_status(notifier: &mut Notifier, session: &WorkSession) {
         session,
         w::WorkEventKind::StatusChanged,
         w::work_event::Detail::StatusChanged(Box::new(w::WorkStatusChanged {
-            status: wire::work_status(session.status).into(),
+            status: w::WorkStatus::from(session.status).into(),
             ..Default::default()
         })),
     );

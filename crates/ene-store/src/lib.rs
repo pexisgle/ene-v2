@@ -14,6 +14,7 @@ pub mod memories;
 pub mod migrations;
 pub mod plugins;
 pub mod policies;
+mod row;
 pub mod schedules;
 pub mod settings;
 pub mod skills;
@@ -35,12 +36,9 @@ pub use settings::SettingsRepo;
 pub use skills::{Skill, SkillRepo, validate_skill_name};
 pub use work::{WorkRepo, open_state};
 
+use parking_lot::{Mutex, MutexGuard};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
-use std::{
-    fmt,
-    path::Path,
-    sync::{Arc, Mutex, MutexGuard},
-};
+use std::{fmt, path::Path, sync::Arc};
 
 fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
     let connection = Connection::open(path)?;
@@ -86,16 +84,14 @@ impl Store {
     }
 
     /// Borrows the primary SQLite connection under its mutual-exclusion lock.
-    pub fn conn(&self) -> Result<MutexGuard<'_, Connection>> {
-        self.0
-            .lock()
-            .map_err(|_| StoreError::Storage("state database lock was poisoned".into()))
+    pub fn conn(&self) -> MutexGuard<'_, Connection> {
+        self.0.lock()
     }
 
     /// Opens a second read-write connection to the same database file with the
     /// same WAL pragmas, allowing background workers to avoid holding `conn()`.
-    pub fn open_secondary(&self) -> Result<Connection> {
-        let primary = self.conn()?;
+    pub fn open_secondary(&self) -> Result<Self> {
+        let primary = self.conn();
         let path = primary
             .path()
             .filter(|path| !path.is_empty())
@@ -106,7 +102,31 @@ impl Store {
             })?;
         let connection = open_connection(Path::new(path))?;
         configure_connection(&connection)?;
-        Ok(connection)
+        Ok(Self(Arc::new(Mutex::new(connection))))
+    }
+
+    /// Clears learned state with a durable commit so an interrupted offline reset can resume.
+    pub fn reset_learned_state(&self) -> Result<()> {
+        let mut connection = self.conn();
+        connection.pragma_update(None, "synchronous", "FULL")?;
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(
+            "DELETE FROM memory_edges;
+             DELETE FROM memory_injections;
+             DELETE FROM mind_operations;
+             DELETE FROM memories;
+             DELETE FROM device_operations;
+             DELETE FROM approval_requests;
+             DELETE FROM work_runs;
+             DELETE FROM work_sessions;",
+        )?;
+        let empty = to_json(&ene_mind::State::default())?;
+        transaction.execute(
+            "UPDATE companions SET state = ?1, state_revision = state_revision + 1 WHERE state <> ?1",
+            [empty],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Repository for approval requests.
@@ -165,7 +185,7 @@ impl Store {
         params: impl rusqlite::Params,
         map: impl FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     ) -> Result<Option<T>> {
-        let connection = self.conn()?;
+        let connection = self.conn();
         let mut statement = connection.prepare_cached(sql)?;
         Ok(statement.query_row(params, map).optional()?)
     }
@@ -176,7 +196,7 @@ impl Store {
         params: impl rusqlite::Params,
         map: impl FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     ) -> Result<T> {
-        let connection = self.conn()?;
+        let connection = self.conn();
         let mut statement = connection.prepare_cached(sql)?;
         Ok(statement.query_row(params, map)?)
     }
@@ -191,7 +211,7 @@ impl Store {
         &self,
         write: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T>,
     ) -> Result<T> {
-        let mut connection = self.conn()?;
+        let mut connection = self.conn();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let value = write(&transaction)?;
         transaction.commit()?;
@@ -204,7 +224,7 @@ impl Store {
         params: impl rusqlite::Params,
         map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     ) -> Result<Vec<T>> {
-        let connection = self.conn()?;
+        let connection = self.conn();
         let mut statement = connection.prepare_cached(sql)?;
         let rows = statement.query_map(params, map)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -405,7 +425,8 @@ mod tests {
     fn primary_and_secondary_connections_share_options_and_transactions() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
-        let mut secondary = store.open_secondary().unwrap();
+        let secondary_store = store.open_secondary().unwrap();
+        let mut secondary = secondary_store.conn();
         let options = |connection: &Connection| {
             let journal: String = connection
                 .pragma_query_value(None, "journal_mode", |row| row.get(0))
@@ -418,7 +439,7 @@ mod tests {
                 .unwrap();
             (journal, synchronous, timeout)
         };
-        assert_eq!(options(&store.conn().unwrap()), ("wal".into(), 1, 5000));
+        assert_eq!(options(&store.conn()), ("wal".into(), 1, 5000));
         assert_eq!(options(&secondary), ("wal".into(), 1, 5000));
 
         let tx = secondary.transaction().unwrap();
@@ -433,7 +454,6 @@ mod tests {
         assert_eq!(visible_inside_tx, 1);
         let visible_to_store: i64 = store
             .conn()
-            .unwrap()
             .query_row("SELECT COUNT(*) FROM user_profiles", [], |row| row.get(0))
             .unwrap();
         assert_eq!(visible_to_store, 0);
@@ -441,7 +461,6 @@ mod tests {
         assert_eq!(
             store
                 .conn()
-                .unwrap()
                 .query_row("SELECT COUNT(*) FROM user_profiles", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),
@@ -456,7 +475,6 @@ mod tests {
         assert_eq!(
             store
                 .conn()
-                .unwrap()
                 .query_row("SELECT name FROM user_profiles", [], |row| {
                     row.get::<_, String>(0)
                 })
@@ -502,7 +520,6 @@ mod tests {
         let store = Store::open(&path).unwrap();
         store
             .conn()
-            .unwrap()
             .execute_batch("CREATE TABLE busy_probe (id INTEGER PRIMARY KEY, who TEXT NOT NULL)")
             .unwrap();
 
@@ -538,7 +555,6 @@ mod tests {
         assert_eq!(existing, 0, "the read ran before either write");
         let total: i64 = store
             .conn()
-            .unwrap()
             .query_row("SELECT COUNT(*) FROM busy_probe", [], |row| row.get(0))
             .unwrap();
         assert_eq!(total, 2, "both the reader-writer and the competitor commit");
@@ -612,7 +628,6 @@ mod tests {
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
         store
             .conn()
-            .unwrap()
             .execute_batch(
                 "CREATE TABLE query_values (id INTEGER PRIMARY KEY, value TEXT NOT NULL)",
             )
@@ -669,7 +684,6 @@ mod tests {
         assert_eq!(
             store
                 .conn()
-                .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
             VERSION
@@ -678,7 +692,6 @@ mod tests {
         let store = Store::open(&path).unwrap();
         store
             .conn()
-            .unwrap()
             .pragma_update(None, "user_version", VERSION + 1)
             .unwrap();
         drop(store);

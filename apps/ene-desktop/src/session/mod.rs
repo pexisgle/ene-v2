@@ -22,6 +22,7 @@
 mod audio_pipeline;
 mod bridge;
 mod commands;
+mod device_commands;
 mod phase;
 mod stream;
 mod stream_audio;
@@ -39,18 +40,23 @@ use crate::{
     state::{Device, Devices, Link},
     update::{Command, Update},
 };
+use backon::{BackoffBuilder as _, ExponentialBackoff, ExponentialBuilder};
 use buffa::view::MessageView;
 use ene_rpc as w;
+use parking_lot::RwLock;
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::Duration,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-/// The first wait before a retry, doubled up to [`MAX_RETRY`].
-const FIRST_RETRY: Duration = Duration::from_secs(1);
 const MAX_RETRY: Duration = Duration::from_secs(30);
+/// The first wait is one second, doubled up to [`MAX_RETRY`].
+const RECONNECT_BACKOFF: ExponentialBuilder = ExponentialBuilder::new()
+    .with_min_delay(Duration::from_secs(1))
+    .with_max_delay(MAX_RETRY)
+    .without_max_times();
 /// How often the client samples the OS for perception.
 pub(super) const SAMPLE: Duration = Duration::from_secs(1);
 pub(super) const SCREEN_SAMPLE: Duration = Duration::from_secs(20);
@@ -87,7 +93,7 @@ pub fn load_or_create_client_id(path: &Path) -> String {
     {
         use std::io::Write as _;
         if tmp.write_all(id.as_bytes()).is_ok() {
-            ene_platform_os::warn_if_err(tmp.persist(path), "session file persistence");
+            ene_domain::warn_if_err(tmp.persist(path), "session file persistence");
         }
     }
     id
@@ -217,7 +223,7 @@ impl Session {
             &self.updates,
             Update::ComputerUseEnabled(self.devices.computer_enabled),
         );
-        let mut retry = FIRST_RETRY;
+        let mut retry = RECONNECT_BACKOFF.build();
         loop {
             let outcome = Box::pin(self.attempt()).await;
             if !self.handle_attempt_outcome(outcome, &mut retry).await {
@@ -227,7 +233,11 @@ impl Session {
         self.devices.shutdown().await;
     }
 
-    async fn handle_attempt_outcome(&mut self, outcome: Outcome, retry: &mut Duration) -> bool {
+    async fn handle_attempt_outcome(
+        &mut self,
+        outcome: Outcome,
+        retry: &mut ExponentialBackoff,
+    ) -> bool {
         match outcome {
             Outcome::Closed => false,
             Outcome::Resync(reason) => {
@@ -235,13 +245,12 @@ impl Session {
                 // cursor is dropped so the next attempt resnapshots.
                 self.transport.cursor = None;
                 tracing::info!("resubscribing: {reason}");
-                *retry = FIRST_RETRY;
+                *retry = RECONNECT_BACKOFF.build();
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 true
             }
             Outcome::Dropped(reason) => {
-                let retry_in = *retry;
-                *retry = (*retry * 2).min(MAX_RETRY);
+                let retry_in = retry.next().unwrap_or(MAX_RETRY);
                 tracing::warn!("the link dropped: {reason}");
                 self.report_phase(ConnectionPhase::Lost { reason, retry_in })
                     .await;
@@ -325,7 +334,7 @@ impl Session {
 
         let _record = match self.transport.register(&host, &self.devices).await {
             Ok(record) => record,
-            Err(error) => return self.transport.classify(error),
+            Err(error) => return self.transport.classify(&error),
         };
         self.report_devices().await;
 
@@ -334,7 +343,7 @@ impl Session {
                 Ok(snapshot) => snapshot,
                 Err(error) => return Outcome::Dropped(error.to_string()),
             },
-            Err(error) => return self.transport.classify(error),
+            Err(error) => return self.transport.classify(&error),
         };
         let changed = match self.transport.bind(&host, &snapshot).await {
             Ok(changed) => changed,
@@ -619,41 +628,57 @@ mod tests {
 
     #[test]
     fn a_motion_plan_carries_the_face_with_the_motion() {
-        let plan = MotionPlan::parse(&serde_json::json!({"motion": "idle"})).unwrap();
+        let plan = MotionPlan::parse(
+            serde_json::from_value(serde_json::json!({"motion": "idle"})).unwrap(),
+        )
+        .unwrap();
         assert_eq!(plan.motion, "idle");
         assert_eq!(plan.expression, None);
         assert_eq!(plan.clip, avatar::motion("idle"));
 
-        let plan = MotionPlan::parse(&serde_json::json!({"motion": "idle", "expression": "happy"}))
-            .unwrap();
+        let plan = MotionPlan::parse(
+            serde_json::from_value(serde_json::json!({"motion": "idle", "expression": "happy"}))
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(plan.expression.as_deref(), Some("happy"));
 
         // `neutral` is a real request, not an absent one: it clears the face.
-        let plan =
-            MotionPlan::parse(&serde_json::json!({"motion": "idle", "expression": "neutral"}))
-                .unwrap();
+        let plan = MotionPlan::parse(
+            serde_json::from_value(serde_json::json!({"motion": "idle", "expression": "neutral"}))
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(plan.expression.as_deref(), Some("neutral"));
 
         // An explicit null leaves the face alone, like an absent field.
-        let plan =
-            MotionPlan::parse(&serde_json::json!({"motion": "idle", "expression": null})).unwrap();
+        let plan = MotionPlan::parse(
+            serde_json::from_value(serde_json::json!({"motion": "idle", "expression": null}))
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(plan.expression, None);
     }
 
     #[test]
     fn a_motion_plan_rejects_what_this_client_never_declared() {
-        let error = MotionPlan::parse(&serde_json::json!({"motion": "idle", "expression": "smug"}))
-            .unwrap_err()
-            .to_string();
+        let error = MotionPlan::parse(
+            serde_json::from_value(serde_json::json!({"motion": "idle", "expression": "smug"}))
+                .unwrap(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("not a declared expression"), "{error}");
-        let error = MotionPlan::parse(&serde_json::json!({"motion": "dance"}))
-            .unwrap_err()
-            .to_string();
+        let error = MotionPlan::parse(
+            serde_json::from_value(serde_json::json!({"motion": "dance"})).unwrap(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("not a declared motion preset"), "{error}");
-        let error = MotionPlan::parse(&serde_json::json!({}))
+        let error = serde_json::from_str::<super::device_commands::MotionInput>("{}")
             .unwrap_err()
             .to_string();
-        assert!(error.contains("requires a `motion`"), "{error}");
+        assert!(error.contains("missing field `motion`"), "{error}");
     }
 
     #[test]
@@ -682,7 +707,7 @@ mod tests {
         let finished = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         for _ in 0..8 {
             let finished = std::sync::Arc::clone(&finished);
-            devices.background.lock().unwrap().spawn(async move {
+            devices.background.lock().spawn(async move {
                 finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             });
         }
@@ -697,7 +722,7 @@ mod tests {
 
         devices.reap_background();
         assert_eq!(
-            devices.background.lock().unwrap().len(),
+            devices.background.lock().len(),
             0,
             "completed tasks must leave the set"
         );
@@ -705,7 +730,7 @@ mod tests {
         // A task that outlives its work must still be drained by shutdown.
         let slow = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = std::sync::Arc::clone(&slow);
-        devices.background.lock().unwrap().spawn(async move {
+        devices.background.lock().spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         });

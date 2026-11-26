@@ -6,7 +6,7 @@ mod controls;
 mod menu;
 mod onboarding;
 
-use crate::input::{self, Draft};
+use crate::input::{Draft, SubmitDraft};
 use crate::ui::theme::{resolve_ui_font_family, ui_font_fallbacks};
 use crate::ui::{Hub, PodMode};
 use ene_client_core::domain::TurnStatus;
@@ -19,12 +19,7 @@ const MAX_INPUT: usize = 4000;
 
 actions!(
     ene_desktop,
-    [
-        Submit,
-        CancelOrStop,
-        ToggleMicShortcut,
-        OpenSettingsShortcut
-    ]
+    [CancelOrStop, ToggleMicShortcut, OpenSettingsShortcut]
 );
 
 /// Compatibility alias expected by `lib.rs`.
@@ -84,20 +79,28 @@ impl std::fmt::Debug for CompanionPod {
 }
 
 impl CompanionPod {
-    pub fn new(hub: Entity<Hub>, cx: &mut Context<Self>) -> Self {
-        let chat_input = cx.new(|cx| Draft::new(cx, "メッセージを入力…", "ChatInput"));
+    pub fn new(hub: Entity<Hub>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let chat_input = cx.new(|_| Draft::new("メッセージを入力…", false));
+        cx.subscribe_in(
+            &chat_input,
+            window,
+            |this, _, _: &SubmitDraft, window, cx| {
+                this.submit(window, cx);
+            },
+        )
+        .detach();
         let onboard_key = cx.new(|cx| {
-            let mut draft = Draft::new(cx, "APIキーを入力…", "TextField");
+            let mut draft = Draft::new("APIキーを入力…", false);
             draft.set_masked(true, cx);
             draft
         });
         let onboard_name = cx.new(|cx| {
-            let mut draft = Draft::new(cx, "コンパニオン名", "TextField");
+            let mut draft = Draft::new("コンパニオン名", false);
             draft.set("ene", cx);
             draft
         });
-        let setup_model_filter = cx.new(|cx| Draft::new(cx, "モデルを検索…", "TextField"));
-        let setup_voice_filter = cx.new(|cx| Draft::new(cx, "話者を検索…", "TextField"));
+        let setup_model_filter = cx.new(|_| Draft::new("モデルを検索…", false));
+        let setup_voice_filter = cx.new(|_| Draft::new("話者を検索…", false));
         let _observe = cx.observe(&hub, |_, _, cx| cx.notify());
         Self {
             hub,
@@ -174,8 +177,7 @@ impl CompanionPod {
         } else {
             &self.chat_input
         };
-        let handle = field.read(cx).focus_handle();
-        window.focus(&handle);
+        field.update(cx, |draft, cx| draft.focus(window, cx));
     }
 
     pub(crate) fn sync_mode_and_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -247,10 +249,12 @@ impl CompanionPod {
         }
     }
 
-    pub(super) fn submit(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.needs_connection(cx)
             || self.in_model_setup(cx)
-            || self.chat_input.read(cx).composing()
+            || self
+                .chat_input
+                .update(cx, |draft, cx| draft.composing(window, cx))
         {
             return;
         }
@@ -258,7 +262,7 @@ impl CompanionPod {
         if text.is_empty() || text.chars().count() > MAX_INPUT {
             return;
         }
-        let sent = self.hub.update(cx, |hub, cx| hub.send(text, cx));
+        let sent = self.hub.update(cx, |hub, cx| hub.send(&text, cx));
         if sent {
             self.controls_open = false;
             self.chat_input
@@ -397,32 +401,27 @@ impl Render for CompanionPod {
 
 /// The pod's shortcuts. Every one is scoped to a key context: an unscoped
 /// `Escape` would also cancel a pod turn while `SettingsStudio` has focus.
-fn pod_key_bindings() -> [KeyBinding; 4] {
+fn pod_key_bindings() -> [KeyBinding; 3] {
+    #[cfg(target_os = "macos")]
+    let (mute, settings) = ("cmd-m", "cmd-,");
+    #[cfg(not(target_os = "macos"))]
+    let (mute, settings) = ("ctrl-m", "ctrl-,");
     [
-        KeyBinding::new("enter", Submit, Some("ChatInput")),
         KeyBinding::new("escape", CancelOrStop, Some(POD_KEY_CONTEXT)),
         // Scoped to the pod, so Ctrl/Cmd+M types an "m" in a settings field
         // rather than muting the microphone under it.
-        KeyBinding::new("secondary-m", ToggleMicShortcut, Some(POD_KEY_CONTEXT)),
-        KeyBinding::new("secondary-,", OpenSettingsShortcut, Some(POD_KEY_CONTEXT)),
+        KeyBinding::new(mute, ToggleMicShortcut, Some(POD_KEY_CONTEXT)),
+        KeyBinding::new(settings, OpenSettingsShortcut, Some(POD_KEY_CONTEXT)),
     ]
 }
 
 /// The key context the pod root declares with `.key_context(..)`.
 const POD_KEY_CONTEXT: &str = "CompanionPod";
 
-/// Binds keyboard shortcuts (`Enter` send in `ChatInput`, `Esc` stop/collapse) globally.
+/// Binds keyboard shortcuts scoped to the pod.
 pub fn bind(cx: &mut App, hub: Entity<Hub>) {
-    input::bind(cx);
+    crate::ui::theme::init_components(cx);
     cx.bind_keys(pod_key_bindings());
-
-    let submit_hub = hub.clone();
-    cx.on_action(move |_: &Submit, cx: &mut App| {
-        let Some(view) = submit_hub.read(cx).pod_view() else {
-            return;
-        };
-        let _updated = view.update(cx, CompanionPod::submit);
-    });
 
     let escape_hub = hub.clone();
     cx.on_action(move |_: &CancelOrStop, cx: &mut App| {

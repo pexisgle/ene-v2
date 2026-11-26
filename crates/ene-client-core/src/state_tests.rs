@@ -1,7 +1,7 @@
 use crate::{
     domain::{
         Activation, ApprovalRequest, ApprovalStatus, Companion, HostNotification, Message,
-        MessageDelta, MessageRole, MindUpdated, NotificationEvent, PolicyText, RunStatus, Settings,
+        MessageDelta, MessageRole, MindUpdated, NotificationEvent, PolicyText, RunState, Settings,
         Snapshot, TurnEvent, TurnStatus, WorkEvent, WorkEventDetail,
     },
     reducer::is_user_facing_message,
@@ -397,7 +397,7 @@ fn internal_work_messages_are_hidden_and_work_event_tracks_active_status() {
             work_id: "work-1".into(),
             run_id: "run-1".into(),
             detail: Some(WorkEventDetail::RunFinished {
-                state: RunStatus::Completed,
+                state: Some(RunState::Completed),
                 failure: None,
                 pending_request_id: None,
             }),
@@ -456,15 +456,15 @@ fn f01_r03_resident_companions_queries_multiple_activations_on_one_client() {
     let mut snap = snapshot();
     snap.activations = vec![
         Activation {
-            companion_id: "ene".to_owned(),
+            companion_id: ene_domain::CompanionId::parse("ene").unwrap(),
             client_id: Some("desk-a".into()),
         },
         Activation {
-            companion_id: "miku".into(),
+            companion_id: ene_domain::CompanionId::parse("miku").unwrap(),
             client_id: Some("desk-a".into()),
         },
         Activation {
-            companion_id: "kai".into(),
+            companion_id: ene_domain::CompanionId::parse("kai").unwrap(),
             client_id: Some("desk-b".into()),
         },
     ];

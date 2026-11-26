@@ -1,5 +1,7 @@
 //! Pure permission approval, policy rule, and policy text domain types.
 
+use ene_domain::{PolicyEffect, PolicyRule, PolicyText};
+
 /// Prefix used for per-capability workspace file confirmation policy rules.
 pub const SKIP_FILE_CONFIRMATION_PREFIX: &str = "desktop.skip-file-confirmation:";
 
@@ -59,48 +61,6 @@ pub struct ApprovalRequest {
     pub client_id: Option<String>,
     /// The capability the action invokes, when it names one.
     pub capability: Option<String>,
-}
-
-/// Enforcement action for a structured policy rule.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum PolicyEffect {
-    /// The host did not report an effect.
-    #[default]
-    Unspecified,
-    /// Let the operation run without prompting.
-    Allow,
-    /// Block the operation.
-    Deny,
-    /// Require a human approval before the operation runs.
-    Confirm,
-    /// Ask the model to decide before falling back to a human.
-    AskLlm,
-}
-
-/// Structured tool/capability permission rule.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PolicyRule {
-    /// Id of this rule.
-    pub id: String,
-    /// Tool or capability the rule applies to; `*` matches any.
-    pub tool_name: String,
-    /// Invocation pattern the rule matches.
-    pub pattern: String,
-    /// What the rule decides when it matches.
-    pub effect: PolicyEffect,
-    /// Creation time, as the host stamped it.
-    pub created_at: String,
-}
-
-/// Free-text policy guideline evaluated by the decision engine.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PolicyText {
-    /// Id of this policy text.
-    pub id: String,
-    /// The prose itself.
-    pub text: String,
-    /// Creation time, as the host stamped it.
-    pub created_at: String,
 }
 
 /// Batch update payload for structured policy rules.

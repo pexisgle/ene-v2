@@ -11,10 +11,10 @@ use crate::host::{
     model::{Credentials, ModelFactory},
     providers::Providers,
     resources::HostRuntime,
-    util::truncate,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bevy_ecs::prelude::*;
+use ene_store::util::truncate;
 use rig_core::{
     completion::CompletionRequest,
     driver::DynModel,

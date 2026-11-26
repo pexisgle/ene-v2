@@ -7,14 +7,12 @@
 use crate::host::{
     agent,
     db::Store,
-    mind::{
-        embedding::{self, Embeddings},
-        memory::{RecallMode, Scored},
-    },
+    mind::embedding::{self, Embeddings},
     model::Credentials,
     resources::Perception,
-    util::now,
 };
+use ene_mind::{RecallMode, Scored};
+use ene_store::util::now;
 use rig_ecs::prelude::{Conversation, MessageId};
 
 /// The tail's opening: the clock is part of every request, companion or not.

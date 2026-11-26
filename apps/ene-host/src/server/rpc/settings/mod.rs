@@ -8,10 +8,8 @@ mod policy;
 mod probe;
 
 use super::Services;
-use crate::host::error::HostError;
 use crate::host::model;
 use crate::host::notify::Notifier;
-use crate::host::permission;
 use crate::host::settings;
 use crate::host::settings::Connection;
 use connectrpc::RequestContext;
@@ -19,7 +17,6 @@ use connectrpc::ServiceRequest;
 use connectrpc::ServiceResult;
 use ene_rpc as w;
 use rig_core::catalog::ModelSpec;
-use rig_ecs::prelude::App;
 
 #[expect(refining_impl_trait, reason = "Connect boxes futures")]
 impl w::SettingsService for Services {
@@ -337,8 +334,8 @@ impl w::SettingsService for Services {
     }
 }
 
-fn notify_settings(app: &mut App, settings: w::Settings) {
-    app.world_mut().resource_mut::<Notifier>().push(
+fn notify_settings(notifier: &Notifier, settings: w::Settings) {
+    notifier.push(
         None,
         None,
         w::notification::Event::SettingsUpdated(Box::new(w::SettingsUpdated {
@@ -360,25 +357,6 @@ fn is_builtin_voicevox(
             .eq_ignore_ascii_case("voicevox")
         && !model::is_sakura_endpoint(&connection.endpoint().endpoint)
         && providers.get("voicevox").is_none()
-}
-
-fn rule_from(rule: w::PolicyRule) -> Result<permission::PolicyRule, HostError> {
-    let effect = match rule.effect.as_known() {
-        Some(w::PolicyEffect::Allow) => permission::PolicyEffect::Allow,
-        Some(w::PolicyEffect::Deny) => permission::PolicyEffect::Deny,
-        Some(w::PolicyEffect::Confirm) => permission::PolicyEffect::Confirm,
-        Some(w::PolicyEffect::AskLlm) => permission::PolicyEffect::AskLlm,
-        Some(w::PolicyEffect::Unspecified) | None => {
-            return Err(HostError::Invalid(("a policy effect is required").into()));
-        }
-    };
-    Ok(permission::PolicyRule {
-        id: rule.id,
-        tool_name: rule.tool_name,
-        pattern: rule.pattern,
-        effect,
-        created_at: rule.created_at,
-    })
 }
 
 fn model_item(id: String, spec: &ModelSpec) -> w::Model {
@@ -449,12 +427,13 @@ mod contract_tests {
     #[test]
     fn each_effect_maps_to_its_own_policy_effect() {
         for (wire, expected) in [
-            (w::PolicyEffect::Allow, permission::PolicyEffect::Allow),
-            (w::PolicyEffect::Deny, permission::PolicyEffect::Deny),
-            (w::PolicyEffect::Confirm, permission::PolicyEffect::Confirm),
-            (w::PolicyEffect::AskLlm, permission::PolicyEffect::AskLlm),
+            (w::PolicyEffect::Allow, ene_domain::PolicyEffect::Allow),
+            (w::PolicyEffect::Deny, ene_domain::PolicyEffect::Deny),
+            (w::PolicyEffect::Confirm, ene_domain::PolicyEffect::Confirm),
+            (w::PolicyEffect::AskLlm, ene_domain::PolicyEffect::AskLlm),
         ] {
-            let converted = rule_from(rule(wire)).expect("a specified effect converts");
+            let converted =
+                ene_domain::PolicyRule::try_from(rule(wire)).expect("a specified effect converts");
             assert_eq!(converted.effect, expected, "{wire:?}");
         }
     }
@@ -464,10 +443,10 @@ mod contract_tests {
     /// creating a rule that allows everything.
     #[test]
     fn an_unspecified_effect_is_rejected_rather_than_defaulted() {
-        let error = rule_from(rule(w::PolicyEffect::Unspecified))
+        let error = ene_domain::PolicyRule::try_from(rule(w::PolicyEffect::Unspecified))
             .expect_err("Unspecified must not convert");
         assert!(
-            matches!(error, HostError::Invalid(_)),
+            matches!(error, ene_domain::DomainError::Invalid(_)),
             "expected Invalid, got {error:?}"
         );
     }
@@ -476,8 +455,8 @@ mod contract_tests {
     /// later matched by them.
     #[test]
     fn identifying_fields_survive_the_conversion() {
-        let converted =
-            rule_from(rule(w::PolicyEffect::Allow)).expect("a specified effect converts");
+        let converted = ene_domain::PolicyRule::try_from(rule(w::PolicyEffect::Allow))
+            .expect("a specified effect converts");
         assert_eq!(converted.id, "rule-1");
         assert_eq!(converted.tool_name, "files");
         assert_eq!(converted.pattern, "**/*.md");

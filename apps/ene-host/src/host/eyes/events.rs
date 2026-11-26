@@ -10,55 +10,20 @@ use super::{
 use crate::host::{
     error::{HostError, Result},
     notify::Notifier,
-    resources::{DeviceHub, Perception},
-    util::truncate,
+    resources::Perception,
 };
-use bevy_ecs::prelude::*;
 use ene_rpc as w;
+use ene_store::util::truncate;
 use serde_json::{Value, json};
 use std::time::Instant;
 
 /// Applies a perception event to `companion`.
 ///
-/// The three maps this touches are fetched here; the actual event handling in
-/// [`apply_report`] takes them explicitly so it can be tested without a world.
-pub(crate) fn report_with(
-    world: &mut World,
-    companion: String,
-    event: w::PerceptionEvent,
-) -> Result<()> {
-    // A stream the activating client no longer owns carries nothing to apply.
-    if world
-        .resource::<DeviceHub>()
-        .subscription(&event.client_id)
-        .as_deref()
-        != Some(event.subscription_id.as_str())
-    {
-        return Ok(());
-    }
-    let mut eyes = std::mem::take(&mut *world.resource_mut::<Eyes>());
-    let mut perception = std::mem::take(&mut *world.resource_mut::<Perception>());
-    let mut notifier = world.remove_resource::<Notifier>();
-    let outcome = apply_report(
-        &mut eyes,
-        &mut perception,
-        notifier.as_mut(),
-        &companion,
-        event,
-    );
-    *world.resource_mut::<Eyes>() = eyes;
-    *world.resource_mut::<Perception>() = perception;
-    if let Some(notifier) = notifier {
-        world.insert_resource(notifier);
-    }
-    outcome
-}
-
 /// The event handling itself: pure over the three maps it is given.
-fn apply_report(
+pub(crate) fn apply_report(
     eyes: &mut Eyes,
     perception: &mut Perception,
-    notifier: Option<&mut Notifier>,
+    notifier: Option<&Notifier>,
     companion: &str,
     event: w::PerceptionEvent,
 ) -> Result<()> {
@@ -104,12 +69,12 @@ fn apply_report(
                 notifier,
                 companion,
                 "watch_matched",
-                json!({"transition": transition}),
+                &json!({"transition": transition}),
             );
         }
         SessionOutcome::Diagnostic(diag) => {
             if let Some((action, detail)) = diag {
-                diagnostic(notifier, companion, action, detail);
+                diagnostic(notifier, companion, action, &detail);
             }
         }
     }
@@ -139,7 +104,7 @@ struct EnabledTarget<'a> {
 fn handle_enabled_event(
     eyes: &mut Eyes,
     perception: &mut Perception,
-    notifier: &mut Notifier,
+    notifier: &Notifier,
     target: EnabledTarget<'_>,
 ) {
     let EnabledTarget {
@@ -178,7 +143,7 @@ fn handle_enabled_event(
         }
     };
     if let Some(action) = diag_action {
-        diagnostic(notifier, companion, action, json!({}));
+        diagnostic(notifier, companion, action, &json!({}));
     }
     if enabled {
         perception.events.remove(companion);

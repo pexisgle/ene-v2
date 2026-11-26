@@ -34,7 +34,7 @@ pub(super) fn render_connection_editor(
     let mcp_tools_strip = render_mcp_tools_strip(pane, conn, check, &drafts.list_d, theme, cx);
     let dropdown_picker = render_kind_dropdown_picker(
         pane,
-        PickerInput {
+        &PickerInput {
             conn,
             endpoint,
             list_d: &drafts.list_d,
@@ -267,7 +267,7 @@ pub(super) fn render_enable_row(
             theme,
             move |_, cx| {
                 hub_toggle.update(cx, |hub, cx| {
-                    hub.set_connection_enabled(conn_toggle.clone(), !conn_toggle.enabled, cx);
+                    hub.set_connection_enabled(&conn_toggle.clone(), !conn_toggle.enabled, cx);
                 });
             },
         ))
@@ -326,7 +326,7 @@ pub(super) fn render_editor_actions(
                 );
                 cx.spawn(async move |cx| {
                     if answer.await == Ok(1) {
-                        let _discarded =  cx.update(|cx| {
+                        cx.update(|cx| {
                             hub.update(cx, |hub, cx| hub.delete_connection(id, rev, cx));
                         });
                     }

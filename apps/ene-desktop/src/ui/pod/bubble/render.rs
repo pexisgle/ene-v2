@@ -49,7 +49,7 @@ pub(super) fn compute_status_word(
     }
 }
 
-pub(super) fn render_notice_strip(notice: Notice, hub: &Entity<Hub>, theme: &Theme) -> gpui::Div {
+pub(super) fn render_notice_strip(notice: &Notice, hub: &Entity<Hub>, theme: &Theme) -> gpui::Div {
     let hub_dismiss = hub.clone();
     let hub_resync = hub.clone();
     let is_conflict = notice.kind == NoticeKind::Conflict;

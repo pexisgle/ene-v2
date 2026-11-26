@@ -233,7 +233,7 @@ fn remove_companion(model: &mut Model, companion_id: &str) {
             .retain(|companion| companion.id != companion_id);
         snapshot
             .activations
-            .retain(|activation| activation.companion_id != companion_id);
+            .retain(|activation| activation.companion_id.as_str() != companion_id);
     }
     model.companions.minds.remove(companion_id);
     if model.companions.selected.as_deref() == Some(companion_id) {

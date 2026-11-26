@@ -38,13 +38,13 @@ impl Hub {
         chat::load_history(self, cx);
     }
 
-    pub(crate) fn send(&mut self, text: String, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn send(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
         chat::send(self, text, cx)
     }
 
     pub(crate) fn send_keyed(
         &mut self,
-        text: String,
+        text: &str,
         request_key: String,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -217,7 +217,7 @@ impl Hub {
             tool_name,
             pattern,
             effect,
-            ..Default::default()
+            created_at: String::new(),
         };
         self.update_policy_rules(
             "許可ルールの追加",
@@ -310,7 +310,7 @@ impl Hub {
         rpc::policy::load_plugins(&self.rpc, self.model.connections.link_epoch);
     }
 
-    pub(crate) fn install_plugin(&mut self, source_path: String, cx: &mut Context<Self>) {
+    pub(crate) fn install_plugin(&mut self, source_path: &str, cx: &mut Context<Self>) {
         let trimmed = source_path.trim().to_owned();
         if trimmed.is_empty() {
             return;
@@ -354,8 +354,8 @@ impl Hub {
 
     pub(crate) fn save_remote_host(
         &mut self,
-        endpoint: String,
-        token: String,
+        endpoint: &str,
+        token: &str,
         cx: &mut Context<Self>,
     ) -> Result<(), RemoteHostError> {
         let Some(path) = Self::remote_host_config_path() else {
@@ -409,7 +409,7 @@ impl Hub {
         cx.notify();
     }
 
-    pub(crate) fn import_companion_json(&mut self, raw: String, cx: &mut Context<Self>) {
+    pub(crate) fn import_companion_json(&mut self, raw: &str, cx: &mut Context<Self>) {
         companions::import_companion_json(self, raw, cx);
     }
 

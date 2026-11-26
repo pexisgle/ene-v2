@@ -3,10 +3,11 @@
 
 use super::{
     Batch, COLUMNS, Commit, Fact, Memory, MemoryContext, MemoryRecord, MemoryRepo, Result,
-    SHARED_SCOPE, VISIBLE, add_edge, insert_row, now, read_memory_tx, row_to_memory, supersede_tx,
-    truncate, validate_citations,
+    SHARED_SCOPE, VISIBLE, add_edge, insert_row, now, read_memory_tx, supersede_tx, truncate,
+    validate_citations,
 };
 use crate::StoreError;
+use crate::row::FromRow;
 use ene_mind::{RecallMode, in_scope};
 use rusqlite::params;
 use serde_json::json as value;
@@ -49,14 +50,14 @@ impl<'a> MemoryRepo<'a> {
                 return Ok(contexts);
             }
         }
-        let connection = self.0.conn()?;
+        let connection = self.0.conn();
         let mut statement = connection.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM memories m \
              WHERE {VISIBLE} AND m.importance >= 2 \
              ORDER BY m.importance DESC, COALESCE(m.last_accessed_at, m.recorded_at) DESC, \
              m.rowid DESC LIMIT ?2"
         ))?;
-        let rows = statement.query_map(params![companion, limit as i64], row_to_memory)?;
+        let rows = statement.query_map(params![companion, limit as i64], Memory::from_row)?;
         for memory in rows {
             push(&memory?, &mut contexts);
             if contexts.len() >= limit {
@@ -83,7 +84,7 @@ impl<'a> MemoryRepo<'a> {
             inserted: 0,
             updated: 0,
         };
-        let mut connection = self.0.conn()?;
+        let mut connection = self.0.conn();
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         for fact in facts {

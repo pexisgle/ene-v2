@@ -10,21 +10,51 @@ use std::{
 };
 
 /// A fatal state means the host must not accept new work.
-#[derive(Resource, Default)]
-pub(crate) struct HostState {
-    pub(crate) failed: Option<String>,
-    pub(crate) closing: bool,
+#[derive(Clone, Resource, Default)]
+pub(crate) struct HostState(Arc<Mutex<Lifecycle>>);
+
+#[derive(Default)]
+enum Lifecycle {
+    #[default]
+    Ready,
+    Closing,
+    Failed(String),
 }
 
 impl HostState {
     pub(crate) fn ready(&self) -> Result<()> {
-        if let Some(reason) = &self.failed {
-            return Err(HostError::Unavailable(reason.clone()));
+        match &*self.0.lock() {
+            Lifecycle::Ready => Ok(()),
+            Lifecycle::Closing => Err(HostError::Unavailable("host is stopping".into())),
+            Lifecycle::Failed(reason) => Err(HostError::Unavailable(reason.clone())),
         }
-        if self.closing {
-            return Err(HostError::Unavailable(("host is stopping").into()));
+    }
+
+    pub(crate) fn failure(&self) -> Option<String> {
+        match &*self.0.lock() {
+            Lifecycle::Failed(reason) => Some(reason.clone()),
+            _ => None,
         }
-        Ok(())
+    }
+
+    pub(crate) fn closing(&self) -> bool {
+        matches!(*self.0.lock(), Lifecycle::Closing)
+    }
+
+    pub(crate) fn close(&self) {
+        let mut state = self.0.lock();
+        if matches!(*state, Lifecycle::Ready) {
+            *state = Lifecycle::Closing;
+        }
+    }
+
+    pub(crate) fn fail(&self, reason: &str) -> bool {
+        let mut state = self.0.lock();
+        if matches!(*state, Lifecycle::Failed(_)) {
+            return false;
+        }
+        *state = Lifecycle::Failed(reason.to_owned());
+        true
     }
 }
 

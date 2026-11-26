@@ -127,7 +127,7 @@ fn render_add_plugin_panel(
                                 && let Some(path) = paths.into_iter().next()
                             {
                                 let path_str = path.to_string_lossy().into_owned();
-                                let _updated = cx.update(|cx| {
+                                cx.update(|cx| {
                                     draft.update(cx, |d, cx| d.set(path_str, cx));
                                 });
                             }
@@ -144,7 +144,7 @@ fn render_add_plugin_panel(
                     theme,
                     move |_, cx| {
                         let path = path_val.clone();
-                        hub_install.update(cx, |h, cx| h.install_plugin(path, cx));
+                        hub_install.update(cx, |h, cx| h.install_plugin(&path, cx));
                         draft_clear.update(cx, crate::input::Draft::clear);
                         pane_close.update(cx, |this, cx| {
                             this.form.adding_plugin_open = false;
@@ -312,8 +312,8 @@ fn render_remote_host_form(
                         let ep = ep_val.clone();
                         let tok = tok_val.clone();
                         hub_save_remote.update(cx, |h, cx| {
-                            ene_platform_os::warn_if_err(
-                                h.save_remote_host(ep, tok, cx),
+                            ene_domain::warn_if_err(
+                                h.save_remote_host(&ep, &tok, cx),
                                 "remote host save",
                             );
                         });

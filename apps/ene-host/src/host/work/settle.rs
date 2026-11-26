@@ -32,15 +32,15 @@ fn resolve_settle_outcome(
     }
 }
 
-pub(crate) fn settle_run(world: &mut World, run_id: String, outcome: TurnOutcome) {
+pub(crate) fn settle_run(world: &mut World, run_id: &str, outcome: &TurnOutcome) {
     let store = world.resource::<Store>().clone();
-    let Ok(Some(run)) = store.work_repo().run(&run_id) else {
+    let Ok(Some(run)) = store.work_repo().run(run_id) else {
         return;
     };
     if run.state.is_terminal() {
         return;
     }
-    let (state, text) = resolve_settle_outcome(world.resource::<WorkReports>(), &run_id, &outcome);
+    let (state, text) = resolve_settle_outcome(world.resource::<WorkReports>(), run_id, outcome);
     finish_run(world, run, state, text);
 }
 
@@ -50,7 +50,7 @@ pub(super) fn finish_run(world: &mut World, mut run: Run, state: RunState, text:
         Ok(active) => active,
         Err(error) => {
             if error.is_storage() {
-                crate::host::fail(world, error.to_string());
+                crate::host::fail(world, &error.to_string());
             }
             return;
         }
@@ -66,7 +66,7 @@ pub(super) fn finish_run(world: &mut World, mut run: Run, state: RunState, text:
         ));
     }
     if let Err(error) = store.work_repo().update_run(&run) {
-        crate::host::fail(world, error.to_string());
+        crate::host::fail(world, &error.to_string());
         return;
     }
     crate::host::client::computer::invalidate_run(world, &run_id);
@@ -74,7 +74,7 @@ pub(super) fn finish_run(world: &mut World, mut run: Run, state: RunState, text:
         Ok(session) => session,
         Err(error) => {
             if error.is_storage() {
-                crate::host::fail(world, error.to_string());
+                crate::host::fail(world, &error.to_string());
             }
             return;
         }

@@ -60,38 +60,13 @@ pub use ene_policy::COMPUTER_USE;
 /// the approval card and the host decides it, so it travels with the contract.
 pub use ene_policy::RiskLevel;
 pub use rpc::*;
+
+#[cfg(not(target_family = "wasm"))]
+mod domain;
 /// Maximum width or height of a reported JPEG frame.
 pub const MAX_PERCEPTION_FRAME_EDGE: u32 = 1280;
 /// Maximum encoded JPEG size before Connect serialization.
 pub const MAX_PERCEPTION_JPEG_BYTES: usize = 512 * 1024;
-
-/// Structured payload for `Companion.body` (`schema = "ene.body.v1"`).
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct BodyBinding {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub monitor: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub position: Option<[f32; 2]>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_percent: Option<f32>,
-}
-
-/// Structured payload for `Companion.voice` (`schema = "ene.voice.v1"`).
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct VoiceBinding {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub voice_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub speed: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pitch: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub style: Option<String>,
-}
 
 #[cfg(all(feature = "client", not(target_family = "wasm")))]
 mod client;

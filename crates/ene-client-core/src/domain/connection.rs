@@ -1,6 +1,6 @@
 //! Pure connection, provider, model, and plugin domain types.
 
-use super::Failure;
+use super::{ConnectionCheck, ConnectionEndpoint};
 use std::collections::BTreeMap;
 
 /// Kind of host-managed external connection.
@@ -64,19 +64,6 @@ impl ConnectionKind {
             Self::Unspecified => "オプション",
         }
     }
-}
-
-/// Endpoint adapter, URL, and JSON options schema/payload for a connection.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ConnectionEndpoint {
-    /// Adapter name that selects the transport, such as `openai`.
-    pub adapter: String,
-    /// Base URL, empty when the adapter derives one.
-    pub endpoint: String,
-    /// JSON Schema object text for `options`.
-    pub options_schema: String,
-    /// JSON object text conforming to `options_schema`.
-    pub options: String,
 }
 
 /// LLM connection settings.
@@ -205,21 +192,6 @@ impl ConnectionConfig {
             Self::Search(c) => c.endpoint.as_mut(),
         }
     }
-}
-
-/// Result of probing a connection.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ConnectionCheck {
-    /// Whether the probe reached the service and passed.
-    pub healthy: bool,
-    /// When the probe ran, as the host stamped it.
-    pub checked_at: String,
-    /// Why the probe failed, when it did.
-    pub failure: Option<Failure>,
-    /// Capabilities the service advertised, such as streaming or tool calls.
-    pub capabilities: Vec<String>,
-    /// Resources the service listed, such as models or voices.
-    pub resources: Vec<String>,
 }
 
 /// Saved host connection entry.

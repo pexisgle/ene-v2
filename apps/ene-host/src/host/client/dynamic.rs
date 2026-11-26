@@ -27,11 +27,11 @@ use crate::host::{
     client::device,
     db::{Result, Store},
     error::HostError,
-    json,
     permission::CallBinding,
     resources::{CompanionAgent, GrantedCompanionTools},
 };
 use bevy_ecs::prelude::*;
+use ene_domain::json;
 use rig_core::{
     effect::{Answered, EffectId, EffectKind, HandlerDescriptor, family},
     error::{ErrorKind, ErrorReport},
@@ -378,7 +378,7 @@ fn granted_names(
 /// Startup: publishes the tools of the clients restored as active.
 pub(crate) fn init(world: &mut World) {
     if let Err(error) = sync_tools(world) {
-        crate::host::fail(world, error.to_string());
+        crate::host::fail(world, &error.to_string());
     }
 }
 

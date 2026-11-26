@@ -171,7 +171,7 @@ impl CompactVectorIndex {
 }
 
 pub(super) fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
-    // Match Rig 0.46's f64 reduction order without widening the stored vectors.
+    // Match Rig's f64 reduction order without widening the stored vectors.
     let pair_sum = |a: &[f32], b: &[f32], term: fn(f64, f64) -> f64| {
         a.chunks(256)
             .zip(b.chunks(256))

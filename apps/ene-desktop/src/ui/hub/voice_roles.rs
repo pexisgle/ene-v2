@@ -37,10 +37,10 @@ pub(super) fn select_connection_model(
     if let Some(comp) = hub.model.companion().cloned() {
         let assignments = comp.assignments.as_ref();
         let comp_uses_conn = assignments
-            .and_then(|a| a.companion.as_ref())
+            .map(|a| &a.companion)
             .is_none_or(|a| a.connection_id.is_empty() || a.connection_id == connection_id);
         let task_uses_conn = assignments
-            .and_then(|a| a.task.as_ref())
+            .map(|a| &a.task)
             .is_none_or(|a| a.connection_id.is_empty() || a.connection_id == connection_id);
         if comp_uses_conn {
             hub.assign_model(
@@ -137,6 +137,7 @@ pub(super) fn assign_stt_model(
         "音声認識モデルの割当",
         settings.revision,
         inputs,
+        None,
     );
     cx.notify();
 }
@@ -166,26 +167,17 @@ pub(super) fn assign_tts_voice(
             && (!conn.enabled || hub.voice_choices_for_connection(&conn.id).len() <= 1))
             .then(|| conn.id.clone())
     });
-    let epoch = hub.model.connections.link_epoch;
-    if let Some(check_id) = probe_voicevox_id {
+    if let Some(check_id) = &probe_voicevox_id {
         hub.setup.checking_connections.insert(check_id.clone());
-        rpc::connections::update_settings_and_probe(
-            &hub.rpc,
-            epoch,
-            "音声合成（TTS）の割当",
-            settings.revision,
-            inputs,
-            check_id,
-        );
-    } else {
-        rpc::connections::update_settings(
-            &hub.rpc,
-            epoch,
-            "音声合成（TTS）の割当",
-            settings.revision,
-            inputs,
-        );
     }
+    rpc::connections::update_settings(
+        &hub.rpc,
+        hub.model.connections.link_epoch,
+        "音声合成（TTS）の割当",
+        settings.revision,
+        inputs,
+        probe_voicevox_id,
+    );
     sync_companion_voice(hub, target_voice_clean);
     cx.notify();
 }

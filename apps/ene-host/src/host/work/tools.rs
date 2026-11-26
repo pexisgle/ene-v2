@@ -64,13 +64,13 @@ pub(crate) fn register(app: &mut App) {
         "stop_work",
         "Ask a running task to stop.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, args| stop(world, agent, args)),
+        run_tool(|world, agent, _, args: StopArgs| stop(world, agent, &args)),
     )
     .add_open_tool::<ReportArgs, _>(
         "report",
         "Report progress (`activity`), important update (`message`), a clarifying question for the user (`question`), completion (`completed`), or failure (`failed`). The host binds the session and run.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, args| report(world, agent, args)),
+        run_tool(|world, agent, _, args: ReportArgs| report(world, agent, &args)),
     );
 }
 
@@ -143,7 +143,7 @@ fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
     }
     let session = super::start(
         world,
-        w::StartWorkRequest {
+        &w::StartWorkRequest {
             companion_id: companion,
             instruction: args.instruction,
             ..Default::default()
@@ -173,7 +173,7 @@ fn send(world: &mut World, agent: Entity, args: SendArgs) -> Result<String> {
     let session = own_session(world.resource::<Store>(), &args.work_id, &companion)?;
     let acceptance = super::send(
         world,
-        w::SendWorkRequest {
+        &w::SendWorkRequest {
             work_id: session.id,
             request_key: uuid::Uuid::new_v4().to_string(),
             text: args.text,
@@ -183,7 +183,7 @@ fn send(world: &mut World, agent: Entity, args: SendArgs) -> Result<String> {
     Ok(json!({"request_id": acceptance.request_id}).to_string())
 }
 
-fn stop(world: &mut World, agent: Entity, args: StopArgs) -> Result<String> {
+fn stop(world: &mut World, agent: Entity, args: &StopArgs) -> Result<String> {
     let companion = companion(world.get::<CompanionAgent>(agent))?;
     let session = own_session(world.resource::<Store>(), &args.work_id, &companion)?;
     if session.status == WorkStatus::Closed {
@@ -193,7 +193,7 @@ fn stop(world: &mut World, agent: Entity, args: StopArgs) -> Result<String> {
     Ok(json!({"work_id": session.id, "stopping": true}).to_string())
 }
 
-fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> {
+fn report(world: &mut World, agent: Entity, args: &ReportArgs) -> Result<String> {
     let Some(work) = world.get::<WorkAgent>(agent).cloned() else {
         return Err(HostError::Permission(
             ("report is only available to a running task").into(),
@@ -246,10 +246,11 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
                 run_id,
                 format!("[作業質問 (work_id: {work_id})] {}", args.content),
             );
-            world.trigger(StopTurn {
-                entity: agent,
-                reason: Some("the hand asked a question".into()),
-            });
+            world.trigger(StopTurn::plugin_alone(
+                agent,
+                "ene-host",
+                "the hand asked a question",
+            ));
             Ok(json!({"accepted": true, "status": "waiting_for_answer"}).to_string())
         }
         "completed" => {
@@ -266,10 +267,11 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
                 run_id.clone(),
                 format!("[作業失敗 (work_id: {work_id})] {}", args.content),
             );
-            world.trigger(StopTurn {
-                entity: agent,
-                reason: Some("the hand reported a failure".into()),
-            });
+            world.trigger(StopTurn::plugin_alone(
+                agent,
+                "ene-host",
+                "the hand reported a failure",
+            ));
             super::inform(
                 world,
                 &work.companion_id,
@@ -287,7 +289,7 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
 mod tests {
     use super::*;
     use crate::host::delegation::DeliveredClaims;
-    use crate::host::mind::{Assignments, Companion, Profile, State};
+    use crate::host::mind::{Companion, ModelAssignments, Profile, State};
     use crate::host::model::{Credentials, ModelFactory};
     use crate::host::notify::Notifier;
     use crate::host::tests::bound;
@@ -334,7 +336,7 @@ mod tests {
         };
 
         assert!(
-            super::report(&mut world, agent, args())
+            super::report(&mut world, agent, &args())
                 .unwrap()
                 .contains("\"accepted\":false")
         );
@@ -344,7 +346,7 @@ mod tests {
             companion_id: "ene".into(),
         });
         assert!(
-            super::report(&mut world, agent, args())
+            super::report(&mut world, agent, &args())
                 .unwrap()
                 .contains("\"accepted\":true")
         );
@@ -359,14 +361,14 @@ mod tests {
             profile_revision: 1,
             state: State::default(),
             state_revision: 1,
-            body: crate::host::json::JsonDoc::new("ene.body.v1", serde_json::json!({})),
-            voice: crate::host::json::JsonDoc::new("ene.voice.v1", serde_json::json!({})),
-            assignments: Assignments::default(),
+            body: ene_mind::JsonDoc::new("ene.body.v1", serde_json::json!({})),
+            voice: ene_mind::JsonDoc::new("ene.voice.v1", serde_json::json!({})),
+            assignments: ModelAssignments::default(),
             persona: None,
             voice_identifier: None,
             revision: 1,
-            created_at: crate::host::util::now(),
-            updated_at: crate::host::util::now(),
+            created_at: ene_store::util::now(),
+            updated_at: ene_store::util::now(),
         }
     }
 

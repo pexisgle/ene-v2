@@ -19,10 +19,8 @@ pub use resampler::WIRE_RATE;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AudioError {
-    #[error("the sample rate cannot be converted: {0}")]
-    ResampleSetup(String),
-    #[error("the audio was not converted: {0}")]
-    Convert(String),
+    #[error(transparent)]
+    Resample(#[from] ene_voice::pcm::ResampleError),
     #[error("the host sent an odd number of PCM bytes")]
     OddPcmBytes,
     #[error(
@@ -52,6 +50,4 @@ pub enum AudioError {
         direction: &'static str,
         reason: String,
     },
-    #[error("the audio deck was poisoned")]
-    DeckPoisoned,
 }

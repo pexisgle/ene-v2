@@ -11,10 +11,11 @@ use super::{
     db::Store,
     error::{HostError, Result},
     resources::DeviceHub,
-    util::truncate,
 };
+use crate::host::notify::Notifier;
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
+use ene_store::util::truncate;
 use rig_core::conversation::{Author, AuthorKind, RequestId};
 use rig_ecs::prelude::*;
 use serde_json::{Value, json};
@@ -41,15 +42,15 @@ mod delivery;
 mod events;
 
 use assess::{Assessment, Evaluation, ImportantObservation, evaluate};
-use delivery::{deliver, diagnostic, publish_status, with_notifier};
-pub(crate) use events::report_with;
+use delivery::{deliver, diagnostic, publish_status};
+pub(crate) use events::apply_report;
 
 /// The assessment parser and its model plumbing are `assess`'s own; the tests
 /// below still drive [`Session::queue_assessment`] with parsed assessments and
 /// inspect the request the perception model receives.
 #[cfg(test)]
 use {
-    super::{mind::Role, model::ModelFactory, notify::Notifier, resources::HostRuntime},
+    super::{mind::Role, model::ModelFactory, resources::HostRuntime},
     assess::parse_assessment,
     rig_core::message::{Message, UserContent},
 };
@@ -344,17 +345,17 @@ pub(crate) fn poll(world: &mut World) {
                     ("image", None) => "no_frame",
                     _ => "model_text_only",
                 };
-                with_notifier(world, |notifier| {
+                if let Some(notifier) = world.get_resource::<Notifier>() {
                     diagnostic(
                         notifier,
                         companion_id,
                         "evaluated",
-                        json!({
+                        &json!({
                             "image": frame_id.is_some(), "input": input, "frame_id": frame_id,
                             "decision": decision, "summary": summary,
                         }),
                     );
-                });
+                }
                 if result.screen.is_some() {
                     session.last_evaluated = result.screen;
                 }
@@ -396,12 +397,9 @@ pub(crate) fn poll(world: &mut World) {
     });
 }
 
-pub(crate) fn preview(world: &World, id: &str) -> Result<w::ScreenFrame> {
+pub(crate) fn preview(eyes: &Eyes, hub: &DeviceHub, id: &str) -> Result<w::ScreenFrame> {
     let now = Instant::now();
-    let hub = world.resource::<DeviceHub>();
-    world
-        .resource::<Eyes>()
-        .sessions
+    eyes.sessions
         .values()
         .filter(|session| session.valid(hub, now))
         .flat_map(|session| session.recent_screens.iter().chain(&session.last_evaluated))

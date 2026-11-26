@@ -48,6 +48,7 @@ impl Hub {
             context,
             settings.revision,
             vec![input],
+            None,
         );
         cx.notify();
     }
@@ -64,7 +65,7 @@ impl Hub {
 
     pub(crate) fn set_connection_enabled(
         &mut self,
-        connection: Connection,
+        connection: &Connection,
         enabled: bool,
         cx: &mut Context<Self>,
     ) {
@@ -73,7 +74,7 @@ impl Hub {
         };
         let is_voicevox = connection.is_local_voicevox();
         let conn_id = connection.id.clone();
-        let input = build_connection_enabled_input(&connection, enabled);
+        let input = build_connection_enabled_input(connection, enabled);
         if !(enabled && is_voicevox) {
             self.upsert_connection("接続状態の更新", input, cx);
             return;
@@ -82,13 +83,13 @@ impl Hub {
             return;
         }
         self.setup.checking_connections.insert(conn_id.clone());
-        rpc::connections::update_settings_and_probe(
+        rpc::connections::update_settings(
             &self.rpc,
             self.model.connections.link_epoch,
             "接続状態の更新",
             settings.revision,
             vec![input],
-            conn_id,
+            Some(conn_id),
         );
         cx.notify();
     }
@@ -227,6 +228,7 @@ impl Hub {
             connection_id.to_owned(),
             secret.to_owned(),
             is_search,
+            None,
         );
         cx.notify();
     }
@@ -278,7 +280,7 @@ impl Hub {
     pub(crate) fn save_search_provider_key(
         &mut self,
         adapter: &'static str,
-        secret: String,
+        secret: &str,
         activate: bool,
         cx: &mut Context<Self>,
     ) {
@@ -306,7 +308,7 @@ impl Hub {
     pub(crate) fn complete_setup_selection(
         &mut self,
         connection_id: String,
-        model_id: String,
+        model_id: &str,
         companion_name: Option<String>,
         voice_identifier: Option<String>,
         cx: &mut Context<Self>,

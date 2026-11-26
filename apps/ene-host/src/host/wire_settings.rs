@@ -5,11 +5,11 @@
 use super::{
     error::HostError,
     settings::{
-        AcpConnection, Check, Connection, ConnectionConfig, ConnectionKind, CredentialState,
-        EmbeddingConnection, Endpoint, LlmConnection, McpConnection, SearchConnection, Settings,
+        AcpConnection, Connection, ConnectionConfig, ConnectionKind, CredentialState,
+        EmbeddingConnection, LlmConnection, McpConnection, SearchConnection, Settings,
         SttConnection, TtsConnection,
     },
-    wire::{failure, policy_text, wire_enum},
+    wire::wire_enum,
 };
 use ene_rpc as w;
 
@@ -41,7 +41,7 @@ macro_rules! connection_configs {
             match value {
                 $(w::connection_config::Config::$variant(config) => {
                     ConnectionConfig::$variant($config {
-                        endpoint: endpoint_from(config.endpoint.as_option()),
+                        endpoint: config.endpoint.as_option().map_or_default(Into::into),
                         $($field: config.$field,)*
                         $($map: config.$map.into_iter().collect(),)*
                     })
@@ -65,15 +65,6 @@ connection_configs! {
 }
 
 /// Rebuilds the common endpoint from the contract.
-pub(crate) fn endpoint_from(value: Option<&w::ConnectionEndpoint>) -> Endpoint {
-    value.map_or_else(Endpoint::default, |value| Endpoint {
-        adapter: value.adapter.clone(),
-        endpoint: value.endpoint.clone(),
-        options_schema: value.options_schema.clone(),
-        options: value.options.clone(),
-    })
-}
-
 /// Rebuilds a connection from a settings write.
 pub(crate) fn connection_from(input: w::ConnectionInput) -> Result<Connection, HostError> {
     let kind = match input.kind.as_known() {
@@ -111,14 +102,7 @@ wire_enum!(connection_kind: ConnectionKind => w::ConnectionKind {
 });
 
 pub(crate) fn connection(value: &Connection) -> w::Connection {
-    let endpoint = value.endpoint();
-    let endpoint = w::ConnectionEndpoint {
-        adapter: endpoint.adapter.clone(),
-        endpoint: endpoint.endpoint.clone(),
-        options_schema: endpoint.options_schema.clone(),
-        options: endpoint.options.clone(),
-        ..Default::default()
-    };
+    let endpoint = value.endpoint().into();
     let config = config_to_wire(&value.config, &endpoint);
     w::Connection {
         id: value.id.clone(),
@@ -127,7 +111,7 @@ pub(crate) fn connection(value: &Connection) -> w::Connection {
         credential_state: value.credential_state.as_str().into(),
         revision: value.revision,
         kind: connection_kind(value.kind).into(),
-        last_check: value.last_check.as_ref().map(check).into(),
+        last_check: value.last_check.as_ref().map(Into::into).into(),
         config: Some(w::ConnectionConfig {
             config: Some(config),
             ..Default::default()
@@ -137,23 +121,12 @@ pub(crate) fn connection(value: &Connection) -> w::Connection {
     }
 }
 
-pub(crate) fn check(value: &Check) -> w::ConnectionCheck {
-    w::ConnectionCheck {
-        healthy: value.healthy,
-        checked_at: value.checked_at.clone(),
-        failure: value.failure.as_ref().map(failure).into(),
-        capabilities: value.capabilities.clone(),
-        resources: value.resources.clone(),
-        ..Default::default()
-    }
-}
-
 pub(crate) fn settings(value: &Settings) -> w::Settings {
     w::Settings {
         revision: value.revision,
         connections: value.connections.iter().map(connection).collect(),
         updated_at: value.updated_at.clone(),
-        policy_texts: value.policy_texts.iter().map(policy_text).collect(),
+        policy_texts: value.policy_texts.iter().map(Into::into).collect(),
         ..Default::default()
     }
 }

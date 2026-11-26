@@ -76,10 +76,11 @@ pub(crate) fn register(app: &mut App) {
                 .get::<ActiveTurn>(entity)
                 .and_then(|active| world.get::<Turn>(active.turn()));
             if is_eyes_silent_turn(turn, world.get::<Conversation>(entity)) {
-                world.trigger(StopTurn {
+                world.trigger(StopTurn::plugin_alone(
                     entity,
-                    reason: Some(super::eyes::WATCHED.into()),
-                });
+                    "ene-host",
+                    super::eyes::WATCHED,
+                ));
             }
             Ok(json!({"ok": true}).to_string())
         }),
@@ -88,13 +89,13 @@ pub(crate) fn register(app: &mut App) {
         "schedule_create",
         "Register a reminder or repeating schedule.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, args| {
+        run_tool(|world, agent, _, args: CreateArgs| {
             let companion = companion_id(world.get::<CompanionAgent>(agent))?.to_owned();
             create_schedule(
                 world.resource::<Store>(),
                 world.resource::<ScheduleClock>(),
                 &companion,
-                args,
+                &args,
             )
         }),
     )
@@ -128,7 +129,7 @@ fn create_schedule(
     store: &Store,
     clock: &ScheduleClock,
     companion: &str,
-    args: CreateArgs,
+    args: &CreateArgs,
 ) -> Result<String> {
     let schedule = store.schedule_repo().insert_schedule(
         super::db::schedules::NewSchedule {
@@ -215,7 +216,7 @@ fn confirm_delivered_schedules(world: &mut World) {
         Ok(pending) => pending,
         Err(error) => {
             if error.is_storage() {
-                super::fail(world, error.to_string());
+                super::fail(world, &error.to_string());
             } else {
                 tracing::warn!(%error, "pending schedule occurrences could not be read");
             }
@@ -239,7 +240,7 @@ fn confirm_delivered_schedules(world: &mut World) {
             now,
         ) && error.is_storage()
         {
-            super::fail(world, error.to_string());
+            super::fail(world, &error.to_string());
             return;
         }
     }
@@ -283,7 +284,7 @@ pub(crate) fn poll_schedules(world: &mut World, now: Timestamp) -> usize {
             Ok(occurrences) => occurrences,
             Err(error) => {
                 if error.is_storage() {
-                    super::fail(world, error.to_string());
+                    super::fail(world, &error.to_string());
                 } else {
                     tracing::warn!(%error, "schedules could not be materialized");
                 }
@@ -334,7 +335,7 @@ fn dispatch_due_occurrence(
         Ok(false) => {}
         Err(error) => {
             if error.is_storage() {
-                super::fail(world, error.to_string());
+                super::fail(world, &error.to_string());
                 return OccurrenceOutcome::FatalStorage;
             }
             tracing::warn!(%error, key = %occ.occurrence_key, "delivered schedule occurrence was not recorded");
@@ -366,7 +367,7 @@ fn dispatch_due_occurrence(
         .record_occurrence_attempt(&occ.occurrence_key, "model unavailable")
         && error.is_storage()
     {
-        super::fail(world, error.to_string());
+        super::fail(world, &error.to_string());
         return OccurrenceOutcome::FatalStorage;
     }
     OccurrenceOutcome::Skipped
@@ -410,7 +411,7 @@ mod tests {
     /// A UTC instant at whole-second precision.
     fn utc(year: i16, month: i8, day: i8, hour: i8, minute: i8) -> Timestamp {
         jiff::tz::TimeZone::UTC
-            .to_zoned(date(year, month, day).at(hour, minute, 0, 0))
+            .to_zoned_datetime(date(year, month, day).at(hour, minute, 0, 0))
             .unwrap()
             .timestamp()
     }
@@ -419,7 +420,7 @@ mod tests {
     fn tokyo(year: i16, month: i8, day: i8, hour: i8, minute: i8) -> Timestamp {
         jiff::tz::TimeZone::get("Asia/Tokyo")
             .unwrap()
-            .to_zoned(date(year, month, day).at(hour, minute, 0, 0))
+            .to_zoned_datetime(date(year, month, day).at(hour, minute, 0, 0))
             .unwrap()
             .timestamp()
     }
@@ -427,7 +428,6 @@ mod tests {
     fn row(store: &Store, id: &str) -> (bool, Option<String>, Option<String>) {
         store
             .conn()
-            .unwrap()
             .query_row(
                 "SELECT enabled, last_triggered_at, next_run_at FROM schedules WHERE id = ?1",
                 [id],
@@ -689,7 +689,6 @@ mod tests {
         harness
             .store()
             .conn()
-            .unwrap()
             .execute(
                 "UPDATE schedule_occurrences SET status = 'pending', delivered_at = NULL \
                  WHERE occurrence_key = ?1",

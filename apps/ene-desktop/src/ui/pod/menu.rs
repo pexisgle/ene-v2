@@ -131,7 +131,7 @@ struct ControlButtonSpec {
 }
 
 fn control_button(
-    spec: ControlButtonSpec,
+    spec: &ControlButtonSpec,
     theme: &Theme,
     cx: &Context<CompanionPod>,
 ) -> AnyElement {
@@ -177,7 +177,7 @@ fn render_media_controls(
         .flex_wrap()
         .gap(px(6.))
         .child(control_button(
-            ControlButtonSpec {
+            &ControlButtonSpec {
                 id: "pod-control-companions",
                 label: "コンパニオン",
                 icon: Icon::UserBook,
@@ -188,7 +188,7 @@ fn render_media_controls(
             cx,
         ))
         .child(control_button(
-            ControlButtonSpec {
+            &ControlButtonSpec {
                 id: "pod-control-mic",
                 label: mic_label,
                 icon: if mic_on { Icon::Mic } else { Icon::MicOff },
@@ -199,7 +199,7 @@ fn render_media_controls(
             cx,
         ))
         .child(control_button(
-            ControlButtonSpec {
+            &ControlButtonSpec {
                 id: "pod-control-speaker",
                 label: speaker_label,
                 icon: if speaker_on {
@@ -231,7 +231,7 @@ fn render_capture_controls(
         .flex_wrap()
         .gap(px(6.))
         .child(control_button(
-            ControlButtonSpec {
+            &ControlButtonSpec {
                 id: "pod-control-capture-mode",
                 // Plain words: "PTT" and "VAD" are names for how the mic
                 // decides when to listen, and the label says that instead.
@@ -249,7 +249,7 @@ fn render_capture_controls(
         ))
         .when(is_ptt && mic_on, |row| {
             row.child(control_button(
-                ControlButtonSpec {
+                &ControlButtonSpec {
                     id: "pod-control-ptt-toggle",
                     label: if ptt_active {
                         "送信（話す終了）"
@@ -269,7 +269,7 @@ fn render_capture_controls(
             ))
             .when(ptt_active, |row| {
                 row.child(control_button(
-                    ControlButtonSpec {
+                    &ControlButtonSpec {
                         id: "pod-control-ptt-cancel",
                         label: "キャンセル",
                         icon: Icon::Close,
@@ -291,7 +291,7 @@ fn render_nav_controls(expanded: bool, theme: &Theme, cx: &Context<CompanionPod>
         .flex_wrap()
         .gap(px(6.))
         .child(control_button(
-            ControlButtonSpec {
+            &ControlButtonSpec {
                 id: "pod-control-history",
                 label: if expanded {
                     "履歴を閉じる"
@@ -310,7 +310,7 @@ fn render_nav_controls(expanded: bool, theme: &Theme, cx: &Context<CompanionPod>
             cx,
         ))
         .child(control_button(
-            ControlButtonSpec {
+            &ControlButtonSpec {
                 id: "pod-control-settings",
                 label: "設定",
                 icon: Icon::Settings,
@@ -321,7 +321,7 @@ fn render_nav_controls(expanded: bool, theme: &Theme, cx: &Context<CompanionPod>
             cx,
         ))
         .child(control_button(
-            ControlButtonSpec {
+            &ControlButtonSpec {
                 id: "pod-control-close",
                 label: "チャットを閉じる",
                 icon: Icon::Close,

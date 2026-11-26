@@ -266,7 +266,7 @@ impl AudioPipeline {
         );
     }
 
-    pub(super) fn handle_ptt(&mut self, command: Command, updates: &UnboundedSender<Update>) {
+    pub(super) fn handle_ptt(&mut self, command: &Command, updates: &UnboundedSender<Update>) {
         let changed = match command {
             Command::PttStart if self.capture_mode == audio::CaptureMode::Ptt => {
                 self.ptt_active = true;

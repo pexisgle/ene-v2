@@ -1,20 +1,22 @@
 use super::{
     COMMAND_TIMEOUT, FILE_LIMIT, GREP_BYTES, IMAGE_LIMIT, MAX_RESULTS, OUTPUT_LIMIT, PREFIX,
     SCAN_LIMIT, SHELL, WorkToolError,
-    helpers::{edit, glob, image, positive, relative, required, text},
+    helpers::{edit, glob, positive, relative, required, text},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use cap_std::{
     ambient_authority,
     fs::{Dir, OpenOptions},
 };
+use ene_client_core::is_attachment_image;
 use ene_rpc as w;
 
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 pub(crate) struct Workspace {
@@ -147,10 +149,7 @@ impl Workspace {
         match name {
             "read" => self.read(path, positive(input, "offset", 1)?, limit),
             "write" | "edit" => {
-                let _guard = self
-                    .edits
-                    .lock()
-                    .map_err(|_| WorkToolError::WriterUnavailable)?;
+                let _guard = self.edits.lock();
                 let content = if name == "edit" {
                     let bytes = self.load(path)?;
                     edit(text(&bytes)?, input)?
@@ -195,7 +194,7 @@ impl Workspace {
         limit: usize,
     ) -> Result<Value, WorkToolError> {
         let bytes = self.load(path)?;
-        if image(&bytes) {
+        if is_attachment_image(&bytes) {
             if bytes.len() > IMAGE_LIMIT {
                 return Err(WorkToolError::ImageTooLarge);
             }
@@ -254,7 +253,7 @@ impl Workspace {
         drop(file);
         let saved = saved.and_then(|()| folder.rename(&temp, &folder, name));
         if saved.is_err() {
-            ene_platform_os::debug_if_err(folder.remove_file(&temp), "temporary file cleanup");
+            ene_domain::debug_if_err(folder.remove_file(&temp), "temporary file cleanup");
         }
         saved
     }

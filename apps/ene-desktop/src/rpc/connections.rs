@@ -1,12 +1,13 @@
 //! Connection CRUD, probing, credential registration, and onboarding setup RPCs.
 
-use super::{RpcDispatcher, decode, failure, settings_update};
+use super::{
+    RpcDispatcher, companion_update, companions::shared_model_assignments, failure, id_request,
+    settings_update,
+};
 use crate::{host::Host, update::Update};
-use buffa::view::MessageView;
 use ene_client_core::{
     connections::build_connection_model_input,
-    domain::{Companion, Connection, ConnectionInput, HostNotification, ModelAssignment},
-    wire::companion::assignment_patch_set,
+    domain::{Companion, Connection, ConnectionInput, ModelAssignment},
 };
 use ene_rpc as w;
 use tokio::sync::mpsc::UnboundedSender;
@@ -34,21 +35,19 @@ pub(crate) struct SetupSelection {
 async fn run_connection_probe(host: Host, connection_id: String) -> Update {
     match host
         .settings
-        .check_connection(w::CheckRequest {
-            id: connection_id.clone(),
-            request_key: uuid::Uuid::new_v4().to_string(),
-            ..Default::default()
-        })
+        .check_connection(check_request(connection_id.clone()))
         .await
     {
-        Ok(resp) => match resp.view().to_owned_message() {
-            Ok(res) => Update::Checked {
-                connection_id,
-                check: res.check.into_option().unwrap_or_default().into(),
-            },
-            Err(err) => failure("接続確認", decode(err)),
+        Ok(resp) => Update::Checked {
+            connection_id,
+            check: resp
+                .into_owned()
+                .check
+                .into_option()
+                .unwrap_or_default()
+                .into(),
         },
-        Err(err) => failure("接続確認", err),
+        Err(err) => failure("接続確認", &err),
     }
 }
 
@@ -59,19 +58,9 @@ fn spawn_connection_probe(host: Host, connection_id: String, updates: UnboundedS
     });
 }
 
-pub(crate) fn load_providers(rpc: &RpcDispatcher, epoch: u64) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
-    rpc.spawn(
-        epoch,
-        "プロバイダ一覧の取得",
-        async move {
-            let response = host.settings.list_providers(w::Empty::default()).await?;
-            response.view().to_owned_message().map_err(decode)
-        },
-        |providers| Update::Providers(providers.items.into_iter().map(Into::into).collect()),
-    );
+load! {
+    load_providers: settings.list_providers("プロバイダ一覧の取得") =>
+        |providers| Update::Providers(providers.items.into_iter().map(Into::into).collect());
 }
 
 pub(crate) fn load_models(rpc: &RpcDispatcher, epoch: u64, connection_ids: Vec<String>) {
@@ -81,23 +70,27 @@ pub(crate) fn load_models(rpc: &RpcDispatcher, epoch: u64, connection_ids: Vec<S
     for id in connection_ids {
         let request_id = id.clone();
         let host = host.clone();
-        rpc.spawn(
+        rpc.dispatch(
             epoch,
             "モデル一覧の取得",
             async move {
-                let response = host
-                    .settings
+                host.settings
                     .list_models(w::ModelsRequest {
                         id: request_id,
                         ..Default::default()
                     })
-                    .await?;
-                response.view().to_owned_message().map_err(decode)
+                    .await
             },
             move |models| Update::Models {
                 connection_id: id,
-                models: models.items.into_iter().map(Into::into).collect(),
+                models: models
+                    .into_owned()
+                    .items
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
             },
+            failure,
         );
     }
 }
@@ -108,90 +101,63 @@ pub(crate) fn update_settings(
     context: &'static str,
     expected_revision: u64,
     inputs: Vec<ConnectionInput>,
+    probe: Option<String>,
 ) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
-    let wire_inputs: Vec<w::ConnectionInput> = inputs.into_iter().map(Into::into).collect();
-    rpc.spawn(
+    let request = settings_request(expected_revision, inputs);
+    let updates = rpc.updates();
+    rpc.call_owned(
         epoch,
         context,
-        async move {
-            let response = host
-                .settings
-                .update_settings(w::UpdateSettingsRequest {
-                    expected_revision,
-                    connections: wire_inputs,
-                    ..Default::default()
-                })
-                .await?;
-            response.view().to_owned_message().map_err(decode)
+        |host| async move {
+            let response = host.settings.update_settings(request).await?;
+            if let Some(id) = probe {
+                spawn_connection_probe(host, id, updates);
+            }
+            Ok(response)
         },
         settings_update,
     );
 }
 
-pub(crate) fn update_settings_and_probe(
-    rpc: &RpcDispatcher,
-    epoch: u64,
-    context: &'static str,
-    expected_revision: u64,
-    inputs: Vec<ConnectionInput>,
-    probe_connection_id: String,
-) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
-    let wire_inputs: Vec<w::ConnectionInput> = inputs.into_iter().map(Into::into).collect();
-    let updates = rpc.updates();
-    let probe_host = host.clone();
-    rpc.spawn(
-        epoch,
-        context,
-        async move {
-            let response = host
-                .settings
-                .update_settings(w::UpdateSettingsRequest {
-                    expected_revision,
-                    connections: wire_inputs,
-                    ..Default::default()
-                })
-                .await?;
-            let updated = response.view().to_owned_message().map_err(decode)?;
-            spawn_connection_probe(probe_host, probe_connection_id, updates);
-            Ok(updated)
-        },
-        settings_update,
-    );
+fn settings_request(revision: u64, inputs: Vec<ConnectionInput>) -> w::UpdateSettingsRequest {
+    w::UpdateSettingsRequest {
+        expected_revision: revision,
+        connections: inputs.into_iter().map(Into::into).collect(),
+        ..Default::default()
+    }
+}
+
+fn credential_request(id: String, secret: String) -> w::CredentialRequest {
+    w::CredentialRequest {
+        id,
+        secret: Some(secret),
+        ..Default::default()
+    }
+}
+
+fn check_request(id: String) -> w::CheckRequest {
+    w::CheckRequest {
+        id,
+        request_key: uuid::Uuid::new_v4().to_string(),
+        ..Default::default()
+    }
 }
 
 pub(crate) fn delete_connection(rpc: &RpcDispatcher, epoch: u64, id: String, revision: u64) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
-    rpc.spawn(
+    rpc.call_owned(
         epoch,
         "接続の削除",
-        async move {
-            let response = host
-                .settings
-                .delete_connection(w::DeleteConnectionRequest {
-                    id,
-                    expected_revision: revision,
-                    ..Default::default()
-                })
-                .await?;
-            response.view().to_owned_message().map_err(decode)
-        },
+        request!(settings.delete_connection(w::DeleteConnectionRequest {
+            id,
+            expected_revision: revision,
+            ..Default::default()
+        })),
         settings_update,
     );
 }
 
 pub(crate) fn probe_connection(rpc: &RpcDispatcher, epoch: u64, connection_id: String) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
-    rpc.spawn_update(epoch, run_connection_probe(host, connection_id));
+    rpc.call_update(epoch, |host| run_connection_probe(host, connection_id));
 }
 
 pub(crate) fn register_secret(
@@ -200,32 +166,35 @@ pub(crate) fn register_secret(
     connection_id: String,
     secret: String,
     probe_after: bool,
+    settings: Option<(u64, Vec<ConnectionInput>)>,
 ) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
-    let id = connection_id.clone();
     let updates = rpc.updates();
-    let probe_host = host.clone();
-    rpc.spawn(
+    let id = connection_id.clone();
+    let context = if settings.is_some() {
+        "Web 検索APIキーの登録"
+    } else {
+        "資格情報の登録"
+    };
+    rpc.call(
         epoch,
-        "資格情報の登録",
-        async move {
-            let response = host
-                .settings
-                .register_credentials(w::CredentialRequest {
-                    id: connection_id.clone(),
-                    secret: Some(secret),
-                    ..Default::default()
-                })
-                .await?;
-            let out = response.view().to_owned_message().map_err(decode)?;
-            if probe_after {
-                spawn_connection_probe(probe_host, connection_id, updates);
+        context,
+        |host| async move {
+            if let Some((revision, inputs)) = settings.filter(|(_, inputs)| !inputs.is_empty()) {
+                let response = host
+                    .settings
+                    .update_settings(settings_request(revision, inputs))
+                    .await?;
+                crate::session::notify_ui(&updates, settings_update(response.into_owned()));
             }
-            Ok(out)
+            host.settings
+                .register_credentials(credential_request(connection_id.clone(), secret))
+                .await?;
+            if probe_after {
+                spawn_connection_probe(host, connection_id, updates);
+            }
+            Ok(())
         },
-        move |_| Update::CredentialRegistered { connection_id: id },
+        move |()| Update::CredentialRegistered { connection_id: id },
     );
 }
 
@@ -235,20 +204,13 @@ pub(crate) fn register_secret_for_connections(
     connection_ids: Vec<String>,
     secret: String,
 ) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
-    rpc.spawn(
+    rpc.call(
         epoch,
         "複数接続への資格情報登録",
-        async move {
+        |host| async move {
             for id in connection_ids {
                 host.settings
-                    .register_credentials(w::CredentialRequest {
-                        id,
-                        secret: Some(secret.clone()),
-                        ..Default::default()
-                    })
+                    .register_credentials(credential_request(id, secret.clone()))
                     .await?;
             }
             Ok::<_, connectrpc::ConnectError>(())
@@ -258,119 +220,46 @@ pub(crate) fn register_secret_for_connections(
 }
 
 pub(crate) fn revoke_secret(rpc: &RpcDispatcher, epoch: u64, connection_id: String) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
-    rpc.spawn(
+    rpc.call(
         epoch,
         "資格情報の削除",
-        async move {
+        |host| async move {
             host.settings
-                .revoke_credentials(w::Id {
-                    id: connection_id,
-                    ..Default::default()
-                })
+                .revoke_credentials(id_request(connection_id))
                 .await
         },
         |_| Update::Resnapshot,
     );
 }
 
-pub(crate) fn save_search_provider_key(
-    rpc: &RpcDispatcher,
-    epoch: u64,
-    expected_revision: u64,
-    inputs: Vec<ConnectionInput>,
-    target_id: String,
-    secret: String,
-) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
-    let updates = rpc.updates();
-    let return_id = target_id.clone();
-    let wire_inputs: Vec<w::ConnectionInput> = inputs.into_iter().map(Into::into).collect();
-    rpc.spawn(
-        epoch,
-        "Web 検索APIキーの登録",
-        async move {
-            if !wire_inputs.is_empty() {
-                let response = host
-                    .settings
-                    .update_settings(w::UpdateSettingsRequest {
-                        expected_revision,
-                        connections: wire_inputs,
-                        ..Default::default()
-                    })
-                    .await?;
-                let updated = response.view().to_owned_message().map_err(decode)?;
-                crate::session::notify_ui(&updates, settings_update(updated));
-            }
-            host.settings
-                .register_credentials(w::CredentialRequest {
-                    id: target_id.clone(),
-                    secret: Some(secret),
-                    ..Default::default()
-                })
-                .await?;
-            spawn_connection_probe(host, target_id, updates);
-            Ok::<_, connectrpc::ConnectError>(())
-        },
-        move |_| Update::CredentialRegistered {
-            connection_id: return_id,
-        },
-    );
-}
-
 pub(crate) fn quick_connect_llm(rpc: &RpcDispatcher, epoch: u64, req: QuickConnectRequest) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
-    let wire_input: w::ConnectionInput = req.input.into();
-    rpc.spawn_update(epoch, async move {
+    rpc.call_update(epoch, |host| async move {
         let outcome: Result<Update, connectrpc::ConnectError> = async {
             if req.create {
                 host.settings
-                    .update_settings(w::UpdateSettingsRequest {
-                        expected_revision: req.revision,
-                        connections: vec![wire_input],
-                        ..Default::default()
-                    })
+                    .update_settings(settings_request(req.revision, vec![req.input]))
                     .await?;
             }
             if !req.secret.is_empty() {
                 host.settings
-                    .register_credentials(w::CredentialRequest {
-                        id: req.id.clone(),
-                        secret: Some(req.secret),
-                        ..Default::default()
-                    })
+                    .register_credentials(credential_request(req.id.clone(), req.secret))
                     .await?;
             }
             let probe = host
                 .settings
-                .check_connection(w::CheckRequest {
-                    id: req.id.clone(),
-                    request_key: uuid::Uuid::new_v4().to_string(),
-                    ..Default::default()
-                })
+                .check_connection(check_request(req.id.clone()))
                 .await?
-                .view()
-                .to_owned_message()
-                .map_err(decode)?;
-            let check = probe.check.into_option();
-            let healthy = check.as_ref().is_some_and(|c| c.healthy);
-            let models = check.as_ref().map_or_default(|c| c.resources.clone());
-            let error = check
-                .as_ref()
-                .and_then(|c| c.failure.as_option())
-                .map(|f| f.message.clone())
-                .filter(|msg| !msg.trim().is_empty());
+                .into_owned();
+            let check = probe.check.into_option().unwrap_or_default();
             Ok(Update::SetupFinished {
-                ok: healthy,
+                ok: check.healthy,
                 connection_id: Some(req.id),
-                models,
-                error,
+                models: check.resources,
+                error: check
+                    .failure
+                    .into_option()
+                    .map(|failure| failure.message)
+                    .filter(|message| !message.trim().is_empty()),
             })
         }
         .await;
@@ -387,29 +276,21 @@ pub(crate) fn quick_connect_llm(rpc: &RpcDispatcher, epoch: u64, req: QuickConne
 }
 
 pub(crate) fn complete_setup_selection(rpc: &RpcDispatcher, epoch: u64, selection: SetupSelection) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
-    rpc.spawn(
+    rpc.call(
         epoch,
         "初期設定の完了",
-        async move {
+        |host| async move {
             if let Some(conn) = selection.conn {
-                let wire_input: w::ConnectionInput =
-                    build_connection_model_input(&conn, &selection.model_id).into();
+                let input = build_connection_model_input(&conn, &selection.model_id);
                 let _written = host
                     .settings
-                    .update_settings(w::UpdateSettingsRequest {
-                        expected_revision: selection.settings_revision,
-                        connections: vec![wire_input],
-                        ..Default::default()
-                    })
+                    .update_settings(settings_request(selection.settings_revision, vec![input]))
                     .await?;
             }
-            let patch = assignment_patch_set(ModelAssignment {
+            let patch = w::AssignmentPatch::from(Some(ModelAssignment {
                 connection_id: selection.connection_id.clone(),
                 model_id: selection.model_id.clone(),
-            });
+            }));
             if let Some(comp) = selection.existing_comp {
                 let response = host
                     .host
@@ -422,26 +303,12 @@ pub(crate) fn complete_setup_selection(rpc: &RpcDispatcher, epoch: u64, selectio
                         ..Default::default()
                     })
                     .await?;
-                let updated = response.view().to_owned_message().map_err(decode)?;
-                Ok(Update::Notification(Box::new(HostNotification::companion(
-                    updated.into(),
-                ))))
+                Ok(companion_update(response.into_owned()))
             } else {
-                let assignments = w::ModelAssignments {
-                    companion: Some(w::ModelAssignment {
-                        connection_id: selection.connection_id.clone(),
-                        model_id: selection.model_id.clone(),
-                        ..Default::default()
-                    })
-                    .into(),
-                    task: Some(w::ModelAssignment {
-                        connection_id: selection.connection_id,
-                        model_id: selection.model_id,
-                        ..Default::default()
-                    })
-                    .into(),
-                    ..Default::default()
-                };
+                let assignments = shared_model_assignments(ModelAssignment {
+                    connection_id: selection.connection_id,
+                    model_id: selection.model_id,
+                });
                 let response = host
                     .host
                     .create_companion(w::CreateCompanionRequest {
@@ -453,7 +320,7 @@ pub(crate) fn complete_setup_selection(rpc: &RpcDispatcher, epoch: u64, selectio
                         ..Default::default()
                     })
                     .await?;
-                let created = response.view().to_owned_message().map_err(decode)?;
+                let created = response.into_owned();
                 Ok(Update::Created(created.id))
             }
         },

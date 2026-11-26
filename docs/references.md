@@ -8,7 +8,7 @@
 <a id="alpha-rig"></a>
 ### Rigへの委譲
 
-[S01](research/mind-sources.md#s01)〜[S05](research/mind-sources.md#s05)を基に、調査基準版v0.46.0のrig-ecs、会話保存、ツール、モデル、拡張点を優先する。独自の第二カーネル・受信箱・履歴の複製を作らない。ステップ1の実装でv0.46.0を採用し`Cargo.lock`へ固定した。接続、途中状態の記録、停止、待機時負荷は[全体アーキテクチャ](architecture.md)および[技術スタック](design/tech-stack.md)を基準とする。
+[S01](research/mind-sources.md#s01)〜[S05](research/mind-sources.md#s05)を基に、調査基準版v0.46.0のrig-ecs、会話保存、ツール、モデル、拡張点を優先する。独自の第二カーネル・受信箱・履歴の複製を作らない。実装はv0.46.0から開始し、現在の採用版は`Cargo.lock`で管理する。接続、途中状態の記録、停止、待機時負荷は[全体アーキテクチャ](architecture.md)および[技術スタック](design/tech-stack.md)を基準とする。
 
 <a id="alpha-mind"></a>
 ### 人格・心
@@ -46,7 +46,7 @@
 
 [ACPセッション](https://agentclientprotocol.com/protocol/session-setup)、[prompt turn](https://agentclientprotocol.com/protocol/prompt-turn)、[公式Rust SDK](https://agentclientprotocol.com/libraries/rust)を基準に、eneのsession・入力・更新・停止をアダプターへ写像する。ACP全機能をプラグインへ強制しないが、対応して公開する部分では要求ID・エラー・取消・完了の意味を守る。
 
-2026-11-14時点の採用版は `agent-client-protocol 5.2.0`（ACP v1。型・スキーマは公式安定性規約に基づき `agent_client_protocol::v1::schema` 経由で使用）。JSON-RPCのフレーミング・要求ID・応答対応付け・既知メソッドへの型付けはSDKへ委譲し、ene側は子プロセスの起動、環境変数許可リスト、workspace境界、terminal権限・上限、ターン状態と停止だけを持つ。公式SDKの`AcpAgent`にはプロセス起動を委譲しない（`env_clear`と許可環境変数を表現できないため）。子プロセスのグループ終了とkill-on-dropは `process-wrap 10.0.1` に委譲し、cancel/timeout時に孫プロセスを残さない。未知の`stopReason`やRPCエラーは`end_turn`へ丸めない。
+ACP v1 の型は `agent-client-protocol-schema` を通じてホストと Wasm プラグインで共有する。ホストは ACP 接続の設定をハーネスプラグインへ渡す。`ene-work` のネイティブ ACP ブリッジは標準入出力の JSON-RPC を扱い、プロセスグループと kill-on-drop を `process-wrap` に委譲する。MCP は `rig-rmcp` と `rmcp` で接続する。採用版は `Cargo.lock` に記録する。
 
 共通ツールの外部公開は[MCP公式Rust SDK](https://github.com/modelcontextprotocol/rust-sdk)を優先する。ACPのモデルや認証は接続先の能力に従う。独自機能は能力と名前空間で表し、未対応を成功や自動的な別動作へ変換しない。実際のアダプター版で双方向の最小互換性を検証する。
 

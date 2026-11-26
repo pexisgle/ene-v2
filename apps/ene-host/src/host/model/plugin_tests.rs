@@ -12,6 +12,7 @@ use crate::host::{
 use ene_plugin::Extension;
 use ene_plugin_runtime::service::HttpGrants;
 use futures_util::StreamExt;
+use parking_lot::Mutex;
 use reqwest::header::HeaderMap;
 use rig_core::{
     completion::{CompletionRequest, FinishReason, ToolDefinition, message::ToolName},
@@ -23,7 +24,7 @@ use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -106,7 +107,6 @@ impl Fixture {
                         };
                         requests.fetch_add(1, Ordering::SeqCst);
                         auth.lock()
-                            .unwrap()
                             .push(request.headers.get("authorization").cloned());
                         serve(&mut stream, &request, &base, &closed, &bodies, &cancel).await;
                     });
@@ -129,11 +129,11 @@ impl Fixture {
     }
 
     fn seen_auth(&self) -> Vec<Option<String>> {
-        self.auth.lock().unwrap().clone()
+        self.auth.lock().clone()
     }
 
     fn bodies(&self) -> Vec<Value> {
-        self.bodies.lock().unwrap().clone()
+        self.bodies.lock().clone()
     }
 
     fn request_count(&self) -> usize {
@@ -206,7 +206,7 @@ async fn serve(
     cancel: &CancellationToken,
 ) {
     let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
-    bodies.lock().unwrap().push(body.clone());
+    bodies.lock().push(body.clone());
     let model = body["model"].as_str().unwrap_or("test-normal");
     let streaming = body["stream"].as_bool().unwrap_or(false);
     let _discarded = (request.method.as_str(), request.path.as_str(), base);
@@ -395,7 +395,7 @@ impl HttpGrants for Recording {
         provider: &str,
         headers: &mut HeaderMap,
     ) -> Result<(), ene_plugin::Failure> {
-        self.seen.lock().unwrap().push(headers.clone());
+        self.seen.lock().push(headers.clone());
         self.inner.authorize(provider, headers)
     }
 }
@@ -512,17 +512,11 @@ impl Harness {
             &self.providers,
             broker,
         );
-        plugin_completion(
-            Arc::clone(&self.running),
-            role,
-            context,
-            model.into(),
-            false,
-        )
+        plugin_completion(Arc::clone(&self.running), role, context, model, false)
     }
 
     fn seen(&self) -> Vec<HeaderMap> {
-        self.seen.lock().unwrap().clone()
+        self.seen.lock().clone()
     }
 }
 
@@ -761,7 +755,7 @@ async fn a_plugin_model_binds_through_the_agent_path() {
     world.insert_resource(super::ModelFactory::default());
     world.insert_resource(Models::default());
     world.insert_resource(Notifier::new());
-    let assignment = crate::host::mind::Assignment {
+    let assignment = crate::host::mind::ModelAssignment {
         connection_id: CONNECTION.into(),
         model_id: "test-unlisted".into(),
     };
@@ -770,8 +764,8 @@ async fn a_plugin_model_binds_through_the_agent_path() {
         ene_rpc::CreateCompanionRequest {
             name: "Mio".into(),
             mind: "kind".into(),
-            assignments: Some(crate::host::wire::assignments(
-                &crate::host::mind::Assignments {
+            assignments: Some(ene_rpc::ModelAssignments::from(
+                &crate::host::mind::ModelAssignments {
                     companion: assignment.clone(),
                     task: assignment,
                     ..Default::default()
@@ -868,7 +862,7 @@ async fn a_plugin_shadowing_a_catalog_vendor_binds_through_ensure_model() {
     world.insert_resource(super::ModelFactory::default());
     world.insert_resource(Models::default());
     world.insert_resource(Notifier::new());
-    let assignment = crate::host::mind::Assignment {
+    let assignment = crate::host::mind::ModelAssignment {
         connection_id: CONNECTION.into(),
         model_id: "vendor/test-unlisted".into(),
     };
@@ -877,8 +871,8 @@ async fn a_plugin_shadowing_a_catalog_vendor_binds_through_ensure_model() {
         ene_rpc::CreateCompanionRequest {
             name: "Mio".into(),
             mind: "kind".into(),
-            assignments: Some(crate::host::wire::assignments(
-                &crate::host::mind::Assignments {
+            assignments: Some(ene_rpc::ModelAssignments::from(
+                &crate::host::mind::ModelAssignments {
                     companion: assignment.clone(),
                     task: assignment,
                     ..Default::default()

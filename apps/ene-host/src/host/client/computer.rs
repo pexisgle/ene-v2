@@ -87,7 +87,7 @@ pub(super) struct ComputerState<'a> {
 }
 
 pub(super) fn prepare(
-    state: ComputerState<'_>,
+    state: &ComputerState<'_>,
     work: &WorkAgent,
     client: &str,
     run: &str,
@@ -156,7 +156,7 @@ pub(super) enum ResultError {
 /// Strip the image before the result reaches the operation ledger or any event.
 pub(super) fn result(
     pending: Pending,
-    output: Value,
+    output: &Value,
 ) -> std::result::Result<(Value, Option<Frame>), ResultError> {
     if !pending.screenshot {
         return (output["applied"].as_bool() == Some(true))
@@ -203,6 +203,10 @@ pub(super) fn result(
 }
 
 impl ComputerUse {
+    pub(super) fn save_frame(&mut self, frame: Frame) {
+        self.frames.insert(frame.owner.client.clone(), frame);
+    }
+
     /// Only the model-request view contains screen pixels.
     pub(super) fn attach_frame(
         &self,
@@ -263,11 +267,4 @@ fn invalidate(world: &mut World, matches: impl Fn(&Pending) -> bool) {
             "the Computer Use operation is no longer active; its result is unknown",
         );
     }
-}
-
-pub(super) fn save_frame(world: &mut World, frame: Frame) {
-    world
-        .resource_mut::<ComputerUse>()
-        .frames
-        .insert(frame.owner.client.clone(), frame);
 }

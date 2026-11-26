@@ -28,7 +28,7 @@ impl CompanionsPane {
         let expanded = self.form.expanded_companion_id.as_deref() == Some(id.as_str());
         let row_header = self.render_companion_row_header(
             comp,
-            RowStatus {
+            &RowStatus {
                 active,
                 resident,
                 expanded,
@@ -46,7 +46,7 @@ impl CompanionsPane {
         let editor = expanded.then(|| {
             editor::render_companion_editor(
                 self,
-                editor::EditorContext {
+                &editor::EditorContext {
                     comp,
                     mind_view: snap.minds.get(&id),
                     tts_voices: &snap.tts_voices,
@@ -75,7 +75,7 @@ impl CompanionsPane {
     fn render_companion_row_header(
         &self,
         comp: &Companion,
-        status: RowStatus,
+        status: &RowStatus,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -141,7 +141,7 @@ impl CompanionsPane {
     fn render_companion_row_actions(
         &self,
         id: &str,
-        status: RowStatus,
+        status: &RowStatus,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -150,7 +150,7 @@ impl CompanionsPane {
             resident,
             expanded,
             live,
-        } = status;
+        } = *status;
         let hub_select = self.hub.clone();
         let select_id = id.to_owned();
         let hub_res = self.hub.clone();

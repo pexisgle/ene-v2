@@ -12,6 +12,7 @@
 //! what keeps that boundary synchronous, and it bounds the instance count to
 //! the plugins the operator installed rather than to the connections that
 //! happen to reference them.
+pub(crate) mod character;
 pub(crate) mod extensions;
 mod grant;
 mod install;

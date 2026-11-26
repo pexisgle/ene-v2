@@ -13,19 +13,7 @@ use rig_ecs::prelude::*;
 use serde_json::{Value, json};
 use std::time::Instant;
 
-/// Runs `with` against the world's notifier. Callers that already hold other
-/// world state cannot borrow it in place, so it is temporarily removed.
-pub(super) fn with_notifier<R>(
-    world: &mut World,
-    with: impl FnOnce(&mut Notifier) -> R,
-) -> Option<R> {
-    let mut notifier = world.remove_resource::<Notifier>()?;
-    let result = with(&mut notifier);
-    world.insert_resource(notifier);
-    Some(result)
-}
-
-pub(super) fn diagnostic(notifier: &mut Notifier, companion: &str, action: &str, detail: Value) {
+pub(super) fn diagnostic(notifier: &Notifier, companion: &str, action: &str, detail: &Value) {
     notifier.diagnostic(companion, "eyes", action, detail);
 }
 
@@ -50,12 +38,12 @@ pub(super) fn deliver(
         DeliveryMode::Queue,
         author,
     ) {
-        with_notifier(world, |notifier| {
+        if let Some(notifier) = world.get_resource::<Notifier>() {
             diagnostic(
                 notifier,
                 companion,
                 "delivered",
-                json!({
+                &json!({
                     "watch": reaction.kind == ReportKind::Watch,
                     "important": reaction.kind.important(),
                     "heartbeat": reaction.kind == ReportKind::Heartbeat,
@@ -63,7 +51,7 @@ pub(super) fn deliver(
                     "summary": reaction.summary
                 }),
             );
-        });
+        }
         session.last_delivery = now;
         match reaction.kind {
             ReportKind::Automatic => session.last_automatic = Some((now, reaction.summary.clone())),

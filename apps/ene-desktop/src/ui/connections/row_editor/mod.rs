@@ -38,7 +38,7 @@ pub(super) fn render_connection_row(
         pane,
         conn,
         &badge,
-        RowHeaderFlags {
+        &RowHeaderFlags {
             expanded,
             should_auto_probe,
             live,
@@ -65,7 +65,7 @@ fn render_row_header(
     pane: &ConnectionsPane,
     conn: &Connection,
     badge: &RowBadge,
-    flags: RowHeaderFlags,
+    flags: &RowHeaderFlags,
     theme: &Theme,
     cx: &Context<ConnectionsPane>,
 ) -> gpui::Div {
@@ -73,7 +73,7 @@ fn render_row_header(
         expanded,
         should_auto_probe,
         live,
-    } = flags;
+    } = *flags;
     let id = &conn.id;
     let kind = conn.kind;
     let hub_check = pane.hub.clone();

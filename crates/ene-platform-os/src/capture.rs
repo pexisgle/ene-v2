@@ -10,15 +10,12 @@ pub const MAX_FRAME_EDGE: u32 = 1280;
 /// Maximum encoded JPEG size before it is rejected.
 pub const MAX_JPEG_BYTES: usize = 512 * 1024;
 
-use crate::best_effort::ignore_teardown;
-use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
+use crate::{Rect, best_effort::ignore_teardown};
+use image::{DynamicImage, ExtendedColorType, codecs::jpeg::JpegEncoder};
 use std::mem::size_of;
 use windows::Win32::{
     Foundation::{HANDLE, HWND, RECT},
-    Graphics::Gdi::{
-        self, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CAPTUREBLT, DIB_RGB_COLORS, HALFTONE, HDC,
-        HGDIOBJ, MONITOR_DEFAULTTONULL, MONITORINFO, SRCCOPY,
-    },
+    Graphics::Gdi::{self, MONITOR_DEFAULTTONULL, MONITORINFO},
     System::StationsAndDesktops::{
         CloseDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, GetUserObjectInformationW,
         OpenInputDesktop, UOI_NAME,
@@ -66,7 +63,7 @@ pub struct CapturedFrame {
     pub jpeg: Vec<u8>,
     pub width: u32,
     pub height: u32,
-    pub monitor: RECT,
+    pub monitor: Rect,
     pub window: isize,
 }
 
@@ -138,15 +135,40 @@ pub fn capture_frame() -> Option<CapturedFrame> {
     if !unlocked() {
         return None;
     }
-    let (pixels, width, height, window, monitor) = physical(|| {
-        let (window, monitor) = foreground()?;
-        // SAFETY: the rectangle was read from the monitor in this DPI context.
-        let (pixels, width, height) = unsafe { pixels(monitor) }?;
-        Some((pixels, width, height, window.0 as isize, monitor))
+    let (pixels, window, monitor) = physical(|| {
+        let foreground = foreground_rect()?;
+        let bounds = Rect::from(foreground.rect());
+        let monitor = xcap::Monitor::from_point(bounds.left, bounds.top).ok()?;
+        let pixels = monitor.capture_image().ok()?;
+        if pixels.dimensions()
+            != (
+                bounds.left.abs_diff(bounds.right),
+                bounds.top.abs_diff(bounds.bottom),
+            )
+        {
+            return None;
+        }
+        Some((pixels, foreground.window, bounds))
     })??;
+    let pixels = DynamicImage::ImageRgba8(pixels).into_rgb8();
+    let (width, height) = pixels.dimensions();
+    let edge = width.max(height);
+    let pixels = if edge > MAX_FRAME_EDGE {
+        let scale = f64::from(MAX_FRAME_EDGE) / f64::from(edge);
+        let scaled = |size| (f64::from(size) * scale).round().max(1.0) as u32;
+        image::imageops::resize(
+            &pixels,
+            scaled(width),
+            scaled(height),
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        pixels
+    };
+    let (width, height) = pixels.dimensions();
     let mut jpeg = Vec::new();
     JpegEncoder::new_with_quality(&mut jpeg, 75)
-        .encode(&pixels, width, height, ExtendedColorType::Rgb8)
+        .encode(pixels.as_raw(), width, height, ExtendedColorType::Rgb8)
         .ok()?;
     (unlocked() && jpeg.len() <= MAX_JPEG_BYTES).then_some(CapturedFrame {
         jpeg,
@@ -155,113 +177,4 @@ pub fn capture_frame() -> Option<CapturedFrame> {
         monitor,
         window,
     })
-}
-
-unsafe fn pixels(src: RECT) -> Option<(Vec<u8>, u32, u32)> {
-    let (src_width, src_height) = (src.right - src.left, src.bottom - src.top);
-    if src_width <= 0 || src_height <= 0 {
-        return None;
-    }
-    let limit = MAX_FRAME_EDGE as i32;
-    let scale = f64::from(limit) / f64::from(src_width.max(src_height).max(limit));
-    let width = ((f64::from(src_width) * scale).round() as i32).max(1);
-    let height = ((f64::from(src_height) * scale).round() as i32).max(1);
-    // SAFETY: acquires the screen DC; takes no pointer and the handle is
-    // released on every path below.
-    let desktop = unsafe { Gdi::GetDC(None) };
-    if desktop.is_invalid() {
-        return None;
-    }
-    // SAFETY: creates a memory DC compatible with the live screen DC above.
-    let memory = unsafe { Gdi::CreateCompatibleDC(Some(desktop)) };
-    let result = if memory.is_invalid() {
-        None
-    } else {
-        // SAFETY: both DCs are live and every argument is passed by value.
-        let result = unsafe { copy(desktop, memory, src, width, height) };
-        // SAFETY: `memory` came from `CreateCompatibleDC` and owns no selected
-        // bitmap by this point, because `copy` restores the original one.
-        ignore_teardown(unsafe { Gdi::DeleteDC(memory) });
-        result
-    };
-    // SAFETY: releases the DC acquired above, exactly once.
-    unsafe { Gdi::ReleaseDC(None, desktop) };
-    result.map(|pixels| (pixels, width as u32, height as u32))
-}
-
-unsafe fn copy(
-    desktop: HDC,
-    memory: HDC,
-    src: windows::Win32::Foundation::RECT,
-    width: i32,
-    height: i32,
-) -> Option<Vec<u8>> {
-    let info = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width,
-            biHeight: -height,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let mut bits = std::ptr::null_mut();
-    // SAFETY: `info` describes a top-down 32bpp DIB and `bits` is a live local
-    // the call points at the mapped pixel buffer through.
-    let bitmap = unsafe {
-        Gdi::CreateDIBSection(Some(memory), &info, DIB_RGB_COLORS, &mut bits, None, 0).ok()?
-    };
-    let object = HGDIOBJ(bitmap.0);
-    // SAFETY: selects the new bitmap into the memory DC and returns the
-    // previous object, which is restored before the bitmap is freed.
-    let previous = unsafe { Gdi::SelectObject(memory, object) };
-    let result = if previous.is_invalid() || bits.is_null() {
-        None
-    } else {
-        // SAFETY: sets a raster mode flag on a live DC; no pointer is involved.
-        ignore_teardown(unsafe { Gdi::SetStretchBltMode(memory, HALFTONE) });
-        // SAFETY: every handle is live and the arguments describe the source
-        // and destination rectangles by value.
-        let blitted = unsafe {
-            Gdi::StretchBlt(
-                memory,
-                0,
-                0,
-                width,
-                height,
-                Some(desktop),
-                src.left,
-                src.top,
-                src.right - src.left,
-                src.bottom - src.top,
-                SRCCOPY | CAPTUREBLT,
-            )
-        };
-        // SAFETY: flushes pending GDI work so the mapped pixels are current
-        // before they are read; takes no pointer.
-        let flushed = unsafe { Gdi::GdiFlush().as_bool() };
-        (blitted.as_bool() && flushed).then(|| {
-            // SAFETY: `bits` was produced by `CreateDIBSection` for exactly
-            // `width * height * 4` bytes of a top-down 32bpp surface.
-            let pixels = unsafe {
-                std::slice::from_raw_parts(bits.cast::<u8>(), (width * height * 4) as usize)
-            };
-            pixels
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .flat_map(|pixel| [pixel[2], pixel[1], pixel[0]])
-                .collect()
-        })
-    };
-    if !previous.is_invalid() {
-        // SAFETY: restores the DC's original bitmap before the new one is freed.
-        unsafe { Gdi::SelectObject(memory, previous) };
-    }
-    // SAFETY: the bitmap is deselected by now, so releasing it is safe.
-    let _discarded = unsafe { Gdi::DeleteObject(object) };
-    result
 }

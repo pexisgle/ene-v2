@@ -183,7 +183,7 @@ impl Harness {
     pub(crate) fn accept(&mut self, key: &str, text: &str) -> super::error::Result<String> {
         Ok(chat::accept(
             &mut self.app,
-            w::SendMessageRequest {
+            &w::SendMessageRequest {
                 companion_id: self.companion.clone(),
                 request_key: key.into(),
                 text: text.into(),
@@ -202,12 +202,7 @@ impl Harness {
             }
             let _discarded = self.wakes.recv_timeout(Duration::from_millis(20));
         }
-        let failed = self
-            .app
-            .world()
-            .resource::<super::HostState>()
-            .failed
-            .clone();
+        let failed = self.app.world().resource::<super::HostState>().failure();
         panic!("the condition did not hold in time; failed={failed:?}");
     }
 
@@ -383,7 +378,7 @@ pub(super) fn register(world: &mut World, id: &str, spec: w::ClientCapabilitySpe
     let capability = spec.name.clone();
     client::register(
         world,
-        w::RegisterClientRequest {
+        &w::RegisterClientRequest {
             id: id.into(),
             name: id.into(),
             platform: "linux".into(),
@@ -398,7 +393,7 @@ pub(super) fn register(world: &mut World, id: &str, spec: w::ClientCapabilitySpe
 pub(super) fn activate(world: &mut World, companion: &str, client: &str) -> w::Activation {
     client::activate(
         world,
-        w::ActivationRequest {
+        &w::ActivationRequest {
             companion_id: companion.into(),
             client_id: client.into(),
             ..Default::default()
@@ -453,8 +448,17 @@ fn a_subscription_resumes_from_its_cursor_without_a_gap_or_a_duplicate() {
         .resource_mut::<Notifier>()
         .push(None, None, event("one"));
     harness.tick();
+    let world = harness.app.world();
+    let providers = super::providers::Providers::default();
+    let snapshot_reader = super::SnapshotReader {
+        store: world.resource::<Store>(),
+        hub: world.resource::<DeviceHub>(),
+        providers: &providers,
+        notifier: world.resource::<Notifier>(),
+        health: world.resource::<super::HostState>(),
+    };
     let (snapshot, mut receiver, replayed) =
-        super::subscribe(&mut harness.app, None, Some(&before)).unwrap();
+        snapshot_reader.subscribe(None, Some(&before)).unwrap();
     let replayed = replayed.expect("a cursor from this epoch is resumable");
     assert_eq!(replayed.len(), 1);
     assert_eq!(host_event(&replayed[0]), "one");

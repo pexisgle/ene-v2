@@ -159,7 +159,9 @@ pub async fn synthesize(
     voice: String,
 ) -> HttpResult<(Vec<u8>, u32)> {
     match tokio::time::timeout(SYNTHESIS_TIMEOUT, engine.synthesize(text, voice)).await {
-        Err(_) => Err(VoiceHttpError::TtsTimeout),
+        Err(_) => Err(VoiceHttpError::Transport(
+            "the TTS connection timed out".into(),
+        )),
         Ok(outcome) => outcome,
     }
 }
@@ -173,10 +175,12 @@ pub async fn synthesize_for_probe(
 ) -> HttpResult<(Vec<u8>, u32)> {
     let text = text.trim().to_owned();
     if text.is_empty() {
-        return Err(VoiceHttpError::TextRequired);
+        return Err(VoiceHttpError::InvalidInput("text is required".into()));
     }
     if text.chars().count() > MAX_PROBE_CHARS {
-        return Err(VoiceHttpError::TextTooLong(MAX_PROBE_CHARS));
+        return Err(VoiceHttpError::LimitExceeded(format!(
+            "text is limited to {MAX_PROBE_CHARS} characters"
+        )));
     }
     synthesize(&*source, text, voice).await
 }

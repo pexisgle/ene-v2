@@ -73,7 +73,7 @@ async fn connected_assignments_observe_cloned_credential_mutations() {
         .companion(&harness.companion)
         .unwrap()
         .unwrap();
-    companion.assignments.companion = crate::host::mind::Assignment {
+    companion.assignments.companion = crate::host::mind::ModelAssignment {
         connection_id: "credential-model".into(),
         model_id: "fake".into(),
     };

@@ -198,7 +198,7 @@ impl gpui::Render for ConnectionsPane {
             roles_panel::render_advanced_roles_panel(
                 self,
                 companion.as_ref(),
-                roles_panel::ModelRoleChoices {
+                &roles_panel::ModelRoleChoices {
                     all_models: &all_models,
                     embedding_models: &embedding_models,
                 },

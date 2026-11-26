@@ -12,25 +12,29 @@
 // reports zero for it. The workspace cannot enable it centrally yet, because a
 // crate cannot override `[lints] workspace = true`.
 #![warn(clippy::needless_pass_by_value)]
-pub mod best_effort;
+#[cfg(windows)]
+mod best_effort;
 #[cfg(windows)]
 pub mod capture;
 #[cfg(windows)]
 pub mod input;
 #[cfg(windows)]
 pub mod observe;
+#[cfg(target_os = "linux")]
+mod observe_linux;
 pub mod observe_types;
 pub mod tray;
 #[cfg(windows)]
 pub mod window;
 
-pub use best_effort::{debug_if_err, ignore_teardown, warn_if_err};
 #[cfg(windows)]
 pub use capture::{CapturedFrame, Foreground, MAX_FRAME_EDGE, MAX_JPEG_BYTES};
 #[cfg(windows)]
-pub use input::{Desktop, Rect, UnsafeToSend, check_before_send, send_input};
+pub use input::{Desktop, Point, Rect};
 #[cfg(windows)]
 pub use observe::observe;
+#[cfg(target_os = "linux")]
+pub use observe_linux::{observe, supported as observation_supported};
 pub use observe_types::{Observation, Window};
 pub use tray::{Tray, TrayAction, TrayHandle, TrayMode, TraySection, TrayState};
 #[cfg(windows)]

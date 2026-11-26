@@ -74,7 +74,7 @@ pub(super) fn backfill(mut commands: Commands, params: BackfillParams<'_>) {
                     notifier.notice(
                         Some(&companion),
                         "embedding_failed",
-                        &crate::host::util::truncate(&error.to_string(), 300),
+                        &ene_store::util::truncate(&error.to_string(), 300),
                     );
                 }
             }
@@ -93,9 +93,7 @@ pub(super) fn backfill(mut commands: Commands, params: BackfillParams<'_>) {
         Err(error) => {
             if error.is_storage() {
                 let message = error.to_string();
-                commands.queue(move |world: &mut World| {
-                    crate::host::fail(world, message);
-                });
+                commands.run_system_cached_with(crate::host::stop_on_failure, message);
             }
             return;
         }
@@ -117,9 +115,7 @@ pub(super) fn backfill(mut commands: Commands, params: BackfillParams<'_>) {
             Err(error) => {
                 if error.is_storage() {
                     let message = error.to_string();
-                    commands.queue(move |world: &mut World| {
-                        crate::host::fail(world, message);
-                    });
+                    commands.run_system_cached_with(crate::host::stop_on_failure, message);
                     return;
                 }
                 continue;
@@ -142,9 +138,9 @@ pub(super) fn backfill(mut commands: Commands, params: BackfillParams<'_>) {
             // connection to the same database, with the same WAL pragmas, so
             // the store's lock is never held while it writes.
             let result = match store.open_secondary() {
-                Ok(connection) => {
+                Ok(secondary) => {
                     fill(
-                        connection,
+                        &secondary,
                         &store,
                         &embeddings,
                         credentials.as_ref(),
@@ -160,23 +156,20 @@ pub(super) fn backfill(mut commands: Commands, params: BackfillParams<'_>) {
 }
 
 pub(super) async fn fill(
-    connection: rusqlite::Connection,
+    secondary: &ene_store::Store,
     store: &Store,
     embeddings: &Embeddings,
     credentials: Option<&Credentials>,
     companion: &Companion,
 ) -> Result<usize> {
+    let memories = secondary.memory_repo();
     let mut written = 0;
     while written < MAX_BACKFILL {
         let Some(target) = target(store, credentials, companion, embeddings)? else {
             break;
         };
-        let pending = crate::host::db::memories::missing_embeddings_on(
-            &connection,
-            &companion.id,
-            &target.space,
-            MAX_EMBED_BATCH,
-        )?;
+        let pending =
+            memories.memories_missing_embedding(&companion.id, &target.space, MAX_EMBED_BATCH)?;
         if pending.is_empty() {
             break;
         }
@@ -193,8 +186,7 @@ pub(super) async fn fill(
                     ("embedding dimensions do not match the connection").into(),
                 ));
             }
-            if crate::host::db::memories::write_embedding_on(
-                &connection,
+            if memories.write_embedding(
                 &row.id,
                 row.content_revision,
                 &target.space,

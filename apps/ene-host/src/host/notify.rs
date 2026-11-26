@@ -5,8 +5,9 @@
 //! that misses events can always resnapshot.
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
+use parking_lot::Mutex;
 use serde_json::json;
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -15,30 +16,37 @@ const CAPACITY: usize = 256;
 const REPLAY: usize = 512;
 pub(crate) const DIAGNOSTIC: &str = "diagnostic";
 
-#[derive(Resource)]
+#[derive(Clone, Resource)]
 pub(crate) struct Notifier {
+    state: Arc<Mutex<Outbox>>,
+    events: broadcast::Sender<w::Notification>,
+}
+
+struct Outbox {
     epoch: String,
     sequence: u64,
     outbox: Vec<w::Notification>,
     history: VecDeque<w::Notification>,
-    events: broadcast::Sender<w::Notification>,
 }
 
 impl Notifier {
     pub(crate) fn new() -> Self {
         Self {
-            epoch: Uuid::new_v4().to_string(),
-            sequence: 0,
-            outbox: Vec::new(),
-            history: VecDeque::new(),
+            state: Arc::new(Mutex::new(Outbox {
+                epoch: Uuid::new_v4().to_string(),
+                sequence: 0,
+                outbox: Vec::new(),
+                history: VecDeque::new(),
+            })),
             events: broadcast::channel(CAPACITY).0,
         }
     }
 
     pub(crate) fn cursor(&self) -> w::Cursor {
+        let state = self.state.lock();
         w::Cursor {
-            epoch: self.epoch.clone(),
-            seq: self.sequence,
+            epoch: state.epoch.clone(),
+            seq: state.sequence,
             ..Default::default()
         }
     }
@@ -49,16 +57,16 @@ impl Notifier {
 
     /// Queues one event for the next tick.
     pub(crate) fn push(
-        &mut self,
+        &self,
         companion: Option<&str>,
         client: Option<&str>,
         event: w::notification::Event,
     ) {
         let kind = kind_of(&event);
-        self.outbox.push(w::Notification {
+        self.state.lock().outbox.push(w::Notification {
             kind: kind.into(),
             emitted_at: if matches!(kind, "turn" | "work" | "approval") {
-                super::util::now()
+                ene_store::util::now()
             } else {
                 String::new()
             },
@@ -71,15 +79,15 @@ impl Notifier {
 
     /// Adds operational metadata to opt-in subscriptions.
     pub(crate) fn diagnostic(
-        &mut self,
+        &self,
         companion: &str,
         role: &str,
         action: &str,
-        detail: serde_json::Value,
+        detail: &serde_json::Value,
     ) {
-        self.outbox.push(w::Notification {
+        self.state.lock().outbox.push(w::Notification {
             kind: DIAGNOSTIC.into(),
-            emitted_at: super::util::now(),
+            emitted_at: ene_store::util::now(),
             companion_id: Some(companion.to_owned()),
             event: Some(w::notification::Event::Generic(Box::new(w::HostEvent {
                 kind: DIAGNOSTIC.into(),
@@ -101,7 +109,7 @@ impl Notifier {
     }
 
     /// A host-level notice the clients can display.
-    pub(crate) fn notice(&mut self, companion: Option<&str>, code: &str, message: &str) {
+    pub(crate) fn notice(&self, companion: Option<&str>, code: &str, message: &str) {
         let document = w::JsonDocument {
             schema: "ene.notice.v1".into(),
             json: json!({"code": code, "message": message}).to_string(),
@@ -118,19 +126,20 @@ impl Notifier {
         );
     }
 
-    pub(crate) fn flush(&mut self) {
-        let outbox = std::mem::take(&mut self.outbox);
+    pub(crate) fn flush(&self) {
+        let mut state = self.state.lock();
+        let outbox = std::mem::take(&mut state.outbox);
         for mut event in outbox {
-            self.sequence += 1;
+            state.sequence += 1;
             event.cursor = Some(w::Cursor {
-                epoch: self.epoch.clone(),
-                seq: self.sequence,
+                epoch: state.epoch.clone(),
+                seq: state.sequence,
                 ..Default::default()
             })
             .into();
-            self.history.push_back(event.clone());
-            if self.history.len() > REPLAY {
-                self.history.pop_front();
+            state.history.push_back(event.clone());
+            if state.history.len() > REPLAY {
+                state.history.pop_front();
             }
             if self.events.send(event).is_err() {
                 tracing::debug!("the notification stream has no receiver; event dropped");
@@ -141,19 +150,21 @@ impl Notifier {
     /// The events after `cursor`, when the caller's epoch is this boot and no
     /// event it needs has been dropped. `None` asks the caller to resnapshot.
     pub(crate) fn replay(&self, cursor: &w::Cursor) -> Option<Vec<w::Notification>> {
-        if cursor.epoch != self.epoch || cursor.seq > self.sequence {
+        let state = self.state.lock();
+        if cursor.epoch != state.epoch || cursor.seq > state.sequence {
             return None;
         }
         let first_needed = cursor.seq + 1;
-        if first_needed > self.sequence {
+        if first_needed > state.sequence {
             return Some(Vec::new());
         }
-        let oldest = self.history.front().and_then(seq_of);
+        let oldest = state.history.front().and_then(seq_of);
         if oldest.is_none_or(|oldest| oldest > first_needed) {
             return None;
         }
         Some(
-            self.history
+            state
+                .history
                 .iter()
                 .filter(|event| seq_of(event).is_some_and(|seq| seq >= first_needed))
                 .cloned()
@@ -161,14 +172,15 @@ impl Notifier {
         )
     }
 
-    pub(crate) fn clear(&mut self) {
-        self.outbox.clear();
+    pub(crate) fn clear(&self) {
+        self.state.lock().outbox.clear();
     }
 
     /// Reports a fatal host failure to every subscriber.
-    pub(crate) fn fail(&mut self, reason: &str) {
-        self.outbox.clear();
-        self.sequence += 1;
+    pub(crate) fn fail(&self, reason: &str) {
+        let mut state = self.state.lock();
+        state.outbox.clear();
+        state.sequence += 1;
         let document = w::JsonDocument {
             schema: "ene.notice.v1".into(),
             json: json!({"code": "storage_error", "message": reason}).to_string(),
@@ -176,8 +188,8 @@ impl Notifier {
         };
         let event = w::Notification {
             cursor: Some(w::Cursor {
-                epoch: self.epoch.clone(),
-                seq: self.sequence,
+                epoch: state.epoch.clone(),
+                seq: state.sequence,
                 ..Default::default()
             })
             .into(),
@@ -189,7 +201,7 @@ impl Notifier {
             }))),
             ..Default::default()
         };
-        ene_platform_os::debug_if_err(
+        ene_domain::debug_if_err(
             self.events
                 .send(event)
                 .map_err(|_| "the notification stream has no receiver"),
@@ -238,7 +250,7 @@ mod tests {
 
     #[test]
     fn a_cursor_resumes_from_the_replay_ring_and_reports_gaps() {
-        let mut notifier = Notifier::new();
+        let notifier = Notifier::new();
         notifier.push(None, None, event("one"));
         notifier.flush();
         let after_one = notifier.cursor();

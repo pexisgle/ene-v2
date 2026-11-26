@@ -20,7 +20,7 @@ pub(crate) fn run_tool<A: Clone + Send + Sync + 'static>(
                 Ok(text) => super::permission::answer(world, call, &text),
                 Err(error) => {
                     if error.is_storage() {
-                        super::fail(world, error.to_string());
+                        super::fail(world, &error.to_string());
                     }
                     super::permission::refuse(world, call, &error.to_string());
                 }

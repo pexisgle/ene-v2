@@ -175,7 +175,7 @@ fn the_shared_connection_does_not_need_a_read_pool() {
 }
 
 fn seed(store: &Store) {
-    let connection = must(store.conn(), "conn");
+    let connection = store.conn();
     for index in 0..500 {
         let sql = "INSERT INTO memories (id, scope, content, importance, occurred_at, \
                    recorded_at, source_context) VALUES (?1, 'shared', ?2, 5, \

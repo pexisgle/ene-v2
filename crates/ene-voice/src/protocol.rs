@@ -80,29 +80,10 @@ impl Default for VoiceOutputEvent {
     }
 }
 
-/// How the host configured a companion's voice (`schema = "ene.voice.v1"`).
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct VoiceBinding {
-    /// The TTS connection id, when the companion pinned one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_id: Option<String>,
-    /// The voice id passed to the engine.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub voice_id: Option<String>,
-    /// Speaking rate multiplier.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub speed: Option<f32>,
-    /// Pitch offset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pitch: Option<f32>,
-    /// The engine style name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub style: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ene_domain::VoiceBinding;
 
     #[test]
     fn flush_reasons_are_distinct_and_default_to_unspecified() {

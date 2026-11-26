@@ -2,7 +2,7 @@ use super::*;
 use crate::host::settings::{
     Connection, ConnectionConfig, ConnectionKind, CredentialState, EmbeddingConnection, Endpoint,
 };
-use crate::host::{mind::Assignment, model::ModelFactory, resources::HostRuntime};
+use crate::host::{mind::ModelAssignment, model::ModelFactory, resources::HostRuntime};
 use rig_core::{
     catalog::Catalog,
     test_utils::{MockCompletionModel, MockStreamEvent},
@@ -86,7 +86,7 @@ async fn a_slow_embedding_holds_the_model_call_without_blocking_the_host() {
         )
         .unwrap();
     let mut companion = store.companion_repo().companion(&id).unwrap().unwrap();
-    companion.assignments.embedding = Some(Assignment {
+    companion.assignments.embedding = Some(ModelAssignment {
         connection_id: "embedding-test".into(),
         model_id: "test-embedding".into(),
     });
@@ -435,7 +435,6 @@ fn q05_storage_fault_in_tail_marks_host_failed_instead_of_empty_state() {
     harness
         .store()
         .conn()
-        .unwrap()
         .execute("DROP TABLE user_profiles", [])
         .unwrap();
     let err = render_tail(
@@ -449,5 +448,10 @@ fn q05_storage_fault_in_tail_marks_host_failed_instead_of_empty_state() {
     .unwrap_err();
     assert!(err.is_storage(), "expected storage error, got {err:?}");
     let _discarded = harness.accept("k-fault", "こんにちは");
-    harness.run_until(|world| world.resource::<crate::host::HostState>().failed.is_some());
+    harness.run_until(|world| {
+        world
+            .resource::<crate::host::HostState>()
+            .failure()
+            .is_some()
+    });
 }

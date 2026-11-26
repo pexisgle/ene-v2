@@ -22,9 +22,7 @@ pub use engine::{
 };
 pub use error::{BoxFuture, HttpResult, SetupError, VoiceHttpError, VoiceSessionError};
 pub use pcm::{SAMPLE_RATE, STT_SAMPLE_RATES, parse_wav, resample_mono, wav_wrap, wire_pcm};
-pub use protocol::{
-    AudioChunk, FlushControl, FlushReason, UtteranceFinished, VoiceBinding, VoiceOutputEvent,
-};
+pub use protocol::{AudioChunk, FlushControl, FlushReason, UtteranceFinished, VoiceOutputEvent};
 pub use session::{
     AudioSubscription, Dispatch, EndedUtterance, InputBinding, MAX_PROBE_CHARS, MAX_SENTENCE_CHARS,
     MAX_STT_BYTES, MIN_STT_BYTES, MIN_STT_RMS, STT_SILENCE_WINDOW, STT_TIMEOUT, VOICE_UNAVAILABLE,

@@ -1,35 +1,30 @@
 //! Companions and their mind: persistence and revision checks.
 
-use crate::{Store, error::Result, json_column, require, to_json, util::now};
+use crate::row::{FromRow, row_fields};
+use crate::{Store, error::Result, require, to_json, util::now};
 use ene_mind::{Companion, Profile};
-use rusqlite::{OptionalExtension, Row, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 const INITIAL_ENE_SEED: &str = "default_companion_ene";
 const PREVIOUS_ENE_PERSONA: &str = "一人称は「私」、ユーザーのことは「マスター」（別の呼び方を望まれたらそちらに従う）と呼ぶ。明るい敬語（〜ですよ、〜ですね、〜じゃないですか！）をベースに、親しみやすい軽口や茶目っ気を少し混ぜてテンポよく1〜3文で話す。相手を傷つける煽りや邪魔はしない。作業報告では最初に成否を簡潔に伝え、詳しい説明を求められたときは手順や根拠を丁寧に並べる。";
 
-fn row_to_companion(row: &Row<'_>) -> rusqlite::Result<Companion> {
-    Ok(Companion {
-        id: row.get("id")?,
-        name: row.get("name")?,
-        mind: row.get("mind")?,
-        profile: json_column(row, "profile", "stored profile is corrupt")?,
-        profile_revision: row.get::<_, u64>("profile_revision")?,
-        state: json_column(row, "state", "stored state is corrupt")?,
-        state_revision: row.get::<_, u64>("state_revision")?,
-        body: json_column(row, "body", "stored body is corrupt")?,
-        voice: json_column(row, "voice", "stored voice is corrupt")?,
-        assignments: json_column(row, "assignments", "stored assignments are corrupt")?,
-        persona: row.get("persona")?,
-        voice_identifier: row.get("voice_identifier")?,
-        revision: row.get::<_, u64>("revision")?,
-        created_at: row.get("created_at")?,
-        updated_at: row.get("updated_at")?,
-    })
-}
-
-pub const COLUMNS: &str = "id, name, mind, profile, profile_revision, state, \
-     state_revision, body, voice, assignments, persona, voice_identifier, revision, \
-     created_at, updated_at";
+row_fields!(Companion, COLUMNS {
+    id,
+    name,
+    mind,
+    profile => json_column("stored profile is corrupt"),
+    profile_revision,
+    state => json_column("stored state is corrupt"),
+    state_revision,
+    body => json_column("stored body is corrupt"),
+    voice => json_column("stored voice is corrupt"),
+    assignments => json_column("stored assignments are corrupt"),
+    persona,
+    voice_identifier,
+    revision,
+    created_at,
+    updated_at,
+});
 
 /// Repository managing `companions` and bootstrap seed state.
 #[derive(Clone, Copy, Debug)]
@@ -44,7 +39,7 @@ impl<'a> CompanionRepo<'a> {
         self.0.fetch_all(
             &format!("SELECT {COLUMNS} FROM companions ORDER BY created_at, id"),
             [],
-            row_to_companion,
+            Companion::from_row,
         )
     }
 
@@ -52,12 +47,12 @@ impl<'a> CompanionRepo<'a> {
         self.0.fetch(
             &format!("SELECT {COLUMNS} FROM companions WHERE id = ?1"),
             [id],
-            row_to_companion,
+            Companion::from_row,
         )
     }
 
     pub fn insert_companion(&self, companion: &Companion) -> Result<()> {
-        let connection = self.0.conn()?;
+        let connection = self.0.conn();
         insert_companion_with(&connection, companion)
     }
 
@@ -66,7 +61,7 @@ impl<'a> CompanionRepo<'a> {
     /// Recording a one-time marker in `bootstrap_state` ensures that user edits
     /// or deletions are preserved across restarts instead of resurrecting `ene`.
     pub fn seed_initial_companion(&self) -> Result<bool> {
-        let mut connection = self.0.conn()?;
+        let mut connection = self.0.conn();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let stamp = now();
         let applied: Option<String> = transaction
@@ -109,7 +104,7 @@ impl<'a> CompanionRepo<'a> {
     pub fn update_companion(&self, companion: &Companion, expected: u64) -> Result<()> {
         let updated = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE companions SET name = ?2, mind = ?3, profile = ?4, profile_revision = ?5, \
                  state = ?6, state_revision = ?7, body = ?8, voice = ?9, assignments = ?10, \
@@ -145,7 +140,7 @@ impl<'a> CompanionRepo<'a> {
         let next = expected + 1;
         let updated = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE companions SET profile = ?2, profile_revision = ?3, updated_at = ?4 \
                  WHERE id = ?1 AND profile_revision = ?5",
@@ -164,7 +159,7 @@ impl<'a> CompanionRepo<'a> {
     pub fn delete_companion(&self, id: &str) -> Result<bool> {
         let deleted = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached("DELETE FROM companions WHERE id = ?1")?
             .execute([id])?;
         Ok(deleted > 0)
@@ -268,7 +263,6 @@ mod tests {
             let repo = store.companion_repo();
             store
                 .conn()
-                .unwrap()
                 .execute(
                     "INSERT INTO bootstrap_state (key, applied_at) VALUES (?1, ?2)",
                     params![INITIAL_ENE_SEED, seed_stamp],

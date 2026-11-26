@@ -28,9 +28,9 @@ use crate::host::{
     resources::{DeviceHub, Perception},
 };
 use bevy_ecs::{prelude::*, system::SystemParam};
+use compaction::RequestStart;
 use rig_core::completion::Message;
 use rig_ecs::prelude::*;
-use rig_memory::{Prepared, RequestStart};
 
 #[derive(Component)]
 struct DynamicTail(String);
@@ -97,9 +97,7 @@ fn collect_tails(mut commands: Commands, mut pending: Query<(Entity, &HoldOf, &m
             Some(Err(error)) => {
                 if error.is_storage() {
                     let message = error.to_string();
-                    commands.queue(move |world: &mut World| {
-                        crate::host::fail(world, message);
-                    });
+                    commands.run_system_cached_with(crate::host::stop_on_failure, message);
                 } else {
                     tracing::warn!(%error, "dynamic tail could not be rendered");
                 }
@@ -131,7 +129,7 @@ fn inject_tail(
     turns: Query<(&Turn, Option<&DynamicTail>)>,
     agents: Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
     conversations: Query<&Conversation>,
-    env: TailEnv<'_>,
+    env: &TailEnv<'_>,
 ) {
     for (call_entity, mut call, of, agent) in &mut calls {
         let Ok((turn, cached)) = turns.get(of.0) else {
@@ -155,8 +153,8 @@ fn inject_tail(
                 &mut commands,
                 &agents,
                 conversation,
-                &env,
-                SpawnTailTarget {
+                env,
+                &SpawnTailTarget {
                     call_entity,
                     turn_entity: of.0,
                     turn_start: turn.start,
@@ -217,7 +215,7 @@ fn compute_or_spawn_tail(
     agents: &Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
     conversation: Option<&Conversation>,
     env: &TailEnv<'_>,
-    target: SpawnTailTarget,
+    target: &SpawnTailTarget,
 ) -> Option<String> {
     let SpawnTailTarget {
         call_entity,
@@ -225,7 +223,7 @@ fn compute_or_spawn_tail(
         turn_start,
         agent,
         has_eye_report,
-    } = target;
+    } = *target;
     let view = agent_view(agents, conversation, agent)?;
     let cause = TurnCause::classify(view.conversation, turn_start, has_eye_report);
     let query = cause.recall_query().map(str::to_owned);
@@ -278,9 +276,7 @@ fn compute_or_spawn_tail(
         Err(error) => {
             if error.is_storage() {
                 let message = error.to_string();
-                commands.queue(move |world: &mut World| {
-                    crate::host::fail(world, message);
-                });
+                commands.run_system_cached_with(crate::host::stop_on_failure, message);
             } else {
                 tracing::warn!(%error, "dynamic tail could not be rendered");
             }
@@ -414,29 +410,19 @@ fn fit(
         let Some(view) = history.as_mut() else {
             continue;
         };
-        let fits = compaction::fit(
-            view,
-            &compaction::FitRequest {
-                model: &model,
-                prompt: prompt.as_deref(),
-                tools: &request.tools,
-                anchor: anchor.as_ref(),
-                sent,
-                budget: limit.saturating_sub(reserve),
-            },
-        );
-        // What Start will send, for the next reply's anchor to be checked
-        // against (rig-memory's `RequestStart`).
-        if let Some(agent) = agent {
-            commands.entity(agent).insert(SentRequest(
-                Prepared {
-                    model: &model,
-                    prompt: prompt.as_deref(),
-                    tools: &request.tools,
-                    history: view,
-                }
-                .start(),
-            ));
+        let request = compaction::FitRequest {
+            model: &model,
+            prompt: prompt.as_deref(),
+            tools: &request.tools,
+            anchor: anchor.as_ref(),
+            sent,
+            budget: limit.saturating_sub(reserve),
+        };
+        let fits = compaction::fit(view, &request);
+        if let Some(agent) = agent.filter(|_| fits) {
+            commands
+                .entity(agent)
+                .insert(SentRequest(request.start(view)));
         }
         if !fits {
             decision.decide(
@@ -453,7 +439,18 @@ pub(crate) struct RecallPlugin;
 impl Plugin for RecallPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Update, collect_tails.before(AgentLoop))
-            .add_systems(AgentPass, inject_tail.in_set(PrepareSystems::Edit))
+            .add_systems(
+                AgentPass,
+                (|calls: Query<TurnRequest<'static>, NeedsTail>,
+                  commands: Commands,
+                  turns: Query<(&Turn, Option<&DynamicTail>)>,
+                  agents: Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
+                  conversations: Query<&Conversation>,
+                  env: TailEnv| {
+                    inject_tail(calls, commands, turns, agents, conversations, &env);
+                })
+                .in_set(PrepareSystems::Edit),
+            )
             .add_systems(AgentPass, fit.in_set(PrepareSystems::Fit));
     }
 }

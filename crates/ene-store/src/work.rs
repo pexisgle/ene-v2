@@ -1,43 +1,35 @@
 //! Work sessions and runs persistence.
 
+use crate::row::{FromRow, row_fields};
 use crate::{
-    Store, StoreError, enum_name_column,
+    Store, StoreError,
     error::Result,
-    optional_json_column, require_found, to_json,
+    require_found, to_json,
     util::{now, or_stamp},
 };
-use ene_domain::{Failure, Run, RunState, WorkSession, WorkStatus};
-use rusqlite::{Row, params};
+use ene_domain::{Run, RunState, WorkSession, WorkStatus};
+use rusqlite::params;
 
-fn row_to_session(row: &Row<'_>) -> rusqlite::Result<WorkSession> {
-    Ok(WorkSession {
-        id: row.get("id")?,
-        companion_id: row.get("companion_id")?,
-        title: row.get("title")?,
-        status: enum_name_column(row, "status", "unknown work status")?,
-        client_id: row.get("client_id")?,
-        created_at: row.get("created_at")?,
-        updated_at: row.get("updated_at")?,
-    })
-}
+row_fields!(WorkSession, SESSION_COLUMNS {
+    id,
+    companion_id,
+    title,
+    status => enum_name_column("unknown work status"),
+    client_id,
+    created_at,
+    updated_at,
+});
 
-const SESSION_COLUMNS: &str = "id, companion_id, title, status, client_id, created_at, updated_at";
-
-fn row_to_run(row: &Row<'_>) -> rusqlite::Result<Run> {
-    Ok(Run {
-        run_id: row.get("run_id")?,
-        work_id: row.get("work_id")?,
-        instruction: row.get("instruction")?,
-        state: enum_name_column(row, "state", "unknown run state")?,
-        pending_request_id: row.get("pending_request_id")?,
-        failure: optional_json_column::<Failure>(row, "failure", "stored failure is corrupt")?,
-        started_at: row.get("started_at")?,
-        updated_at: row.get("updated_at")?,
-    })
-}
-
-const RUN_COLUMNS: &str =
-    "run_id, work_id, instruction, state, pending_request_id, failure, started_at, updated_at";
+row_fields!(Run, RUN_COLUMNS {
+    run_id,
+    work_id,
+    instruction,
+    state => enum_name_column("unknown run state"),
+    pending_request_id,
+    failure => optional_json_column("stored failure is corrupt"),
+    started_at,
+    updated_at,
+});
 
 /// A run is open while it can still produce events.
 pub fn open_state(state: RunState) -> bool {
@@ -63,7 +55,7 @@ impl<'a> WorkRepo<'a> {
                  ORDER BY updated_at DESC, id"
             ),
             [companion],
-            row_to_session,
+            WorkSession::from_row,
         )
     }
 
@@ -78,7 +70,7 @@ impl<'a> WorkRepo<'a> {
                  ORDER BY companion_id, updated_at DESC, id"
             ),
             [],
-            row_to_session,
+            WorkSession::from_row,
         )
     }
 
@@ -86,14 +78,14 @@ impl<'a> WorkRepo<'a> {
         self.0.fetch(
             &format!("SELECT {SESSION_COLUMNS} FROM work_sessions WHERE id = ?1"),
             [id],
-            row_to_session,
+            WorkSession::from_row,
         )
     }
 
     pub fn insert_work_session(&self, session: &WorkSession) -> Result<()> {
         let stamp = now();
         self.0
-            .conn()?
+            .conn()
             .prepare_cached(&format!(
                 "INSERT INTO work_sessions ({SESSION_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
             ))?
@@ -112,7 +104,7 @@ impl<'a> WorkRepo<'a> {
     pub fn set_work_status(&self, id: &str, status: WorkStatus) -> Result<()> {
         let changed = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached("UPDATE work_sessions SET status = ?2, updated_at = ?3 WHERE id = ?1")?
             .execute(params![id, status.as_str(), now()])?;
         require_found(changed, "work session not found")
@@ -134,7 +126,7 @@ impl<'a> WorkRepo<'a> {
                 "SELECT {RUN_COLUMNS} FROM work_runs WHERE work_id = ?1 ORDER BY started_at, run_id"
             ),
             [work],
-            row_to_run,
+            Run::from_row,
         )
     }
 
@@ -142,7 +134,7 @@ impl<'a> WorkRepo<'a> {
         self.0.fetch(
             &format!("SELECT {RUN_COLUMNS} FROM work_runs WHERE run_id = ?1"),
             [run_id],
-            row_to_run,
+            Run::from_row,
         )
     }
 
@@ -156,14 +148,14 @@ impl<'a> WorkRepo<'a> {
                  ORDER BY started_at DESC LIMIT 1"
             ),
             [work],
-            row_to_run,
+            Run::from_row,
         )
     }
 
     pub fn insert_run(&self, run: &Run) -> Result<()> {
         let stamp = now();
         self.0
-            .conn()?
+            .conn()
             .prepare_cached(&format!(
                 "INSERT INTO work_runs ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
             ))?
@@ -183,7 +175,7 @@ impl<'a> WorkRepo<'a> {
     pub fn update_run(&self, run: &Run) -> Result<()> {
         let changed = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE work_runs SET state = ?2, pending_request_id = ?3, failure = ?4, \
                  updated_at = ?5 WHERE run_id = ?1",

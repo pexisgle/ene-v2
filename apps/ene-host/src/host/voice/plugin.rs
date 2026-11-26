@@ -5,7 +5,7 @@
 //! engine is therefore the same shape as the built-in one: it asks the plugin
 //! for the work, and the plugin reaches its endpoint through the host's
 //! broker, so no credential ever enters the guest.
-use super::{BoxFuture, HttpResult, SAMPLE_RATE, SetupError, SttEngine, TtsEngine};
+use super::{BoxFuture, HttpResult, SAMPLE_RATE, SetupError, SttEngine, TtsEngine, VoiceHttpError};
 use crate::host::{
     model::Credentials,
     providers::{ProviderInvocationContext, Providers},
@@ -63,20 +63,23 @@ impl PluginSpeech {
     async fn read_audio(&self, handle: &str, bytes: u64) -> HttpResult<Vec<u8>> {
         use base64::Engine;
         if bytes > MAX_AUDIO_BYTES {
-            return Err(super::VoiceHttpError::PluginAudioTooLarge);
+            return Err(VoiceHttpError::LimitExceeded(
+                "the speech provider returned more audio than the host reads".into(),
+            ));
         }
         let mut audio = Vec::with_capacity(bytes as usize);
         loop {
-            let chunk = self
-                .context
-                .broker
-                .read(handle)
-                .await
-                .map_err(|error| super::VoiceHttpError::PluginAudioRead(error.to_string()))?;
+            let chunk = self.context.broker.read(handle).await.map_err(|error| {
+                VoiceHttpError::Transport(format!("the speech provider's audio: {error}"))
+            })?;
             audio.extend_from_slice(
                 &base64::engine::general_purpose::STANDARD
                     .decode(&chunk.data_base64)
-                    .map_err(|_| super::VoiceHttpError::PluginAudioDecode)?,
+                    .map_err(|_| {
+                        VoiceHttpError::Decode(
+                            "the speech provider returned undecodable audio".into(),
+                        )
+                    })?,
             );
             if chunk.done {
                 return Ok(audio);
@@ -121,24 +124,34 @@ impl TtsEngine for PluginSpeech {
                         if !data_base64.is_empty() {
                             let decoded = base64::engine::general_purpose::STANDARD
                                 .decode(&data_base64)
-                                .map_err(|_| super::VoiceHttpError::PluginStreamDecode)?;
+                                .map_err(|_| {
+                                    VoiceHttpError::Decode(
+                                        "the speech provider emitted undecodable audio chunk"
+                                            .into(),
+                                    )
+                                })?;
                             if (streamed.len() + decoded.len()) as u64 > MAX_AUDIO_BYTES {
-                                return Err(super::VoiceHttpError::PluginStreamTooLarge);
+                                return Err(VoiceHttpError::LimitExceeded(
+                                    "the speech provider exceeded the maximum streamed audio size"
+                                        .into(),
+                                ));
                             }
                             streamed.extend_from_slice(&decoded);
                         }
                     }
                 }
-                Ok::<_, super::VoiceHttpError>((got_chunks, streamed, sample_rate))
+                Ok::<_, VoiceHttpError>((got_chunks, streamed, sample_rate))
             });
             let reply = self
                 .running
                 .invoke_streaming(PluginOperation::Synthesize { request }, self.services(), tx)
                 .await
-                .map_err(|error| super::VoiceHttpError::PluginCall(error.to_string()))?;
-            let (got_chunks, streamed, streamed_rate) = collector
-                .await
-                .map_err(|_| super::VoiceHttpError::PluginCollectorStopped)??;
+                .map_err(|error| {
+                    VoiceHttpError::Transport(format!("the speech provider: {error}"))
+                })?;
+            let (got_chunks, streamed, streamed_rate) = collector.await.map_err(|_| {
+                VoiceHttpError::Transport("the speech stream collector stopped".into())
+            })??;
             if got_chunks {
                 let rate = if streamed_rate > 0 {
                     streamed_rate
@@ -150,7 +163,9 @@ impl TtsEngine for PluginSpeech {
             let handle = reply
                 .get("handle")
                 .and_then(|value| value.as_str())
-                .ok_or(super::VoiceHttpError::PluginMissingHandle)?;
+                .ok_or_else(|| {
+                    VoiceHttpError::Protocol("the speech provider returned no audio handle".into())
+                })?;
             let bytes = reply
                 .get("bytes")
                 .and_then(serde_json::Value::as_u64)
@@ -203,7 +218,9 @@ impl SttEngine for PluginSpeech {
                 .running
                 .invoke_streaming(PluginOperation::Transcribe { request }, self.services(), tx)
                 .await
-                .map_err(|error| super::VoiceHttpError::PluginCall(error.to_string()))?;
+                .map_err(|error| {
+                    VoiceHttpError::Transport(format!("the speech provider: {error}"))
+                })?;
             if let Some(streamed) = collector.await.ok().flatten() {
                 return Ok(streamed);
             }

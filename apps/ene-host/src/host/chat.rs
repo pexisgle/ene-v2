@@ -3,9 +3,9 @@ use super::{
     agent,
     db::{Result, Store},
     error::HostError,
-    util::{digest, now},
 };
 use ene_rpc as w;
+use ene_store::util::{digest, now};
 use rig_core::conversation::{Aside, Author, RequestId};
 use rig_ecs::prelude::*;
 use serde_json::json;
@@ -21,7 +21,7 @@ pub(crate) const MAX_INPUT_CHARS: usize = 32_000;
     skip_all,
     fields(companion_id = %request.companion_id, request_id = tracing::field::Empty)
 )]
-pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w::Acceptance> {
+pub(crate) fn accept(app: &mut App, request: &w::SendMessageRequest) -> Result<w::Acceptance> {
     if request.text.trim().is_empty() {
         return Err(HostError::Invalid(("a message is required").into()));
     }
@@ -33,9 +33,9 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
     {
         return Err(HostError::Invalid(("the message is too large").into()));
     }
-    super::util::validate_id(&request.companion_id)?;
+    ene_domain::validate_id(&request.companion_id)?;
     if !request.request_key.is_empty() {
-        super::util::validate_id(&request.request_key)?;
+        ene_domain::validate_id(&request.request_key)?;
     }
     let text = request.text.clone();
     let hash = digest(format!("{}:{}", request.companion_id, text).as_bytes());
@@ -91,8 +91,7 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
     if let Some(reason) = app
         .world()
         .resource::<super::resources::HostState>()
-        .failed
-        .clone()
+        .failure()
     {
         return Err(HostError::Unavailable(reason));
     }
@@ -174,17 +173,14 @@ fn has_input(world: &World, agent: Entity, request_id: &str) -> bool {
 }
 
 /// Stops the current turn.
-pub(crate) fn stop(world: &mut World, request: w::StopRequest) -> Result<()> {
+pub(crate) fn stop(world: &mut World, request: &w::StopRequest) -> Result<()> {
     let store = world.resource::<Store>().clone();
     store
         .companion_repo()
         .companion(&request.companion_id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     if let Some(agent) = agent::agent_of(world, &request.companion_id) {
-        world.trigger(StopTurn {
-            entity: agent,
-            reason: Some("the user stopped the turn".into()),
-        });
+        world.trigger(StopTurn::new(agent));
     }
     // Stop means stop speaking too; stale playback reports are discarded.
     let _discarded = super::voice::flush(

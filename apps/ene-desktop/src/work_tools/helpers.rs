@@ -42,22 +42,6 @@ pub(super) fn text(bytes: &[u8]) -> Result<&str, WorkToolError> {
     std::str::from_utf8(bytes).map_err(|_| WorkToolError::NotUtf8)
 }
 
-/// The formats the read tool hands to the model as a base64 image.
-///
-/// `guess_format` recognises more than this (BMP, TIFF, ICO, ...), but the
-/// downstream image pipeline only ever received these four, so the set stays
-/// explicit rather than silently widening what is sent.
-const IMAGE_FORMATS: [image::ImageFormat; 4] = [
-    image::ImageFormat::Png,
-    image::ImageFormat::Jpeg,
-    image::ImageFormat::Gif,
-    image::ImageFormat::WebP,
-];
-
-pub(super) fn image(bytes: &[u8]) -> bool {
-    image::guess_format(bytes).is_ok_and(|format| IMAGE_FORMATS.contains(&format))
-}
-
 pub(super) fn edit(content: &str, input: &Value) -> Result<String, WorkToolError> {
     let edits = input["edits"]
         .as_array()

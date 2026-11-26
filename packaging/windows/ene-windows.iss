@@ -26,8 +26,6 @@ Source: "{#BuildDir}\ene-avatar.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#CrtDir}\*.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\assets\ENE.vrm"; DestDir: "{app}\assets"; Flags: ignoreversion
 Source: "..\..\assets\vrma\*.vrma"; DestDir: "{app}\assets\vrma"; Flags: ignoreversion
-Source: "..\..\THIRD_PARTY_NOTICES"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\..\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\ene"; Filename: "{app}\ene-desktop.exe"; WorkingDir: "{app}"

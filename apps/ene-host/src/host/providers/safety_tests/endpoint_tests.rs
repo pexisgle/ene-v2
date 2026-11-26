@@ -42,18 +42,18 @@ async fn p10_listing_uses_authorized_http_and_connection_credentials() {
         assert_guest_bytes(r#""options":{"fixture_option":"preserved"}"#, true, true),
         assert_guest_bytes(secret, true, false),
         assert_guest_bytes("replacement-secret", true, false),
-        service(json!({"type":"http_open", "request":{
+        service(&json!({"type":"http_open", "request":{
             "method":"GET", "url":format!("{}/models", upstream.base), "headers":{}
         }})),
         assert_guest_bytes(r#""Ok":{"#, false, true),
-        service(json!({"type":"http_read", "handle":"http-1"})),
+        service(&json!({"type":"http_read", "handle":"http-1"})),
         assert_guest_bytes(&format!("\"data_base64\":\"{encoded}\""), false, true),
         assert_guest_bytes(r#""done":true"#, false, true),
         assert_guest_bytes(secret, false, false),
         assert_guest_bytes("replacement-secret", false, false),
         assert_guest_bytes("private-response", false, false),
         assert_guest_bytes("set-cookie", false, false),
-        service(json!({"type":"http_close", "handle":"http-1"})),
+        service(&json!({"type":"http_close", "handle":"http-1"})),
         assert_guest_bytes(r#"{"Ok":null}"#, false, true),
         emit(r#"{"type":"models","models":[{"id":"plugin-http-model","name":"HTTP"}]}"#),
         reply("{}"),
@@ -64,7 +64,7 @@ async fn p10_listing_uses_authorized_http_and_connection_credentials() {
         Extension::Llm,
         &body,
         &upstream.base,
-        json!({"type":"bearer"}),
+        &json!({"type":"bearer"}),
     );
     for key in [secret, "replacement-secret"] {
         credentials.remember(&connection.id, key.into());
@@ -96,7 +96,7 @@ async fn p10_listing_http_failures_never_select_native_or_expand_origins() {
         let destination = if denied { &native.base } else { &approved };
         let body = format!(
             "{} local.get $p call $error i32.const 1 return",
-            service(json!({"type":"http_open", "request":{
+            service(&json!({"type":"http_open", "request":{
                 "method":"GET", "url":destination, "headers":{}
             }}))
         );
@@ -131,9 +131,13 @@ async fn p08_speech_construction_failure_never_selects_native() {
         world.insert_resource(providers);
         let _failure = construction_failure::Guard::enter();
         let error = if kind == ConnectionKind::Tts {
-            voice::tts_source(&world).err().expect("TTS must fail")
+            voice::tts_source(&voice::VoiceEngineContext::for_test(&world))
+                .err()
+                .expect("TTS must fail")
         } else {
-            voice::stt_source(&world).err().expect("STT must fail")
+            voice::stt_source(&voice::VoiceEngineContext::for_test(&world))
+                .err()
+                .expect("STT must fail")
         };
         assert!(
             matches!(error, SetupError::Broken(ref message) if message.starts_with("plugin HTTP transport: ")),
@@ -189,9 +193,13 @@ async fn p08_absent_plugin_leaves_speech_unavailable() {
         world.insert_resource(store(root.path(), &connection));
         world.insert_resource(Providers::none());
         let error = if kind == ConnectionKind::Tts {
-            voice::tts_source(&world).err().expect("TTS must fail")
+            voice::tts_source(&voice::VoiceEngineContext::for_test(&world))
+                .err()
+                .expect("TTS must fail")
         } else {
-            voice::stt_source(&world).err().expect("STT must fail")
+            voice::stt_source(&voice::VoiceEngineContext::for_test(&world))
+                .err()
+                .expect("STT must fail")
         };
         let SetupError::Unsupported(message) = &error else {
             panic!("expected an unsupported adapter, got {error:?}")
@@ -224,7 +232,7 @@ async fn p08_plugin_serves_tts() {
     let mut world = World::new();
     world.insert_resource(store(root.path(), &connection));
     world.insert_resource(providers);
-    let engine = voice::tts_source(&world).unwrap();
+    let engine = voice::tts_source(&voice::VoiceEngineContext::for_test(&world)).unwrap();
     for _ in 0..2 {
         let (pcm, rate) = engine.synthesize("hello".into(), "v".into()).await.unwrap();
         assert_eq!(pcm, [7, 0]);
@@ -303,7 +311,7 @@ async fn p08_plugin_serves_stt() {
     let mut world = World::new();
     world.insert_resource(store(root.path(), &connection));
     world.insert_resource(providers);
-    let engine = voice::stt_source(&world).unwrap();
+    let engine = voice::stt_source(&voice::VoiceEngineContext::for_test(&world)).unwrap();
     for _ in 0..2 {
         assert_eq!(
             engine.transcribe(vec![0, 0], 24_000).await.unwrap(),
@@ -599,7 +607,7 @@ fn p10_listed_providers_cover_installed_plugins_and_their_defaults() {
         Extension::Llm,
         &reply("{}"),
         "https://plugin.example",
-        json!({"type":"none"}),
+        &json!({"type":"none"}),
     );
     let listed = settings::providers(&providers);
     let builtins = [
@@ -656,11 +664,11 @@ async fn b07_embedding_plugin_uses_provider_context_and_broker() {
         assert_guest_bytes(r#""fixture_option":"preserved""#, true, true),
         assert_guest_bytes(r#""tier":"a""#, true, true),
         assert_guest_bytes("secret-a", true, false),
-        service(json!({"type":"http_open", "request":{
+        service(&json!({"type":"http_open", "request":{
             "method":"POST", "url":format!("{}/embeddings", upstream_a.base), "headers":{}
         }})),
         assert_guest_bytes(r#""Ok":{"#, false, true),
-        service(json!({"type":"http_close", "handle":"http-1"})),
+        service(&json!({"type":"http_close", "handle":"http-1"})),
         assert_guest_bytes(r#"{"Ok":null}"#, false, true),
         reply(r#"{"vectors":[[0.1,0.2,0.3]]}"#),
     ]
@@ -670,11 +678,11 @@ async fn b07_embedding_plugin_uses_provider_context_and_broker() {
         assert_guest_bytes(r#""fixture_option":"overridden""#, true, true),
         assert_guest_bytes(r#""tier":"b""#, true, true),
         assert_guest_bytes("secret-b", true, false),
-        service(json!({"type":"http_open", "request":{
+        service(&json!({"type":"http_open", "request":{
             "method":"POST", "url":format!("{}/embeddings", upstream_b.base), "headers":{}
         }})),
         assert_guest_bytes(r#""Ok":{"#, false, true),
-        service(json!({"type":"http_close", "handle":"http-1"})),
+        service(&json!({"type":"http_close", "handle":"http-1"})),
         assert_guest_bytes(r#"{"Ok":null}"#, false, true),
         reply(r#"{"vectors":[[0.4,0.5,0.6]]}"#),
     ]
@@ -685,7 +693,7 @@ async fn b07_embedding_plugin_uses_provider_context_and_broker() {
         Extension::Embedding,
         &body,
         &manifest_unused.base,
-        json!({"type":"bearer"}),
+        &json!({"type":"bearer"}),
     );
     let manifest_path = root
         .path()

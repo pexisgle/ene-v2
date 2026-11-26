@@ -327,7 +327,7 @@ mod tests {
         };
 
         let store = Store::open(&path).unwrap();
-        assert_eq!(user_version(&store.conn().unwrap()), VERSION);
+        assert_eq!(user_version(&store.conn()), VERSION);
         let settings = store.settings_repo().settings().unwrap();
         assert_eq!(settings.revision, 3);
         assert_eq!(settings.connections.len(), 1);
@@ -350,7 +350,6 @@ mod tests {
 
         let recorded: i64 = store
             .conn()
-            .unwrap()
             .query_row(
                 "SELECT COUNT(*) FROM schema_migrations WHERE version = 7",
                 [],
@@ -361,7 +360,6 @@ mod tests {
 
         let indexed: i64 = store
             .conn()
-            .unwrap()
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
                  AND name = 'idx_work_sessions_companion'",
@@ -374,7 +372,7 @@ mod tests {
         drop(store);
         let reopened = Store::open(&path).unwrap();
         assert_eq!(reopened.settings_repo().settings().unwrap(), settings);
-        assert_eq!(user_version(&reopened.conn().unwrap()), VERSION);
+        assert_eq!(user_version(&reopened.conn()), VERSION);
     }
 
     #[test]
@@ -383,7 +381,6 @@ mod tests {
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
         let indexed: i64 = store
             .conn()
-            .unwrap()
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
                  AND name = 'idx_work_sessions_companion'",

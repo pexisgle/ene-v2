@@ -1,7 +1,7 @@
 use super::*;
 use crate::host::{
     client,
-    mind::Assignment,
+    mind::ModelAssignment,
     tests::{Harness, bound, text_turn},
 };
 use rig_core::{
@@ -31,7 +31,7 @@ fn bind(
     let world = harness.app.world_mut();
     client::register(
         world,
-        w::RegisterClientRequest {
+        &w::RegisterClientRequest {
             id: client_id.into(),
             capabilities: vec!["eye.watch".into()],
             capability_specs: vec![w::ClientCapabilitySpec {
@@ -45,7 +45,7 @@ fn bind(
     .unwrap();
     client::activate(
         world,
-        w::ActivationRequest {
+        &w::ActivationRequest {
             client_id: client_id.into(),
             companion_id: harness.companion.clone(),
             ..Default::default()
@@ -58,7 +58,7 @@ fn bind(
 fn report(harness: &mut Harness, client: &str, subscription: &str, event: Event) {
     client::report_perception(
         harness.app.world_mut(),
-        w::PerceptionEvent {
+        &w::PerceptionEvent {
             client_id: client.into(),
             subscription_id: subscription.into(),
             event: Some(event),
@@ -114,7 +114,14 @@ async fn the_head_can_stay_silent_on_routine_reports_and_answer_the_important_fa
     let frame_id =
         assert_eye_notifications_and_dispositions(&mut harness, &mut notifications, &head);
     report(&mut harness, "desktop", &sub, Event::Enabled(false));
-    assert!(preview(harness.app.world(), &frame_id).is_err());
+    assert!(
+        preview(
+            harness.app.world().resource::<Eyes>(),
+            harness.app.world().resource::<DeviceHub>(),
+            &frame_id
+        )
+        .is_err()
+    );
     assert_eq!(eye.requests().len(), 4);
 }
 
@@ -129,7 +136,7 @@ fn setup_eye_and_head_harness(
         .companion(&harness.companion)
         .unwrap()
         .unwrap();
-    companion.assignments.companion = Assignment {
+    companion.assignments.companion = ModelAssignment {
         connection_id: "head".into(),
         model_id: "shared".into(),
     };
@@ -237,7 +244,7 @@ fn assert_response_check_and_watch_turns(
     let entity = harness.companion_agent();
     client::report_perception(
         harness.app.world_mut(),
-        w::PerceptionEvent {
+        &w::PerceptionEvent {
             client_id: "desktop".into(),
             event: Some(Event::PerceptionSummary(Box::new(w::PerceptionSummary {
                 summary: "unfiltered-passive-window-log".into(),
@@ -355,7 +362,13 @@ fn assert_eye_notifications_and_dispositions(
     let frame_id = received_frame.unwrap();
     assert_eq!(evaluated_frame.as_deref(), Some(frame_id.as_str()));
     assert_eq!(
-        preview(harness.app.world(), &frame_id).unwrap().jpeg,
+        preview(
+            harness.app.world().resource::<Eyes>(),
+            harness.app.world().resource::<DeviceHub>(),
+            &frame_id
+        )
+        .unwrap()
+        .jpeg,
         jpeg(8, 8)
     );
     assert_eq!(delivered.len(), 4);
@@ -404,9 +417,25 @@ fn previews_keep_recent_frames_after_new_captures() {
             (session.recent_screens.back().unwrap().id.clone(), jpeg)
         })
         .collect();
-    assert!(preview(harness.app.world(), &frames[0].0).is_err());
+    assert!(
+        preview(
+            harness.app.world().resource::<Eyes>(),
+            harness.app.world().resource::<DeviceHub>(),
+            &frames[0].0
+        )
+        .is_err()
+    );
     for (id, jpeg) in &frames[1..] {
-        assert_eq!(preview(harness.app.world(), id).unwrap().jpeg, *jpeg);
+        assert_eq!(
+            preview(
+                harness.app.world().resource::<Eyes>(),
+                harness.app.world().resource::<DeviceHub>(),
+                id
+            )
+            .unwrap()
+            .jpeg,
+            *jpeg
+        );
     }
     harness
         .app
@@ -419,8 +448,22 @@ fn previews_keep_recent_frames_after_new_captures() {
         .front_mut()
         .unwrap()
         .at = Instant::now() - PREVIEW_LIFETIME - Duration::from_secs(1);
-    assert!(preview(harness.app.world(), &frames[1].0).is_err());
-    assert!(preview(harness.app.world(), &frames[2].0).is_ok());
+    assert!(
+        preview(
+            harness.app.world().resource::<Eyes>(),
+            harness.app.world().resource::<DeviceHub>(),
+            &frames[1].0
+        )
+        .is_err()
+    );
+    assert!(
+        preview(
+            harness.app.world().resource::<Eyes>(),
+            harness.app.world().resource::<DeviceHub>(),
+            &frames[2].0
+        )
+        .is_ok()
+    );
 }
 
 #[test]

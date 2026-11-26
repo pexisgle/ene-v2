@@ -1,7 +1,9 @@
 //! Pure connection configuration editing, assignment builders, and MCP draft helpers.
 
 pub mod edits;
+pub mod form;
 pub mod mcp;
+mod options;
 
 pub use edits::{
     ConnectionEditSpec, apply_connection_edits, apply_mcp_extra_edits,
@@ -17,12 +19,7 @@ use crate::domain::{
     Connection, ConnectionConfig, ConnectionEndpoint, ConnectionInput, ConnectionKind,
 };
 
-pub(crate) fn parse_options_map(raw: &str) -> serde_json::Map<String, serde_json::Value> {
-    match serde_json::from_str::<serde_json::Value>(raw) {
-        Ok(serde_json::Value::Object(map)) => map,
-        _ => serde_json::Map::new(),
-    }
-}
+use options::{Speaker, SpeechOptions, nonempty};
 
 /// Applies TTS voice settings onto a domain `ConnectionConfig`.
 pub fn apply_tts_voice_to_config(cfg: &mut ConnectionConfig, is_sakura: bool, voice_clean: &str) {
@@ -31,28 +28,15 @@ pub fn apply_tts_voice_to_config(cfg: &mut ConnectionConfig, is_sakura: bool, vo
     };
     tts.voice_ids = vec![voice_clean.to_owned()];
     let mut ep = tts.endpoint.take().unwrap_or_default();
-    let mut opts = parse_options_map(&ep.options);
+    let mut opts = SpeechOptions::parse(&ep.options);
     if is_sakura {
-        if let Some((model, voice)) = voice_clean.split_once('/') {
-            if !model.trim().is_empty() {
-                opts.insert("model".into(), serde_json::json!(model.trim()));
-            }
-            if !voice.trim().is_empty() {
-                opts.insert("voice".into(), serde_json::json!(voice.trim()));
-            }
-        } else {
-            opts.insert("model".into(), serde_json::json!(voice_clean));
-        }
-        opts.entry("protocol".to_owned())
-            .or_insert_with(|| serde_json::json!("sakura"));
-        opts.entry("response_format".to_owned())
-            .or_insert_with(|| serde_json::json!("wav"));
-    } else if let Ok(speaker_num) = voice_clean.parse::<u32>() {
-        opts.insert("speaker".into(), serde_json::json!(speaker_num));
+        opts.set_sakura_voice(voice_clean);
+    } else if let Ok(speaker) = voice_clean.parse::<u32>() {
+        opts.speaker = Some(Speaker::Id(speaker.into()));
     } else {
-        opts.insert("voice".into(), serde_json::json!(voice_clean));
+        opts.voice = Some(voice_clean.to_owned());
     }
-    ep.options = serde_json::Value::Object(opts).to_string();
+    ep.options = opts.json();
     tts.endpoint = Some(ep);
 }
 
@@ -62,9 +46,9 @@ pub fn apply_stt_model_to_config(cfg: &mut ConnectionConfig, model_clean: &str) 
         return;
     };
     let mut ep = stt.endpoint.take().unwrap_or_default();
-    let mut opts = parse_options_map(&ep.options);
-    opts.insert("model".into(), serde_json::json!(model_clean));
-    ep.options = serde_json::Value::Object(opts).to_string();
+    let mut opts = SpeechOptions::parse(&ep.options);
+    opts.model = Some(model_clean.to_owned());
+    ep.options = opts.json();
     stt.endpoint = Some(ep);
 }
 
@@ -72,12 +56,8 @@ pub fn apply_stt_model_to_config(cfg: &mut ConnectionConfig, model_clean: &str) 
 pub fn stt_model_of_connection(conn: &Connection) -> String {
     if let Some(ConnectionConfig::Stt(stt)) = &conn.config
         && let Some(ep) = &stt.endpoint
-        && let Ok(serde_json::Value::Object(opts)) = serde_json::from_str(&ep.options)
-        && let Some(model) = opts
-            .get("model")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
+        && let Some(model) = SpeechOptions::parse(&ep.options).model
+        && let Some(model) = nonempty(&model)
     {
         return model.to_owned();
     }
@@ -111,41 +91,8 @@ pub fn tts_voice_of_connection(conn: &Connection) -> Option<String> {
 }
 
 fn tts_voice_from_endpoint(ep: &ConnectionEndpoint, sakura: bool) -> Option<String> {
-    if let Ok(serde_json::Value::Object(opts)) = serde_json::from_str(&ep.options) {
-        if sakura {
-            let model = opts
-                .get("model")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or("zundamon");
-            let voice = opts
-                .get("voice")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or("normal");
-            return Some(format!("{model}/{voice}"));
-        }
-        if let Some(speaker) = opts.get("speaker") {
-            if let Some(num) = speaker.as_u64() {
-                return Some(num.to_string());
-            }
-            if let Some(s) = speaker.as_str().map(str::trim).filter(|s| !s.is_empty()) {
-                return Some(s.to_owned());
-            }
-        }
-        if let Some(voice) = opts
-            .get("voice")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return Some(voice.to_owned());
-        }
-    }
-    if sakura {
-        return Some("zundamon/normal".to_owned());
+    if let Some(voice) = SpeechOptions::parse(&ep.options).voice_id(sakura) {
+        return Some(voice);
     }
     match ep.adapter.trim().to_ascii_lowercase().as_str() {
         "voicevox" => Some("3".to_owned()),

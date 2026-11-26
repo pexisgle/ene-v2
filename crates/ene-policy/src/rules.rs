@@ -56,7 +56,7 @@ pub struct PolicyRule {
 pub const MAX_POLICY_TEXT_CHARS: usize = 500;
 
 /// A free-text policy the decision engine reads (`docs/design/permissions.md`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyText {
     /// Id of this policy text.
     pub id: String,

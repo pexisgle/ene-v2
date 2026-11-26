@@ -47,14 +47,43 @@ impl From<rusqlite::Error> for StoreError {
     }
 }
 
-impl From<ene_mind::MindError> for StoreError {
-    fn from(error: ene_mind::MindError) -> Self {
+impl From<ene_domain::DomainError> for StoreError {
+    fn from(error: ene_domain::DomainError) -> Self {
         Self::Invalid(error.to_string())
     }
 }
 
-impl From<ene_domain::DomainError> for StoreError {
-    fn from(error: ene_domain::DomainError) -> Self {
-        Self::Invalid(error.to_string())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sqlite(code: rusqlite::ErrorCode) -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code,
+                extended_code: 0,
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn a_busy_database_is_transient_and_a_broken_one_stops_the_host() {
+        for code in [
+            rusqlite::ErrorCode::DatabaseBusy,
+            rusqlite::ErrorCode::DatabaseLocked,
+        ] {
+            let mapped = StoreError::from(sqlite(code));
+            assert!(!mapped.is_storage(), "{code:?} must not stop the host");
+            assert!(matches!(mapped, StoreError::Unavailable(_)), "{code:?}");
+        }
+        for code in [
+            rusqlite::ErrorCode::DatabaseCorrupt,
+            rusqlite::ErrorCode::DiskFull,
+            rusqlite::ErrorCode::SystemIoFailure,
+        ] {
+            let mapped = StoreError::from(sqlite(code));
+            assert!(mapped.is_storage(), "{code:?} must stop the host");
+        }
     }
 }

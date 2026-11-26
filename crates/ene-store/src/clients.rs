@@ -1,6 +1,7 @@
 //! Clients, their declared capabilities, the active client per companion and
 //! bound device operations.
 
+use crate::row::{FromRow, row_fields};
 use crate::{
     Store, StoreError, enum_name_column,
     error::Result,
@@ -11,52 +12,44 @@ use ene_domain::{Activation, Client, DeviceOperation, DeviceStatus, Failure};
 use ene_policy::CapabilitySpec;
 use rusqlite::{OptionalExtension, Row, params};
 
-fn row_to_client(row: &Row<'_>) -> rusqlite::Result<Client> {
-    Ok(Client {
-        id: row.get("id")?,
-        name: row.get("name")?,
-        platform: row.get("platform")?,
-        capabilities: json_column(row, "capabilities", "stored client JSON is corrupt")?,
-        granted_capabilities: json_column(
-            row,
-            "granted_capabilities",
-            "stored client JSON is corrupt",
-        )?,
-        capability_specs: json_column(row, "capability_specs", "stored client JSON is corrupt")?,
-        revision: row.get::<_, u64>("revision")?,
-        last_seen: row.get("last_seen")?,
-    })
-}
-
-const CLIENT_COLUMNS: &str = "id, name, platform, capabilities, granted_capabilities, \
-     capability_specs, revision, last_seen";
-
-const ACTIVATION_COLUMNS: &str = "companion_id, client_id";
+row_fields!(Client, CLIENT_COLUMNS {
+    id,
+    name,
+    platform,
+    capabilities => json_column("stored client JSON is corrupt"),
+    granted_capabilities => json_column("stored client JSON is corrupt"),
+    capability_specs => json_column("stored client JSON is corrupt"),
+    revision,
+    last_seen,
+});
 
 const OPERATION_COLUMNS: &str = "operation_id, client_id, capability, input, \
      work_id, status, output, failure, created_at, updated_at";
 
-fn row_to_activation(row: &Row<'_>) -> rusqlite::Result<Activation> {
-    Ok(Activation {
-        companion_id: row.get(0)?,
-        client_id: row.get(1)?,
-    })
-}
+row_fields!(
+    Activation,
+    ACTIVATION_COLUMNS {
+        companion_id,
+        client_id,
+    }
+);
 
-fn row_to_operation(row: &Row<'_>) -> rusqlite::Result<DeviceOperation> {
-    let status = enum_name_column(row, "status", "unknown device status")?;
-    Ok(DeviceOperation {
-        id: row.get("operation_id")?,
-        client_id: row.get("client_id")?,
-        capability: row.get("capability")?,
-        input: json_column(row, "input", "stored operation JSON is corrupt")?,
-        work_id: row.get("work_id")?,
-        status,
-        output: optional_json_column(row, "output", "stored operation JSON is corrupt")?,
-        failure: optional_json_column(row, "failure", "stored operation JSON is corrupt")?,
-        created_at: row.get("created_at")?,
-        updated_at: row.get("updated_at")?,
-    })
+impl FromRow for DeviceOperation {
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        let status = enum_name_column(row, "status", "unknown device status")?;
+        Ok(DeviceOperation {
+            id: row.get("operation_id")?,
+            client_id: row.get("client_id")?,
+            capability: row.get("capability")?,
+            input: json_column(row, "input", "stored operation JSON is corrupt")?,
+            work_id: row.get("work_id")?,
+            status,
+            output: optional_json_column(row, "output", "stored operation JSON is corrupt")?,
+            failure: optional_json_column(row, "failure", "stored operation JSON is corrupt")?,
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+        })
+    }
 }
 
 /// Everything a client declares on registration, with the revision it saw.
@@ -83,7 +76,7 @@ impl<'a> ClientRepo<'a> {
         self.0.fetch_all(
             &format!("SELECT {CLIENT_COLUMNS} FROM clients ORDER BY last_seen DESC, id"),
             [],
-            row_to_client,
+            Client::from_row,
         )
     }
 
@@ -91,7 +84,7 @@ impl<'a> ClientRepo<'a> {
         self.0.fetch(
             &format!("SELECT {CLIENT_COLUMNS} FROM clients WHERE id = ?1"),
             [id],
-            row_to_client,
+            Client::from_row,
         )
     }
 
@@ -122,7 +115,7 @@ impl<'a> ClientRepo<'a> {
         let revision = current + 1;
         let changed = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(&format!(
                 "INSERT INTO clients (id, name, platform, capabilities, granted_capabilities, \
                  capability_specs, revision, last_seen) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
@@ -144,7 +137,7 @@ impl<'a> ClientRepo<'a> {
                     now(),
                     current,
                 ],
-                row_to_client,
+                Client::from_row,
             );
         changed
             .optional()?
@@ -179,7 +172,7 @@ impl<'a> ClientRepo<'a> {
         let next = existing.revision + 1;
         let changed = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(&format!(
                 "UPDATE clients SET capabilities = ?2, granted_capabilities = ?3, \
                  capability_specs = ?4, revision = ?5, last_seen = ?6 \
@@ -195,7 +188,7 @@ impl<'a> ClientRepo<'a> {
                     now(),
                     existing.revision,
                 ],
-                row_to_client,
+                Client::from_row,
             );
         changed
             .optional()?
@@ -206,7 +199,7 @@ impl<'a> ClientRepo<'a> {
         self.0.fetch_all(
             &format!("SELECT {ACTIVATION_COLUMNS} FROM activations ORDER BY companion_id"),
             [],
-            row_to_activation,
+            Activation::from_row,
         )
     }
 
@@ -214,7 +207,7 @@ impl<'a> ClientRepo<'a> {
         self.0.fetch(
             &format!("SELECT {ACTIVATION_COLUMNS} FROM activations WHERE companion_id = ?1"),
             [companion],
-            row_to_activation,
+            Activation::from_row,
         )
     }
 
@@ -230,7 +223,7 @@ impl<'a> ClientRepo<'a> {
                      updated_at = excluded.updated_at RETURNING {ACTIVATION_COLUMNS}"
                 ),
                 params![companion, client, now()],
-                row_to_activation,
+                Activation::from_row,
             )?
             .ok_or_else(|| StoreError::Storage("the activation did not persist".into()))
     }
@@ -254,7 +247,7 @@ impl<'a> ClientRepo<'a> {
     pub fn insert_operation(&self, operation: &DeviceOperation) -> Result<()> {
         let stamp = now();
         self.0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "INSERT INTO device_operations (operation_id, client_id, \
                  capability, input, work_id, status, created_at, updated_at) \
@@ -277,13 +270,13 @@ impl<'a> ClientRepo<'a> {
         self.0.fetch(
             &format!("SELECT {OPERATION_COLUMNS} FROM device_operations WHERE operation_id = ?1"),
             [id],
-            row_to_operation,
+            DeviceOperation::from_row,
         )
     }
 
     pub fn set_operation_status(&self, id: &str, status: DeviceStatus) -> Result<()> {
         self.0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE device_operations SET status = ?2, updated_at = ?3 \
                  WHERE operation_id = ?1",
@@ -314,7 +307,7 @@ impl<'a> ClientRepo<'a> {
         };
         let updated = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(&format!(
                 "UPDATE device_operations SET status = ?2, output = ?3, failure = ?4, \
                  updated_at = ?5 WHERE operation_id = ?1 \
@@ -329,7 +322,7 @@ impl<'a> ClientRepo<'a> {
                     failure.map(to_json).transpose()?,
                     now(),
                 ],
-                row_to_operation,
+                DeviceOperation::from_row,
             );
         match updated.optional()? {
             Some(operation) => Ok(Some(operation)),
@@ -347,7 +340,7 @@ impl<'a> ClientRepo<'a> {
                  ORDER BY created_at"
             ),
             [client],
-            row_to_operation,
+            DeviceOperation::from_row,
         )
     }
 
@@ -356,7 +349,7 @@ impl<'a> ClientRepo<'a> {
     pub fn mark_unanswered_operations_uncertain(&self) -> Result<usize> {
         let changed = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE device_operations SET status = 'uncertain', updated_at = ?1 \
                  WHERE status = 'dispatched'",
@@ -382,7 +375,7 @@ impl<'a> ClientRepo<'a> {
                      WHERE client_id = ?1 ORDER BY companion_id"
                 ),
                 [client],
-                row_to_activation,
+                Activation::from_row,
             )
             .map(|items| {
                 items
@@ -396,7 +389,7 @@ impl<'a> ClientRepo<'a> {
     /// whose tool publication failed.
     pub fn restore_client(&self, client: &Client) -> Result<()> {
         self.0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "INSERT OR REPLACE INTO clients (id, name, platform, capabilities, \
                  granted_capabilities, capability_specs, revision, last_seen) \
@@ -417,7 +410,7 @@ impl<'a> ClientRepo<'a> {
 
     pub fn delete_client(&self, id: &str) -> Result<()> {
         self.0
-            .conn()?
+            .conn()
             .prepare_cached("DELETE FROM clients WHERE id = ?1")?
             .execute([id])?;
         Ok(())
@@ -427,7 +420,7 @@ impl<'a> ClientRepo<'a> {
     /// publication failed.
     pub fn restore_activation(&self, activation: &Activation) -> Result<()> {
         self.0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "INSERT OR REPLACE INTO activations (companion_id, client_id, updated_at) \
                  VALUES (?1, ?2, ?3)",
@@ -442,7 +435,7 @@ impl<'a> ClientRepo<'a> {
 
     pub fn delete_activation(&self, companion: &str) -> Result<()> {
         self.0
-            .conn()?
+            .conn()
             .prepare_cached("DELETE FROM activations WHERE companion_id = ?1")?
             .execute([companion])?;
         Ok(())

@@ -59,8 +59,9 @@ async fn storage_errors_with_discarded_replies_still_stop_the_host() {
             .read(|app| {
                 app.world()
                     .resource::<Store>()
-                    .conn()?
-                    .execute_batch("DROP TABLE clients")?;
+                    .conn()
+                    .execute_batch("DROP TABLE clients")
+                    .map_err(ene_store::StoreError::from)?;
                 Ok(())
             })
             .await
@@ -95,7 +96,10 @@ async fn storage_errors_with_discarded_replies_still_stop_the_host() {
 async fn fresh_runtime_seeds_ene_once_and_does_not_resurrect_after_delete() {
     let state = tempfile::tempdir().unwrap();
     let runtime = Runtime::start(state.path()).await.unwrap();
-    let snap = runtime.read(snapshot).await.unwrap();
+    let snap = runtime
+        .inspect(|services| SnapshotReader::from(services).get())
+        .await
+        .unwrap();
     assert!(
         snap.companions
             .iter()
@@ -112,7 +116,10 @@ async fn fresh_runtime_seeds_ene_once_and_does_not_resurrect_after_delete() {
     runtime.shutdown().await.unwrap();
 
     let restarted = Runtime::start(state.path()).await.unwrap();
-    let snap = restarted.read(snapshot).await.unwrap();
+    let snap = restarted
+        .inspect(|services| SnapshotReader::from(services).get())
+        .await
+        .unwrap();
     assert!(
         snap.companions.is_empty(),
         "deleted initial companion must stay deleted after restart"
@@ -140,20 +147,20 @@ async fn a_job_runs_inside_the_callers_span() {
     let runtime = Runtime::start(state.path()).await.unwrap();
 
     let caller = tracing::info_span!("rpc-caller");
-    let observed = Arc::new(std::sync::Mutex::new(None));
+    let observed = Arc::new(parking_lot::Mutex::new(None));
     let slot = Arc::clone(&observed);
     caller
         .in_scope(|| {
             runtime.read(move |_| {
                 // The span the actor thread is running this job inside.
-                *slot.lock().unwrap() = tracing::Span::current().id();
+                *slot.lock() = tracing::Span::current().id();
                 Ok(())
             })
         })
         .await
         .unwrap();
 
-    let seen = observed.lock().unwrap().clone();
+    let seen = observed.lock().clone();
     assert!(caller.id().is_some(), "the caller span must be enabled");
     assert_eq!(
         seen,

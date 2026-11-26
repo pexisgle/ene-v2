@@ -8,7 +8,97 @@
 //! not declared, and no renderer means no `body.motion` at all.
 
 use ene_rpc as w;
-use std::path::Path;
+use serde::Serialize;
+use std::{collections::BTreeMap, path::Path};
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SchemaType {
+    Object,
+    String,
+    Number,
+    Boolean,
+    Null,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum PropertyType {
+    Scalar(SchemaType),
+    Nullable([SchemaType; 2]),
+}
+
+#[derive(Serialize)]
+struct Property<'a> {
+    #[serde(rename = "type")]
+    kind: PropertyType,
+    #[serde(rename = "enum", skip_serializing_if = "Vec::is_empty")]
+    choices: Vec<Option<&'a str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    minimum: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    maximum: Option<f32>,
+}
+
+impl<'a> Property<'a> {
+    fn new(kind: SchemaType, description: Option<&'static str>) -> Self {
+        Self {
+            kind: PropertyType::Scalar(kind),
+            choices: Vec::new(),
+            description,
+            minimum: None,
+            maximum: None,
+        }
+    }
+
+    fn text_choices(choices: &'a [&'a str]) -> Self {
+        let mut field = Self::new(SchemaType::String, None);
+        field.choices.extend(choices.iter().copied().map(Some));
+        field
+    }
+
+    fn nullable_text(choices: &'a [&'a str], description: &'static str) -> Self {
+        let mut field = Self::text_choices(choices);
+        field.kind = PropertyType::Nullable([SchemaType::String, SchemaType::Null]);
+        if !choices.is_empty() {
+            field.choices.push(None);
+        }
+        field.description = Some(description);
+        field
+    }
+
+    fn angle(limit: f32, description: &'static str) -> Self {
+        let mut field = Self::new(SchemaType::Number, Some(description));
+        field.minimum = Some(-limit);
+        field.maximum = Some(limit);
+        field
+    }
+}
+
+#[derive(Serialize)]
+struct ObjectSchema<'a> {
+    #[serde(rename = "type")]
+    kind: SchemaType,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    required: &'static [&'static str],
+    properties: BTreeMap<&'static str, Property<'a>>,
+}
+
+impl<'a> ObjectSchema<'a> {
+    fn json(
+        required: &'static [&'static str],
+        properties: impl IntoIterator<Item = (&'static str, Property<'a>)>,
+    ) -> String {
+        serde_json::json!(Self {
+            kind: SchemaType::Object,
+            required,
+            properties: properties.into_iter().collect(),
+        })
+        .to_string()
+    }
+}
 
 /// The faces the renderer can blend. `neutral` clears an expression.
 pub const EXPRESSIONS: &[&str] = &["neutral", "happy", "sad", "surprised", "relaxed"];
@@ -70,35 +160,16 @@ impl Declaration {
     }
 
     fn body_motion_spec(&self) -> w::ClientCapabilitySpec {
-        let mut properties = serde_json::Map::new();
-        properties.insert(
-            "motion".into(),
-            serde_json::json!({
-                "type": "string",
-                "enum": self.motions,
-            }),
-        );
+        let mut properties = BTreeMap::from([("motion", Property::text_choices(&self.motions))]);
         if !self.expressions.is_empty() {
-            let mut expr_enum: Vec<serde_json::Value> = self
-                .expressions
-                .iter()
-                .map(|name| serde_json::Value::String((*name).to_owned()))
-                .collect();
-            expr_enum.push(serde_json::Value::Null);
             properties.insert(
-                "expression".into(),
-                serde_json::json!({
-                    "type": ["string", "null"],
-                    "enum": expr_enum,
-                    "description": "A face to hold, or null to keep the current one. Use neutral to clear.",
-                }),
+                "expression",
+                Property::nullable_text(
+                    &self.expressions,
+                    "A face to hold, or null to keep the current one. Use neutral to clear.",
+                ),
             );
         }
-        let schema = serde_json::json!({
-            "type": "object",
-            "required": ["motion"],
-            "properties": properties,
-        });
         w::ClientCapabilitySpec {
             name: "body.motion".into(),
             tool_name: "body_motion".into(),
@@ -115,7 +186,7 @@ impl Declaration {
                           task_complete, apologize). An optional expression sets the face \
                           separately."
                 .into(),
-            input_schema: schema.to_string(),
+            input_schema: ObjectSchema::json(&["motion"], properties),
             presets: self
                 .motions
                 .iter()
@@ -129,33 +200,32 @@ impl Declaration {
 }
 
 fn body_look_at_spec() -> w::ClientCapabilitySpec {
-    let look_at_schema = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "yaw_deg": {
-                "type": "number",
-                "minimum": -90.0,
-                "maximum": 90.0,
-                "description": "Horizontal gaze angle in degrees (+left, -right)."
-            },
-            "pitch_deg": {
-                "type": "number",
-                "minimum": -60.0,
-                "maximum": 60.0,
-                "description": "Vertical gaze angle in degrees (+up, -down)."
-            },
-            "reset": {
-                "type": "boolean",
-                "description": "When true, clears any gaze override back to animation/neutral."
-            }
-        }
-    });
+    let input_schema = ObjectSchema::json(
+        &[],
+        [
+            (
+                "yaw_deg",
+                Property::angle(90.0, "Horizontal gaze angle in degrees (+left, -right)."),
+            ),
+            (
+                "pitch_deg",
+                Property::angle(60.0, "Vertical gaze angle in degrees (+up, -down)."),
+            ),
+            (
+                "reset",
+                Property::new(
+                    SchemaType::Boolean,
+                    Some("When true, clears any gaze override back to animation/neutral."),
+                ),
+            ),
+        ],
+    );
     w::ClientCapabilitySpec {
         name: "body.look_at".into(),
         tool_name: "body_look_at".into(),
         description: "Direct the avatar's eye gaze using yaw/pitch degrees, or reset to neutral."
             .into(),
-        input_schema: look_at_schema.to_string(),
+        input_schema,
         presets: Vec::new(),
         approval: w::CapabilityApproval::Auto.into(),
         ..Default::default()
@@ -163,36 +233,43 @@ fn body_look_at_spec() -> w::ClientCapabilitySpec {
 }
 
 fn body_perch_spec() -> w::ClientCapabilitySpec {
-    let perch_schema = serde_json::json!({
-        "type": "object",
-        "required": ["x", "y"],
-        "properties": {
-            "x": {
-                "type": "number",
-                "description": "Logical X coordinate on the monitor."
-            },
-            "y": {
-                "type": "number",
-                "description": "Logical Y coordinate on the monitor."
-            },
-            "monitor": {
-                "type": ["string", "null"],
-                "description": "Optional target monitor name."
-            },
-            "posture": {
-                "type": ["string", "null"],
-                "enum": ["sit_idle", "sit_swing_legs", "idle", null],
-                "description": "Optional resting posture to pair with the perch position."
-            }
-        }
-    });
+    let input_schema = ObjectSchema::json(
+        &["x", "y"],
+        [
+            (
+                "x",
+                Property::new(
+                    SchemaType::Number,
+                    Some("Logical X coordinate on the monitor."),
+                ),
+            ),
+            (
+                "y",
+                Property::new(
+                    SchemaType::Number,
+                    Some("Logical Y coordinate on the monitor."),
+                ),
+            ),
+            (
+                "monitor",
+                Property::nullable_text(&[], "Optional target monitor name."),
+            ),
+            (
+                "posture",
+                Property::nullable_text(
+                    &["sit_idle", "sit_swing_legs", "idle"],
+                    "Optional resting posture to pair with the perch position.",
+                ),
+            ),
+        ],
+    );
     w::ClientCapabilitySpec {
         name: "body.perch".into(),
         tool_name: "body_perch".into(),
         description:
             "Move the avatar to logical screen coordinates (e.g. a window edge) and optionally sit."
                 .into(),
-        input_schema: perch_schema.to_string(),
+        input_schema,
         presets: Vec::new(),
         approval: w::CapabilityApproval::Auto.into(),
         ..Default::default()
@@ -200,34 +277,33 @@ fn body_perch_spec() -> w::ClientCapabilitySpec {
 }
 
 fn eye_watch_spec() -> w::ClientCapabilitySpec {
-    let schema = serde_json::json!({
-        "type": "object",
-        "required": ["target_pattern", "match_kind", "notify_on", "enabled"],
-        "properties": {
-            "target_pattern": {
-                "type": "string",
-                "description": "A substring or regular expression matched against the window title or app id.",
-            },
-            "match_kind": {
-                "type": "string",
-                "enum": ["title", "app_id"],
-            },
-            "notify_on": {
-                "type": "string",
-                "enum": ["focus", "blur", "title_change"],
-            },
-            "enabled": {
-                "type": "boolean",
-            },
-        },
-    });
+    let input_schema = ObjectSchema::json(
+        &["target_pattern", "match_kind", "notify_on", "enabled"],
+        [
+            (
+                "target_pattern",
+                Property::new(
+                    SchemaType::String,
+                    Some(
+                        "A substring or regular expression matched against the window title or app id.",
+                    ),
+                ),
+            ),
+            ("match_kind", Property::text_choices(&["title", "app_id"])),
+            (
+                "notify_on",
+                Property::text_choices(&["focus", "blur", "title_change"]),
+            ),
+            ("enabled", Property::new(SchemaType::Boolean, None)),
+        ],
+    );
     w::ClientCapabilitySpec {
         name: "eye.watch".into(),
         tool_name: "set_eye_watch".into(),
         description: "Watch for a window becoming active, losing focus, or changing title, \
                       and report it as soon as it matches."
             .into(),
-        input_schema: schema.to_string(),
+        input_schema,
         presets: Vec::new(),
         // Watching is read-only perception, never an action on the machine.
         approval: w::CapabilityApproval::Auto.into(),

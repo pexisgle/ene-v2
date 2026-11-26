@@ -4,14 +4,14 @@ use super::*;
 use crate::host::{
     db::Store,
     error::HostError,
-    json::JsonDoc,
-    mind::{Assignment, Assignments, Companion, Profile, Role, State},
+    mind::{Companion, ModelAssignment, ModelAssignments, Profile, Role, State},
     model::{self, Credentials},
     settings::{
         Connection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint, LlmConnection,
         SttConnection, TtsConnection,
     },
 };
+use ene_mind::JsonDoc;
 use rig_core::catalog::Catalog;
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -124,8 +124,8 @@ pub(super) fn companion() -> Companion {
         state_revision: 1,
         body: JsonDoc::empty(),
         voice: JsonDoc::empty(),
-        assignments: Assignments {
-            companion: Assignment {
+        assignments: ModelAssignments {
+            companion: ModelAssignment {
                 connection_id: "p08".into(),
                 model_id: "m".into(),
             },
@@ -154,7 +154,8 @@ pub(super) async fn providers(
     body: &str,
     destination: &str,
 ) -> Providers {
-    let providers = installed_providers(root, extension, body, destination, json!({"type":"none"}));
+    let providers =
+        installed_providers(root, extension, body, destination, &json!({"type":"none"}));
     providers.start("openrouter", extension).await.unwrap();
     providers
 }
@@ -164,7 +165,7 @@ pub(super) fn installed_providers(
     extension: Extension,
     body: &str,
     destination: &str,
-    auth: serde_json::Value,
+    auth: &serde_json::Value,
 ) -> Providers {
     let path = root.join(PLUGINS_DIR).join("openrouter");
     let capabilities =
@@ -224,7 +225,7 @@ pub(super) fn emit(document: &str) -> String {
     format!("{} local.get $p call $emit", guest_write(document))
 }
 
-pub(super) fn service(document: serde_json::Value) -> String {
+pub(super) fn service(document: &serde_json::Value) -> String {
     format!(
         "{} local.get $p call $service local.set $p",
         guest_write(&document.to_string())
@@ -355,7 +356,7 @@ async fn p10_listing_starts_installed_plugins_and_accepts_empty_models() {
             reply("{}")
         ),
         &native.base,
-        json!({"type":"none"}),
+        &json!({"type":"none"}),
     );
     assert!(providers.running("openrouter", Extension::Llm).is_none());
     for _ in 0..2 {
@@ -392,7 +393,7 @@ fn p10_concurrent_cold_probes_share_startup_without_admission_failures() {
                 reply("{}")
             ),
             &native.base,
-            json!({"type":"none"}),
+            &json!({"type":"none"}),
         );
         let (release, blocked) = std::sync::mpsc::channel::<()>();
         let (entered, ready) = tokio::sync::oneshot::channel();
@@ -467,7 +468,7 @@ fn p10_cold_probe_deadline_includes_queued_startup_and_allows_retry() {
                 reply("{}")
             ),
             &native.base,
-            json!({"type":"none"}),
+            &json!({"type":"none"}),
         );
         let (release, blocked) = std::sync::mpsc::channel::<()>();
         let (entered, ready) = tokio::sync::oneshot::channel();
@@ -518,7 +519,7 @@ async fn p10_listing_initialization_failure_never_selects_native() {
         Extension::Llm,
         &reply("{}"),
         &native.base,
-        json!({"type":"none"}),
+        &json!({"type":"none"}),
     );
     let path = root.path().join(PLUGINS_DIR).join("openrouter/main.wasm");
     let wasm = std::fs::read_to_string(&path).unwrap().replace(

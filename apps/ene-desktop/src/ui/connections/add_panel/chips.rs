@@ -102,12 +102,12 @@ pub(super) fn build_voice_embedding_chips(
     ];
     specs
         .into_iter()
-        .map(|spec| preset_chip(spec, hub, theme, cx))
+        .map(|spec| preset_chip(&spec, hub, theme, cx))
         .collect()
 }
 
 fn preset_chip(
-    spec: PresetChipSpec,
+    spec: &PresetChipSpec,
     hub: &Entity<Hub>,
     theme: &Theme,
     cx: &Context<ConnectionsPane>,

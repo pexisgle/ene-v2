@@ -9,17 +9,16 @@ pub(crate) async fn read_response_body(
     label: &str,
 ) -> HttpResult<Vec<u8>> {
     let mut out = Vec::new();
-    while let Some(chunk) =
-        response
-            .chunk()
-            .await
-            .map_err(|error| VoiceHttpError::ResponseRead {
-                label: label.to_owned(),
-                error: error.without_url().to_string(),
-            })?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        VoiceHttpError::Transport(format!(
+            "the {label} response failed: {}",
+            error.without_url()
+        ))
+    })? {
         if out.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(VoiceHttpError::ResponseTooLarge(label.to_owned()));
+            return Err(VoiceHttpError::LimitExceeded(format!(
+                "the {label} response exceeded the host limit"
+            )));
         }
         out.extend_from_slice(&chunk);
     }
@@ -35,19 +34,16 @@ pub(crate) async fn post(
         Some(secret) => call.bearer_auth(secret),
         None => call,
     };
-    let response = call
-        .send()
-        .await
-        .map_err(|error| VoiceHttpError::EndpointUnreachable {
-            label: label.to_owned(),
-            error: error.to_string(),
-        })?;
-    if response.status().is_success() {
+    let response = call.send().await.map_err(|error| {
+        VoiceHttpError::Transport(format!("the {label} endpoint is unreachable: {error}"))
+    })?;
+    let status = response.status();
+    if status.is_success() {
         Ok(response)
     } else {
-        Err(VoiceHttpError::EndpointStatus {
-            label: label.to_owned(),
-            status: response.status().as_u16(),
-        })
+        Err(VoiceHttpError::Protocol(format!(
+            "the {label} endpoint answered {}",
+            status.as_u16()
+        )))
     }
 }

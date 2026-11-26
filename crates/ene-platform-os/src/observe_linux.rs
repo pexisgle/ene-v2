@@ -1,9 +1,9 @@
-use super::{Observation, Window, parse_wm_class, wayland_state_is_activated};
-use std::{
-    collections::HashMap,
-    sync::{LazyLock, Mutex},
-    time::Instant,
-};
+mod protocol;
+
+use self::protocol::{parse_wm_class, wayland_state_is_activated};
+use crate::{Observation, Window};
+use parking_lot::Mutex;
+use std::{collections::HashMap, sync::LazyLock, time::Instant};
 use wayland_client::backend::ObjectId;
 use wayland_client::{
     Connection as WaylandConnection, Dispatch, EventQueue, Proxy, QueueHandle, delegate_noop,
@@ -34,17 +34,13 @@ enum LinuxBackend {
     Unsupported,
 }
 
-pub(super) fn supported() -> bool {
-    let Ok(backend) = BACKEND.lock() else {
-        return false;
-    };
+pub fn supported() -> bool {
+    let backend = BACKEND.lock();
     !matches!(*backend, LinuxBackend::Unsupported)
 }
 
-pub(super) fn observe() -> Observation {
-    let Ok(mut backend) = BACKEND.lock() else {
-        return empty();
-    };
+pub fn observe() -> Observation {
+    let mut backend = BACKEND.lock();
     match &mut *backend {
         LinuxBackend::Wayland(wayland) => wayland.observe(),
         LinuxBackend::X11(x11) => x11.observe(),

@@ -3,12 +3,13 @@ use crate::host::{
     Credentials, HostError, HostRuntime,
     client::{CapabilityApproval, CapabilitySpec},
     db::Store,
-    json::JsonDoc,
-    mind::{Assignment, Assignments, Companion, Profile, State},
+    mind::{Companion, ModelAssignment, ModelAssignments, Profile, State},
     notify::Notifier,
     resources::{DeviceHub, DeviceTimeout, Waiting},
 };
 use bevy_ecs::prelude::*;
+use ene_domain::PolicyText;
+use ene_mind::JsonDoc;
 use ene_rpc as w;
 use rig_core::catalog::{Catalog, Connector, ModelSpec};
 use rig_core::completion::Message;
@@ -34,7 +35,7 @@ const STALL: Duration = Duration::from_secs(600);
 /// variants answer nothing a test waits for (compaction.rs's `serve`).
 struct Provider {
     base: String,
-    bodies: Arc<std::sync::Mutex<Vec<String>>>,
+    bodies: Arc<parking_lot::Mutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -43,7 +44,7 @@ async fn serve(text: &'static str, delay: Duration) -> Provider {
         .await
         .unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let bodies = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let seen = Arc::clone(&bodies);
     let answer = completion(text);
     let task = tokio::spawn(async move {
@@ -80,7 +81,7 @@ async fn serve(text: &'static str, delay: Duration) -> Provider {
             let Some(body) = body else {
                 return;
             };
-            seen.lock().unwrap().push(body);
+            seen.lock().push(body);
             tokio::time::sleep(delay).await;
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -142,8 +143,8 @@ fn settle(app: &mut App, runtime: &tokio::runtime::Runtime) {
     panic!("the decision did not settle in time");
 }
 
-fn companion(assignments: Assignments) -> Companion {
-    let now = crate::host::util::now();
+fn companion(assignments: ModelAssignments) -> Companion {
+    let now = ene_store::util::now();
     Companion {
         id: "ene".into(),
         name: "ene".into(),
@@ -165,11 +166,11 @@ fn companion(assignments: Assignments) -> Companion {
 
 /// The Decision role assigned, so the gate asks the model at `provider`.
 fn decision_companion() -> Companion {
-    let assignment = Assignment {
+    let assignment = ModelAssignment {
         connection_id: "c1".into(),
         model_id: "gpt-4o-mini".into(),
     };
-    companion(Assignments {
+    companion(ModelAssignments {
         task: assignment.clone(),
         decision: Some(assignment),
         ..Default::default()
@@ -178,8 +179,8 @@ fn decision_companion() -> Companion {
 
 /// Only the task model assigned: the Decision role falls back to it.
 fn task_only_companion() -> Companion {
-    companion(Assignments {
-        task: Assignment {
+    companion(ModelAssignments {
+        task: ModelAssignment {
             connection_id: "c1".into(),
             model_id: "gpt-4o-mini".into(),
         },
@@ -268,7 +269,7 @@ struct DecisionWorld {
 }
 
 impl DecisionWorld {
-    fn at(runtime: &tokio::runtime::Runtime, provider: &str, owner: Companion) -> Self {
+    fn at(runtime: &tokio::runtime::Runtime, provider: &str, owner: &Companion) -> Self {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
         store
@@ -278,7 +279,7 @@ impl DecisionWorld {
                 &[(connection_row(provider), 0)],
             )
             .unwrap();
-        store.companion_repo().insert_companion(&owner).unwrap();
+        store.companion_repo().insert_companion(owner).unwrap();
         register_files_client(&store);
         let credentials = Credentials::new(true);
         credentials.remember("c1", "test-key".into());
@@ -318,17 +319,17 @@ impl DecisionWorld {
         // `Agent` and `AgentId` are the kernel's own identity for an
         // agent: without them the start stage finds no agent for the call
         // and drops it, so the gate never runs.
-        let agent = app
-            .world_mut()
-            .spawn((
-                Agent,
+        let agent = spawn_root(
+            app.world_mut(),
+            (
                 AgentId(crate::host::agent::companion_agent_id("ene")),
                 crate::host::agent::CompanionAgent {
                     companion_id: "ene".into(),
                 },
                 Conversation(history),
-            ))
-            .id();
+            ),
+        )
+        .id();
         Self {
             app,
             agent,
@@ -421,7 +422,7 @@ fn a_safe_operation_the_model_allows_runs_without_a_card() {
         r#"{"decision":"allow","reason":"依頼どおりの安全な操作です"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     let call = world.gated_call("/tmp/a");
     world.app.update();
     let request = world.pending().request_id;
@@ -460,7 +461,7 @@ fn a_safe_operation_the_model_allows_runs_without_a_card() {
             .len(),
         0
     );
-    let bodies = provider.bodies.lock().unwrap().clone();
+    let bodies = provider.bodies.lock().clone();
     assert_eq!(bodies.len(), 1, "one decision call");
     provider.task.abort();
 }
@@ -472,7 +473,7 @@ fn an_operation_that_breaks_a_free_text_policy_is_carded_once() {
         r#"{"decision":"require_approval","reason":"ポリシー: 外部への送信は常に確認"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     world
         .store()
         .policy_repo()
@@ -517,7 +518,7 @@ fn a_timeout_or_an_invalid_reply_fails_safe_to_the_card() {
     let runtime = paused_runtime();
     // The endpoint stalls past the deadline: only the timeout answers.
     let provider = runtime.block_on(serve(r#"{"decision":"allow","reason":"遅すぎる"}"#, STALL));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     let call = world.gated_call("/tmp/a");
     world.app.update();
     let request = world.pending().request_id;
@@ -535,12 +536,12 @@ fn a_timeout_or_an_invalid_reply_fails_safe_to_the_card() {
             == ApprovalStatus::Pending
     );
     assert!(world.app.world().get::<Approved>(call).is_none());
-    assert!(provider.bodies.lock().unwrap().len() <= 1);
+    assert!(provider.bodies.lock().len() <= 1);
     provider.task.abort();
 
     // The reply is prose, not the JSON asked for.
     let provider = runtime.block_on(serve("はい、承認します", Duration::ZERO));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     let call = world.gated_call("/tmp/a");
     world.app.update();
     let request = world.pending().request_id;
@@ -572,7 +573,7 @@ fn the_prompt_the_model_received_carries_the_bounded_inputs() {
         r#"{"decision":"require_approval","reason":"対象が大きすぎる"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     world
         .store()
         .policy_repo()
@@ -605,7 +606,7 @@ fn the_prompt_the_model_received_carries_the_bounded_inputs() {
     world.app.update();
     settle(&mut world.app, &runtime);
 
-    let bodies = provider.bodies.lock().unwrap().clone();
+    let bodies = provider.bodies.lock().clone();
     assert_eq!(bodies.len(), 1, "one decision call");
     let body = &bodies[0];
     assert!(body.contains("device_request"), "{body}");
@@ -634,7 +635,7 @@ fn a_late_decision_drops_when_the_user_answered_first() {
         r#"{"decision":"allow","reason":"安全だった"}"#,
         Duration::from_secs(1),
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     let call = world.gated_call("/tmp/a");
     world.app.update();
     let request = world.pending().request_id;
@@ -675,17 +676,13 @@ fn the_decision_role_falls_back_to_the_task_model() {
         r#"{"decision":"allow","reason":"依頼どおりの操作"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, task_only_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &task_only_companion());
     let call = world.gated_call("/tmp/a");
     world.app.update();
     let request = world.pending().request_id;
     settle(&mut world.app, &runtime);
 
-    assert_eq!(
-        provider.bodies.lock().unwrap().len(),
-        1,
-        "the task model answered"
-    );
+    assert_eq!(provider.bodies.lock().len(), 1, "the task model answered");
     let approval = world
         .store()
         .approval_repo()
@@ -704,7 +701,7 @@ fn always_approve_persists_allow_rule_and_skips_second_prompt() {
         r#"{"decision":"require_approval","reason":"外部ファイル操作"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     let call1 = world.gated_call("/tmp/a");
     world.app.update();
     let request = world.pending().request_id;
@@ -723,7 +720,7 @@ fn always_approve_persists_allow_rule_and_skips_second_prompt() {
 
     // A second matching call is auto-approved directly from the saved rule
     // without asking the decision model or raising a second approval card.
-    let calls_before = provider.bodies.lock().unwrap().len();
+    let calls_before = provider.bodies.lock().len();
     let call2 = world.gated_call("/tmp/a");
     world.app.update();
     assert!(
@@ -743,7 +740,7 @@ fn always_approve_persists_allow_rule_and_skips_second_prompt() {
             .unwrap(),
         [] as [ene_policy::Approval; 0]
     );
-    assert_eq!(provider.bodies.lock().unwrap().len(), calls_before);
+    assert_eq!(provider.bodies.lock().len(), calls_before);
     world.gated_call("/tmp/b");
     world.app.update();
     assert_eq!(
@@ -765,7 +762,7 @@ fn b20_confirm_rule_is_never_bypassed_by_decision_allow() {
         r#"{"decision":"allow","reason":"safe"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     world
         .store()
         .policy_repo()
@@ -790,7 +787,7 @@ fn b20_confirm_rule_is_never_bypassed_by_decision_allow() {
     let events = world.events();
     assert_eq!(cards(&events), vec![request.clone()]);
     assert!(world.app.world().get::<Approved>(call).is_none());
-    assert_eq!(provider.bodies.lock().unwrap().len(), 0);
+    assert_eq!(provider.bodies.lock().len(), 0);
     let resolved = submit(world.app.world_mut(), &request, ApprovalDecision::Approve).unwrap();
     assert_eq!(resolved.status, ApprovalStatus::Approved);
     assert!(world.app.world().get::<Approved>(call).is_some());
@@ -804,7 +801,7 @@ fn b06_submit_keeps_hold_when_bound_client_loses_grant() {
         r#"{"decision":"require_approval","reason":"ask"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     let call = world.gated_call("/tmp/a");
     world.app.update();
     let request = world.pending().request_id;
@@ -844,7 +841,7 @@ fn b18_large_always_approve_persists_exact_digest_rule_and_skips_second_prompt()
         r#"{"decision":"require_approval","reason":"large payload"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     let big_path = format!("/tmp/{}", "a".repeat(4200));
     let call1 = world.gated_call(&big_path);
     world.app.update();
@@ -891,12 +888,11 @@ fn b05_policy_read_failure_fails_closed_instead_of_treating_as_empty() {
         r#"{"decision":"allow","reason":"safe"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     // Corrupt policy_rules row triggers HostError::Storage on policy_rules().
     world
         .store()
         .conn()
-        .unwrap()
         .execute(
             "INSERT INTO policy_rules (id, tool_name, pattern, effect, created_at) \
                  VALUES ('bad', '*', '*', 'bogus', '2026-01-01T00:00:00Z')",
@@ -910,7 +906,7 @@ fn b05_policy_read_failure_fails_closed_instead_of_treating_as_empty() {
             .app
             .world()
             .resource::<crate::host::HostState>()
-            .failed
+            .failure()
             .is_some(),
         "corrupted policy rules must fail the host instead of returning empty rules"
     );

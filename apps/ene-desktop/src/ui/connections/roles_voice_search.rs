@@ -105,13 +105,13 @@ pub(super) struct VoiceRoleSpec {
 
 pub(super) fn render_voice_role_row(
     pane: &mut ConnectionsPane,
-    spec: VoiceRoleSpec,
+    spec: &VoiceRoleSpec,
     conn_names: &BTreeMap<String, String>,
     live: bool,
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
 ) -> AnyElement {
-    let current_text = resolve_voice_label(&spec, conn_names);
+    let current_text = resolve_voice_label(spec, conn_names);
     let dd_open = pane.open_dropdown.as_deref() == Some(spec.dd_key);
     let filter_d = pane.drafts.draft(
         cx,
@@ -121,7 +121,7 @@ pub(super) fn render_voice_role_row(
         theme,
     );
     let filter_txt = filter_d.read(cx).text().to_owned();
-    let options = build_voice_role_options(&spec);
+    let options = build_voice_role_options(spec);
     let current_value = spec.active.as_ref().map_or_else(
         || "__off__".to_owned(),
         |(cid, vid)| encode_model_choice(cid, vid),

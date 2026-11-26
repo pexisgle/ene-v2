@@ -1,8 +1,7 @@
 //! Companion CRUD, model assignment, mind profile, template, and preview RPCs.
 
-use super::{RpcDispatcher, companion_update, decode};
+use super::{RpcDispatcher, companion_update, id_request};
 use crate::update::Update;
-use buffa::view::MessageView;
 use ene_client_core::{
     ModelRoleSlot,
     domain::{
@@ -10,26 +9,40 @@ use ene_client_core::{
         ModelAssignment, NewCompanionSpec,
     },
     templates::export_template_json,
-    wire::companion::assignment_patch_from,
 };
 use ene_rpc as w;
 
-fn default_assignments(default_model: Option<(String, String)>) -> Option<w::ModelAssignments> {
-    default_model.map(|(conn_id, model_id)| w::ModelAssignments {
-        companion: Some(w::ModelAssignment {
-            connection_id: conn_id.clone(),
-            model_id: model_id.clone(),
-            ..Default::default()
-        })
-        .into(),
-        task: Some(w::ModelAssignment {
-            connection_id: conn_id,
-            model_id,
-            ..Default::default()
-        })
-        .into(),
+pub(super) fn shared_model_assignments(value: ModelAssignment) -> w::ModelAssignments {
+    let assignment = w::ModelAssignment::from(value);
+    w::ModelAssignments {
+        companion: Some(assignment.clone()).into(),
+        task: Some(assignment).into(),
         ..Default::default()
-    })
+    }
+}
+
+fn update_companion(
+    rpc: &RpcDispatcher,
+    epoch: u64,
+    context: &'static str,
+    request: w::UpdateCompanionRequest,
+) {
+    rpc.call_owned(
+        epoch,
+        context,
+        request!(host.update_companion(request)),
+        companion_update,
+    );
+}
+
+fn binding_document(schema: &str, value: &impl serde::Serialize) -> Option<w::JsonDocument> {
+    serde_json::to_string(value)
+        .ok()
+        .map(|json| w::JsonDocument {
+            schema: schema.into(),
+            json,
+            ..Default::default()
+        })
 }
 
 pub(crate) fn create_companion(
@@ -37,29 +50,20 @@ pub(crate) fn create_companion(
     epoch: u64,
     spec: NewCompanionSpec,
     voice: Option<String>,
-    default_model: Option<(String, String)>,
+    default_model: Option<ModelAssignment>,
 ) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
-    let assignments = default_assignments(default_model);
-    rpc.spawn(
+    let assignments = default_model.map(shared_model_assignments);
+    rpc.call_owned(
         epoch,
         "コンパニオンの作成",
-        async move {
-            let response = host
-                .host
-                .create_companion(w::CreateCompanionRequest {
-                    name: spec.name,
-                    mind: spec.mind,
-                    persona: (!spec.persona.trim().is_empty()).then_some(spec.persona),
-                    voice_identifier: voice,
-                    assignments: assignments.into(),
-                    ..Default::default()
-                })
-                .await?;
-            response.view().to_owned_message().map_err(decode)
-        },
+        request!(host.create_companion(w::CreateCompanionRequest {
+            name: spec.name,
+            mind: spec.mind,
+            persona: (!spec.persona.trim().is_empty()).then_some(spec.persona),
+            voice_identifier: voice,
+            assignments: assignments.into(),
+            ..Default::default()
+        })),
         |companion| Update::Created(companion.id),
     );
 }
@@ -70,46 +74,24 @@ pub(crate) fn update_companion_profile(
     companion: Companion,
     patch: CompanionProfilePatch,
 ) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
     let voice_identifier = patch.voice.voice_id.clone().unwrap_or_default();
-    let body_doc = serde_json::to_string(&patch.body)
-        .ok()
-        .map(|json| w::JsonDocument {
-            schema: "ene.body.v1".into(),
-            json,
-            ..Default::default()
-        });
-    let voice_doc = serde_json::to_string(&patch.voice)
-        .ok()
-        .map(|json| w::JsonDocument {
-            schema: "ene.voice.v1".into(),
-            json,
-            ..Default::default()
-        });
-    rpc.spawn(
+    let body_doc = binding_document("ene.body.v1", &patch.body);
+    let voice_doc = binding_document("ene.voice.v1", &patch.voice);
+    update_companion(
+        rpc,
         epoch,
         "コンパニオンの保存",
-        async move {
-            let response = host
-                .host
-                .update_companion(w::UpdateCompanionRequest {
-                    id: companion.id,
-                    revision: companion.revision,
-                    name: (!patch.name.is_empty() && patch.name != companion.name)
-                        .then_some(patch.name),
-                    persona: Some(patch.persona),
-                    mind: (patch.mind != companion.mind).then_some(patch.mind),
-                    body: body_doc.into(),
-                    voice: voice_doc.into(),
-                    voice_identifier: Some(voice_identifier),
-                    ..Default::default()
-                })
-                .await?;
-            response.view().to_owned_message().map_err(decode)
+        w::UpdateCompanionRequest {
+            id: companion.id,
+            revision: companion.revision,
+            name: (!patch.name.is_empty() && patch.name != companion.name).then_some(patch.name),
+            persona: Some(patch.persona),
+            mind: (patch.mind != companion.mind).then_some(patch.mind),
+            body: body_doc.into(),
+            voice: voice_doc.into(),
+            voice_identifier: Some(voice_identifier),
+            ..Default::default()
         },
-        companion_update,
     );
 }
 
@@ -121,35 +103,22 @@ pub(crate) fn assign_model(
     slot: ModelRoleSlot,
     assignment: Option<ModelAssignment>,
 ) {
-    let Some(host) = rpc.host() else {
-        return;
+    let patch = w::AssignmentPatch::from(assignment);
+    let mut request = w::UpdateCompanionRequest {
+        id: companion_id,
+        revision,
+        ..Default::default()
     };
-    let patch = assignment_patch_from(assignment);
-    rpc.spawn(
-        epoch,
-        "モデル割当の変更",
-        async move {
-            let mut request = w::UpdateCompanionRequest {
-                id: companion_id,
-                revision,
-                ..Default::default()
-            };
-            match slot {
-                ModelRoleSlot::Companion => request.companion_assignment = Some(patch).into(),
-                ModelRoleSlot::Task => request.task_assignment = Some(patch).into(),
-                ModelRoleSlot::Perception => request.perception_assignment = Some(patch).into(),
-                ModelRoleSlot::Compaction => request.compaction_assignment = Some(patch).into(),
-                ModelRoleSlot::Consolidation => {
-                    request.consolidation_assignment = Some(patch).into()
-                }
-                ModelRoleSlot::Decision => request.decision_assignment = Some(patch).into(),
-                ModelRoleSlot::Embedding => request.embedding_assignment = Some(patch).into(),
-            }
-            let response = host.host.update_companion(request).await?;
-            response.view().to_owned_message().map_err(decode)
-        },
-        companion_update,
-    );
+    match slot {
+        ModelRoleSlot::Companion => request.companion_assignment = Some(patch).into(),
+        ModelRoleSlot::Task => request.task_assignment = Some(patch).into(),
+        ModelRoleSlot::Perception => request.perception_assignment = Some(patch).into(),
+        ModelRoleSlot::Compaction => request.compaction_assignment = Some(patch).into(),
+        ModelRoleSlot::Consolidation => request.consolidation_assignment = Some(patch).into(),
+        ModelRoleSlot::Decision => request.decision_assignment = Some(patch).into(),
+        ModelRoleSlot::Embedding => request.embedding_assignment = Some(patch).into(),
+    }
+    update_companion(rpc, epoch, "モデル割当の変更", request);
 }
 
 pub(crate) fn auto_assign_default_model(
@@ -157,10 +126,7 @@ pub(crate) fn auto_assign_default_model(
     epoch: u64,
     patch: AutoAssignModelPatch,
 ) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
-    let wire_patch = assignment_patch_from(Some(patch.assignment));
+    let wire_patch = w::AssignmentPatch::from(Some(patch.assignment));
     let request = w::UpdateCompanionRequest {
         id: patch.companion_id,
         revision: patch.revision,
@@ -168,15 +134,7 @@ pub(crate) fn auto_assign_default_model(
         task_assignment: patch.assign_task.then_some(wire_patch).into(),
         ..Default::default()
     };
-    rpc.spawn(
-        epoch,
-        "既定モデルの自動設定",
-        async move {
-            let response = host.host.update_companion(request).await?;
-            response.view().to_owned_message().map_err(decode)
-        },
-        companion_update,
-    );
+    update_companion(rpc, epoch, "既定モデルの自動設定", request);
 }
 
 pub(crate) fn sync_companion_voice(
@@ -186,92 +144,47 @@ pub(crate) fn sync_companion_voice(
     revision: u64,
     voice_clean: String,
 ) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
-    rpc.spawn(
+    update_companion(
+        rpc,
         epoch,
         "コンパニオン話者の同期",
-        async move {
-            let response = host
-                .host
-                .update_companion(w::UpdateCompanionRequest {
-                    id: companion_id,
-                    revision,
-                    voice_identifier: Some(voice_clean),
-                    ..Default::default()
-                })
-                .await?;
-            response.view().to_owned_message().map_err(decode)
+        w::UpdateCompanionRequest {
+            id: companion_id,
+            revision,
+            voice_identifier: Some(voice_clean),
+            ..Default::default()
         },
-        companion_update,
     );
 }
 
 pub(crate) fn delete_companion(rpc: &RpcDispatcher, epoch: u64, companion_id: String) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
     let gone_id = companion_id.clone();
-    rpc.spawn(
+    rpc.call(
         epoch,
         "コンパニオンの削除",
-        async move {
-            host.host
-                .delete_companion(w::Id {
-                    id: companion_id,
-                    ..Default::default()
-                })
-                .await
-        },
+        request!(host.delete_companion(id_request(companion_id))),
         move |_| Update::Gone {
             companion_id: gone_id,
         },
     );
 }
 
-pub(crate) fn load_companion_templates(rpc: &RpcDispatcher, epoch: u64) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
-    rpc.spawn(
-        epoch,
-        "テンプレート一覧の取得",
-        async move {
-            let response = host
-                .host
-                .list_companion_templates(w::Empty::default())
-                .await?;
-            Ok(response
-                .view()
-                .to_owned_message()
-                .map_err(decode)?
-                .items
-                .into_iter()
-                .map(Into::into)
-                .collect())
-        },
-        Update::CompanionTemplates,
-    );
+load! {
+    load_companion_templates: host.list_companion_templates("テンプレート一覧の取得") =>
+        |templates| Update::CompanionTemplates(templates.items.into_iter().map(Into::into).collect());
 }
 
 pub(crate) fn export_companion(rpc: &RpcDispatcher, epoch: u64, companion_id: String) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
     let target = companion_id.clone();
-    rpc.spawn(
+    rpc.call(
         epoch,
         "テンプレートの書き出し",
-        async move {
-            let response = host
+        |host| async move {
+            let template = host
                 .host
-                .export_companion(w::Id {
-                    id: companion_id,
-                    ..Default::default()
-                })
-                .await?;
-            let template = response.view().to_owned_message().map_err(decode)?;
+                .export_companion(id_request(companion_id))
+                .await?
+                .into_owned();
             export_template_json(&template.into())
                 .map_err(|error| connectrpc::ConnectError::internal(error.to_string()))
         },
@@ -286,26 +199,17 @@ pub(crate) fn import_companion(
     rpc: &RpcDispatcher,
     epoch: u64,
     template: CompanionTemplate,
-    default_model: Option<(String, String)>,
+    default_model: Option<ModelAssignment>,
 ) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
-    let assignments = default_assignments(default_model);
-    rpc.spawn(
+    let assignments = default_model.map(shared_model_assignments);
+    rpc.call_owned(
         epoch,
         "テンプレートから作成",
-        async move {
-            let response = host
-                .host
-                .import_companion(w::ImportCompanionRequest {
-                    template: Some(template.into()).into(),
-                    assignments: assignments.into(),
-                    ..Default::default()
-                })
-                .await?;
-            response.view().to_owned_message().map_err(decode)
-        },
+        request!(host.import_companion(w::ImportCompanionRequest {
+            template: Some(template.into()).into(),
+            assignments: assignments.into(),
+            ..Default::default()
+        })),
         |companion| Update::Created(companion.id),
     );
 }
@@ -318,9 +222,6 @@ pub(crate) fn preview_companion(
     persona: String,
     model: Option<ModelAssignment>,
 ) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
     let request = w::PreviewCompanionRequest {
         name,
         mind,
@@ -329,17 +230,11 @@ pub(crate) fn preview_companion(
         user_message: "はじめまして！短く自己紹介してください。".into(),
         ..Default::default()
     };
-    rpc.spawn_update(epoch, async move {
+    rpc.call_update(epoch, |host| async move {
         match host.host.preview_companion(request).await {
-            Ok(resp) => match resp.view().to_owned_message() {
-                Ok(body) => Update::CompanionPreview {
-                    reply: Some(body.reply),
-                    error: None,
-                },
-                Err(err) => Update::CompanionPreview {
-                    reply: None,
-                    error: Some(err.to_string()),
-                },
+            Ok(resp) => Update::CompanionPreview {
+                reply: Some(resp.view().reply.to_owned()),
+                error: None,
             },
             Err(err) => Update::CompanionPreview {
                 reply: None,
@@ -350,23 +245,11 @@ pub(crate) fn preview_companion(
 }
 
 pub(crate) fn load_mind(rpc: &RpcDispatcher, epoch: u64, companion_id: String) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
     let target = companion_id.clone();
-    rpc.spawn(
+    rpc.call_owned(
         epoch,
         "詳細プロフィールの取得",
-        async move {
-            let response = host
-                .host
-                .get_mind(w::Id {
-                    id: companion_id,
-                    ..Default::default()
-                })
-                .await?;
-            response.view().to_owned_message().map_err(decode)
-        },
+        request!(host.get_mind(id_request(companion_id))),
         move |view| Update::MindLoaded {
             companion_id: target,
             view: Box::new(view.into()),
@@ -381,25 +264,16 @@ pub(crate) fn update_mind_profile(
     expected_revision: u64,
     profile: MindProfile,
 ) {
-    let Some(host) = rpc.host() else {
-        return;
-    };
     let target = companion_id.clone();
-    rpc.spawn(
+    rpc.call_owned(
         epoch,
         "詳細プロフィールの保存",
-        async move {
-            let response = host
-                .host
-                .update_mind_profile(w::UpdateMindProfileRequest {
-                    companion_id,
-                    expected_revision,
-                    profile: Some(profile.into()).into(),
-                    ..Default::default()
-                })
-                .await?;
-            response.view().to_owned_message().map_err(decode)
-        },
+        request!(host.update_mind_profile(w::UpdateMindProfileRequest {
+            companion_id,
+            expected_revision,
+            profile: Some(profile.into()).into(),
+            ..Default::default()
+        })),
         move |view| Update::MindLoaded {
             companion_id: target,
             view: Box::new(view.into()),

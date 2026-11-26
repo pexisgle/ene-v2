@@ -30,6 +30,7 @@
         pkgs.mkShell {
           packages = [ rustToolchain ] ++ (with pkgs; [
             buf
+            cargo-nextest
             clang
             lld
             pkg-config

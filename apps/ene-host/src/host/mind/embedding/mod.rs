@@ -129,7 +129,7 @@ struct ConnectParams<'a> {
     providers: &'a crate::host::providers::Providers,
 }
 
-fn connect_with_ndims(params: ConnectParams<'_>) -> Result<DynModel<Embedding>> {
+fn connect_with_ndims(params: &ConnectParams<'_>) -> Result<DynModel<Embedding>> {
     let ConnectParams {
         connection,
         credentials,
@@ -138,7 +138,7 @@ fn connect_with_ndims(params: ConnectParams<'_>) -> Result<DynModel<Embedding>> 
         ndims,
         plugin_ndims,
         providers,
-    } = params;
+    } = *params;
     let adapter = connection.endpoint().adapter.as_str();
     // A plugin provider answers through the host's broker, not through rig's
     // HTTP client, so it is resolved before the catalog is consulted.
@@ -204,7 +204,7 @@ fn connect(
     dimensions: usize,
     providers: &crate::host::providers::Providers,
 ) -> Result<DynModel<Embedding>> {
-    connect_with_ndims(ConnectParams {
+    connect_with_ndims(&ConnectParams {
         connection,
         credentials,
         endpoint,
@@ -258,7 +258,7 @@ pub(crate) async fn probe_dimensions(
     } else {
         config.model_id.trim()
     };
-    let model = connect_with_ndims(ConnectParams {
+    let model = connect_with_ndims(&ConnectParams {
         connection,
         credentials: Some(credentials),
         endpoint: &base,

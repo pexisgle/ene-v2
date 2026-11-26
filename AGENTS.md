@@ -20,7 +20,7 @@ Dependencies always point inward. The canonical four-layer model
 | Layer | Crates | May depend on | Never |
 | :--- | :--- | :--- | :--- |
 | **L0 Pure domain** | `ene-domain`, `ene-policy`, `ene-catalog`, `ene-mind`, `ene-work`, `ene-voice`, `ene-plugin` | std, serialization helpers, lower L0 crates | `ene-rpc`, `rusqlite`, `reqwest`, `axum`, `gpui`, `bevy_ecs`, OS FFI |
-| **L1 Application** | `ene-host-core`, `ene-client-core` | L0 only; external I/O through port traits | concrete DB/HTTP/RPC/Win32 implementations |
+| **L1 Application** | `ene-client-core` | L0 only; external I/O through port traits | concrete DB/HTTP/RPC/Win32 implementations |
 | **L2 Infrastructure** | `ene-rpc`, `ene-store`, `ene-plugin-runtime`, `ene-vrm`, `ene-avatar-ipc`, `ene-platform-os` | L0, L1 port traits, external I/O crates | lateral adapter dependencies, business rules |
 | **L3 Thin apps** | `apps/ene-host`, `apps/ene-desktop`, `apps/ene-avatar` | L0-L2 wiring, CLI, server startup, GPUI drawing | domain logic, direct `unsafe` |
 
@@ -53,7 +53,7 @@ CI already cover.
 | 2 | `db_upward_imports` from `apps/ene-host/src/host/db/` | 0 |
 | 3 | `impl_file_spread` (inherent `impl` blocks per type across files) | 1 |
 | 4 | `providers_no_model_import` | 0 |
-| 5 | `host_world_refs` `&World`/`&mut World` in `apps/ene-host` | 159 |
+| 5 | `host_world_refs` `&World`/`&mut World` in `apps/ene-host` | 130 |
 | 6 | `max_prod_file_lines` production files over 500 lines | 0 |
 | 7 | `rpc_no_ecs_resource` `#[derive(Resource)]` under `server/rpc/` | 0 |
 | 8 | `prod_block_on` `block_on`/`block_in_place` in production | 7 |
@@ -69,13 +69,12 @@ A crate cannot add the lint to `[lints]` while `workspace = true` — cargo reje
 
 ## GPUI components
 
-`gpui-component` 0.5.1 is compatible with the pinned `gpui =0.2.2` and was
-verified to resolve and compile alongside it in a scratch crate. The only
-obstacle was `xattr 0.2.3` needing `libc::ENOATTR`, which the existing
-`libc = ">=0.2.186, <0.2.190"` pin in `apps/ene-desktop` already solves. Its
-transitive licences are all in `deny.toml`'s allow list. Adopting it is a
-feature change, not a refactor: it replaces `src/input/` and `src/ui/widgets/`
-with library widgets and needs a GUI harness to verify.
+`ene-desktop` uses GPUI Kit through the workspace's `gpui` dependency alias.
+The Kit release pins the matching GPUI crates. Initialize its components before
+opening windows with `gpui::open_window`, which installs the component root.
+Use the desktop palette in `apps/ene-desktop/src/ui/theme.rs`. Verify changes to
+text entry and selection with the GUI test harness and check native IME behavior
+on the affected platforms.
 
 ## OS perception on Linux
 

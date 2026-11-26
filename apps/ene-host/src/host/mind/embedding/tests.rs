@@ -2,7 +2,7 @@ use super::backfill::{MAX_EMBED_BATCH, fill};
 use super::index::{Space, cosine_similarity, encode};
 use super::*;
 use crate::host::db::memories::MemoryRecord;
-use crate::host::mind::memory::Memory;
+use ene_mind::Memory;
 
 fn test_space(model: &str, dimensions: usize) -> String {
     space_id(
@@ -193,7 +193,7 @@ async fn embedding_credentials_rotate_and_revoke_across_clones() {
         .companion(&harness.companion)
         .unwrap()
         .unwrap();
-    companion.assignments.embedding = Some(super::super::Assignment {
+    companion.assignments.embedding = Some(super::super::ModelAssignment {
         connection_id: "credential-embedding".into(),
         model_id: "credential-model".into(),
     });
@@ -245,7 +245,7 @@ async fn embedding_credentials_rotate_and_revoke_across_clones() {
     }
     assert_eq!(
         fill(
-            store.open_secondary().unwrap(),
+            &store.open_secondary().unwrap(),
             &store,
             &embeddings,
             Some(&credentials),
@@ -293,15 +293,16 @@ fn memory(content: &str) -> MemoryRecord {
 }
 
 fn embed(store: &Store, memory: &Memory, space: &str, dimensions: usize, vector: &[f32]) {
-    crate::host::db::memories::write_embedding_on(
-        &store.conn().unwrap(),
-        &memory.id,
-        memory.content_revision,
-        space,
-        dimensions,
-        &encode(vector),
-    )
-    .unwrap();
+    store
+        .memory_repo()
+        .write_embedding(
+            &memory.id,
+            memory.content_revision,
+            space,
+            dimensions,
+            &encode(vector),
+        )
+        .unwrap();
 }
 
 #[test]
@@ -338,7 +339,6 @@ fn the_index_mirrors_only_the_matching_space_and_revision() {
     // A content change invalidates the vector; the next sync drops it.
     store
         .conn()
-        .unwrap()
         .execute(
             "UPDATE memories SET content = 'green tea', \
              content_revision = content_revision + 1, \
@@ -606,7 +606,7 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
         .companion(&harness.companion)
         .unwrap()
         .unwrap();
-    comp_a.assignments.embedding = Some(super::super::Assignment {
+    comp_a.assignments.embedding = Some(super::super::ModelAssignment {
         connection_id: "emb-alpha".into(),
         model_id: "shared-name".into(),
     });
@@ -618,7 +618,7 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
     let mut comp_b = comp_a.clone();
     comp_b.id = "beta".into();
     comp_b.name = "Beta".into();
-    comp_b.assignments.embedding = Some(super::super::Assignment {
+    comp_b.assignments.embedding = Some(super::super::ModelAssignment {
         connection_id: "emb-beta".into(),
         model_id: "shared-name".into(),
     });
@@ -647,7 +647,7 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
     );
 
     fill(
-        store.open_secondary().unwrap(),
+        &store.open_secondary().unwrap(),
         &store,
         &embeddings,
         None,
@@ -671,7 +671,7 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
     );
 
     fill(
-        store.open_secondary().unwrap(),
+        &store.open_secondary().unwrap(),
         &store,
         &embeddings,
         None,
@@ -796,7 +796,7 @@ async fn sakura_embedding_omits_dimensions_and_decodes_without_usage() {
         .companion(&harness.companion)
         .unwrap()
         .unwrap();
-    comp.assignments.embedding = Some(super::super::Assignment {
+    comp.assignments.embedding = Some(super::super::ModelAssignment {
         connection_id: "sakura-emb".into(),
         model_id: "multilingual-e5-large".into(),
     });

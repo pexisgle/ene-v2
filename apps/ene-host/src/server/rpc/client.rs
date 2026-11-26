@@ -1,6 +1,6 @@
 //! Client registration, device streams and perception.
 use super::Services;
-use crate::host::{Runtime, client, db::Store, error::HostError, resources::DeviceHub};
+use crate::host::{Runtime, client, error::HostError, resources::DeviceHub};
 use connectrpc::{
     ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream,
 };
@@ -9,12 +9,16 @@ use futures_util::StreamExt;
 
 #[expect(refining_impl_trait, reason = "Connect boxes futures")]
 impl w::ClientService for Services {
-    request!(
-        register_client,
-        w::RegisterClientRequest,
-        w::Client,
-        client::register
-    );
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "register_client", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn register_client(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::RegisterClientRequest>,
+    ) -> connectrpc::ServiceResult<w::Client> {
+        let request = request.to_owned_message();
+        self.call(move |kernel| kernel.register_client(&request))
+            .await
+    }
 
     #[tracing::instrument(
         name = "rpc",
@@ -30,29 +34,35 @@ impl w::ClientService for Services {
         _: RequestContext,
         _: ServiceRequest<'_, w::Empty>,
     ) -> ServiceResult<w::Clients> {
-        self.read(|app| {
-            let store = app.world().resource::<Store>().clone();
-            let hub = app.world().resource::<DeviceHub>().clone();
+        self.inspect(|services| {
             Ok(w::Clients {
-                items: client::clients(&store, &hub)?,
+                items: client::clients(&services.store, &services.hub)?,
                 ..Default::default()
             })
         })
         .await
     }
 
-    request!(
-        activate,
-        w::ActivationRequest,
-        w::Activation,
-        client::activate
-    );
-    request!(
-        set_capabilities,
-        w::SetCapabilitiesRequest,
-        w::Client,
-        client::set_capabilities
-    );
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "activate", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn activate(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::ActivationRequest>,
+    ) -> connectrpc::ServiceResult<w::Activation> {
+        let request = request.to_owned_message();
+        self.call(move |kernel| kernel.activate_client(&request))
+            .await
+    }
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "set_capabilities", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn set_capabilities(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::SetCapabilitiesRequest>,
+    ) -> connectrpc::ServiceResult<w::Client> {
+        let request = request.to_owned_message();
+        self.call(move |kernel| kernel.set_capabilities(&request))
+            .await
+    }
 
     #[tracing::instrument(
         name = "rpc",
@@ -70,10 +80,9 @@ impl w::ClientService for Services {
         request: ServiceRequest<'_, w::Id>,
     ) -> ServiceResult<ServiceStream<w::DeviceEvent>> {
         let client_id = request.id.to_owned();
-        self.read({
+        self.with_store({
             let client_id = client_id.clone();
-            move |app| {
-                let store = app.world().resource::<Store>().clone();
+            move |store| {
                 store
                     .client_repo()
                     .client(&client_id)?
@@ -88,10 +97,10 @@ impl w::ClientService for Services {
         // Replay operations the client has not received yet.
         if let Err(error) = self
             .runtime
-            .call({
+            .call_kernel({
                 let client_id = client_id.clone();
-                move |app| {
-                    client::device::resend(app.world_mut(), &client_id);
+                move |kernel| {
+                    kernel.client_reconnected(&client_id);
                     Ok(())
                 }
             })
@@ -124,18 +133,38 @@ impl w::ClientService for Services {
         Response::stream_ok(stream)
     }
 
-    discard!(
-        report_perception,
-        w::PerceptionEvent,
-        client::report_perception
-    );
-    request!(
-        complete_operation,
-        w::DeviceOperationResult,
-        w::DeviceOperationState,
-        client::device::complete
-    );
-    request!(read get_operation, w::Id, w::DeviceOperationState, client::device::get);
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "report_perception", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn report_perception(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::PerceptionEvent>,
+    ) -> connectrpc::ServiceResult<ene_rpc::Empty> {
+        let request = request.to_owned_message();
+        self.call(move |kernel| {
+            kernel.report_perception(&request)?;
+            Ok(ene_rpc::Empty::default())
+        })
+        .await
+    }
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "complete_operation", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn complete_operation(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::DeviceOperationResult>,
+    ) -> connectrpc::ServiceResult<w::DeviceOperationState> {
+        let request = request.to_owned_message();
+        self.call(move |kernel| kernel.complete_operation(&request))
+            .await
+    }
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "get_operation", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn get_operation(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::Id>,
+    ) -> connectrpc::ServiceResult<w::DeviceOperationState> {
+        let id = request.id.to_owned();
+        self.read(move |kernel| kernel.operation_state(&id)).await
+    }
 }
 
 /// Closes a device stream when the response stream is dropped, including a
@@ -157,8 +186,8 @@ impl Drop for StreamGuard {
             return;
         }
         let client_id = self.client_id.clone();
-        drop(self.runtime.call(move |app| {
-            client::device::disconnected(app.world_mut(), &client_id);
+        drop(self.runtime.call_kernel(move |kernel| {
+            kernel.client_disconnected(&client_id);
             Ok(())
         }));
     }
@@ -168,6 +197,7 @@ impl Drop for StreamGuard {
 mod tests {
     use super::*;
     use crate::host::client::{DeviceOperation, DeviceStatus};
+    use crate::host::db::Store;
 
     #[tokio::test]
     async fn device_guard_cleanup_outside_tokio_preserves_replacement_and_pending_operations() {

@@ -56,14 +56,14 @@ pub(crate) fn completion(
     provider: Arc<Running>,
     role: &crate::host::providers::ProviderRole,
     context: ProviderInvocationContext,
-    model: String,
+    model: &str,
     image_input: bool,
 ) -> DynModel<Completion> {
     let endpoint = context.endpoint.clone();
     let provider_id = role.id;
     // An unlisted model is assumed to call tools; the host cannot prove
     // otherwise without a probe. Its limits stay unknown rather than guessed.
-    let mut spec = ModelSpec::new(provider_id, model.clone()).with_tools(true);
+    let mut spec = ModelSpec::new(provider_id, model.to_string()).with_tools(true);
     spec.input.image = image_input;
     // Match the wire descriptor's vendor name to `spec.provider` so
     // `ModelFacts::for_model` returns the bound spec even when a plugin
@@ -76,7 +76,7 @@ pub(crate) fn completion(
             .with_route(Route::Chat),
     );
     config.completion_model(
-        &model,
+        model,
         DynHttpClient::new(GuestClient { provider, context }),
         ModelFacts::new(spec),
     )
@@ -114,7 +114,7 @@ struct Exchange {
     reason = "rig-core's HttpError exceeds clippy's threshold and cannot be boxed here"
 )]
 impl Exchange {
-    fn accept(&mut self, chunk: HttpChunk) -> Result<(), HttpError> {
+    fn accept(&mut self, chunk: &HttpChunk) -> Result<(), HttpError> {
         if self.done {
             return Err(protocol("a chunk arrived after the terminal chunk"));
         }
@@ -171,13 +171,13 @@ impl Exchange {
             if self.done {
                 if !self.invocation_done {
                     self.invocation_done = true;
-                    (&mut self.invocation).await.map_err(HttpError::instance)?;
+                    (&mut self.invocation).await.map_err(HttpError::permanent)?;
                 }
                 return Ok(None);
             }
             if self.invocation_done {
                 match self.events.recv().await {
-                    Some(PluginEvent::Http { chunk }) => self.accept(chunk)?,
+                    Some(PluginEvent::Http { chunk }) => self.accept(&chunk)?,
                     Some(_) => return Err(protocol("the plugin emitted a non-HTTP event")),
                     None => {
                         return Err(protocol("the plugin ended without a terminal chunk"));
@@ -187,13 +187,13 @@ impl Exchange {
             }
             tokio::select! {
                 event = self.events.recv() => match event {
-                    Some(PluginEvent::Http { chunk }) => self.accept(chunk)?,
+                    Some(PluginEvent::Http { chunk }) => self.accept(&chunk)?,
                     Some(_) => return Err(protocol("the plugin emitted a non-HTTP event")),
                     None => {
                         self.invocation_done = true;
                         (&mut self.invocation)
                             .await
-                            .map_err(HttpError::instance)?;
+                            .map_err(HttpError::permanent)?;
                         if !self.done {
                             return Err(protocol("the plugin ended without a terminal chunk"));
                         }
@@ -201,7 +201,7 @@ impl Exchange {
                 },
                 result = &mut self.invocation => {
                     self.invocation_done = true;
-                    result.map_err(HttpError::instance)?;
+                    result.map_err(HttpError::permanent)?;
                 }
             }
         }
@@ -294,23 +294,12 @@ impl GuestClient {
     }
 }
 
-// `HttpClientExt` requires returning `'static` futures while extracting `&self`
-// fields synchronously, so `async fn` cannot be used.
-#[expect(
-    clippy::manual_async_fn,
-    reason = "the trait demands a 'static future, so this cannot be an async fn"
-)]
 impl HttpClientExt for GuestClient {
-    fn send<T, U>(
+    fn send(
         &self,
-        req: Request<T>,
-    ) -> impl Future<Output = Result<Response<LazyBody<U>>, HttpError>> + Send + 'static
-    where
-        T: Into<Bytes> + Send,
-        U: From<Bytes> + Send + 'static,
-    {
+        req: Request<Bytes>,
+    ) -> impl Future<Output = Result<Response<LazyBody>, HttpError>> + Send + 'static {
         let (parts, body) = req.into_parts();
-        let body: Bytes = body.into();
         let exchange = self.exchange(&parts, &body);
         async move {
             let mut exchange = exchange?;
@@ -322,38 +311,26 @@ impl HttpClientExt for GuestClient {
             while let Some(bytes) = exchange.next().await? {
                 body.extend_from_slice(&bytes);
             }
-            let mut response = Response::new(
-                Box::pin(async move { Ok(U::from(Bytes::from(body))) }) as LazyBody<U>,
-            );
+            let mut response =
+                Response::new(Box::pin(async move { Ok(Bytes::from(body)) }) as LazyBody);
             *response.status_mut() = status;
             *response.headers_mut() = headers;
             Ok(response)
         }
     }
 
-    fn send_multipart<U>(
+    fn send_multipart(
         &self,
         _req: Request<MultipartForm>,
-    ) -> impl Future<Output = Result<Response<LazyBody<U>>, HttpError>> + Send + 'static
-    where
-        U: From<Bytes> + Send + 'static,
-    {
-        async {
-            Err(HttpError::Instance(Box::new(std::io::Error::other(
-                "chat completions does not use multipart",
-            ))))
-        }
+    ) -> impl Future<Output = Result<Response<LazyBody>, HttpError>> + Send + 'static {
+        std::future::ready(Err(protocol("chat completions does not use multipart")))
     }
 
-    fn send_streaming<T>(
+    fn send_streaming(
         &self,
-        req: Request<T>,
-    ) -> impl Future<Output = Result<StreamingResponse, HttpError>> + Send
-    where
-        T: Into<Bytes> + Send,
-    {
+        req: Request<Bytes>,
+    ) -> impl Future<Output = Result<StreamingResponse, HttpError>> + Send {
         let (parts, body) = req.into_parts();
-        let body: Bytes = body.into();
         let exchange = self.exchange(&parts, &body);
         async move {
             let mut exchange = exchange?;
@@ -375,5 +352,5 @@ impl HttpClientExt for GuestClient {
 }
 
 fn protocol(message: &str) -> HttpError {
-    HttpError::instance(std::io::Error::other(message.to_owned()))
+    HttpError::permanent(std::io::Error::other(message.to_owned()))
 }

@@ -23,11 +23,10 @@ use super::{
     mind::Companion,
     notify::Notifier,
     providers::Providers,
-    util::now,
-    wire,
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
+use ene_store::util::now;
 use rig_ecs::prelude::*;
 use serde_json::json;
 
@@ -116,18 +115,18 @@ fn require_session(store: &Store, id: &str) -> Result<WorkSession> {
         .ok_or_else(|| HostError::NotFound(("work session not found").into()))
 }
 
-pub(crate) fn start(world: &mut World, request: w::StartWorkRequest) -> Result<w::WorkSession> {
+pub(crate) fn start(world: &mut World, request: &w::StartWorkRequest) -> Result<w::WorkSession> {
     let store = world.resource::<Store>().clone();
     let companion = require_companion(&store, &request.companion_id)?;
     if request.instruction.trim().is_empty() {
         return Err(HostError::Invalid(("an instruction is required").into()));
     }
-    let client_id = binding_for(&store, &request)?;
+    let client_id = binding_for(&store, request)?;
     let session = WorkSession {
         id: uuid::Uuid::new_v4().to_string(),
         companion_id: ene_domain::CompanionId::parse(companion.id.clone())?,
         title: if request.title.trim().is_empty() {
-            super::util::truncate(&request.instruction, 80)
+            ene_store::util::truncate(&request.instruction, 80)
         } else {
             request.title.clone()
         },
@@ -145,7 +144,7 @@ pub(crate) fn start(world: &mut World, request: w::StartWorkRequest) -> Result<w
         return Err(error);
     }
     let stored = require_session(&store, &session.id)?;
-    Ok(wire::work_session(&stored))
+    Ok(w::WorkSession::from(&stored))
 }
 
 pub(crate) fn start_run(
@@ -185,12 +184,12 @@ pub(crate) fn start_run(
             let outcome = hand::start_run(
                 world,
                 &mut hands,
-                hand::RunStart {
+                &hand::RunStart {
                     session,
                     run: &run,
                     instruction,
                 },
-                adapter,
+                &adapter,
                 running,
             );
             *world.resource_mut::<hand::Hands>() = hands;
@@ -212,7 +211,7 @@ pub(crate) fn start_run(
         }
     };
     if let Some(error) = failure {
-        ene_platform_os::warn_if_err(fail_run(&store, &run, &error), "failed run record");
+        ene_domain::warn_if_err(fail_run(&store, &run, &error), "failed run record");
         let _written = store
             .work_repo()
             .set_work_status(&session.id, WorkStatus::Idle);
@@ -244,7 +243,8 @@ pub(crate) fn start_run(
 fn fail_run(store: &Store, run: &Run, error: &HostError) -> Result<()> {
     let mut failed = run.clone();
     failed.state = RunState::Failed;
-    failed.failure = Some(Failure::new(error.code().as_str(), error.message()));
+    let code: &str = error.code().into();
+    failed.failure = Some(Failure::new(code, error.message()));
     Ok(store.work_repo().update_run(&failed)?)
 }
 
@@ -256,7 +256,7 @@ fn binding_for(store: &Store, request: &w::StartWorkRequest) -> Result<Option<St
     if request.client_id.is_empty() {
         return Ok(activation.and_then(|activation| activation.client_id));
     }
-    super::util::validate_id(&request.client_id)?;
+    ene_domain::validate_id(&request.client_id)?;
     store
         .client_repo()
         .client(&request.client_id)?
@@ -274,13 +274,13 @@ fn binding_for(store: &Store, request: &w::StartWorkRequest) -> Result<Option<St
     Ok(activation.client_id)
 }
 
-pub(crate) fn send(world: &mut World, request: w::SendWorkRequest) -> Result<w::WorkAcceptance> {
+pub(crate) fn send(world: &mut World, request: &w::SendWorkRequest) -> Result<w::WorkAcceptance> {
     let store = world.resource::<Store>().clone();
     let session = require_session(&store, &request.work_id)?;
     if session.status == WorkStatus::Closed {
         return Err(HostError::Conflict(("work session is closed").into()));
     }
-    let hash = super::util::digest(format!("{}:{}", request.work_id, request.text).as_bytes());
+    let hash = ene_store::util::digest(format!("{}:{}", request.work_id, request.text).as_bytes());
     let agent = agent_of(world, &request.work_id);
     if !request.request_key.is_empty()
         && let Some((stored, request_id)) = receipt(
@@ -335,7 +335,7 @@ pub(crate) fn send(world: &mut World, request: w::SendWorkRequest) -> Result<w::
 fn accepted(
     world: &mut World,
     store: &Store,
-    request: w::SendWorkRequest,
+    request: &w::SendWorkRequest,
     hash: &[u8],
     request_id: String,
 ) -> Result<w::WorkAcceptance> {
@@ -427,7 +427,6 @@ pub(crate) fn stop_with(world: &mut World, work_id: &str, reason: Option<&str>) 
     let Some(run) = store.work_repo().active_run(work_id)? else {
         return Ok(());
     };
-    let reason = reason.unwrap_or("the user stopped the work");
     if hand::owns(world.resource::<hand::Hands>(), work_id) {
         let runtime = world
             .resource::<crate::host::resources::HostRuntime>()
@@ -441,10 +440,11 @@ pub(crate) fn stop_with(world: &mut World, work_id: &str, reason: Option<&str>) 
         }
         *world.resource_mut::<hand::Hands>() = hands;
     } else if let Some(agent) = agent_of(world, work_id) {
-        world.trigger(StopTurn {
-            entity: agent,
-            reason: Some(reason.to_owned()),
-        });
+        let stop = reason.map_or_else(
+            || StopTurn::new(agent),
+            |reason| StopTurn::plugin(agent, "ene-host", reason),
+        );
+        world.trigger(stop);
     }
     finish_run(world, run, RunState::Cancelled, None);
     Ok(())

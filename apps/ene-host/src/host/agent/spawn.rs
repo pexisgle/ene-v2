@@ -6,7 +6,6 @@
 
 use super::binding::{ensure_model, notice_model_unavailable};
 use super::companion_of;
-use super::prompt::{system_prompt, work_prompt};
 use crate::host::{
     db::{Result, Store},
     mind::Companion,
@@ -14,6 +13,7 @@ use crate::host::{
     resources::{CompanionAgent, LastProjectedEntry, WorkAgent},
 };
 use bevy_ecs::prelude::*;
+use ene_mind::prompt::{system_prompt, work_prompt};
 use rig_ecs::model::Connection as ModelConnection;
 use rig_ecs::prelude::*;
 use std::collections::HashMap;
@@ -90,13 +90,14 @@ pub(crate) fn spawn_companion(world: &mut World, companion: &Companion) -> Entit
     let id = companion_agent_id(&companion.id);
     let entity = match restored_agent(world, &id) {
         Some(entity) => entity,
-        None => world
-            .spawn((
+        None => spawn_root(
+            world,
+            (
                 Name::new(format!("companion:{}", companion.id)),
-                Agent,
                 AgentId(id),
-            ))
-            .id(),
+            ),
+        )
+        .id(),
     };
     let published = published_through(world.get::<Conversation>(entity));
     world.entity_mut(entity).insert((
@@ -128,9 +129,7 @@ pub(crate) fn spawn_work_agent(
     let id = work_agent_id(run_id);
     let entity = match restored_agent(world, &id) {
         Some(entity) => entity,
-        None => world
-            .spawn((Name::new(format!("work:{run_id}")), Agent, AgentId(id)))
-            .id(),
+        None => spawn_root(world, (Name::new(format!("work:{run_id}")), AgentId(id))).id(),
     };
     let published = published_through(world.get::<Conversation>(entity));
     let access = crate::host::tools::sync::hand_tool_access(world);
@@ -248,7 +247,7 @@ pub(crate) fn reconcile(world: &mut World) -> Result<()> {
             notice_model_unavailable(&mut world.resource_mut::<Notifier>(), &companion, &error);
         }
     }
-    let mut notifier = world.resource_mut::<Notifier>();
+    let notifier = world.resource_mut::<Notifier>();
     notifier.notice(None, "host_ready", "the host restored its state");
     Ok(())
 }

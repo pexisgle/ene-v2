@@ -11,7 +11,7 @@ pub(crate) async fn probe(
     connection: &Connection,
     providers: &crate::host::providers::Providers,
 ) -> Check {
-    let checked_at = crate::host::util::now();
+    let checked_at = ene_store::util::now();
     let failure = |message: String| Check {
         healthy: false,
         checked_at: checked_at.clone(),

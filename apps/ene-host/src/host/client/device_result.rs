@@ -7,7 +7,7 @@
 use super::{
     DeviceOperation,
     computer::{self, ComputerUse},
-    device::{get, uncertain},
+    device::{get_state, uncertain},
 };
 use crate::host::{
     db::{Result, Store},
@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 /// matched to its operation by id; the client id it carries is the record.
 pub(crate) fn complete(
     world: &mut World,
-    result: w::DeviceOperationResult,
+    result: &w::DeviceOperationResult,
 ) -> Result<w::DeviceOperationState> {
     let store = world.resource::<Store>().clone();
     let Some(operation) = store.client_repo().operation(&result.operation_id)? else {
@@ -45,7 +45,7 @@ pub(crate) fn complete(
         &store,
         world.get_resource::<DeviceHub>(),
         &operation,
-        &result,
+        result,
     ) {
         ComputerUseCheck::Skip => None,
         ComputerUseCheck::Ready(pending) => Some(pending),
@@ -55,17 +55,15 @@ pub(crate) fn complete(
                 &operation.id,
                 "the Computer Use operation's result is unknown; do not retry it",
             );
-            return get(
-                world,
-                &w::Id {
-                    id: operation.id.clone(),
-                    ..Default::default()
-                },
+            return get_state(
+                &store,
+                world.get_resource::<ComputerUse>(),
+                world.resource::<DeviceHub>(),
+                &operation.id,
             );
         }
     };
-    let (base_success, failure, validated) =
-        parse_and_validate_output(&store, &operation, &result)?;
+    let (base_success, failure, validated) = parse_and_validate_output(&store, &operation, result)?;
     let (validated, frame) = apply_computer_use_output(
         world.get_resource_mut::<ComputerUse>().as_deref_mut(),
         &operation,
@@ -85,7 +83,7 @@ pub(crate) fn complete(
     {
         if success {
             if let Some(frame) = frame {
-                computer::save_frame(world, frame);
+                world.resource_mut::<ComputerUse>().save_frame(frame);
             }
             let outcome = build_waiter_outcome(&operation, output.as_ref());
             permission::decide(world, waiter.call, outcome);
@@ -169,11 +167,7 @@ fn parse_and_validate_output(
                 .unwrap_or_else(|_| Value::String(result.output.clone())),
         )
     };
-    let failure = result
-        .failure
-        .as_option()
-        .cloned()
-        .map(|failure| wire::failure_from(&failure));
+    let failure = result.failure.as_option().cloned().map(Into::into);
     let success = result.success && failure.is_none() && output.is_some();
     // A capability declared without a spec has no output contract; its
     // answer is accepted as the client sent it.
@@ -209,7 +203,7 @@ fn apply_computer_use_output(
     let mut frame = None;
     let validated = match (success, validated) {
         (true, Some(Ok(output))) => Some(
-            computer::result(pending, output)
+            computer::result(pending, &output)
                 .map(|(metadata, captured)| {
                     frame = captured;
                     metadata

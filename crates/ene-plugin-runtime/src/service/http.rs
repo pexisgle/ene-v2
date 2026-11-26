@@ -10,11 +10,12 @@
 //! cannot override the headers the host sets.
 use crate::limits::{HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_CHUNK, MAX_HTTP_HEADERS};
 use ene_plugin::{Failure, HttpChunk, HttpRequest};
+use parking_lot::Mutex;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -170,19 +171,16 @@ impl HttpBroker {
             }
             let status = response.status().as_u16();
             let headers = copy_headers(response.headers());
-            self.open
-                .lock()
-                .map_err(|_| Failure::new("http_unavailable"))?
-                .insert(
-                    handle.clone(),
-                    Open::Streaming {
-                        status,
-                        deadline,
-                        total: 0,
-                        pending: VecDeque::new(),
-                        response,
-                    },
-                );
+            self.open.lock().insert(
+                handle.clone(),
+                Open::Streaming {
+                    status,
+                    deadline,
+                    total: 0,
+                    pending: VecDeque::new(),
+                    response,
+                },
+            );
             return Ok(HttpChunk {
                 handle,
                 status,
@@ -203,18 +201,15 @@ impl HttpBroker {
         })
         .await
         .map_err(|_| Failure::new("http_timeout"))??;
-        self.open
-            .lock()
-            .map_err(|_| Failure::new("http_unavailable"))?
-            .insert(
-                handle.clone(),
-                Open::Buffered {
-                    status,
-                    headers,
-                    body,
-                    read: 0,
-                },
-            );
+        self.open.lock().insert(
+            handle.clone(),
+            Open::Buffered {
+                status,
+                headers,
+                body,
+                read: 0,
+            },
+        );
         Ok(HttpChunk {
             handle,
             status,
@@ -231,7 +226,6 @@ impl HttpBroker {
         let entry = self
             .open
             .lock()
-            .map_err(|_| Failure::new("http_unavailable"))?
             .remove(handle)
             .ok_or_else(|| Failure::new("unknown_handle"))?;
         match entry {
@@ -291,18 +285,15 @@ impl HttpBroker {
         let headers = if read == 0 { headers } else { BTreeMap::new() };
         let chunk = base64::engine::general_purpose::STANDARD.encode(&body[read..end]);
         if !done {
-            self.open
-                .lock()
-                .map_err(|_| Failure::new("http_unavailable"))?
-                .insert(
-                    handle.to_owned(),
-                    Open::Buffered {
-                        status,
-                        headers: BTreeMap::new(),
-                        body,
-                        read: end,
-                    },
-                );
+            self.open.lock().insert(
+                handle.to_owned(),
+                Open::Buffered {
+                    status,
+                    headers: BTreeMap::new(),
+                    body,
+                    read: end,
+                },
+            );
         }
         Ok(HttpChunk {
             handle: handle.to_owned(),
@@ -328,19 +319,16 @@ impl HttpBroker {
             mut response,
         } = stream;
         if let Some(bytes) = pending.pop_front() {
-            self.open
-                .lock()
-                .map_err(|_| Failure::new("http_unavailable"))?
-                .insert(
-                    handle.to_owned(),
-                    Open::Streaming {
-                        status,
-                        deadline,
-                        total,
-                        pending,
-                        response,
-                    },
-                );
+            self.open.lock().insert(
+                handle.to_owned(),
+                Open::Streaming {
+                    status,
+                    deadline,
+                    total,
+                    pending,
+                    response,
+                },
+            );
             return Ok(HttpChunk {
                 handle: handle.to_owned(),
                 status,
@@ -381,19 +369,16 @@ impl HttpBroker {
             let rest = bytes.split_off(MAX_HTTP_CHUNK);
             pending.push_back(rest);
         }
-        self.open
-            .lock()
-            .map_err(|_| Failure::new("http_unavailable"))?
-            .insert(
-                handle.to_owned(),
-                Open::Streaming {
-                    status,
-                    deadline,
-                    total,
-                    pending,
-                    response,
-                },
-            );
+        self.open.lock().insert(
+            handle.to_owned(),
+            Open::Streaming {
+                status,
+                deadline,
+                total,
+                pending,
+                response,
+            },
+        );
         Ok(HttpChunk {
             handle: handle.to_owned(),
             status,
@@ -424,11 +409,7 @@ impl HttpBroker {
     /// already read to its end succeeds: the end state is the same, so a guest
     /// may close unconditionally.
     pub fn close(&self, handle: &str) -> Result<(), Failure> {
-        let mut open = self
-            .open
-            .lock()
-            .map_err(|_| Failure::new("http_unavailable"))?;
-        open.remove(handle);
+        self.open.lock().remove(handle);
         Ok(())
     }
 }
@@ -723,7 +704,7 @@ mod tests {
         .await;
         server.abort();
         assert_eq!(result.unwrap().unwrap_err().code, "http_timeout");
-        assert!(broker.open.lock().unwrap().is_empty());
+        assert!(broker.open.lock().is_empty());
     }
 
     /// A caller that streams a long generation sets its own whole-exchange
@@ -783,7 +764,7 @@ mod tests {
                 .code,
             "http_body_too_large"
         );
-        assert!(broker.open.lock().unwrap().is_empty());
+        assert!(broker.open.lock().is_empty());
         server.await.unwrap();
     }
 

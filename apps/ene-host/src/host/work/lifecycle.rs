@@ -83,7 +83,7 @@ pub(super) fn restore(world: &mut World) {
             Ok(active) => active.map(|run| run.run_id),
             Err(error) => {
                 if error.is_storage() {
-                    super::super::fail(world, error.to_string());
+                    super::super::fail(world, &error.to_string());
                     return;
                 }
                 None
@@ -93,7 +93,7 @@ pub(super) fn restore(world: &mut World) {
             Ok(session) => session.is_some_and(|session| session.status != WorkStatus::Closed),
             Err(error) => {
                 if error.is_storage() {
-                    super::super::fail(world, error.to_string());
+                    super::super::fail(world, &error.to_string());
                     return;
                 }
                 false
@@ -112,7 +112,7 @@ pub(super) fn restore(world: &mut World) {
         Ok(companions) => companions,
         Err(error) => {
             if error.is_storage() {
-                super::super::fail(world, error.to_string());
+                super::super::fail(world, &error.to_string());
             }
             return;
         }
@@ -124,7 +124,7 @@ pub(super) fn restore(world: &mut World) {
             Ok(sessions) => sessions,
             Err(error) => {
                 if error.is_storage() {
-                    super::super::fail(world, error.to_string());
+                    super::super::fail(world, &error.to_string());
                     return;
                 }
                 continue;
@@ -145,7 +145,7 @@ pub(super) fn restore(world: &mut World) {
                 Ok(None) => {}
                 Err(error) => {
                     if error.is_storage() {
-                        super::super::fail(world, error.to_string());
+                        super::super::fail(world, &error.to_string());
                         return;
                     }
                 }

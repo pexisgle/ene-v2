@@ -2,10 +2,11 @@
 
 use crate::ui::icons::{Icon, icon};
 use crate::ui::theme::{Theme, companion_palette};
-use gpui::{
-    AnyElement, ElementId, Hsla, MouseButton, MouseDownEvent, SharedString, Window, div,
-    prelude::*, px,
-};
+use gpui::component::button::{Button, ButtonVariants};
+use gpui::component::tag::Tag;
+use gpui::{AnyElement, ElementId, Hsla, SharedString, Window, div, prelude::*, px};
+#[cfg(not(windows))]
+use gpui::{MouseButton, MouseDownEvent};
 
 /// Status pill with an optional live dot indicator.
 pub fn status_pill(
@@ -14,38 +15,20 @@ pub fn status_pill(
     bg: Hsla,
     fg: Hsla,
 ) -> AnyElement {
-    div()
-        .flex_none()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(5.))
-        .px(px(10.))
-        .py(px(3.))
+    Tag::custom(bg, fg, gpui::transparent_black())
         .rounded_full()
-        .bg(bg)
-        .text_color(fg)
-        .text_xs()
+        .flex_none()
+        .gap(px(5.))
         .font_weight(gpui::FontWeight::BOLD)
-        .when_some(dot, |this, color| {
-            this.child(div().size(px(6.)).rounded_full().bg(color))
+        .when_some(dot, |tag, color| {
+            tag.child(div().size(px(6.)).rounded_full().bg(color))
         })
         .child(label.into())
         .into_any_element()
 }
 /// Strawberry-milk tag pill for connection/capability kinds.
 pub fn kind_pill(label: impl Into<SharedString>, theme: &Theme) -> AnyElement {
-    div()
-        .flex_none()
-        .px(px(10.))
-        .py(px(3.))
-        .rounded_full()
-        .bg(theme.bg_milk)
-        .text_color(theme.ink_muted)
-        .text_xs()
-        .font_weight(gpui::FontWeight::BOLD)
-        .child(label.into())
-        .into_any_element()
+    status_pill(label, None, theme.bg_milk, theme.ink_muted)
 }
 /// Companion pastel emblem circle with initial and optional status dot.
 pub fn companion_badge(
@@ -116,23 +99,19 @@ where
     } else {
         Icon::ChevronRight
     };
-    div()
-        .id(id)
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(6.))
+    let label = label.into();
+    Button::new(id)
+        .text()
+        .h_auto()
+        .px_0()
         .py(px(6.))
-        .cursor_pointer()
         .text_xs()
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(theme.ink_muted)
-        .hover(|this| this.text_color(theme.ink))
-        .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, window, cx| {
-            on_toggle(window, cx);
-        })
+        .accessibility_label(label.clone())
+        .on_click(move |_, window, cx| on_toggle(window, cx))
         .child(icon(chevron, 14., theme.ink_muted))
-        .child(label.into())
+        .child(label)
         .into_any_element()
 }
 /// Marks a container as a draggable window title/handle region across platforms.

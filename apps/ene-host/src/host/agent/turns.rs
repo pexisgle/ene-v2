@@ -21,28 +21,29 @@ type TurnAgentRows = (
     Option<&'static WorkAgent>,
 );
 
-/// Reports a companion turn that appeared this frame as streaming.
+/// Records the start while the turn exists, even when it settles in the same frame.
 pub(super) fn turn_started(
-    turns: Query<(&Turn, &TurnOf), Added<TurnOf>>,
+    entity: Entity,
+    turns: Query<(&Turn, &TurnOf)>,
     agents: Query<&CompanionAgent>,
-    mut notifier: ResMut<Notifier>,
+    notifier: Res<Notifier>,
 ) {
-    for (turn, of) in &turns {
-        let Ok(agent) = agents.get(of.0) else {
-            continue;
-        };
-        notifier.push(
-            Some(agent.companion_id.as_str()),
-            None,
-            w::notification::Event::TurnEvent(Box::new(w::TurnEvent {
-                companion_id: agent.companion_id.clone(),
-                turn_id: turn.start.get().to_string(),
-                status: w::TurnStatus::Streaming.into(),
-                failure: None.into(),
-                ..Default::default()
-            })),
-        );
-    }
+    let Ok((turn, of)) = turns.get(entity) else {
+        return;
+    };
+    let Ok(agent) = agents.get(of.0) else {
+        return;
+    };
+    notifier.into_inner().push(
+        Some(agent.companion_id.as_str()),
+        None,
+        w::notification::Event::TurnEvent(Box::new(w::TurnEvent {
+            companion_id: agent.companion_id.clone(),
+            turn_id: turn.start.get().to_string(),
+            status: w::TurnStatus::Streaming.into(),
+            ..Default::default()
+        })),
+    );
 }
 
 type ToolActivity = Or<(Added<ToolRequest>, Added<Settled>)>;
@@ -50,8 +51,9 @@ type ToolActivity = Or<(Added<ToolRequest>, Added<Settled>)>;
 pub(super) fn log_tools(
     tools: Query<(&ToolRequest, &ForAgent, Has<Settled>), ToolActivity>,
     agents: Query<TurnAgentRows>,
-    mut notifier: ResMut<Notifier>,
+    notifier: ResMut<Notifier>,
 ) {
+    let notifier = notifier.into_inner();
     for (request, target, settled) in &tools {
         let Ok((_, companion, work)) = agents.get(target.0) else {
             continue;
@@ -67,7 +69,7 @@ pub(super) fn log_tools(
             } else {
                 "tool_requested"
             },
-            serde_json::json!({
+            &serde_json::json!({
                 "tool": request.call.function.name.as_str(),
                 "call_id": request.call.id.to_string(),
                 "work_id": work.map(|work| work.work_id.as_str()),
@@ -96,11 +98,11 @@ pub(super) struct TurnSettledParams<'w, 's> {
 /// Publishes the final turn event once a companion turn settles, and settles
 /// the run when a work agent's turn finishes.
 pub(super) fn turn_settled(
-    settled: On<Add<Settled>>,
+    turn_entity: Entity,
     mut commands: Commands,
-    mut params: TurnSettledParams<'_, '_>,
+    params: TurnSettledParams<'_, '_>,
 ) {
-    let turn_entity = settled.entity;
+    let notifier = params.notifier.into_inner();
     let Ok((outcome, of)) = params.outcomes.get(turn_entity) else {
         return;
     };
@@ -118,7 +120,7 @@ pub(super) fn turn_settled(
                 w::TurnStatus::Failed,
                 Some(w::Failure {
                     code: "turn_failed".into(),
-                    message: crate::host::util::truncate(why, 500),
+                    message: ene_store::util::truncate(why, 500),
                     ..Default::default()
                 }),
             ),
@@ -131,7 +133,7 @@ pub(super) fn turn_settled(
                 params.conversations.get(of.0).ok(),
             ))
         });
-        params.notifier.push(
+        notifier.push(
             Some(companion_id.as_str()),
             None,
             w::notification::Event::TurnEvent(Box::new(w::TurnEvent {
@@ -167,7 +169,7 @@ pub(super) fn turn_settled(
         let run_id = work.run_id.clone();
         let outcome = outcome.clone();
         commands.queue(move |world: &mut World| {
-            crate::host::work::settle_run(world, run_id, outcome);
+            crate::host::work::settle_run(world, &run_id, &outcome);
         });
     }
 }
@@ -179,7 +181,9 @@ fn eye_report_result(
     conversation: Option<&Conversation>,
 ) -> w::EyeReportResult {
     use w::eye_report_result::Disposition;
-    let watched = matches!(outcome, TurnOutcome::Stopped(Some(reason)) if reason == crate::host::eyes::WATCHED);
+    let watched = matches!(outcome, TurnOutcome::Stopped(stop)
+        if matches!(stop.cause(), StopCause::Plugin { by, why }
+            if by == "ene-host" && why == crate::host::eyes::WATCHED));
     let completed = watched || matches!(outcome, TurnOutcome::Answered(_));
     // A tool step can already have published text before the turn ends.
     let reply = conversation.filter(|_| completed).and_then(|conversation| {
@@ -194,7 +198,7 @@ fn eye_report_result(
             .filter_map(|entry| entry_text(&entry))
             .map(|text| crate::host::voice::speech::strip_motion_leak(&text))
             .rfind(|text| !text.is_empty())
-            .map(|text| crate::host::util::truncate(&text, 1500))
+            .map(|text| ene_store::util::truncate(&text, 1500))
     });
     let disposition = match (reply.is_some(), watched, completed) {
         (true, _, _) => Disposition::Replied,

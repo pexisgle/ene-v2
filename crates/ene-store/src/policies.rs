@@ -1,32 +1,31 @@
 //! Saved policy rules and free-text policies.
 
+use crate::row::{FromRow, row_fields};
 use crate::{
-    Store, StoreError, enum_name_column,
+    Store, StoreError,
     error::Result,
     util::{now, validate_id},
 };
 use ene_policy::{MAX_POLICY_TEXT_CHARS, PolicyRule, PolicyText};
-use rusqlite::{Row, params};
+use rusqlite::params;
 use std::collections::HashSet;
 
-fn row_to_rule(row: &Row<'_>) -> rusqlite::Result<PolicyRule> {
-    let effect = enum_name_column(row, "effect", "unknown policy effect")?;
-    Ok(PolicyRule {
-        id: row.get("id")?,
-        tool_name: row.get("tool_name")?,
-        pattern: row.get("pattern")?,
-        effect,
-        created_at: row.get("created_at")?,
-    })
-}
+row_fields!(PolicyRule, RULE_COLUMNS {
+    id,
+    tool_name,
+    pattern,
+    effect => enum_name_column("unknown policy effect"),
+    created_at,
+});
 
-fn row_to_text(row: &Row<'_>) -> rusqlite::Result<PolicyText> {
-    Ok(PolicyText {
-        id: row.get("id")?,
-        text: row.get("text")?,
-        created_at: row.get("created_at")?,
-    })
-}
+row_fields!(
+    PolicyText,
+    TEXT_COLUMNS {
+        id,
+        text,
+        created_at,
+    }
+);
 
 /// Repository managing `policy_rules` and `policy_texts`.
 #[derive(Clone, Copy, Debug)]
@@ -39,10 +38,12 @@ impl<'a> PolicyRepo<'a> {
 
     pub fn policy_rules(&self) -> Result<Vec<PolicyRule>> {
         self.0.fetch_all(
-            "SELECT id, tool_name, pattern, effect, created_at FROM policy_rules \
-             ORDER BY created_at, id",
+            &format!(
+                "SELECT {RULE_COLUMNS} FROM policy_rules \
+             ORDER BY created_at, id"
+            ),
             [],
-            row_to_rule,
+            PolicyRule::from_row,
         )
     }
 
@@ -100,9 +101,9 @@ impl<'a> PolicyRepo<'a> {
 
     pub fn policy_texts(&self) -> Result<Vec<PolicyText>> {
         self.0.fetch_all(
-            "SELECT id, text, created_at FROM policy_texts ORDER BY created_at, id",
+            &format!("SELECT {TEXT_COLUMNS} FROM policy_texts ORDER BY created_at, id"),
             [],
-            row_to_text,
+            PolicyText::from_row,
         )
     }
 

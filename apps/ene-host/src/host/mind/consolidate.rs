@@ -330,7 +330,7 @@ fn turn_query(turns: &[Turn]) -> String {
         query.push_str(&turn.text);
         query.push('\n');
     }
-    crate::host::util::truncate(&query, MAX_QUERY_CHARS)
+    ene_store::util::truncate(&query, MAX_QUERY_CHARS)
 }
 
 #[cfg(test)]
@@ -381,7 +381,7 @@ mod tests {
         }
     }
 
-    fn context(memory: &crate::host::mind::memory::Memory) -> MemoryContext {
+    fn context(memory: &ene_mind::Memory) -> MemoryContext {
         MemoryContext {
             id: memory.id.clone(),
             revision: memory.memory_revision,
@@ -448,7 +448,6 @@ mod tests {
         // A concurrent correction moves the revision the pass captured.
         store
             .conn()
-            .unwrap()
             .execute(
                 "UPDATE memories SET memory_revision = memory_revision + 1 WHERE id = 'm1'",
                 [],
@@ -473,7 +472,6 @@ mod tests {
         );
         let count: i64 = store
             .conn()
-            .unwrap()
             .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1, "the conflict rolled the whole pass back");
@@ -511,7 +509,6 @@ mod tests {
         );
         let citations: i64 = store
             .conn()
-            .unwrap()
             .query_row(
                 "SELECT COUNT(*) FROM memory_edges WHERE relation = 'estimated_cited_in'",
                 [],
@@ -524,9 +521,9 @@ mod tests {
     // === The pass end to end: retrieval, extraction, guard and commit ===
 
     fn companion() -> crate::host::mind::Companion {
-        use crate::host::json::JsonDoc;
-        use crate::host::mind::{Assignment, Assignments};
-        let assignment = Assignment {
+        use crate::host::mind::{ModelAssignment, ModelAssignments};
+        use ene_mind::JsonDoc;
+        let assignment = ModelAssignment {
             connection_id: "c1".into(),
             model_id: "test-model".into(),
         };
@@ -540,7 +537,7 @@ mod tests {
             state_revision: 1,
             body: JsonDoc::empty(),
             voice: JsonDoc::empty(),
-            assignments: Assignments {
+            assignments: ModelAssignments {
                 companion: assignment.clone(),
                 task: assignment.clone(),
                 consolidation: Some(assignment),
@@ -698,15 +695,12 @@ mod tests {
             );
             // A write that fails means the batch never reached the peer; the
             // caller turns this into a retry, so the reason has to survive.
-            ene_platform_os::warn_if_err(
+            ene_domain::warn_if_err(
                 socket.write_all(head.as_bytes()).await,
                 "recall header write",
             );
-            ene_platform_os::warn_if_err(
-                socket.write_all(body.as_bytes()).await,
-                "recall body write",
-            );
-            ene_platform_os::warn_if_err(socket.flush().await, "recall request flush");
+            ene_domain::warn_if_err(socket.write_all(body.as_bytes()).await, "recall body write");
+            ene_domain::warn_if_err(socket.flush().await, "recall request flush");
         });
         ExtractionServer { base, task }
     }
@@ -746,7 +740,6 @@ mod tests {
         let count: i64 = setup
             .store
             .conn()
-            .unwrap()
             .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
             .unwrap();
         assert_eq!(
@@ -815,7 +808,6 @@ mod tests {
         setup
             .store
             .conn()
-            .unwrap()
             .execute(
                 "UPDATE companions SET state_revision = state_revision + 1 WHERE id = 'ene'",
                 [],
@@ -854,7 +846,6 @@ mod tests {
         let receipts: i64 = setup
             .store
             .conn()
-            .unwrap()
             .query_row("SELECT COUNT(*) FROM mind_operations", [], |row| row.get(0))
             .unwrap();
         assert_eq!(receipts, 0, "a discarded reflection leaves no receipt");

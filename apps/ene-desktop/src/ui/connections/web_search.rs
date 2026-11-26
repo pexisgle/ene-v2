@@ -391,7 +391,7 @@ fn render_provider_key_row(
             theme,
             move |_, cx| {
                 hub_save.update(cx, |hub, cx| {
-                    hub.save_search_provider_key(adapter, key_text.clone(), true, cx);
+                    hub.save_search_provider_key(adapter, &key_text, true, cx);
                 });
             },
         ))

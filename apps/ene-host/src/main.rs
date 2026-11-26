@@ -1,3 +1,5 @@
+#![warn(clippy::needless_pass_by_value)]
+
 fn main() {
     let result = match ene_host::parse(std::env::args_os()) {
         Ok(ene_host::Action::Serve) => ene_host::run(),

@@ -10,13 +10,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-ene-platform-os = { path = "../../crates/ene-platform-os" }
 async-stream.workspace = true
 axum.workspace = true
 base64.workspace = true
-# rig-ecs 0.46.0 pins `bevy_ecs =0.20.0` and hands its `App`/`World` to the
-# host, so this exact version is what keeps both sides on one type set.
-bevy_ecs = "=0.20.0"
+bevy_ecs.workspace = true
 bytes.workspace = true
 connectrpc = { workspace = true, features = ["axum"] }
 crossbeam-channel = "0.5"
@@ -24,7 +21,6 @@ directories = "6"
 ene-rpc.workspace = true
 ene-catalog.workspace = true
 ene-domain.workspace = true
-ene-host-core.workspace = true
 ene-mind.workspace = true
 ene-policy.workspace = true
 ene-plugin.workspace = true
@@ -54,7 +50,6 @@ rig-ecs.workspace = true
 rig-memory.workspace = true
 rig-rmcp.workspace = true
 rig-reqwest.workspace = true
-rusqlite.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -69,14 +64,14 @@ tokio-util = { workspace = true, features = ["rt", "compat", "codec"] }
 # Request tracing, a body ceiling, a response deadline and panic isolation for
 # the Connect surface; `TraceLayer` emits the same `tracing` spans the RPC
 # handlers already use.
-tower-http = { version = "0.6", features = ["trace", "timeout", "limit", "catch-panic"] }
+tower-http = { version = "0.7", features = ["trace", "timeout", "limit", "catch-panic"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-bevy_time = "=0.20.0"
+bevy_time.workspace = true
 ene-rpc = { workspace = true, features = ["client"] }
 process-wrap.workspace = true
 # `span-locations` lets the architecture test read the line span of a parsed
@@ -86,7 +81,7 @@ regex.workspace = true
 rig-core = { workspace = true, features = ["test-utils"] }
 # Parses each workspace file so the architecture test can blank `#[cfg(test)]`
 # spans by real syntax instead of counting braces.
-syn = { version = "2", features = ["full", "parsing", "printing", "extra-traits"] }
+syn = { version = "3", features = ["full", "parsing", "printing", "extra-traits"] }
 tempfile.workspace = true
 # `start_paused` lets the decision-timeout test fire the 15s deadline
 # without waiting it out.

@@ -4,11 +4,12 @@ use crate::{Error, contract::Events, limits::*};
 use ene_plugin::*;
 use extism::convert::FromBytesOwned;
 use futures_util::future::BoxFuture;
+use parking_lot::Mutex;
 use serde_json::Value;
 use std::{
     future::Future,
     sync::{
-        Arc, LazyLock, Mutex, Weak,
+        Arc, LazyLock, Weak,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -34,35 +35,56 @@ impl Services for DenyServices {
 // A cancelled compilation still holds its slot until the native compiler returns.
 pub(super) static SLOTS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MAX_INSTANCES)));
-extism::host_fn!(pub(super) ene_service(context: Weak<Invocation>; raw: &[u8]) -> Vec<u8> {
+pub(super) fn host_functions(context: &Arc<Mutex<Weak<Invocation>>>) -> [extism::Function; 2] {
+    let service_context = context.clone();
+    let emit_context = context.clone();
+    [
+        extism::Function::new(
+            "ene_service",
+            [extism::PTR],
+            [extism::PTR],
+            extism::UserData::<()>::default(),
+            move |plugin, inputs, outputs, _| {
+                let raw = plugin.memory_get_val(&inputs[0])?;
+                let bytes = ene_service(&service_context, raw)?;
+                let output = plugin.memory_new(&bytes)?;
+                outputs[0] = plugin.memory_to_val(output);
+                Ok(())
+            },
+        ),
+        extism::Function::new(
+            "ene_emit",
+            [extism::PTR],
+            [],
+            extism::UserData::<()>::default(),
+            move |plugin, inputs, _, _| {
+                let raw = plugin.memory_get_val(&inputs[0])?;
+                ene_emit(&emit_context, raw)
+            },
+        ),
+    ]
+}
+
+fn ene_service(context: &Mutex<Weak<Invocation>>, raw: &[u8]) -> Result<Vec<u8>, extism::Error> {
     let raw_len = raw.len();
     let request = BoundedJson::<ServiceRequest, MAX_MESSAGE_BYTES>::from_bytes_owned(raw)?.0;
-    let invocation = context
-        .get()?
-        .lock()
-        .map_err(|_| Error::Unavailable)?
-        .upgrade()
-        .ok_or(Error::Unavailable)?;
+    let invocation = context.lock().upgrade().ok_or(Error::Unavailable)?;
     // Charge the bytes actually received and sent, not their re-encoded form.
     invocation.charge(&invocation.bytes, raw_len, MAX_SERVICE_BYTES)?;
     let result = invocation.service(request)?;
     let bytes = json::encode::<_, MAX_CHUNK>(result)?;
     invocation.charge(&invocation.bytes, bytes.len(), MAX_SERVICE_BYTES)?;
     Ok(bytes)
-});
-extism::host_fn!(pub(super) ene_emit(context: Weak<Invocation>; raw: &[u8]) {
+}
+
+fn ene_emit(context: &Mutex<Weak<Invocation>>, raw: &[u8]) -> Result<(), extism::Error> {
     let raw_len = raw.len();
     let event = BoundedJson::<Event, MAX_CHUNK>::from_bytes_owned(raw)?.0;
-    let invocation = context
-        .get()?
-        .lock()
-        .map_err(|_| Error::Unavailable)?
-        .upgrade()
-        .ok_or(Error::Unavailable)?;
+    let invocation = context.lock().upgrade().ok_or(Error::Unavailable)?;
     invocation.charge(&invocation.stream_bytes, raw_len, MAX_STREAM_BYTES)?;
     invocation.emit(event)?;
     Ok(())
-});
+}
 pub(super) struct Invocation {
     pub(super) services: Arc<dyn Services>,
     pub(super) declared: Vec<Service>,
@@ -105,10 +127,7 @@ impl Invocation {
     }
     #[tracing::instrument(name = "wasm.host_emit", skip_all)]
     fn emit(&self, event: Event) -> crate::Result<()> {
-        self.validator
-            .lock()
-            .map_err(|_| Error::Unavailable)?
-            .accept(&event)?;
+        self.validator.lock().accept(&event)?;
         self.wait(async {
             self.services.check().await?;
             self.events.send(event).await.map_err(|_| Error::Cancelled)
