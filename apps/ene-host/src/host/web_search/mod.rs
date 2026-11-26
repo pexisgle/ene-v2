@@ -15,7 +15,7 @@ use super::{
     model::{Credentials, connection_secret},
     net,
     providers::Providers,
-    settings::{Check, Connection, ConnectionConfig, ConnectionKind, endpoint_of},
+    settings::{Check, Connection, ConnectionConfig, ConnectionKind},
 };
 use adapter::{contains_credential, parse_adapter_results, read_http_error, send_search_request};
 use bevy_ecs::prelude::Component;
@@ -25,8 +25,7 @@ use ene_policy::CandidateAction;
 use ene_store::util;
 use rig_core::tool::{ToolErrorKind, ToolExecutionError};
 use serde_json::Value;
-use std::{sync::Arc, time::Duration};
-use tokio::{sync::Mutex, time::Instant};
+use std::time::Duration;
 use url::Url;
 
 // `tests.rs` reaches `json!` through `use super::*`, as it did before the split.
@@ -56,13 +55,25 @@ fn search_endpoint(adapter: SearchAdapter, configured: &str) -> Result<Url, Sear
         SearchAdapter::Mwmbl if !url.path().ends_with('/') => {
             url.path_segments_mut().map_err(|()| invalid())?.push("");
         }
-        SearchAdapter::Searxng if !url.path().ends_with("/search") => {
+        SearchAdapter::Searxng if !url.path().trim_end_matches('/').ends_with("/search") => {
             url.path_segments_mut()
                 .map_err(|()| invalid())?
                 .pop_if_empty()
                 .push("search");
         }
         _ => {}
+    }
+    let reserved: &[&str] = match adapter {
+        SearchAdapter::Searxng => &["q", "format"],
+        SearchAdapter::Brave => &["q", "count"],
+        SearchAdapter::Mwmbl => &["q"],
+        SearchAdapter::Exa | SearchAdapter::Tavily => &[],
+    };
+    if url
+        .query_pairs()
+        .any(|(name, _)| reserved.contains(&name.as_ref()))
+    {
+        return Err(SearchConfigError::ReservedParameters(provider));
     }
     url.set_fragment(None);
     Ok(url)
@@ -131,6 +142,8 @@ pub(crate) enum SearchConfigError {
     MissingEndpoint(&'static str),
     #[error("search_unconfigured: invalid {0} HTTP(S) endpoint")]
     InvalidEndpoint(&'static str),
+    #[error("search_unconfigured: {0} endpoint supplies parameters owned by the search tool")]
+    ReservedParameters(&'static str),
     #[error("search_unconfigured: `{0}` search connection requires an API key credential")]
     MissingCredential(&'static str),
     #[error(transparent)]
@@ -175,10 +188,15 @@ pub(crate) fn resolve_connection(
     let adapter = SearchAdapter::parse(&cfg.endpoint.adapter)
         .ok_or_else(|| SearchConfigError::UnsupportedAdapter(cfg.endpoint.adapter.clone()))?;
     let provider = adapter.provider();
-    let endpoint = endpoint_of(connection, providers)
-        .or_else(|| provider.default_endpoint.map(str::to_owned))
-        .ok_or(SearchConfigError::MissingEndpoint(provider.name))?;
-    let endpoint = search_endpoint(adapter, &endpoint)?;
+    let configured = cfg.endpoint.endpoint.trim();
+    let endpoint = if configured.is_empty() {
+        provider
+            .default_endpoint
+            .ok_or(SearchConfigError::MissingEndpoint(provider.name))?
+    } else {
+        configured
+    };
+    let endpoint = search_endpoint(adapter, endpoint)?;
     let secret = connection_secret(connection, credentials, providers)?
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
@@ -221,34 +239,18 @@ pub(crate) async fn probe(
     providers: &Providers,
 ) -> Check {
     let checked_at = util::now();
-    let resolved = match resolve_connection(connection, Some(credentials), providers, 0) {
-        Ok(resolved) => resolved,
-        Err(error) => {
-            return Check {
-                healthy: false,
-                checked_at,
-                failure: Some(Failure::new("connection_check", error.to_string())),
-                capabilities: Vec::new(),
-                resources: Vec::new(),
-            };
-        }
+    let failure = match resolve_connection(connection, Some(credentials), providers, 0) {
+        Ok(resolved) => execute(&resolved, "rust programming", 1)
+            .await
+            .err()
+            .map(|error| Failure::new("connection_check", error.to_string())),
+        Err(error) => Some(Failure::new("connection_check", error.to_string())),
     };
-    let throttle = Arc::new(Mutex::new(None));
-    match execute(&resolved, "rust programming", 1, &throttle).await {
-        Ok(_) => Check {
-            healthy: true,
-            checked_at,
-            failure: None,
-            capabilities: Vec::new(),
-            resources: Vec::new(),
-        },
-        Err(error) => Check {
-            healthy: false,
-            checked_at,
-            failure: Some(Failure::new("connection_check", error.to_string())),
-            capabilities: Vec::new(),
-            resources: Vec::new(),
-        },
+    Check {
+        healthy: failure.is_none(),
+        checked_at,
+        failure,
+        ..Default::default()
     }
 }
 
@@ -256,12 +258,10 @@ async fn execute(
     resolved: &ResolvedSearch,
     query: &str,
     limit: usize,
-    mwmbl_next_request: &Arc<Mutex<Option<Instant>>>,
 ) -> Result<Value, ToolExecutionError> {
     tokio::time::timeout(TIMEOUT, async {
         let client = net::client().map_err(|error| ToolExecutionError::other(error.to_string()))?;
-        let response =
-            send_search_request(&client, resolved, query, limit, mwmbl_next_request).await?;
+        let response = send_search_request(&client, resolved, query, limit).await?;
         let status = response.status();
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(ToolExecutionError::other(format!(

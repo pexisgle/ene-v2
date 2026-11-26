@@ -59,7 +59,7 @@ pub(crate) async fn read_response_body(
     response: reqwest::Response,
     max_bytes: usize,
     label: &str,
-) -> Result<Vec<u8>, NetError> {
+) -> Result<hyper::body::Bytes, NetError> {
     use futures_util::TryStreamExt;
     use http_body_util::BodyExt;
     let body =
@@ -67,7 +67,7 @@ pub(crate) async fn read_response_body(
     http_body_util::Limited::new(body, max_bytes)
         .collect()
         .await
-        .map(|body| body.to_bytes().to_vec())
+        .map(http_body_util::Collected::to_bytes)
         .map_err(|error| {
             if error.is::<http_body_util::LengthLimitError>() {
                 return NetError::ResponseTooLarge(label.to_owned());
@@ -146,6 +146,6 @@ mod tests {
         let empty = read_response_body(response_with(b"").await, 0, "test")
             .await
             .expect("an empty body must be readable with a zero limit");
-        assert_eq!(empty, [] as [u8; 0]);
+        assert_eq!(empty.as_ref(), [] as [u8; 0]);
     }
 }

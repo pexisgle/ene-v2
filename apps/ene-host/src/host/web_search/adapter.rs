@@ -9,9 +9,9 @@ use super::{ResolvedSearch, SearchAdapter};
 use crate::host::net;
 use ene_store::util::truncate;
 use rig_core::tool::ToolExecutionError;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 use tokio::{sync::Mutex, time::Instant};
 
 const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
@@ -99,120 +99,78 @@ pub(super) async fn send_search_request(
     resolved: &ResolvedSearch,
     query: &str,
     limit: usize,
-    mwmbl_next_request: &Arc<Mutex<Option<Instant>>>,
 ) -> Result<reqwest::Response, ToolExecutionError> {
-    let sent = match resolved.adapter {
+    let mut url = resolved.binding.endpoint.clone();
+    let key = resolved.secret.as_deref().unwrap_or_default();
+    let request = match resolved.adapter {
         SearchAdapter::Mwmbl => {
-            send_mwmbl_request(
-                client,
-                resolved.binding.endpoint.clone(),
-                query,
-                mwmbl_next_request,
-            )
-            .await?
+            if url.host_str() == Some("api.mwmbl.org") {
+                take_mwmbl_slot(&MWMBL_NEXT_REQUEST).await;
+            }
+            url.query_pairs_mut().append_pair("q", query);
+            client.get(url)
         }
         SearchAdapter::Searxng => {
-            let mut url = resolved.binding.endpoint.clone();
             url.query_pairs_mut()
                 .append_pair("q", query)
                 .append_pair("format", "json");
-            client
-                .get(url)
-                .header(reqwest::header::USER_AGENT, SEARCH_USER_AGENT)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .send()
-                .await
+            client.get(url)
         }
         SearchAdapter::Brave => {
-            let mut url = resolved.binding.endpoint.clone();
             url.query_pairs_mut()
                 .append_pair("q", query)
                 .append_pair("count", &limit.to_string());
-            let key = resolved.secret.as_deref().unwrap_or_default().trim();
             client
                 .get(url)
-                .header(reqwest::header::USER_AGENT, SEARCH_USER_AGENT)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .header("X-Subscription-Token", key)
-                .send()
-                .await
+                .header("X-Subscription-Token", credential_header(key)?)
         }
-        SearchAdapter::Tavily => {
-            let key = resolved.secret.as_deref().unwrap_or_default().trim();
-            client
-                .post(resolved.binding.endpoint.clone())
-                .header(reqwest::header::USER_AGENT, SEARCH_USER_AGENT)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .bearer_auth(key)
-                .json(&json!({
-                    "api_key": key,
-                    "query": query,
-                    "max_results": limit,
-                }))
-                .send()
-                .await
-        }
-        SearchAdapter::Exa => {
-            let key = resolved.secret.as_deref().unwrap_or_default().trim();
-            client
-                .post(resolved.binding.endpoint.clone())
-                .header(reqwest::header::USER_AGENT, SEARCH_USER_AGENT)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .header("x-api-key", key)
-                .json(&json!({
-                    "query": query,
-                    "numResults": limit,
-                    "type": "auto",
-                    "contents": {
-                        "highlights": {
-                            "maxCharacters": 500,
-                        }
-                    }
-                }))
-                .send()
-                .await
-        }
+        SearchAdapter::Tavily => client.post(url).bearer_auth(key).json(&json!({
+            "query": query,
+            "max_results": limit,
+        })),
+        SearchAdapter::Exa => client
+            .post(url)
+            .header("x-api-key", credential_header(key)?)
+            .json(&json!({
+                "query": query,
+                "numResults": limit,
+                "type": "auto",
+                "contents": {"highlights": {"maxCharacters": 500}},
+            })),
     };
-    sent.map_err(|error| {
-        ToolExecutionError::other(format!(
-            "could not reach {}: {}",
-            resolved.adapter.provider().name,
-            error.without_url()
-        ))
-    })
-}
-
-async fn send_mwmbl_request(
-    client: &reqwest::Client,
-    mut url: url::Url,
-    query: &str,
-    mwmbl_next_request: &Arc<Mutex<Option<Instant>>>,
-) -> Result<Result<reqwest::Response, reqwest::Error>, ToolExecutionError> {
-    if url
-        .host_str()
-        .is_some_and(|host| host.eq_ignore_ascii_case("api.mwmbl.org"))
-    {
-        // Reserve the slot under the lock, then wait for it outside: holding
-        // the guard across the sleep would queue every later request behind
-        // this one's wait instead of letting them run up to the same deadline.
-        let deadline = {
-            let mut next = mwmbl_next_request.lock().await;
-            let deadline = *next;
-            // Mwmbl's anonymous tier allows one request per second.
-            *next = Some(Instant::now() + Duration::from_secs(1));
-            deadline
-        };
-        if let Some(deadline) = deadline {
-            tokio::time::sleep_until(deadline).await;
-        }
-    }
-    url.query_pairs_mut().append_pair("q", query);
-    Ok(client
-        .get(url)
+    request
         .header(reqwest::header::USER_AGENT, SEARCH_USER_AGENT)
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
-        .await)
+        .await
+        .map_err(|error| {
+            ToolExecutionError::other(format!(
+                "could not reach {}: {}",
+                resolved.adapter.provider().name,
+                error.without_url()
+            ))
+        })
+}
+
+fn credential_header(key: &str) -> Result<reqwest::header::HeaderValue, ToolExecutionError> {
+    let mut value = reqwest::header::HeaderValue::from_str(key).map_err(|_| {
+        ToolExecutionError::other("the search credential is not a valid header value")
+    })?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
+// The anonymous public tier permits one request per second. The same queue
+// admits searches and explicit probes. Cancellation while waiting drops the
+// guard without reserving a future slot.
+static MWMBL_NEXT_REQUEST: Mutex<Option<Instant>> = Mutex::const_new(None);
+
+async fn take_mwmbl_slot(slot: &Mutex<Option<Instant>>) {
+    let mut next = slot.lock().await;
+    if let Some(deadline) = *next {
+        tokio::time::sleep_until(deadline).await;
+    }
+    *next = Some(Instant::now() + Duration::from_secs(1));
 }
 
 pub(super) async fn read_http_error(
@@ -261,72 +219,125 @@ pub(super) fn parse_adapter_results(
     limit: usize,
     secret: Option<&str>,
 ) -> Result<Value, ToolExecutionError> {
-    let raw_hits: Vec<(String, Option<String>, Option<String>)> = match adapter {
+    let results = match adapter {
         SearchAdapter::Mwmbl | SearchAdapter::Searxng | SearchAdapter::Tavily => {
-            let parsed: MwmblOrSearxngResponse = serde_json::from_slice(body).map_err(|_| {
-                ToolExecutionError::other(format!(
-                    "{} returned invalid search results",
-                    adapter.provider().name
-                ))
-            })?;
-            parsed
-                .results
-                .into_iter()
-                .map(|hit| (hit.url, hit.title, hit.content))
-                .collect()
+            let parsed: MwmblOrSearxngResponse = decode(body, adapter)?;
+            bounded_results(parsed.results, limit, secret)
         }
         SearchAdapter::Brave => {
-            let parsed: BraveResponse = serde_json::from_slice(body)
-                .map_err(|_| ToolExecutionError::other("Brave returned invalid search results"))?;
-            parsed
+            let parsed: BraveResponse = decode(body, adapter)?;
+            let hits = parsed
                 .web
-                .map_or_default(|web| web.results)
                 .into_iter()
-                .map(|hit| (hit.url, hit.title, hit.description))
-                .collect()
+                .flat_map(|web| web.results)
+                .map(|hit| GenericHit {
+                    url: hit.url,
+                    title: hit.title,
+                    content: hit.description,
+                });
+            bounded_results(hits, limit, secret)
         }
         SearchAdapter::Exa => {
-            let parsed: ExaResponse = serde_json::from_slice(body)
-                .map_err(|_| ToolExecutionError::other("Exa returned invalid search results"))?;
-            parsed
-                .results
-                .into_iter()
-                .map(|hit| {
-                    let snippet = hit.best_snippet();
-                    (hit.url, hit.title, snippet)
-                })
-                .collect()
+            let parsed: ExaResponse = decode(body, adapter)?;
+            let hits = parsed.results.into_iter().map(|hit| GenericHit {
+                content: hit.best_snippet(),
+                url: hit.url,
+                title: hit.title,
+            });
+            bounded_results(hits, limit, secret)
         }
     };
-    let results: Vec<_> = raw_hits
-        .into_iter()
-        .filter_map(|(raw_url, title, content)| {
-            let url = url::Url::parse(&raw_url).ok()?;
-            if !matches!(url.scheme(), "http" | "https")
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.as_str().len() > 2048
-                || [
-                    raw_url.as_str(),
-                    title.as_deref().unwrap_or(""),
-                    content.as_deref().unwrap_or(""),
-                ]
-                .into_iter()
-                .any(|text| contains_credential(text, secret))
-            {
-                return None;
-            }
-            let title = title
-                .as_deref()
-                .map(str::trim)
-                .filter(|title| !title.is_empty());
-            Some(SearchResult {
-                title: truncate(title.unwrap_or(url.as_str()), 300),
-                url: url.into(),
-                snippet: truncate(content.as_deref().unwrap_or("").trim(), 500),
-            })
-        })
-        .take(limit)
-        .collect();
     Ok(json!({"provider": provider_label, "results": results}))
+}
+
+fn decode<T: DeserializeOwned>(
+    body: &[u8],
+    adapter: SearchAdapter,
+) -> Result<T, ToolExecutionError> {
+    serde_json::from_slice(body).map_err(|_| {
+        ToolExecutionError::other(format!(
+            "{} returned invalid search results",
+            adapter.provider().name
+        ))
+    })
+}
+
+fn bounded_results(
+    hits: impl IntoIterator<Item = GenericHit>,
+    limit: usize,
+    secret: Option<&str>,
+) -> Vec<SearchResult> {
+    hits.into_iter()
+        .filter_map(
+            |GenericHit {
+                 url: raw_url,
+                 title,
+                 content,
+             }| {
+                let url = url::Url::parse(&raw_url).ok()?;
+                if !matches!(url.scheme(), "http" | "https")
+                    || !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.as_str().len() > 2048
+                    || [
+                        raw_url.as_str(),
+                        title.as_deref().unwrap_or(""),
+                        content.as_deref().unwrap_or(""),
+                    ]
+                    .into_iter()
+                    .any(|text| contains_credential(text, secret))
+                {
+                    return None;
+                }
+                let title = title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty());
+                Some(SearchResult {
+                    title: truncate(title.unwrap_or(url.as_str()), 300),
+                    url: url.into(),
+                    snippet: truncate(content.as_deref().unwrap_or("").trim(), 500),
+                })
+            },
+        )
+        .take(limit)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn mwmbl_admission_spaces_concurrent_requests() {
+        let slot = Mutex::new(None);
+        let start = Instant::now();
+        let take = || async {
+            take_mwmbl_slot(&slot).await;
+            start.elapsed()
+        };
+        let (one, two, three) = tokio::join!(biased; take(), take(), take());
+        assert_eq!(
+            [one, two, three],
+            [
+                Duration::ZERO,
+                Duration::from_secs(1),
+                Duration::from_secs(2)
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_waiter_does_not_take_a_slot() {
+        let slot = Mutex::new(None);
+        let start = Instant::now();
+        take_mwmbl_slot(&slot).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), take_mwmbl_slot(&slot))
+                .await
+                .is_err()
+        );
+        take_mwmbl_slot(&slot).await;
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+    }
 }

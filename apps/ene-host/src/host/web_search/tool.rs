@@ -9,36 +9,30 @@ use bevy_tasks::{AsyncComputeTaskPool, TaskPool};
 use rig_core::tool::{ToolErrorKind, ToolExecutionError, ToolOutput, ToolResult, Touches};
 use rig_ecs::prelude::*;
 use serde::Deserialize;
-use std::sync::Arc;
-use tokio::{sync::Mutex, time::Instant};
 
 pub(crate) struct SearchPlugin;
 
 impl Plugin for SearchPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Throttle>()
-            .add_open_tool::<SearchArgs, _>(
-                NAME,
-                "Search the public Web using the configured search connection and return titles, \
+        app.add_open_tool::<SearchArgs, _>(
+            NAME,
+            "Search the public Web using the configured search connection and return titles, \
              source URLs and snippets. Cite the source URLs when reporting findings.",
-                // A search reads public results but sends the user's query. Restoring
-                // an interrupted turn must not repeat that external transfer.
-                ToolOptions {
-                    footprint: Some(Touches::Independent),
-                },
-                |called: On<ToolCalled<SearchArgs>>,
-                 bindings: Query<&SearchBinding>,
-                 decisions: Query<&mut Decision>,
-                 services: SearchServices<'_>,
-                 commands: Commands| {
-                    search(called.event(), bindings, decisions, &services, commands);
-                },
-            );
+            // A search reads public results but sends the user's query. Restoring
+            // an interrupted turn must not repeat that external transfer.
+            ToolOptions {
+                footprint: Some(Touches::Independent),
+            },
+            |called: On<ToolCalled<SearchArgs>>,
+             bindings: Query<&SearchBinding>,
+             decisions: Query<&mut Decision>,
+             services: SearchServices<'_>,
+             commands: Commands| {
+                search(called.event(), bindings, decisions, &services, commands);
+            },
+        );
     }
 }
-
-#[derive(Default, Resource)]
-struct Throttle(Arc<Mutex<Option<Instant>>>);
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -61,7 +55,6 @@ struct SearchServices<'w> {
     providers: Option<Res<'w, Providers>>,
     runtime: Option<Res<'w, HostRuntime>>,
     wake: Res<'w, Wake>,
-    throttle: Res<'w, Throttle>,
 }
 
 fn search(
@@ -130,9 +123,8 @@ fn start(
     let limit = resolved
         .max_results
         .map_or(limit, |maximum| maximum.min(limit));
-    let throttle = Arc::clone(&services.throttle.0);
     let task = background::spawn(&runtime, None, async move {
-        execute(&resolved, &query, limit, &throttle).await
+        execute(&resolved, &query, limit).await
     });
     Ok(Running::answering(
         AsyncComputeTaskPool::get_or_init(TaskPool::default),
