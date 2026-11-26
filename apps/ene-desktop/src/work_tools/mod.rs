@@ -37,8 +37,6 @@ pub(crate) enum WorkToolError {
     UnknownTool,
     #[error("path must stay relative to the workspace")]
     InvalidPath,
-    #[error("workspace tool arguments must be an object")]
-    InvalidArguments,
     #[error("invalid workspace tool arguments: {0}")]
     Arguments(#[from] serde_json::Error),
     #[error("image exceeds the 512 KiB limit")]
@@ -63,8 +61,6 @@ pub(crate) enum WorkToolError {
     ShellUnavailable,
     #[error("command is empty")]
     EmptyCommand,
-    #[error("the shell process is unavailable")]
-    ShellProcessUnavailable,
     #[error("the shell process pipes are unavailable")]
     ShellPipesUnavailable,
     #[error("command exceeded {COMMAND_TIMEOUT} seconds")]

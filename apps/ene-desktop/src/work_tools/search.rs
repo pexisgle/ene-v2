@@ -7,6 +7,7 @@ use super::{
 };
 use cap_fs_ext::DirExt as _;
 use cap_std::fs::{Dir, FileType};
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{io, num::NonZeroUsize, path::Path};
@@ -21,11 +22,13 @@ pub(super) enum Search<'a> {
     },
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 pub(super) struct Browse {
+    /// Path relative to the workspace, using / between components.
     #[serde(default = "workspace_root")]
     path: String,
     #[serde(default = "max_results")]
+    #[schemars(range(max = MAX_RESULTS))]
     limit: NonZeroUsize,
 }
 

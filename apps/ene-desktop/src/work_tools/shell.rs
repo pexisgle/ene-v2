@@ -41,10 +41,9 @@ impl Workspace {
         #[cfg(windows)]
         process.wrap(process_wrap::tokio::JobObject);
         process.wrap(KillOnDrop);
-        let mut running = RunningShell(Some(process.spawn()?));
-        let Some(child) = running.0.as_mut() else {
-            return Err(WorkToolError::ShellProcessUnavailable);
-        };
+        let mut child = scopeguard::guard(process.spawn()?, |mut child| {
+            reap_killed_child(child.as_mut());
+        });
         let (Some(stdout), Some(stderr)) = (child.stdout().take(), child.stderr().take()) else {
             return Err(WorkToolError::ShellPipesUnavailable);
         };
@@ -57,7 +56,7 @@ impl Workspace {
             Ok(result) => result?,
             Err(_) => return Err(WorkToolError::CommandTimedOut),
         };
-        running.0 = None;
+        drop(scopeguard::ScopeGuard::into_inner(child));
         Ok(json!({
             "success": status.success(), "exit_code": status.code(), "stdout": stdout, "stderr": stderr,
             "truncated": stdout_cut || stderr_cut
@@ -65,40 +64,26 @@ impl Workspace {
     }
 }
 
-pub(super) struct RunningShell(pub(super) Option<Box<dyn ChildWrapper>>);
-
-impl Drop for RunningShell {
-    fn drop(&mut self) {
-        // Kill the group or job even if the device stream drops the future.
-        //
-        // `start_kill` only signals; nothing here collected the exit status, so
-        // a timed-out command stayed unreaped. `wait` is a future and `Drop`
-        // cannot await, so the status is polled for a bounded moment instead.
-        if let Some(child) = &mut self.0 {
-            ene_domain::warn_if_err(child.start_kill(), "tool process termination");
-            let deadline = std::time::Instant::now() + REAP_TIMEOUT;
-            while std::time::Instant::now() < deadline {
-                match child.try_wait() {
-                    Ok(Some(_)) | Err(_) => break,
-                    Ok(None) => std::thread::sleep(Duration::from_millis(5)),
-                }
-            }
-        }
+fn reap_killed_child(child: &mut dyn ChildWrapper) {
+    // Kill the group or job when the device stream drops the future, then
+    // poll for its exit status within the synchronous drop budget.
+    ene_domain::warn_if_err(child.start_kill(), "tool process termination");
+    let deadline = std::time::Instant::now() + REAP_TIMEOUT;
+    while std::time::Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
 async fn capture(mut stream: impl AsyncRead + Unpin) -> io::Result<(String, bool)> {
-    let mut buffer = [0; 8192];
     let mut output = Vec::new();
-    let mut truncated = false;
-    loop {
-        let count = stream.read(&mut buffer).await?;
-        if count == 0 {
-            break;
-        }
-        let keep = count.min(OUTPUT_LIMIT - output.len());
-        output.extend_from_slice(&buffer[..keep]);
-        truncated |= keep < count;
+    (&mut stream)
+        .take(OUTPUT_LIMIT as u64 + 1)
+        .read_to_end(&mut output)
+        .await?;
+    let truncated = output.len() > OUTPUT_LIMIT;
+    if truncated {
+        output.truncate(OUTPUT_LIMIT);
+        tokio::io::copy(&mut stream, &mut tokio::io::sink()).await?;
     }
     Ok((String::from_utf8_lossy(&output).into_owned(), truncated))
 }

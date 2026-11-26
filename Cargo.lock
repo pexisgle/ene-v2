@@ -4063,6 +4063,8 @@ dependencies = [
  "parking_lot 0.13.0",
  "process-wrap",
  "regex",
+ "schemars 1.2.3",
+ "scopeguard",
  "serde",
  "serde_json",
  "tempfile",

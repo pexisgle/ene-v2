@@ -31,6 +31,8 @@ directories = "6"
 gpui.workspace = true
 globset = "0.4"
 process-wrap.workspace = true
+schemars.workspace = true
+scopeguard = { version = "1", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

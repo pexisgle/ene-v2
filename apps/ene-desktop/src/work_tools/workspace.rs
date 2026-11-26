@@ -10,10 +10,11 @@ use cap_tempfile::TempFile;
 use ene_client_core::is_attachment_image;
 use ene_rpc as w;
 use parking_lot::Mutex;
-
-use serde::Deserialize;
+use schemars::{JsonSchema, generate::SchemaSettings};
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
+    borrow::Cow,
     io::{self, Read, Write},
     num::NonZeroUsize,
     path::{Path, PathBuf},
@@ -27,55 +28,80 @@ pub(crate) struct Workspace {
     pub(super) shell: Option<PathBuf>,
 }
 
-#[derive(Deserialize)]
-struct Request {
+#[derive(Deserialize, JsonSchema)]
+struct Request<T> {
+    /// Copy this workspace path exactly.
     workspace: String,
     #[serde(flatten)]
-    tool: Tool,
+    tool: T,
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "tool", rename_all = "snake_case")]
-enum Tool {
-    Read {
-        path: String,
-        #[serde(default = "first_line")]
-        offset: NonZeroUsize,
-        #[serde(default = "max_results")]
-        limit: NonZeroUsize,
-    },
-    Write {
-        path: String,
-        content: String,
-    },
-    Edit {
-        path: String,
-        edits: Vec<Edit>,
-    },
-    Ls {
-        #[serde(flatten)]
-        browse: Browse,
-    },
-    Find {
-        #[serde(flatten)]
-        browse: Browse,
-        pattern: String,
-    },
-    Grep {
-        #[serde(flatten)]
-        browse: Browse,
-        pattern: String,
-        #[serde(default, rename = "ignoreCase")]
-        ignore_case: bool,
-        #[serde(default)]
-        literal: bool,
-        glob: Option<String>,
-    },
-    #[cfg_attr(windows, serde(rename = "powershell"))]
-    #[cfg_attr(not(windows), serde(rename = "bash"))]
-    Shell {
-        command: String,
-    },
+enum FileTool {
+    Read(ReadArgs),
+    Write(WriteArgs),
+    Edit(EditArgs),
+    Grep(GrepArgs),
+    Find(FindArgs),
+    Ls(Browse),
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ReadArgs {
+    /// Path relative to the workspace, using / between components.
+    path: String,
+    #[serde(default = "first_line")]
+    offset: NonZeroUsize,
+    #[serde(default = "max_results")]
+    #[schemars(range(max = MAX_RESULTS))]
+    limit: NonZeroUsize,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct WriteArgs {
+    /// Path relative to the workspace, using / between components.
+    path: String,
+    content: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct EditArgs {
+    /// Path relative to the workspace, using / between components.
+    path: String,
+    #[schemars(length(min = 1))]
+    edits: Vec<Edit>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct GrepArgs {
+    #[serde(flatten)]
+    browse: Browse,
+    pattern: String,
+    #[serde(default, rename = "ignoreCase")]
+    ignore_case: bool,
+    #[serde(default)]
+    literal: bool,
+    #[serde(default)]
+    #[schemars(with = "String")]
+    glob: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct FindArgs {
+    #[serde(flatten)]
+    browse: Browse,
+    pattern: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ShellArgs {
+    #[schemars(length(min = 1))]
+    command: String,
+}
+
+#[derive(Clone, Copy)]
+enum FileChange<'a> {
+    Write(&'a str),
+    Edit(&'a [Edit]),
 }
 
 fn first_line() -> NonZeroUsize {
@@ -115,60 +141,45 @@ impl Workspace {
     }
 
     pub(crate) fn specs(&self) -> Vec<w::ClientCapabilitySpec> {
-        let path = json!({"type": "string", "description": "Path relative to the workspace, using / between components."});
-        let limit = json!({"type": "integer", "minimum": 1, "maximum": MAX_RESULTS});
-        let mut tools = vec![
-            self.spec("read", "Read text by line or a PNG, JPEG, GIF or WebP image.",
-                json!({"path": path, "offset": {"type": "integer", "minimum": 1}, "limit": limit}),
-                &["path"], "{path}"),
-            self.spec("write", "Create or replace a UTF-8 text file. Creates missing parent folders.",
-                json!({"path": path, "content": {"type": "string"}}), &["path", "content"], "{path}"),
-            self.spec("edit", "Apply exact replacements in order. Each oldText must match exactly once. Save only if all replacements succeed.",
-                json!({"path": path, "edits": {"type": "array", "minItems": 1, "items": {
-                    "type": "object", "properties": {"oldText": {"type": "string", "minLength": 1}, "newText": {"type": "string"}},
-                    "required": ["oldText", "newText"], "additionalProperties": false
-                }}}), &["path", "edits"], "{path}"),
-            self.spec("grep", "Search UTF-8 files for matching lines. Pattern is a Rust regular expression. Path defaults to the workspace.",
-                json!({"path": path, "pattern": {"type": "string"}, "ignoreCase": {"type": "boolean"},
-                    "literal": {"type": "boolean"}, "glob": {"type": "string"}, "limit": limit}),
-                &["pattern"], "{path}"),
-            self.spec("find", "Find paths matching a glob, for example **/*.rs. Path defaults to the workspace.",
-                json!({"path": path, "pattern": {"type": "string"}, "limit": limit}), &["pattern"], "{path}"),
-            self.spec("ls", "List a directory. Path defaults to the workspace.",
-                json!({"path": path, "limit": limit}), &[], "{path}"),
+        let mut specs = vec![
+            self.spec::<ReadArgs>("read", "Read text by line or a PNG, JPEG, GIF or WebP image.", "{path}"),
+            self.spec::<WriteArgs>("write", "Create or replace a UTF-8 text file. Creates missing parent folders.", "{path}"),
+            self.spec::<EditArgs>("edit", "Apply exact replacements in order. Each oldText must match exactly once. Save only if all replacements succeed.", "{path}"),
+            self.spec::<GrepArgs>("grep", "Search UTF-8 files for matching lines. Pattern is a Rust regular expression. Path defaults to the workspace.", "{path}"),
+            self.spec::<FindArgs>("find", "Find paths matching a glob, for example **/*.rs. Path defaults to the workspace.", "{path}"),
+            self.spec::<Browse>("ls", "List a directory. Path defaults to the workspace.", "{path}"),
         ];
         if self.shell.is_some() {
-            tools.push(self.spec(
+            specs.push(self.spec::<ShellArgs>(
                 SHELL,
                 &format!("Run a {SHELL} command starting in the workspace and return its exit code, stdout and stderr. Time limit: {COMMAND_TIMEOUT} seconds."),
-                json!({"command": {"type": "string", "minLength": 1}}),
-                &["command"],
                 "{command}",
             ));
         }
-        tools
+        specs
     }
 
-    pub(super) fn spec(
+    fn spec<T: JsonSchema>(
         &self,
         name: &str,
         description: &str,
-        mut properties: Value,
-        required: &[&str],
         target: &str,
     ) -> w::ClientCapabilitySpec {
-        properties["workspace"] = json!({
-            "type": "string", "const": self.root.to_string_lossy(),
-            "description": "Copy this workspace path exactly."
-        });
-        let mut required = required.to_vec();
-        required.push("workspace");
+        let root = self.root.to_string_lossy();
+        let mut schema = SchemaSettings::draft2020_12()
+            .with(|settings| {
+                settings.inline_subschemas = true;
+                settings.meta_schema = None;
+            })
+            .into_generator()
+            .into_root_schema_for::<Request<T>>()
+            .to_value();
+        schema["properties"]["workspace"]["const"] = json!(root);
+        schema["additionalProperties"] = json!(false);
         w::ClientCapabilitySpec {
             name: format!("{PREFIX}{name}"),
-            description: format!("{description} Workspace: {}", self.root.display()),
-            input_schema: json!({
-                "type": "object", "properties": properties, "required": required, "additionalProperties": false
-            }).to_string(),
+            description: format!("{description} Workspace: {root}"),
+            input_schema: schema.to_string(),
             approval: w::CapabilityApproval::Confirm.into(),
             approval_target: format!("{name} in {{workspace}}: {target}"),
             ..Default::default()
@@ -180,41 +191,54 @@ impl Workspace {
         capability: &str,
         input: Value,
     ) -> Result<Value, WorkToolError> {
-        let tool = capability
-            .strip_prefix(PREFIX)
-            .ok_or(WorkToolError::UnknownTool)?;
-        let Value::Object(mut fields) = input else {
-            return Err(WorkToolError::InvalidArguments);
+        let tool = match capability.strip_prefix(PREFIX) {
+            Some("read") => FileTool::Read(self.arguments(input)?),
+            Some("write") => FileTool::Write(self.arguments(input)?),
+            Some("edit") => FileTool::Edit(self.arguments(input)?),
+            Some("grep") => FileTool::Grep(self.arguments(input)?),
+            Some("find") => FileTool::Find(self.arguments(input)?),
+            Some("ls") => FileTool::Ls(self.arguments(input)?),
+            Some(SHELL) => {
+                let ShellArgs { command } = self.arguments(input)?;
+                return Box::pin(self.shell(&command)).await;
+            }
+            _ => return Err(WorkToolError::UnknownTool),
         };
-        fields.insert("tool".into(), tool.into());
-        let request: Request = serde_json::from_value(Value::Object(fields))?;
+        tokio::task::spawn_blocking(move || self.file_tool(tool)).await?
+    }
+
+    fn arguments<T: DeserializeOwned>(&self, input: Value) -> Result<T, WorkToolError> {
+        let request: Request<T> = serde_json::from_value(input)?;
         if request.workspace != self.root.to_string_lossy() {
             return Err(WorkToolError::WorkspaceChanged);
         }
-        match request.tool {
-            Tool::Shell { command } => Box::pin(self.shell(&command)).await,
-            tool => tokio::task::spawn_blocking(move || self.file_tool(tool)).await?,
-        }
+        Ok(request.tool)
     }
 
-    fn file_tool(&self, tool: Tool) -> Result<Value, WorkToolError> {
+    fn file_tool(&self, tool: FileTool) -> Result<Value, WorkToolError> {
         match tool {
-            Tool::Read {
+            FileTool::Read(ReadArgs {
                 path,
                 offset,
                 limit,
-            } => self.read(relative(&path)?, offset, limit.get().min(MAX_RESULTS)),
-            Tool::Write { path, content } => self.change(relative(&path)?, Some(&content), &[]),
-            Tool::Edit { path, edits } => self.change(relative(&path)?, None, &edits),
-            Tool::Ls { browse } => self.search(&browse, Search::List),
-            Tool::Find { browse, pattern } => self.search(&browse, Search::Find(&glob(&pattern)?)),
-            Tool::Grep {
+            }) => self.read(relative(&path)?, offset, limit.get().min(MAX_RESULTS)),
+            FileTool::Write(WriteArgs { path, content }) => {
+                self.change(relative(&path)?, FileChange::Write(&content))
+            }
+            FileTool::Edit(EditArgs { path, edits }) => {
+                self.change(relative(&path)?, FileChange::Edit(&edits))
+            }
+            FileTool::Ls(browse) => self.search(&browse, Search::List),
+            FileTool::Find(FindArgs { browse, pattern }) => {
+                self.search(&browse, Search::Find(&glob(&pattern)?))
+            }
+            FileTool::Grep(GrepArgs {
                 browse,
                 pattern,
                 ignore_case,
                 literal,
                 glob: filter,
-            } => {
+            }) => {
                 let pattern = if literal {
                     regex::escape(&pattern)
                 } else {
@@ -232,29 +256,17 @@ impl Workspace {
                     },
                 )
             }
-            Tool::Shell { .. } => Err(WorkToolError::UnknownTool),
         }
     }
 
-    fn change(
-        &self,
-        path: &Path,
-        content: Option<&str>,
-        edits: &[Edit],
-    ) -> Result<Value, WorkToolError> {
+    fn change(&self, path: &Path, change: FileChange<'_>) -> Result<Value, WorkToolError> {
         let _guard = self.edits.lock();
-        let len = match content {
-            Some(content) => {
-                self.save(path, content, true)?;
-                content.len()
-            }
-            None => {
-                let content = edit(text(&self.load(path)?)?, edits)?;
-                self.save(path, &content, false)?;
-                content.len()
-            }
+        let (content, create) = match change {
+            FileChange::Write(content) => (Cow::Borrowed(content), true),
+            FileChange::Edit(edits) => (Cow::Owned(edit(text(&self.load(path)?)?, edits)?), false),
         };
-        Ok(json!({"path": path, "bytes": len}))
+        self.save(path, &content, create)?;
+        Ok(json!({"path": path, "bytes": content.len()}))
     }
 
     pub(super) fn load(&self, path: &Path) -> io::Result<Vec<u8>> {

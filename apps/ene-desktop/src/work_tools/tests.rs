@@ -1,4 +1,5 @@
-use super::{SHELL, workspace::Workspace};
+use super::{OUTPUT_LIMIT, SHELL, WORKSPACE_FILE_CAPABILITIES, workspace::Workspace};
+use ene_domain::json::validate;
 use serde_json::{Value, json};
 #[cfg(unix)]
 use std::path::Path;
@@ -8,8 +9,32 @@ use std::sync::Arc;
 async fn workspace_tools_read_search_and_edit_only_the_bound_workspace() {
     let directory = tempfile::tempdir().unwrap();
     let workspace = Arc::new(Workspace::open(directory.path()).unwrap());
+    let specs = workspace.specs();
+    assert_eq!(
+        specs
+            .iter()
+            .take(WORKSPACE_FILE_CAPABILITIES.len())
+            .map(|spec| spec.name.as_str())
+            .collect::<Vec<_>>(),
+        WORKSPACE_FILE_CAPABILITIES,
+    );
+    let schema = |name: &str| -> Value {
+        let name = format!("work.{name}");
+        let spec = specs.iter().find(|spec| spec.name == name).unwrap();
+        serde_json::from_str(&spec.input_schema).unwrap()
+    };
+    let root = workspace.root.to_string_lossy();
+    for args in [
+        json!({"workspace": "another workspace", "pattern": "hello"}),
+        json!({"workspace": root, "pattern": "hello", "tool": "bash"}),
+        json!({"workspace": root, "pattern": "hello", "glob": null}),
+        json!({"workspace": root, "pattern": "hello", "limit": 501}),
+    ] {
+        assert!(validate(&schema("grep"), &args).is_err(), "{args}");
+    }
     let call = |name: &str, mut input: Value| {
         input["workspace"] = json!(workspace.root.to_string_lossy());
+        validate(&schema(name), &input).unwrap();
         let workspace = workspace.clone();
         let name = format!("work.{name}");
         async move { Box::pin(workspace.execute(&name, input)).await }
@@ -93,6 +118,16 @@ async fn workspace_tools_read_search_and_edit_only_the_bound_workspace() {
         let result = call(SHELL, json!({"command": command})).await.unwrap();
         assert_eq!(result["exit_code"], 0, "{result}");
         assert!(result["stdout"].as_str().unwrap().contains("world"));
+
+        #[cfg(windows)]
+        let command = "[Console]::Out.Write('x' * 131072); [Console]::Error.Write('y' * 131072)";
+        #[cfg(not(windows))]
+        let command = "printf '%131072s' x; printf '%131072s' y >&2";
+        let result = call(SHELL, json!({"command": command})).await.unwrap();
+        assert_eq!(result["exit_code"], 0);
+        assert_eq!(result["truncated"], true);
+        assert_eq!(result["stdout"].as_str().unwrap().len(), OUTPUT_LIMIT);
+        assert_eq!(result["stderr"].as_str().unwrap().len(), OUTPUT_LIMIT);
     }
 }
 

@@ -1,5 +1,6 @@
 use super::{FILE_LIMIT, WorkToolError};
 use globset::{GlobBuilder, GlobMatcher};
+use schemars::JsonSchema;
 use serde::Deserialize;
 use std::path::{Component, Path};
 
@@ -23,9 +24,10 @@ pub(super) fn text(bytes: &[u8]) -> Result<&str, WorkToolError> {
     std::str::from_utf8(bytes).map_err(|_| WorkToolError::NotUtf8)
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Edit {
+    #[schemars(length(min = 1))]
     old_text: String,
     new_text: String,
 }
