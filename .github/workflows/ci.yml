@@ -81,7 +81,8 @@ jobs:
       # says which half ran out of time, and the job can be re-run from Clippy.
       - name: Tests
         run: |
-          cargo nextest run --profile ci --workspace --all-features --locked --no-fail-fast
+          # Cargo 1.100 reports example-only dev-dependencies as unused with implicit target selection.
+          cargo nextest run --profile ci --workspace --tests --examples --all-features --locked --no-fail-fast
 
       - name: Native Wasm tool-call regressions
         run: |

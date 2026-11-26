@@ -18,7 +18,7 @@ clippy:
 verify: fmt-check clippy
 
 test: build-test-plugins
-    cargo nextest run --workspace --all-features --locked
+    cargo nextest run --workspace --tests --examples --all-features --locked
 
 build-test-plugins:
     cargo build --release --locked -p ene-reference-wasm -p ene-openrouter-wasm --target wasm32-unknown-unknown
