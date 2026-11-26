@@ -1,6 +1,51 @@
 use super::*;
 
 #[test]
+fn cancelling_a_held_call_expires_the_card_and_cancels_evaluation() {
+    for human_card in [true, false] {
+        let runtime = paused_runtime();
+        let provider = runtime.block_on(serve("unused", STALL));
+        let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
+        if human_card {
+            world
+                .store()
+                .policy_repo()
+                .apply_policy_rules(
+                    &[PolicyRule {
+                        id: "confirm".into(),
+                        tool_name: "device_request".into(),
+                        pattern: "*".into(),
+                        effect: PolicyEffect::Confirm,
+                        created_at: String::new(),
+                    }],
+                    &[],
+                )
+                .unwrap();
+        }
+        let call = world.gated_call("/tmp/a");
+        world.app.update();
+        let request = world.pending().request_id;
+        assert_eq!(
+            world.app.world().resource::<Decisions>().running.len(),
+            usize::from(!human_card)
+        );
+        assert_eq!(cards(&world.events()).len(), usize::from(human_card));
+        assert!(world.app.world_mut().despawn(call));
+        world.app.update();
+        let approval = world
+            .store()
+            .approval_repo()
+            .approval(&request)
+            .unwrap()
+            .unwrap();
+        assert_eq!(approval.status, ApprovalStatus::Expired);
+        assert_eq!(notices(&world.events(), "approval_resolved"), 1);
+        assert!(world.app.world().resource::<Decisions>().running.is_empty());
+        provider.task.abort();
+    }
+}
+
+#[test]
 fn a_decision_reply_based_on_old_policy_cannot_release_a_call() {
     let runtime = paused_runtime();
     let provider = runtime.block_on(serve(

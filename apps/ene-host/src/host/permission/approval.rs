@@ -1,5 +1,8 @@
 //! Approval submission, hold release, rule persistence, and orphan expiration.
-use super::gate::{Approvals, Approved, CallBinding, ResolveApprovalArgs};
+use super::{
+    decision::Decisions,
+    gate::{Approvals, Approved, CallBinding, ResolveApprovalArgs},
+};
 use crate::host::{
     db::Store,
     error::{HostError, Result},
@@ -40,6 +43,9 @@ pub(crate) fn refuse(world: &mut World, call: Entity, reason: &str) {
 fn release(world: &mut World, request: &str) {
     if let Some(hold) = world.resource_mut::<Approvals>().by_request.remove(request) {
         let _despawned = world.try_despawn(hold.hold);
+    }
+    if let Some(mut decisions) = world.get_resource_mut::<Decisions>() {
+        decisions.running.remove(request);
     }
 }
 
@@ -424,6 +430,8 @@ pub(super) fn expire_orphaned_approvals(
     mut approvals: ResMut<Approvals>,
     entities: Query<()>,
     store: Res<Store>,
+    mut notifier: ResMut<Notifier>,
+    mut decisions: ResMut<Decisions>,
     mut commands: Commands,
 ) {
     let repo = store.into_inner().approval_repo();
@@ -432,7 +440,15 @@ pub(super) fn expire_orphaned_approvals(
             return true;
         }
         commands.entity(hold.hold).try_despawn();
-        let _expired = repo.resolve_approval(request, ApprovalStatus::Expired);
+        decisions.running.remove(request);
+        match repo.resolve_approval(request, ApprovalStatus::Expired) {
+            Ok(expired) => notify_resolved(&mut notifier, &expired),
+            Err(ene_store::StoreError::Unavailable(_)) => return true,
+            Err(error) if error.is_storage() => {
+                commands.run_system_cached_with(crate::host::stop_on_failure, error.to_string());
+            }
+            Err(error) => tracing::debug!(%request, %error, "approval is already closed"),
+        }
         false
     });
 }
