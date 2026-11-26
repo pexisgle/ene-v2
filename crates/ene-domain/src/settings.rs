@@ -89,9 +89,9 @@ macro_rules! connection_bodies {
         $(
             #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
             #[doc = $variant_doc]
-            pub struct $name {
+            pub struct $name<E = Endpoint> {
                 /// The shared adapter, URL and options block.
-                pub endpoint: Endpoint,
+                pub endpoint: E,
                 $(
                     #[serde(default)]
                     #[doc = $field_doc]
@@ -104,14 +104,14 @@ macro_rules! connection_bodies {
         /// the stored kind; callers refuse a mismatch instead of guessing.
         #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(tag = "config", rename_all = "snake_case")]
-        pub enum ConnectionConfig {
+        pub enum ConnectionConfig<E = Endpoint> {
             $(
                 #[doc = $variant_doc]
-                $variant($name),
+                $variant($name<E>),
             )+
         }
 
-        impl ConnectionConfig {
+        impl<E> ConnectionConfig<E> {
             /// Returns the connection kind corresponding to this config variant.
             pub fn kind(&self) -> ConnectionKind {
                 match self {
@@ -120,9 +120,16 @@ macro_rules! connection_bodies {
             }
 
             /// Returns the shared endpoint block carried by this config variant.
-            pub fn endpoint(&self) -> &Endpoint {
+            pub fn endpoint(&self) -> &E {
                 match self {
                     $(Self::$variant(config) => &config.endpoint),+
+                }
+            }
+
+            /// Returns mutable access to the endpoint.
+            pub fn endpoint_mut(&mut self) -> &mut E {
+                match self {
+                    $(Self::$variant(config) => &mut config.endpoint),+
                 }
             }
         }

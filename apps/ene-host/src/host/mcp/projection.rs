@@ -1,14 +1,12 @@
 //! ECS tool projection for connected MCP servers.
-use super::supervisor::{Desired, Launch, McpSupervisor, Server};
-use crate::host::resources::HostRuntime;
+use super::supervisor::{McpServers, Server};
 use bevy_ecs::prelude::*;
-use rig_agent::tool::{ToolCatalog, server::ToolServerHandle};
+use rig_agent::tool::ToolCatalog;
 use rig_core::{
     effect::{Key, family},
     message::ToolName,
 };
 use rig_ecs::prelude::*;
-use rig_rmcp::McpConnection;
 use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::HashSet;
@@ -22,64 +20,32 @@ pub(super) struct McpTool {
     pub(super) key: Key<family::Tool>,
 }
 
-/// What a freshly connected server brings: the transport, its registry and the
-/// configuration it was launched for.
-pub(super) struct Connected {
-    pub(super) id: String,
-    pub(super) launch: Launch,
-    pub(super) connection: McpConnection,
-    pub(super) registry: ToolServerHandle,
-}
-
-/// Records a newly connected server, retiring whatever it replaces.
-///
-/// The replacement must drop the previous server's tools before the new
-/// registry takes over, so this takes the world as well as the state.
-pub(super) fn attach(
-    world: &mut World,
-    supervisor: &mut McpSupervisor,
-    connected: Connected,
-    want: &Desired,
-) {
-    let Connected {
-        id,
-        launch,
-        connection,
-        registry,
-    } = connected;
-    retire_one(world, supervisor, &id);
-    supervisor.servers.0.insert(
-        id,
-        Server {
-            connection,
-            launch,
-            registry,
-            label: want.name.clone(),
-            allowed: want.allowed.clone(),
-        },
-    );
-}
-
-/// Publishes every connected server's tools onto the world.
-pub(super) fn project_servers(world: &mut World, supervisor: &McpSupervisor) {
-    let mut changed = false;
-    for (id, server) in &supervisor.servers.0 {
-        let catalog = server.registry.snapshot();
-        changed |= project(world, id, server, Some(&catalog));
+/// Retire old owners before publishing any new tools. This keeps a retired
+/// server from blocking another server that now owns the same exposed name.
+pub(super) fn project_servers(world: &mut World, servers: &McpServers, retired: &[String]) {
+    let obsolete: Vec<_> = world
+        .query::<(Entity, &McpTool)>()
+        .iter(world)
+        .filter(|(_, tool)| !servers.0.contains_key(&tool.server) || retired.contains(&tool.server))
+        .map(|(entity, _)| entity)
+        .collect();
+    let mut changed = !obsolete.is_empty();
+    for entity in obsolete {
+        if let Ok(entity) = world.get_entity_mut(entity) {
+            entity.despawn();
+        }
+    }
+    for (id, server) in &servers.0 {
+        changed |= project(world, id, server, &server.registry.snapshot());
     }
     if changed {
-        refresh_access(world);
+        crate::host::tools::sync::sync_access(world);
     }
 }
 
-pub(super) fn project(
-    world: &mut World,
-    id: &str,
-    server: &Server,
-    catalog: Option<&ToolCatalog>,
-) -> bool {
+pub(super) fn project(world: &mut World, id: &str, server: &Server, catalog: &ToolCatalog) -> bool {
     let mut desired = HashMap::new();
-    for definition in catalog.into_iter().flat_map(ToolCatalog::definitions) {
+    for definition in catalog.definitions() {
         let raw = definition.name.as_str();
         if !server.allowed.is_empty() && !server.allowed.iter().any(|name| name == raw) {
             continue;
@@ -90,7 +56,7 @@ pub(super) fn project(
         let Ok(name) = ToolName::new(exposed.clone()) else {
             continue;
         };
-        let Some(registration) = catalog.and_then(|c| c.get(raw)) else {
+        let Some(registration) = catalog.get(raw) else {
             continue;
         };
         let mut definition = (**definition).clone();
@@ -159,23 +125,4 @@ pub(crate) fn tool_servers(world: &mut World) -> HashMap<String, String> {
         .iter(world)
         .map(|(definition, tool)| (definition.0.name.as_str().to_owned(), tool.server.clone()))
         .collect()
-}
-
-fn refresh_access(world: &mut World) {
-    crate::host::tools::sync::sync_access(world);
-}
-
-/// Removes one server's tools and closes its transport.
-pub(super) fn retire_one(world: &mut World, supervisor: &mut McpSupervisor, id: &str) {
-    let Some(server) = supervisor.servers.0.remove(id) else {
-        return;
-    };
-    if project(world, id, &server, None) {
-        refresh_access(world);
-    }
-    // Closing waits for the transport, so it runs off the host thread.
-    if let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) {
-        let connection = server.connection;
-        runtime.spawn(async move { connection.close().await });
-    }
 }

@@ -1,7 +1,24 @@
 //! Pure connection, provider, model, and plugin domain types.
 
 use super::{ConnectionCheck, ConnectionEndpoint};
-use std::collections::BTreeMap;
+use crate::settings;
+
+/// Configuration received from a host that may omit its endpoint metadata.
+pub type ConnectionConfig = settings::ConnectionConfig<Option<ConnectionEndpoint>>;
+/// Agent Client Protocol connection with optional endpoint metadata.
+pub type AcpConnection = settings::AcpConnection<Option<ConnectionEndpoint>>;
+/// Embedding connection with optional endpoint metadata.
+pub type EmbeddingConnection = settings::EmbeddingConnection<Option<ConnectionEndpoint>>;
+/// Language model connection with optional endpoint metadata.
+pub type LlmConnection = settings::LlmConnection<Option<ConnectionEndpoint>>;
+/// Model Context Protocol connection with optional endpoint metadata.
+pub type McpConnection = settings::McpConnection<Option<ConnectionEndpoint>>;
+/// Search connection with optional endpoint metadata.
+pub type SearchConnection = settings::SearchConnection<Option<ConnectionEndpoint>>;
+/// Speech recognition connection with optional endpoint metadata.
+pub type SttConnection = settings::SttConnection<Option<ConnectionEndpoint>>;
+/// Speech synthesis connection with optional endpoint metadata.
+pub type TtsConnection = settings::TtsConnection<Option<ConnectionEndpoint>>;
 
 /// Kind of host-managed external connection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -66,134 +83,6 @@ impl ConnectionKind {
     }
 }
 
-/// LLM connection settings.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LlmConnection {
-    /// The shared adapter, URL and options block.
-    pub endpoint: Option<ConnectionEndpoint>,
-    /// Model ids this endpoint serves.
-    pub model_ids: Vec<String>,
-}
-
-/// Text-to-speech connection settings.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct TtsConnection {
-    /// The shared adapter, URL and options block.
-    pub endpoint: Option<ConnectionEndpoint>,
-    /// Voice ids this endpoint can synthesise.
-    pub voice_ids: Vec<String>,
-}
-
-/// Speech-to-text connection settings.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SttConnection {
-    /// The shared adapter, URL and options block.
-    pub endpoint: Option<ConnectionEndpoint>,
-    /// Language hints for recognition; empty lets the service detect.
-    pub language_hints: Vec<String>,
-}
-
-/// Text embedding connection settings.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct EmbeddingConnection {
-    /// The shared adapter, URL and options block.
-    pub endpoint: Option<ConnectionEndpoint>,
-    /// Embedding model to call.
-    pub model_id: String,
-    /// Width of the returned vector, checked against the model.
-    pub dimensions: u32,
-}
-
-/// Model Context Protocol (MCP) server connection settings.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct McpConnection {
-    /// The shared adapter, URL and options block.
-    pub endpoint: Option<ConnectionEndpoint>,
-    /// Tools the host may call; empty allows every tool the server lists.
-    pub allowed_tools: Vec<String>,
-    /// Executable launched for a stdio server; empty for a remote one.
-    pub command: String,
-    /// Arguments passed to `command`, never a shell string.
-    pub args: Vec<String>,
-    /// Working directory for `command`; empty inherits the host's.
-    pub cwd: String,
-    /// Environment variables added to `command`.
-    pub env: BTreeMap<String, String>,
-    /// HTTP headers sent to a remote server.
-    pub headers: BTreeMap<String, String>,
-    /// Header name the stored secret is sent in.
-    pub auth_header: String,
-    /// Environment variable holding the secret, read at connect time.
-    pub secret_env_var: String,
-}
-
-/// Agent Client Protocol (ACP) harness connection settings.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct AcpConnection {
-    /// The shared adapter, URL and options block.
-    pub endpoint: Option<ConnectionEndpoint>,
-    /// Executable launched for the agent.
-    pub command: String,
-    /// Arguments passed to `command`.
-    pub args: Vec<String>,
-}
-
-/// Web search provider connection settings.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SearchConnection {
-    /// The shared adapter, URL and options block.
-    pub endpoint: Option<ConnectionEndpoint>,
-    /// Result cap per query, at most 20.
-    pub max_results: u32,
-}
-
-/// Kind-specific connection configuration payload.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ConnectionConfig {
-    /// Chat and other text generation.
-    Llm(LlmConnection),
-    /// Text to speech.
-    Tts(TtsConnection),
-    /// Speech to text.
-    Stt(SttConnection),
-    /// Vector embeddings.
-    Embedding(EmbeddingConnection),
-    /// A Model Context Protocol server.
-    Mcp(McpConnection),
-    /// An external Agent Client Protocol agent.
-    Acp(AcpConnection),
-    /// A web search backend.
-    Search(SearchConnection),
-}
-
-impl ConnectionConfig {
-    /// Returns the endpoint metadata inside whichever config variant is present.
-    pub fn endpoint(&self) -> Option<&ConnectionEndpoint> {
-        match self {
-            Self::Llm(c) => c.endpoint.as_ref(),
-            Self::Tts(c) => c.endpoint.as_ref(),
-            Self::Stt(c) => c.endpoint.as_ref(),
-            Self::Embedding(c) => c.endpoint.as_ref(),
-            Self::Mcp(c) => c.endpoint.as_ref(),
-            Self::Acp(c) => c.endpoint.as_ref(),
-            Self::Search(c) => c.endpoint.as_ref(),
-        }
-    }
-
-    /// Returns a mutable reference to the endpoint metadata inside this config.
-    pub fn endpoint_mut(&mut self) -> Option<&mut ConnectionEndpoint> {
-        match self {
-            Self::Llm(c) => c.endpoint.as_mut(),
-            Self::Tts(c) => c.endpoint.as_mut(),
-            Self::Stt(c) => c.endpoint.as_mut(),
-            Self::Embedding(c) => c.endpoint.as_mut(),
-            Self::Mcp(c) => c.endpoint.as_mut(),
-            Self::Acp(c) => c.endpoint.as_mut(),
-            Self::Search(c) => c.endpoint.as_mut(),
-        }
-    }
-}
-
 /// Saved host connection entry.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Connection {
@@ -218,7 +107,7 @@ pub struct Connection {
 impl Connection {
     /// Returns the endpoint metadata if the config carries one.
     pub fn endpoint(&self) -> Option<&ConnectionEndpoint> {
-        self.config.as_ref()?.endpoint()
+        self.config.as_ref()?.endpoint().as_ref()
     }
 
     /// Returns the endpoint metadata if this is an LLM connection.

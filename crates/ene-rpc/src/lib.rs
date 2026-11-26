@@ -62,6 +62,8 @@ pub use ene_policy::RiskLevel;
 pub use rpc::*;
 
 #[cfg(not(target_family = "wasm"))]
+pub mod client_model;
+#[cfg(not(target_family = "wasm"))]
 mod domain;
 /// Maximum width or height of a reported JPEG frame.
 pub const MAX_PERCEPTION_FRAME_EDGE: u32 = 1280;

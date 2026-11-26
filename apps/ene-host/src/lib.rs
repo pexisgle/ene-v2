@@ -111,10 +111,9 @@
 //! 実プロバイダーを呼ぶ受入テストは通常のテストでは無視します。テストは専用の一時stateディレクトリとホストプロセスを使います。
 #![warn(clippy::needless_pass_by_value)]
 
-mod cli;
 pub(crate) mod config;
 mod host;
 pub(crate) mod server;
 
-pub use cli::{Action, parse};
+pub use config::HostArgs;
 pub use server::{reset_history, run};

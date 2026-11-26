@@ -1,7 +1,7 @@
 //! Wire conversions for connection, provider, model, and plugin types.
 
-use crate::domain;
-use ene_rpc as w;
+use crate as w;
+use ene_domain::client_view as domain;
 
 from_variants! {
     w::ConnectionKind => domain::ConnectionKind [

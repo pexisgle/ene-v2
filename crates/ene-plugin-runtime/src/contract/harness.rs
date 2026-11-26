@@ -1,5 +1,4 @@
 //! ACP-shaped harness event validation.
-use super::Events;
 use crate::{Error, Result, limits::MAX_CHUNK};
 use ene_plugin::{
     ContentBlock, HarnessEvent, PermissionOption, Plan, SessionUpdate, ToolCall, ToolCallContent,
@@ -16,28 +15,26 @@ const MAX_RAW_BYTES: usize = 64 * 1024;
 const MAX_PLAN_ENTRIES: usize = 512;
 const MAX_PLAN_TEXT: usize = 2048;
 
-impl Events {
-    pub(super) fn accept_harness(&mut self, event: &HarnessEvent) -> Result<()> {
-        match event {
-            HarnessEvent::Update { update } => validate_update(update),
-            HarnessEvent::RequestPermission {
-                request_id,
-                tool_call,
-                options,
-            } => {
-                identifier(request_id.as_str())?;
-                validate_tool_update(tool_call)?;
-                validate_options(options)?;
-                // The host answers through a separate invocation; nothing can
-                // follow the request inside this one.
-                self.harness_pending = true;
-                Ok(())
-            }
-            HarnessEvent::Stop { .. } => {
-                self.terminal = true;
-                Ok(())
-            }
+pub(super) enum Progress {
+    Update,
+    AwaitingPermission,
+    Stopped,
+}
+
+pub(super) fn validate(event: &HarnessEvent) -> Result<Progress> {
+    match event {
+        HarnessEvent::Update { update } => validate_update(update).map(|()| Progress::Update),
+        HarnessEvent::RequestPermission {
+            request_id,
+            tool_call,
+            options,
+        } => {
+            identifier(request_id.as_str())?;
+            validate_tool_update(tool_call)?;
+            validate_options(options)?;
+            Ok(Progress::AwaitingPermission)
         }
+        HarnessEvent::Stop { .. } => Ok(Progress::Stopped),
     }
 }
 

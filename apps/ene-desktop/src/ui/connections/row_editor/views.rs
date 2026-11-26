@@ -1,6 +1,7 @@
 //! The connection editor's visual parts.
 
 use super::ConnectionsPane;
+use crate::ui::connections::SecretField;
 use crate::ui::connections::mcp_editor::{append_mcp_extra_fields, render_mcp_tools_strip};
 use crate::ui::connections::pickers::{PickerInput, render_kind_dropdown_picker};
 use crate::ui::connections::schema_form::{render_agent_platform_options, render_options_schema};
@@ -121,7 +122,7 @@ pub(super) fn render_credentials_strip(
     cx: &mut Context<ConnectionsPane>,
 ) -> gpui::Div {
     let id = conn.id.clone();
-    let revealed = pane.form.revealed_secret_for.as_deref() == Some(id.as_str());
+    let revealed = pane.form.revealed == Some(SecretField::Connection(id.clone()));
     let secret_d = pane.drafts.masked_draft(
         cx,
         format!("conn:secret:{id}"),
@@ -137,7 +138,10 @@ pub(super) fn render_credentials_strip(
         _ => "未登録",
     };
     let sakura_ids = collect_sakura_conn_ids(conn, pane.hub.read(cx));
-    let revoke_armed = pane.form.revoke_armed_for.as_deref() == Some(id.as_str());
+    let revoke_armed = pane
+        .form
+        .editor(&id)
+        .is_some_and(|editor| editor.revoke_armed);
 
     div()
         .rounded(crate::ui::theme::radius::medium())
@@ -160,14 +164,7 @@ pub(super) fn render_credentials_strip(
             cx,
         ))
         .when(conn.credential_state == "registered", |this| {
-            this.child(render_revoke_controls(
-                &id,
-                revoke_armed,
-                live,
-                &pane.hub,
-                theme,
-                cx,
-            ))
+            this.child(render_revoke_controls(&id, revoke_armed, live, theme, cx))
         })
 }
 
@@ -182,62 +179,66 @@ pub(super) fn render_schema_box(schema_controls: Vec<AnyElement>, theme: &Theme)
         .children(schema_controls)
 }
 
-pub(super) fn render_revoke_controls(
+fn render_revoke_controls(
     id: &str,
     revoke_armed: bool,
     live: bool,
-    hub: &Entity<Hub>,
     theme: &Theme,
     cx: &Context<ConnectionsPane>,
 ) -> gpui::Div {
     let pane = cx.entity();
-    let hub_rev = hub.clone();
-    let own_id = id.to_owned();
-    let row = div().flex().flex_row().justify_end().gap(px(6.));
-    if revoke_armed {
-        let cancel_pane = pane.clone();
-        row.child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.))
-                .child(pill_button(
-                    SharedString::from(format!("conn-rev-cancel-{id}")),
-                    "キャンセル",
-                    Tone::Ghost,
-                    theme,
-                    move |_, cx| {
-                        cancel_pane.update(cx, |this, cx| {
-                            this.form.revoke_armed_for = None;
-                            cx.notify();
-                        });
-                    },
-                ))
-                .child(pill_button(
-                    SharedString::from(format!("conn-rev-exec-{id}")),
-                    "キーを削除",
-                    Tone::Danger.icon(Icon::Trash).enabled(live),
-                    theme,
-                    move |_, cx| {
-                        hub_rev.update(cx, |hub, cx| hub.revoke_secret(own_id.clone(), cx))
-                    },
-                )),
+    let cancel_id = id.to_owned();
+    let cancel = revoke_armed.then(|| {
+        let pane = pane.clone();
+        pill_button(
+            SharedString::from(format!("conn-rev-cancel-{id}")),
+            "キャンセル",
+            Tone::Ghost,
+            theme,
+            move |_, cx| {
+                pane.update(cx, |this, cx| {
+                    if let Some(editor) = this
+                        .form
+                        .expanded
+                        .as_mut()
+                        .filter(|editor| editor.id == cancel_id)
+                    {
+                        editor.revoke_armed = false;
+                        cx.notify();
+                    }
+                });
+            },
         )
-    } else {
-        row.child(pill_button(
-            SharedString::from(format!("conn-rev-arm-{id}")),
+    });
+    let button = if revoke_armed { "exec" } else { "arm" };
+    let id = id.to_owned();
+    div()
+        .flex()
+        .items_center()
+        .justify_end()
+        .gap(px(6.))
+        .children(cancel)
+        .child(pill_button(
+            SharedString::from(format!("conn-rev-{button}-{id}")),
             "キーを削除",
             Tone::Danger.icon(Icon::Trash).enabled(live),
             theme,
             move |_, cx| {
                 pane.update(cx, |this, cx| {
-                    this.form.revoke_armed_for = Some(own_id.clone());
-                    cx.notify();
-                });
+                    if let Some(editor) =
+                        this.form.expanded.as_mut().filter(|editor| editor.id == id)
+                    {
+                        if revoke_armed && editor.revoke_armed {
+                            this.hub
+                                .update(cx, |hub, cx| hub.revoke_secret(id.clone(), cx));
+                        } else if !revoke_armed {
+                            editor.revoke_armed = true;
+                            cx.notify();
+                        }
+                    }
+                })
             },
         ))
-    }
 }
 
 pub(super) fn render_enable_row(
@@ -267,7 +268,7 @@ pub(super) fn render_enable_row(
             theme,
             move |_, cx| {
                 hub_toggle.update(cx, |hub, cx| {
-                    hub.set_connection_enabled(&conn_toggle.clone(), !conn_toggle.enabled, cx);
+                    hub.set_connection_enabled(&conn_toggle, !conn_toggle.enabled, cx);
                 });
             },
         ))

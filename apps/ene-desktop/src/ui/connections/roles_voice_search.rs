@@ -349,7 +349,7 @@ fn render_missing_role_hint(
             theme,
             move |_, cx| {
                 pane_add.update(cx, |this, cx| {
-                    this.form.adding_connection = true;
+                    this.form.add = super::AddFlow::Presets;
                     cx.notify();
                 });
             },

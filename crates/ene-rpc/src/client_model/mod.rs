@@ -35,8 +35,8 @@ pub mod companion;
 pub mod connection;
 pub mod policy;
 
-use crate::domain;
-use ene_rpc as w;
+use crate as w;
+use ene_domain::client_view as domain;
 
 from_fields! {
     w::JsonDocument => domain::JsonDocument {

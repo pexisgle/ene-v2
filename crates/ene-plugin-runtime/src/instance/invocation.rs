@@ -6,15 +6,13 @@ use extism::convert::FromBytesOwned;
 use futures_util::future::BoxFuture;
 use parking_lot::Mutex;
 use serde_json::Value;
-use std::{
-    future::Future,
-    sync::{
-        Arc, LazyLock, Weak,
-        atomic::{AtomicUsize, Ordering},
-    },
+use std::sync::{
+    Arc, LazyLock, Weak,
+    atomic::{AtomicUsize, Ordering},
 };
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 pub trait Services: Send + Sync {
     fn handle(&self, request: ServiceRequest)
@@ -94,45 +92,81 @@ pub(super) struct Invocation {
     pub(super) events: mpsc::Sender<Event>,
     pub(super) validator: Mutex<Events>,
     pub(super) cancel: CancellationToken,
-    pub(super) runtime: tokio::runtime::Handle,
+    pub(super) callbacks: mpsc::Sender<Callback>,
 }
+type ServiceResult = crate::Result<std::result::Result<Value, Failure>>;
+
+// Extism's callbacks run synchronously on the native worker. At most one
+// request is outstanding, and dropping the invocation closes its response.
+pub(super) enum Callback {
+    Service(
+        ServiceRequest,
+        oneshot::Sender<ServiceResult>,
+        tracing::Span,
+    ),
+    Emit(
+        Box<Event>,
+        oneshot::Sender<crate::Result<()>>,
+        tracing::Span,
+    ),
+}
+
 impl Invocation {
-    fn wait<T>(&self, work: impl Future<Output = crate::Result<T>>) -> crate::Result<T> {
-        self.runtime.block_on(async {
-            tokio::select! { biased;
-                _ = self.cancel.cancelled() => Err(Error::Cancelled),
-                _ = self.events.closed() => Err(Error::Cancelled),
-                // The enclosing call timeout drops Cancellation and cancels this token.
-                result = work => result,
+    pub(super) async fn serve(&self, mut callbacks: mpsc::Receiver<Callback>) {
+        while let Some(callback) = callbacks.recv().await {
+            match callback {
+                Callback::Service(request, reply, span) => {
+                    let result = self.handle_service(request).instrument(span).await;
+                    let _sent = reply.send(result);
+                }
+                Callback::Emit(event, reply, span) => {
+                    let result = self.send_event(*event).instrument(span).await;
+                    let _sent = reply.send(result);
+                }
             }
-        })
+        }
     }
-    #[tracing::instrument(name = "wasm.host_service", skip_all, fields(service = ?request.service()))]
-    fn service(
+
+    fn request<T>(
         &self,
-        request: ServiceRequest,
-    ) -> crate::Result<std::result::Result<Value, Failure>> {
+        callback: impl FnOnce(oneshot::Sender<crate::Result<T>>, tracing::Span) -> Callback,
+    ) -> crate::Result<T> {
+        let (reply, response) = oneshot::channel();
+        self.callbacks
+            .try_send(callback(reply, tracing::Span::current()))
+            .map_err(|_| Error::Cancelled)?;
+        response.blocking_recv().map_err(|_| Error::Cancelled)?
+    }
+
+    #[tracing::instrument(name = "wasm.host_service", skip_all, fields(service = ?request.service()))]
+    fn service(&self, request: ServiceRequest) -> ServiceResult {
         if self.calls.fetch_add(1, Ordering::Relaxed) >= MAX_SERVICE_CALLS {
             return Err(Error::Protocol);
         }
-        self.wait(async {
-            self.services.check().await?;
-            if !self.declared.contains(&request.service()) {
-                return Ok(Err(Failure::new("undeclared_service")));
-            }
-            let result = self.services.handle(request).await;
-            self.services.check().await?;
-            Ok(result)
-        })
+        self.request(|reply, span| Callback::Service(request, reply, span))
     }
+
+    async fn handle_service(&self, request: ServiceRequest) -> ServiceResult {
+        self.services.check().await?;
+        if !self.declared.contains(&request.service()) {
+            return Ok(Err(Failure::new("undeclared_service")));
+        }
+        let result = self.services.handle(request).await;
+        self.services.check().await?;
+        Ok(result)
+    }
+
     #[tracing::instrument(name = "wasm.host_emit", skip_all)]
     fn emit(&self, event: Event) -> crate::Result<()> {
         self.validator.lock().accept(&event)?;
-        self.wait(async {
-            self.services.check().await?;
-            self.events.send(event).await.map_err(|_| Error::Cancelled)
-        })
+        self.request(|reply, span| Callback::Emit(Box::new(event), reply, span))
     }
+
+    async fn send_event(&self, event: Event) -> crate::Result<()> {
+        self.services.check().await?;
+        self.events.send(event).await.map_err(|_| Error::Cancelled)
+    }
+
     fn charge(&self, total: &AtomicUsize, bytes: usize, limit: usize) -> crate::Result<()> {
         let total = total
             .fetch_add(bytes, Ordering::Relaxed)

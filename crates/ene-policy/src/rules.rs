@@ -421,10 +421,11 @@ fn target(spec: Option<&CapabilitySpec>, capability: &str, arguments: &Value) ->
 }
 
 /// What a person answered on an approval card.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
     /// No answer arrived.
+    #[default]
     Unspecified,
     /// Allow this one call.
     Approve,

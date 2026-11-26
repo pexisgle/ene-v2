@@ -157,8 +157,7 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
                 .clone();
             assert_ne!(old_launch, new_launch);
             let mut supervisor = std::mem::take(&mut *world.resource::<Mcp>().lock());
-            accept_event(
-                &mut world,
+            let _retired = accept_event(
                 &mut supervisor,
                 &[(
                     row.id.clone(),

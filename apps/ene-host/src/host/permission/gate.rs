@@ -5,8 +5,8 @@ use super::decision::{
     request_context, start_decision,
 };
 use super::resolve::{
-    AgentCapabilityContext, CandidateOutcome, build_candidate_action, load_gate_rules,
-    resolve_device_candidate, run_pre_tool_hooks,
+    AgentCapabilityContext, CandidateOutcome, PreToolChecked, build_candidate_action,
+    collect_pre_tool_hooks, load_gate_rules, resolve_device_candidate, start_pre_tool_hooks,
 };
 use crate::host::{
     db::Store,
@@ -90,6 +90,7 @@ impl Plugin for GatePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Decisions>()
             .add_systems(AgentPass, gate.in_set(Stage::Gate))
+            .add_systems(Update, collect_pre_tool_hooks.before(AgentLoop))
             .add_systems(
                 Update,
                 (expire_orphaned_approvals, collect_decisions)
@@ -129,6 +130,7 @@ pub(super) struct GateContext {
     pub(super) providers: Option<crate::host::providers::Providers>,
     pub(super) credentials: Option<crate::host::model::Credentials>,
     pub(super) runtime: Option<tokio::runtime::Handle>,
+    pub(super) wake: Option<Wake>,
     pub(super) cached_rules: Option<Vec<PolicyRule>>,
     reply_calls: HashMap<EffectId, usize>,
 }
@@ -160,6 +162,7 @@ fn gate(world: &mut World) {
         runtime: world
             .get_resource::<crate::host::resources::HostRuntime>()
             .map(|r| r.0.clone()),
+        wake: world.get_resource::<Wake>().cloned(),
         cached_rules: None,
         reply_calls: count_reply_calls(world),
     };
@@ -251,9 +254,18 @@ fn process_gate_call(
     };
     let (companion_id, work_id, run_id) = binding_of(world, item.agent);
     tracing::Span::current().record("companion_id", companion_id.as_str());
-    if let Some(reason) = run_pre_tool_hooks(ctx, &companion_id, &item.tool_name, &item.arguments) {
-        refuse(world, item.entity, &reason);
-        return std::ops::ControlFlow::Continue(());
+    if world.get::<PreToolChecked>(item.entity).is_none() {
+        match start_pre_tool_hooks(ctx, &item, &companion_id) {
+            Ok(Some(hook)) => {
+                world.spawn((HoldOf(item.entity), hook));
+                return std::ops::ControlFlow::Continue(());
+            }
+            Err(error) => {
+                refuse(world, item.entity, &error.to_string());
+                return std::ops::ControlFlow::Continue(());
+            }
+            Ok(None) => {}
+        }
     }
     let candidate = match build_candidate_action(ctx, &item) {
         CandidateOutcome::Resolved(candidate) => Some(*candidate),

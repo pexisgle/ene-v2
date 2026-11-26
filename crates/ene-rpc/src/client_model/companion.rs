@@ -1,8 +1,8 @@
 //! Wire conversions for companion, mind, chat message, and turn types.
 
-use crate::domain;
+use crate as w;
 use ene_domain::CompanionId;
-use ene_rpc as w;
+use ene_domain::client_view as domain;
 
 from_fields! {
     w::MindProfile => domain::MindProfile {

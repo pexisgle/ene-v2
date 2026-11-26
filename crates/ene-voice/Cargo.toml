@@ -10,6 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+directories = "6"
 parking_lot.workspace = true
 ene-catalog.workspace = true
 ene-domain.workspace = true

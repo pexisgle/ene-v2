@@ -1,4 +1,4 @@
-use super::ConnectionsPane;
+use super::{AddFlow, ConnectionsPane};
 use crate::ui::icons::Icon;
 use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
@@ -12,25 +12,33 @@ use ene_client_core::{
 };
 use gpui::{AnyElement, Context, FontWeight, div, prelude::*, px};
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
 pub(crate) enum Mode {
+    #[default]
     Npx,
     Http,
     Local,
 }
 
+#[derive(Clone, Copy, Default)]
+pub(super) struct Form {
+    mode: Mode,
+    advanced: bool,
+}
+
 pub(super) fn render_mcp_add(
     pane: &mut ConnectionsPane,
+    form: Form,
     live: bool,
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
 ) -> AnyElement {
-    let mode = pane.form.mcp_add_mode;
+    let mode = form.mode;
     let name = pane
         .drafts
         .draft(cx, "add:mcp:name", "空欄なら接続先から設定", None, theme);
     let (fields, helper, target) = render_mcp_mode_fields(pane, mode, theme, cx);
-    let adv_open = pane.form.mcp_add_advanced_open;
+    let adv_open = form.advanced;
     let (mcp_secret, adv_fields, adv_error, extra_cfg) =
         render_mcp_advanced_section(pane, mode, theme, cx);
 
@@ -326,7 +334,7 @@ fn render_mcp_add_header(theme: &Theme, cx: &Context<ConnectionsPane>) -> gpui::
             theme,
             move |_, cx| {
                 pane.update(cx, |this, cx| {
-                    this.form.custom_kind = ConnectionKind::Llm;
+                    this.form.add = AddFlow::Custom(ConnectionKind::Llm);
                     cx.notify();
                 });
             },
@@ -353,7 +361,9 @@ fn render_mcp_mode_chips(mode: Mode, theme: &Theme, cx: &Context<ConnectionsPane
             theme,
             move |_, cx| {
                 pane.update(cx, |this, cx| {
-                    this.form.mcp_add_mode = choice;
+                    if let AddFlow::Mcp(form) = &mut this.form.add {
+                        form.mode = choice;
+                    }
                     cx.notify();
                 });
             },
@@ -380,7 +390,9 @@ fn render_mcp_adv_toggle(
         theme,
         move |_, cx| {
             pane.update(cx, |this, cx| {
-                this.form.mcp_add_advanced_open = !this.form.mcp_add_advanced_open;
+                if let AddFlow::Mcp(form) = &mut this.form.add {
+                    form.advanced = !form.advanced;
+                }
                 cx.notify();
             });
         },
@@ -417,9 +429,8 @@ fn render_mcp_submit(
             });
             submit.update(cx, |this, cx| {
                 this.form.pending_mcp = Some(id.clone());
-                this.form.expanded_connection_id = Some(id);
-                this.form.adding_connection = false;
-                this.form.mcp_add_advanced_open = false;
+                this.form.open_editor(id);
+                this.form.add = AddFlow::Closed;
                 this.open_dropdown = None;
                 cx.notify();
             });

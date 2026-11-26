@@ -10,18 +10,21 @@ pub const MAX_FRAME_EDGE: u32 = 1280;
 /// Maximum encoded JPEG size before it is rejected.
 pub const MAX_JPEG_BYTES: usize = 512 * 1024;
 
-use crate::{Rect, best_effort::ignore_teardown};
+use crate::Rect;
 use image::{DynamicImage, ExtendedColorType, codecs::jpeg::JpegEncoder};
 use std::mem::size_of;
 use windows::Win32::{
     Foundation::{HANDLE, HWND, RECT},
     Graphics::Gdi::{self, MONITOR_DEFAULTTONULL, MONITORINFO},
     System::StationsAndDesktops::{
-        CloseDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, GetUserObjectInformationW,
-        OpenInputDesktop, UOI_NAME,
+        DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, GetUserObjectInformationW, OpenInputDesktop,
+        UOI_NAME,
     },
     UI::{
-        HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
+        HiDpi::{
+            DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            SetThreadDpiAwarenessContext,
+        },
         WindowsAndMessaging::GetForegroundWindow,
     },
 };
@@ -35,6 +38,8 @@ pub fn unlocked() -> bool {
     else {
         return false;
     };
+    // SAFETY: `OpenInputDesktop` returned a newly owned handle.
+    let desktop = unsafe { windows::core::Owned::new(desktop) };
     // SAFETY: `name` is a live 64-element UTF-16 buffer whose capacity is
     // passed explicitly, so the call cannot write past it.
     let result = unsafe {
@@ -46,9 +51,6 @@ pub fn unlocked() -> bool {
             None,
         )
     };
-    // SAFETY: `desktop` came from `OpenInputDesktop` above and is closed once,
-    // after its last use.
-    ignore_teardown(unsafe { CloseDesktop(desktop) });
     result.is_ok()
         && String::from_utf16_lossy(&name[..name.iter().position(|&ch| ch == 0).unwrap_or(64)])
             .eq_ignore_ascii_case("default")
@@ -67,18 +69,24 @@ pub struct CapturedFrame {
     pub window: isize,
 }
 
+struct RestoreDpi(DPI_AWARENESS_CONTEXT);
+
+impl Drop for RestoreDpi {
+    fn drop(&mut self) {
+        // SAFETY: this is the previous DPI context of the current thread.
+        let _previous = unsafe { SetThreadDpiAwarenessContext(self.0) };
+    }
+}
+
 pub fn physical<T>(action: impl FnOnce() -> T) -> Option<T> {
-    // SAFETY: sets this thread's DPI awareness; the returned previous context
-    // is restored below, so no other thread observes the change.
+    // SAFETY: sets only the calling thread's DPI context.
     let context =
         unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     if context.is_invalid() {
         return None;
     }
-    let result = action();
-    // SAFETY: restores the context this thread had before the call above.
-    ignore_teardown(unsafe { SetThreadDpiAwarenessContext(context) });
-    Some(result)
+    let _restore = RestoreDpi(context);
+    Some(action())
 }
 
 fn foreground() -> Option<(HWND, RECT)> {

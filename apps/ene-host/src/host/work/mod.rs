@@ -243,8 +243,7 @@ pub(crate) fn start_run(
 fn fail_run(store: &Store, run: &Run, error: &HostError) -> Result<()> {
     let mut failed = run.clone();
     failed.state = RunState::Failed;
-    let code: &str = error.code().into();
-    failed.failure = Some(Failure::new(code, error.message()));
+    failed.failure = Some(Failure::new(error.code(), error.to_string()));
     Ok(store.work_repo().update_run(&failed)?)
 }
 

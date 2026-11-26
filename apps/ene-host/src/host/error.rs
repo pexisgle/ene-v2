@@ -2,25 +2,33 @@
 //! so the host stays independent of any transport.
 pub(crate) type Result<T> = std::result::Result<T, HostError>;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub(crate) enum HostError {
     /// The request is malformed or carries an unsupported value.
     #[error("{0}")]
+    #[strum(serialize = "invalid_argument")]
     Invalid(String),
+    #[error(transparent)]
+    #[strum(serialize = "invalid_argument")]
+    Domain(#[from] ene_domain::DomainError),
     /// The addressed entity does not exist.
     #[error("{0}")]
     NotFound(String),
     /// The request contradicts current state, such as a stale revision.
     #[error("{0}")]
+    #[strum(serialize = "aborted")]
     Conflict(String),
     /// The addressed entity already exists.
     #[error("{0}")]
     AlreadyExists(String),
     /// The caller is not allowed to perform the operation.
     #[error("{0}")]
+    #[strum(serialize = "permission_denied")]
     Permission(String),
     /// A bounded resource, such as the command queue, is exhausted.
     #[error("{0}")]
+    #[strum(serialize = "resource_exhausted")]
     Exhausted(String),
     /// The capability exists but is not available right now.
     #[error("{0}")]
@@ -30,47 +38,17 @@ pub(crate) enum HostError {
     FailedPrecondition(String),
     /// The state database or the session log failed. The host stops.
     #[error("{0}")]
+    #[strum(serialize = "storage_error")]
     Storage(String),
     /// A defect the host cannot classify.
     #[error("{0}")]
     Internal(String),
 }
 
-/// The classified reason an operation failed.
-///
-/// One place decides how a failure is named on the wire and whether repeating
-/// it can help, so the wire mapping and the retry decision cannot drift apart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
-#[strum(serialize_all = "snake_case")]
-pub(crate) enum ErrorCode {
-    InvalidArgument,
-    NotFound,
-    Aborted,
-    AlreadyExists,
-    PermissionDenied,
-    ResourceExhausted,
-    Unavailable,
-    FailedPrecondition,
-    #[strum(serialize = "storage_error")]
-    Storage,
-    Internal,
-}
-
 impl HostError {
-    /// The classified reason, which drives both the wire code and retryability.
-    pub(crate) fn code(&self) -> ErrorCode {
-        match self {
-            Self::Invalid(_) => ErrorCode::InvalidArgument,
-            Self::NotFound(_) => ErrorCode::NotFound,
-            Self::Conflict(_) => ErrorCode::Aborted,
-            Self::AlreadyExists(_) => ErrorCode::AlreadyExists,
-            Self::Permission(_) => ErrorCode::PermissionDenied,
-            Self::Exhausted(_) => ErrorCode::ResourceExhausted,
-            Self::Unavailable(_) => ErrorCode::Unavailable,
-            Self::FailedPrecondition(_) => ErrorCode::FailedPrecondition,
-            Self::Storage(_) => ErrorCode::Storage,
-            Self::Internal(_) => ErrorCode::Internal,
-        }
+    /// Machine-readable code stored with a failed run.
+    pub(crate) fn code(&self) -> &'static str {
+        self.into()
     }
 
     /// Whether this failure means the host can no longer trust its state and
@@ -78,30 +56,9 @@ impl HostError {
     pub(crate) fn is_storage(&self) -> bool {
         matches!(self, Self::Storage(_))
     }
-
-    pub(crate) fn message(&self) -> &str {
-        match self {
-            Self::Invalid(message)
-            | Self::NotFound(message)
-            | Self::Conflict(message)
-            | Self::AlreadyExists(message)
-            | Self::Permission(message)
-            | Self::Exhausted(message)
-            | Self::Unavailable(message)
-            | Self::FailedPrecondition(message)
-            | Self::Storage(message)
-            | Self::Internal(message) => message,
-        }
-    }
 }
 
 pub(crate) use ene_domain::Failure;
-
-impl From<ene_domain::DomainError> for HostError {
-    fn from(error: ene_domain::DomainError) -> Self {
-        Self::Invalid(error.to_string())
-    }
-}
 
 impl From<ene_store::StoreError> for HostError {
     fn from(error: ene_store::StoreError) -> Self {
@@ -159,7 +116,7 @@ mod tests {
             HostError::Storage(String::new()),
             HostError::Internal(String::new()),
         ];
-        let codes: [&str; 10] = errors.map(|error| error.code().into());
+        let codes: [&str; 10] = errors.map(|error| error.code());
         assert_eq!(
             codes,
             [

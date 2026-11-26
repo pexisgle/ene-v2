@@ -53,19 +53,17 @@ struct Baselines {
     long_prod_files: usize,
     rpc_ecs_resources: usize,
     prod_block_on: usize,
-    impl_spread_allowlist: &'static [(&'static str, &'static str, usize)],
 }
 
 const BASELINES: Baselines = Baselines {
     ui_rpc_refs: 0,
     db_upward_refs: 0,
     providers_model_refs: 0,
-    host_world_refs: 130,
-    impl_over_default: 1,
+    host_world_refs: 125,
+    impl_over_default: 0,
     long_prod_files: 0,
     rpc_ecs_resources: 0,
-    prod_block_on: 7,
-    impl_spread_allowlist: &[("crates/ene-plugin-runtime", "Events", 4)],
+    prod_block_on: 0,
 };
 
 /// One rule's measurement, kept whole so a failure can print what it saw.
@@ -394,27 +392,14 @@ fn rule_impl_file_spread(root: &Path, base: &Baselines) -> Res<Measurement> {
                 .insert(rel.display().to_string());
         }
     }
-    let mut over = Vec::new();
-    let mut offenders = Vec::new();
-    for ((crate_dir, type_name), files) in &impl_files {
-        let limit = base
-            .impl_spread_allowlist
-            .iter()
-            .find(|(dir, name, _)| dir == crate_dir && name == type_name)
-            .map_or(DEFAULT_MAX_IMPL_FILES, |(_, _, limit)| *limit);
-        if files.len() > DEFAULT_MAX_IMPL_FILES {
-            over.push(format!("{crate_dir}::{type_name}={}", files.len()));
-        }
-        if files.len() > limit {
-            offenders.push(format!(
-                "{crate_dir}::{type_name} spans {} files (max {limit}): {files:?}",
-                files.len()
-            ));
-        }
-    }
+    let offenders = impl_files
+        .iter()
+        .filter(|(_, files)| files.len() > DEFAULT_MAX_IMPL_FILES)
+        .map(|((dir, name), files)| format!("{dir}::{name} spans {} files: {files:?}", files.len()))
+        .collect::<Vec<_>>();
     Ok(Measurement {
         rule: "impl_file_spread",
-        count: over.len(),
+        count: offenders.len(),
         max: base.impl_over_default,
         detail: format!("one type must not be spread across files. offenders: {offenders:?}"),
     })

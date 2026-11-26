@@ -202,16 +202,9 @@ fn default_motion() -> Result<String, CliError> {
 
 // Keep the cache layout in sync with `ene_desktop::avatar::presets::asset_cache`.
 fn cached_model() -> Result<String, CliError> {
-    #[cfg(windows)]
-    let cache = PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?)
-        .join("ene/cache");
-    #[cfg(not(windows))]
-    let cache = match std::env::var_os("XDG_CACHE_HOME") {
-        Some(path) => PathBuf::from(path),
-        None => PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set")?).join(".cache"),
-    }
-    .join("ene");
-    let path = cache.join("models/Seed-san.vrm");
+    let dirs = directories::ProjectDirs::from("", "", "ene")
+        .ok_or("could not locate the per-user cache")?;
+    let path = dirs.cache_dir().join("models/Seed-san.vrm");
     if !path.is_file() {
         return Err(CliError::Message(format!(
             "default model not found: {}; pass `model <path>` instead",

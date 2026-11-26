@@ -1,6 +1,7 @@
 //! Preset chip builders for the add-connection panel: the voice, STT,
 //! embedding and web-search presets, plus the custom-connection kind picker.
 
+use super::AddFlow;
 use super::ConnectionsPane;
 use crate::ui::Hub;
 use crate::ui::SearchPresetSpec;
@@ -10,6 +11,7 @@ use crate::ui::widgets::{Tone, pill_button};
 use ene_client_core::domain::ConnectionKind;
 use gpui::{AnyElement, Context, Entity, SharedString};
 
+#[derive(Clone, Copy)]
 struct PresetChipSpec {
     id: &'static str,
     label: &'static str,
@@ -119,9 +121,9 @@ fn preset_chip(
     pill_button(spec.id, spec.label, spec.style, theme, move |_, cx| {
         hub.update(cx, action);
         pane.update(cx, |this, cx| {
-            this.form.adding_connection = false;
+            this.form.add = AddFlow::Closed;
             if let Some(eid) = expand_id {
-                this.form.expanded_connection_id = Some(eid.into());
+                this.form.open_editor(eid.into());
                 this.open_dropdown = None;
             }
             cx.notify();
@@ -207,8 +209,8 @@ pub(super) fn build_search_preset_chips(
                             )
                         });
                         pane_s.update(cx, |this, cx| {
-                            this.form.adding_connection = false;
-                            this.form.expanded_connection_id = Some(target_id);
+                            this.form.add = AddFlow::Closed;
+                            this.form.open_editor(target_id);
                             this.open_dropdown = None;
                             cx.notify();
                         });
@@ -236,7 +238,11 @@ pub(super) fn build_custom_kind_chips(
                 theme,
                 move |_, cx| {
                     pane.update(cx, |this, cx| {
-                        this.form.custom_kind = kind;
+                        this.form.add = if kind == ConnectionKind::Mcp {
+                            AddFlow::Mcp(crate::ui::connections::mcp_add::Form::default())
+                        } else {
+                            AddFlow::Custom(kind)
+                        };
                         cx.notify();
                     });
                 },

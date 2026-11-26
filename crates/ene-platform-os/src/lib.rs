@@ -13,8 +13,6 @@
 // crate cannot override `[lints] workspace = true`.
 #![warn(clippy::needless_pass_by_value)]
 #[cfg(windows)]
-mod best_effort;
-#[cfg(windows)]
 pub mod capture;
 #[cfg(windows)]
 pub mod input;

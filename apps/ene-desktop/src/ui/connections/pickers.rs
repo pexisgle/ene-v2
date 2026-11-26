@@ -12,6 +12,7 @@ use ene_client_core::domain::{Connection, ConnectionEndpoint, ConnectionKind};
 use gpui::{Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 use std::rc::Rc;
 
+#[derive(Clone, Copy)]
 pub(super) struct PickerInput<'a> {
     pub(super) conn: &'a Connection,
     pub(super) endpoint: Option<&'a ConnectionEndpoint>,

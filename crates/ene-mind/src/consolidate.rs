@@ -1,4 +1,5 @@
 //! Consolidation domain types and citation guard.
+use crate::{State, StateUpdate};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -59,6 +60,70 @@ pub struct Fact {
     #[serde(default)]
     #[schemars(inner(length(max = 128)))]
     pub cited_memory_ids: Vec<String>,
+}
+
+/// Everything one extraction returns: the facts of the interval, and the mind
+/// the interval moved (a part is absent when nothing changed it).
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct Extraction {
+    #[serde(default)]
+    pub facts: Vec<Fact>,
+    #[serde(default)]
+    pub state: Option<StateUpdate>,
+}
+
+/// The extraction system prompt: facts only, separate records, never revive
+/// something the user asked to forget, and never invent a change of mind.
+pub const EXTRACTION_SYSTEM_PROMPT: &str = "あなたはコンパニオンの経験記憶を整理する抽出器です。\
+会話から長期記憶として残す価値のある事実だけを抽出します。\
+推測・願望・ロールプレイ上の虚構を事実として保存してはいけません。\
+既存記憶と同一の事実は新規作成せず、supersedes に既存IDを指定します。\
+importance 1以下（忘却済み）の既存記憶を高重要度で復活させてはいけません。\
+cited_memory_ids には、提示された「注入済み記憶ID」に含まれるIDだけを書きます。\
+心境や成長が実際に動いた場合だけ state に、現在の心の該当部分を更新した完全な形で書きます。\
+出力は指定されたJSONスキーマのみです。";
+
+/// Renders the extraction prompt. It carries the transcript, the candidate
+/// memories with their revisions, the ids the host injected and the mind the
+/// interval may move.
+pub fn extraction_prompt(
+    turns: &[Turn],
+    context: &[MemoryContext],
+    injected: &[String],
+    mind: &State,
+) -> String {
+    let mut prompt = String::from("以下から長期記憶にする事実を抽出してください。\n\n");
+    prompt.push_str("既存記憶（id / revision / importance / 内容）:\n");
+    if context.is_empty() {
+        prompt.push_str("- なし\n");
+    }
+    for memory in context {
+        prompt.push_str(&format!(
+            "- id={} revision={} importance={} content={}\n",
+            memory.id, memory.revision, memory.importance, memory.content
+        ));
+    }
+    prompt.push_str("\n注入済み記憶ID（cited_memory_ids に書けるのはこれだけ）:\n");
+    if injected.is_empty() {
+        prompt.push_str("- なし\n");
+    }
+    for id in injected {
+        prompt.push_str(&format!("- {id}\n"));
+    }
+    prompt.push_str(&format!(
+        "\n現在の心（state を書くときはこの形に合わせる）: 感情={} 関係={} 傾向={} 懸念={}\n",
+        mind.emotion.json, mind.relationships.json, mind.tendencies.json, mind.concerns.json
+    ));
+    prompt.push_str("\n会話（確定済みターン）:\n");
+    for turn in turns {
+        prompt.push_str(&format!("[turn {}]\n{}", turn.turn_id, turn.text));
+    }
+    prompt.push_str(
+        "\n各 fact は内容ごとに分割してください。scope は非公開なら空文字、\
+共有なら \"shared\" です。心境や成長が動いていない区間では state を省略してください。",
+    );
+    prompt
 }
 
 /// Host-side citation guard: a cited id counts only when the host really

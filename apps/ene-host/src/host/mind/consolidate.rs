@@ -8,7 +8,7 @@
 //! between the previous summary and the new one, so the newest `ene.summary`
 //! aside is the only position (docs/design/compaction.md §2.1).
 use super::{
-    Companion, Role, State,
+    Companion, Role,
     embedding::{self, Embeddings},
 };
 use crate::host::{
@@ -24,7 +24,6 @@ use rig_core::completion::Message;
 use rig_core::conversation::{Conversation as CoreConversation, TurnEnd};
 use rig_core::{DynModel, operation::Completion};
 use rig_ecs::model::Models;
-use serde::{Deserialize, Serialize};
 
 /// How many candidate memories the extraction model may merge into.
 const MAX_CONTEXT: usize = 20;
@@ -33,18 +32,7 @@ const MAX_QUERY_CHARS: usize = 2_000;
 /// How many newest turns are joined into that query.
 const QUERY_TURNS: usize = 4;
 
-pub(crate) use ene_mind::{Batch, Commit, Fact, MemoryContext, Turn};
-
-/// Everything one extraction returns: the facts of the interval, and the mind
-/// the interval moved (a part is absent when nothing changed it).
-#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
-#[schemars(deny_unknown_fields)]
-struct Extraction {
-    #[serde(default)]
-    facts: Vec<Fact>,
-    #[serde(default)]
-    state: Option<StateUpdate>,
-}
+use ene_mind::{Batch, Commit, EXTRACTION_SYSTEM_PROMPT, Extraction, Turn, extraction_prompt};
 
 /// The turns inside the message-id window `(after, through]`, in conversation
 /// order: exactly the turns the summary this pass runs beside stands for.
@@ -56,9 +44,9 @@ pub(crate) fn pending_turns(
     after: Option<u64>,
     through: u64,
 ) -> Vec<Turn> {
-    let records: Vec<_> = conversation.turns().collect();
+    let mut records = conversation.turns().peekable();
     let mut turns = Vec::new();
-    for (position, (_, record)) in records.iter().enumerate() {
+    while let Some((_, record)) = records.next() {
         let start = record.start.get();
         if start > through || after.is_some_and(|after| start <= after) {
             continue;
@@ -68,7 +56,7 @@ pub(crate) fn pending_turns(
         }
         let from = conversation.start_of(record.start);
         let to = records
-            .get(position + 1)
+            .peek()
             .map_or(conversation.entries().len(), |(_, next)| {
                 conversation.start_of(next.start)
             });
@@ -162,7 +150,7 @@ pub(crate) async fn pass(
         .injected_between(companion_id, after, through)?;
     let extraction = extract(
         &target,
-        prompt(&turns, &context, &injected, &companion.state),
+        extraction_prompt(&turns, &context, &injected, &companion.state),
     )
     .await?;
     let batch = Batch {
@@ -218,26 +206,21 @@ fn reflect(
         "state": &patch,
     });
     let request_hash = services.store.memory_repo().mind_hash(&request);
-    let applied = services
-        .store
-        .memory_repo()
-        .apply_mind_update(&MindUpdate {
-            operation_id,
-            companion_id: companion.id.clone(),
-            request_hash,
-            memories: Vec::new(),
-            state: Some(MindStateChange {
-                expected_revision: companion.state_revision,
-                state,
-            }),
-        })
-        .map_err(HostError::from);
-    match applied {
+    match services.store.memory_repo().apply_mind_update(&MindUpdate {
+        operation_id,
+        companion_id: companion.id.clone(),
+        request_hash,
+        memories: Vec::new(),
+        state: Some(MindStateChange {
+            expected_revision: companion.state_revision,
+            state,
+        }),
+    }) {
         Ok(_) => Ok(()),
         // A mind edit that landed while the pass ran wins: the reflection of
         // this window is discarded, and the rest of the pass still counts
         // (docs/design/mind.md §5.2).
-        Err(HostError::Conflict(why)) => {
+        Err(ene_store::StoreError::Conflict(why)) => {
             tracing::debug!(
                 companion = %companion.id,
                 %why,
@@ -245,61 +228,8 @@ fn reflect(
             );
             Ok(())
         }
-        Err(error) => Err(error),
+        Err(error) => Err(error.into()),
     }
-}
-
-/// The extraction system prompt: facts only, separate records, never revive
-/// something the user asked to forget, and never invent a change of mind.
-const SYSTEM_PROMPT: &str = "あなたはコンパニオンの経験記憶を整理する抽出器です。\
-会話から長期記憶として残す価値のある事実だけを抽出します。\
-推測・願望・ロールプレイ上の虚構を事実として保存してはいけません。\
-既存記憶と同一の事実は新規作成せず、supersedes に既存IDを指定します。\
-importance 1以下（忘却済み）の既存記憶を高重要度で復活させてはいけません。\
-cited_memory_ids には、提示された「注入済み記憶ID」に含まれるIDだけを書きます。\
-心境や成長が実際に動いた場合だけ state に、現在の心の該当部分を更新した完全な形で書きます。\
-出力は指定されたJSONスキーマのみです。";
-
-/// Renders the extraction prompt. It carries the transcript, the candidate
-/// memories with their revisions, the ids the host injected and the mind the
-/// interval may move.
-pub(crate) fn prompt(
-    turns: &[Turn],
-    context: &[MemoryContext],
-    injected: &[String],
-    mind: &State,
-) -> String {
-    let mut prompt = String::from("以下から長期記憶にする事実を抽出してください。\n\n");
-    prompt.push_str("既存記憶（id / revision / importance / 内容）:\n");
-    if context.is_empty() {
-        prompt.push_str("- なし\n");
-    }
-    for memory in context {
-        prompt.push_str(&format!(
-            "- id={} revision={} importance={} content={}\n",
-            memory.id, memory.revision, memory.importance, memory.content
-        ));
-    }
-    prompt.push_str("\n注入済み記憶ID（cited_memory_ids に書けるのはこれだけ）:\n");
-    if injected.is_empty() {
-        prompt.push_str("- なし\n");
-    }
-    for id in injected {
-        prompt.push_str(&format!("- {id}\n"));
-    }
-    prompt.push_str(&format!(
-        "\n現在の心（state を書くときはこの形に合わせる）: 感情={} 関係={} 傾向={} 懸念={}\n",
-        mind.emotion.json, mind.relationships.json, mind.tendencies.json, mind.concerns.json
-    ));
-    prompt.push_str("\n会話（確定済みターン）:\n");
-    for turn in turns {
-        prompt.push_str(&format!("[turn {}]\n{}", turn.turn_id, turn.text));
-    }
-    prompt.push_str(
-        "\n各 fact は内容ごとに分割してください。scope は非公開なら空文字、\
-共有なら \"shared\" です。心境や成長が動いていない区間では state を省略してください。",
-    );
-    prompt
 }
 
 /// The provider must submit typed facts. Text and fenced JSON are not accepted.
@@ -308,7 +238,7 @@ async fn extract(model: &DynModel<Completion>, prompt: String) -> Result<Extract
         .spec()
         .map_or_default(|spec| spec.default_options(None));
     let extraction = ExtractorBuilder::<Extraction>::new(model.clone())
-        .append_preamble(SYSTEM_PROMPT)
+        .append_preamble(EXTRACTION_SYSTEM_PROMPT)
         .retries(0)
         .build()
         .extract(prompt)
@@ -326,7 +256,7 @@ async fn extract(model: &DynModel<Completion>, prompt: String) -> Result<Extract
 fn turn_query(turns: &[Turn]) -> String {
     let from = turns.len().saturating_sub(QUERY_TURNS);
     let mut query = String::new();
-    for turn in turns.get(from..).unwrap_or_default() {
+    for turn in &turns[from..] {
         query.push_str(&turn.text);
         query.push('\n');
     }
@@ -336,6 +266,7 @@ fn turn_query(turns: &[Turn]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ene_mind::{Fact, MemoryContext};
     use ene_mind::{MemoryRecord, validate_citations};
     use rig_core::conversation::MessageId;
 
@@ -872,7 +803,7 @@ mod tests {
         ExtractorBuilder::<Extraction>::from_agent_builder(
             rig_agent::agent::AgentBuilder::new(model.clone()).options(options),
         )
-        .append_preamble(SYSTEM_PROMPT)
+        .append_preamble(EXTRACTION_SYSTEM_PROMPT)
         .retries(0)
         .build()
         .extract("The user prefers tea.")
@@ -892,7 +823,7 @@ mod tests {
             requests[1]
                 .system_instructions()
                 .unwrap()
-                .contains(SYSTEM_PROMPT)
+                .contains(EXTRACTION_SYSTEM_PROMPT)
         );
         assert_eq!(requests[1].options.cache, Some(CacheRetention::Short));
     }

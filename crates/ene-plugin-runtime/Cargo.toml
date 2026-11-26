@@ -8,6 +8,8 @@ publish.workspace = true
 [lints]
 workspace = true
 [dependencies]
+async-task = "4"
+blocking = "1"
 parking_lot.workspace = true
 cap-fs-ext.workspace = true
 cap-std.workspace = true

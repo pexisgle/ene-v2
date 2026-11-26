@@ -8,6 +8,7 @@
 use std::{io, time::Duration};
 
 mod helpers;
+mod search;
 mod shell;
 #[cfg(test)]
 mod tests;
@@ -34,16 +35,12 @@ pub(crate) enum WorkToolError {
     WorkspaceChanged,
     #[error("unknown workspace tool")]
     UnknownTool,
-    #[error("path must be a string")]
-    PathNotString,
-    #[error("path is required")]
-    MissingPath,
     #[error("path must stay relative to the workspace")]
     InvalidPath,
-    #[error("{0} must be a string")]
-    NotString(&'static str),
-    #[error("{0} must be a positive integer")]
-    NotPositiveInt(&'static str),
+    #[error("workspace tool arguments must be an object")]
+    InvalidArguments,
+    #[error("invalid workspace tool arguments: {0}")]
+    Arguments(#[from] serde_json::Error),
     #[error("image exceeds the 512 KiB limit")]
     ImageTooLarge,
     #[error("line exceeds the output limit. Use grep or a shell command to inspect part of it.")]

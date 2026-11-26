@@ -10,7 +10,7 @@ load! {
     load_approvals: settings.list_pending_approvals("承認一覧の取得") =>
         |approvals| Update::Approvals(approvals.items.into_iter().map(Into::into).collect());
     load_policy_rules: settings.list_policy_rules("許可ルールの取得") =>
-        |rules| Update::PolicyRules(ene_client_core::wire::policy_rules(rules.items));
+        |rules| Update::PolicyRules(ene_rpc::client_model::policy_rules(rules.items));
     load_policy_texts: settings.list_policy_texts("自由文ポリシーの取得") =>
         |texts| Update::PolicyTexts(texts.items.into_iter().map(Into::into).collect());
     load_plugins: settings.list_plugins("プラグイン一覧の取得") =>
@@ -66,7 +66,7 @@ pub(crate) fn update_policy_rules(
         epoch,
         context,
         request!(settings.update_policy_rules(request)),
-        |rules| Update::PolicyRules(ene_client_core::wire::policy_rules(rules.items)),
+        |rules| Update::PolicyRules(ene_rpc::client_model::policy_rules(rules.items)),
     );
 }
 

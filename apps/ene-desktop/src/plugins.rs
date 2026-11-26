@@ -59,22 +59,11 @@ pub struct ClientPlugins {
 }
 
 impl ClientPlugins {
-    /// Discovers verified `Target::Client` plugin packages under the desktop
-    /// data directory (or `ENE_CLIENT_PLUGINS_DIR`). Runs synchronously at
-    /// startup; plugins with invalid manifests or non-client targets are skipped.
-    pub fn probe_default() -> Self {
-        let Some(root) = plugins_dir() else {
-            return Self::default();
-        };
-        if !root.is_dir() {
-            return Self::default();
-        }
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(Self::load_from(&root))),
-            Err(_) => tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_or_default(|rt| rt.block_on(Self::load_from(&root))),
+    /// Discovers verified client packages in the configured directory.
+    pub async fn probe_default() -> Self {
+        match plugins_dir() {
+            Some(root) => Self::load_from(&root).await,
+            None => Self::default(),
         }
     }
 

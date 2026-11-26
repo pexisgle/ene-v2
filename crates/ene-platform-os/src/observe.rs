@@ -4,10 +4,9 @@
 
 #![cfg(windows)]
 
-use crate::best_effort::ignore_teardown;
 use crate::observe_types::{Observation, Window};
 use windows::Win32::{
-    Foundation::{CloseHandle, HWND, MAX_PATH},
+    Foundation::{HWND, MAX_PATH},
     System::Threading::{
         OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
         QueryFullProcessImageNameW,
@@ -55,21 +54,20 @@ fn process_name(pid: u32) -> Option<String> {
     // SAFETY: opens a query-only handle to the given pid; no memory is
     // borrowed and a failure is returned rather than used.
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()? };
+    // SAFETY: the successful OpenProcess call transferred ownership.
+    let handle = unsafe { windows::core::Owned::new(handle) };
     let mut buffer = [0u16; MAX_PATH as usize];
     let mut size = buffer.len() as u32;
     // SAFETY: `buffer` is live and its capacity is passed in `size`, which the
     // call updates to what it wrote.
     let result = unsafe {
         QueryFullProcessImageNameW(
-            handle,
+            *handle,
             PROCESS_NAME_WIN32,
             windows::core::PWSTR(buffer.as_mut_ptr()),
             &mut size,
         )
     };
-    // SAFETY: `handle` came from `OpenProcess` above and is closed exactly
-    // once, on this path and after its last use.
-    ignore_teardown(unsafe { CloseHandle(handle) });
     result.ok()?;
     let path = String::from_utf16_lossy(&buffer[..size as usize]);
     path.rsplit(['\\', '/']).next().map(ToOwned::to_owned)

@@ -39,9 +39,9 @@ pub(super) struct DeviceBridge {
 }
 
 impl DeviceBridge {
-    pub(super) fn new() -> Self {
+    pub(super) async fn new() -> Self {
         let workspace = Workspace::probe().map(Arc::new);
-        let client_plugins = Arc::new(crate::plugins::ClientPlugins::probe_default());
+        let client_plugins = Arc::new(crate::plugins::ClientPlugins::probe_default().await);
         Self {
             avatar: None,
             avatar_scale: 100.,

@@ -6,10 +6,11 @@ use crate::ui::connections::mcp_editor::{
     McpDraftGroup, ParsedMcpExtra, mcp_args_draft, mcp_extra_drafts, process_command_draft,
     read_mcp_extra,
 };
+use crate::ui::connections::{SecretField, secret_row};
 use crate::ui::icons::Icon;
 use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
-use crate::ui::widgets::{CircleButtonStyle, Tone, circle_icon_button, pill_button, status_pill};
+use crate::ui::widgets::{Tone, pill_button, status_pill};
 use crate::ui::{GOOGLE_AGENT_PLATFORM, Hub, default_embedding_dimensions};
 use ene_client_core::{
     connections::{extract_kind_list_init, parse_process_args},
@@ -24,6 +25,7 @@ pub(crate) struct RowBadge {
     pub(super) fg: gpui::Hsla,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct RowHeaderFlags {
     pub(super) expanded: bool,
     pub(super) should_auto_probe: bool,
@@ -241,61 +243,49 @@ pub(super) fn render_cred_secret_row(
         revealed,
         live,
     } = input;
-    let pane_eye = cx.entity();
-    let eye_id = id.to_owned();
     let hub_reg = hub.clone();
     let reg_id = id.to_owned();
     let secret_save = secret_val.clone();
     let ids_all = sakura_ids.to_vec();
     let hub_all = hub.clone();
 
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.))
-        .child(div().flex_1().min_w_0().child(secret_d))
-        .child(circle_icon_button(
-            SharedString::from(format!("conn-eye-{id}")),
-            CircleButtonStyle::new(if revealed { Icon::EyeOff } else { Icon::Eye }, 30., 14.),
-            theme,
-            move |_, cx| {
-                pane_eye.update(cx, |this, cx| {
-                    this.form.revealed_secret_for =
-                        if revealed { None } else { Some(eye_id.clone()) };
-                    cx.notify();
-                });
-            },
-        ))
-        .when(ids_all.len() > 1, |this| {
-            let sec_all = secret_val.clone();
-            this.child(pill_button(
-                SharedString::from(format!("conn-save-sakura-all-{id}")),
-                "全さくら接続に登録",
-                Tone::Soft
-                    .icon(Icon::Check)
-                    .enabled(live && !sec_all.is_empty()),
-                theme,
-                move |_, cx| {
-                    hub_all.update(cx, |hub, cx| {
-                        hub.register_secret_for_connections(ids_all.clone(), &sec_all, cx);
-                    });
-                },
-            ))
-        })
-        .child(pill_button(
-            SharedString::from(format!("conn-save-key-{id}")),
-            "キーを登録",
-            Tone::Primary
+    secret_row(
+        format!("conn-eye-{id}"),
+        SecretField::Connection(id.to_owned()),
+        secret_d,
+        revealed,
+        theme,
+        cx,
+    )
+    .when(ids_all.len() > 1, |this| {
+        let sec_all = secret_val.clone();
+        this.child(pill_button(
+            SharedString::from(format!("conn-save-sakura-all-{id}")),
+            "全さくら接続に登録",
+            Tone::Soft
                 .icon(Icon::Check)
-                .enabled(live && !secret_save.is_empty()),
+                .enabled(live && !sec_all.is_empty()),
             theme,
             move |_, cx| {
-                hub_reg.update(cx, |hub, cx| {
-                    hub.register_secret(&reg_id, &secret_save, cx);
+                hub_all.update(cx, |hub, cx| {
+                    hub.register_secret_for_connections(ids_all.clone(), &sec_all, cx);
                 });
             },
         ))
+    })
+    .child(pill_button(
+        SharedString::from(format!("conn-save-key-{id}")),
+        "キーを登録",
+        Tone::Primary
+            .icon(Icon::Check)
+            .enabled(live && !secret_save.is_empty()),
+        theme,
+        move |_, cx| {
+            hub_reg.update(cx, |hub, cx| {
+                hub.register_secret(&reg_id, &secret_save, cx);
+            });
+        },
+    ))
 }
 
 pub(super) fn compute_connection_badge(

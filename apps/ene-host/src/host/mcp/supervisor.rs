@@ -3,10 +3,8 @@
 //! lifecycle management.
 use super::{
     failures::{FailureKind, FailureReport, McpFailures, prune_failures, record_failure},
-    projection::{attach, project_servers, retire_one},
-    settings::{
-        McpSettings, ReloadOutcome, collect_retire_ids, prune_connecting, reload_desired_settings,
-    },
+    projection::project_servers,
+    settings::{McpSettings, collect_retire_ids, prune_connecting, reload_desired_settings},
 };
 use crate::host::{db::Store, model::Credentials, resources::HostRuntime};
 use bevy_ecs::prelude::*;
@@ -94,7 +92,12 @@ impl Mcp {
         id: &str,
         revision: u64,
     ) -> CheckState {
-        check_state(&self.lock(), credentials, id, revision)
+        check_state(
+            &self.lock(),
+            id,
+            revision,
+            credentials.map(Credentials::generation),
+        )
     }
 }
 
@@ -115,114 +118,104 @@ pub(crate) struct McpSupervisor {
     pub(super) wake: Option<Wake>,
 }
 
-impl McpSupervisor {
-    /// The event sender a connect task reports on.
-    pub(super) fn sender(&self) -> mpsc::Sender<Event> {
-        self.events.sender.clone()
-    }
-}
-
-/// Connects what the settings ask for, retires what they no longer do, and
-/// attaches the tools a handler listed.
+/// Reconcile transports first, then publish their tool registries to Rig.
 pub(super) fn sync(world: &mut World) {
-    let closing = world
-        .get_resource::<crate::host::resources::HostState>()
-        .is_some_and(|state| state.ready().is_err());
     let mcp = world.resource::<Mcp>().clone();
     let mut supervisor = mcp.lock();
-    if closing {
-        handle_closing_servers(world, &mut supervisor);
-        return;
-    }
-    let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) else {
-        return;
-    };
-    let store = world.resource::<Store>().clone();
-    let revision = match store.settings_repo().settings_revision() {
-        Ok(revision) => revision,
-        Err(error) => {
-            if error.is_storage() {
-                crate::host::fail(world, &error.to_string());
-            }
-            return;
-        }
-    };
-    let credentials = world.get_resource::<Credentials>().cloned();
-    match reload_desired_settings(
-        &mut supervisor.settings,
-        &store,
-        credentials.as_ref(),
-        revision,
-    ) {
-        ReloadOutcome::Ready => {}
-        ReloadOutcome::Skip => {
-            return;
-        }
-        ReloadOutcome::Fail(message) => {
-            crate::host::fail(world, &message);
-            return;
+    let runtime = world
+        .get_resource::<HostRuntime>()
+        .map(|runtime| &runtime.0);
+    if world
+        .get_resource::<crate::host::resources::HostState>()
+        .is_some_and(|state| state.ready().is_err())
+    {
+        supervisor.close(runtime);
+        project_servers(world, &supervisor.servers, &[]);
+    } else if let Some(runtime) = runtime {
+        match supervisor.reconcile(
+            world.resource::<Store>(),
+            world.get_resource::<Credentials>(),
+            world.get_resource::<Wake>(),
+            runtime,
+        ) {
+            Ok(retired) => project_servers(world, &supervisor.servers, &retired),
+            Err(error) if error.is_storage() => crate::host::fail(world, &error.to_string()),
+            Err(_) => {}
         }
     }
-    let wanted = supervisor.settings.desired.clone();
-    prune_connecting(&mut supervisor.connecting, &wanted);
-    prune_failures(&mut supervisor.failures, &wanted);
-    let events = drain(&mut supervisor.events);
-    for event in events {
-        accept_event(world, &mut supervisor, &wanted, event, &runtime);
-    }
-    let retire = collect_retire_ids(&supervisor.servers, &wanted);
-    for id in retire {
-        retire_one(world, &mut supervisor, &id);
-    }
-    let targets = plan_connect_targets(
-        &supervisor.servers,
-        &supervisor.connecting,
-        &supervisor.failures,
-        wanted,
-        Instant::now(),
-    );
-    if targets.is_empty() {
-        project_servers(world, &supervisor);
-        return;
-    }
-    let sender = supervisor.sender();
-    let wake = world.get_resource::<Wake>();
-    let launched = spawn_connect_tasks(targets, &sender, wake, &runtime);
-    supervisor.connecting.0.extend(launched);
-    project_servers(world, &supervisor);
 }
 
-fn handle_closing_servers(world: &mut World, supervisor: &mut McpSupervisor) {
-    supervisor.connecting.0.clear();
-    supervisor.failures.0.clear();
-    let ids: Vec<String> = supervisor.servers.0.keys().cloned().collect();
-    for id in ids {
-        retire_one(world, supervisor, &id);
+impl McpSupervisor {
+    fn reconcile(
+        &mut self,
+        store: &Store,
+        credentials: Option<&Credentials>,
+        wake: Option<&Wake>,
+        runtime: &tokio::runtime::Handle,
+    ) -> crate::host::db::Result<Vec<String>> {
+        reload_desired_settings(&mut self.settings, store, credentials)?;
+        let wanted = self.settings.desired.clone();
+        prune_connecting(&mut self.connecting, &wanted);
+        prune_failures(&mut self.failures, &wanted);
+        let mut retired = Vec::new();
+        while let Ok(event) = self.events.receiver.try_recv() {
+            retired.extend(accept_event(self, &wanted, event, runtime));
+        }
+        for id in collect_retire_ids(&self.servers, &wanted) {
+            if let Some(server) = self.servers.0.remove(&id) {
+                close_connection(server.connection, runtime);
+            }
+        }
+        let targets = plan_connect_targets(
+            &self.servers,
+            &self.connecting,
+            &self.failures,
+            &wanted,
+            Instant::now(),
+        );
+        self.connecting.0.extend(spawn_connect_tasks(
+            targets,
+            &self.events.sender,
+            wake,
+            runtime,
+        ));
+        Ok(retired)
     }
-    if let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) {
-        for event in drain(&mut supervisor.events) {
-            if let Event::Connected { connection, .. } = event {
-                runtime.spawn(async move { connection.close().await });
+
+    fn close(&mut self, runtime: Option<&tokio::runtime::Handle>) {
+        self.connecting.0.clear();
+        self.failures.0.clear();
+        for (_, server) in self.servers.0.drain() {
+            if let Some(runtime) = runtime {
+                close_connection(server.connection, runtime);
+            }
+        }
+        if let Some(runtime) = runtime {
+            while let Ok(event) = self.events.receiver.try_recv() {
+                if let Event::Connected { connection, .. } = event {
+                    close_connection(connection, runtime);
+                }
             }
         }
     }
+}
+
+pub(super) fn close_connection(connection: McpConnection, runtime: &tokio::runtime::Handle) {
+    runtime.spawn(async move { connection.close().await });
 }
 
 fn plan_connect_targets(
     servers: &McpServers,
     connecting: &Connecting,
     failures: &McpFailures,
-    wanted: Vec<(String, Desired)>,
+    wanted: &[(String, Desired)],
     now: Instant,
 ) -> Vec<(String, Desired)> {
     let mut seen = HashSet::new();
     wanted
-        .into_iter()
+        .iter()
         .filter(|(id, _)| {
-            if !seen.insert(id.clone())
-                || servers.0.contains_key(id)
-                || connecting.0.contains_key(id)
-            {
+            if !seen.insert(id) || servers.0.contains_key(id) || connecting.0.contains_key(id) {
                 return false;
             }
             if let Some(failure) = failures.0.get(id) {
@@ -234,6 +227,7 @@ fn plan_connect_targets(
             }
             true
         })
+        .cloned()
         .collect()
 }
 
@@ -296,31 +290,30 @@ fn spawn_connect_tasks(
 }
 
 pub(super) fn accept_event(
-    world: &mut World,
     supervisor: &mut McpSupervisor,
     wanted: &[(String, Desired)],
     event: Event,
     runtime: &tokio::runtime::Handle,
-) {
+) -> Option<String> {
     let (id, launch) = match &event {
         Event::Connected { id, launch, .. } | Event::Failed { id, launch, .. } => (id, launch),
     };
+    let want = wanted.iter().find(|(wanted, want)| {
+        wanted == id
+            && want.revision == launch.revision
+            && want.credential_generation == launch.credential_generation
+    });
     let current = supervisor
         .connecting
         .0
         .get(id)
-        .is_some_and(|pending| &pending.launch == launch)
-        && wanted.iter().any(|(wanted, want)| {
-            wanted == id
-                && want.revision == launch.revision
-                && want.credential_generation == launch.credential_generation
-        });
-    if !current {
+        .is_some_and(|pending| &pending.launch == launch);
+    let Some((_, want)) = want.filter(|_| current) else {
         if let Event::Connected { connection, .. } = event {
-            runtime.spawn(async move { connection.close().await });
+            close_connection(connection, runtime);
         }
-        return;
-    }
+        return None;
+    };
     supervisor.connecting.0.remove(id);
     match event {
         Event::Connected {
@@ -330,20 +323,18 @@ pub(super) fn accept_event(
             registry,
         } => {
             supervisor.failures.0.remove(&id);
-            let Some((_, want)) = wanted.iter().find(|(wanted, _)| wanted == &id) else {
-                return;
-            };
-            attach(
-                world,
-                supervisor,
-                super::projection::Connected {
-                    id,
-                    launch,
+            let previous = supervisor.servers.0.insert(
+                id.clone(),
+                Server {
                     connection,
+                    launch,
                     registry,
+                    label: want.name.clone(),
+                    allowed: want.allowed.clone(),
                 },
-                want,
-            );
+            )?;
+            close_connection(previous.connection, runtime);
+            Some(id)
         }
         Event::Failed {
             id,
@@ -352,7 +343,6 @@ pub(super) fn accept_event(
             config_error,
         } => {
             tracing::warn!(connection = %id, config_error, "the MCP server did not connect: {reason}");
-            let wake = supervisor.wake.clone();
             record_failure(
                 &mut supervisor.failures,
                 FailureReport {
@@ -361,19 +351,12 @@ pub(super) fn accept_event(
                     reason,
                     config_error,
                 },
-                wake,
+                supervisor.wake.clone(),
                 runtime,
             );
+            None
         }
     }
-}
-
-fn drain(events: &mut EventChannel) -> Vec<Event> {
-    let mut out = Vec::new();
-    while let Ok(event) = events.receiver.try_recv() {
-        out.push(event);
-    }
-    out
 }
 
 pub(super) async fn open(
@@ -393,37 +376,16 @@ pub(super) fn request_reconnect(supervisor: &mut McpSupervisor, id: &str) {
     supervisor.failures.0.remove(id);
 }
 
-struct CheckContext<'a> {
-    cred_gen: Option<u64>,
-    servers: Option<&'a McpServers>,
-    connecting: Option<&'a Connecting>,
-    failures: Option<&'a McpFailures>,
-}
-
-/// Inspects the current MCP supervisor state for a specific connection revision
-/// and credential generation.
+/// Inspects the current MCP state for a specific configuration and credential generation.
 fn check_state(
     supervisor: &McpSupervisor,
-    credentials: Option<&Credentials>,
     id: &str,
     revision: u64,
+    credential_generation: Option<u64>,
 ) -> CheckState {
-    check_state_from(
-        &CheckContext {
-            cred_gen: credentials.map(Credentials::generation),
-            servers: Some(&supervisor.servers),
-            connecting: Some(&supervisor.connecting),
-            failures: Some(&supervisor.failures),
-        },
-        id,
-        revision,
-    )
-}
-
-fn check_state_from(ctx: &CheckContext<'_>, id: &str, revision: u64) -> CheckState {
-    if let Some(server) = ctx.servers.and_then(|servers| servers.0.get(id))
+    if let Some(server) = supervisor.servers.0.get(id)
         && server.launch.revision == revision
-        && server.launch.credential_generation == ctx.cred_gen
+        && server.launch.credential_generation == credential_generation
         && !server.connection.is_closed()
     {
         let catalog = server.registry.snapshot();
@@ -436,17 +398,14 @@ fn check_state_from(ctx: &CheckContext<'_>, id: &str, revision: u64) -> CheckSta
         names.dedup();
         return CheckState::Connected(names);
     }
-    if ctx.connecting.is_some_and(|connecting| {
-        connecting
+    if let Some(failure) = supervisor.failures.0.get(id)
+        && failure.revision == revision
+        && failure.credential_generation == credential_generation
+        && !supervisor
+            .connecting
             .0
             .get(id)
             .is_some_and(|pending| pending.launch.revision == revision)
-    }) {
-        return CheckState::Connecting;
-    }
-    if let Some(failure) = ctx.failures.and_then(|failures| failures.0.get(id))
-        && failure.revision == revision
-        && failure.credential_generation == ctx.cred_gen
     {
         return CheckState::Failed(failure.reason.clone());
     }

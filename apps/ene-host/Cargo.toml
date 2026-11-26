@@ -10,6 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+clap.workspace = true
 async-stream.workspace = true
 axum.workspace = true
 base64.workspace = true

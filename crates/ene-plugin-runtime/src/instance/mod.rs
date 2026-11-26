@@ -252,6 +252,7 @@ impl Instance {
             result = tokio::time::timeout(timeout, services.check()) => result.map_err(|_| Error::Timeout)??,
         }
         let input = json::encode::<_, MAX_MESSAGE_BYTES>(&operation)?;
+        let (callback_tx, callback_rx) = mpsc::channel(1);
         let context = Arc::new(Invocation {
             services,
             declared: entry.uses.clone(),
@@ -261,8 +262,24 @@ impl Instance {
             events,
             validator: Mutex::new(Events::new(&operation)),
             cancel: cancel.child_token(),
-            runtime: tokio::runtime::Handle::current(),
+            callbacks: callback_tx,
         });
+        // Keep callback polls off the caller's executor and the native guest
+        // pool: a guest waiting for a response can occupy the last native slot.
+        let runtime = tokio::runtime::Handle::current();
+        let invocation = Arc::clone(&context);
+        let (runnable, callbacks) = async_task::spawn(
+            async move { invocation.serve(callback_rx).await },
+            move |runnable: async_task::Runnable| {
+                let runtime = runtime.clone();
+                blocking::unblock(move || {
+                    let _entered = runtime.enter();
+                    runnable.run();
+                })
+                .detach();
+            },
+        );
+        runnable.schedule();
         let result = tokio::select! { biased;
             _ = context.events.closed() => Err(Error::Cancelled),
             result = async {
@@ -283,6 +300,7 @@ impl Instance {
                 }
             } => result,
         };
+        drop(callbacks);
         let plugin = self.plugin.take();
         let result = async {
             let value = result?;

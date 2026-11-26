@@ -1,7 +1,7 @@
 //! Pure companion, mind, chat message, turn, and binding domain types.
 
 use super::{BodyBinding, Failure, JsonDocument, ModelAssignment, ModelAssignments, VoiceBinding};
-use ene_domain::CompanionId;
+use crate::CompanionId;
 
 /// Structured personality profile stored on a companion's mind.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -2533,6 +2533,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cap-tempfile"
+version = "4.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "038b3f6a5d4b5641b1bb99d638eb7a22013de84f81c528d8930de06d7383fbd5"
+dependencies = [
+ "cap-std",
+ "rand 0.9.5",
+ "rustix 1.1.6",
+ "rustix-linux-procfs",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2726,6 +2740,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50066ca966813ca8957ee15361752f19424a8ff620dbe9c8993d9f99d99b04b3"
 dependencies = [
  "clap_builder",
+ "clap_derive",
 ]
 
 [[package]]
@@ -2734,8 +2749,22 @@ version = "4.6.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a0ed97c96ef4efb3cc84e09fa388df4463e7cc3224ec38d7b1d9e45749333590"
 dependencies = [
+ "anstream",
  "anstyle",
  "clap_lex",
+ "strsim",
+]
+
+[[package]]
+name = "clap_derive"
+version = "4.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4c174f11f949b9ca8c60580925e282b9cbd5454750e506f08648b2038080cd7"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -3964,6 +3993,7 @@ name = "ene-avatar"
 version = "0.1.8"
 dependencies = [
  "bevy",
+ "directories",
  "ene-avatar-ipc",
  "ene-vrm",
  "exwlshellev",
@@ -3995,7 +4025,6 @@ version = "0.1.8"
 dependencies = [
  "ene-catalog",
  "ene-domain",
- "ene-rpc",
  "image",
  "proptest",
  "serde",
@@ -4012,7 +4041,10 @@ dependencies = [
  "backon",
  "base64 0.23.1",
  "buffa",
+ "cap-fs-ext",
  "cap-std",
+ "cap-tempfile",
+ "clap",
  "connectrpc",
  "cpal",
  "directories",
@@ -4027,8 +4059,9 @@ dependencies = [
  "ene-voice",
  "globset",
  "gpui-kit",
+ "libc",
  "parking_lot 0.13.0",
- "process-wrap 11.0.0",
+ "process-wrap",
  "regex",
  "serde",
  "serde_json",
@@ -4071,6 +4104,7 @@ dependencies = [
  "bevy_ecs",
  "bevy_time",
  "bytes",
+ "clap",
  "connectrpc",
  "crossbeam-channel",
  "directories",
@@ -4099,7 +4133,7 @@ dependencies = [
  "parking_lot 0.13.0",
  "private-fs",
  "proc-macro2",
- "process-wrap 11.0.0",
+ "process-wrap",
  "regex",
  "reqwest",
  "rig-agent",
@@ -4186,7 +4220,9 @@ dependencies = [
 name = "ene-plugin-runtime"
 version = "0.1.8"
 dependencies = [
+ "async-task",
  "base64 0.23.1",
+ "blocking",
  "cap-fs-ext",
  "cap-std",
  "ene-plugin",
@@ -4278,12 +4314,13 @@ dependencies = [
 name = "ene-voice"
 version = "0.1.8"
 dependencies = [
+ "directories",
  "ene-catalog",
  "ene-domain",
  "ene-mind",
  "futures-util",
  "parking_lot 0.13.0",
- "process-wrap 11.0.0",
+ "process-wrap",
  "pulldown-cmark",
  "regex",
  "reqwest",
@@ -4320,8 +4357,7 @@ dependencies = [
  "backon",
  "ene-domain",
  "ene-plugin",
- "process-wrap 10.0.2",
- "process-wrap 11.0.0",
+ "process-wrap",
  "reqwest",
  "rig-agent",
  "rig-rmcp",
@@ -9649,19 +9685,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "process-wrap"
-version = "11.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3655b18489c90df24f2c401ac65f908b17210e59cf676127f79890f67f3e30e"
-dependencies = [
- "futures",
- "indexmap 2.14.2",
- "nix 0.32.0",
- "tokio",
- "windows 0.62.2",
-]
-
-[[package]]
 name = "profiling"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10537,7 +10560,7 @@ dependencies = [
  "pastey 0.2.3",
  "percent-encoding",
  "pin-project-lite",
- "process-wrap 10.0.2",
+ "process-wrap",
  "reqwest",
  "rmcp-macros",
  "schemars 1.2.3",

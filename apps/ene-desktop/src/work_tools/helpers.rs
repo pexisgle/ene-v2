@@ -1,6 +1,6 @@
 use super::{FILE_LIMIT, WorkToolError};
 use globset::{GlobBuilder, GlobMatcher};
-use serde_json::Value;
+use serde::Deserialize;
 use std::path::{Component, Path};
 
 pub(super) fn relative(path: &str) -> Result<&Path, WorkToolError> {
@@ -16,25 +16,6 @@ pub(super) fn relative(path: &str) -> Result<&Path, WorkToolError> {
     Ok(parsed)
 }
 
-pub(super) fn required<'a>(input: &'a Value, name: &'static str) -> Result<&'a str, WorkToolError> {
-    input[name].as_str().ok_or(WorkToolError::NotString(name))
-}
-
-pub(super) fn positive(
-    input: &Value,
-    name: &'static str,
-    default: usize,
-) -> Result<usize, WorkToolError> {
-    match input.get(name) {
-        None => Ok(default),
-        Some(value) => value
-            .as_u64()
-            .and_then(|value| usize::try_from(value).ok())
-            .filter(|&value| value > 0)
-            .ok_or(WorkToolError::NotPositiveInt(name)),
-    }
-}
-
 pub(super) fn text(bytes: &[u8]) -> Result<&str, WorkToolError> {
     if bytes.contains(&0) {
         return Err(WorkToolError::BinaryFile);
@@ -42,26 +23,31 @@ pub(super) fn text(bytes: &[u8]) -> Result<&str, WorkToolError> {
     std::str::from_utf8(bytes).map_err(|_| WorkToolError::NotUtf8)
 }
 
-pub(super) fn edit(content: &str, input: &Value) -> Result<String, WorkToolError> {
-    let edits = input["edits"]
-        .as_array()
-        .filter(|edits| !edits.is_empty())
-        .ok_or(WorkToolError::EmptyEdits)?;
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct Edit {
+    old_text: String,
+    new_text: String,
+}
+
+pub(super) fn edit(content: &str, edits: &[Edit]) -> Result<String, WorkToolError> {
+    if edits.is_empty() {
+        return Err(WorkToolError::EmptyEdits);
+    }
     let mut content = content.to_owned();
-    for edit in edits {
-        let old = required(edit, "oldText")?;
-        let new = required(edit, "newText")?;
-        if old.is_empty() {
+    for Edit {
+        old_text: old,
+        new_text: new,
+    } in edits
+    {
+        let Some(first_char) = old.chars().next() else {
             return Err(WorkToolError::EmptyOldText);
-        }
+        };
         let Some(index) = content.find(old) else {
             return Err(WorkToolError::OldTextNotFound);
         };
         let end = index + old.len();
         // Check overlapping occurrences as well.
-        let Some(first_char) = old.chars().next() else {
-            return Err(WorkToolError::EmptyOldText);
-        };
         let next = index + first_char.len_utf8();
         if content[next..].contains(old) {
             return Err(WorkToolError::OldTextNotUnique);

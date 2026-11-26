@@ -4,13 +4,11 @@
 
 pub mod choices;
 pub mod connections;
-pub mod domain;
 pub mod presets;
 pub mod reducer;
 pub mod state;
 pub mod templates;
 pub mod update;
-pub mod wire;
 
 mod attachments;
 mod notifications;
@@ -26,6 +24,7 @@ pub use ene_catalog::{
     GOOGLE_AGENT_PLATFORM, SAKURA_AI_ENDPOINT, default_embedding_dimensions, is_sakura_endpoint,
     parse_voice_resource, search_adapter_requires_key,
 };
+pub use ene_domain::client_view as domain;
 pub use reducer::{is_user_facing_message, merge_message, upsert_approval};
 pub use state::{
     ApprovalState, AudioState, Capture, Chat, CompanionState, ConnectionViewState, Device, Devices,

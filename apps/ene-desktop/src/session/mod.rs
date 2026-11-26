@@ -69,13 +69,12 @@ pub(super) const LIP: Duration = Duration::from_millis(16);
 
 fn client_id_path() -> Option<PathBuf> {
     #[cfg(windows)]
-    {
-        if let Some(root) = std::env::var_os("LOCALAPPDATA") {
-            return Some(PathBuf::from(root).join("ene").join("desktop-client-id"));
-        }
-    }
-    directories::ProjectDirs::from("", "", "ene")
-        .map(|dirs| dirs.config_local_dir().join("desktop-client-id"))
+    let dir = directories::BaseDirs::new()?.data_local_dir().join("ene");
+    #[cfg(not(windows))]
+    let dir = directories::ProjectDirs::from("", "", "ene")?
+        .config_local_dir()
+        .to_owned();
+    Some(dir.join("desktop-client-id"))
 }
 
 /// Loads or atomically initializes a stable per-install client ID at `path`.
@@ -188,14 +187,14 @@ pub(crate) fn notify_ui(tx: &UnboundedSender<Update>, update: Update) {
 }
 
 impl Session {
-    pub fn new(
+    pub async fn new(
         path: PathBuf,
         options: Options,
         connection: Connection,
         updates: UnboundedSender<Update>,
         commands: UnboundedReceiver<Command>,
     ) -> Self {
-        let devices = DeviceBridge::new();
+        let devices = DeviceBridge::new().await;
         let transport = SessionTransport::new(
             path,
             options,
@@ -703,7 +702,7 @@ mod tests {
         // shutdown drops reports the host is still waiting for. This covers the
         // two methods themselves; that the frame loop calls `reap_background`
         // each sample tick is a schedule detail pinned by the call site.
-        let mut devices = super::bridge::DeviceBridge::new();
+        let mut devices = super::bridge::DeviceBridge::new().await;
         let finished = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         for _ in 0..8 {
             let finished = std::sync::Arc::clone(&finished);

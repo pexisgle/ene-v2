@@ -1,7 +1,7 @@
-use super::ConnectionsPane;
+use super::{ConnectionsPane, SecretField, secret_row};
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
-use crate::ui::widgets::{CircleButtonStyle, Tone, circle_icon_button, pill_button, status_pill};
+use crate::ui::widgets::{Tone, pill_button, status_pill};
 use crate::ui::{Hub, search_adapter_requires_key};
 use ene_client_core::domain::{Connection, ConnectionCheck, ConnectionKind};
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
@@ -99,8 +99,8 @@ fn render_search_provider_row(
         .is_some_and(|id| pane.hub.read(cx).setup.checking_connections.contains(id));
     let check = existing.and_then(|c| checks.get(&c.id).or(c.last_check.as_ref()));
 
-    let reveal_key = format!("search-card:{}", spec.adapter);
-    let revealed = pane.form.revealed_secret_for.as_deref() == Some(reveal_key.as_str());
+    let field = SecretField::Search(spec.adapter);
+    let revealed = pane.form.revealed.as_ref() == Some(&field);
     let draft = pane.drafts.masked_draft(
         cx,
         format!("search-card:secret:{}", spec.adapter),
@@ -129,20 +129,33 @@ fn render_search_provider_row(
         &pane.hub,
         theme,
     );
-    let input_row = render_provider_key_row(
-        spec.adapter,
-        ProviderKeyInput {
-            draft,
-            reveal_key,
-            revealed,
-            has_cred,
-            key_text,
-            live,
-        },
-        &pane.hub,
+    let adapter = spec.adapter;
+    let hub_save = pane.hub.clone();
+    let input_row = secret_row(
+        format!("search-card-eye-{adapter}"),
+        field,
+        draft,
+        revealed,
         theme,
         cx,
-    );
+    )
+    .child(pill_button(
+        SharedString::from(format!("search-card-save-{adapter}")),
+        if has_cred {
+            "キーを更新"
+        } else {
+            "登録して使う"
+        },
+        Tone::Primary
+            .icon(Icon::Check)
+            .enabled(live && !key_text.is_empty()),
+        theme,
+        move |_, cx| {
+            hub_save.update(cx, |hub, cx| {
+                hub.save_search_provider_key(adapter, &key_text, true, cx);
+            });
+        },
+    ));
 
     div()
         .w_full()
@@ -335,66 +348,6 @@ fn render_provider_header(
                     ))
                 }),
         )
-}
-
-struct ProviderKeyInput {
-    draft: Entity<crate::input::Draft>,
-    reveal_key: String,
-    revealed: bool,
-    has_cred: bool,
-    key_text: String,
-    live: bool,
-}
-
-fn render_provider_key_row(
-    adapter: &'static str,
-    input: ProviderKeyInput,
-    hub: &Entity<Hub>,
-    theme: &Theme,
-    cx: &Context<ConnectionsPane>,
-) -> gpui::Div {
-    let pane_eye = cx.entity();
-    let hub_save = hub.clone();
-    let revealed = input.revealed;
-    let reveal_key = input.reveal_key;
-    let key_text = input.key_text;
-    let can_save = input.live && !key_text.is_empty();
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.))
-        .child(div().flex_1().min_w_0().child(input.draft))
-        .child(circle_icon_button(
-            SharedString::from(format!("search-card-eye-{adapter}")),
-            CircleButtonStyle::new(if revealed { Icon::EyeOff } else { Icon::Eye }, 30., 14.),
-            theme,
-            move |_, cx| {
-                pane_eye.update(cx, |this, cx| {
-                    this.form.revealed_secret_for = if revealed {
-                        None
-                    } else {
-                        Some(reveal_key.clone())
-                    };
-                    cx.notify();
-                });
-            },
-        ))
-        .child(pill_button(
-            SharedString::from(format!("search-card-save-{adapter}")),
-            if input.has_cred {
-                "キーを更新"
-            } else {
-                "登録して使う"
-            },
-            Tone::Primary.icon(Icon::Check).enabled(can_save),
-            theme,
-            move |_, cx| {
-                hub_save.update(cx, |hub, cx| {
-                    hub.save_search_provider_key(adapter, &key_text, true, cx);
-                });
-            },
-        ))
 }
 
 fn render_search_switcher(

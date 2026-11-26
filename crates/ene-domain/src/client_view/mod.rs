@@ -4,7 +4,7 @@ pub mod companion;
 pub mod connection;
 pub mod policy;
 
-pub use ene_domain::{
+pub use crate::{
     Activation, BodyBinding, COMPUTER_USE, Check as ConnectionCheck,
     Endpoint as ConnectionEndpoint, Failure, ModelAssignment, ModelAssignments, PolicyEffect,
     PolicyRule, PolicyText, RiskLevel, RunState, VoiceBinding, WorkSession, WorkStatus,
@@ -20,8 +20,9 @@ pub use connection::{
     EmbeddingConnection, LlmConnection, LlmProvider, McpConnection, ModelInfo, PluginInfo,
     SearchConnection, SettingField, SttConnection, TtsConnection,
 };
+pub use ene_policy::ApprovalDecision;
 pub use policy::{
-    ApprovalDecision, ApprovalRequest, ApprovalStatus, PolicyRulesUpdate, PolicyTextsUpdate,
+    ApprovalRequest, ApprovalStatus, PolicyRulesUpdate, PolicyTextsUpdate,
     SKIP_FILE_CONFIRMATION_PREFIX, SKIP_TOOL_CONFIRMATION_ID, is_file_confirmation_rule,
     tool_confirmation_update,
 };

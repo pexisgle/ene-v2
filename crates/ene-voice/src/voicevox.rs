@@ -283,7 +283,7 @@ fn find_explicit_or_env_binary(options_json: &str) -> Option<PathBuf> {
 #[cfg(windows)]
 fn find_windows_binary() -> Option<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+    if let Some(local) = directories::BaseDirs::new().map(|dirs| dirs.data_local_dir().to_owned()) {
         candidates.push(
             local
                 .join("Programs")
@@ -330,7 +330,7 @@ fn find_macos_binary() -> Option<PathBuf> {
     let mut candidates = vec![PathBuf::from(
         "/Applications/VOICEVOX.app/Contents/Resources/vv-engine/run",
     )];
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_owned()) {
         candidates.push(
             home.join("Applications")
                 .join("VOICEVOX.app")
@@ -352,7 +352,7 @@ fn find_linux_binary() -> Option<PathBuf> {
         PathBuf::from("/opt/voicevox/vv-engine/run"),
         PathBuf::from("/usr/local/bin/voicevox_engine"),
     ];
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_owned()) {
         candidates.push(
             home.join(".local")
                 .join("share")

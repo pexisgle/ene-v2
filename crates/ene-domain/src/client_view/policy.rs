@@ -1,6 +1,6 @@
 //! Pure permission approval, policy rule, and policy text domain types.
 
-use ene_domain::{PolicyEffect, PolicyRule, PolicyText};
+use crate::{PolicyEffect, PolicyRule, PolicyText};
 
 /// Prefix used for per-capability workspace file confirmation policy rules.
 pub const SKIP_FILE_CONFIRMATION_PREFIX: &str = "desktop.skip-file-confirmation:";
@@ -22,20 +22,6 @@ pub enum ApprovalStatus {
     Denied,
     /// Nobody answered in time, so the operation did not run.
     Expired,
-}
-
-/// User decision submitted for a pending approval card.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ApprovalDecision {
-    /// No answer arrived.
-    #[default]
-    Unspecified,
-    /// Allow this one call.
-    Approve,
-    /// Allow this and matching calls from now on.
-    AlwaysApprove,
-    /// Refuse this call.
-    Deny,
 }
 
 /// Pending or resolved host approval request.

@@ -3,14 +3,18 @@
 use super::approval::refuse;
 use super::gate::{GateCall, GateContext};
 use crate::host::{
+    background::{self, AbortOnDropHandle},
     client::Client,
     db::Store,
     error::{HostError, Result},
+    providers::extensions::run_hooks,
 };
 use bevy_ecs::prelude::*;
 use ene_policy::{CandidateAction, CapabilitySpec, PolicyRule};
 use ene_rpc as w;
+use rig_ecs::prelude::{Decider, Decision, HoldOf, Outcome, SupersededBy};
 use serde_json::Value;
+use tokio::sync::oneshot::{self, error::TryRecvError};
 
 pub(super) fn load_gate_rules(
     ctx: &mut GateContext,
@@ -23,34 +27,71 @@ pub(super) fn load_gate_rules(
     Ok(rules)
 }
 
-pub(super) fn run_pre_tool_hooks(
+#[derive(Component)]
+pub(super) struct PendingToolHook {
+    response: oneshot::Receiver<Option<String>>,
+    _task: AbortOnDropHandle<()>,
+}
+
+#[derive(Component)]
+pub(super) struct PreToolChecked;
+
+pub(super) fn start_pre_tool_hooks(
     ctx: &GateContext,
+    call: &GateCall,
     companion_id: &str,
-    tool_name: &str,
-    arguments: &Value,
-) -> Option<String> {
-    let providers = ctx.providers.as_ref()?;
-    if providers
-        .with_extension(ene_plugin::Extension::Hook)
-        .is_empty()
-    {
-        return None;
-    }
-    let runtime = ctx.runtime.as_ref()?;
-    let hook_store = ctx.store.clone();
-    let hook_event = ene_plugin::HookEvent::PreTool {
-        companion_id: companion_id.to_owned(),
-        tool_name: tool_name.to_owned(),
-        arguments: arguments.clone(),
+) -> Result<Option<PendingToolHook>> {
+    let Some(providers) = ctx.providers.as_ref().filter(|providers| {
+        !providers
+            .with_extension(ene_plugin::Extension::Hook)
+            .is_empty()
+    }) else {
+        return Ok(None);
     };
-    let outcome = tokio::task::block_in_place(|| {
-        runtime.block_on(crate::host::providers::extensions::run_hooks(
-            providers,
-            &hook_store,
-            hook_event,
-        ))
+    let runtime = ctx
+        .runtime
+        .as_ref()
+        .ok_or_else(|| HostError::Unavailable("pre-tool hooks are unavailable".into()))?;
+    let (reply, response) = oneshot::channel();
+    let providers = providers.clone();
+    let store = ctx.store.clone();
+    let event = ene_plugin::HookEvent::PreTool {
+        companion_id: companion_id.to_owned(),
+        tool_name: call.tool_name.clone(),
+        arguments: call.arguments.clone(),
+    };
+    let task = background::spawn(runtime, ctx.wake.as_ref(), async move {
+        let outcome = run_hooks(&providers, &store, event).await;
+        let _sent = reply.send(outcome.blocked);
     });
-    outcome.blocked
+    Ok(Some(PendingToolHook {
+        response,
+        _task: task,
+    }))
+}
+
+pub(super) fn collect_pre_tool_hooks(
+    mut commands: Commands,
+    mut hooks: Query<(Entity, &HoldOf, &mut PendingToolHook)>,
+    mut calls: Query<&mut Decision, (Without<Outcome>, Without<SupersededBy>)>,
+) {
+    for (hold, &HoldOf(call), mut hook) in &mut hooks {
+        if let Ok(mut decision) = calls.get_mut(call) {
+            let reason = match hook.response.try_recv() {
+                Ok(None) => {
+                    commands.entity(call).insert(PreToolChecked);
+                    None
+                }
+                Ok(Some(reason)) => Some(reason),
+                Err(TryRecvError::Empty) => continue,
+                Err(TryRecvError::Closed) => Some("pre-tool hooks did not complete".into()),
+            };
+            if let Some(reason) = reason {
+                decision.decide(Decider::plugin("ene-host"), Outcome::refused(&reason));
+            }
+        }
+        commands.entity(hold).despawn();
+    }
 }
 
 type CandidateResolution = (CandidateAction, Option<String>, Option<String>);
@@ -167,7 +208,7 @@ pub(super) fn resolve_device_candidate(
         match crate::host::client::dynamic::tool_spec_for(world, &client, &item.tool_name) {
             Ok(spec) => spec,
             Err(error) => {
-                refuse(world, item.entity, error.message());
+                refuse(world, item.entity, &error.to_string());
                 return None;
             }
         }
@@ -183,7 +224,7 @@ pub(super) fn resolve_device_candidate(
     ) {
         Ok(resolved) => resolved,
         Err(error) => {
-            refuse(world, item.entity, error.message());
+            refuse(world, item.entity, &error.to_string());
             return None;
         }
     };
@@ -214,7 +255,7 @@ pub(super) fn resolve_device_candidate(
         && let Some(spec) = &spec
         && let Err(error) = crate::host::client::validate_input(spec, &input)
     {
-        refuse(world, item.entity, error.message());
+        refuse(world, item.entity, &error.to_string());
         return None;
     }
     Some((
@@ -282,4 +323,36 @@ fn resolve_capability(
         return Ok(None);
     };
     Ok(Some((spec.name.clone(), Some(spec))))
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+    use rig_ecs::prelude::{App, Holds, Update};
+
+    #[tokio::test]
+    async fn pre_tool_hook_holds_only_its_call_until_the_verdict() {
+        let mut app = App::new();
+        app.add_systems(Update, collect_pre_tool_hooks);
+        let call = app.world_mut().spawn(Decision::default()).id();
+        let other = app.world_mut().spawn(Decision::default()).id();
+        let (reply, response) = oneshot::channel();
+        app.world_mut().spawn((
+            HoldOf(call),
+            PendingToolHook {
+                response,
+                _task: AbortOnDropHandle::new(tokio::spawn(std::future::pending())),
+            },
+        ));
+
+        app.update();
+        assert!(app.world().get::<Holds>(call).is_some());
+        assert!(app.world().get::<Holds>(other).is_none());
+        reply.send(Some("blocked by hook".into())).unwrap();
+        app.update();
+
+        assert!(app.world().get::<Holds>(call).is_none());
+        assert!(app.world().get::<Decision>(call).unwrap().is_decided());
+        assert!(!app.world().get::<Decision>(other).unwrap().is_decided());
+    }
 }

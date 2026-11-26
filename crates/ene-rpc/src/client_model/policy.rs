@@ -1,7 +1,7 @@
 //! Wire conversions for permission approval and policy types.
 
-use crate::domain;
-use ene_rpc as w;
+use crate as w;
+use ene_domain::client_view as domain;
 
 from_variants! {
     w::ApprovalStatus => domain::ApprovalStatus [

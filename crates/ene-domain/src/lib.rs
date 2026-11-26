@@ -8,6 +8,7 @@
 mod best_effort;
 mod binding;
 pub mod client;
+pub mod client_view;
 pub mod error;
 pub mod failure;
 pub mod ids;

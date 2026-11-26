@@ -13,9 +13,13 @@
 //! are `Send` futures spawned on the same runtime, so there is exactly one
 //! runtime in the process.
 
+mod args;
+
+use args::{DesktopArgs, OpenAt};
+use clap::Parser as _;
 use ene_desktop::{
     Command, Connection, EmbeddedAssets, Hub, Options, PodMode, Session, Tray, TrayAction,
-    TrayState, bind_actions, default_renderer, open_pod_window,
+    TrayState, bind_actions, open_pod_window,
 };
 use gpui::{App, AppContext as _};
 use parking_lot::RwLock;
@@ -29,6 +33,8 @@ struct SessionRuntime {
 
 struct DesktopAppInit {
     connection: Connection,
+    options: Options,
+    open_at: OpenAt,
     commands_tx: UnboundedSender<Command>,
     updates_tx: UnboundedSender<ene_desktop::Update>,
     updates_rx: UnboundedReceiver<ene_desktop::Update>,
@@ -42,14 +48,12 @@ struct DesktopAppInit {
 }
 
 fn main() {
+    let args = DesktopArgs::parse();
     init_tracing();
     install_panic_hook();
 
-    let connection_override = std::env::var_os("ENE_HOST_CONNECTION")
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from);
-    let local_host = detect_local_host(connection_override.is_some());
-    let path = discovery_path(connection_override).unwrap_or_else(|reason| {
+    let local_host = detect_local_host(&args);
+    let path = args.discovery_path().unwrap_or_else(|reason| {
         // Without a runtime directory there is no host to find, so the
         // window could only repeat this sentence.
         tracing::error!(%reason, "could not resolve host discovery path");
@@ -62,14 +66,16 @@ fn main() {
         .as_ref()
         .map(|_| ene_desktop::HistoryReset {
             requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            failure: std::env::var("ENE_DESKTOP_HISTORY_RESET_ERROR").ok(),
+            failure: args.history_reset_error.clone(),
         });
 
     let (updates_tx, updates_rx) = unbounded_channel();
     let (commands_tx, commands_rx) = unbounded_channel();
     let connection: Connection = Arc::new(RwLock::new(None));
+    let options = args.options();
     let session_runtime = start_session_runtime(
         path.clone(),
+        options.clone(),
         connection.clone(),
         updates_tx.clone(),
         commands_rx,
@@ -84,6 +90,8 @@ fn main() {
 
     run_gpui_app(DesktopAppInit {
         connection,
+        options,
+        open_at: args.open_settings,
         commands_tx,
         updates_tx,
         updates_rx,
@@ -150,16 +158,14 @@ fn install_panic_hook() {
     }));
 }
 
-fn detect_local_host(has_connection_override: bool) -> Option<PathBuf> {
-    let start_local_host = std::env::args_os()
-        .skip(1)
-        .find_map(|arg| match arg.to_str() {
-            Some("--local-host") => Some(true),
-            Some("--connect-only") => Some(false),
-            _ => None,
-        })
-        .unwrap_or(cfg!(windows));
-    if has_connection_override || !start_local_host {
+fn detect_local_host(args: &DesktopArgs) -> Option<PathBuf> {
+    if args
+        .connection
+        .as_ref()
+        .is_some_and(|path| !path.is_empty())
+        || args.connect_only
+        || !(args.local_host || cfg!(windows))
+    {
         return None;
     }
     let host = std::env::current_exe()
@@ -186,29 +192,40 @@ fn spawn_local_host(local_host: Option<&std::path::Path>) -> Option<std::process
 
 fn start_session_runtime(
     path: PathBuf,
+    options: Options,
     connection: Connection,
     updates_tx: UnboundedSender<ene_desktop::Update>,
     commands_rx: UnboundedReceiver<Command>,
 ) -> SessionRuntime {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap_or_else(|error| {
-            tracing::error!(%error, "the async runtime did not start");
-            std::process::exit(1);
-        });
-    let handle = runtime.handle().clone();
-    let session = Session::new(path, options(), connection, updates_tx, commands_rx);
+    let (ready, handle) = std::sync::mpsc::sync_channel(1);
     let worker = std::thread::Builder::new()
         .name("ene-session".into())
-        .spawn(move || {
-            runtime.block_on(session.run());
-        })
+        .spawn(move || run_session(path, options, connection, updates_tx, commands_rx, &ready))
         .unwrap_or_else(|error| {
             tracing::error!(%error, "the session thread did not start");
             std::process::exit(1);
         });
+    let handle = handle.recv().unwrap_or_else(|error| {
+        tracing::error!(%error, "the session runtime did not start");
+        std::process::exit(1);
+    });
     SessionRuntime { handle, worker }
+}
+
+// Starts the async session on its owner thread while GPUI owns the main thread.
+#[tokio::main(flavor = "current_thread")]
+async fn run_session(
+    path: PathBuf,
+    options: Options,
+    connection: Connection,
+    updates: UnboundedSender<ene_desktop::Update>,
+    commands: UnboundedReceiver<Command>,
+    ready: &std::sync::mpsc::SyncSender<tokio::runtime::Handle>,
+) {
+    if ready.send(tokio::runtime::Handle::current()).is_ok() {
+        let session = Session::new(path, options, connection, updates, commands).await;
+        Box::pin(session.run()).await;
+    }
 }
 
 fn spawn_shutdown_signal(handle: &tokio::runtime::Handle) -> tokio::sync::oneshot::Receiver<()> {
@@ -259,7 +276,7 @@ fn run_gpui_app(init: DesktopAppInit) {
                 Hub::new(
                     cx,
                     ene_desktop::HubInit {
-                        options: options(),
+                        options: init.options,
                         connection: init.connection.clone(),
                         commands: init.commands_tx.clone(),
                         updates_tx: init.updates_tx.clone(),
@@ -271,8 +288,7 @@ fn run_gpui_app(init: DesktopAppInit) {
                     },
                 )
             });
-            let (open_chat, open_section) = env_open_options();
-            if open_chat {
+            if matches!(init.open_at, OpenAt::Chat) {
                 hub.update(cx, |hub, _cx| hub.windows.pod_mode = PodMode::ExpandedChat);
             }
             bind_actions(cx, hub.clone());
@@ -286,24 +302,10 @@ fn run_gpui_app(init: DesktopAppInit) {
             })
             .detach();
             cx.activate(true);
-            if let Some(section) = open_section {
+            if let Some(section) = init.open_at.section() {
                 hub.update(cx, |hub, cx| hub.open_settings(section, cx));
             }
         });
-}
-
-fn env_open_options() -> (bool, Option<ene_desktop::SettingsSection>) {
-    let raw = std::env::var("ENE_DESKTOP_OPEN_SETTINGS").ok();
-    let trimmed = raw.as_deref().map(str::trim);
-    let open_chat = trimmed.is_some_and(|val| val.eq_ignore_ascii_case("chat"));
-    let open_section = trimmed.and_then(|val| match val.to_ascii_lowercase().as_str() {
-        "companions" => Some(ene_desktop::SettingsSection::Companions),
-        "connections" | "1" | "true" => Some(ene_desktop::SettingsSection::Connections),
-        "voice" => Some(ene_desktop::SettingsSection::Voice),
-        "device" => Some(ene_desktop::SettingsSection::Device),
-        _ => None,
-    });
-    (open_chat, open_section)
 }
 
 #[cfg(windows)]
@@ -322,42 +324,6 @@ fn maybe_finish_history_reset(
             tracing::error!(%error, "could not reopen ene after the history reset");
         }
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-enum DesktopInitError {
-    #[error("no runtime directory is configured; set ENE_HOST_CONNECTION")]
-    MissingRuntimeDir,
-    #[cfg(windows)]
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[cfg(windows)]
-    #[error("ローカルホストの停止を待ってから、もう一度お試しください。")]
-    HostStopTimeout,
-    #[cfg(windows)]
-    #[error("{0}")]
-    ResetFailed(String),
-}
-
-/// The discovery file: `ENE_HOST_CONNECTION`, or the host's default runtime
-/// directory.
-fn discovery_path(connection_override: Option<PathBuf>) -> Result<PathBuf, DesktopInitError> {
-    if let Some(path) = connection_override {
-        return Ok(path);
-    }
-    if let Some(runtime) = std::env::var_os("ENE_HOST_RUNTIME_DIR").filter(|path| !path.is_empty())
-    {
-        return Ok(PathBuf::from(runtime).join("connection.json"));
-    }
-    if let Some(dev_dir) = std::env::var_os("ENE_DEV_HOST_DIR").filter(|path| !path.is_empty()) {
-        return Ok(PathBuf::from(dev_dir).join("runtime/connection.json"));
-    }
-    let dirs =
-        directories::ProjectDirs::from("", "", "ene").ok_or(DesktopInitError::MissingRuntimeDir)?;
-    let runtime = dirs
-        .runtime_dir()
-        .map_or_else(|| dirs.cache_dir().join("runtime"), PathBuf::from);
-    Ok(runtime.join("connection.json"))
 }
 
 fn local_host_command(host: &std::path::Path) -> std::process::Command {
@@ -420,26 +386,4 @@ fn restart_desktop(reset_error: Option<String>) -> std::io::Result<()> {
         command.env_remove("ENE_DESKTOP_HISTORY_RESET_ERROR");
     }
     command.spawn().map(|_| ())
-}
-
-/// The client's identity and renderer, from the environment or persistent data dir.
-fn options() -> Options {
-    let defaults = Options::default();
-    let id = std::env::var("ENE_DESKTOP_CLIENT_ID")
-        .ok()
-        .map(|v| v.trim().to_owned())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(ene_desktop::persistent_client_id);
-    Options {
-        id,
-        name: std::env::var("ENE_DESKTOP_CLIENT_NAME").unwrap_or(defaults.name),
-        platform: defaults.platform,
-        renderer: std::env::var_os("ENE_DESKTOP_RENDERER")
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-            .or_else(default_renderer),
-        model: std::env::var_os("ENE_DESKTOP_MODEL")
-            .map(PathBuf::from)
-            .or(defaults.model),
-    }
 }

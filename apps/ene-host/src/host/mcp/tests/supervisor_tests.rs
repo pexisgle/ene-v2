@@ -25,43 +25,36 @@ fn assert_pending_launch(supervisor: &McpSupervisor, launch: &Launch) {
     );
 }
 
-/// Records a server on the world's own supervisor.
 fn attach_now(
-    world: &mut bevy_ecs::prelude::World,
+    world: &mut World,
     id: &str,
     launch: Launch,
     connection: rig_rmcp::McpConnection,
     registry: rig_agent::tool::server::ToolServerHandle,
     want: &Desired,
 ) {
-    let mut supervisor = std::mem::take(&mut *world.resource::<Mcp>().lock());
-    attach(
-        world,
-        &mut supervisor,
-        Connected {
-            id: id.to_owned(),
+    let previous = world.resource::<Mcp>().lock().servers.0.insert(
+        id.to_owned(),
+        Server {
             launch,
             connection,
             registry,
+            label: want.name.clone(),
+            allowed: want.allowed.clone(),
         },
-        want,
     );
-    *world.resource::<Mcp>().lock() = supervisor;
+    assert!(previous.is_none());
 }
 
-/// Retires one server from the world's own supervisor.
-fn retire_one_now(world: &mut bevy_ecs::prelude::World, id: &str) {
-    let mut supervisor = std::mem::take(&mut *world.resource::<Mcp>().lock());
-    retire_one(world, &mut supervisor, id);
-    *world.resource::<Mcp>().lock() = supervisor;
+fn retire_one_now(world: &mut World, id: &str) {
+    let server = world.resource::<Mcp>().lock().servers.0.remove(id).unwrap();
+    close_connection(server.connection, &world.resource::<HostRuntime>().0);
+    project_servers_now(world);
 }
 
-/// Runs the projection against the world's own supervisor, which `project_servers`
-/// needs borrowed while the world is also borrowed mutably.
-fn project_servers_now(world: &mut bevy_ecs::prelude::World) {
-    let supervisor = std::mem::take(&mut *world.resource::<Mcp>().lock());
-    project_servers(world, &supervisor);
-    *world.resource::<Mcp>().lock() = supervisor;
+fn project_servers_now(world: &mut World) {
+    let mcp = world.resource::<Mcp>().clone();
+    project_servers(world, &mcp.lock().servers, &[]);
 }
 
 #[tokio::test]
@@ -84,11 +77,11 @@ async fn registry_refresh_replaces_handlers_and_keeps_pinned_calls() {
         allowed: Vec::new(),
     };
     let mut world = World::new();
-    assert!(project(&mut world, "c1", &server, Some(&pinned)));
+    assert!(project(&mut world, "c1", &server, &pinned));
     let old_entity = tool_entity(&mut world, "mcp_notes_echo").unwrap();
     let refreshed = registry.reconcile_managed_tools(expected.clone(), vec![local_tool("echo", 2)]);
     let current = registry.snapshot();
-    assert!(project(&mut world, "c1", &server, Some(&current)));
+    assert!(project(&mut world, "c1", &server, &current));
     let entity = tool_entity(&mut world, "mcp_notes_echo").unwrap();
     assert_ne!(old_entity, entity);
     assert!(world.get_entity(old_entity).is_err());
@@ -122,12 +115,7 @@ async fn registry_refresh_replaces_handlers_and_keeps_pinned_calls() {
         current.get("echo").unwrap().key(),
     );
     registry.reconcile_managed_tools(refreshed, Vec::new());
-    assert!(project(
-        &mut world,
-        "c1",
-        &server,
-        Some(&registry.snapshot())
-    ));
+    assert!(project(&mut world, "c1", &server, &registry.snapshot()));
     assert!(tool_entity(&mut world, "mcp_notes_echo").is_none());
     assert!(world.get_entity(entity).is_err());
     let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -136,19 +124,9 @@ async fn registry_refresh_replaces_handlers_and_keeps_pinned_calls() {
         local_tool("echo", 4)
             .with_liveness(move || probe.load(std::sync::atomic::Ordering::SeqCst)),
     ]);
-    assert!(project(
-        &mut world,
-        "c1",
-        &server,
-        Some(&registry.snapshot())
-    ));
+    assert!(project(&mut world, "c1", &server, &registry.snapshot()));
     alive.store(false, std::sync::atomic::Ordering::SeqCst);
-    assert!(project(
-        &mut world,
-        "c1",
-        &server,
-        Some(&registry.snapshot())
-    ));
+    assert!(project(&mut world, "c1", &server, &registry.snapshot()));
     assert!(tool_entity(&mut world, "mcp_notes_echo").is_none());
     connection.close().await;
     task.abort();
@@ -248,8 +226,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
         },
     );
     let wanted = vec![("c1".into(), want("notes"))];
-    accept_event(
-        world,
+    let _retired = accept_event(
         &mut supervisor,
         &wanted,
         Event::Failed {
@@ -263,8 +240,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
     assert_pending_launch(&supervisor, &new_launch);
     let mut changed_revision = wanted.clone();
     changed_revision[0].1.revision = 2;
-    accept_event(
-        world,
+    let _retired = accept_event(
         &mut supervisor,
         &changed_revision,
         Event::Failed {
@@ -276,8 +252,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
         &runtime,
     );
     assert_pending_launch(&supervisor, &new_launch);
-    accept_event(
-        world,
+    let _retired = accept_event(
         &mut supervisor,
         &wanted,
         Event::Connected {
@@ -305,8 +280,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
     })
     .await
     .expect("the old launch processed its late notification");
-    accept_event(
-        world,
+    let _retired = accept_event(
         &mut supervisor,
         &wanted,
         Event::Connected {

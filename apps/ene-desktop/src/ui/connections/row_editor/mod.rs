@@ -22,7 +22,7 @@ pub(super) fn render_connection_row(
     cx: &mut Context<ConnectionsPane>,
 ) -> AnyElement {
     let id = conn.id.clone();
-    let expanded = pane.form.expanded_connection_id.as_deref() == Some(id.as_str());
+    let expanded = pane.form.editor(&id).is_some();
     let needs_key_flag = conn.needs_key(
         pane.hub
             .read(cx)
@@ -154,26 +154,22 @@ fn render_row_header(
                     if expanded { Tone::Soft } else { Tone::Ghost },
                     theme,
                     move |_, cx| {
-                        let mut probe_id = None;
-                        pane_expand.update(cx, |this, cx| {
-                            if this.form.expanded_connection_id.as_deref()
-                                == Some(expand_id.as_str())
-                            {
-                                this.form.expanded_connection_id = None;
+                        let probe = pane_expand.update(cx, |this, cx| {
+                            let opening = this.form.editor(&expand_id).is_none();
+                            if opening {
+                                this.form.open_editor(expand_id.clone());
                             } else {
-                                this.form.expanded_connection_id = Some(expand_id.clone());
-                                if should_auto_probe
-                                    && this.form.auto_probed_connections.insert(expand_id.clone())
-                                {
-                                    probe_id = Some(expand_id.clone());
-                                }
+                                this.form.close_editor();
                             }
                             this.open_dropdown = None;
-                            this.form.revoke_armed_for = None;
                             cx.notify();
+                            opening
+                                && should_auto_probe
+                                && this.form.auto_probed_connections.insert(expand_id.clone())
                         });
-                        if let Some(pid) = probe_id {
-                            hub_expand_probe.update(cx, |hub, cx| hub.check_connection(pid, cx));
+                        if probe {
+                            hub_expand_probe
+                                .update(cx, |hub, cx| hub.check_connection(expand_id.clone(), cx));
                         }
                     },
                 )),

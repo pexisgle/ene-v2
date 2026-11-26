@@ -13,54 +13,107 @@ mod row_editor;
 mod schema_form;
 mod web_search;
 
+use crate::input::Draft;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
-use crate::ui::widgets::{Tone, disclosure_row, pill_button};
+use crate::ui::widgets::{
+    CircleButtonStyle, Tone, circle_icon_button, disclosure_row, pill_button,
+};
 use crate::ui::{DraftStore, GOOGLE_AGENT_PLATFORM, Hub};
 use ene_client_core::domain::{Connection, ConnectionCheck, ConnectionKind};
 use gpui::{AnyElement, Context, Entity, FontWeight, Subscription, Window, div, prelude::*, px};
 use std::collections::{BTreeMap, HashSet};
 
-/// Form and disclosure state owned by [`ConnectionsPane`].
-pub(super) struct ConnectionFormState {
-    pub(super) adding_connection: bool,
-    pub(super) custom_connection_open: bool,
-    pub(super) custom_kind: ConnectionKind,
-    pub(super) mcp_add_mode: mcp_add::Mode,
-    pub(super) mcp_add_advanced_open: bool,
-    pub(super) pending_mcp: Option<String>,
-    pub(super) expanded_connection_id: Option<String>,
-    pub(super) revealed_secret_for: Option<String>,
-    pub(super) revoke_armed_for: Option<String>,
-    pub(super) advanced_roles_open: bool,
-    pub(super) auto_probed_connections: HashSet<String>,
+#[derive(Clone, Copy, Default)]
+enum AddFlow {
+    #[default]
+    Closed,
+    Presets,
+    Custom(ConnectionKind),
+    Mcp(mcp_add::Form),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum SecretField {
+    Connection(String),
+    Search(&'static str),
+}
+
+struct ExpandedConnection {
+    id: String,
+    revoke_armed: bool,
+}
+
+#[derive(Default)]
+struct ConnectionFormState {
+    add: AddFlow,
+    pending_mcp: Option<String>,
+    expanded: Option<ExpandedConnection>,
+    revealed: Option<SecretField>,
+    advanced_roles_open: bool,
+    auto_probed_connections: HashSet<String>,
     last_cleared_secret_seq: u64,
 }
 
-impl Default for ConnectionFormState {
-    fn default() -> Self {
-        Self {
-            adding_connection: false,
-            custom_connection_open: false,
-            custom_kind: ConnectionKind::Llm,
-            mcp_add_mode: mcp_add::Mode::Npx,
-            mcp_add_advanced_open: false,
-            pending_mcp: None,
-            expanded_connection_id: None,
-            revealed_secret_for: None,
-            revoke_armed_for: None,
-            advanced_roles_open: false,
-            auto_probed_connections: HashSet::new(),
-            last_cleared_secret_seq: 0,
+impl ConnectionFormState {
+    fn editor(&self, id: &str) -> Option<&ExpandedConnection> {
+        self.expanded.as_ref().filter(|editor| editor.id == id)
+    }
+
+    fn open_editor(&mut self, id: String) {
+        self.close_editor();
+        self.expanded = Some(ExpandedConnection {
+            id,
+            revoke_armed: false,
+        });
+    }
+
+    fn close_editor(&mut self) {
+        self.expanded = None;
+        if matches!(self.revealed, Some(SecretField::Connection(_))) {
+            self.revealed = None;
         }
     }
+}
+
+fn secret_row(
+    button_id: String,
+    field: SecretField,
+    draft: Entity<Draft>,
+    revealed: bool,
+    theme: &Theme,
+    cx: &Context<ConnectionsPane>,
+) -> gpui::Div {
+    let pane = cx.entity();
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(div().flex_1().min_w_0().child(draft))
+        .child(circle_icon_button(
+            gpui::SharedString::from(button_id),
+            CircleButtonStyle::new(if revealed { Icon::EyeOff } else { Icon::Eye }, 30., 14.),
+            theme,
+            move |_, cx| {
+                pane.update(cx, |this, cx| {
+                    if let SecretField::Connection(id) = &field
+                        && this.form.editor(id).is_none()
+                    {
+                        return;
+                    }
+                    this.form.revealed =
+                        (this.form.revealed.as_ref() != Some(&field)).then(|| field.clone());
+                    cx.notify();
+                });
+            },
+        ))
 }
 
 /// Connections chapter rendered as an independent GPUI pane entity.
 pub(crate) struct ConnectionsPane {
     pub(crate) hub: Entity<Hub>,
     pub(super) drafts: DraftStore,
-    pub(super) form: ConnectionFormState,
+    form: ConnectionFormState,
     pub(super) open_dropdown: Option<String>,
     initialized: bool,
     _observe: Subscription,
@@ -89,6 +142,10 @@ impl ConnectionsPane {
 
     pub(crate) fn on_leave(&mut self) {
         self.open_dropdown = None;
+        self.form.revealed = None;
+        if let Some(editor) = &mut self.form.expanded {
+            editor.revoke_armed = false;
+        }
     }
 
     pub(super) fn clear_mcp_drafts(&mut self) {
@@ -113,21 +170,25 @@ impl ConnectionsPane {
                     .and_then(|c| c.search_adapter())
                     .map(str::to_ascii_lowercase)
             });
-            let mut keys = vec![format!("conn:secret:{conn_id}")];
-            if let Some(adapter) = adapter {
-                keys.push(format!("search-card:secret:{adapter}"));
-            } else if let Some(suffix) = conn_id.strip_prefix("search-") {
-                keys.push(format!("search-card:secret:{suffix}"));
-            }
-            self.drafts.clear_keys(cx, keys.iter().map(String::as_str));
-            if self.form.revealed_secret_for.as_deref() == Some(conn_id.as_str())
-                || self
-                    .form
-                    .revealed_secret_for
-                    .as_deref()
-                    .is_some_and(|r| r.starts_with("search-card:"))
+            let search_adapter = adapter
+                .as_deref()
+                .or_else(|| conn_id.strip_prefix("search-"));
+            let keys = [
+                Some(format!("conn:secret:{conn_id}")),
+                search_adapter.map(|adapter| format!("search-card:secret:{adapter}")),
+            ];
+            self.drafts
+                .clear_keys(cx, keys.iter().flatten().map(String::as_str));
+            if self
+                .form
+                .revealed
+                .as_ref()
+                .is_some_and(|field| match field {
+                    SecretField::Connection(id) => id == &conn_id,
+                    SecretField::Search(adapter) => Some(*adapter) == search_adapter,
+                })
             {
-                self.form.revealed_secret_for = None;
+                self.form.revealed = None;
             }
         }
     }
@@ -187,9 +248,14 @@ impl gpui::Render for ConnectionsPane {
         };
 
         self.consume_pending_mcp_probe(&connections, cx);
-        let adding = self.form.adding_connection;
-        let add_panel = adding
-            .then(|| add_panel::render_add_connection_panel(self, live, &providers, &theme, cx));
+        let adding = !matches!(self.form.add, AddFlow::Closed);
+        let add_panel = match self.form.add {
+            AddFlow::Closed => None,
+            AddFlow::Presets | AddFlow::Custom(_) => Some(add_panel::render_add_connection_panel(
+                self, live, &providers, &theme, cx,
+            )),
+            AddFlow::Mcp(form) => Some(mcp_add::render_mcp_add(self, form, live, &theme, cx)),
+        };
         let search_card =
             web_search::render_web_search_card(self, &connections, &checks, live, &theme, cx);
         let rows = self.build_connection_rows(&connections, (&checks, live, adding), &theme, cx);
@@ -277,10 +343,7 @@ fn render_connections_header(
                     theme,
                     move |_, cx| {
                         pane_mcp.update(cx, |this, cx| {
-                            this.form.adding_connection = true;
-                            this.form.custom_connection_open = true;
-                            this.form.custom_kind = ConnectionKind::Mcp;
-                            this.form.mcp_add_mode = mcp_add::Mode::Npx;
+                            this.form.add = AddFlow::Mcp(mcp_add::Form::default());
                             cx.notify();
                         });
                     },
@@ -297,12 +360,11 @@ fn render_connections_header(
                     theme,
                     move |_, cx| {
                         pane_add.update(cx, |this, cx| {
-                            this.form.adding_connection = !this.form.adding_connection;
-                            if this.form.adding_connection
-                                && this.form.custom_kind == ConnectionKind::Mcp
-                            {
-                                this.form.custom_kind = ConnectionKind::Llm;
-                            }
+                            this.form.add = if adding {
+                                AddFlow::Closed
+                            } else {
+                                AddFlow::Presets
+                            };
                             cx.notify();
                         });
                     },

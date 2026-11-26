@@ -50,14 +50,14 @@ ignore = true
 multiple-versions = "warn"
 wildcards = "allow"
 
-# `ene-rpc` is the wire protocol crate. Only these three may depend on it; every
+# `ene-rpc` is the wire protocol crate. Only the apps listed below may depend on it; every
 # other crate, including every L0 domain crate, is denied if it reaches
 # `ene-rpc` directly or through another crate. `deny.toml` reads the resolved
 # dependency graph, so this catches an indirect path that scraping `Cargo.toml`
 # files would miss.
 [[bans.deny]]
 name = "ene-rpc"
-wrappers = ["ene-client-core", "ene-desktop", "ene-host"]
+wrappers = ["ene-desktop", "ene-host"]
 reason = "the wire protocol crate belongs to the transport and app layers only"
 
 [sources]

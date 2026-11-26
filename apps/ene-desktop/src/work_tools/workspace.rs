@@ -1,31 +1,86 @@
 use super::{
-    COMMAND_TIMEOUT, FILE_LIMIT, GREP_BYTES, IMAGE_LIMIT, MAX_RESULTS, OUTPUT_LIMIT, PREFIX,
-    SCAN_LIMIT, SHELL, WorkToolError,
-    helpers::{edit, glob, positive, relative, required, text},
+    COMMAND_TIMEOUT, FILE_LIMIT, IMAGE_LIMIT, MAX_RESULTS, OUTPUT_LIMIT, PREFIX, SHELL,
+    WorkToolError,
+    helpers::{Edit, edit, glob, relative, text},
+    search::{Browse, Search, max_results},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use cap_std::{
-    ambient_authority,
-    fs::{Dir, OpenOptions},
-};
+use cap_std::{ambient_authority, fs::Dir};
+use cap_tempfile::TempFile;
 use ene_client_core::is_attachment_image;
 use ene_rpc as w;
-
 use parking_lot::Mutex;
+
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     io::{self, Read, Write},
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 pub(crate) struct Workspace {
     pub(super) root: PathBuf,
-    dir: Dir,
+    pub(super) dir: Dir,
     edits: Mutex<()>,
     pub(super) shell: Option<PathBuf>,
 }
 
+#[derive(Deserialize)]
+struct Request {
+    workspace: String,
+    #[serde(flatten)]
+    tool: Tool,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "tool", rename_all = "snake_case")]
+enum Tool {
+    Read {
+        path: String,
+        #[serde(default = "first_line")]
+        offset: NonZeroUsize,
+        #[serde(default = "max_results")]
+        limit: NonZeroUsize,
+    },
+    Write {
+        path: String,
+        content: String,
+    },
+    Edit {
+        path: String,
+        edits: Vec<Edit>,
+    },
+    Ls {
+        #[serde(flatten)]
+        browse: Browse,
+    },
+    Find {
+        #[serde(flatten)]
+        browse: Browse,
+        pattern: String,
+    },
+    Grep {
+        #[serde(flatten)]
+        browse: Browse,
+        pattern: String,
+        #[serde(default, rename = "ignoreCase")]
+        ignore_case: bool,
+        #[serde(default)]
+        literal: bool,
+        glob: Option<String>,
+    },
+    #[cfg_attr(windows, serde(rename = "powershell"))]
+    #[cfg_attr(not(windows), serde(rename = "bash"))]
+    Shell {
+        command: String,
+    },
+}
+
+fn first_line() -> NonZeroUsize {
+    NonZeroUsize::MIN
+}
 impl Workspace {
     pub(crate) fn probe() -> Option<Self> {
         let root = match std::env::var_os("ENE_DESKTOP_WORKSPACE") {
@@ -125,43 +180,81 @@ impl Workspace {
         capability: &str,
         input: Value,
     ) -> Result<Value, WorkToolError> {
-        if required(&input, "workspace")? != self.root.to_string_lossy() {
-            return Err(WorkToolError::WorkspaceChanged);
-        }
-        let name = capability
+        let tool = capability
             .strip_prefix(PREFIX)
             .ok_or(WorkToolError::UnknownTool)?;
-        if name == SHELL {
-            return Box::pin(self.shell(required(&input, "command")?)).await;
+        let Value::Object(mut fields) = input else {
+            return Err(WorkToolError::InvalidArguments);
+        };
+        fields.insert("tool".into(), tool.into());
+        let request: Request = serde_json::from_value(Value::Object(fields))?;
+        if request.workspace != self.root.to_string_lossy() {
+            return Err(WorkToolError::WorkspaceChanged);
         }
-        let name = name.to_owned();
-        tokio::task::spawn_blocking(move || self.file_tool(&name, &input)).await?
+        match request.tool {
+            Tool::Shell { command } => Box::pin(self.shell(&command)).await,
+            tool => tokio::task::spawn_blocking(move || self.file_tool(tool)).await?,
+        }
     }
 
-    pub(super) fn file_tool(&self, name: &str, input: &Value) -> Result<Value, WorkToolError> {
-        let path = match input.get("path") {
-            Some(path) => path.as_str().ok_or(WorkToolError::PathNotString)?,
-            None if matches!(name, "ls" | "grep" | "find") => ".",
-            None => return Err(WorkToolError::MissingPath),
-        };
-        let path = relative(path)?;
-        let limit = positive(input, "limit", MAX_RESULTS)?.min(MAX_RESULTS);
-        match name {
-            "read" => self.read(path, positive(input, "offset", 1)?, limit),
-            "write" | "edit" => {
-                let _guard = self.edits.lock();
-                let content = if name == "edit" {
-                    let bytes = self.load(path)?;
-                    edit(text(&bytes)?, input)?
+    fn file_tool(&self, tool: Tool) -> Result<Value, WorkToolError> {
+        match tool {
+            Tool::Read {
+                path,
+                offset,
+                limit,
+            } => self.read(relative(&path)?, offset, limit.get().min(MAX_RESULTS)),
+            Tool::Write { path, content } => self.change(relative(&path)?, Some(&content), &[]),
+            Tool::Edit { path, edits } => self.change(relative(&path)?, None, &edits),
+            Tool::Ls { browse } => self.search(&browse, Search::List),
+            Tool::Find { browse, pattern } => self.search(&browse, Search::Find(&glob(&pattern)?)),
+            Tool::Grep {
+                browse,
+                pattern,
+                ignore_case,
+                literal,
+                glob: filter,
+            } => {
+                let pattern = if literal {
+                    regex::escape(&pattern)
                 } else {
-                    required(input, "content")?.to_owned()
+                    pattern
                 };
-                self.save(path, &content, name == "write")?;
-                Ok(json!({"path": path, "bytes": content.len()}))
+                let regex = regex::RegexBuilder::new(&pattern)
+                    .case_insensitive(ignore_case)
+                    .build()?;
+                let filter = filter.as_deref().map(glob).transpose()?;
+                self.search(
+                    &browse,
+                    Search::Grep {
+                        regex: &regex,
+                        glob: filter.as_ref(),
+                    },
+                )
             }
-            "ls" | "find" | "grep" => self.search(name, path, input, limit),
-            _ => Err(WorkToolError::UnknownTool),
+            Tool::Shell { .. } => Err(WorkToolError::UnknownTool),
         }
+    }
+
+    fn change(
+        &self,
+        path: &Path,
+        content: Option<&str>,
+        edits: &[Edit],
+    ) -> Result<Value, WorkToolError> {
+        let _guard = self.edits.lock();
+        let len = match content {
+            Some(content) => {
+                self.save(path, content, true)?;
+                content.len()
+            }
+            None => {
+                let content = edit(text(&self.load(path)?)?, edits)?;
+                self.save(path, &content, false)?;
+                content.len()
+            }
+        };
+        Ok(json!({"path": path, "bytes": len}))
     }
 
     pub(super) fn load(&self, path: &Path) -> io::Result<Vec<u8>> {
@@ -173,6 +266,16 @@ impl Workspace {
         if metadata.len() > FILE_LIMIT as u64 {
             return Err(io::Error::other("file exceeds the 4 MiB limit"));
         }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        let mut file = {
+            use cap_std::fs::{OpenOptions, OpenOptionsExt as _};
+            // A replacement FIFO between metadata and open must not block before fstat.
+            self.dir.open_with(
+                path,
+                OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK),
+            )?
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         let mut file = self.dir.open(path)?;
         if !file.metadata()?.is_file() {
             return Err(io::Error::other("path must name a regular file"));
@@ -187,10 +290,10 @@ impl Workspace {
         Ok(bytes)
     }
 
-    pub(super) fn read(
+    fn read(
         &self,
         path: &Path,
-        offset: usize,
+        offset: NonZeroUsize,
         limit: usize,
     ) -> Result<Value, WorkToolError> {
         let bytes = self.load(path)?;
@@ -200,6 +303,7 @@ impl Workspace {
             }
             return Ok(json!({"path": path, "image_base64": STANDARD.encode(&bytes)}));
         }
+        let offset = offset.get();
         let mut lines = text(&bytes)?
             .split_inclusive('\n')
             .skip(offset - 1)
@@ -241,166 +345,13 @@ impl Workspace {
             Err(error) if create && error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
-        let temp = format!(".ene-{}.tmp", uuid::Uuid::new_v4());
-        let mut file = folder.open_with(&temp, OpenOptions::new().write(true).create_new(true))?;
-        let saved = (|| {
-            file.write_all(content.as_bytes())?;
-            if let Some(permissions) = permissions {
-                file.set_permissions(permissions)?;
-            }
-            file.sync_all()
-        })();
-        drop(file);
-        let saved = saved.and_then(|()| folder.rename(&temp, &folder, name));
-        if saved.is_err() {
-            ene_domain::debug_if_err(folder.remove_file(&temp), "temporary file cleanup");
+        let mut temp = TempFile::new(&folder)?;
+        let file = temp.as_file_mut();
+        file.write_all(content.as_bytes())?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
         }
-        saved
-    }
-
-    pub(super) fn search(
-        &self,
-        name: &str,
-        path: &Path,
-        input: &Value,
-        limit: usize,
-    ) -> Result<Value, WorkToolError> {
-        let glob = match name {
-            "find" => Some(glob(required(input, "pattern")?)?),
-            "grep" => input
-                .get("glob")
-                .map(|_| required(input, "glob").and_then(glob))
-                .transpose()?,
-            _ => None,
-        };
-        let regex = if name == "grep" {
-            let pattern = required(input, "pattern")?;
-            let pattern = if input["literal"].as_bool() == Some(true) {
-                regex::escape(pattern)
-            } else {
-                pattern.to_owned()
-            };
-            Some(
-                regex::RegexBuilder::new(&pattern)
-                    .case_insensitive(input["ignoreCase"].as_bool() == Some(true))
-                    .build()?,
-            )
-        } else {
-            None
-        };
-
-        let mut entries = Vec::new();
-        let mut remaining_bytes = GREP_BYTES;
-        let mut output_bytes = 0;
-        let mut scanned = 0;
-        let mut truncated = false;
-        let mut skipped = 0;
-        let start = path;
-        let mut visit = |path: &Path, is_file: bool, is_dir: bool| -> bool {
-            scanned += 1;
-            if scanned > SCAN_LIMIT {
-                truncated = true;
-                return false;
-            }
-            if glob.as_ref().is_some_and(|(glob, nested)| {
-                let candidate = if *nested {
-                    path.strip_prefix(start).unwrap_or(path)
-                } else {
-                    Path::new(path.file_name().unwrap_or_default())
-                };
-                !glob.is_match(candidate)
-            }) {
-                return true;
-            }
-            if let Some(regex) = &regex {
-                if !is_file {
-                    return true;
-                }
-                let Ok(bytes) = self.load(path) else {
-                    skipped += 1;
-                    return true;
-                };
-                if bytes.len() > remaining_bytes {
-                    truncated = true;
-                    return false;
-                }
-                remaining_bytes -= bytes.len();
-                let Ok(text) = text(&bytes) else { return true };
-                for (index, line) in text.lines().enumerate() {
-                    if regex.is_match(line) {
-                        let prefix = &line[..line.floor_char_boundary(2048)];
-                        truncated |= prefix.len() < line.len();
-                        let line = prefix;
-                        output_bytes += path.as_os_str().len() + line.len();
-                        if entries.len() >= limit || output_bytes > OUTPUT_LIMIT {
-                            truncated = true;
-                            return false;
-                        }
-                        entries.push(json!({"path": path.to_string_lossy(), "line": index + 1, "text": line}));
-                    }
-                }
-            } else {
-                output_bytes += path.as_os_str().len();
-                if entries.len() >= limit || output_bytes > OUTPUT_LIMIT {
-                    truncated = true;
-                    return false;
-                }
-                entries.push(json!({"path": path.to_string_lossy(), "directory": is_dir}));
-            }
-            true
-        };
-        if name == "grep"
-            && self
-                .dir
-                .symlink_metadata(path)
-                .is_ok_and(|meta| meta.is_file())
-        {
-            visit(path, true, false);
-        } else {
-            self.walk(path, name != "ls", &mut visit)?;
-        }
-        entries.sort_by(|left, right| {
-            left["path"]
-                .as_str()
-                .cmp(&right["path"].as_str())
-                .then_with(|| left["line"].as_u64().cmp(&right["line"].as_u64()))
-        });
-        Ok(json!({"entries": entries, "truncated": truncated, "skipped_files": skipped}))
-    }
-
-    pub(super) fn walk(
-        &self,
-        root: &Path,
-        recursive: bool,
-        visit: &mut impl FnMut(&Path, bool, bool) -> bool,
-    ) -> io::Result<()> {
-        // A stack of directory iterators bounds open handles by depth and
-        // never follows a symlink encountered in the listing.
-        let mut stack = vec![(root.to_owned(), self.dir.read_dir(root)?)];
-        while let Some((parent, entries)) = stack.last_mut() {
-            let Some(entry) = entries.next() else {
-                stack.pop();
-                continue;
-            };
-            let entry = entry?;
-            let name = entry.file_name();
-            let path = if parent == Path::new(".") {
-                PathBuf::from(&name)
-            } else {
-                parent.join(&name)
-            };
-            let kind = entry.file_type()?;
-            if !visit(&path, kind.is_file(), kind.is_dir()) {
-                break;
-            }
-            if recursive && kind.is_dir() && name != ".git" && stack.len() < 64 {
-                match self.dir.read_dir(&path) {
-                    Ok(entries) => stack.push((path, entries)),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-        Ok(())
+        file.sync_all()?;
+        temp.replace(name)
     }
 }

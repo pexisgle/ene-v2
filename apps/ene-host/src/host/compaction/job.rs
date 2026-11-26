@@ -1,7 +1,8 @@
 //! One compaction job: the summary request, then the memory pass over the same
 //! window (docs/design/compaction.md).
 use super::{Summary, budget::cut};
-use crate::host::mind::consolidate::{self, Commit, Services};
+use crate::host::mind::consolidate::{self, Services};
+use ene_mind::Commit;
 use rig_core::catalog::ModelSpec;
 use rig_core::conversation::Conversation as History;
 use rig_core::{DynModel, operation::Completion};

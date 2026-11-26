@@ -1,6 +1,6 @@
 mod chips;
 
-use super::ConnectionsPane;
+use super::{AddFlow, ConnectionsPane};
 use crate::ui::Hub;
 use crate::ui::icons::Icon;
 use crate::ui::studio::labeled_field;
@@ -21,13 +21,15 @@ pub(super) fn render_add_connection_panel(
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
 ) -> AnyElement {
-    if pane.form.custom_connection_open && pane.form.custom_kind == ConnectionKind::Mcp {
-        return super::mcp_add::render_mcp_add(pane, live, theme, cx);
-    }
     let llm_chips = build_llm_provider_chips(providers, live, &pane.hub, theme, cx);
-    let custom_section = render_custom_connection_section(pane, live, theme, cx);
+    let custom_section = match pane.form.add {
+        AddFlow::Custom(kind) => Some(render_custom_connection_section(
+            pane, kind, live, theme, cx,
+        )),
+        _ => None,
+    };
     let pane_entity = cx.entity();
-    let custom_open = pane.form.custom_connection_open;
+    let custom_open = custom_section.is_some();
 
     div()
         .w_full()
@@ -59,7 +61,11 @@ pub(super) fn render_add_connection_panel(
             theme,
             move |_, cx| {
                 pane_entity.update(cx, |this, cx| {
-                    this.form.custom_connection_open = !this.form.custom_connection_open;
+                    this.form.add = if custom_open {
+                        AddFlow::Presets
+                    } else {
+                        AddFlow::Custom(ConnectionKind::Llm)
+                    };
                     cx.notify();
                 });
             },
@@ -70,14 +76,11 @@ pub(super) fn render_add_connection_panel(
 
 fn render_custom_connection_section(
     pane: &mut ConnectionsPane,
+    custom_kind: ConnectionKind,
     live: bool,
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
-) -> Option<gpui::Div> {
-    if !pane.form.custom_connection_open {
-        return None;
-    }
-    let custom_kind = pane.form.custom_kind;
+) -> gpui::Div {
     let kind_chips = build_custom_kind_chips(custom_kind, theme, cx);
     let (adapter_label, adapter_placeholder, target_label, target_placeholder) =
         custom_kind_placeholders(custom_kind);
@@ -104,64 +107,59 @@ fn render_custom_connection_section(
     let hub_custom = pane.hub.clone();
     let pane_done = cx.entity();
 
-    Some(
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(10.))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .gap(px(6.))
-                    .children(kind_chips),
-            )
-            .child(labeled_field("名前", name_d, theme))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(10.))
-                    .child(div().flex_1().min_w_0().child(labeled_field(
-                        adapter_label,
-                        adapter_d,
-                        theme,
-                    )))
-                    .child(div().flex_1().min_w_0().child(labeled_field(
-                        target_label,
-                        target_d,
-                        theme,
-                    ))),
-            )
-            .child(
-                div().flex().flex_row().justify_end().child(pill_button(
-                    "add-custom-submit",
-                    "追加",
-                    Tone::Primary
-                        .icon(Icon::Plus)
-                        .enabled(live && !c_name.is_empty()),
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(10.))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(6.))
+                .children(kind_chips),
+        )
+        .child(labeled_field("名前", name_d, theme))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(10.))
+                .child(div().flex_1().min_w_0().child(labeled_field(
+                    adapter_label,
+                    adapter_d,
                     theme,
-                    move |_, cx| {
-                        let Some(input) = build_custom_connection_input(
-                            custom_kind,
-                            &c_name,
-                            &c_adapter,
-                            &c_target,
-                        ) else {
-                            return;
-                        };
-                        hub_custom.update(cx, |hub, cx| {
-                            hub.upsert_connection("接続の追加", input, cx);
-                        });
-                        pane_done.update(cx, |this, cx| {
-                            this.form.adding_connection = false;
-                            cx.notify();
-                        });
-                    },
-                )),
-            ),
-    )
+                )))
+                .child(div().flex_1().min_w_0().child(labeled_field(
+                    target_label,
+                    target_d,
+                    theme,
+                ))),
+        )
+        .child(
+            div().flex().flex_row().justify_end().child(pill_button(
+                "add-custom-submit",
+                "追加",
+                Tone::Primary
+                    .icon(Icon::Plus)
+                    .enabled(live && !c_name.is_empty()),
+                theme,
+                move |_, cx| {
+                    let Some(input) =
+                        build_custom_connection_input(custom_kind, &c_name, &c_adapter, &c_target)
+                    else {
+                        return;
+                    };
+                    hub_custom.update(cx, |hub, cx| {
+                        hub.upsert_connection("接続の追加", input, cx);
+                    });
+                    pane_done.update(cx, |this, cx| {
+                        this.form.add = AddFlow::Closed;
+                        cx.notify();
+                    });
+                },
+            )),
+        )
 }
 
 fn render_chip_section(title: &'static str, chips: Vec<AnyElement>, theme: &Theme) -> gpui::Div {
@@ -209,7 +207,7 @@ fn build_llm_provider_chips(
                         hub.add_llm_from_provider(p.clone(), vec![], cx)
                     });
                     pane.update(cx, |this, cx| {
-                        this.form.adding_connection = false;
+                        this.form.add = AddFlow::Closed;
                         cx.notify();
                     });
                 },

@@ -2,20 +2,11 @@ use std::path::{Path, PathBuf};
 
 /// The per-user directory where downloaded model and motion assets are cached.
 pub fn asset_cache() -> Option<PathBuf> {
-    // `%LOCALAPPDATA%\ene\cache` on Windows and `$XDG_CACHE_HOME/ene` (no
-    // extra level) elsewhere.
-    #[cfg(windows)]
-    {
-        let root = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
-        Some(root.join("ene").join("cache"))
-    }
-    #[cfg(not(windows))]
-    {
-        let root = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
-        Some(root.join("ene"))
-    }
+    Some(
+        directories::ProjectDirs::from("", "", "ene")?
+            .cache_dir()
+            .to_owned(),
+    )
 }
 
 /// Normalizes `.` and `..` segments onto an absolute path without `\\?\` verbatim
@@ -44,25 +35,21 @@ pub(super) fn normalize_path(path: &Path) -> Option<PathBuf> {
     Some(normalized)
 }
 
-/// Adds user data directory candidates for `ENE.vrm` without pulling `shell32.dll`
-/// into Windows test binaries via `directories::ProjectDirs`.
-fn push_user_model_candidates(candidates: &mut Vec<PathBuf>) {
-    #[cfg(windows)]
-    {
-        for var in ["APPDATA", "LOCALAPPDATA"] {
-            if let Some(root) = std::env::var_os(var) {
-                let base = PathBuf::from(root).join("ene");
-                candidates.push(base.join("data").join("models").join("ENE.vrm"));
-                candidates.push(base.join("models").join("ENE.vrm"));
-            }
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        if let Some(dirs) = directories::ProjectDirs::from("", "", "ene") {
-            candidates.push(dirs.data_dir().join("models").join("ENE.vrm"));
-        }
-    }
+fn user_model_dirs() -> impl Iterator<Item = PathBuf> {
+    directories::ProjectDirs::from("", "", "ene")
+        .into_iter()
+        .flat_map(|dirs| {
+            #[cfg(windows)]
+            let paths = [
+                dirs.data_dir().join("models"),
+                dirs.config_dir().with_file_name("models"),
+                dirs.data_local_dir().join("models"),
+                dirs.config_local_dir().with_file_name("models"),
+            ];
+            #[cfg(not(windows))]
+            let paths = [dirs.data_dir().join("models")];
+            paths
+        })
 }
 
 /// Searches standard development and installed layouts for the bundled `ENE.vrm`.
@@ -89,7 +76,7 @@ pub fn bundled_ene_model() -> Option<PathBuf> {
         candidates.push(dir.join("..").join("..").join("assets").join("ENE.vrm"));
     }
     candidates.push(PathBuf::from("assets").join("ENE.vrm"));
-    push_user_model_candidates(&mut candidates);
+    candidates.extend(user_model_dirs().map(|dir| dir.join("ENE.vrm")));
     if let Some(cache) = asset_cache() {
         candidates.push(cache.join("models").join("ENE.vrm"));
     }
@@ -136,14 +123,7 @@ pub fn resolve_model_path(spec: Option<&str>, fallback: Option<&Path>) -> Option
                 if let Some(cache) = asset_cache() {
                     dirs.push(cache.join("models"));
                 }
-                #[cfg(windows)]
-                for var in ["APPDATA", "LOCALAPPDATA"] {
-                    if let Some(root) = std::env::var_os(var) {
-                        let base = PathBuf::from(root).join("ene");
-                        dirs.push(base.join("data").join("models"));
-                        dirs.push(base.join("models"));
-                    }
-                }
+                dirs.extend(user_model_dirs());
                 for dir in dirs {
                     let full = dir.join(file_name);
                     if full.is_file()

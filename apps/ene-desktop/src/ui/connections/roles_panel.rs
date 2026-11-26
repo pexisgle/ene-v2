@@ -12,6 +12,7 @@ use ene_client_core::{
 };
 use gpui::{AnyElement, Context, Entity, FontWeight, div, prelude::*, px};
 
+#[derive(Clone, Copy)]
 pub(super) struct ModelRoleChoices<'a> {
     pub(super) all_models: &'a [(String, String, String)],
     pub(super) embedding_models: &'a [(String, String, String)],
@@ -95,6 +96,7 @@ pub(super) fn render_advanced_roles_panel(
         .into_any_element()
 }
 
+#[derive(Clone, Copy)]
 struct ModelRoleRowCtx<'a> {
     idx: usize,
     slot: ModelRoleSlot,

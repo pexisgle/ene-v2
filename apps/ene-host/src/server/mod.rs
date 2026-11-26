@@ -5,23 +5,20 @@ mod history;
 pub(crate) mod rpc;
 
 use self::rpc::router;
-use crate::host::Runtime;
+use crate::{config::HostArgs, host::Runtime};
 use std::error::Error;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-pub fn reset_history() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let config = crate::config::HostConfig::from_env()?;
-    let _access = access::Access::acquire(&config.state_dir, &config.runtime_dir)?;
-    history::reset(&config.state_dir, true)
+pub fn reset_history(args: &HostArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (state, runtime) = args.paths()?;
+    let _access = access::Access::acquire(&state, &runtime)?;
+    history::reset(&state, true)
 }
 
 #[tokio::main(flavor = "multi_thread")]
-pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
-    // Every setting is read and validated here, once, before anything runs.
-    let config = crate::config::HostConfig::from_env()?;
-    let state = config.state_dir.clone();
-    let runtime_path = config.runtime_dir.clone();
+pub async fn run(config: &HostArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (state, runtime_path) = config.paths()?;
     // The host runs for one desktop: its log goes to stderr, warnings and
     // above unless `RUST_LOG` asks for more.
     tracing_subscriber::fmt()
@@ -78,9 +75,10 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     // plain socket as well as HTTP/1.1 (tech-stack §G, h2c). That is what the
     // bidirectional VoiceService streams need, and why this does not pin the
     // listener to HTTP/1.1.
+    let exit_on_stdin_eof = config.exit_on_stdin_eof;
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            wait_for_shutdown(config.exit_on_stdin_eof).await;
+            wait_for_shutdown(exit_on_stdin_eof).await;
             shutdown.cancel();
             running.begin_shutdown().await;
         })

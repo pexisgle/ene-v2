@@ -1,7 +1,5 @@
 //! Checks extension semantics independently of the execution backend.
-mod character;
 mod harness;
-mod llm;
 
 use crate::{
     Error, Result,
@@ -9,13 +7,20 @@ use crate::{
 };
 use ene_plugin::*;
 
+#[derive(Debug, Default, PartialEq, Eq)]
+enum StreamState {
+    #[default]
+    Streaming,
+    AwaitingPermission,
+    Finished,
+}
+
 #[derive(Debug)]
 pub struct Events {
     extension: Extension,
     models: bool,
     raw: bool,
-    terminal: bool,
-    harness_pending: bool,
+    state: StreamState,
     count: u64,
     character: Option<CharacterTarget>,
 }
@@ -26,8 +31,7 @@ impl Events {
             extension: operation.extension(),
             models: matches!(operation, Operation::ListModels { .. }),
             raw: matches!(operation, Operation::GenerateHttp { .. }),
-            terminal: false,
-            harness_pending: false,
+            state: StreamState::Streaming,
             count: 0,
             character: match operation {
                 Operation::Character { target, .. } => Some(target.clone()),
@@ -37,8 +41,7 @@ impl Events {
     }
 
     pub fn accept(&mut self, event: &Event) -> Result<()> {
-        if self.terminal
-            || self.harness_pending
+        if self.state != StreamState::Streaming
             || self.count >= MAX_STREAM_EVENTS
             || event.extension() != self.extension
             || self.extension == Extension::Llm
@@ -62,7 +65,7 @@ impl Events {
                         return Err(Error::Protocol);
                     }
                     if chunk.done {
-                        self.terminal = true;
+                        self.state = StreamState::Finished;
                     }
                     self.count += 1;
                     return Ok(());
@@ -75,8 +78,19 @@ impl Events {
         }
         match event {
             Event::Character { target, action } => self.accept_character(target, action)?,
-            Event::Harness { event } => self.accept_harness(event)?,
-            Event::Models { .. } => self.accept_llm(event)?,
+            Event::Harness { event } => match harness::validate(event)? {
+                harness::Progress::Update => {}
+                harness::Progress::AwaitingPermission => {
+                    self.state = StreamState::AwaitingPermission
+                }
+                harness::Progress::Stopped => self.state = StreamState::Finished,
+            },
+            Event::Models { models } => {
+                if models.len() > 32_768 {
+                    return Err(Error::Protocol);
+                }
+                self.state = StreamState::Finished;
+            }
             Event::Audio {
                 data_base64,
                 sample_rate,
@@ -86,7 +100,7 @@ impl Events {
                     return Err(Error::Protocol);
                 }
                 if *done {
-                    self.terminal = true;
+                    self.state = StreamState::Finished;
                 }
             }
             Event::Transcription { text, is_final } => {
@@ -94,7 +108,7 @@ impl Events {
                     return Err(Error::Protocol);
                 }
                 if *is_final {
-                    self.terminal = true;
+                    self.state = StreamState::Finished;
                 }
             }
             _ => {}
@@ -103,8 +117,23 @@ impl Events {
         Ok(())
     }
 
+    fn accept_character(&self, target: &CharacterTarget, action: &CharacterAction) -> Result<()> {
+        if self.character.as_ref() != Some(target) {
+            return Err(Error::Protocol);
+        }
+        match action {
+            CharacterAction::Speak { text } if text.len() > 16_384 => Err(Error::Protocol),
+            CharacterAction::Expression { name, duration_ms }
+            | CharacterAction::Motion {
+                asset: name,
+                duration_ms,
+            } if name.len() > 128 || *duration_ms > 60_000 => Err(Error::Protocol),
+            _ => Ok(()),
+        }
+    }
+
     pub fn finish(&self) -> Result<()> {
-        if matches!(self.extension, Extension::Llm) && !self.terminal {
+        if matches!(self.extension, Extension::Llm) && self.state != StreamState::Finished {
             return Err(Error::Protocol);
         }
         Ok(())

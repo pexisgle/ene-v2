@@ -1,5 +1,7 @@
-set default-list
 set windows-shell := ["cmd.exe", "/c"]
+
+default:
+    @just --list
 
 fmt:
     cargo fmt --all

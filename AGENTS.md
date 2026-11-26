@@ -15,7 +15,7 @@ Read README.md carefully and follow the development instructions provided there 
 ## Layered Architecture
 
 Dependencies always point inward. The canonical four-layer model
-([`docs/refactoring/ene_v2_refactoring_plan.md`](docs/refactoring/ene_v2_refactoring_plan.md) §2.1):
+([`docs/architecture.md`](docs/architecture.md)):
 
 | Layer | Crates | May depend on | Never |
 | :--- | :--- | :--- | :--- |
@@ -51,12 +51,12 @@ CI already cover.
 | :--- | :--- | ---: |
 | 1 | `ui_rpc_leak` wire refs under `apps/ene-desktop/src/ui/` | 0 |
 | 2 | `db_upward_imports` from `apps/ene-host/src/host/db/` | 0 |
-| 3 | `impl_file_spread` (inherent `impl` blocks per type across files) | 1 |
+| 3 | `impl_file_spread` (inherent `impl` blocks per type across files) | 0 |
 | 4 | `providers_no_model_import` | 0 |
-| 5 | `host_world_refs` `&World`/`&mut World` in `apps/ene-host` | 130 |
+| 5 | `host_world_refs` `&World`/`&mut World` in `apps/ene-host` | 125 |
 | 6 | `max_prod_file_lines` production files over 500 lines | 0 |
 | 7 | `rpc_no_ecs_resource` `#[derive(Resource)]` under `server/rpc/` | 0 |
-| 8 | `prod_block_on` `block_on`/`block_in_place` in production | 7 |
+| 8 | `prod_block_on` `block_on`/`block_in_place` in production | 0 |
 
 `needless_pass_by_value` is enforced per crate, not workspace-wide: every crate
 except `ene-vrm` and the three apps carries
