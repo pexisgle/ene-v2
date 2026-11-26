@@ -26,8 +26,8 @@ mod tests {
 
     /// Captures the history an in-process RPC read produced, without registering
     /// anything on the ECS world: the request path hands the value to this channel.
-    static OBSERVED: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<w::History>>> =
-        std::sync::Mutex::new(None);
+    static OBSERVED: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<w::History>>> =
+        parking_lot::Mutex::new(None);
 
     fn observed_history(
         world: &mut bevy_ecs::world::World,
@@ -38,7 +38,6 @@ mod tests {
         // means the test did not arm the probe, which is its own failure.
         let sender = OBSERVED
             .lock()
-            .expect("observed probe mutex is never poisoned")
             .take()
             .expect("the test arms the observed channel before calling");
         sender
@@ -76,7 +75,7 @@ mod tests {
             })
             .await
             .unwrap();
-        *OBSERVED.lock().expect("observed probe") = Some(observed);
+        *OBSERVED.lock() = Some(observed);
         let (entered, blocked) = tokio::sync::oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
         let blocker = runtime.read(move |_| {

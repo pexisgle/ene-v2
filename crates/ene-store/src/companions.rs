@@ -57,7 +57,7 @@ impl<'a> CompanionRepo<'a> {
     }
 
     pub fn insert_companion(&self, companion: &Companion) -> Result<()> {
-        let connection = self.0.conn()?;
+        let connection = self.0.conn();
         insert_companion_with(&connection, companion)
     }
 
@@ -66,7 +66,7 @@ impl<'a> CompanionRepo<'a> {
     /// Recording a one-time marker in `bootstrap_state` ensures that user edits
     /// or deletions are preserved across restarts instead of resurrecting `ene`.
     pub fn seed_initial_companion(&self) -> Result<bool> {
-        let mut connection = self.0.conn()?;
+        let mut connection = self.0.conn();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let stamp = now();
         let applied: Option<String> = transaction
@@ -109,7 +109,7 @@ impl<'a> CompanionRepo<'a> {
     pub fn update_companion(&self, companion: &Companion, expected: u64) -> Result<()> {
         let updated = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE companions SET name = ?2, mind = ?3, profile = ?4, profile_revision = ?5, \
                  state = ?6, state_revision = ?7, body = ?8, voice = ?9, assignments = ?10, \
@@ -145,7 +145,7 @@ impl<'a> CompanionRepo<'a> {
         let next = expected + 1;
         let updated = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE companions SET profile = ?2, profile_revision = ?3, updated_at = ?4 \
                  WHERE id = ?1 AND profile_revision = ?5",
@@ -164,7 +164,7 @@ impl<'a> CompanionRepo<'a> {
     pub fn delete_companion(&self, id: &str) -> Result<bool> {
         let deleted = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached("DELETE FROM companions WHERE id = ?1")?
             .execute([id])?;
         Ok(deleted > 0)
@@ -268,7 +268,6 @@ mod tests {
             let repo = store.companion_repo();
             store
                 .conn()
-                .unwrap()
                 .execute(
                     "INSERT INTO bootstrap_state (key, applied_at) VALUES (?1, ?2)",
                     params![INITIAL_ENE_SEED, seed_stamp],

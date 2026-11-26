@@ -504,7 +504,7 @@ mod tests {
     use rig_ecs::prelude::Update;
     use tokio::sync::mpsc::error::TryRecvError;
 
-    type Captured = Arc<std::sync::Mutex<Vec<(u32, Vec<i16>)>>>;
+    type Captured = Arc<parking_lot::Mutex<Vec<(u32, Vec<i16>)>>>;
 
     struct RecordingStt(Captured);
 
@@ -521,7 +521,7 @@ mod tests {
                     .iter()
                     .map(|pair| i16::from_le_bytes(*pair))
                     .collect();
-                let mut received = self.0.lock().unwrap();
+                let mut received = self.0.lock();
                 received.push((sample_rate, samples));
                 Ok(format!("capture {}", received.len()))
             })
@@ -533,7 +533,7 @@ mod tests {
         use connectrpc::StreamMessage;
         use w::VoiceService;
 
-        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let recording = RecordingStt(captured.clone());
         let state = tempfile::tempdir().unwrap();
         let runtime = Runtime::start(state.path()).await.unwrap();
@@ -618,7 +618,7 @@ mod tests {
             .collect();
         assert_eq!(finals, ["capture 1", "capture 2"]);
         {
-            let captured = captured.lock().unwrap();
+            let captured = captured.lock();
             assert_eq!(
                 captured
                     .iter()

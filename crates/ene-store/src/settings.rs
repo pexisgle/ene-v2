@@ -52,7 +52,7 @@ impl<'a> SettingsRepo<'a> {
             None => {
                 let stamp = now();
                 self.0
-                    .conn()?
+                    .conn()
                     .prepare_cached(
                         "INSERT INTO settings_state (id, revision, updated_at) VALUES (1, 1, ?1)",
                     )?
@@ -195,7 +195,7 @@ impl<'a> SettingsRepo<'a> {
         });
         let changed = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE connections SET credential_state = ?2, updated_at = ?3,
                  last_check = CASE WHEN ?4 THEN NULL ELSE last_check END WHERE id = ?1",
@@ -214,7 +214,7 @@ impl<'a> SettingsRepo<'a> {
         E: From<StoreError>,
     {
         let mut companions = self.0.companion_repo().companions()?;
-        let mut db = self.0.conn()?;
+        let mut db = self.0.conn();
         let tx = db.transaction().map_err(StoreError::from)?;
         let deleted = tx
             .execute(
@@ -254,7 +254,7 @@ impl<'a> SettingsRepo<'a> {
     pub fn set_check(&self, id: &str, check: &Check) -> Result<()> {
         let changed = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE connections SET last_check = ?2, updated_at = ?3 WHERE id = ?1",
             )?
@@ -321,7 +321,6 @@ mod tests {
         ] {
             store
                 .conn()
-                .unwrap()
                 .execute(
                     "UPDATE connections SET credential_state = ?1 WHERE id = 'c1'",
                     [stored],
@@ -335,7 +334,6 @@ mod tests {
         for invalid_kind in ["unknown", ""] {
             store
                 .conn()
-                .unwrap()
                 .execute(
                     "UPDATE connections SET kind = ?1 WHERE id = 'c1'",
                     [invalid_kind],
@@ -345,7 +343,6 @@ mod tests {
         }
         store
             .conn()
-            .unwrap()
             .execute("UPDATE connections SET kind = 'tts' WHERE id = 'c1'", [])
             .unwrap();
         assert!(matches!(repo.connection("c1"), Err(StoreError::Storage(_))));

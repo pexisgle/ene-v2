@@ -33,7 +33,7 @@ pub(super) struct DeviceBridge {
     /// Fire-and-forget work whose completion nobody waits on but which must not
     /// outlive the session: draining it on shutdown is the whole point. The
     /// mutex is held only for the spawn call, never across an await.
-    pub(super) background: std::sync::Mutex<tokio::task::JoinSet<()>>,
+    pub(super) background: parking_lot::Mutex<tokio::task::JoinSet<()>>,
     /// Per-character debounce timestamp for avatar click/interaction perception (`F21`).
     pub(super) last_avatar_interaction: HashMap<String, std::time::Instant>,
 }
@@ -54,7 +54,7 @@ impl DeviceBridge {
             workspace,
             client_plugins,
             work: tokio::task::JoinSet::new(),
-            background: std::sync::Mutex::new(tokio::task::JoinSet::new()),
+            background: parking_lot::Mutex::new(tokio::task::JoinSet::new()),
             last_avatar_interaction: HashMap::new(),
         }
     }
@@ -188,11 +188,9 @@ impl DeviceBridge {
             ..Default::default()
         };
         // Tracked so shutdown can wait for the last report to land.
-        if let Ok(mut background) = self.background.lock() {
-            background.spawn(async move {
-                let _sampled = host.client.report_perception(event).await;
-            });
-        }
+        self.background.lock().spawn(async move {
+            let _sampled = host.client.report_perception(event).await;
+        });
     }
 
     pub(super) fn set_eyes_enabled(&mut self, enabled: bool, updates: &UnboundedSender<Update>) {
@@ -359,10 +357,7 @@ impl DeviceBridge {
             avatar.shutdown();
         }
         // The set is moved out so the mutex guard is not held across an await.
-        let mut background = std::mem::take(&mut *match self.background.lock() {
-            Ok(background) => background,
-            Err(poison) => poison.into_inner(),
-        });
+        let mut background = std::mem::take(&mut *self.background.lock());
         let drained = tokio::time::timeout(BACKGROUND_DRAIN_TIMEOUT, async {
             while background.join_next().await.is_some() {}
         })
@@ -379,10 +374,7 @@ impl DeviceBridge {
     /// Reaps finished background tasks so the set does not grow for the life
     /// of the session.
     pub(super) fn reap_background(&mut self) {
-        let mut background = match self.background.lock() {
-            Ok(background) => background,
-            Err(poison) => poison.into_inner(),
-        };
+        let mut background = self.background.lock();
         while let Some(result) = background.try_join_next() {
             if let Err(error) = result
                 && error.is_panic()

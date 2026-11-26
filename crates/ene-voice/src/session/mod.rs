@@ -17,10 +17,11 @@ use crate::{
     protocol::{FlushReason, VoiceOutputEvent},
 };
 use futures_util::{StreamExt, stream::FuturesOrdered};
+use parking_lot::{Mutex, MutexGuard};
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::Arc,
 };
 use tokio::sync::{Notify, mpsc};
 use tokio_util::task::AbortOnDropHandle;
@@ -28,12 +29,6 @@ use tokio_util::task::AbortOnDropHandle;
 const MAX_SYNTHESIS_SENTENCES: usize = 3;
 const TRANSCRIPTION_MEMORY: usize = 128;
 const AUDIO_QUEUE: usize = 32;
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
 
 #[derive(Clone)]
 struct Stream {
@@ -140,7 +135,7 @@ impl VoicePipeline {
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
-        lock(&self.inner)
+        self.inner.lock()
     }
 
     pub fn register(&self, client: &str) -> AudioSubscription {

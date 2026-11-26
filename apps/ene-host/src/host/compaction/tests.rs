@@ -685,7 +685,7 @@ fn fact() -> serde_json::Value {
 /// request bodies are kept, so a test can read what each model was asked.
 struct Provider {
     base: String,
-    bodies: Arc<std::sync::Mutex<Vec<String>>>,
+    bodies: Arc<parking_lot::Mutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -701,7 +701,7 @@ async fn serve_with(summary: &'static str, output: Option<serde_json::Value>) ->
         .await
         .unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let bodies = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let seen = Arc::clone(&bodies);
     let task = tokio::spawn(async move {
         loop {
@@ -738,7 +738,7 @@ async fn serve_with(summary: &'static str, output: Option<serde_json::Value>) ->
                 return;
             };
             let extraction = body.contains("\"submit\"");
-            seen.lock().unwrap().push(body);
+            seen.lock().push(body);
             let answer = match (&output, extraction) {
                 (Some(output), true) => tool_call(output.clone()),
                 _ => text(summary),
@@ -839,7 +839,7 @@ fn one_job_covers_the_same_range_for_the_summary_and_the_memories() {
         "the fixture must leave turns on both sides: {window:?} of {all:?}"
     );
 
-    let bodies = provider.bodies.lock().unwrap().clone();
+    let bodies = provider.bodies.lock().clone();
     assert_eq!(
         bodies.len(),
         2,
@@ -892,7 +892,7 @@ fn a_failed_pass_leaves_the_summary_unwritten_and_the_range_pending() {
         summary_of(&conversation.expect("the companion's conversation").0).is_none(),
         "a failed pass does not advance the stored summary"
     );
-    let bodies = provider.bodies.lock().unwrap().clone();
+    let bodies = provider.bodies.lock().clone();
     assert_eq!(
         bodies.len(),
         2,

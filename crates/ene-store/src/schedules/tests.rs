@@ -300,7 +300,6 @@ fn firing_a_row_advances_or_disables_it() {
 fn stored(store: &Store, id: &str) -> (bool, Option<String>, Option<String>) {
     store
         .conn()
-        .unwrap()
         .query_row(
             "SELECT enabled, last_triggered_at, next_run_at FROM schedules WHERE id = ?1",
             [id],

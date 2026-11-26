@@ -34,8 +34,6 @@ pub(crate) enum WorkToolError {
     WorkspaceChanged,
     #[error("unknown workspace tool")]
     UnknownTool,
-    #[error("file writer is unavailable")]
-    WriterUnavailable,
     #[error("path must be a string")]
     PathNotString,
     #[error("path is required")]

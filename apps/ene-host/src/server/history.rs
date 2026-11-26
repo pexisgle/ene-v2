@@ -24,7 +24,7 @@ pub(super) fn reset(state: &Path, requested: bool) -> Result<(), Box<dyn Error +
         }
     }
 
-    let mut connection = store.conn()?;
+    let mut connection = store.conn();
     connection.pragma_update(None, "synchronous", "FULL")?;
     let transaction = connection.transaction()?;
     transaction.execute_batch(
@@ -72,7 +72,6 @@ mod tests {
         store.companion_repo().seed_initial_companion().unwrap();
         store
             .conn()
-            .unwrap()
             .execute_batch(
                 "INSERT INTO memories (id, scope, content, importance, recorded_at)
                  VALUES ('memory', 'ene', 'remembered detail', 5, '');
@@ -90,7 +89,7 @@ mod tests {
         assert!(!pending.exists());
 
         let store = Store::open(&db).unwrap();
-        let connection = store.conn().unwrap();
+        let connection = store.conn();
         let memories: i64 = connection
             .query_row("SELECT count(*) FROM memories", [], |row| row.get(0))
             .unwrap();

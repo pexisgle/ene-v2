@@ -18,7 +18,7 @@ impl<'a> MemoryRepo<'a> {
             ));
         }
         let stamp = now();
-        let mut connection = self.0.conn()?;
+        let mut connection = self.0.conn();
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let existing: Option<(String, Vec<u8>, String)> = transaction
@@ -137,7 +137,7 @@ impl<'a> MemoryRepo<'a> {
         let Some(dimensions) = dimensions_of_space(space) else {
             return Ok(Vec::new());
         };
-        let connection = self.0.conn()?;
+        let connection = self.0.conn();
         let mut statement = connection.prepare_cached(&format!(
             "SELECT m.id, m.memory_revision FROM memories m \
              WHERE {VISIBLE} AND m.embedding_model = ?2 AND m.embedding_dimensions = ?3 \
@@ -157,7 +157,7 @@ impl<'a> MemoryRepo<'a> {
         };
         let row: Option<(i64, Vec<u8>)> = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "SELECT embedding_dimensions, embedding FROM memories WHERE id = ?1 \
                  AND embedding_model = ?2 AND embedding_dimensions = ?3 \
@@ -176,12 +176,12 @@ impl<'a> MemoryRepo<'a> {
         space: &str,
         limit: usize,
     ) -> Result<Vec<PendingEmbedding>> {
-        let connection = self.0.conn()?;
+        let connection = self.0.conn();
         missing_embeddings_on(&connection, companion, space, limit)
     }
 
     pub fn memory_edges(&self, id: &str) -> Result<Vec<(String, String)>> {
-        let connection = self.0.conn()?;
+        let connection = self.0.conn();
         let mut statement = connection.prepare_cached(
             "SELECT relation, to_id FROM memory_edges WHERE from_id = ?1 \
              UNION ALL SELECT relation, from_id FROM memory_edges WHERE to_id = ?1",
@@ -348,7 +348,7 @@ fn correct_memory_tx(
 
 /// The profile lines injected into dynamic context recall.
 pub fn profile_lines(store: &Store) -> Result<Vec<String>> {
-    let connection = store.conn()?;
+    let connection = store.conn();
     let mut statement = connection.prepare_cached(
         "SELECT name, preferences, static_constraints FROM user_profiles \
          ORDER BY updated_at DESC, id LIMIT 1",

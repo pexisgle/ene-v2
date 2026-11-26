@@ -42,7 +42,7 @@ impl RpcDispatcher {
     }
 
     pub(crate) fn host(&self) -> Option<Host> {
-        self.connection.read().ok()?.clone()
+        self.connection.read().clone()
     }
 
     pub(crate) fn updates(&self) -> UnboundedSender<Update> {

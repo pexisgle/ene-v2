@@ -8,6 +8,7 @@ publish.workspace = true
 [lints]
 workspace = true
 [dependencies]
+parking_lot.workspace = true
 cap-fs-ext.workspace = true
 cap-std.workspace = true
 hex.workspace = true

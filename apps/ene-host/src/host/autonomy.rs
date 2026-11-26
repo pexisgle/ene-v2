@@ -427,7 +427,6 @@ mod tests {
     fn row(store: &Store, id: &str) -> (bool, Option<String>, Option<String>) {
         store
             .conn()
-            .unwrap()
             .query_row(
                 "SELECT enabled, last_triggered_at, next_run_at FROM schedules WHERE id = ?1",
                 [id],
@@ -689,7 +688,6 @@ mod tests {
         harness
             .store()
             .conn()
-            .unwrap()
             .execute(
                 "UPDATE schedule_occurrences SET status = 'pending', delivered_at = NULL \
                  WHERE occurrence_key = ?1",

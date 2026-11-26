@@ -6,10 +6,11 @@ use super::resampler::{
 use super::vad::{
     VAD_FRAME_SAMPLES, VAD_HANGOVER_FRAMES, VAD_MAX_ACTIVE_FRAMES, VAD_START_FRAMES, VoiceGate,
 };
+use parking_lot::Mutex;
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicU32, Ordering},
     },
 };
@@ -144,7 +145,7 @@ fn stereo_capture_with_dead_channel_preserves_active_channel_amplitude() {
     let level = AtomicU32::new(0);
     let stereo_one_channel = [0.02f32, 0.0, -0.02, 0.0, 0.02, 0.0, -0.02, 0.0];
     push_captured(&stereo_one_channel, 2, 64, &sink, &muted, &level);
-    let captured: Vec<f32> = sink.lock().unwrap().iter().copied().collect();
+    let captured: Vec<f32> = sink.lock().iter().copied().collect();
     assert_eq!(captured, [0.02, -0.02, 0.02, -0.02]);
     let rms = f32::from_bits(level.load(Ordering::Relaxed));
     assert!((rms - 0.02).abs() < 1e-6, "{rms}");
@@ -188,10 +189,7 @@ fn a_streamed_conversion_preserves_the_sample_count_across_chunks() {
 #[test]
 fn the_played_buffer_reports_its_rms_and_silence() {
     let deck = Arc::new(Mutex::new(Deck::default()));
-    deck.lock()
-        .unwrap()
-        .pending
-        .extend([0.5f32, -0.5, 0.5, -0.5]);
+    deck.lock().pending.extend([0.5f32, -0.5, 0.5, -0.5]);
     let level = AtomicU32::new(0);
     let muted = AtomicBool::new(false);
     let mut output = vec![0.; 4];
@@ -208,7 +206,7 @@ fn the_played_buffer_reports_its_rms_and_silence() {
 fn muted_playback_silences_output_and_level_while_advancing_deck() {
     let deck = Arc::new(Mutex::new(Deck::default()));
     {
-        let mut guard = deck.lock().unwrap();
+        let mut guard = deck.lock();
         guard.utterance = "u".into();
         guard.generation = 1;
         guard.pending.extend([0.5f32, -0.5, 0.5, -0.5]);
@@ -219,7 +217,7 @@ fn muted_playback_silences_output_and_level_while_advancing_deck() {
     fill(&mut output, 1, &deck, &level, &muted);
     assert_eq!(output, [0., 0., 0., 0.]);
     assert_eq!(f32::from_bits(level.load(Ordering::Relaxed)), 0.);
-    assert!(deck.lock().unwrap().pending.is_empty());
+    assert!(deck.lock().pending.is_empty());
 }
 
 #[test]
@@ -228,7 +226,7 @@ fn muted_capture_drops_samples_and_clears_rms() {
     let muted = AtomicBool::new(false);
     let level = AtomicU32::new(0);
     push_captured(&[0.5, -0.5, 0.5, -0.5], 2, 64, &sink, &muted, &level);
-    assert_eq!(sink.lock().unwrap().len(), 2);
+    assert_eq!(sink.lock().len(), 2);
     assert_eq!(f32::from_bits(level.load(Ordering::Relaxed)), 0.);
 
     push_captured(&[0.5, 0.5, -0.5, -0.5], 2, 64, &sink, &muted, &level);
@@ -237,7 +235,7 @@ fn muted_capture_drops_samples_and_clears_rms() {
 
     muted.store(true, Ordering::Relaxed);
     push_captured(&[0.9, 0.9], 2, 64, &sink, &muted, &level);
-    assert_eq!(sink.lock().unwrap().len(), 4);
+    assert_eq!(sink.lock().len(), 4);
     assert_eq!(f32::from_bits(level.load(Ordering::Relaxed)), 0.);
 }
 
@@ -301,7 +299,7 @@ fn i16_only_hardware_range_is_accepted_and_converts_accurately() {
 
     let deck = Arc::new(Mutex::new(Deck::default()));
     {
-        let mut guard = deck.lock().unwrap();
+        let mut guard = deck.lock();
         guard.utterance = "u".into();
         guard.generation = 1;
         guard.pending.extend([0.5f32, -0.5]);
@@ -337,7 +335,7 @@ fn i16_only_hardware_range_is_accepted_and_converts_accurately() {
         },
         i16_to_f32,
     );
-    let captured: Vec<f32> = sink.lock().unwrap().iter().copied().collect();
+    let captured: Vec<f32> = sink.lock().iter().copied().collect();
     assert_eq!(captured.len(), 2);
     assert!((captured[0] - 0.5).abs() < 1e-3);
     assert!((captured[1] + 0.5).abs() < 1e-3);
@@ -349,18 +347,18 @@ fn b01_stop_current_and_reset_stream_do_not_silence_generation_one() {
     let mut queue = PlayerQueue::new(WIRE_RATE).unwrap();
     let pcm = encode(&[0.25; 64]);
     queue.push("u1", 5, &pcm).unwrap();
-    assert!(!queue.deck.lock().unwrap().pending.is_empty());
+    assert!(!queue.deck.lock().pending.is_empty());
 
     queue.stop_current();
-    assert!(queue.deck.lock().unwrap().pending.is_empty());
+    assert!(queue.deck.lock().pending.is_empty());
     queue.push("u2", 6, &pcm).unwrap();
-    assert!(!queue.deck.lock().unwrap().pending.is_empty());
+    assert!(!queue.deck.lock().pending.is_empty());
 
     queue.flush(6);
     queue.reset_stream();
     queue.push("u3", 1, &pcm).unwrap();
-    assert_eq!(queue.deck.lock().unwrap().generation, 1);
-    assert!(!queue.deck.lock().unwrap().pending.is_empty());
+    assert_eq!(queue.deck.lock().generation, 1);
+    assert!(!queue.deck.lock().pending.is_empty());
 }
 
 #[test]
@@ -370,7 +368,7 @@ fn q01_older_generation_chunk_never_overwrites_newer_generation() {
     let older = encode(&[-0.5; 32]);
     queue.push("u3", 3, &newer).unwrap();
     queue.push("u2", 2, &older).unwrap();
-    let deck = queue.deck.lock().unwrap();
+    let deck = queue.deck.lock();
     assert_eq!(deck.generation, 3);
     assert_eq!(deck.utterance, "u3");
     assert_eq!(deck.pending.len(), 32);
@@ -381,21 +379,21 @@ fn q02_utterance_switch_resets_filter_and_finish_drains_tail() {
     let mut queue = PlayerQueue::new(48_000).unwrap();
     let partial = encode(&[0.25; 240]);
     queue.push("u1", 1, &partial).unwrap();
-    assert!(queue.deck.lock().unwrap().pending.is_empty());
+    assert!(queue.deck.lock().pending.is_empty());
 
     let full = encode(&[-0.25; 480]);
     queue.push("u2", 2, &full).unwrap();
     {
-        let deck = queue.deck.lock().unwrap();
+        let deck = queue.deck.lock();
         assert_eq!(deck.generation, 2);
         assert!(deck.pending.iter().all(|&s| s <= 0.05));
     }
 
     let mut queue2 = PlayerQueue::new(48_000).unwrap();
     queue2.push("u3", 1, &partial).unwrap();
-    assert!(queue2.deck.lock().unwrap().pending.is_empty());
+    assert!(queue2.deck.lock().pending.is_empty());
     queue2.finish_utterance("u3", 1).unwrap();
-    assert!(!queue2.deck.lock().unwrap().pending.is_empty());
+    assert!(!queue2.deck.lock().pending.is_empty());
 }
 
 #[test]

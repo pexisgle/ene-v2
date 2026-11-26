@@ -93,7 +93,7 @@ impl<'a> WorkRepo<'a> {
     pub fn insert_work_session(&self, session: &WorkSession) -> Result<()> {
         let stamp = now();
         self.0
-            .conn()?
+            .conn()
             .prepare_cached(&format!(
                 "INSERT INTO work_sessions ({SESSION_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
             ))?
@@ -112,7 +112,7 @@ impl<'a> WorkRepo<'a> {
     pub fn set_work_status(&self, id: &str, status: WorkStatus) -> Result<()> {
         let changed = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached("UPDATE work_sessions SET status = ?2, updated_at = ?3 WHERE id = ?1")?
             .execute(params![id, status.as_str(), now()])?;
         require_found(changed, "work session not found")
@@ -163,7 +163,7 @@ impl<'a> WorkRepo<'a> {
     pub fn insert_run(&self, run: &Run) -> Result<()> {
         let stamp = now();
         self.0
-            .conn()?
+            .conn()
             .prepare_cached(&format!(
                 "INSERT INTO work_runs ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
             ))?
@@ -183,7 +183,7 @@ impl<'a> WorkRepo<'a> {
     pub fn update_run(&self, run: &Run) -> Result<()> {
         let changed = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE work_runs SET state = ?2, pending_request_id = ?3, failure = ?4, \
                  updated_at = ?5 WHERE run_id = ?1",

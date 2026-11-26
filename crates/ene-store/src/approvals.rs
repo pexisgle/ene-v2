@@ -36,7 +36,7 @@ impl<'a> ApprovalRepo<'a> {
 
     pub fn insert_approval(&self, approval: &Approval) -> Result<()> {
         self.0
-            .conn()?
+            .conn()
             .prepare_cached(&format!(
                 "INSERT INTO approval_requests ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
             ))?
@@ -106,7 +106,7 @@ impl<'a> ApprovalRepo<'a> {
     pub fn expire_pending_approvals(&self) -> Result<usize> {
         let expired = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE approval_requests SET status = 'expired', resolved_at = ?1 \
                  WHERE status = 'pending'",

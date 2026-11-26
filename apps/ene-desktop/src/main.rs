@@ -17,10 +17,8 @@ use ene_desktop::{
     TrayState, bind_actions, default_renderer, open_pod_window,
 };
 use gpui::{App, AppContext as _, Application};
-use std::{
-    path::PathBuf,
-    sync::{Arc, RwLock},
-};
+use parking_lot::RwLock;
+use std::{path::PathBuf, sync::Arc};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 struct SessionRuntime {
@@ -347,6 +345,7 @@ fn discovery_path(local_host: bool) -> Result<PathBuf, DesktopInitError> {
 
 #[cfg(windows)]
 fn local_host_command(host: &std::path::Path) -> std::process::Command {
+    use parking_lot::RwLock;
     use std::{os::windows::process::CommandExt as _, process::Command};
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;

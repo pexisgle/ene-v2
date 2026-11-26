@@ -2,12 +2,13 @@ use super::client::{PendingReplies, TestRenderer, WriteItem, lip_sync_line, read
 use super::presets::{LOOPING_MOTIONS, idle_return_preset, is_looping_motion, normalize_path};
 use super::*;
 use ene_avatar_ipc::{AvatarEvent, AvatarMessage, AvatarStatus, CharacterConfig, Command, Request};
+use parking_lot::Mutex;
 use serde_json::Value;
 use std::{
     collections::HashMap,
     path::Path,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -170,9 +171,9 @@ fn b09_read_loop_resolves_pending_and_preserves_all_event_kinds() {
     let (events_tx, mut events_rx) = mpsc::unbounded_channel();
     let pending: PendingReplies = Arc::new(Mutex::new(HashMap::new()));
     let (reply_tx, mut reply_rx) = oneshot::channel();
-    pending.lock().unwrap().insert(7, reply_tx);
+    pending.lock().insert(7, reply_tx);
     let (waiter_tx, mut waiter_rx) = oneshot::channel();
-    pending.lock().unwrap().insert(8, waiter_tx);
+    pending.lock().insert(8, waiter_tx);
 
     let healthy = AtomicBool::new(true);
     read_loop(input.as_bytes(), events_tx, Arc::clone(&pending), &healthy);
@@ -256,15 +257,9 @@ fn fake_renderer(
             let Ok(request) = serde_json::from_str::<Request>(&line) else {
                 break;
             };
-            recorded
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(request.command.clone());
+            recorded.lock().push(request.command.clone());
             let reply = respond(&request.command);
-            let waiter = pending
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&id);
+            let waiter = pending.lock().remove(&id);
             if let Some(tx) = waiter {
                 let _replied = tx.send(Ok(reply));
             }
@@ -331,9 +326,7 @@ async fn an_explicit_body_placement_beats_the_renderer_snapshot() {
         .await
         .expect("the renderer accepts the update");
 
-    let sent = sent
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let sent = sent.lock();
     let config = sent
         .iter()
         .find_map(|command| match command {

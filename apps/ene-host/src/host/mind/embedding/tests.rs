@@ -294,7 +294,7 @@ fn memory(content: &str) -> MemoryRecord {
 
 fn embed(store: &Store, memory: &Memory, space: &str, dimensions: usize, vector: &[f32]) {
     crate::host::db::memories::write_embedding_on(
-        &store.conn().unwrap(),
+        &store.conn(),
         &memory.id,
         memory.content_revision,
         space,
@@ -338,7 +338,6 @@ fn the_index_mirrors_only_the_matching_space_and_revision() {
     // A content change invalidates the vector; the next sync drops it.
     store
         .conn()
-        .unwrap()
         .execute(
             "UPDATE memories SET content = 'green tea', \
              content_revision = content_revision + 1, \

@@ -291,7 +291,7 @@ impl<'a> ScheduleRepo<'a> {
     ) -> Result<bool> {
         let changed = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE schedules SET last_triggered_at = ?2, next_run_at = ?3, enabled = ?4 \
                  WHERE id = ?1",
@@ -405,7 +405,7 @@ impl<'a> ScheduleRepo<'a> {
     pub fn mark_occurrence_delivered(&self, occurrence_key: &str, at: Timestamp) -> Result<bool> {
         let changed = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE schedule_occurrences SET status = 'delivered', delivered_at = ?2, \
                  last_error = NULL WHERE occurrence_key = ?1 AND status != 'delivered'",
@@ -417,7 +417,7 @@ impl<'a> ScheduleRepo<'a> {
     /// Records a failed delivery attempt on a pending occurrence.
     pub fn record_occurrence_attempt(&self, occurrence_key: &str, error: &str) -> Result<()> {
         self.0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE schedule_occurrences SET attempts = attempts + 1, last_error = ?2 \
                  WHERE occurrence_key = ?1 AND status = 'pending'",

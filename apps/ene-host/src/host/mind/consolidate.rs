@@ -448,7 +448,6 @@ mod tests {
         // A concurrent correction moves the revision the pass captured.
         store
             .conn()
-            .unwrap()
             .execute(
                 "UPDATE memories SET memory_revision = memory_revision + 1 WHERE id = 'm1'",
                 [],
@@ -473,7 +472,6 @@ mod tests {
         );
         let count: i64 = store
             .conn()
-            .unwrap()
             .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1, "the conflict rolled the whole pass back");
@@ -511,7 +509,6 @@ mod tests {
         );
         let citations: i64 = store
             .conn()
-            .unwrap()
             .query_row(
                 "SELECT COUNT(*) FROM memory_edges WHERE relation = 'estimated_cited_in'",
                 [],
@@ -746,7 +743,6 @@ mod tests {
         let count: i64 = setup
             .store
             .conn()
-            .unwrap()
             .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
             .unwrap();
         assert_eq!(
@@ -815,7 +811,6 @@ mod tests {
         setup
             .store
             .conn()
-            .unwrap()
             .execute(
                 "UPDATE companions SET state_revision = state_revision + 1 WHERE id = 'ene'",
                 [],
@@ -854,7 +849,6 @@ mod tests {
         let receipts: i64 = setup
             .store
             .conn()
-            .unwrap()
             .query_row("SELECT COUNT(*) FROM mind_operations", [], |row| row.get(0))
             .unwrap();
         assert_eq!(receipts, 0, "a discarded reflection leaves no receipt");

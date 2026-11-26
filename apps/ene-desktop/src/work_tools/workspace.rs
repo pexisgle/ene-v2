@@ -10,11 +10,12 @@ use cap_std::{
 };
 use ene_rpc as w;
 
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 pub(crate) struct Workspace {
@@ -147,10 +148,7 @@ impl Workspace {
         match name {
             "read" => self.read(path, positive(input, "offset", 1)?, limit),
             "write" | "edit" => {
-                let _guard = self
-                    .edits
-                    .lock()
-                    .map_err(|_| WorkToolError::WriterUnavailable)?;
+                let _guard = self.edits.lock();
                 let content = if name == "edit" {
                     let bytes = self.load(path)?;
                     edit(text(&bytes)?, input)?

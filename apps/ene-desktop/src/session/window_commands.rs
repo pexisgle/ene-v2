@@ -221,9 +221,7 @@ fn cmd_speak(session: &Session, host: &Host, companion_id: Option<String>, text:
     let client_id = session.transport.options.id.clone();
     // Synthesis is a network call; awaiting it here would stall the
     // microphone and the playback this loop owns.
-    let Ok(mut background) = session.devices.background.lock() else {
-        return;
-    };
+    let mut background = session.devices.background.lock();
     background.spawn(async move {
         let update = match host
             .voice

@@ -435,7 +435,6 @@ fn q05_storage_fault_in_tail_marks_host_failed_instead_of_empty_state() {
     harness
         .store()
         .conn()
-        .unwrap()
         .execute("DROP TABLE user_profiles", [])
         .unwrap();
     let err = render_tail(

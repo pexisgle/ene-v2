@@ -86,14 +86,11 @@ impl SessionTransport {
     }
 
     pub(super) fn set_connection(&self, host: Option<Host>) {
-        *self
-            .connection
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = host;
+        *self.connection.write() = host;
     }
 
     pub(super) fn current_host(&self) -> Option<Host> {
-        self.connection.read().ok().and_then(|guard| guard.clone())
+        self.connection.read().clone()
     }
 
     pub(super) fn rebuild_specs(

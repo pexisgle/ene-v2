@@ -122,7 +122,7 @@ impl<'a> ClientRepo<'a> {
         let revision = current + 1;
         let changed = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(&format!(
                 "INSERT INTO clients (id, name, platform, capabilities, granted_capabilities, \
                  capability_specs, revision, last_seen) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
@@ -179,7 +179,7 @@ impl<'a> ClientRepo<'a> {
         let next = existing.revision + 1;
         let changed = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(&format!(
                 "UPDATE clients SET capabilities = ?2, granted_capabilities = ?3, \
                  capability_specs = ?4, revision = ?5, last_seen = ?6 \
@@ -254,7 +254,7 @@ impl<'a> ClientRepo<'a> {
     pub fn insert_operation(&self, operation: &DeviceOperation) -> Result<()> {
         let stamp = now();
         self.0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "INSERT INTO device_operations (operation_id, client_id, \
                  capability, input, work_id, status, created_at, updated_at) \
@@ -283,7 +283,7 @@ impl<'a> ClientRepo<'a> {
 
     pub fn set_operation_status(&self, id: &str, status: DeviceStatus) -> Result<()> {
         self.0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE device_operations SET status = ?2, updated_at = ?3 \
                  WHERE operation_id = ?1",
@@ -314,7 +314,7 @@ impl<'a> ClientRepo<'a> {
         };
         let updated = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(&format!(
                 "UPDATE device_operations SET status = ?2, output = ?3, failure = ?4, \
                  updated_at = ?5 WHERE operation_id = ?1 \
@@ -356,7 +356,7 @@ impl<'a> ClientRepo<'a> {
     pub fn mark_unanswered_operations_uncertain(&self) -> Result<usize> {
         let changed = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE device_operations SET status = 'uncertain', updated_at = ?1 \
                  WHERE status = 'dispatched'",
@@ -396,7 +396,7 @@ impl<'a> ClientRepo<'a> {
     /// whose tool publication failed.
     pub fn restore_client(&self, client: &Client) -> Result<()> {
         self.0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "INSERT OR REPLACE INTO clients (id, name, platform, capabilities, \
                  granted_capabilities, capability_specs, revision, last_seen) \
@@ -417,7 +417,7 @@ impl<'a> ClientRepo<'a> {
 
     pub fn delete_client(&self, id: &str) -> Result<()> {
         self.0
-            .conn()?
+            .conn()
             .prepare_cached("DELETE FROM clients WHERE id = ?1")?
             .execute([id])?;
         Ok(())
@@ -427,7 +427,7 @@ impl<'a> ClientRepo<'a> {
     /// publication failed.
     pub fn restore_activation(&self, activation: &Activation) -> Result<()> {
         self.0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "INSERT OR REPLACE INTO activations (companion_id, client_id, updated_at) \
                  VALUES (?1, ?2, ?3)",
@@ -442,7 +442,7 @@ impl<'a> ClientRepo<'a> {
 
     pub fn delete_activation(&self, companion: &str) -> Result<()> {
         self.0
-            .conn()?
+            .conn()
             .prepare_cached("DELETE FROM activations WHERE companion_id = ?1")?
             .execute([companion])?;
         Ok(())

@@ -1,4 +1,5 @@
 use ene_avatar_ipc::{AvatarEvent, AvatarMessage, AvatarStatus, CharacterConfig, Command, Request};
+use parking_lot::Mutex;
 use serde_json::Value;
 use std::{
     collections::{HashMap, VecDeque},
@@ -6,7 +7,7 @@ use std::{
     path::Path,
     process::{Child, ChildStdin, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -172,19 +173,13 @@ impl Avatar {
             return Err(AvatarError::InputClosed);
         };
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id, reply_tx);
+        self.pending.lock().insert(id, reply_tx);
         if write_tx
             .send(WriteItem::Request { id, line })
             .await
             .is_err()
         {
-            self.pending
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&id);
+            self.pending.lock().remove(&id);
             self.healthy.store(false, Ordering::Release);
             return Err(AvatarError::InputClosed);
         }
@@ -195,10 +190,7 @@ impl Avatar {
                 Err(AvatarError::Exited)
             }
             Err(_) => {
-                self.pending
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&id);
+                self.pending.lock().remove(&id);
                 self.healthy.store(false, Ordering::Release);
                 if let Some(child) = self.child.as_mut()
                     && let Err(error) = child.kill()
@@ -404,10 +396,7 @@ fn write_loop(
         {
             let reason = AvatarError::WriteFailed(error.to_string());
             if let Some(id) = id
-                && let Some(tx) = pending
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&id)
+                && let Some(tx) = pending.lock().remove(&id)
             {
                 let _replied = tx.send(Err(reason));
             }
@@ -435,11 +424,7 @@ pub(super) fn read_loop(
             Ok(0) => break,
             Ok(_) => match serde_json::from_str::<AvatarMessage>(&line) {
                 Ok(AvatarMessage::Reply { id, ok, error }) => {
-                    if let Some(tx) = pending
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .remove(&id)
-                    {
+                    if let Some(tx) = pending.lock().remove(&id) {
                         let _discarded = tx.send(match error {
                             Some(error) => Err(AvatarError::Renderer(error)),
                             None => Ok(ok),
@@ -460,12 +445,7 @@ pub(super) fn read_loop(
             }
         }
     }
-    let waiters: Vec<_> = pending
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .drain()
-        .map(|(_, tx)| tx)
-        .collect();
+    let waiters: Vec<_> = pending.lock().drain().map(|(_, tx)| tx).collect();
     for tx in waiters {
         let _replied = tx.send(Err(fail_reason.clone()));
     }

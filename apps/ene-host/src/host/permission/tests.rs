@@ -34,7 +34,7 @@ const STALL: Duration = Duration::from_secs(600);
 /// variants answer nothing a test waits for (compaction.rs's `serve`).
 struct Provider {
     base: String,
-    bodies: Arc<std::sync::Mutex<Vec<String>>>,
+    bodies: Arc<parking_lot::Mutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -43,7 +43,7 @@ async fn serve(text: &'static str, delay: Duration) -> Provider {
         .await
         .unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let bodies = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let seen = Arc::clone(&bodies);
     let answer = completion(text);
     let task = tokio::spawn(async move {
@@ -80,7 +80,7 @@ async fn serve(text: &'static str, delay: Duration) -> Provider {
             let Some(body) = body else {
                 return;
             };
-            seen.lock().unwrap().push(body);
+            seen.lock().push(body);
             tokio::time::sleep(delay).await;
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -460,7 +460,7 @@ fn a_safe_operation_the_model_allows_runs_without_a_card() {
             .len(),
         0
     );
-    let bodies = provider.bodies.lock().unwrap().clone();
+    let bodies = provider.bodies.lock().clone();
     assert_eq!(bodies.len(), 1, "one decision call");
     provider.task.abort();
 }
@@ -535,7 +535,7 @@ fn a_timeout_or_an_invalid_reply_fails_safe_to_the_card() {
             == ApprovalStatus::Pending
     );
     assert!(world.app.world().get::<Approved>(call).is_none());
-    assert!(provider.bodies.lock().unwrap().len() <= 1);
+    assert!(provider.bodies.lock().len() <= 1);
     provider.task.abort();
 
     // The reply is prose, not the JSON asked for.
@@ -605,7 +605,7 @@ fn the_prompt_the_model_received_carries_the_bounded_inputs() {
     world.app.update();
     settle(&mut world.app, &runtime);
 
-    let bodies = provider.bodies.lock().unwrap().clone();
+    let bodies = provider.bodies.lock().clone();
     assert_eq!(bodies.len(), 1, "one decision call");
     let body = &bodies[0];
     assert!(body.contains("device_request"), "{body}");
@@ -681,11 +681,7 @@ fn the_decision_role_falls_back_to_the_task_model() {
     let request = world.pending().request_id;
     settle(&mut world.app, &runtime);
 
-    assert_eq!(
-        provider.bodies.lock().unwrap().len(),
-        1,
-        "the task model answered"
-    );
+    assert_eq!(provider.bodies.lock().len(), 1, "the task model answered");
     let approval = world
         .store()
         .approval_repo()
@@ -723,7 +719,7 @@ fn always_approve_persists_allow_rule_and_skips_second_prompt() {
 
     // A second matching call is auto-approved directly from the saved rule
     // without asking the decision model or raising a second approval card.
-    let calls_before = provider.bodies.lock().unwrap().len();
+    let calls_before = provider.bodies.lock().len();
     let call2 = world.gated_call("/tmp/a");
     world.app.update();
     assert!(
@@ -743,7 +739,7 @@ fn always_approve_persists_allow_rule_and_skips_second_prompt() {
             .unwrap(),
         [] as [ene_policy::Approval; 0]
     );
-    assert_eq!(provider.bodies.lock().unwrap().len(), calls_before);
+    assert_eq!(provider.bodies.lock().len(), calls_before);
     world.gated_call("/tmp/b");
     world.app.update();
     assert_eq!(
@@ -790,7 +786,7 @@ fn b20_confirm_rule_is_never_bypassed_by_decision_allow() {
     let events = world.events();
     assert_eq!(cards(&events), vec![request.clone()]);
     assert!(world.app.world().get::<Approved>(call).is_none());
-    assert_eq!(provider.bodies.lock().unwrap().len(), 0);
+    assert_eq!(provider.bodies.lock().len(), 0);
     let resolved = submit(world.app.world_mut(), &request, ApprovalDecision::Approve).unwrap();
     assert_eq!(resolved.status, ApprovalStatus::Approved);
     assert!(world.app.world().get::<Approved>(call).is_some());
@@ -896,7 +892,6 @@ fn b05_policy_read_failure_fails_closed_instead_of_treating_as_empty() {
     world
         .store()
         .conn()
-        .unwrap()
         .execute(
             "INSERT INTO policy_rules (id, tool_name, pattern, effect, created_at) \
                  VALUES ('bad', '*', '*', 'bogus', '2026-01-01T00:00:00Z')",

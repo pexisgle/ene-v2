@@ -58,11 +58,12 @@ use self::{
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
+use parking_lot::Mutex;
 use rig_ecs::{prelude::*, session_log::SessionLog, session_log::SessionStore};
 use rig_memory::DirStore;
 use std::{
     path::Path,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, mpsc},
     thread::JoinHandle,
     time::Duration,
 };
@@ -143,9 +144,7 @@ struct Handle {
 impl Drop for Handle {
     fn drop(&mut self) {
         let _shutdown = self.shutdown.try_send(());
-        if let Ok(mut thread) = self.thread.lock()
-            && let Some(thread) = thread.take()
-        {
+        if let Some(thread) = self.thread.get_mut().take() {
             let _joined = thread.join();
         }
     }
@@ -254,12 +253,7 @@ impl Runtime {
     pub(crate) async fn shutdown(&self) -> Result<()> {
         self.voicevox.stop().await;
         let shutdown = self.handle.shutdown.clone();
-        let thread = self
-            .handle
-            .thread
-            .lock()
-            .map_err(|_| HostError::Internal(("Rig kernel lock failed").into()))?
-            .take();
+        let thread = self.handle.thread.lock().take();
         tokio::task::spawn_blocking(move || {
             thread.map_or(Ok(()), |thread| {
                 let _shutdown = shutdown.try_send(());

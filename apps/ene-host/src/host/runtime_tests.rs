@@ -59,7 +59,7 @@ async fn storage_errors_with_discarded_replies_still_stop_the_host() {
             .read(|app| {
                 app.world()
                     .resource::<Store>()
-                    .conn()?
+                    .conn()
                     .execute_batch("DROP TABLE clients")?;
                 Ok(())
             })
@@ -140,20 +140,20 @@ async fn a_job_runs_inside_the_callers_span() {
     let runtime = Runtime::start(state.path()).await.unwrap();
 
     let caller = tracing::info_span!("rpc-caller");
-    let observed = Arc::new(std::sync::Mutex::new(None));
+    let observed = Arc::new(parking_lot::Mutex::new(None));
     let slot = Arc::clone(&observed);
     caller
         .in_scope(|| {
             runtime.read(move |_| {
                 // The span the actor thread is running this job inside.
-                *slot.lock().unwrap() = tracing::Span::current().id();
+                *slot.lock() = tracing::Span::current().id();
                 Ok(())
             })
         })
         .await
         .unwrap();
 
-    let seen = observed.lock().unwrap().clone();
+    let seen = observed.lock().clone();
     assert!(caller.id().is_some(), "the caller span must be enabled");
     assert_eq!(
         seen,

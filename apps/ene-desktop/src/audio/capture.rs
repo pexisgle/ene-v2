@@ -4,10 +4,11 @@ use super::resampler::{
 use super::vad::VoiceGate;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ene_client_core::CaptureMode;
+use parking_lot::Mutex;
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicU32, Ordering},
     },
 };
@@ -257,9 +258,7 @@ impl Microphone {
                     chosen = default_cfg;
                     rate = chosen.sample_rate();
                     capacity = rate as usize * 2;
-                    if let Ok(mut guard) = frames.lock() {
-                        guard.reserve(capacity);
-                    }
+                    frames.lock().reserve(capacity);
                     build_microphone_stream(&device, &chosen, capacity, &frames, &muted, &level)?
                 }
             };
@@ -302,7 +301,7 @@ impl Microphone {
     pub fn ptt_cancel(&mut self) {
         if self.mode == CaptureMode::Ptt {
             self.ptt.cancel();
-            if let Ok(mut frames) = self.frames.try_lock() {
+            if let Some(mut frames) = self.frames.try_lock() {
                 frames.clear();
             }
             if let Some(filter) = &mut self.filter {
@@ -315,7 +314,7 @@ impl Microphone {
         self.muted.store(muted, Ordering::Relaxed);
         if muted {
             self.level.store(0f32.to_bits(), Ordering::Relaxed);
-            if let Ok(mut frames) = self.frames.try_lock() {
+            if let Some(mut frames) = self.frames.try_lock() {
                 frames.clear();
             }
         }
@@ -335,9 +334,7 @@ impl Microphone {
 
     pub fn take(&mut self, companion_speaking: bool, far_end_level: f32) -> CaptureOutput {
         if self.is_muted() {
-            if let Ok(mut frames) = self.frames.lock() {
-                frames.clear();
-            }
+            self.frames.lock().clear();
             if let Some(filter) = &mut self.filter {
                 filter.reset();
             }
@@ -349,10 +346,7 @@ impl Microphone {
                 barge_in: false,
             };
         }
-        let samples: Vec<f32> = match self.frames.lock() {
-            Ok(mut frames) => frames.drain(..).collect(),
-            Err(_) => return CaptureOutput::default(),
-        };
+        let samples: Vec<f32> = self.frames.lock().drain(..).collect();
         if self.mode == CaptureMode::Ptt {
             let barge_in = self.ptt.active && companion_speaking;
             let converted = match self.filter.as_mut() {
@@ -449,7 +443,7 @@ pub(super) fn push_captured_with<T: Copy>(
         sink.level.store(0f32.to_bits(), Ordering::Relaxed);
         return;
     }
-    let Ok(mut frames) = sink.frames.try_lock() else {
+    let Some(mut frames) = sink.frames.try_lock() else {
         return;
     };
     let (active_mask, active_channels) = select_active_channels(input, channels, &to_f32);

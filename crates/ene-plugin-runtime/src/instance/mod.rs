@@ -8,12 +8,13 @@ pub use invocation::{DenyServices, Services};
 
 use crate::{Error, Package, Result, contract::Events, limits::*};
 use ene_plugin::*;
-use invocation::{Cancellation, Invocation, SLOTS, ene_emit, ene_service};
+use invocation::{Cancellation, Invocation, SLOTS, host_functions};
 use json::BoundedJson;
+use parking_lot::Mutex;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::{
-    sync::{Arc, Mutex, Weak, atomic::AtomicUsize},
+    sync::{Arc, Weak, atomic::AtomicUsize},
     time::Duration,
 };
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
@@ -21,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 pub struct Instance {
     plugin: Option<extism::Plugin>,
-    context: extism::UserData<Weak<Invocation>>,
+    context: Arc<Mutex<Weak<Invocation>>>,
     package: Package,
     entrypoint: String,
     permit: Arc<OwnedSemaphorePermit>,
@@ -52,7 +53,7 @@ fn build(
     package: &Package,
     file: &str,
     timeout: Duration,
-    context: extism::UserData<Weak<Invocation>>,
+    context: &Arc<Mutex<Weak<Invocation>>>,
 ) -> Result<extism::Plugin> {
     let code = package.code(file)?.to_vec();
     let mut manifest = extism::Manifest::new([extism::Wasm::data(code)])
@@ -83,14 +84,7 @@ fn build(
         .with_wasi(false)
         .with_fuel_limit(WASM_FUEL)
         .with_initialization_fuel_limit(WASM_INITIALIZATION_FUEL)
-        .with_function(
-            "ene_service",
-            [extism::PTR],
-            [extism::PTR],
-            context.clone(),
-            ene_service,
-        )
-        .with_function("ene_emit", [extism::PTR], [], context, ene_emit)
+        .with_functions(host_functions(context))
         .build()
         .map_err(Error::Execution)
 }
@@ -143,8 +137,8 @@ impl Instance {
                 return Err(Error::Cancelled);
             }
             package.verify()?;
-            let context = extism::UserData::new(Weak::new());
-            let plugin = build(&package, &file, timeout, context.clone())?;
+            let context = Arc::new(Mutex::new(Weak::new()));
+            let plugin = build(&package, &file, timeout, &context)?;
             if token.is_cancelled() {
                 return Err(Error::Cancelled);
             }
@@ -196,7 +190,7 @@ impl Instance {
             armed: true,
         };
         let permit = self.permit.clone();
-        let context = self.context.get().map_err(Error::Execution)?;
+        let context = self.context.clone();
         #[cfg(test)]
         let native_exit = self.native_exit.take();
         let task = tokio::task::spawn_blocking(move || {
@@ -205,8 +199,7 @@ impl Instance {
                 if token.is_cancelled() {
                     return Err(Error::Cancelled);
                 }
-                *context.lock().map_err(|_| Error::Unavailable)? =
-                    invocation.as_ref().map_or_default(Arc::downgrade);
+                *context.lock() = invocation.as_ref().map_or_default(Arc::downgrade);
                 let result = plugin.call::<_, BoundedJson<T, MAX_CHUNK>>(function, input);
                 #[cfg(test)]
                 if let Some(native_exit) = native_exit {
@@ -217,7 +210,7 @@ impl Instance {
                         fuel_consumed: plugin.fuel_consumed(),
                     });
                 }
-                *context.lock().map_err(|_| Error::Unavailable)? = Weak::new();
+                *context.lock() = Weak::new();
                 result.map(|value| value.0).map_err(json::error)
             })();
             (plugin, result)
@@ -293,7 +286,7 @@ impl Instance {
         let plugin = self.plugin.take();
         let result = async {
             let value = result?;
-            context.validator.lock().map_err(|_| Error::Unavailable)?.finish()?;
+            context.validator.lock().finish()?;
             tokio::select! { biased;
                 _ = cancel.cancelled() => return Err(Error::Cancelled),
                 _ = context.events.closed() => return Err(Error::Cancelled),

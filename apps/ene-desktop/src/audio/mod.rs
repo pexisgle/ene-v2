@@ -52,6 +52,4 @@ pub enum AudioError {
         direction: &'static str,
         reason: String,
     },
-    #[error("the audio deck was poisoned")]
-    DeckPoisoned,
 }

@@ -49,7 +49,7 @@ impl<'a> MemoryRepo<'a> {
                 return Ok(contexts);
             }
         }
-        let connection = self.0.conn()?;
+        let connection = self.0.conn();
         let mut statement = connection.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM memories m \
              WHERE {VISIBLE} AND m.importance >= 2 \
@@ -83,7 +83,7 @@ impl<'a> MemoryRepo<'a> {
             inserted: 0,
             updated: 0,
         };
-        let mut connection = self.0.conn()?;
+        let mut connection = self.0.conn();
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         for fact in facts {

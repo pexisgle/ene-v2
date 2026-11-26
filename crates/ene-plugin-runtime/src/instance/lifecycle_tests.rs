@@ -448,7 +448,7 @@ impl Services for BlockingServices {
     fn handle(&self, _: ServiceRequest) -> BoxFuture<'_, std::result::Result<Value, Failure>> {
         Box::pin(async {
             self.entered.notify_one();
-            self.release.lock().unwrap().recv().unwrap();
+            self.release.lock().recv().unwrap();
             Ok(Value::Null)
         })
     }

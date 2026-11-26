@@ -115,7 +115,6 @@ fn historical_hash_receipts_replay_after_reopening() {
         assert_ne!(digest(canonical.as_bytes()), legacy_hash);
         store
             .conn()
-            .unwrap()
             .execute(
                 "INSERT INTO mind_operations (operation_id, companion_id, request_hash, result, created_at) \
                  VALUES (?1, 'ene', ?2, '{\"replayed\":true}', ?3)",
@@ -217,7 +216,6 @@ fn companion_row(store: &Store) {
     let assignments = r#"{"companion":{"connection_id":"c","model_id":"m"},"task":{"connection_id":"c","model_id":"m"}}"#;
     store
         .conn()
-        .unwrap()
         .execute(
             "INSERT INTO companions \
              (id, name, mind, profile, state, body, voice, assignments, created_at, updated_at) \

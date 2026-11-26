@@ -24,8 +24,9 @@ pub enum TraySection {
 }
 #[cfg(windows)]
 use crate::best_effort::ignore_teardown;
+use parking_lot::RwLock;
 use std::sync::{
-    Arc, RwLock,
+    Arc,
     atomic::{AtomicBool, Ordering},
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -80,18 +81,11 @@ impl TrayHandle {
     }
 
     pub fn update(&self, next: TrayState) {
-        let tip_changed = match self.shared.write() {
-            Ok(mut guard) => {
-                let changed = guard.tooltip != next.tooltip;
-                *guard = next;
-                changed
-            }
-            Err(poisoned) => {
-                let mut guard = poisoned.into_inner();
-                let changed = guard.tooltip != next.tooltip;
-                *guard = next;
-                changed
-            }
+        let tip_changed = {
+            let mut guard = self.shared.write();
+            let changed = guard.tooltip != next.tooltip;
+            *guard = next;
+            changed
         };
         #[cfg(windows)]
         if self.is_resident() && tip_changed {

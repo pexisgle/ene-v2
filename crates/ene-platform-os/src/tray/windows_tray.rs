@@ -236,10 +236,7 @@ fn run_thread(
 }
 
 pub(super) fn current_state(ctx: &WindowContext) -> TrayState {
-    match ctx.shared.read() {
-        Ok(guard) => guard.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
-    }
+    ctx.shared.read().clone()
 }
 
 fn build_nid(hwnd: HWND, ctx: &WindowContext, tooltip: &str) -> NOTIFYICONDATAW {

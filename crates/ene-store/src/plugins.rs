@@ -33,7 +33,7 @@ impl<'a> PluginRepo<'a> {
     pub fn plugin_config(&self, plugin_id: &str) -> Result<Value> {
         let raw: Option<String> = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached("SELECT config FROM plugin_config WHERE plugin_id = ?1")?
             .query_row([plugin_id], |row| row.get(0))
             .optional()?;
@@ -54,7 +54,7 @@ impl<'a> PluginRepo<'a> {
             ));
         }
         self.0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "INSERT INTO plugin_config (plugin_id, config, updated_at) VALUES (?1, ?2, ?3) \
                  ON CONFLICT(plugin_id) DO UPDATE SET config = excluded.config, \
@@ -69,7 +69,7 @@ impl<'a> PluginRepo<'a> {
         validate_state_key(key)?;
         let raw: Option<String> = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached("SELECT value FROM plugin_state WHERE plugin_id = ?1 AND key = ?2")?
             .query_row(params![plugin_id, key], |row| row.get(0))
             .optional()?;
@@ -90,7 +90,7 @@ impl<'a> PluginRepo<'a> {
                 "plugin state value exceeds 64 KiB limit".into(),
             ));
         }
-        let conn = self.0.conn()?;
+        let conn = self.0.conn();
         let exists: bool = conn
             .prepare_cached("SELECT 1 FROM plugin_state WHERE plugin_id = ?1 AND key = ?2")?
             .query_row(params![plugin_id, key], |_| Ok(()))
@@ -115,7 +115,7 @@ impl<'a> PluginRepo<'a> {
     }
 
     pub fn plugin_entries(&self) -> Result<Vec<PluginEntry>> {
-        let conn = self.0.conn()?;
+        let conn = self.0.conn();
         let mut stmt = conn.prepare_cached(
             "SELECT plugin_id, name, version, path, enabled, installed_at, updated_at \
              FROM plugin_entries ORDER BY plugin_id",
@@ -135,7 +135,7 @@ impl<'a> PluginRepo<'a> {
         enabled: bool,
     ) -> Result<PluginEntry> {
         let stamp = now();
-        let conn = self.0.conn()?;
+        let conn = self.0.conn();
         conn.prepare_cached(
             "INSERT INTO plugin_entries (plugin_id, name, version, path, enabled, installed_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6) \
@@ -162,7 +162,7 @@ impl<'a> PluginRepo<'a> {
     pub fn set_plugin_enabled(&self, plugin_id: &str, enabled: bool) -> Result<bool> {
         let changed = self
             .0
-            .conn()?
+            .conn()
             .prepare_cached(
                 "UPDATE plugin_entries SET enabled = ?2, updated_at = ?3 WHERE plugin_id = ?1",
             )?
@@ -171,7 +171,7 @@ impl<'a> PluginRepo<'a> {
     }
 
     pub fn remove_plugin_entry(&self, plugin_id: &str) -> Result<Option<PluginEntry>> {
-        let conn = self.0.conn()?;
+        let conn = self.0.conn();
         let existing = conn
             .prepare_cached(
                 "SELECT plugin_id, name, version, path, enabled, installed_at, updated_at \

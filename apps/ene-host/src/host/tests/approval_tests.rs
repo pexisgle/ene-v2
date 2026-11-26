@@ -356,7 +356,6 @@ fn a_work_approval_without_a_stored_work_id_falls_back_to_its_run() {
     harness
         .store()
         .conn()
-        .unwrap()
         .execute(
             "UPDATE approval_requests SET work_id = NULL WHERE request_id = ?1",
             [&request.request_id],
@@ -391,7 +390,6 @@ fn an_approval_whose_stored_session_is_gone_still_runs_on_its_client() {
     harness
         .store()
         .conn()
-        .unwrap()
         .execute(
             "UPDATE approval_requests SET work_id = 'missing' WHERE request_id = ?1",
             [&request.request_id],

@@ -41,9 +41,10 @@ use crate::{
 };
 use buffa::view::MessageView;
 use ene_rpc as w;
+use parking_lot::RwLock;
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::Duration,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -682,7 +683,7 @@ mod tests {
         let finished = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         for _ in 0..8 {
             let finished = std::sync::Arc::clone(&finished);
-            devices.background.lock().unwrap().spawn(async move {
+            devices.background.lock().spawn(async move {
                 finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             });
         }
@@ -697,7 +698,7 @@ mod tests {
 
         devices.reap_background();
         assert_eq!(
-            devices.background.lock().unwrap().len(),
+            devices.background.lock().len(),
             0,
             "completed tasks must leave the set"
         );
@@ -705,7 +706,7 @@ mod tests {
         // A task that outlives its work must still be drained by shutdown.
         let slow = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = std::sync::Arc::clone(&slow);
-        devices.background.lock().unwrap().spawn(async move {
+        devices.background.lock().spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         });
