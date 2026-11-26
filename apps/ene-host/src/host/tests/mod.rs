@@ -100,6 +100,7 @@ impl Harness {
                 permission::GatePlugin,
                 client::ClientPlugin,
                 work::WorkPlugin,
+                super::web_search::SearchPlugin,
                 super::mind::MindPlugin,
                 super::compaction::CompactionPlugin,
                 super::autonomy::AutonomyPlugin,

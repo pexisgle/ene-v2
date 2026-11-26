@@ -97,6 +97,7 @@ fn build_kernel_app(res: KernelResources) -> App {
             client::ClientPlugin,
             tools::sync::ToolsSyncPlugin,
             work::WorkPlugin,
+            crate::host::web_search::SearchPlugin,
             mind::MindPlugin,
             mcp::McpPlugin,
             providers::character::CharacterPlugin,

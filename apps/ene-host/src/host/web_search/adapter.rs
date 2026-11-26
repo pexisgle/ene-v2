@@ -103,10 +103,16 @@ pub(super) async fn send_search_request(
 ) -> Result<reqwest::Response, ToolExecutionError> {
     let sent = match resolved.adapter {
         SearchAdapter::Mwmbl => {
-            send_mwmbl_request(client, &resolved.endpoint, query, mwmbl_next_request).await?
+            send_mwmbl_request(
+                client,
+                &resolved.binding.endpoint,
+                query,
+                mwmbl_next_request,
+            )
+            .await?
         }
         SearchAdapter::Searxng => {
-            let mut url = url::Url::parse(&resolved.endpoint)
+            let mut url = url::Url::parse(&resolved.binding.endpoint)
                 .map_err(|_| ToolExecutionError::other("invalid SearXNG endpoint URL"))?;
             if !url.path().ends_with("/search")
                 && let Ok(mut segments) = url.path_segments_mut()
@@ -124,7 +130,7 @@ pub(super) async fn send_search_request(
                 .await
         }
         SearchAdapter::Brave => {
-            let mut url = url::Url::parse(&resolved.endpoint)
+            let mut url = url::Url::parse(&resolved.binding.endpoint)
                 .map_err(|_| ToolExecutionError::other("invalid Brave Search URL"))?;
             url.query_pairs_mut()
                 .append_pair("q", query)
@@ -139,7 +145,7 @@ pub(super) async fn send_search_request(
                 .await
         }
         SearchAdapter::Tavily => {
-            let url = url::Url::parse(&resolved.endpoint)
+            let url = url::Url::parse(&resolved.binding.endpoint)
                 .map_err(|_| ToolExecutionError::other("invalid Tavily Search URL"))?;
             let key = resolved.secret.as_deref().unwrap_or_default().trim();
             client
@@ -156,7 +162,7 @@ pub(super) async fn send_search_request(
                 .await
         }
         SearchAdapter::Exa => {
-            let url = url::Url::parse(&resolved.endpoint)
+            let url = url::Url::parse(&resolved.binding.endpoint)
                 .map_err(|_| ToolExecutionError::other("invalid Exa Search URL"))?;
             let key = resolved.secret.as_deref().unwrap_or_default().trim();
             client

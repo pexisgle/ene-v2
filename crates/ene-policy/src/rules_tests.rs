@@ -246,6 +246,38 @@ fn b03_b04_mcp_and_web_search_require_gate_and_respect_rules() {
     ));
 }
 
+#[test]
+fn a_saved_search_approval_is_exact_to_destination_and_arguments() {
+    let endpoint = "https://search.example:8443/query";
+    let arguments = json!({"query": "test"});
+    let allow = rule(
+        PolicyEffect::Allow,
+        "web_search",
+        &approved_search_pattern(endpoint, &arguments),
+    );
+    let search = |endpoint: &str, input: serde_json::Value| CandidateAction::WebSearch {
+        endpoint: endpoint.into(),
+        query: input["query"].as_str().unwrap().into(),
+        input,
+    };
+    assert_eq!(
+        decide_action(
+            std::slice::from_ref(&allow),
+            &search(endpoint, arguments.clone())
+        ),
+        Verdict::Allow
+    );
+    for changed in [
+        search("https://search.example:9443/query", arguments),
+        search(endpoint, json!({"query": "different"})),
+    ] {
+        assert!(matches!(
+            decide_action(std::slice::from_ref(&allow), &changed),
+            Verdict::NeedsDecision { .. }
+        ));
+    }
+}
+
 /// The badge on an approval card must not disagree with what the policy
 /// engine blocks, so the level is derived from the same capability rules.
 #[test]

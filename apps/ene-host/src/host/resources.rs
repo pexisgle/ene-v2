@@ -230,10 +230,6 @@ pub(crate) enum HostExternalTool {
     Plugin(String),
 }
 
-/// Capability tool names currently granted to each active companion.
-#[derive(Resource, Clone, Debug, Default)]
-pub(crate) struct GrantedCompanionTools(pub(crate) HashMap<String, Vec<String>>);
-
 /// Dispatches a character lifecycle event to installed `Extension::Character` plugins.
 #[derive(Event, Clone, Debug)]
 pub(crate) struct TriggerCharacterEvent {

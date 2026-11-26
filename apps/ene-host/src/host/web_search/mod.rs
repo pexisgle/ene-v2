@@ -1,33 +1,32 @@
-//! Public web search for the built-in work agent driven strictly by saved
+//! Public web search for the companion and its work agent, using saved
 //! `Search` connections (`exa`, `tavily`, `brave`, `mwmbl`, `searxng`).
 //!
 //! This file keeps the tool itself: resolving a connection, probing it from
-//! settings, the [`SearchArgs`] schema and the [`Tool`] impl. The per-service
-//! wire shapes and request builders live in the `adapter` submodule.
+//! settings, and executing a bounded request. The library registers the tool
+//! and schedules its result. The adapter module owns the provider wire formats.
 mod adapter;
+mod tool;
+
+pub(crate) use tool::SearchPlugin;
 
 use super::{
-    background,
     db::Store,
     error::Failure,
     model::{Credentials, connection_secret},
     net,
     providers::Providers,
-    resources::HostRuntime,
     settings::{Check, Connection, ConnectionConfig, ConnectionKind, endpoint_of},
 };
 use adapter::{parse_adapter_results, read_http_error, send_search_request};
+use bevy_ecs::prelude::Component;
+use ene_domain::ConnectionId;
+use ene_policy::CandidateAction;
 use ene_store::util;
-use rig_core::{
-    completion::ToolAnnotations,
-    tool::{Tool, ToolContext, ToolErrorKind, ToolExecutionError},
-};
-use rig_ecs::prelude::{App, AppToolsExt};
-use serde::Deserialize;
+use rig_core::tool::{ToolErrorKind, ToolExecutionError};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 use strum::{EnumString, IntoStaticStr};
-use tokio::{runtime::Handle, sync::Mutex, time::Instant};
+use tokio::{sync::Mutex, time::Instant};
 
 // `tests.rs` reaches `json!` through `use super::*`, as it did before the split.
 #[cfg(test)]
@@ -102,23 +101,70 @@ fn normalize_endpoint(adapter: SearchAdapter, raw: String) -> String {
     raw
 }
 
-#[derive(Clone)]
+/// The route the permission gate evaluated. A held call cannot switch to
+/// a replacement connection or to a different revision of the same one.
+#[derive(Clone, Component, Debug, PartialEq, Eq)]
+pub(crate) struct SearchBinding {
+    connection: ConnectionId,
+    revision: u64,
+    pub(crate) endpoint: String,
+}
+
+impl SearchBinding {
+    pub(crate) fn action(&self, arguments: &Value) -> CandidateAction {
+        CandidateAction::WebSearch {
+            endpoint: self.endpoint.clone(),
+            query: arguments
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            input: arguments.clone(),
+        }
+    }
+
+    pub(crate) fn current(
+        &self,
+        store: &Store,
+        credentials: Option<&Credentials>,
+        providers: &Providers,
+    ) -> Result<ResolvedSearch, SearchConfigError> {
+        let resolved = resolve(store, credentials, providers)?;
+        if self != &resolved.binding {
+            return Err(SearchConfigError::ConnectionChanged);
+        }
+        Ok(resolved)
+    }
+}
+
 pub(crate) struct ResolvedSearch {
     pub(crate) adapter: SearchAdapter,
     pub(crate) provider_name: String,
-    pub(crate) endpoint: String,
+    pub(crate) binding: SearchBinding,
     pub(crate) max_results: Option<usize>,
     secret: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub(crate) struct SearchConfigError(pub(crate) String);
-
-impl From<&'static str> for SearchConfigError {
-    fn from(message: &'static str) -> Self {
-        Self(message.to_owned())
-    }
+pub(crate) enum SearchConfigError {
+    #[error("could not read search settings: {0}")]
+    Settings(#[from] ene_store::StoreError),
+    #[error(
+        "search_unconfigured: Web検索を使うには設定画面で有効な Search 接続（Exa / Tavily / Brave / Mwmbl / SearXNG）を登録してください"
+    )]
+    Unconfigured,
+    #[error("search_unconfigured: invalid Search connection configuration")]
+    WrongKind,
+    #[error("search_unconfigured: unsupported search adapter `{0}`")]
+    UnsupportedAdapter(String),
+    #[error("search_unconfigured: `{0}` connection requires an endpoint URL")]
+    MissingEndpoint(&'static str),
+    #[error("search_unconfigured: `{0}` search connection requires an API key credential")]
+    MissingCredential(&'static str),
+    #[error(transparent)]
+    Credential(#[from] super::error::HostError),
+    #[error("the search connection changed before execution")]
+    ConnectionChanged,
 }
 
 /// Resolves the active enabled `Search` connection from saved settings.
@@ -129,34 +175,18 @@ pub(crate) fn resolve(
     credentials: Option<&Credentials>,
     providers: &Providers,
 ) -> Result<ResolvedSearch, SearchConfigError> {
-    let settings = store
-        .settings_repo()
-        .settings()
-        .map_err(|error| SearchConfigError(format!("could not read search settings: {error}")))?;
-    let enabled: Vec<&Connection> = settings
+    let settings = store.settings_repo().settings()?;
+    let mut enabled = settings
         .connections
         .iter()
-        .filter(|conn| conn.enabled && conn.kind == ConnectionKind::Search)
-        .collect();
-    if enabled.is_empty() {
-        return Err(
-            "search_unconfigured: Web検索を使うには設定画面で有効な Search 接続（Exa / Tavily / Brave / Mwmbl / SearXNG）を登録してください"
-                .into(),
-        );
+        .filter(|connection| connection.enabled && connection.kind == ConnectionKind::Search);
+    let first = enabled.next().ok_or(SearchConfigError::Unconfigured)?;
+    match resolve_connection(first, credentials, providers) {
+        Ok(resolved) => Ok(resolved),
+        Err(error) => enabled
+            .find_map(|connection| resolve_connection(connection, credentials, providers).ok())
+            .ok_or(error),
     }
-    let mut first_error = None;
-    for connection in enabled {
-        match resolve_connection(connection, credentials, providers) {
-            Ok(resolved) => return Ok(resolved),
-            Err(error) => {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-            }
-        }
-    }
-    Err(first_error
-        .unwrap_or_else(|| "search_unconfigured: 有効な Web 検索接続を構成できませんでした".into()))
 }
 
 pub(crate) fn resolve_connection(
@@ -165,32 +195,19 @@ pub(crate) fn resolve_connection(
     providers: &Providers,
 ) -> Result<ResolvedSearch, SearchConfigError> {
     let ConnectionConfig::Search(cfg) = &connection.config else {
-        return Err("search_unconfigured: invalid Search connection configuration".into());
+        return Err(SearchConfigError::WrongKind);
     };
-    let adapter = SearchAdapter::parse(&cfg.endpoint.adapter).ok_or_else(|| {
-        SearchConfigError(format!(
-            "search_unconfigured: unsupported search adapter `{}`",
-            cfg.endpoint.adapter
-        ))
-    })?;
+    let adapter = SearchAdapter::parse(&cfg.endpoint.adapter)
+        .ok_or_else(|| SearchConfigError::UnsupportedAdapter(cfg.endpoint.adapter.clone()))?;
     let endpoint = endpoint_of(connection, providers)
         .or_else(|| adapter.default_endpoint().map(str::to_owned))
         .map(|raw| normalize_endpoint(adapter, raw))
-        .ok_or_else(|| {
-            SearchConfigError(format!(
-                "search_unconfigured: `{}` connection requires an endpoint URL",
-                adapter.display_name()
-            ))
-        })?;
-    let secret = connection_secret(connection, credentials, providers)
-        .map_err(|error| SearchConfigError(error.to_string()))?
+        .ok_or_else(|| SearchConfigError::MissingEndpoint(adapter.display_name()))?;
+    let secret = connection_secret(connection, credentials, providers)?
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
     if adapter.requires_api_key() && secret.is_none() {
-        return Err(SearchConfigError(format!(
-            "search_unconfigured: `{}` search connection requires an API key credential",
-            adapter.display_name()
-        )));
+        return Err(SearchConfigError::MissingCredential(adapter.display_name()));
     }
     let provider_name = if connection.name.trim().is_empty() {
         adapter.display_name().to_owned()
@@ -202,7 +219,11 @@ pub(crate) fn resolve_connection(
     Ok(ResolvedSearch {
         adapter,
         provider_name,
-        endpoint,
+        binding: SearchBinding {
+            connection: connection.id.clone(),
+            revision: connection.revision,
+            endpoint,
+        },
         max_results,
         secret,
     })
@@ -246,143 +267,6 @@ pub(crate) async fn probe(
     }
 }
 
-struct WebSearch {
-    runtime: Option<Handle>,
-    wake: Option<rig_ecs::tasks::Wake>,
-    store: Option<Store>,
-    credentials: Option<Credentials>,
-    providers: Providers,
-    mwmbl_next_request: Arc<Mutex<Option<Instant>>>,
-}
-
-pub(crate) fn register(app: &mut App) {
-    let world = app.world();
-    let runtime = world
-        .get_resource::<HostRuntime>()
-        .map(|r| r.0.clone())
-        .or_else(|| tokio::runtime::Handle::try_current().ok());
-    let wake = world.get_resource::<rig_ecs::tasks::Wake>().cloned();
-    let store = world.get_resource::<Store>().cloned();
-    let credentials = world.get_resource::<Credentials>().cloned();
-    let providers = world
-        .get_resource::<Providers>()
-        .cloned()
-        .unwrap_or_default();
-    app.add_tool(WebSearch {
-        runtime,
-        wake,
-        store,
-        credentials,
-        providers,
-        mwmbl_next_request: Arc::default(),
-    });
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-#[schemars(deny_unknown_fields)]
-struct SearchArgs {
-    #[schemars(length(min = 1, max = MAX_QUERY_CHARS))]
-    query: String,
-    // `default` is a no-op on `Option`, and it is what keeps `limit` out of
-    // `required` now that `with` supplies the plain integer shape.
-    #[serde(default)]
-    #[schemars(
-        with = "usize",
-        range(min = 1, max = MAX_RESULTS),
-        extend("default" = DEFAULT_RESULTS),
-        transform = plain_integer
-    )]
-    limit: Option<usize>,
-}
-
-/// schemars names the integer width in `format`; the model-facing contract
-/// carries no format keyword.
-fn plain_integer(schema: &mut schemars::Schema) {
-    schema.remove("format");
-}
-
-impl WebSearch {
-    /// The tool-calling schema, derived from `SearchArgs` so it cannot drift
-    /// from the type the arguments decode into.
-    fn schema_for_arguments() -> Value {
-        let schema = schemars::schema_for!(SearchArgs);
-        let mut schema = serde_json::to_value(schema).unwrap_or(Value::Null);
-        // The tool contract carries no root `$schema` or `title`.
-        if let Some(object) = schema.as_object_mut() {
-            object.remove("$schema");
-            object.remove("title");
-        }
-        schema
-    }
-}
-
-impl Tool for WebSearch {
-    const NAME: &'static str = NAME;
-    type Args = SearchArgs;
-    type Output = Value;
-    type Error = ToolExecutionError;
-
-    fn description(&self) -> String {
-        "Search the public Web using the configured search connection and return titles, \
-         source URLs and snippets. Cite the source URLs when reporting findings."
-            .into()
-    }
-
-    fn parameters(&self) -> Value {
-        Self::schema_for_arguments()
-    }
-
-    fn annotations(&self) -> ToolAnnotations {
-        ToolAnnotations {
-            read_only_hint: Some(true),
-            ..Default::default()
-        }
-    }
-
-    async fn call(
-        &self,
-        _: &mut ToolContext,
-        args: SearchArgs,
-    ) -> Result<Value, ToolExecutionError> {
-        let query = args.query.trim();
-        if query.is_empty() || query.chars().count() > MAX_QUERY_CHARS {
-            return Err(ToolExecutionError::new(
-                ToolErrorKind::InvalidArgs,
-                format!("query must be 1–{MAX_QUERY_CHARS} characters"),
-            ));
-        }
-        let requested_limit = args.limit.unwrap_or(DEFAULT_RESULTS);
-        if !(1..=MAX_RESULTS).contains(&requested_limit) {
-            return Err(ToolExecutionError::new(
-                ToolErrorKind::InvalidArgs,
-                format!("limit must be 1–{MAX_RESULTS}"),
-            ));
-        }
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| ToolExecutionError::other("host settings store is unavailable"))?;
-        let resolved = resolve(store, self.credentials.as_ref(), &self.providers)
-            .map_err(|error| ToolExecutionError::other(error.to_string()))?;
-        let limit = resolved
-            .max_results
-            .map_or(requested_limit, |cap| requested_limit.min(cap));
-        let current_runtime = tokio::runtime::Handle::try_current().ok();
-        let runtime = self
-            .runtime
-            .as_ref()
-            .or(current_runtime.as_ref())
-            .ok_or_else(|| ToolExecutionError::other("the host HTTP runtime is unavailable"))?;
-        let query = query.to_owned();
-        let throttle = Arc::clone(&self.mwmbl_next_request);
-        background::spawn(runtime, self.wake.as_ref(), async move {
-            execute(&resolved, &query, limit, &throttle).await
-        })
-        .await
-        .map_err(|_| ToolExecutionError::other("the web search task stopped"))?
-    }
-}
 async fn execute(
     resolved: &ResolvedSearch,
     query: &str,

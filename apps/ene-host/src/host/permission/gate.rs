@@ -264,6 +264,10 @@ fn process_gate_call(
     }
     let candidate = match build_candidate_action(ctx, &item) {
         CandidateOutcome::Resolved(candidate) => Some(*candidate),
+        CandidateOutcome::Search(action, binding) => {
+            world.entity_mut(item.entity).insert(binding);
+            Some((action, None, None))
+        }
         CandidateOutcome::NeedsDeviceClient => {
             let agent_ctx = AgentCapabilityContext {
                 is_work_agent: world.get::<WorkAgent>(item.agent).is_some(),

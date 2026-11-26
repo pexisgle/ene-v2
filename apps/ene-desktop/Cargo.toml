@@ -46,6 +46,9 @@ earshot = "1.2.2"
 regex = "1"
 uuid.workspace = true
 
+[build-dependencies]
+embed-resource = "3.0.12"
+
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 

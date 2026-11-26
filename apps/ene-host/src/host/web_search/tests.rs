@@ -150,7 +150,7 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
         5,
     );
     let resolved_mwmbl = resolve_connection(&mwmbl_conn, Some(&creds), &providers).unwrap();
-    assert!(resolved_mwmbl.endpoint.ends_with('/'));
+    assert!(resolved_mwmbl.binding.endpoint.ends_with('/'));
     let out = execute(&resolved_mwmbl, "rust", 5, &throttle)
         .await
         .unwrap();
@@ -308,21 +308,20 @@ fn resolve_skips_unconfigured_enabled_search_when_another_is_ready() {
 
     let resolved = resolve(&store, Some(&creds), &providers).unwrap();
     assert_eq!(resolved.adapter, SearchAdapter::Exa);
-    assert_eq!(resolved.endpoint, EXA_DEFAULT_ENDPOINT);
+    assert_eq!(resolved.binding.endpoint, EXA_DEFAULT_ENDPOINT);
 }
 
-fn work_search_result_contains(
+fn search_result_contains<A: bevy_ecs::prelude::Component>(
     world: &mut bevy_ecs::prelude::World,
     expected: &str,
     expect_error: bool,
 ) -> bool {
-    use crate::host::agent::WorkAgent;
     use bevy_ecs::prelude::With;
     use rig_core::completion::Message;
     use rig_core::message::{ToolResultContent, UserContent};
     use rig_ecs::prelude::Conversation;
     world
-        .query_filtered::<&Conversation, With<WorkAgent>>()
+        .query_filtered::<&Conversation, With<A>>()
         .iter(world)
         .any(|conversation| {
             conversation.entries().any(|entry| match &entry.message {
@@ -476,7 +475,7 @@ async fn f13_b04_unconfigured_search_refuses_without_http_and_gates_on_configure
     )
     .unwrap();
     harness.run_until(|world| {
-        work_search_result_contains(world, "search_unconfigured", true)
+        search_result_contains::<crate::host::agent::WorkAgent>(world, "search_unconfigured", true)
             && companion_replied_with(world, "了解")
     });
     assert!(
@@ -531,7 +530,9 @@ async fn f13_b04_unconfigured_search_refuses_without_http_and_gates_on_configure
         },
     )
     .unwrap();
-    harness.run_until(|world| work_search_result_contains(world, "Configured Hit", false));
+    harness.run_until(|world| {
+        search_result_contains::<crate::host::agent::WorkAgent>(world, "Configured Hit", false)
+    });
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     server.abort();
 }
@@ -648,7 +649,7 @@ async fn exa_and_tavily_work_end_to_end_and_switch_cleanly_in_work_agent() {
     )
     .unwrap();
     harness.run_until(|world| {
-        work_search_result_contains(world, "Exa Live Hit", false)
+        search_result_contains::<crate::host::agent::WorkAgent>(world, "Exa Live Hit", false)
             && companion_replied_with(world, "Exa完了")
     });
 
@@ -676,7 +677,9 @@ async fn exa_and_tavily_work_end_to_end_and_switch_cleanly_in_work_agent() {
         },
     )
     .unwrap();
-    harness.run_until(|world| work_search_result_contains(world, "Tavily Live Hit", false));
+    harness.run_until(|world| {
+        search_result_contains::<crate::host::agent::WorkAgent>(world, "Tavily Live Hit", false)
+    });
 
     // 1 probe + 1 WorkAgent search each = 2 hits per provider.
     assert_eq!(exa_hits.load(Ordering::SeqCst), 2);
@@ -714,15 +717,163 @@ fn the_tool_arguments_schema_is_derived_without_drift() {
     // Pinned because this schema is the LLM tool-calling contract: the model
     // sees exactly these keys and this required set.
     assert_eq!(
-        WebSearch::schema_for_arguments(),
+        tool::argument_schema(),
         json!({
             "type": "object",
             "properties": {
                 "query": {"type": "string", "minLength": 1, "maxLength": MAX_QUERY_CHARS},
-                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTS, "default": DEFAULT_RESULTS},
+                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTS},
             },
             "required": ["query"],
             "additionalProperties": false,
         })
     );
+}
+
+fn configure_test_search(harness: &crate::host::tests::Harness, endpoint: String) {
+    let store = harness.store();
+    let repo = store.settings_repo();
+    let settings = repo.settings().unwrap();
+    let revision = settings
+        .connections
+        .iter()
+        .find(|connection| connection.id.as_str() == "search-1")
+        .map_or(0, |connection| connection.revision);
+    let connection = search_test_connection(
+        "search-1",
+        "Local Search",
+        "searxng",
+        endpoint,
+        CredentialState::Absent,
+        5,
+    );
+    repo.update_settings(settings.revision, &[(connection, revision)])
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_companion_answers_a_quick_search_in_its_own_turn() {
+    use crate::host::{agent::CompanionAgent, tests::Harness};
+    use rig_core::test_utils::MockStreamEvent;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let (address, server) = spawn_searx_test_server(Arc::clone(&hits)).await;
+    let mut harness = Harness::new([
+        vec![
+            MockStreamEvent::tool_call("call", NAME, json!({"query": "ene"})),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            MockStreamEvent::text("出典は https://ok.example/ です"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+    ]);
+    configure_test_search(&harness, format!("http://{address}/searx"));
+    harness
+        .store()
+        .policy_repo()
+        .apply_policy_rules(
+            &[ene_policy::PolicyRule {
+                id: "allow-fixture".into(),
+                tool_name: NAME.into(),
+                pattern: "127.0.0.1".into(),
+                effect: ene_policy::PolicyEffect::Allow,
+                created_at: util::now(),
+            }],
+            &[],
+        )
+        .unwrap();
+    harness.accept("search", "今すぐ調べて").unwrap();
+    harness.run_until(|world| companion_replied_with(world, "出典は https://ok.example/ です"));
+    assert!(search_result_contains::<CompanionAgent>(
+        harness.app.world_mut(),
+        "https://ok.example/",
+        false,
+    ));
+    let world = harness.app.world_mut();
+    assert!(
+        world
+            .query::<&crate::host::agent::WorkAgent>()
+            .iter(world)
+            .next()
+            .is_none()
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_search_cannot_send_the_query_after_its_connection_changes() {
+    use crate::host::{agent::CompanionAgent, permission, tests::Harness};
+    use rig_core::test_utils::MockStreamEvent;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let original_hits = Arc::new(AtomicUsize::new(0));
+    let replacement_hits = Arc::new(AtomicUsize::new(0));
+    let (original, original_server) = spawn_searx_test_server(Arc::clone(&original_hits)).await;
+    let (replacement, replacement_server) =
+        spawn_searx_test_server(Arc::clone(&replacement_hits)).await;
+    let mut harness = Harness::new([
+        vec![
+            MockStreamEvent::tool_call("call", NAME, json!({"query": "ene"})),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            MockStreamEvent::text("検索接続が変わりました"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+    ]);
+    configure_test_search(&harness, format!("http://{original}/searx"));
+    harness
+        .store()
+        .policy_repo()
+        .apply_policy_rules(
+            &[ene_policy::PolicyRule {
+                id: "confirm-fixture".into(),
+                tool_name: NAME.into(),
+                pattern: "*".into(),
+                effect: ene_policy::PolicyEffect::Confirm,
+                created_at: util::now(),
+            }],
+            &[],
+        )
+        .unwrap();
+    harness.accept("search", "今すぐ調べて").unwrap();
+    let store = harness.store();
+    let approvals = || {
+        store
+            .approval_repo()
+            .approvals(permission::ApprovalStatus::Pending)
+            .unwrap()
+    };
+    harness.run_until(|_| approvals().len() == 1);
+    assert_eq!(original_hits.load(Ordering::SeqCst), 0);
+    configure_test_search(&harness, format!("http://{replacement}/searx"));
+    let request_id = approvals()[0].request_id.clone();
+    let error = permission::submit_with_outcome(
+        harness.app.world_mut(),
+        permission::ApprovalRequest::Operator(&request_id),
+        permission::ApprovalDecision::AlwaysApprove,
+    )
+    .err()
+    .expect("the approval must expire if the search destination changed");
+    assert!(error.to_string().contains("search connection changed"));
+    assert_eq!(
+        store
+            .approval_repo()
+            .approval(&request_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        permission::ApprovalStatus::Expired
+    );
+    assert_eq!(store.policy_repo().policy_rules().unwrap().len(), 1);
+    harness.run_until(|world| {
+        search_result_contains::<CompanionAgent>(world, "search connection changed", true)
+    });
+    assert_eq!(original_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(replacement_hits.load(Ordering::SeqCst), 0);
+    original_server.abort();
+    replacement_server.abort();
 }

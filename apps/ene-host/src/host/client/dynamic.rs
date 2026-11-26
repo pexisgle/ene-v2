@@ -28,7 +28,7 @@ use crate::host::{
     db::{Result, Store},
     error::HostError,
     permission::CallBinding,
-    resources::{CompanionAgent, GrantedCompanionTools},
+    resources::CompanionAgent,
 };
 use bevy_ecs::prelude::*;
 use ene_domain::json;
@@ -41,7 +41,7 @@ use rig_core::{
 };
 use rig_ecs::prelude::*;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::sync::{mpsc, oneshot};
 
 /// How many capability calls may queue before a handler waits.
@@ -66,12 +66,6 @@ pub(crate) struct CapabilityTool {
     pub(crate) spec: CapabilitySpec,
     /// Every active companion/client this definition serves.
     pub(crate) bindings: Vec<CapabilityBinding>,
-}
-
-/// The capability tool entities currently published, by tool name.
-#[derive(Resource, Default)]
-pub(crate) struct CapabilityTools {
-    pub(crate) entities: HashMap<String, Entity>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -268,70 +262,58 @@ pub(crate) fn sync_tools(world: &mut World) -> Result<()> {
             .map_err(|_| HostError::Internal(("a capability tool name was empty").into()))?;
         wanted.push((name, tool_name, tool, parameters));
     }
-    let published = world.resource::<CapabilityTools>().entities.clone();
-    let mut stale = Vec::new();
-    for (name, entity) in &published {
-        let keep = wanted.iter().any(|(wanted_name, _, tool, _)| {
-            wanted_name == name
-                && world
-                    .get::<CapabilityTool>(*entity)
-                    .is_some_and(|current| current == tool)
-        });
-        if !keep && let Ok(mut current) = world.get_entity_mut(*entity) {
-            current.insert(Disabled);
-            stale.push(*entity);
-        }
+    let mut unchanged = HashSet::new();
+    let stale: Vec<_> = world
+        .query::<(Entity, &CapabilityTool)>()
+        .iter(world)
+        .filter_map(|(entity, current)| {
+            if wanted.iter().any(|(_, _, tool, _)| current == tool) {
+                unchanged.insert(current.spec.tool_name.clone());
+                None
+            } else {
+                Some(entity)
+            }
+        })
+        .collect();
+    for entity in &stale {
+        world.entity_mut(*entity).insert(Disabled);
     }
     let (calls, wake) = {
         let calls = world.resource::<CapabilityCalls>();
         (calls.sender.clone(), calls.wake.clone())
     };
-    let mut entities = HashMap::with_capacity(wanted.len());
     let mut spawned: Vec<Entity> = Vec::new();
     for (name, tool_name, tool, parameters) in wanted {
-        let existing = published.get(&name).copied().filter(|entity| {
-            !stale.contains(entity)
-                && world
-                    .get::<CapabilityTool>(*entity)
-                    .is_some_and(|current| current == &tool)
+        if unchanged.contains(&name) {
+            continue;
+        }
+        let description = tool.spec.tool_description();
+        let definition = rig_core::completion::ToolDefinition::new(
+            tool_name,
+            description.clone(),
+            parameters.clone(),
+        );
+        let handler = ErasedHandler::new(CapabilityHandler {
+            name: name.clone(),
+            description,
+            parameters,
+            calls: calls.clone(),
+            wake: wake.clone(),
         });
-        let entity = match existing {
-            Some(entity) => entity,
-            None => {
-                let definition = rig_core::completion::ToolDefinition::new(
-                    tool_name,
-                    tool.spec.tool_description(),
-                    parameters.clone(),
-                );
-                let handler = ErasedHandler::new(CapabilityHandler {
-                    name: name.clone(),
-                    description: tool.spec.tool_description(),
-                    parameters,
-                    calls: calls.clone(),
-                    wake: wake.clone(),
-                });
-                let Some(entity) = world.spawn_tool(definition, handler, ToolOptions::default())
-                else {
-                    rollback(world, &spawned, &stale);
-                    return Err(HostError::Conflict(format!(
-                        "tool name `{name}` is already registered"
-                    )));
-                };
-                world.entity_mut(entity).insert(tool);
-                spawned.push(entity);
-                entity
-            }
+        let Some(entity) = world.spawn_tool(definition, handler, ToolOptions::default()) else {
+            rollback(world, &spawned, &stale);
+            return Err(HostError::Conflict(format!(
+                "tool name `{name}` is already registered"
+            )));
         };
-        entities.insert(name, entity);
+        world.entity_mut(entity).insert(tool);
+        spawned.push(entity);
     }
     for entity in stale {
         if let Ok(entity) = world.get_entity_mut(entity) {
             entity.despawn();
         }
     }
-    world.resource_mut::<CapabilityTools>().entities = entities.clone();
-    let granted = granted_names(world, &entities);
-    world.insert_resource(GrantedCompanionTools(granted));
     crate::host::tools::sync::sync_access(world);
     Ok(())
 }
@@ -349,30 +331,6 @@ fn rollback(world: &mut World, spawned: &[Entity], stale: &[Entity]) {
             entity.remove::<Disabled>();
         }
     }
-}
-
-/// The capability tool names each companion's active client grants.
-fn granted_names(
-    world: &World,
-    entities: &HashMap<String, Entity>,
-) -> HashMap<String, Vec<String>> {
-    let mut granted: HashMap<String, Vec<String>> = HashMap::new();
-    for (name, entity) in entities {
-        let Some(tool) = world.get::<CapabilityTool>(*entity) else {
-            continue;
-        };
-        for binding in &tool.bindings {
-            granted
-                .entry(binding.companion_id.clone())
-                .or_default()
-                .push(name.clone());
-        }
-    }
-    for names in granted.values_mut() {
-        names.sort();
-        names.dedup();
-    }
-    granted
 }
 
 /// Startup: publishes the tools of the clients restored as active.
@@ -403,14 +361,11 @@ pub(crate) fn tool_spec_for(
     client: &Client,
     tool_name: &str,
 ) -> Result<Option<CapabilitySpec>> {
-    let published = {
-        let mut query = world.query::<(&ToolDef, &CapabilityTool)>();
-        query
-            .iter(world)
-            .find(|(definition, _)| definition.0.name.as_str() == tool_name)
-            .map(|(definition, tool)| (definition.0.clone(), tool.clone()))
-    };
-    let Some((definition, tool)) = published else {
+    let mut published = world.query::<(&ToolDef, &CapabilityTool)>();
+    let Some((ToolDef(definition), tool)) = published
+        .iter(world)
+        .find(|(definition, _)| definition.0.name.as_str() == tool_name)
+    else {
         return Ok(None);
     };
     if !tool

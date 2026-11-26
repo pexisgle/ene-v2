@@ -622,14 +622,12 @@ fn moving_the_active_client_moves_the_published_tools() {
         published_tool(harness.app.world_mut(), "body_motion"),
         Some("c1".into())
     );
+    let world = harness.app.world_mut();
     assert!(
-        !harness
-            .app
-            .world()
-            .resource::<client::CapabilityTools>()
-            .entities
-            .keys()
-            .any(|name| name.starts_with("ene_cap_")),
+        world
+            .query::<&client::dynamic::CapabilityTool>()
+            .iter(world)
+            .all(|tool| !tool.spec.tool_name.starts_with("ene_cap_")),
         "the fixed capability slots are gone"
     );
     activate(harness.app.world_mut(), &harness.companion, "c2");
@@ -680,13 +678,13 @@ fn moving_the_active_client_moves_the_published_tools() {
     )
     .unwrap();
     assert_eq!(published_tool(harness.app.world_mut(), "body_motion"), None);
+    let world = harness.app.world_mut();
     assert!(
-        harness
-            .app
-            .world()
-            .resource::<client::CapabilityTools>()
-            .entities
-            .is_empty()
+        world
+            .query::<&client::dynamic::CapabilityTool>()
+            .iter(world)
+            .next()
+            .is_none()
     );
 }
 

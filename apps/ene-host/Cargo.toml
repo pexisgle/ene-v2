@@ -15,6 +15,7 @@ async-stream.workspace = true
 axum.workspace = true
 base64.workspace = true
 bevy_ecs.workspace = true
+bevy_tasks = "0.20.1"
 bytes.workspace = true
 connectrpc = { workspace = true, features = ["axum"] }
 crossbeam-channel = "0.5"

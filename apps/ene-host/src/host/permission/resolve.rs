@@ -99,6 +99,7 @@ type CandidateResolution = (CandidateAction, Option<String>, Option<String>);
 
 pub(super) enum CandidateOutcome {
     Resolved(Box<CandidateResolution>),
+    Search(CandidateAction, crate::host::web_search::SearchBinding),
     NeedsDeviceClient,
     Refuse(String),
 }
@@ -131,21 +132,10 @@ pub(super) fn build_candidate_action(ctx: &GateContext, item: &GateCall) -> Cand
             Ok(resolved) => resolved,
             Err(reason) => return CandidateOutcome::Refuse(reason.to_string()),
         };
-        let query = item
-            .arguments
-            .get("query")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        return CandidateOutcome::Resolved(Box::new((
-            CandidateAction::WebSearch {
-                endpoint: resolved.endpoint,
-                query,
-                input: item.arguments.clone(),
-            },
-            None,
-            None,
-        )));
+        return CandidateOutcome::Search(
+            resolved.binding.action(&item.arguments),
+            resolved.binding,
+        );
     }
     CandidateOutcome::NeedsDeviceClient
 }

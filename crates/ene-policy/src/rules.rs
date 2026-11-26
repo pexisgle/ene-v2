@@ -44,7 +44,7 @@ pub struct PolicyRule {
     /// The tool the approved call would invoke.
     /// Tool or capability the rule applies to; `*` matches any, a trailing `*` is a prefix.
     pub tool_name: String,
-    /// `*`, an exact canonical JSON invocation, `exact_sha256:<hex>`, or a typed target pattern.
+    /// `*`, an exact canonical JSON invocation, a scoped digest, or a typed target pattern.
     pub pattern: String,
     /// What the rule decides when it matches.
     pub effect: PolicyEffect,
@@ -199,6 +199,15 @@ pub fn canonicalise(tool_name: &str, arguments: &Value) -> (String, Vec<u8>) {
 /// Lowercase hex of a digest, as stored in rule patterns.
 pub fn hex_digest(bytes: &[u8]) -> String {
     hex::encode(bytes)
+}
+
+/// An exact Web search rule, scoped to the destination and the arguments the user approved.
+pub fn approved_search_pattern(endpoint: &str, arguments: &Value) -> String {
+    let scoped = serde_json::json!({ "endpoint": endpoint, "arguments": arguments });
+    format!(
+        "search_sha256:{}",
+        hex_digest(&canonicalise(WEB_SEARCH_TOOL, &scoped).1)
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -404,6 +413,11 @@ fn matches_action(rule: &PolicyRule, action: &ActionMatch<'_>) -> bool {
     }
     if let Some(expected_hex) = rule.pattern.strip_prefix("exact_sha256:") {
         return expected_hex == action.raw_hash_hex;
+    }
+    if rule.pattern.starts_with("search_sha256:") {
+        return action.tool_name == WEB_SEARCH_TOOL
+            && matches!(action.typed_target, ActionTarget::Url { url, .. }
+                if rule.pattern == approved_search_pattern(url, action.raw_arguments));
     }
     if rule.pattern.starts_with('{') {
         return serde_json::from_str::<Value>(&rule.pattern)

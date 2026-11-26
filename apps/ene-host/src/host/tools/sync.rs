@@ -1,6 +1,7 @@
 //! Synchronizes model-facing `ToolAccess` across companion and work agents.
 use crate::host::{
-    resources::{CompanionAgent, GrantedCompanionTools, HostExternalTool, WorkAgent},
+    client::dynamic::CapabilityTool,
+    resources::{CompanionAgent, HostExternalTool, WorkAgent},
     web_search,
 };
 use bevy_ecs::{prelude::*, schedule::common_conditions::any_match_filter};
@@ -24,7 +25,7 @@ pub(crate) struct ToolsSyncPlugin;
 
 impl Plugin for ToolsSyncPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<GrantedCompanionTools>().add_systems(
+        app.add_systems(
             Update,
             update_access
                 .run_if(any_match_filter::<Or<(Added<CompanionAgent>, Added<WorkAgent>)>>)
@@ -39,12 +40,12 @@ fn sorted_access<'a>(names: impl Iterator<Item = &'a str>) -> ToolAccess {
     ToolAccess::only(names)
 }
 
-fn parent_access(granted: &[String]) -> ToolAccess {
+fn parent_access(granted: &[&str]) -> ToolAccess {
     let builtins = BUILTIN_TOOLS
         .iter()
         .copied()
-        .filter(|name| !matches!(*name, "report" | web_search::NAME));
-    sorted_access(builtins.chain(granted.iter().map(String::as_str)))
+        .filter(|&name| name != "report");
+    sorted_access(builtins.chain(granted.iter().copied()))
 }
 
 fn hand_access<'a>(external: impl Iterator<Item = &'a ToolDef>) -> ToolAccess {
@@ -89,19 +90,26 @@ type ToolAgents<'w, 's> = Query<
 >;
 
 fn update_access(
-    grants: Option<Res<GrantedCompanionTools>>,
+    capabilities: Query<&CapabilityTool>,
     external: Query<&ToolDef, With<HostExternalTool>>,
     agents: ToolAgents<'_, '_>,
     mut commands: Commands,
 ) {
     let hand = hand_access(external.iter());
-    let grants = grants.map(Res::into_inner);
+    let mut grants = std::collections::HashMap::<&str, Vec<&str>>::new();
+    for tool in &capabilities {
+        for binding in &tool.bindings {
+            grants
+                .entry(binding.companion_id.as_str())
+                .or_default()
+                .push(tool.spec.tool_name.as_str());
+        }
+    }
     for (entity, companion, current) in &agents {
         let access = match companion {
             Some(companion) => Cow::Owned(parent_access(
                 grants
-                    .as_ref()
-                    .and_then(|grants| grants.0.get(&companion.companion_id))
+                    .get(companion.companion_id.as_str())
                     .map_or(&[], Vec::as_slice),
             )),
             None => Cow::Borrowed(&hand),

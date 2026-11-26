@@ -5,11 +5,13 @@ use crate::host::{
     error::{HostError, Result},
     notify::Notifier,
     resources::CompanionAgent,
+    web_search::{self, SearchBinding, SearchConfigError},
 };
 use bevy_ecs::prelude::*;
 use ene_policy::{
     Approval, ApprovalDecision, ApprovalStatus, CandidateAction, PolicyEffect, PolicyRule, Verdict,
-    canonicalise, decide_action, extract_target, hard_denied_action, hex_digest,
+    approved_search_pattern, canonicalise, decide_action, extract_target, hard_denied_action,
+    hex_digest,
 };
 use ene_rpc as w;
 use rig_ecs::prelude::*;
@@ -156,14 +158,17 @@ fn persist_always_allow_rule(
     store: &Store,
     notifier: &mut Notifier,
     approval: &Approval,
+    pattern: Option<String>,
 ) -> Result<()> {
-    let pattern = if approval.normalized_arguments.trim().is_empty() {
-        "*".to_owned()
-    } else if approval.normalized_arguments.chars().count() <= 4_000 {
-        approval.normalized_arguments.clone()
-    } else {
-        format!("exact_sha256:{}", hex_digest(&approval.action_payload_hash))
-    };
+    let pattern = pattern.unwrap_or_else(|| {
+        if approval.normalized_arguments.trim().is_empty() {
+            "*".to_owned()
+        } else if approval.normalized_arguments.chars().count() <= 4_000 {
+            approval.normalized_arguments.clone()
+        } else {
+            format!("exact_sha256:{}", hex_digest(&approval.action_payload_hash))
+        }
+    });
     let rule = PolicyRule {
         id: uuid::Uuid::new_v4().to_string(),
         tool_name: approval.tool_name.clone(),
@@ -181,6 +186,88 @@ fn persist_always_allow_rule(
         })),
     );
     Ok(())
+}
+
+fn search_approval_pattern(
+    binding: Option<&SearchBinding>,
+    store: &Store,
+    credentials: Option<&crate::host::model::Credentials>,
+    providers: &crate::host::providers::Providers,
+    arguments: &Value,
+) -> Result<String> {
+    let changed = || HostError::Conflict(SearchConfigError::ConnectionChanged.to_string());
+    let binding = binding.ok_or_else(changed)?;
+    binding
+        .current(store, credentials, providers)
+        .map_err(|error| match error {
+            SearchConfigError::Settings(error) => error.into(),
+            _ => changed(),
+        })?;
+    let rules = store.policy_repo().policy_rules()?;
+    if let Verdict::Deny { reason } = decide_action(&rules, &binding.action(arguments)) {
+        return Err(HostError::Permission(reason));
+    }
+    Ok(approved_search_pattern(&binding.endpoint, arguments))
+}
+
+fn approve_call(
+    world: &mut World,
+    store: &Store,
+    approval: &Approval,
+    call: Entity,
+    name: &str,
+    arguments: Value,
+) -> Result<(Approval, Option<String>)> {
+    let repo = store.approval_repo();
+    let request_id = &approval.request_id;
+    let pattern = if name == web_search::NAME {
+        let fallback = crate::host::providers::Providers::default();
+        match search_approval_pattern(
+            world.get::<SearchBinding>(call),
+            store,
+            world.get_resource(),
+            world.get_resource().unwrap_or(&fallback),
+            &arguments,
+        ) {
+            Ok(pattern) => Some(pattern),
+            Err(error) => {
+                let status = match error {
+                    HostError::Conflict(_) => ApprovalStatus::Expired,
+                    HostError::Permission(_) => ApprovalStatus::Denied,
+                    _ => return Err(error),
+                };
+                repo.resolve_approval(request_id, status)?;
+                release(world, request_id);
+                refuse(world, call, &error.to_string());
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
+    let binding = world.get::<CallBinding>(call);
+    let rebound = match validate_bound_approval_client(store, approval, binding, name, arguments)? {
+        BoundClientCheck::Allowed(client) => client,
+        BoundClientCheck::Denied(reason) => {
+            repo.resolve_approval(request_id, ApprovalStatus::Denied)?;
+            release(world, request_id);
+            refuse(world, call, &reason);
+            return Err(HostError::Permission(reason));
+        }
+    };
+    let resolved = repo.resolve_approval_with_client(
+        request_id,
+        ApprovalStatus::Approved,
+        rebound.as_deref(),
+    )?;
+    release(world, request_id);
+    if let Some(target) = rebound
+        && let Some(mut binding) = world.get_mut::<CallBinding>(call)
+    {
+        binding.client_id = target;
+    }
+    world.entity_mut(call).insert(Approved);
+    Ok((resolved, pattern))
 }
 
 /// Checks the approval scope, live call hash and current grants before committing the decision.
@@ -213,9 +300,10 @@ pub(crate) fn submit_with_outcome(
         ));
     };
     let snapshot = world.get::<ToolRequest>(hold.call).and_then(|request| {
-        let name = request.call.function.name.as_str();
+        let name = request.call.function.name.clone();
         let args = Value::Object(request.call.function.arguments.clone());
-        (canonicalise(name, &args).1 == approval.action_payload_hash).then_some((name, args))
+        (canonicalise(name.as_str(), &args).1 == approval.action_payload_hash)
+            .then_some((name, args))
     });
     let Some((name, args)) = snapshot else {
         repo.resolve_approval(request_id, ApprovalStatus::Expired)?;
@@ -230,42 +318,24 @@ pub(crate) fn submit_with_outcome(
         ));
     };
 
-    let approval = match decision {
+    let (approval, saved_pattern) = match decision {
         ApprovalDecision::Approve | ApprovalDecision::AlwaysApprove => {
-            let binding = world.get::<CallBinding>(hold.call);
-            let rebound_client =
-                match validate_bound_approval_client(&store, &approval, binding, name, args)? {
-                    BoundClientCheck::Allowed(client) => client,
-                    BoundClientCheck::Denied(reason) => {
-                        repo.resolve_approval(request_id, ApprovalStatus::Denied)?;
-                        release(world, request_id);
-                        refuse(world, hold.call, &reason);
-                        return Err(HostError::Permission(reason));
-                    }
-                };
-            let approval = repo.resolve_approval_with_client(
-                request_id,
-                ApprovalStatus::Approved,
-                rebound_client.as_deref(),
-            )?;
-            release(world, request_id);
-            if let Some(target) = rebound_client
-                && let Some(mut binding) = world.get_mut::<CallBinding>(hold.call)
-            {
-                binding.client_id = target;
-            }
-            world.entity_mut(hold.call).insert(Approved);
-            approval
+            approve_call(world, &store, &approval, hold.call, name.as_str(), args)?
         }
         ApprovalDecision::Deny | ApprovalDecision::Unspecified => {
             let approval = repo.resolve_approval(request_id, ApprovalStatus::Denied)?;
             release(world, request_id);
             refuse(world, hold.call, "the user denied this operation");
-            approval
+            (approval, None)
         }
     };
     let rule = if matches!(decision, ApprovalDecision::AlwaysApprove) {
-        match persist_always_allow_rule(&store, &mut world.resource_mut::<Notifier>(), &approval) {
+        match persist_always_allow_rule(
+            &store,
+            &mut world.resource_mut::<Notifier>(),
+            &approval,
+            saved_pattern,
+        ) {
             Ok(()) => RuleSave::Saved,
             Err(error) => {
                 let message = error.to_string();

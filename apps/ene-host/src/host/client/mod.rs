@@ -52,7 +52,6 @@ use ene_rpc as w;
 use rig_ecs::prelude::*;
 use serde_json::Value;
 
-pub(crate) use dynamic::CapabilityTools;
 pub(crate) use perception::ingest_perception;
 #[cfg(test)]
 pub(crate) use perception::report_perception;
@@ -94,7 +93,6 @@ impl Plugin for ClientPlugin {
         )
         .insert_resource(dynamic::CapabilityCalls::new(wake))
         .init_resource::<CapabilityPolicy>()
-        .init_resource::<CapabilityTools>()
         .init_resource::<computer::ComputerUse>()
         .init_resource::<super::eyes::Eyes>()
         .add_systems(

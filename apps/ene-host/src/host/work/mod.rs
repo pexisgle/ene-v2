@@ -87,7 +87,6 @@ impl Plugin for WorkPlugin {
     fn build(&self, app: &mut App) {
         tools::register(app);
         skills::register(app);
-        super::web_search::register(app);
         app.init_resource::<Runs>()
             .init_resource::<Receipts>()
             .init_resource::<hand::Hands>()
