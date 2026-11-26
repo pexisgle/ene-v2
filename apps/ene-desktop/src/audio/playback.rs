@@ -177,7 +177,7 @@ impl Player {
                     fill_with(
                         output,
                         channels,
-                        PlaybackSink {
+                        &PlaybackSink {
                             deck: &sink,
                             level: &rms,
                             muted: &out_muted,
@@ -195,7 +195,7 @@ impl Player {
                     fill_with(
                         output,
                         channels,
-                        PlaybackSink {
+                        &PlaybackSink {
                             deck: &sink,
                             level: &rms,
                             muted: &out_muted,
@@ -213,7 +213,7 @@ impl Player {
                     fill_with(
                         output,
                         channels,
-                        PlaybackSink {
+                        &PlaybackSink {
                             deck: &sink,
                             level: &rms,
                             muted: &out_muted,
@@ -308,7 +308,7 @@ pub(super) struct PlaybackSink<'a> {
 pub(super) fn fill_with<T: Copy>(
     output: &mut [T],
     channels: usize,
-    sink: PlaybackSink<'_>,
+    sink: &PlaybackSink<'_>,
     silence: T,
     to_device: impl Fn(f32) -> T,
 ) {

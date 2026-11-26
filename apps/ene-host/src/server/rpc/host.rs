@@ -256,18 +256,26 @@ impl w::HostService for Services {
     }
 
     read_id!(get_mind, w::MindView, mind::mind_view);
-    request!(
-        update_mind_profile,
-        w::UpdateMindProfileRequest,
-        w::MindView,
-        mind::update_profile
-    );
-    request!(
-        control_memory,
-        w::MemoryControlRequest,
-        w::MemoryControlResult,
-        mind::control_memory
-    );
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "update_mind_profile", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn update_mind_profile(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::UpdateMindProfileRequest>,
+    ) -> connectrpc::ServiceResult<w::MindView> {
+        let request = request.to_owned_message();
+        self.call(move |app| mind::update_profile(app.world_mut(), &request))
+            .await
+    }
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "control_memory", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn control_memory(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::MemoryControlRequest>,
+    ) -> connectrpc::ServiceResult<w::MemoryControlResult> {
+        let request = request.to_owned_message();
+        self.call(move |app| mind::control_memory(app.world_mut(), &request))
+            .await
+    }
     request!(store list_memories, w::ListMemoriesRequest, w::Memories, mind::list_memories);
 }
 
@@ -336,7 +344,7 @@ mod tests {
                     "ene",
                     "eyes",
                     "screen_received",
-                    serde_json::json!({"bytes": 10}),
+                    &serde_json::json!({"bytes": 10}),
                 );
                 notifier.push(None, Some("c1"), event("replayed"));
                 Ok(())

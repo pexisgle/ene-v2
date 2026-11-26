@@ -1,5 +1,6 @@
 //! Per-plugin configuration, isolated key-value state, and installed registry entries.
 
+use crate::row::FromRow;
 use crate::{Store, StoreError, error::Result, util::now};
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
@@ -121,7 +122,7 @@ impl<'a> PluginRepo<'a> {
              FROM plugin_entries ORDER BY plugin_id",
         )?;
         let rows = stmt
-            .query_map([], row_to_entry)?
+            .query_map([], PluginEntry::from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -155,7 +156,7 @@ impl<'a> PluginRepo<'a> {
                 "SELECT plugin_id, name, version, path, enabled, installed_at, updated_at \
                  FROM plugin_entries WHERE plugin_id = ?1",
             )?
-            .query_row([plugin_id], row_to_entry)?;
+            .query_row([plugin_id], PluginEntry::from_row)?;
         Ok(entry)
     }
 
@@ -177,7 +178,7 @@ impl<'a> PluginRepo<'a> {
                 "SELECT plugin_id, name, version, path, enabled, installed_at, updated_at \
                  FROM plugin_entries WHERE plugin_id = ?1",
             )?
-            .query_row([plugin_id], row_to_entry)
+            .query_row([plugin_id], PluginEntry::from_row)
             .optional()?;
         if existing.is_some() {
             conn.prepare_cached("DELETE FROM plugin_entries WHERE plugin_id = ?1")?
@@ -191,16 +192,18 @@ impl<'a> PluginRepo<'a> {
     }
 }
 
-fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginEntry> {
-    Ok(PluginEntry {
-        plugin_id: row.get(0)?,
-        name: row.get(1)?,
-        version: row.get(2)?,
-        path: row.get(3)?,
-        enabled: row.get::<_, i64>(4)? != 0,
-        installed_at: row.get(5)?,
-        updated_at: row.get(6)?,
-    })
+impl FromRow for PluginEntry {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(PluginEntry {
+            plugin_id: row.get(0)?,
+            name: row.get(1)?,
+            version: row.get(2)?,
+            path: row.get(3)?,
+            enabled: row.get::<_, i64>(4)? != 0,
+            installed_at: row.get(5)?,
+            updated_at: row.get(6)?,
+        })
+    }
 }
 
 fn validate_state_key(key: &str) -> Result<()> {

@@ -25,7 +25,7 @@ fn fill(
     fill_with(
         output,
         channels,
-        PlaybackSink { deck, level, muted },
+        &PlaybackSink { deck, level, muted },
         0.0f32,
         |s| s,
     );
@@ -42,7 +42,7 @@ fn push_captured(
     push_captured_with(
         input,
         (channels, capacity),
-        CaptureSink {
+        &CaptureSink {
             frames: sink,
             muted,
             level,
@@ -290,7 +290,7 @@ fn i16_only_hardware_range_is_accepted_and_converts_accurately() {
     fill_with(
         &mut output_i16,
         2,
-        PlaybackSink {
+        &PlaybackSink {
             deck: &deck,
             level: &level,
             muted: &muted,
@@ -308,7 +308,7 @@ fn i16_only_hardware_range_is_accepted_and_converts_accurately() {
     push_captured_with(
         &output_i16,
         (2, 16),
-        CaptureSink {
+        &CaptureSink {
             frames: &sink,
             muted: &cap_muted,
             level: &cap_level,

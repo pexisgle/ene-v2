@@ -183,7 +183,7 @@ impl Harness {
     pub(crate) fn accept(&mut self, key: &str, text: &str) -> super::error::Result<String> {
         Ok(chat::accept(
             &mut self.app,
-            w::SendMessageRequest {
+            &w::SendMessageRequest {
                 companion_id: self.companion.clone(),
                 request_key: key.into(),
                 text: text.into(),
@@ -383,7 +383,7 @@ pub(super) fn register(world: &mut World, id: &str, spec: w::ClientCapabilitySpe
     let capability = spec.name.clone();
     client::register(
         world,
-        w::RegisterClientRequest {
+        &w::RegisterClientRequest {
             id: id.into(),
             name: id.into(),
             platform: "linux".into(),
@@ -398,7 +398,7 @@ pub(super) fn register(world: &mut World, id: &str, spec: w::ClientCapabilitySpe
 pub(super) fn activate(world: &mut World, companion: &str, client: &str) -> w::Activation {
     client::activate(
         world,
-        w::ActivationRequest {
+        &w::ActivationRequest {
             companion_id: companion.into(),
             client_id: client.into(),
             ..Default::default()

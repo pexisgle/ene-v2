@@ -4,28 +4,31 @@
 //! guards every insert sit in one place, apart from recall and consolidation.
 
 use super::{FIELDS, MAX_IMPORTANCE};
+use crate::row::FromRow;
 use crate::{StoreError, error::Result, json_column, to_json};
 use ene_mind::{Memory, MemoryRecord};
 use rusqlite::{Row, params};
 
-pub(crate) fn row_to_memory(row: &Row<'_>) -> rusqlite::Result<Memory> {
-    Ok(Memory {
-        id: row.get("id")?,
-        scope: row.get("scope")?,
-        content: row.get("content")?,
-        importance: row.get("importance")?,
-        occurred_at: row.get("occurred_at")?,
-        recorded_at: row.get("recorded_at")?,
-        last_accessed_at: row.get("last_accessed_at")?,
-        memory_revision: row.get("memory_revision")?,
-        content_revision: row.get("content_revision")?,
-        emotion: row.get("emotion")?,
-        source_context: json_column(
-            row,
-            "source_context",
-            "stored memory source context is corrupt",
-        )?,
-    })
+impl FromRow for Memory {
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Memory {
+            id: row.get("id")?,
+            scope: row.get("scope")?,
+            content: row.get("content")?,
+            importance: row.get("importance")?,
+            occurred_at: row.get("occurred_at")?,
+            recorded_at: row.get("recorded_at")?,
+            last_accessed_at: row.get("last_accessed_at")?,
+            memory_revision: row.get("memory_revision")?,
+            content_revision: row.get("content_revision")?,
+            emotion: row.get("emotion")?,
+            source_context: json_column(
+                row,
+                "source_context",
+                "stored memory source context is corrupt",
+            )?,
+        })
+    }
 }
 
 pub(crate) fn check_content(content: &str) -> Result<()> {
@@ -67,7 +70,7 @@ pub(crate) fn insert_row(
                 recorded_at,
                 to_json(&memory.source_context)?,
             ],
-            row_to_memory,
+            Memory::from_row,
         )
         .map_err(Into::into)
 }

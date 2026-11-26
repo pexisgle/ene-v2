@@ -20,7 +20,7 @@ pub(super) struct ModelRoleChoices<'a> {
 pub(super) fn render_advanced_roles_panel(
     pane: &mut ConnectionsPane,
     companion: Option<&Companion>,
-    choices: ModelRoleChoices<'_>,
+    choices: &ModelRoleChoices<'_>,
     live: bool,
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
@@ -42,7 +42,7 @@ pub(super) fn render_advanced_roles_panel(
             };
             render_model_role_row(
                 pane,
-                ModelRoleRowCtx {
+                &ModelRoleRowCtx {
                     idx,
                     slot,
                     assignments: &assignments,
@@ -58,7 +58,7 @@ pub(super) fn render_advanced_roles_panel(
     for spec in voice_role_specs(&roles_ctx) {
         rows.push(render_voice_role_row(
             pane,
-            spec,
+            &spec,
             &roles_ctx.conn_names,
             live,
             theme,
@@ -105,7 +105,7 @@ struct ModelRoleRowCtx<'a> {
 
 fn render_model_role_row(
     pane: &mut ConnectionsPane,
-    row: ModelRoleRowCtx<'_>,
+    row: &ModelRoleRowCtx<'_>,
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
 ) -> AnyElement {
@@ -115,7 +115,7 @@ fn render_model_role_row(
         assignments,
         slot_models,
         live,
-    } = row;
+    } = *row;
     let current = slot.current(assignments);
     let current_text = current.as_ref().map_or_else(
         || slot.fallback_hint().to_owned(),

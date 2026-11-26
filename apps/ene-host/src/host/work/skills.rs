@@ -169,7 +169,7 @@ mod tests {
 
         crate::host::work::start(
             harness.app.world_mut(),
-            ene_rpc::StartWorkRequest {
+            &ene_rpc::StartWorkRequest {
                 companion_id: harness.companion.clone(),
                 instruction: "手順を保存して確認して".into(),
                 ..Default::default()

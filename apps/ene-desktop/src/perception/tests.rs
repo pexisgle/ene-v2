@@ -63,13 +63,13 @@ fn a_rule_parses_only_from_a_complete_declaration() {
         "notify_on": "focus",
         "enabled": true,
     });
-    assert!(Watch::parse(&complete).is_ok());
+    assert!(serde_json::from_value::<Watch>(complete.clone()).is_ok());
     let mut incomplete = complete.clone();
     incomplete.as_object_mut().unwrap().remove("notify_on");
-    assert!(Watch::parse(&incomplete).is_err());
+    assert!(serde_json::from_value::<Watch>(incomplete).is_err());
     let mut unknown = complete;
     unknown["extra"] = serde_json::json!(1);
-    assert!(Watch::parse(&unknown).is_err());
+    assert!(serde_json::from_value::<Watch>(unknown).is_err());
 }
 
 /// The parent must be woken on the transition into a match, not on every

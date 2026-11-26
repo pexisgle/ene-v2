@@ -144,7 +144,7 @@ fn render_add_plugin_panel(
                     theme,
                     move |_, cx| {
                         let path = path_val.clone();
-                        hub_install.update(cx, |h, cx| h.install_plugin(path, cx));
+                        hub_install.update(cx, |h, cx| h.install_plugin(&path, cx));
                         draft_clear.update(cx, crate::input::Draft::clear);
                         pane_close.update(cx, |this, cx| {
                             this.form.adding_plugin_open = false;
@@ -313,7 +313,7 @@ fn render_remote_host_form(
                         let tok = tok_val.clone();
                         hub_save_remote.update(cx, |h, cx| {
                             ene_domain::warn_if_err(
-                                h.save_remote_host(ep, tok, cx),
+                                h.save_remote_host(&ep, &tok, cx),
                                 "remote host save",
                             );
                         });

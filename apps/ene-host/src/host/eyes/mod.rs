@@ -349,7 +349,7 @@ pub(crate) fn poll(world: &mut World) {
                         notifier,
                         companion_id,
                         "evaluated",
-                        json!({
+                        &json!({
                             "image": frame_id.is_some(), "input": input, "frame_id": frame_id,
                             "decision": decision, "summary": summary,
                         }),

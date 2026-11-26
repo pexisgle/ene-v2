@@ -328,7 +328,7 @@ pub(crate) fn submit_with_outcome(
                 }
             };
             if let Some(fatal) = rule_outcome.fatal_storage {
-                crate::host::fail(world, fatal);
+                crate::host::fail(world, &fatal);
             }
             notify_resolved(&mut world.resource_mut::<Notifier>(), &approval);
             Ok(SubmitOutcome {
@@ -366,7 +366,7 @@ pub(crate) fn resolve_approval(
     world: &mut World,
     agent: Entity,
     _call_id: &str,
-    args: ResolveApprovalArgs,
+    args: &ResolveApprovalArgs,
 ) -> Result<String> {
     let companion_id = world
         .get::<CompanionAgent>(agent)

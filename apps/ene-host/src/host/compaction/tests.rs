@@ -738,7 +738,7 @@ async fn serve_with(summary: &'static str, output: Option<serde_json::Value>) ->
             let extraction = body.contains("\"submit\"");
             seen.lock().push(body);
             let answer = match (&output, extraction) {
-                (Some(output), true) => tool_call(output.clone()),
+                (Some(output), true) => tool_call(&output.clone()),
                 _ => text(summary),
             };
             let head = format!(
@@ -769,7 +769,7 @@ fn text(text: &str) -> String {
     .to_string()
 }
 
-fn tool_call(output: serde_json::Value) -> String {
+fn tool_call(output: &serde_json::Value) -> String {
     serde_json::json!({
         "id": "chatcmpl-extraction",
         "object": "chat.completion",

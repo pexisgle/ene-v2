@@ -1,29 +1,24 @@
 //! Approval requests: persistence, resolution and startup expiry.
 
-use crate::{Store, StoreError, enum_name_column, error::Result, util::now};
+use crate::row::{FromRow, row_fields};
+use crate::{Store, StoreError, error::Result, util::now};
 use ene_policy::{Approval, ApprovalStatus};
-use rusqlite::{Row, params};
+use rusqlite::params;
 
-fn row_to_approval(row: &Row<'_>) -> rusqlite::Result<Approval> {
-    let status = enum_name_column(row, "status", "unknown approval status")?;
-    Ok(Approval {
-        request_id: row.get("request_id")?,
-        session_id: row.get("session_id")?,
-        run_id: row.get("run_id")?,
-        work_id: row.get("work_id")?,
-        action_payload_hash: row.get("action_payload_hash")?,
-        tool_name: row.get("tool_name")?,
-        normalized_arguments: row.get("normalized_arguments")?,
-        status,
-        created_at: row.get("created_at")?,
-        resolved_at: row.get("resolved_at")?,
-        client_id: row.get("client_id")?,
-        capability: row.get("capability")?,
-    })
-}
-
-const COLUMNS: &str = "request_id, session_id, run_id, work_id, action_payload_hash, tool_name, \
-     normalized_arguments, status, created_at, resolved_at, client_id, capability";
+row_fields!(Approval, COLUMNS {
+    request_id,
+    session_id,
+    run_id,
+    work_id,
+    action_payload_hash,
+    tool_name,
+    normalized_arguments,
+    status => enum_name_column("unknown approval status"),
+    created_at,
+    resolved_at,
+    client_id,
+    capability,
+});
 
 /// Repository managing `approval_requests`.
 #[derive(Clone, Copy, Debug)]
@@ -61,7 +56,7 @@ impl<'a> ApprovalRepo<'a> {
         self.0.fetch(
             &format!("SELECT {COLUMNS} FROM approval_requests WHERE request_id = ?1"),
             [request_id],
-            row_to_approval,
+            Approval::from_row,
         )
     }
 
@@ -71,7 +66,7 @@ impl<'a> ApprovalRepo<'a> {
                 "SELECT {COLUMNS} FROM approval_requests WHERE status = ?1 ORDER BY created_at"
             ),
             [status.as_str()],
-            row_to_approval,
+            Approval::from_row,
         )
     }
 
@@ -96,7 +91,7 @@ impl<'a> ApprovalRepo<'a> {
                      WHERE request_id = ?1 AND status = 'pending' RETURNING {COLUMNS}"
                 ),
                 params![request_id, status.as_str(), resolved, client_id],
-                row_to_approval,
+                Approval::from_row,
             )?
             .ok_or_else(|| StoreError::Conflict("approval is missing or no longer pending".into()))
     }

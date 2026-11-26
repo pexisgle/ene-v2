@@ -80,7 +80,7 @@ pub(super) fn open_pod(hub: &mut Hub, mode: Option<PodMode>, cx: &mut Context<Hu
             {
                 return;
             }
-            if open_pod_window(cx, hub).is_some() {
+            if open_pod_window(cx, &hub).is_some() {
                 cx.activate(true);
             }
         });
@@ -274,7 +274,7 @@ fn settings_window_bounds(cx: &gpui::App) -> Bounds<gpui::Pixels> {
 }
 
 /// Opens the floating companion pod window and registers it with `Hub`.
-pub fn open_pod_window(cx: &mut App, hub: Entity<Hub>) -> Option<AnyWindowHandle> {
+pub fn open_pod_window(cx: &mut App, hub: &Entity<Hub>) -> Option<AnyWindowHandle> {
     let mode = hub.read(cx).windows.pod_mode;
     let bounds = initial_pod_bounds_for_mode(mode, cx);
     let hub_for_pod = hub.clone();

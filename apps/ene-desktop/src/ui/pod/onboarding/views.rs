@@ -200,7 +200,7 @@ pub(super) fn render_setup_finish_button(
             let voice_arg = params.voice_id.clone();
             if let (Some(cid), Some(mid)) = (params.conn_id.clone(), params.model_id.clone()) {
                 hub_start.update(cx, |hub, cx| {
-                    hub.complete_setup_selection(cid, mid, name_arg, voice_arg, cx);
+                    hub.complete_setup_selection(cid, &mid, name_arg, voice_arg, cx);
                 });
             } else if params.companions_empty && !params.name.is_empty() {
                 hub_start.update(cx, |hub, cx| {

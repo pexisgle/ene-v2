@@ -41,7 +41,7 @@ pub(super) struct ResourcePickerSpec<'a> {
 
 pub(super) fn render_kind_dropdown_picker(
     pane: &mut ConnectionsPane,
-    input: PickerInput<'_>,
+    input: &PickerInput<'_>,
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
 ) -> Option<gpui::Div> {

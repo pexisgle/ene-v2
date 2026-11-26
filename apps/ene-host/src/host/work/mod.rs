@@ -115,13 +115,13 @@ fn require_session(store: &Store, id: &str) -> Result<WorkSession> {
         .ok_or_else(|| HostError::NotFound(("work session not found").into()))
 }
 
-pub(crate) fn start(world: &mut World, request: w::StartWorkRequest) -> Result<w::WorkSession> {
+pub(crate) fn start(world: &mut World, request: &w::StartWorkRequest) -> Result<w::WorkSession> {
     let store = world.resource::<Store>().clone();
     let companion = require_companion(&store, &request.companion_id)?;
     if request.instruction.trim().is_empty() {
         return Err(HostError::Invalid(("an instruction is required").into()));
     }
-    let client_id = binding_for(&store, &request)?;
+    let client_id = binding_for(&store, request)?;
     let session = WorkSession {
         id: uuid::Uuid::new_v4().to_string(),
         companion_id: ene_domain::CompanionId::parse(companion.id.clone())?,
@@ -184,12 +184,12 @@ pub(crate) fn start_run(
             let outcome = hand::start_run(
                 world,
                 &mut hands,
-                hand::RunStart {
+                &hand::RunStart {
                     session,
                     run: &run,
                     instruction,
                 },
-                adapter,
+                &adapter,
                 running,
             );
             *world.resource_mut::<hand::Hands>() = hands;
@@ -274,7 +274,7 @@ fn binding_for(store: &Store, request: &w::StartWorkRequest) -> Result<Option<St
     Ok(activation.client_id)
 }
 
-pub(crate) fn send(world: &mut World, request: w::SendWorkRequest) -> Result<w::WorkAcceptance> {
+pub(crate) fn send(world: &mut World, request: &w::SendWorkRequest) -> Result<w::WorkAcceptance> {
     let store = world.resource::<Store>().clone();
     let session = require_session(&store, &request.work_id)?;
     if session.status == WorkStatus::Closed {
@@ -336,7 +336,7 @@ pub(crate) fn send(world: &mut World, request: w::SendWorkRequest) -> Result<w::
 fn accepted(
     world: &mut World,
     store: &Store,
-    request: w::SendWorkRequest,
+    request: &w::SendWorkRequest,
     hash: &[u8],
     request_id: String,
 ) -> Result<w::WorkAcceptance> {

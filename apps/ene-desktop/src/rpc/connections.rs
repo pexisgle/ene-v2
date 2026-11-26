@@ -47,7 +47,7 @@ async fn run_connection_probe(host: Host, connection_id: String) -> Update {
                 .unwrap_or_default()
                 .into(),
         },
-        Err(err) => failure("接続確認", err),
+        Err(err) => failure("接続確認", &err),
     }
 }
 

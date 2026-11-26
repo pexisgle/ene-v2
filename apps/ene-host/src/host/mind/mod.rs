@@ -209,7 +209,7 @@ pub(crate) fn mind_view(store: &Store, id: &str) -> Result<w::MindView> {
 
 pub(crate) fn update_profile(
     world: &mut World,
-    request: w::UpdateMindProfileRequest,
+    request: &w::UpdateMindProfileRequest,
 ) -> Result<w::MindView> {
     let store = world.resource::<Store>().clone();
     store
@@ -231,7 +231,7 @@ pub(crate) fn update_profile(
 
 pub(crate) fn control_memory(
     world: &mut World,
-    request: w::MemoryControlRequest,
+    request: &w::MemoryControlRequest,
 ) -> Result<w::MemoryControlResult> {
     let store = world.resource::<Store>().clone();
     let action = match request.action.as_known() {

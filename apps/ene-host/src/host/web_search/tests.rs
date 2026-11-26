@@ -468,7 +468,7 @@ async fn f13_b04_unconfigured_search_refuses_without_http_and_gates_on_configure
     let companion_id = harness.companion.clone();
     crate::host::work::start(
         harness.app.world_mut(),
-        ene_rpc::StartWorkRequest {
+        &ene_rpc::StartWorkRequest {
             companion_id: companion_id.clone(),
             instruction: "検索して".into(),
             ..Default::default()
@@ -524,7 +524,7 @@ async fn f13_b04_unconfigured_search_refuses_without_http_and_gates_on_configure
         .unwrap();
     crate::host::work::start(
         harness.app.world_mut(),
-        ene_rpc::StartWorkRequest {
+        &ene_rpc::StartWorkRequest {
             companion_id,
             instruction: "再検索して".into(),
             ..Default::default()
@@ -640,7 +640,7 @@ async fn exa_and_tavily_work_end_to_end_and_switch_cleanly_in_work_agent() {
 
     crate::host::work::start(
         harness.app.world_mut(),
-        ene_rpc::StartWorkRequest {
+        &ene_rpc::StartWorkRequest {
             companion_id: companion_id.clone(),
             instruction: "Exaで検索して".into(),
             ..Default::default()
@@ -669,7 +669,7 @@ async fn exa_and_tavily_work_end_to_end_and_switch_cleanly_in_work_agent() {
         .unwrap();
     crate::host::work::start(
         harness.app.world_mut(),
-        ene_rpc::StartWorkRequest {
+        &ene_rpc::StartWorkRequest {
             companion_id,
             instruction: "Tavilyで検索して".into(),
             ..Default::default()

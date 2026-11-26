@@ -64,13 +64,13 @@ pub(crate) fn register(app: &mut App) {
         "stop_work",
         "Ask a running task to stop.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, args| stop(world, agent, args)),
+        run_tool(|world, agent, _, args: StopArgs| stop(world, agent, &args)),
     )
     .add_open_tool::<ReportArgs, _>(
         "report",
         "Report progress (`activity`), important update (`message`), a clarifying question for the user (`question`), completion (`completed`), or failure (`failed`). The host binds the session and run.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, args| report(world, agent, args)),
+        run_tool(|world, agent, _, args: ReportArgs| report(world, agent, &args)),
     );
 }
 
@@ -143,7 +143,7 @@ fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
     }
     let session = super::start(
         world,
-        w::StartWorkRequest {
+        &w::StartWorkRequest {
             companion_id: companion,
             instruction: args.instruction,
             ..Default::default()
@@ -173,7 +173,7 @@ fn send(world: &mut World, agent: Entity, args: SendArgs) -> Result<String> {
     let session = own_session(world.resource::<Store>(), &args.work_id, &companion)?;
     let acceptance = super::send(
         world,
-        w::SendWorkRequest {
+        &w::SendWorkRequest {
             work_id: session.id,
             request_key: uuid::Uuid::new_v4().to_string(),
             text: args.text,
@@ -183,7 +183,7 @@ fn send(world: &mut World, agent: Entity, args: SendArgs) -> Result<String> {
     Ok(json!({"request_id": acceptance.request_id}).to_string())
 }
 
-fn stop(world: &mut World, agent: Entity, args: StopArgs) -> Result<String> {
+fn stop(world: &mut World, agent: Entity, args: &StopArgs) -> Result<String> {
     let companion = companion(world.get::<CompanionAgent>(agent))?;
     let session = own_session(world.resource::<Store>(), &args.work_id, &companion)?;
     if session.status == WorkStatus::Closed {
@@ -193,7 +193,7 @@ fn stop(world: &mut World, agent: Entity, args: StopArgs) -> Result<String> {
     Ok(json!({"work_id": session.id, "stopping": true}).to_string())
 }
 
-fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> {
+fn report(world: &mut World, agent: Entity, args: &ReportArgs) -> Result<String> {
     let Some(work) = world.get::<WorkAgent>(agent).cloned() else {
         return Err(HostError::Permission(
             ("report is only available to a running task").into(),
@@ -334,7 +334,7 @@ mod tests {
         };
 
         assert!(
-            super::report(&mut world, agent, args())
+            super::report(&mut world, agent, &args())
                 .unwrap()
                 .contains("\"accepted\":false")
         );
@@ -344,7 +344,7 @@ mod tests {
             companion_id: "ene".into(),
         });
         assert!(
-            super::report(&mut world, agent, args())
+            super::report(&mut world, agent, &args())
                 .unwrap()
                 .contains("\"accepted\":true")
         );

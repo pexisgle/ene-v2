@@ -94,7 +94,7 @@ pub(super) fn backfill(mut commands: Commands, params: BackfillParams<'_>) {
             if error.is_storage() {
                 let message = error.to_string();
                 commands.queue(move |world: &mut World| {
-                    crate::host::fail(world, message);
+                    crate::host::fail(world, &message);
                 });
             }
             return;
@@ -118,7 +118,7 @@ pub(super) fn backfill(mut commands: Commands, params: BackfillParams<'_>) {
                 if error.is_storage() {
                     let message = error.to_string();
                     commands.queue(move |world: &mut World| {
-                        crate::host::fail(world, message);
+                        crate::host::fail(world, &message);
                     });
                     return;
                 }

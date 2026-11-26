@@ -18,7 +18,7 @@ use gpui::{AnyElement, Context, div, prelude::*, px};
 
 pub(super) fn render_companion_editor(
     pane: &mut CompanionsPane,
-    ctx: EditorContext<'_>,
+    ctx: &EditorContext<'_>,
     theme: &Theme,
     cx: &mut Context<CompanionsPane>,
 ) -> AnyElement {
@@ -52,7 +52,7 @@ pub(super) fn render_companion_editor(
     let model_field = render_body_model_field(&id, drafts.body_model_d.clone(), theme);
     let voice_selector = render_voice_selector(
         pane,
-        &ctx,
+        ctx,
         &drafts,
         (
             &voice_key_val,
@@ -62,7 +62,7 @@ pub(super) fn render_companion_editor(
         theme,
         cx,
     );
-    let (disclosure, mind_strip) = render_mind_section(pane, &ctx, &mind_val, theme, cx);
+    let (disclosure, mind_strip) = render_mind_section(pane, ctx, &mind_val, theme, cx);
     let footer = render_companion_footer(
         pane,
         &id,

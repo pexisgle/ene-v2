@@ -241,7 +241,7 @@ impl SessionTransport {
                 self.pending = None;
                 Ok(previous != self.bindings)
             }
-            Err(error) => Err(self.classify(error)),
+            Err(error) => Err(self.classify(&error)),
         }
     }
 
@@ -256,7 +256,7 @@ impl SessionTransport {
                     Ok(binding) => {
                         self.bindings.insert(target.clone(), binding);
                     }
-                    Err(error) => return Err(self.classify(error)),
+                    Err(error) => return Err(self.classify(&error)),
                 }
             }
             if self.bindings.contains_key(&target) {
@@ -324,7 +324,7 @@ impl SessionTransport {
     }
 
     /// Turns an RPC error into what the window must show.
-    pub(super) fn classify(&self, error: connectrpc::ConnectError) -> Outcome {
+    pub(super) fn classify(&self, error: &connectrpc::ConnectError) -> Outcome {
         match error.code {
             // The endpoint or token is stale: the next attempt re-reads the file.
             connectrpc::ErrorCode::Unauthenticated | connectrpc::ErrorCode::PermissionDenied => {

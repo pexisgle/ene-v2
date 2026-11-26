@@ -121,10 +121,10 @@ impl Avatar {
         let healthy = Arc::new(AtomicBool::new(true));
         let writer_pending = Arc::clone(&pending);
         let writer_healthy = Arc::clone(&healthy);
-        thread::spawn(move || write_loop(stdin, write_rx, writer_pending, &writer_healthy));
+        thread::spawn(move || write_loop(stdin, write_rx, &writer_pending, &writer_healthy));
         let reader_pending = Arc::clone(&pending);
         let reader_healthy = Arc::clone(&healthy);
-        thread::spawn(move || read_loop(stdout, events_tx, reader_pending, &reader_healthy));
+        thread::spawn(move || read_loop(stdout, &events_tx, &reader_pending, &reader_healthy));
         Ok(Self {
             child: Some(child),
             write_tx: Some(write_tx),
@@ -382,7 +382,7 @@ impl Drop for Avatar {
 fn write_loop(
     mut stdin: ChildStdin,
     mut rx: mpsc::Receiver<WriteItem>,
-    pending: PendingReplies,
+    pending: &PendingReplies,
     healthy: &AtomicBool,
 ) {
     while let Some(item) = rx.blocking_recv() {
@@ -411,8 +411,8 @@ fn write_loop(
 /// notices the closed pipe.
 pub(super) fn read_loop(
     stdout: impl std::io::Read,
-    events_tx: mpsc::UnboundedSender<AvatarEvent>,
-    pending: PendingReplies,
+    events_tx: &mpsc::UnboundedSender<AvatarEvent>,
+    pending: &PendingReplies,
     healthy: &AtomicBool,
 ) {
     let mut reader = BufReader::new(stdout);

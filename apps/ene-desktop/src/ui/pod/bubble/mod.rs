@@ -46,7 +46,9 @@ impl CompanionPod {
         let is_busy = speaking || !streaming_preview.is_empty() || stop_requested;
         let in_onboarding = self.needs_connection(cx) || self.in_model_setup(cx);
         let badge_label = compute_badge_label(hub, &streaming_preview, in_onboarding);
-        let notice_strip = notice.map(|n| render_notice_strip(n, &self.hub, &theme));
+        let notice_strip = notice
+            .as_ref()
+            .map(|n| render_notice_strip(n, &self.hub, &theme));
         let body: AnyElement = if !live {
             self.render_offline_body(&hub.model.connections.link, &theme)
         } else if let Some(approval) = approvals.first().cloned() {
@@ -287,7 +289,7 @@ impl CompanionPod {
                     Tone::Primary.icon(Icon::Send).enabled(can_send_greet),
                     theme,
                     move |_, cx| {
-                        greeting.update(cx, |hub, cx| hub.send("こんにちは".into(), cx));
+                        greeting.update(cx, |hub, cx| hub.send("こんにちは", cx));
                     },
                 ))
             })

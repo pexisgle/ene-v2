@@ -116,7 +116,7 @@ pub(crate) fn connect_assignment(
             Arc::clone(&running),
             role,
             context,
-            assignment.model_id.clone(),
+            &assignment.model_id.clone(),
             catalog
                 .resolve(&assignment.model_id)
                 .is_ok_and(|entry| entry.spec.input.image),
@@ -167,7 +167,7 @@ pub(crate) fn connect_assignment(
     };
     let secret = connection_secret(&connection, Some(credentials), providers)?;
     if endpoint.adapter == agent_platform::ADAPTER {
-        return agent_platform::model(endpoint, secret, spec, catalog);
+        return agent_platform::model(endpoint, secret.as_deref(), &spec, catalog);
     }
     let default = super::settings::provider(&endpoint.adapter, providers)
         .map_or_else(String::new, |p| p.endpoint);

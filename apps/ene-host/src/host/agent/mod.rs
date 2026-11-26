@@ -81,7 +81,11 @@ impl Plugin for AgentPlugin {
         app.init_resource::<Connections>()
             .init_resource::<ModelFactory>()
             .init_resource::<WorkReports>()
-            .add_observer(turn_settled)
+            .add_observer(
+                |event: On<Add<Settled>>, commands: Commands, params: turns::TurnSettledParams| {
+                    turn_settled(event.entity, commands, params);
+                },
+            )
             .add_systems(
                 Update,
                 (

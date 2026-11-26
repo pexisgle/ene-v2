@@ -269,7 +269,7 @@ struct DecisionWorld {
 }
 
 impl DecisionWorld {
-    fn at(runtime: &tokio::runtime::Runtime, provider: &str, owner: Companion) -> Self {
+    fn at(runtime: &tokio::runtime::Runtime, provider: &str, owner: &Companion) -> Self {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
         store
@@ -279,7 +279,7 @@ impl DecisionWorld {
                 &[(connection_row(provider), 0)],
             )
             .unwrap();
-        store.companion_repo().insert_companion(&owner).unwrap();
+        store.companion_repo().insert_companion(owner).unwrap();
         register_files_client(&store);
         let credentials = Credentials::new(true);
         credentials.remember("c1", "test-key".into());
@@ -422,7 +422,7 @@ fn a_safe_operation_the_model_allows_runs_without_a_card() {
         r#"{"decision":"allow","reason":"依頼どおりの安全な操作です"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     let call = world.gated_call("/tmp/a");
     world.app.update();
     let request = world.pending().request_id;
@@ -473,7 +473,7 @@ fn an_operation_that_breaks_a_free_text_policy_is_carded_once() {
         r#"{"decision":"require_approval","reason":"ポリシー: 外部への送信は常に確認"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     world
         .store()
         .policy_repo()
@@ -518,7 +518,7 @@ fn a_timeout_or_an_invalid_reply_fails_safe_to_the_card() {
     let runtime = paused_runtime();
     // The endpoint stalls past the deadline: only the timeout answers.
     let provider = runtime.block_on(serve(r#"{"decision":"allow","reason":"遅すぎる"}"#, STALL));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     let call = world.gated_call("/tmp/a");
     world.app.update();
     let request = world.pending().request_id;
@@ -541,7 +541,7 @@ fn a_timeout_or_an_invalid_reply_fails_safe_to_the_card() {
 
     // The reply is prose, not the JSON asked for.
     let provider = runtime.block_on(serve("はい、承認します", Duration::ZERO));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     let call = world.gated_call("/tmp/a");
     world.app.update();
     let request = world.pending().request_id;
@@ -573,7 +573,7 @@ fn the_prompt_the_model_received_carries_the_bounded_inputs() {
         r#"{"decision":"require_approval","reason":"対象が大きすぎる"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     world
         .store()
         .policy_repo()
@@ -635,7 +635,7 @@ fn a_late_decision_drops_when_the_user_answered_first() {
         r#"{"decision":"allow","reason":"安全だった"}"#,
         Duration::from_secs(1),
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     let call = world.gated_call("/tmp/a");
     world.app.update();
     let request = world.pending().request_id;
@@ -676,7 +676,7 @@ fn the_decision_role_falls_back_to_the_task_model() {
         r#"{"decision":"allow","reason":"依頼どおりの操作"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, task_only_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &task_only_companion());
     let call = world.gated_call("/tmp/a");
     world.app.update();
     let request = world.pending().request_id;
@@ -701,7 +701,7 @@ fn always_approve_persists_allow_rule_and_skips_second_prompt() {
         r#"{"decision":"require_approval","reason":"外部ファイル操作"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     let call1 = world.gated_call("/tmp/a");
     world.app.update();
     let request = world.pending().request_id;
@@ -762,7 +762,7 @@ fn b20_confirm_rule_is_never_bypassed_by_decision_allow() {
         r#"{"decision":"allow","reason":"safe"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     world
         .store()
         .policy_repo()
@@ -801,7 +801,7 @@ fn b06_submit_keeps_hold_when_bound_client_loses_grant() {
         r#"{"decision":"require_approval","reason":"ask"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     let call = world.gated_call("/tmp/a");
     world.app.update();
     let request = world.pending().request_id;
@@ -841,7 +841,7 @@ fn b18_large_always_approve_persists_exact_digest_rule_and_skips_second_prompt()
         r#"{"decision":"require_approval","reason":"large payload"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     let big_path = format!("/tmp/{}", "a".repeat(4200));
     let call1 = world.gated_call(&big_path);
     world.app.update();
@@ -888,7 +888,7 @@ fn b05_policy_read_failure_fails_closed_instead_of_treating_as_empty() {
         r#"{"decision":"allow","reason":"safe"}"#,
         Duration::ZERO,
     ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, decision_companion());
+    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     // Corrupt policy_rules row triggers HostError::Storage on policy_rules().
     world
         .store()

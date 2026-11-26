@@ -82,7 +82,9 @@ impl Plugin for ClientPlugin {
             "Run a listed capability on the bound client. Use its declared JSON input schema. \
              The tool waits for the client's validated result.",
             ToolOptions::default(),
-            device::on_device_request,
+            |called: On<ToolCalled<DeviceRequestArgs>>, commands: Commands| {
+                device::on_device_request(called.event(), commands);
+            },
         )
         .add_systems(
             AgentPass,
@@ -162,7 +164,7 @@ fn publish(world: &mut World, client: &Client) -> Result<w::Client> {
 /// Registers or refreshes a client declaration. A client never sends grants:
 /// the host's [`CapabilityPolicy`] decides them, and the operation-level gate
 /// still decides every call.
-pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> Result<w::Client> {
+pub(crate) fn register(world: &mut World, request: &w::RegisterClientRequest) -> Result<w::Client> {
     let store = world.resource::<Store>().clone();
     let specs = declarations(&request.capability_specs, &request.capabilities)?;
     let rules = store.policy_repo().policy_rules()?;
@@ -203,7 +205,7 @@ pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> 
 
 pub(crate) fn set_capabilities(
     world: &mut World,
-    request: w::SetCapabilitiesRequest,
+    request: &w::SetCapabilitiesRequest,
 ) -> Result<w::Client> {
     let store = world.resource::<Store>().clone();
     let specs = declarations(&request.capability_specs, &request.capabilities)?;
@@ -254,7 +256,7 @@ fn notify_client(notifier: &mut Notifier, client: &w::Client) {
 /// client is the active one, and work already accepted by the old client keeps
 /// running there. Its audio output is flushed, its perception summary is
 /// dropped and its tools are unpublished.
-pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Result<w::Activation> {
+pub(crate) fn activate(world: &mut World, request: &w::ActivationRequest) -> Result<w::Activation> {
     let store = world.resource::<Store>().clone();
     store
         .companion_repo()

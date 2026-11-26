@@ -22,6 +22,7 @@
 mod audio_pipeline;
 mod bridge;
 mod commands;
+mod device_commands;
 mod phase;
 mod stream;
 mod stream_audio;
@@ -333,7 +334,7 @@ impl Session {
 
         let _record = match self.transport.register(&host, &self.devices).await {
             Ok(record) => record,
-            Err(error) => return self.transport.classify(error),
+            Err(error) => return self.transport.classify(&error),
         };
         self.report_devices().await;
 
@@ -342,7 +343,7 @@ impl Session {
                 Ok(snapshot) => snapshot,
                 Err(error) => return Outcome::Dropped(error.to_string()),
             },
-            Err(error) => return self.transport.classify(error),
+            Err(error) => return self.transport.classify(&error),
         };
         let changed = match self.transport.bind(&host, &snapshot).await {
             Ok(changed) => changed,
@@ -627,41 +628,57 @@ mod tests {
 
     #[test]
     fn a_motion_plan_carries_the_face_with_the_motion() {
-        let plan = MotionPlan::parse(&serde_json::json!({"motion": "idle"})).unwrap();
+        let plan = MotionPlan::parse(
+            serde_json::from_value(serde_json::json!({"motion": "idle"})).unwrap(),
+        )
+        .unwrap();
         assert_eq!(plan.motion, "idle");
         assert_eq!(plan.expression, None);
         assert_eq!(plan.clip, avatar::motion("idle"));
 
-        let plan = MotionPlan::parse(&serde_json::json!({"motion": "idle", "expression": "happy"}))
-            .unwrap();
+        let plan = MotionPlan::parse(
+            serde_json::from_value(serde_json::json!({"motion": "idle", "expression": "happy"}))
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(plan.expression.as_deref(), Some("happy"));
 
         // `neutral` is a real request, not an absent one: it clears the face.
-        let plan =
-            MotionPlan::parse(&serde_json::json!({"motion": "idle", "expression": "neutral"}))
-                .unwrap();
+        let plan = MotionPlan::parse(
+            serde_json::from_value(serde_json::json!({"motion": "idle", "expression": "neutral"}))
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(plan.expression.as_deref(), Some("neutral"));
 
         // An explicit null leaves the face alone, like an absent field.
-        let plan =
-            MotionPlan::parse(&serde_json::json!({"motion": "idle", "expression": null})).unwrap();
+        let plan = MotionPlan::parse(
+            serde_json::from_value(serde_json::json!({"motion": "idle", "expression": null}))
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(plan.expression, None);
     }
 
     #[test]
     fn a_motion_plan_rejects_what_this_client_never_declared() {
-        let error = MotionPlan::parse(&serde_json::json!({"motion": "idle", "expression": "smug"}))
-            .unwrap_err()
-            .to_string();
+        let error = MotionPlan::parse(
+            serde_json::from_value(serde_json::json!({"motion": "idle", "expression": "smug"}))
+                .unwrap(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("not a declared expression"), "{error}");
-        let error = MotionPlan::parse(&serde_json::json!({"motion": "dance"}))
-            .unwrap_err()
-            .to_string();
+        let error = MotionPlan::parse(
+            serde_json::from_value(serde_json::json!({"motion": "dance"})).unwrap(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("not a declared motion preset"), "{error}");
-        let error = MotionPlan::parse(&serde_json::json!({}))
+        let error = serde_json::from_str::<super::device_commands::MotionInput>("{}")
             .unwrap_err()
             .to_string();
-        assert!(error.contains("requires a `motion`"), "{error}");
+        assert!(error.contains("missing field `motion`"), "{error}");
     }
 
     #[test]

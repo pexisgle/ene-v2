@@ -47,7 +47,7 @@ macro_rules! request {
             request: connectrpc::ServiceRequest<'_, $request>,
         ) -> connectrpc::ServiceResult<$response> {
             let request = request.to_owned_message();
-            self.call(move |app| $op(app, request)).await
+            self.call(move |app| $op(app, &request)).await
         }
     };
     ($name:ident, $request:ty, $response:ty, $op:path) => {
@@ -74,7 +74,7 @@ macro_rules! discard {
         ) -> connectrpc::ServiceResult<ene_rpc::Empty> {
             let request = request.to_owned_message();
             self.call(move |app| {
-                $op(app.world_mut(), request)?;
+                $op(app.world_mut(), &request)?;
                 Ok(ene_rpc::Empty::default())
             })
             .await

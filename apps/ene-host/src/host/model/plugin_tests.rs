@@ -512,13 +512,7 @@ impl Harness {
             &self.providers,
             broker,
         );
-        plugin_completion(
-            Arc::clone(&self.running),
-            role,
-            context,
-            model.into(),
-            false,
-        )
+        plugin_completion(Arc::clone(&self.running), role, context, model, false)
     }
 
     fn seen(&self) -> Vec<HeaderMap> {

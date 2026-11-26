@@ -202,8 +202,8 @@ async fn count_tokens(
 
 pub(super) fn model(
     endpoint: &Endpoint,
-    secret: Option<String>,
-    spec: Arc<ModelSpec>,
+    secret: Option<&str>,
+    spec: &ModelSpec,
     catalog: &Catalog,
 ) -> super::super::error::Result<DynModel<Completion>> {
     let client = net::model_client().map_err(|error| HostError::Unavailable(error.to_string()))?;
@@ -218,8 +218,8 @@ pub(super) fn model(
 
 fn model_with_http(
     endpoint: &Endpoint,
-    secret: Option<String>,
-    spec: Arc<ModelSpec>,
+    secret: Option<&str>,
+    spec: &ModelSpec,
     catalog: &Catalog,
     http: impl HttpClientExt + Clone + 'static,
 ) -> super::super::error::Result<DynModel<Completion>> {
@@ -229,13 +229,13 @@ fn model_with_http(
             "Invalid Agent Platform Gemini model ID".into(),
         ));
     }
-    let key = api_key(secret.as_deref())?;
+    let key = api_key(secret)?;
     // `GenerateContent` reports descriptor vendor `"gcp.gemini"`, while the
     // incoming spec is resolved under `"vertexai"` (a catalog-only vendor).
     // `ModelFacts::for_model` returns a bound spec only when its provider is
     // declared or matches the wire's descriptor vendor, so bind under the
     // declared adapter vendor while keeping all catalog facts intact.
-    let mut bound_spec = (*spec).clone();
+    let mut bound_spec = spec.clone();
     bound_spec.provider = ProviderId::declare(ADAPTER)
         .map_err(|error| HostError::Internal(format!("invalid adapter name: {error}")))?;
     let wire = GenerateContent::new(
@@ -461,8 +461,8 @@ mod tests {
         ]);
         let model = model_with_http(
             &Endpoint::default(),
-            Some("test-key".into()),
-            spec(),
+            Some("test-key"),
+            &spec(),
             Catalog::builtin(),
             http.clone(),
         )
@@ -526,8 +526,8 @@ mod tests {
         let unlisted = Arc::new(ModelSpec::new(vertex, "gemini-4-neon").with_tools(true));
         let model = model_with_http(
             &Endpoint::default(),
-            Some("test-key".into()),
-            unlisted,
+            Some("test-key"),
+            &unlisted,
             Catalog::builtin(),
             SequencedHttpClient::new([]),
         )

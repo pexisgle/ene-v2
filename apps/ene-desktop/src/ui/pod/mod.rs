@@ -262,7 +262,7 @@ impl CompanionPod {
         if text.is_empty() || text.chars().count() > MAX_INPUT {
             return;
         }
-        let sent = self.hub.update(cx, |hub, cx| hub.send(text, cx));
+        let sent = self.hub.update(cx, |hub, cx| hub.send(&text, cx));
         if sent {
             self.controls_open = false;
             self.chat_input

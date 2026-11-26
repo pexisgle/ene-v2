@@ -157,7 +157,7 @@ impl HandWorld {
     fn start_work(&mut self) -> w::WorkSession {
         work::start(
             self.harness.app.world_mut(),
-            w::StartWorkRequest {
+            &w::StartWorkRequest {
                 companion_id: self.companion.clone(),
                 title: "task".into(),
                 instruction: "参照データを調べて".into(),
@@ -170,7 +170,7 @@ impl HandWorld {
     fn send_work(&mut self, work_id: &str, text: &str) {
         work::send(
             self.harness.app.world_mut(),
-            w::SendWorkRequest {
+            &w::SendWorkRequest {
                 work_id: work_id.into(),
                 text: text.into(),
                 ..Default::default()
@@ -296,7 +296,7 @@ fn an_acp_assignment_drives_the_plugin_hand_end_to_end() {
     // open: one plugin hand per adapter at a time.
     let busy = work::start(
         world.harness.app.world_mut(),
-        w::StartWorkRequest {
+        &w::StartWorkRequest {
             companion_id: world.companion.clone(),
             instruction: "同じハーネスで別の作業".into(),
             ..Default::default()
@@ -460,7 +460,7 @@ fn the_rig_hand_stays_the_default_without_an_acp_assignment() {
     world.harness.app.update();
     let session = work::start(
         world.harness.app.world_mut(),
-        w::StartWorkRequest {
+        &w::StartWorkRequest {
             companion_id: created.id,
             instruction: "folder".into(),
             ..Default::default()

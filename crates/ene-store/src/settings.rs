@@ -1,5 +1,6 @@
 //! Settings and connections persistence.
 
+use crate::row::FromRow;
 use crate::{
     Store, StoreError, corrupt, enum_name_column, error::Result, json_column, optional_json_column,
     require_found, to_json, util::now,
@@ -9,26 +10,32 @@ use ene_mind::Companion;
 use rusqlite::{Row, params};
 use std::collections::HashSet;
 
-fn row_to_connection(row: &Row<'_>) -> rusqlite::Result<Connection> {
-    let kind = enum_name_column(row, "kind", "unknown connection kind")?;
-    let config: ConnectionConfig =
-        json_column(row, "config", "stored connection config is corrupt")?;
-    if config.kind() != kind {
-        return Err(corrupt(
-            row.as_ref().column_index("config")?,
-            "stored connection kind and config disagree",
-        ));
+impl FromRow for Connection {
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        let kind = enum_name_column(row, "kind", "unknown connection kind")?;
+        let config: ConnectionConfig =
+            json_column(row, "config", "stored connection config is corrupt")?;
+        if config.kind() != kind {
+            return Err(corrupt(
+                row.as_ref().column_index("config")?,
+                "stored connection kind and config disagree",
+            ));
+        }
+        Ok(Connection {
+            id: row.get("id")?,
+            name: row.get("name")?,
+            enabled: row.get("enabled")?,
+            kind,
+            config,
+            credential_state: CredentialState::parse(&row.get::<_, String>("credential_state")?),
+            revision: row.get::<_, u64>("revision")?,
+            last_check: optional_json_column(
+                row,
+                "last_check",
+                "stored connection check is corrupt",
+            )?,
+        })
     }
-    Ok(Connection {
-        id: row.get("id")?,
-        name: row.get("name")?,
-        enabled: row.get("enabled")?,
-        kind,
-        config,
-        credential_state: CredentialState::parse(&row.get::<_, String>("credential_state")?),
-        revision: row.get::<_, u64>("revision")?,
-        last_check: optional_json_column(row, "last_check", "stored connection check is corrupt")?,
-    })
 }
 
 const COLUMNS: &str = "id, name, enabled, kind, config, credential_state, last_check, revision";
@@ -63,7 +70,7 @@ impl<'a> SettingsRepo<'a> {
         let connections = self.0.fetch_all(
             &format!("SELECT {COLUMNS} FROM connections ORDER BY id"),
             [],
-            row_to_connection,
+            Connection::from_row,
         )?;
         Ok(Settings {
             revision,
@@ -88,7 +95,7 @@ impl<'a> SettingsRepo<'a> {
         self.0.fetch(
             &format!("SELECT {COLUMNS} FROM connections WHERE id = ?1"),
             [id],
-            row_to_connection,
+            Connection::from_row,
         )
     }
 

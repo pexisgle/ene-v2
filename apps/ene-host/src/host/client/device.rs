@@ -30,8 +30,7 @@ pub(crate) use super::device_dispatch::{accept, disconnected, dispatch_direct, r
 pub(crate) use super::device_result::complete;
 
 /// A generic `device_request` call. The tool waits for the client's result.
-pub(crate) fn on_device_request(called: On<ToolCalled<DeviceRequestArgs>>, mut commands: Commands) {
-    let called = called.event();
+pub(crate) fn on_device_request(called: &ToolCalled<DeviceRequestArgs>, mut commands: Commands) {
     let (call, agent, args) = (called.call, called.agent, called.args.clone());
     commands.queue(move |world: &mut World| {
         let store = world.resource::<Store>().clone();
@@ -75,6 +74,11 @@ pub(super) fn describe_device_request(
     computer_use: Res<ComputerUse>,
     mut commands: Commands,
 ) {
+    let (store, hub, computer_use) = (
+        store.into_inner(),
+        hub.into_inner(),
+        computer_use.into_inner(),
+    );
     for (mut call, agent) in &mut calls {
         let Some(index) = call
             .request
@@ -101,7 +105,7 @@ pub(super) fn describe_device_request(
         };
         let computer_model = computer::model_supported(call.connection.as_ref().or(connection));
         if computer_model && let Some(work) = work {
-            computer_use.attach_frame(&mut call, work, &store, &hub);
+            computer_use.attach_frame(&mut call, work, store, hub);
         }
         let target_id = match target {
             Ok(id) => id,
@@ -109,7 +113,7 @@ pub(super) fn describe_device_request(
                 if error.is_storage() {
                     let message = error.to_string();
                     commands.queue(move |world: &mut World| {
-                        crate::host::fail(world, message);
+                        crate::host::fail(world, &message);
                     });
                     return;
                 }
@@ -123,7 +127,7 @@ pub(super) fn describe_device_request(
                     if error.is_storage() {
                         let message = error.to_string();
                         commands.queue(move |world: &mut World| {
-                            crate::host::fail(world, message);
+                            crate::host::fail(world, &message);
                         });
                         return;
                     }

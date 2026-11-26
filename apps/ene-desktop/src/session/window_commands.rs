@@ -58,7 +58,7 @@ pub(super) async fn command(session: &mut Session, host: &Host, command: Command
             Step::Continue
         }
         Command::PttStart | Command::PttCommit | Command::PttCancel => {
-            session.audio.handle_ptt(command, &session.updates);
+            session.audio.handle_ptt(&command, &session.updates);
             Step::Continue
         }
         Command::SetOutputMuted(muted) => {

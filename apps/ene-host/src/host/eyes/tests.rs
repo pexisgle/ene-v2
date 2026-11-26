@@ -31,7 +31,7 @@ fn bind(
     let world = harness.app.world_mut();
     client::register(
         world,
-        w::RegisterClientRequest {
+        &w::RegisterClientRequest {
             id: client_id.into(),
             capabilities: vec!["eye.watch".into()],
             capability_specs: vec![w::ClientCapabilitySpec {
@@ -45,7 +45,7 @@ fn bind(
     .unwrap();
     client::activate(
         world,
-        w::ActivationRequest {
+        &w::ActivationRequest {
             client_id: client_id.into(),
             companion_id: harness.companion.clone(),
             ..Default::default()
@@ -58,7 +58,7 @@ fn bind(
 fn report(harness: &mut Harness, client: &str, subscription: &str, event: Event) {
     client::report_perception(
         harness.app.world_mut(),
-        w::PerceptionEvent {
+        &w::PerceptionEvent {
             client_id: client.into(),
             subscription_id: subscription.into(),
             event: Some(event),
@@ -237,7 +237,7 @@ fn assert_response_check_and_watch_turns(
     let entity = harness.companion_agent();
     client::report_perception(
         harness.app.world_mut(),
-        w::PerceptionEvent {
+        &w::PerceptionEvent {
             client_id: "desktop".into(),
             event: Some(Event::PerceptionSummary(Box::new(w::PerceptionSummary {
                 summary: "unfiltered-passive-window-log".into(),

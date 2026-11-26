@@ -61,7 +61,7 @@ fn a_session_keeps_one_agent_across_runs_and_retires_it_with_the_session() {
     assert_eq!(agent_of(&mut world, "w1"), Some(kept));
     assert_eq!(world.get::<WorkAgent>(kept).unwrap().run_id, "run-b");
 
-    settle_run(&mut world, "run-a".into(), TurnOutcome::Stopped(None));
+    settle_run(&mut world, "run-a", &TurnOutcome::Stopped(None));
     assert_eq!(state(&store, "run-a"), RunState::Cancelled);
     assert_eq!(
         store
@@ -156,16 +156,16 @@ fn a_completion_that_races_a_stop_stays_cancelled() {
     stop(&mut world, "w1").unwrap();
     settle_run(
         &mut world,
-        "run-a".into(),
-        TurnOutcome::Answered(Message::assistant("done")),
+        "run-a",
+        &TurnOutcome::Answered(Message::assistant("done")),
     );
     assert_eq!(state(&store, "run-a"), RunState::Cancelled);
 
     run(&store, "run-b", RunState::Running);
     settle_run(
         &mut world,
-        "run-b".into(),
-        TurnOutcome::Answered(Message::assistant("done")),
+        "run-b",
+        &TurnOutcome::Answered(Message::assistant("done")),
     );
     assert_eq!(state(&store, "run-b"), RunState::Completed);
 }

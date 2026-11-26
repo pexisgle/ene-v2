@@ -12,7 +12,7 @@ use ene_host_core::util;
 use ene_rpc as w;
 
 /// Routes live observations to the eyes and supports legacy passive summaries.
-pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) -> Result<()> {
+pub(crate) fn report_perception(world: &mut World, event: &w::PerceptionEvent) -> Result<()> {
     let store = world.resource::<Store>().clone();
     ene_domain::validate_id(&event.client_id)?;
     let client = store
@@ -45,11 +45,11 @@ pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) ->
             return Ok(());
         }
         for companion_id in targets {
-            eyes::report_with(world, companion_id, event.clone())?;
+            eyes::report_with(world, &companion_id, event.clone())?;
         }
         return Ok(());
     }
-    let Some(summary) = perception_summary(&event) else {
+    let Some(summary) = perception_summary(event) else {
         return Ok(());
     };
     let avatar_interaction = match &event.event {

@@ -65,7 +65,7 @@ impl Hub {
 
     pub(crate) fn set_connection_enabled(
         &mut self,
-        connection: Connection,
+        connection: &Connection,
         enabled: bool,
         cx: &mut Context<Self>,
     ) {
@@ -74,7 +74,7 @@ impl Hub {
         };
         let is_voicevox = connection.is_local_voicevox();
         let conn_id = connection.id.clone();
-        let input = build_connection_enabled_input(&connection, enabled);
+        let input = build_connection_enabled_input(connection, enabled);
         if !(enabled && is_voicevox) {
             self.upsert_connection("接続状態の更新", input, cx);
             return;
@@ -280,7 +280,7 @@ impl Hub {
     pub(crate) fn save_search_provider_key(
         &mut self,
         adapter: &'static str,
-        secret: String,
+        secret: &str,
         activate: bool,
         cx: &mut Context<Self>,
     ) {
@@ -308,7 +308,7 @@ impl Hub {
     pub(crate) fn complete_setup_selection(
         &mut self,
         connection_id: String,
-        model_id: String,
+        model_id: &str,
         companion_name: Option<String>,
         voice_identifier: Option<String>,
         cx: &mut Context<Self>,

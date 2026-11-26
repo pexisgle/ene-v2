@@ -49,7 +49,7 @@ fn setup_shared_body_motion_companions(harness: &mut Harness) -> String {
     .id;
     client::register(
         harness.app.world_mut(),
-        w::RegisterClientRequest {
+        &w::RegisterClientRequest {
             id: "c1".into(),
             name: "c1".into(),
             platform: "linux".into(),
@@ -124,7 +124,7 @@ fn assert_shared_body_motion_dispatch(harness: &mut Harness, other: &str) {
     // B's call of the same tool name is dispatched to B's active client.
     chat::accept(
         &mut harness.app,
-        w::SendMessageRequest {
+        &w::SendMessageRequest {
             companion_id: other.to_owned(),
             request_key: "key-b".into(),
             text: "B please".into(),
@@ -214,7 +214,7 @@ fn a_shared_tool_name_with_different_declarations_is_a_conflict() {
     activate(harness.app.world_mut(), &harness.companion, "c1");
     let error = client::activate(
         harness.app.world_mut(),
-        w::ActivationRequest {
+        &w::ActivationRequest {
             companion_id: other,
             client_id: "c2".into(),
             ..Default::default()
@@ -307,7 +307,7 @@ fn only_device_request_waits_for_the_client_result() {
 pub(super) fn start_work(harness: &mut Harness) -> w::WorkSession {
     work::start(
         harness.app.world_mut(),
-        w::StartWorkRequest {
+        &w::StartWorkRequest {
             companion_id: harness.companion.clone(),
             title: "task".into(),
             instruction: "list the folder".into(),
@@ -395,7 +395,7 @@ fn computer_use_sends_a_request_only_image_and_never_replays_input() {
     assert!(replacement.try_recv().is_err());
     let late = device::complete(
         harness.app.world_mut(),
-        w::DeviceOperationResult {
+        &w::DeviceOperationResult {
             operation_id: click.operation_id,
             output: json!({"applied":true}).to_string(),
             ..result
@@ -472,7 +472,7 @@ fn complete_screenshot_op(
             .to_string(),
         ..Default::default()
     };
-    let state = device::complete(harness.app.world_mut(), result.clone()).unwrap();
+    let state = device::complete(harness.app.world_mut(), &result.clone()).unwrap();
     assert_eq!(state.status, w::DeviceOperationStatus::Completed);
     assert_eq!(
         state.result.unwrap().output,
@@ -677,11 +677,13 @@ fn a_conflicting_activation_is_rolled_back_before_side_effects() {
         }],
         ..Default::default()
     };
-    crate::host::client::register(harness.app.world_mut(), declaration("c1", "ene moves")).unwrap();
-    crate::host::client::register(harness.app.world_mut(), declaration("c2", "kai moves")).unwrap();
+    crate::host::client::register(harness.app.world_mut(), &declaration("c1", "ene moves"))
+        .unwrap();
+    crate::host::client::register(harness.app.world_mut(), &declaration("c2", "kai moves"))
+        .unwrap();
     crate::host::client::activate(
         harness.app.world_mut(),
-        w::ActivationRequest {
+        &w::ActivationRequest {
             companion_id: harness.companion.clone(),
             client_id: "c1".into(),
             ..Default::default()
@@ -693,7 +695,7 @@ fn a_conflicting_activation_is_rolled_back_before_side_effects() {
     assert!(
         crate::host::client::activate(
             harness.app.world_mut(),
-            w::ActivationRequest {
+            &w::ActivationRequest {
                 companion_id: second.clone(),
                 client_id: "c2".into(),
                 ..Default::default()

@@ -88,13 +88,13 @@ pub(crate) fn register(app: &mut App) {
         "schedule_create",
         "Register a reminder or repeating schedule.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, args| {
+        run_tool(|world, agent, _, args: CreateArgs| {
             let companion = companion_id(world.get::<CompanionAgent>(agent))?.to_owned();
             create_schedule(
                 world.resource::<Store>(),
                 world.resource::<ScheduleClock>(),
                 &companion,
-                args,
+                &args,
             )
         }),
     )
@@ -128,7 +128,7 @@ fn create_schedule(
     store: &Store,
     clock: &ScheduleClock,
     companion: &str,
-    args: CreateArgs,
+    args: &CreateArgs,
 ) -> Result<String> {
     let schedule = store.schedule_repo().insert_schedule(
         super::db::schedules::NewSchedule {
@@ -215,7 +215,7 @@ fn confirm_delivered_schedules(world: &mut World) {
         Ok(pending) => pending,
         Err(error) => {
             if error.is_storage() {
-                super::fail(world, error.to_string());
+                super::fail(world, &error.to_string());
             } else {
                 tracing::warn!(%error, "pending schedule occurrences could not be read");
             }
@@ -239,7 +239,7 @@ fn confirm_delivered_schedules(world: &mut World) {
             now,
         ) && error.is_storage()
         {
-            super::fail(world, error.to_string());
+            super::fail(world, &error.to_string());
             return;
         }
     }
@@ -283,7 +283,7 @@ pub(crate) fn poll_schedules(world: &mut World, now: Timestamp) -> usize {
             Ok(occurrences) => occurrences,
             Err(error) => {
                 if error.is_storage() {
-                    super::fail(world, error.to_string());
+                    super::fail(world, &error.to_string());
                 } else {
                     tracing::warn!(%error, "schedules could not be materialized");
                 }
@@ -334,7 +334,7 @@ fn dispatch_due_occurrence(
         Ok(false) => {}
         Err(error) => {
             if error.is_storage() {
-                super::fail(world, error.to_string());
+                super::fail(world, &error.to_string());
                 return OccurrenceOutcome::FatalStorage;
             }
             tracing::warn!(%error, key = %occ.occurrence_key, "delivered schedule occurrence was not recorded");
@@ -366,7 +366,7 @@ fn dispatch_due_occurrence(
         .record_occurrence_attempt(&occ.occurrence_key, "model unavailable")
         && error.is_storage()
     {
-        super::fail(world, error.to_string());
+        super::fail(world, &error.to_string());
         return OccurrenceOutcome::FatalStorage;
     }
     OccurrenceOutcome::Skipped

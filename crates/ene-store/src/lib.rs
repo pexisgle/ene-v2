@@ -14,6 +14,7 @@ pub mod memories;
 pub mod migrations;
 pub mod plugins;
 pub mod policies;
+mod row;
 pub mod schedules;
 pub mod settings;
 pub mod skills;

@@ -1,5 +1,4 @@
 use serde::Deserialize;
-use serde_json::Value;
 
 pub use ene_platform_os::{Observation, Window};
 
@@ -28,16 +27,7 @@ pub enum NotifyOn {
     TitleChange,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error(transparent)]
-pub struct WatchParseError(#[from] serde_json::Error);
-
 impl Watch {
-    /// Parses a rule from a `device_request` or `set_eye_watch` input.
-    pub fn parse(input: &Value) -> Result<Self, WatchParseError> {
-        Ok(serde_json::from_value(input.clone())?)
-    }
-
     /// Whether the observed window matches this rule's target.
     ///
     /// `target_pattern` is documented as "a substring or regular expression"

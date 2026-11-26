@@ -75,7 +75,7 @@ impl Notifier {
         companion: &str,
         role: &str,
         action: &str,
-        detail: serde_json::Value,
+        detail: &serde_json::Value,
     ) {
         self.outbox.push(w::Notification {
             kind: DIAGNOSTIC.into(),

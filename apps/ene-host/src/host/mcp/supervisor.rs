@@ -120,7 +120,7 @@ pub(super) fn sync(world: &mut World) {
         Ok(revision) => revision,
         Err(error) => {
             if error.is_storage() {
-                crate::host::fail(world, error.to_string());
+                crate::host::fail(world, &error.to_string());
             }
             *world.resource_mut::<McpSupervisor>() = supervisor;
             return;
@@ -140,7 +140,7 @@ pub(super) fn sync(world: &mut World) {
         }
         ReloadOutcome::Fail(message) => {
             *world.resource_mut::<McpSupervisor>() = supervisor;
-            crate::host::fail(world, message);
+            crate::host::fail(world, &message);
             return;
         }
     }
@@ -168,7 +168,7 @@ pub(super) fn sync(world: &mut World) {
         return;
     }
     let sender = supervisor.sender();
-    let wake = world.get_resource::<Wake>().cloned();
+    let wake = world.get_resource::<Wake>();
     let launched = spawn_connect_tasks(targets, &sender, wake, &runtime);
     supervisor.connecting.0.extend(launched);
     project_servers(world, &supervisor);
@@ -223,7 +223,7 @@ fn plan_connect_targets(
 fn spawn_connect_tasks(
     targets: Vec<(String, Desired)>,
     sender: &mpsc::Sender<Event>,
-    wake: Option<Wake>,
+    wake: Option<&Wake>,
     runtime: &tokio::runtime::Handle,
 ) -> Vec<(String, Pending)> {
     targets
@@ -238,7 +238,7 @@ fn spawn_connect_tasks(
             let event_id = id.clone();
             let event_launch = launch.clone();
             let sender = sender.clone();
-            let wake = wake.clone();
+            let wake = wake.cloned();
             let task = runtime.spawn(Box::pin(async move {
                 let event = match open(&want, registry.clone()).await {
                     Ok(connection) => Event::Connected {

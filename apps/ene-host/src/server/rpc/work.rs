@@ -51,8 +51,26 @@ impl w::WorkService for Services {
         .await
     }
 
-    request!(start_work, w::StartWorkRequest, w::WorkSession, work::start);
-    request!(send_work, w::SendWorkRequest, w::WorkAcceptance, work::send);
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "start_work", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn start_work(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::StartWorkRequest>,
+    ) -> connectrpc::ServiceResult<w::WorkSession> {
+        let request = request.to_owned_message();
+        self.call(move |app| work::start(app.world_mut(), &request))
+            .await
+    }
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "send_work", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn send_work(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::SendWorkRequest>,
+    ) -> connectrpc::ServiceResult<w::WorkAcceptance> {
+        let request = request.to_owned_message();
+        self.call(move |app| work::send(app.world_mut(), &request))
+            .await
+    }
     discard_id!(stop_work, w::StopWorkRequest, work_id, work::stop);
     discard_id!(close_work, w::WorkRequest, work_id, work::close);
 }

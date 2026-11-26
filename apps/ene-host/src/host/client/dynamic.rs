@@ -378,7 +378,7 @@ fn granted_names(
 /// Startup: publishes the tools of the clients restored as active.
 pub(crate) fn init(world: &mut World) {
     if let Err(error) = sync_tools(world) {
-        crate::host::fail(world, error.to_string());
+        crate::host::fail(world, &error.to_string());
     }
 }
 

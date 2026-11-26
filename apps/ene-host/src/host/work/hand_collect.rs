@@ -161,13 +161,13 @@ fn apply(
                     world,
                     hands,
                     store,
-                    PermissionTarget {
+                    &PermissionTarget {
                         adapter,
                         run: &run,
                         companion: &companion_id,
                         request: &request_id,
                     },
-                    tool_call,
+                    &tool_call,
                     options,
                 );
             }
@@ -206,8 +206,8 @@ fn request_permission(
     world: &mut World,
     hands: &mut Hands,
     store: &Store,
-    target: PermissionTarget<'_>,
-    tool_call: ToolCallUpdate,
+    target: &PermissionTarget<'_>,
+    tool_call: &ToolCallUpdate,
     options: Vec<PermissionOption>,
 ) {
     let PermissionTarget {
@@ -215,14 +215,14 @@ fn request_permission(
         run,
         companion,
         request,
-    } = target;
+    } = *target;
     let (tool_name, arguments) = {
         let Some(hand) = hands.by_adapter.get_mut(adapter) else {
             return;
         };
         hand.buffer.clear_message();
-        let tool_name = hand.buffer.resolve_tool_name(&tool_call);
-        (tool_name, arguments_of(&tool_call))
+        let tool_name = hand.buffer.resolve_tool_name(tool_call);
+        (tool_name, arguments_of(tool_call))
     };
     let Ok(name) = ToolName::new(&tool_name) else {
         tracing::warn!(work = %run.work_id, "the harness named an empty tool");
@@ -234,7 +234,7 @@ fn request_permission(
         Ok(session) => session.and_then(|session| session.client_id),
         Err(error) => {
             if error.is_storage() {
-                crate::host::fail(world, error.to_string());
+                crate::host::fail(world, &error.to_string());
             }
             return;
         }
@@ -261,9 +261,9 @@ fn request_permission(
             ),
         })
         .id();
-    if let Err(error) = permission::issue_hold(world, store, approval.clone(), call) {
+    if let Err(error) = permission::issue_hold(world, store, &approval.clone(), call) {
         world.entity_mut(call).despawn();
-        crate::host::fail(world, error.to_string());
+        crate::host::fail(world, &error.to_string());
         return;
     }
     if let Some(hand) = hands.by_adapter.get_mut(adapter) {

@@ -102,7 +102,9 @@ impl Plugin for GatePlugin {
                  the user has agreed or refused in conversation to the operation the approval \
                  card names. Arguments: request_id, decision (`approve` or `deny`).",
                 ToolOptions::default(),
-                run_tool(resolve_approval),
+                run_tool(|world, agent, request, args: ResolveApprovalArgs| {
+                    resolve_approval(world, agent, request, &args)
+                }),
             );
     }
 }
@@ -236,7 +238,7 @@ fn process_gate_call(
         Ok(rules) => rules,
         Err(error) => {
             if error.is_storage() {
-                crate::host::fail(world, error.to_string());
+                crate::host::fail(world, &error.to_string());
             } else {
                 refuse(
                     world,
@@ -267,7 +269,7 @@ fn process_gate_call(
                 &ctx.store,
                 &companion_id,
                 work_id.as_deref(),
-                agent_ctx,
+                &agent_ctx,
                 &item,
             )
         }
@@ -296,23 +298,23 @@ fn process_gate_call(
         bound_client_id,
         bound_capability,
     };
-    apply_gate_verdict(world, &ctx.store, &rules, binding, verdict)
+    apply_gate_verdict(world, &ctx.store, &rules, &binding, verdict)
 }
 
 fn apply_gate_verdict(
     world: &mut World,
     store: &Store,
     rules: &[PolicyRule],
-    binding: GateBinding,
+    binding: &GateBinding,
     verdict: Verdict,
 ) -> std::ops::ControlFlow<()> {
     match verdict {
         Verdict::Allow => {}
         Verdict::Deny { reason } => refuse(world, binding.call.entity, &reason),
         Verdict::HumanRequired { target } => {
-            let (pending, _) = issue_gate_hold(world, store, &binding, target)?;
+            let (pending, _) = issue_gate_hold(world, store, binding, target)?;
             if let Some(fatal) = push_card(store, &mut world.resource_mut::<Notifier>(), &pending) {
-                crate::host::fail(world, fatal);
+                crate::host::fail(world, &fatal);
                 return std::ops::ControlFlow::Break(());
             }
         }
@@ -320,18 +322,18 @@ fn apply_gate_verdict(
             let agent = binding.call.agent;
             let tool_name = binding.call.tool_name.clone();
             let run_id = binding.run_id.clone();
-            let (pending, arguments_view) = issue_gate_hold(world, store, &binding, target)?;
+            let (pending, arguments_view) = issue_gate_hold(world, store, binding, target)?;
             let policies = match store.policy_repo().policy_texts() {
                 Ok(policies) => policies,
                 Err(error) => {
                     if error.is_storage() {
-                        crate::host::fail(world, error.to_string());
+                        crate::host::fail(world, &error.to_string());
                         return std::ops::ControlFlow::Break(());
                     }
                     if let Some(fatal) =
                         push_card(store, &mut world.resource_mut::<Notifier>(), &pending)
                     {
-                        crate::host::fail(world, fatal);
+                        crate::host::fail(world, &fatal);
                         return std::ops::ControlFlow::Break(());
                     }
                     return std::ops::ControlFlow::Continue(());
@@ -345,7 +347,7 @@ fn apply_gate_verdict(
                 policies,
                 rules: rules.to_vec(),
             };
-            start_decision(world, store, pending, inputs);
+            start_decision(world, store, &pending, inputs);
         }
     }
     std::ops::ControlFlow::Continue(())
@@ -374,9 +376,9 @@ fn issue_gate_hold(
         client_id: binding.bound_client_id.clone(),
         capability: binding.bound_capability.clone(),
     };
-    if let Err(error) = issue_hold(world, store, approval, binding.call.entity) {
+    if let Err(error) = issue_hold(world, store, &approval, binding.call.entity) {
         if error.is_storage() {
-            crate::host::fail(world, error.to_string());
+            crate::host::fail(world, &error.to_string());
             return std::ops::ControlFlow::Break(());
         }
         refuse(
@@ -406,11 +408,11 @@ fn issue_gate_hold(
 pub(crate) fn issue_hold(
     world: &mut World,
     store: &Store,
-    approval: Approval,
+    approval: &Approval,
     call: Entity,
 ) -> Result<Hold> {
     let request_id = approval.request_id.clone();
-    store.approval_repo().insert_approval(&approval)?;
+    store.approval_repo().insert_approval(approval)?;
     let hold = world.spawn(HoldOf(call)).id();
     let entry = Hold { call, hold };
     world

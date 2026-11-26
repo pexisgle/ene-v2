@@ -87,7 +87,7 @@ pub(super) struct ComputerState<'a> {
 }
 
 pub(super) fn prepare(
-    state: ComputerState<'_>,
+    state: &ComputerState<'_>,
     work: &WorkAgent,
     client: &str,
     run: &str,
@@ -156,7 +156,7 @@ pub(super) enum ResultError {
 /// Strip the image before the result reaches the operation ledger or any event.
 pub(super) fn result(
     pending: Pending,
-    output: Value,
+    output: &Value,
 ) -> std::result::Result<(Value, Option<Frame>), ResultError> {
     if !pending.screenshot {
         return (output["applied"].as_bool() == Some(true))

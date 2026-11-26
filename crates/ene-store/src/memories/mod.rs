@@ -8,8 +8,9 @@ mod store;
 mod tests;
 
 pub use ops::{detail, profile_lines};
-pub(crate) use store::{add_edge, check_content, check_importance, insert_row, row_to_memory};
+pub(crate) use store::{add_edge, check_content, check_importance, insert_row};
 
+use crate::row::FromRow;
 use crate::{
     Store, StoreError,
     error::Result,
@@ -128,7 +129,7 @@ impl<'a> MemoryRepo<'a> {
         let connection = self.0.conn();
         let memory = connection
             .prepare_cached(&format!("SELECT {COLUMNS} FROM memories WHERE id = ?1"))?
-            .query_row([id], row_to_memory)
+            .query_row([id], Memory::from_row)
             .optional()?;
         Ok(memory)
     }
@@ -161,7 +162,7 @@ impl<'a> MemoryRepo<'a> {
             ))?
             .query_row(
                 params![id, importance, scope, memory.memory_revision],
-                row_to_memory,
+                Memory::from_row,
             )
             .optional()?;
         updated.ok_or_else(|| StoreError::Conflict("memory changed since it was read".into()))
@@ -273,8 +274,10 @@ impl<'a> MemoryRepo<'a> {
             "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance >= ?2 \
              AND m.id IN (SELECT value FROM json_each(?3))"
         ))?;
-        let rows =
-            statement.query_map(params![companion, minimum, to_json(&ids)?], row_to_memory)?;
+        let rows = statement.query_map(
+            params![companion, minimum, to_json(&ids)?],
+            Memory::from_row,
+        )?;
         let mut found: HashMap<String, Memory> = HashMap::new();
         for memory in rows {
             let memory = memory?;
@@ -292,7 +295,7 @@ impl<'a> MemoryRepo<'a> {
             "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance = 10 \
              ORDER BY COALESCE(m.last_accessed_at, m.recorded_at) DESC, m.rowid DESC"
         ))?;
-        let rows = statement.query_map([companion], row_to_memory)?;
+        let rows = statement.query_map([companion], Memory::from_row)?;
         let mut budget = PINNED_BUDGET_CHARS;
         let mut pinned = Vec::new();
         for memory in rows {
@@ -320,7 +323,7 @@ impl<'a> MemoryRepo<'a> {
         ))?;
         let rows = statement.query_map(
             params![companion, cursor.unwrap_or(0), (limit + 1) as i64],
-            |row| Ok((row.get::<_, i64>("rowid")?, row_to_memory(row)?)),
+            |row| Ok((row.get::<_, i64>("rowid")?, Memory::from_row(row)?)),
         )?;
         let mut items = Vec::new();
         let mut next = None;
@@ -358,7 +361,8 @@ impl<'a> MemoryRepo<'a> {
                  AND m.content LIKE ?3 ESCAPE '\\' ORDER BY m.importance DESC, m.rowid DESC \
                  LIMIT 20"
             ))?;
-            let rows = statement.query_map(params![companion, minimum, pattern], row_to_memory)?;
+            let rows =
+                statement.query_map(params![companion, minimum, pattern], Memory::from_row)?;
             for row in rows {
                 memories.push(row?);
             }
@@ -370,7 +374,8 @@ impl<'a> MemoryRepo<'a> {
              WHERE {VISIBLE} AND m.importance >= ?2 AND memories_fts MATCH ?3 \
              ORDER BY bm25(memories_fts) ASC LIMIT 20"
         ))?;
-        let rows = statement.query_map(params![companion, minimum, expression], row_to_memory)?;
+        let rows =
+            statement.query_map(params![companion, minimum, expression], Memory::from_row)?;
         for row in rows {
             memories.push(row?);
         }

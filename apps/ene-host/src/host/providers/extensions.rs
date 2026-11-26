@@ -467,10 +467,9 @@ fn drain_character_actions(world: &mut World) {
 }
 
 fn observe_character_event(
-    trigger: On<crate::host::resources::TriggerCharacterEvent>,
+    event: &crate::host::resources::TriggerCharacterEvent,
     mut commands: Commands,
 ) {
-    let event = trigger.event();
     let companion_id = event.companion_id.clone();
     let character_event = event.event.clone();
     commands.queue(move |world: &mut World| {
@@ -484,7 +483,11 @@ pub(crate) struct ExtensionPlugin;
 impl Plugin for ExtensionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PendingCharacterActions>()
-            .add_observer(observe_character_event)
+            .add_observer(
+                |trigger: On<crate::host::resources::TriggerCharacterEvent>, commands: Commands| {
+                    observe_character_event(trigger.event(), commands);
+                },
+            )
             .add_systems(Update, drain_character_actions.after(AgentLoop));
     }
 }
@@ -714,7 +717,7 @@ mod tests {
         let companion_id = harness.companion.clone();
         crate::host::work::start(
             harness.app.world_mut(),
-            ene_rpc::StartWorkRequest {
+            &ene_rpc::StartWorkRequest {
                 companion_id,
                 instruction: "エコーして".into(),
                 ..Default::default()

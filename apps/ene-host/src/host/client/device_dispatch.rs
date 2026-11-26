@@ -94,7 +94,7 @@ pub(crate) fn accept(
             ));
         }
         Some(computer::prepare(
-            computer::ComputerState {
+            &computer::ComputerState {
                 store: world.resource::<Store>(),
                 hub: world.resource::<DeviceHub>(),
                 computer: world.resource::<computer::ComputerUse>(),
@@ -317,7 +317,7 @@ pub(crate) fn resend(world: &mut World, client: &str) {
     let plan = match load_resend_plan(&store, client) {
         Ok(plan) => plan,
         Err(Some(fatal)) => {
-            crate::host::fail(world, fatal);
+            crate::host::fail(world, &fatal);
             return;
         }
         Err(None) => return,
@@ -351,7 +351,7 @@ pub(crate) fn disconnected(world: &mut World, client: &str) {
         Ok(operations) => operations,
         Err(error) => {
             if error.is_storage() {
-                crate::host::fail(world, error.to_string());
+                crate::host::fail(world, &error.to_string());
             } else {
                 tracing::warn!(client, %error, "failed to read operations on disconnect");
             }
@@ -367,7 +367,7 @@ pub(crate) fn disconnected(world: &mut World, client: &str) {
             .set_operation_status(&operation.id, DeviceStatus::Uncertain)
             && error.is_storage()
         {
-            crate::host::fail(world, error.to_string());
+            crate::host::fail(world, &error.to_string());
             return;
         }
     }

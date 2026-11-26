@@ -98,7 +98,7 @@ fn collect_tails(mut commands: Commands, mut pending: Query<(Entity, &HoldOf, &m
                 if error.is_storage() {
                     let message = error.to_string();
                     commands.queue(move |world: &mut World| {
-                        crate::host::fail(world, message);
+                        crate::host::fail(world, &message);
                     });
                 } else {
                     tracing::warn!(%error, "dynamic tail could not be rendered");
@@ -131,7 +131,7 @@ fn inject_tail(
     turns: Query<(&Turn, Option<&DynamicTail>)>,
     agents: Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
     conversations: Query<&Conversation>,
-    env: TailEnv<'_>,
+    env: &TailEnv<'_>,
 ) {
     for (call_entity, mut call, of, agent) in &mut calls {
         let Ok((turn, cached)) = turns.get(of.0) else {
@@ -155,8 +155,8 @@ fn inject_tail(
                 &mut commands,
                 &agents,
                 conversation,
-                &env,
-                SpawnTailTarget {
+                env,
+                &SpawnTailTarget {
                     call_entity,
                     turn_entity: of.0,
                     turn_start: turn.start,
@@ -217,7 +217,7 @@ fn compute_or_spawn_tail(
     agents: &Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
     conversation: Option<&Conversation>,
     env: &TailEnv<'_>,
-    target: SpawnTailTarget,
+    target: &SpawnTailTarget,
 ) -> Option<String> {
     let SpawnTailTarget {
         call_entity,
@@ -225,7 +225,7 @@ fn compute_or_spawn_tail(
         turn_start,
         agent,
         has_eye_report,
-    } = target;
+    } = *target;
     let view = agent_view(agents, conversation, agent)?;
     let cause = TurnCause::classify(view.conversation, turn_start, has_eye_report);
     let query = cause.recall_query().map(str::to_owned);
@@ -279,7 +279,7 @@ fn compute_or_spawn_tail(
             if error.is_storage() {
                 let message = error.to_string();
                 commands.queue(move |world: &mut World| {
-                    crate::host::fail(world, message);
+                    crate::host::fail(world, &message);
                 });
             } else {
                 tracing::warn!(%error, "dynamic tail could not be rendered");
@@ -453,7 +453,18 @@ pub(crate) struct RecallPlugin;
 impl Plugin for RecallPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Update, collect_tails.before(AgentLoop))
-            .add_systems(AgentPass, inject_tail.in_set(PrepareSystems::Edit))
+            .add_systems(
+                AgentPass,
+                (|calls: Query<TurnRequest<'static>, NeedsTail>,
+                  commands: Commands,
+                  turns: Query<(&Turn, Option<&DynamicTail>)>,
+                  agents: Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
+                  conversations: Query<&Conversation>,
+                  env: TailEnv| {
+                    inject_tail(calls, commands, turns, agents, conversations, &env);
+                })
+                .in_set(PrepareSystems::Edit),
+            )
             .add_systems(AgentPass, fit.in_set(PrepareSystems::Fit));
     }
 }

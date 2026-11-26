@@ -170,7 +170,7 @@ impl Runtime {
                 if let Err(error) = &result
                     && error.is_storage()
                 {
-                    fail(app.world_mut(), error.to_string());
+                    fail(app.world_mut(), &error.to_string());
                 }
                 tick(app);
                 let result = app.world().resource::<HostState>().ready().and(result);
@@ -198,7 +198,7 @@ impl Runtime {
                 if let Err(error) = &result
                     && error.is_storage()
                 {
-                    fail(app.world_mut(), error.to_string());
+                    fail(app.world_mut(), &error.to_string());
                 }
                 let _reply = reply.send(result);
             })
@@ -287,7 +287,7 @@ fn next(
 pub(crate) fn tick(app: &mut App) {
     app.update();
     if let Some(reason) = app.world().resource::<SessionLog>().failure() {
-        fail(app.world_mut(), reason);
+        fail(app.world_mut(), &reason);
     }
     if app.world().resource::<HostState>().failed.is_some() {
         app.world_mut().resource_mut::<Notifier>().clear();
@@ -297,7 +297,7 @@ pub(crate) fn tick(app: &mut App) {
 }
 
 /// A sticky host failure: it stops the agent loop and refuses new work.
-pub(crate) fn fail(world: &mut World, reason: String) {
+pub(crate) fn fail(world: &mut World, reason: &str) {
     if world
         .get_resource::<HostState>()
         .is_some_and(|state| state.failed.is_some())
@@ -316,10 +316,10 @@ pub(crate) fn fail(world: &mut World, reason: String) {
         });
     }
     if let Some(mut state) = world.get_resource_mut::<HostState>() {
-        state.failed = Some(reason.clone());
+        state.failed = Some(reason.to_string());
     }
     if let Some(mut notifier) = world.get_resource_mut::<Notifier>() {
-        notifier.fail(&reason);
+        notifier.fail(reason);
     }
 }
 

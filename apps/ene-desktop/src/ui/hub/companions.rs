@@ -73,8 +73,8 @@ pub(super) fn update_companion_profile(
     cx.notify();
 }
 
-pub(super) fn import_companion_json(hub: &mut Hub, raw: String, cx: &mut Context<Hub>) {
-    let template = match parse_template_json(&raw) {
+pub(super) fn import_companion_json(hub: &mut Hub, raw: &str, cx: &mut Context<Hub>) {
+    let template = match parse_template_json(raw) {
         Ok(template) => template,
         Err(error) => {
             hub.model.notice(

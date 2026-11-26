@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 /// matched to its operation by id; the client id it carries is the record.
 pub(crate) fn complete(
     world: &mut World,
-    result: w::DeviceOperationResult,
+    result: &w::DeviceOperationResult,
 ) -> Result<w::DeviceOperationState> {
     let store = world.resource::<Store>().clone();
     let Some(operation) = store.client_repo().operation(&result.operation_id)? else {
@@ -45,7 +45,7 @@ pub(crate) fn complete(
         &store,
         world.get_resource::<DeviceHub>(),
         &operation,
-        &result,
+        result,
     ) {
         ComputerUseCheck::Skip => None,
         ComputerUseCheck::Ready(pending) => Some(pending),
@@ -64,8 +64,7 @@ pub(crate) fn complete(
             );
         }
     };
-    let (base_success, failure, validated) =
-        parse_and_validate_output(&store, &operation, &result)?;
+    let (base_success, failure, validated) = parse_and_validate_output(&store, &operation, result)?;
     let (validated, frame) = apply_computer_use_output(
         world.get_resource_mut::<ComputerUse>().as_deref_mut(),
         &operation,
@@ -205,7 +204,7 @@ fn apply_computer_use_output(
     let mut frame = None;
     let validated = match (success, validated) {
         (true, Some(Ok(output))) => Some(
-            computer::result(pending, output)
+            computer::result(pending, &output)
                 .map(|(metadata, captured)| {
                     frame = captured;
                     metadata

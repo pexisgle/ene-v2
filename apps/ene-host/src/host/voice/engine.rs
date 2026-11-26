@@ -66,14 +66,14 @@ impl<'a> VoiceEngineContext<'a> {
 
 fn http_engine(
     ctx: &VoiceEngineContext<'_>,
-    connection: Connection,
+    connection: &Connection,
     kind: ConnectionKind,
     binding: Option<&ene_domain::VoiceBinding>,
 ) -> std::result::Result<HttpEngine, SetupError> {
-    let resolved_base = resolve_base(&connection, ctx.providers);
-    let secret = load_connection_secret(&connection, ctx.credentials, ctx.providers)?;
+    let resolved_base = resolve_base(connection, ctx.providers);
+    let secret = load_connection_secret(connection, ctx.credentials, ctx.providers)?;
     let client = net::client().map_err(|error| SetupError::Broken(error.to_string()))?;
-    let engine = HttpEngine::new(&connection, &resolved_base, secret, kind, client)?;
+    let engine = HttpEngine::new(connection, &resolved_base, secret, kind, client)?;
     Ok(match binding {
         Some(binding) => engine.with_binding(binding),
         None => engine,
@@ -114,7 +114,7 @@ pub(crate) fn companion_tts_source(
         connection.endpoint().adapter.as_str(),
         "voicevox" | "openai" | "sakura"
     ) {
-        let engine = http_engine(&ctx, connection, ConnectionKind::Tts, Some(&binding))?;
+        let engine = http_engine(&ctx, &connection, ConnectionKind::Tts, Some(&binding))?;
         return Ok(Arc::new(engine));
     }
     Err(SetupError::Unsupported(format!(
@@ -136,7 +136,7 @@ pub(crate) fn stt_source(world: &World) -> std::result::Result<Arc<dyn SttEngine
         return Ok(Arc::new(engine));
     }
     if matches!(connection.endpoint().adapter.as_str(), "openai" | "sakura") {
-        let engine = http_engine(&ctx, connection, ConnectionKind::Stt, None)?;
+        let engine = http_engine(&ctx, &connection, ConnectionKind::Stt, None)?;
         return Ok(Arc::new(engine));
     }
     Err(SetupError::Unsupported(format!(

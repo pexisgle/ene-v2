@@ -176,7 +176,12 @@ fn b09_read_loop_resolves_pending_and_preserves_all_event_kinds() {
     pending.lock().insert(8, waiter_tx);
 
     let healthy = AtomicBool::new(true);
-    read_loop(input.as_bytes(), events_tx, Arc::clone(&pending), &healthy);
+    read_loop(
+        input.as_bytes(),
+        &events_tx,
+        &Arc::clone(&pending),
+        &healthy,
+    );
     assert!(
         !healthy.load(Ordering::Acquire),
         "a reader that reached EOF must mark the renderer unhealthy"

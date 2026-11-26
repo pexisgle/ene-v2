@@ -24,7 +24,7 @@ use std::time::Instant;
 /// [`apply_report`] takes them explicitly so it can be tested without a world.
 pub(crate) fn report_with(
     world: &mut World,
-    companion: String,
+    companion: &str,
     event: w::PerceptionEvent,
 ) -> Result<()> {
     // A stream the activating client no longer owns carries nothing to apply.
@@ -43,7 +43,7 @@ pub(crate) fn report_with(
         &mut eyes,
         &mut perception,
         notifier.as_mut(),
-        &companion,
+        companion,
         event,
     );
     *world.resource_mut::<Eyes>() = eyes;
@@ -104,12 +104,12 @@ fn apply_report(
                 notifier,
                 companion,
                 "watch_matched",
-                json!({"transition": transition}),
+                &json!({"transition": transition}),
             );
         }
         SessionOutcome::Diagnostic(diag) => {
             if let Some((action, detail)) = diag {
-                diagnostic(notifier, companion, action, detail);
+                diagnostic(notifier, companion, action, &detail);
             }
         }
     }
@@ -178,7 +178,7 @@ fn handle_enabled_event(
         }
     };
     if let Some(action) = diag_action {
-        diagnostic(notifier, companion, action, json!({}));
+        diagnostic(notifier, companion, action, &json!({}));
     }
     if enabled {
         perception.events.remove(companion);

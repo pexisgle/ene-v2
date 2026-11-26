@@ -392,7 +392,7 @@ async fn an_mcp_tool_runs_through_the_gate() {
     let companion_id = harness.companion.clone();
     crate::host::work::start(
         harness.app.world_mut(),
-        ene_rpc::StartWorkRequest {
+        &ene_rpc::StartWorkRequest {
             companion_id,
             instruction: "ノート読んで".into(),
             ..Default::default()

@@ -25,7 +25,7 @@ pub(super) fn with_notifier<R>(
     Some(result)
 }
 
-pub(super) fn diagnostic(notifier: &mut Notifier, companion: &str, action: &str, detail: Value) {
+pub(super) fn diagnostic(notifier: &mut Notifier, companion: &str, action: &str, detail: &Value) {
     notifier.diagnostic(companion, "eyes", action, detail);
 }
 
@@ -55,7 +55,7 @@ pub(super) fn deliver(
                 notifier,
                 companion,
                 "delivered",
-                json!({
+                &json!({
                     "watch": reaction.kind == ReportKind::Watch,
                     "important": reaction.kind.important(),
                     "heartbeat": reaction.kind == ReportKind::Heartbeat,

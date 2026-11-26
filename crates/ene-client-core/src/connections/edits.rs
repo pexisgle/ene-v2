@@ -1,6 +1,6 @@
 //! Domain connection form editing and custom connection builder helpers.
 
-use super::parse_options_map;
+use super::options::{Speaker, SpeechOptions};
 use crate::domain::{
     AcpConnection, Connection, ConnectionConfig, ConnectionEndpoint, ConnectionInput,
     ConnectionKind, EmbeddingConnection, LlmConnection, McpConnection, SearchConnection,
@@ -150,29 +150,16 @@ fn apply_tts_edits(tts: &mut TtsConnection, spec: &ConnectionEditSpec<'_>) {
     let sakura =
         ep.adapter.eq_ignore_ascii_case("sakura") || ene_catalog::is_sakura_endpoint(&ep.endpoint);
     if sakura && let Some(first) = voices.first() {
-        let mut opts = parse_options_map(&ep.options);
-        if let Some((model, voice)) = first.split_once('/') {
-            if !model.trim().is_empty() {
-                opts.insert("model".into(), serde_json::json!(model.trim()));
-            }
-            if !voice.trim().is_empty() {
-                opts.insert("voice".into(), serde_json::json!(voice.trim()));
-            }
-        } else if !first.trim().is_empty() {
-            opts.insert("model".into(), serde_json::json!(first.trim()));
-        }
-        opts.entry("protocol".to_owned())
-            .or_insert_with(|| serde_json::json!("sakura"));
-        opts.entry("response_format".to_owned())
-            .or_insert_with(|| serde_json::json!("wav"));
-        ep.options = serde_json::Value::Object(opts).to_string();
+        let mut opts = SpeechOptions::parse(&ep.options);
+        opts.set_sakura_voice(first);
+        ep.options = opts.json();
     } else if ep.adapter.eq_ignore_ascii_case("voicevox")
         && let Some(first) = voices.first()
         && let Ok(speaker_num) = first.trim().parse::<u32>()
     {
-        let mut opts = parse_options_map(&ep.options);
-        opts.insert("speaker".into(), serde_json::json!(speaker_num));
-        ep.options = serde_json::Value::Object(opts).to_string();
+        let mut opts = SpeechOptions::parse(&ep.options);
+        opts.speaker = Some(Speaker::Id(speaker_num.into()));
+        ep.options = opts.json();
     }
     tts.endpoint = Some(ep);
     tts.voice_ids = voices;
@@ -182,9 +169,9 @@ fn apply_stt_edits(stt: &mut SttConnection, spec: &ConnectionEditSpec<'_>) {
     let mut ep = updated_endpoint(stt.endpoint.as_ref(), spec.endpoint_url, spec.options_json);
     let hints = split_comma(spec.list_raw);
     if let Some(first_lang) = hints.first() {
-        let mut opts = parse_options_map(&ep.options);
-        opts.insert("language".into(), serde_json::json!(first_lang));
-        ep.options = serde_json::Value::Object(opts).to_string();
+        let mut opts = SpeechOptions::parse(&ep.options);
+        opts.language = Some(first_lang.clone());
+        ep.options = opts.json();
     }
     stt.endpoint = Some(ep);
     stt.language_hints = hints;

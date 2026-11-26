@@ -3,7 +3,10 @@ use crate::ui::icons::Icon;
 use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button, toggle_switch};
-use ene_client_core::domain::ConnectionEndpoint;
+use ene_client_core::{
+    connections::form::{AgentPlatformOptions, FieldKind, FormValue, Options, OptionsSchema},
+    domain::ConnectionEndpoint,
+};
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
 pub(super) fn render_agent_platform_options(
@@ -15,36 +18,29 @@ pub(super) fn render_agent_platform_options(
     cx: &mut Context<ConnectionsPane>,
 ) -> (Vec<AnyElement>, Option<String>) {
     let options = endpoint
-        .and_then(|ep| serde_json::from_str::<serde_json::Value>(&ep.options).ok())
+        .and_then(|ep| serde_json::from_str::<AgentPlatformOptions>(&ep.options).ok())
         .unwrap_or_default();
     let project = pane.drafts.draft(
         cx,
         format!("conn:{id}:r{rev}:project_id"),
         "Express mode では空欄",
-        options["project_id"].as_str(),
+        options.project_id.as_deref(),
         theme,
     );
     let location = pane.drafts.draft(
         cx,
         format!("conn:{id}:r{rev}:location"),
         "未指定時は global",
-        options["location"].as_str(),
+        options.location.as_deref(),
         theme,
     );
-    let next_opts: serde_json::Map<String, serde_json::Value> = [
-        ("project_id", project.read(cx).text().trim()),
-        ("location", location.read(cx).text().trim()),
-    ]
-    .into_iter()
-    .filter(|(_, value)| !value.is_empty())
-    .map(|(key, value)| (key.to_owned(), value.into()))
-    .collect();
+    let next_opts = AgentPlatformOptions::new(project.read(cx).text(), location.read(cx).text());
     (
         vec![
             labeled_field("Google Cloud プロジェクト ID", project, theme).into_any_element(),
             labeled_field("ロケーション", location, theme).into_any_element(),
         ],
-        Some(serde_json::Value::Object(next_opts).to_string()),
+        Some(next_opts.json()),
     )
 }
 
@@ -59,25 +55,17 @@ pub(super) fn render_options_schema(
     let Some(ep) = endpoint else {
         return (Vec::new(), None);
     };
-    let Some(props) = parse_schema_properties(&ep.options_schema) else {
+    let Ok(schema) = serde_json::from_str::<OptionsSchema>(&ep.options_schema) else {
         return (Vec::new(), None);
     };
-
-    let mut opts = match serde_json::from_str::<serde_json::Value>(&ep.options) {
-        Ok(serde_json::Value::Object(map)) => map,
-        _ => serde_json::Map::new(),
-    };
-
-    let mut controls: Vec<AnyElement> = Vec::new();
-    for (key, prop) in props {
-        let prop_type = prop
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("string");
+    let mut opts: Options = serde_json::from_str(&ep.options).unwrap_or_default();
+    let mut controls = Vec::new();
+    for (key, prop) in schema.properties {
+        let prop_type = prop.kind.scalar();
         let current_val = opts.get(&key).cloned();
         let d_key = format!("conn:{id}:r{rev}:opt:{key}");
 
-        if let Some(serde_json::Value::Array(choices)) = prop.get("enum") {
+        if let Some(choices) = prop.choices() {
             let control = render_schema_enum_field(
                 pane,
                 SchemaFieldCtx {
@@ -92,7 +80,7 @@ pub(super) fn render_options_schema(
                 cx,
             );
             controls.push(control);
-        } else if prop_type == "boolean" {
+        } else if matches!(prop_type, FieldKind::Boolean) {
             let control = render_schema_bool_field(
                 pane,
                 SchemaFieldCtx {
@@ -124,32 +112,28 @@ pub(super) fn render_options_schema(
         }
     }
 
-    let serialized = (!opts.is_empty()).then(|| serde_json::Value::Object(opts).to_string());
+    let serialized = (!opts.is_empty()).then(|| serde_json::json!(opts).to_string());
     (controls, serialized)
 }
 
-fn render_schema_enum_field(
+fn render_schema_enum_field<'a>(
     pane: &mut ConnectionsPane,
     ctx: SchemaFieldCtx<'_>,
-    choices: &[serde_json::Value],
+    choices: impl Iterator<Item = &'a str>,
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
 ) -> AnyElement {
     let init = ctx
         .current_val
-        .and_then(|v| v.as_str())
+        .and_then(FormValue::as_text)
         .map_or_default(str::to_owned);
     let d = pane.drafts.draft(cx, ctx.d_key, "", Some(&init), theme);
     let active_val = d.read(cx).text().to_owned();
     if !active_val.is_empty() {
-        ctx.opts.insert(
-            ctx.key.to_owned(),
-            serde_json::Value::String(active_val.clone()),
-        );
+        ctx.opts
+            .insert(ctx.key.to_owned(), FormValue::Text(active_val.clone()));
     }
     let chips: Vec<AnyElement> = choices
-        .iter()
-        .filter_map(|choice| choice.as_str())
         .map(|s| {
             let picked = active_val == s;
             let target_d = d.clone();
@@ -196,12 +180,12 @@ fn render_schema_bool_field(
 ) -> AnyElement {
     let init = ctx
         .current_val
-        .and_then(serde_json::Value::as_bool)
+        .and_then(FormValue::as_bool)
         .map_or("false", |b| if b { "true" } else { "false" });
     let d = pane.drafts.draft(cx, ctx.d_key, "", Some(init), theme);
     let checked = d.read(cx).text() == "true";
     ctx.opts
-        .insert(ctx.key.to_owned(), serde_json::Value::Bool(checked));
+        .insert(ctx.key.to_owned(), FormValue::Boolean(checked));
     let target_d = d.clone();
     div()
         .flex()
@@ -232,19 +216,16 @@ fn render_schema_bool_field(
 fn render_schema_scalar_field(
     pane: &mut ConnectionsPane,
     ctx: SchemaFieldCtx<'_>,
-    prop_type: &str,
+    prop_type: FieldKind,
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
 ) -> AnyElement {
-    let init = ctx.current_val.map(|v| match v {
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
-    });
+    let init = ctx.current_val.map(FormValue::draft_text);
     let d = pane.drafts.draft(cx, ctx.d_key, "", init.as_deref(), theme);
     let txt = d.read(cx).text().trim().to_owned();
     if !txt.is_empty() {
         ctx.opts
-            .insert(ctx.key.to_owned(), parse_scalar_value(prop_type, &txt));
+            .insert(ctx.key.to_owned(), FormValue::from_draft(prop_type, &txt));
     }
     div()
         .flex()
@@ -265,39 +246,6 @@ struct SchemaFieldCtx<'a> {
     id: &'a str,
     key: &'a str,
     d_key: String,
-    current_val: Option<&'a serde_json::Value>,
-    opts: &'a mut serde_json::Map<String, serde_json::Value>,
-}
-
-fn parse_schema_properties(raw_schema: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
-    if raw_schema.trim().is_empty() {
-        return None;
-    }
-    let serde_json::Value::Object(mut schema_obj) =
-        serde_json::from_str::<serde_json::Value>(raw_schema).ok()?
-    else {
-        return None;
-    };
-    let serde_json::Value::Object(props) = schema_obj.remove("properties")? else {
-        return None;
-    };
-    Some(props)
-}
-
-fn parse_scalar_value(prop_type: &str, txt: &str) -> serde_json::Value {
-    match prop_type {
-        "integer" => txt.parse::<i64>().map_or_else(
-            |_| serde_json::Value::String(txt.to_owned()),
-            |n| serde_json::Value::Number(n.into()),
-        ),
-        "number" => txt
-            .parse::<f64>()
-            .ok()
-            .and_then(serde_json::Number::from_f64)
-            .map_or_else(
-                || serde_json::Value::String(txt.to_owned()),
-                serde_json::Value::Number,
-            ),
-        _ => serde_json::Value::String(txt.to_owned()),
-    }
+    current_val: Option<&'a FormValue>,
+    opts: &'a mut Options,
 }

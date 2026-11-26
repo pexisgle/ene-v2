@@ -68,7 +68,7 @@ pub(super) fn add_search_preset(
 pub(super) fn save_search_provider_key(
     hub: &mut Hub,
     adapter: &'static str,
-    secret: String,
+    secret: &str,
     activate: bool,
     cx: &mut Context<Hub>,
 ) {
@@ -153,7 +153,7 @@ pub(super) fn quick_connect_llm(
 pub(super) fn complete_setup_selection(
     hub: &mut Hub,
     connection_id: String,
-    model_id: String,
+    model_id: &str,
     companion_name: Option<String>,
     voice_identifier: Option<String>,
     cx: &mut Context<Hub>,

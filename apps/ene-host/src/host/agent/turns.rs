@@ -67,7 +67,7 @@ pub(super) fn log_tools(
             } else {
                 "tool_requested"
             },
-            serde_json::json!({
+            &serde_json::json!({
                 "tool": request.call.function.name.as_str(),
                 "call_id": request.call.id.to_string(),
                 "work_id": work.map(|work| work.work_id.as_str()),
@@ -96,11 +96,10 @@ pub(super) struct TurnSettledParams<'w, 's> {
 /// Publishes the final turn event once a companion turn settles, and settles
 /// the run when a work agent's turn finishes.
 pub(super) fn turn_settled(
-    settled: On<Add<Settled>>,
+    turn_entity: Entity,
     mut commands: Commands,
     mut params: TurnSettledParams<'_, '_>,
 ) {
-    let turn_entity = settled.entity;
     let Ok((outcome, of)) = params.outcomes.get(turn_entity) else {
         return;
     };
@@ -167,7 +166,7 @@ pub(super) fn turn_settled(
         let run_id = work.run_id.clone();
         let outcome = outcome.clone();
         commands.queue(move |world: &mut World| {
-            crate::host::work::settle_run(world, run_id, outcome);
+            crate::host::work::settle_run(world, &run_id, &outcome);
         });
     }
 }

@@ -103,7 +103,7 @@ impl RpcDispatcher {
         context: &'static str,
         run: impl FnOnce(Host) -> F,
         done: impl FnOnce(T) -> Update + Send + 'static,
-        error: impl FnOnce(&'static str, ConnectError) -> Update + Send + 'static,
+        error: impl FnOnce(&'static str, &ConnectError) -> Update + Send + 'static,
     ) -> bool
     where
         T: Send + 'static,
@@ -122,7 +122,7 @@ impl RpcDispatcher {
         context: &'static str,
         future: impl Future<Output = Result<T, ConnectError>> + Send + 'static,
         done: impl FnOnce(T) -> Update + Send + 'static,
-        error: impl FnOnce(&'static str, ConnectError) -> Update + Send + 'static,
+        error: impl FnOnce(&'static str, &ConnectError) -> Update + Send + 'static,
     ) where
         T: Send + 'static,
     {
@@ -131,10 +131,10 @@ impl RpcDispatcher {
         self.runtime.spawn(async move {
             let inner = match tokio::time::timeout(RPC_TIMEOUT, future).await {
                 Ok(Ok(value)) => done(value),
-                Ok(Err(failed)) => error(context, failed),
+                Ok(Err(failed)) => error(context, &failed),
                 Err(_) => error(
                     context,
-                    ConnectError::deadline_exceeded("the host did not answer in time"),
+                    &ConnectError::deadline_exceeded("the host did not answer in time"),
                 ),
             };
             crate::session::notify_ui(
@@ -168,7 +168,7 @@ impl RpcDispatcher {
     }
 }
 
-pub(crate) fn failure(context: &'static str, error: ConnectError) -> Update {
+pub(crate) fn failure(context: &'static str, error: &ConnectError) -> Update {
     use connectrpc::ErrorCode;
     let message = error.to_string();
     match error.code {

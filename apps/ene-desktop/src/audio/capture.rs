@@ -157,7 +157,7 @@ fn build_microphone_stream(
                 push_captured_with(
                     input,
                     (channels, capacity),
-                    CaptureSink {
+                    &CaptureSink {
                         frames: &sink,
                         muted: &cap_muted,
                         level: &cap_level,
@@ -174,7 +174,7 @@ fn build_microphone_stream(
                 push_captured_with(
                     input,
                     (channels, capacity),
-                    CaptureSink {
+                    &CaptureSink {
                         frames: &sink,
                         muted: &cap_muted,
                         level: &cap_level,
@@ -191,7 +191,7 @@ fn build_microphone_stream(
                 push_captured_with(
                     input,
                     (channels, capacity),
-                    CaptureSink {
+                    &CaptureSink {
                         frames: &sink,
                         muted: &cap_muted,
                         level: &cap_level,
@@ -437,7 +437,7 @@ fn select_active_channels<T: Copy>(
 pub(super) fn push_captured_with<T: Copy>(
     input: &[T],
     (channels, capacity): (usize, usize),
-    sink: CaptureSink<'_>,
+    sink: &CaptureSink<'_>,
     to_f32: impl Fn(T) -> f32,
 ) {
     if sink.muted.load(Ordering::Relaxed) || channels == 0 {

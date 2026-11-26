@@ -2,6 +2,7 @@
 //!
 //! The audio and capture branches of the loop live in [`super::stream_audio`].
 
+use super::device_commands::OperationOutput;
 use super::{
     Binding, CAPTURE, LIP, Outcome, SAMPLE, Session, Step,
     commands::OperationError,
@@ -70,7 +71,7 @@ impl Session {
             .await
         {
             Ok(stream) => stream,
-            Err(error) => return self.transport.classify(error),
+            Err(error) => return self.transport.classify(&error),
         };
         let subscription = match self.subscribe(&host).await {
             Ok(stream) => stream,
@@ -207,7 +208,7 @@ impl Session {
                 }
             }
             Ok(None) => Some(Outcome::Dropped("the host closed the device stream".into())),
-            Err(error) => Some(self.transport.classify(error)),
+            Err(error) => Some(self.transport.classify(&error)),
         }
     }
 
@@ -222,7 +223,7 @@ impl Session {
                 Step::Stop => Some(Outcome::Closed),
             },
             Ok(None) => Some(Outcome::Resync("the host closed the subscription".into())),
-            Err(error) => Some(self.transport.classify(error)),
+            Err(error) => Some(self.transport.classify(&error)),
         }
     }
 
@@ -264,7 +265,7 @@ impl Session {
             .await
         {
             Ok(stream) => Ok(stream),
-            Err(error) => Err(self.transport.classify(error)),
+            Err(error) => Err(self.transport.classify(&error)),
         }
     }
 
@@ -288,7 +289,9 @@ impl Session {
         if operation.capability == w::COMPUTER_USE {
             let outcome = match refusal {
                 Some(reason) => Err(reason.into()),
-                None => Box::pin(self.computer_operation(host, &operation)).await,
+                None => Box::pin(self.computer_operation(host, &operation))
+                    .await
+                    .map(OperationOutput::External),
             };
             let result = Self::operation_result(&self.transport.options.id, &operation, outcome);
             Self::report_operation(host, result).await;
@@ -316,13 +319,11 @@ impl Session {
                 Ok((workspace, input)) => {
                     let client_id = self.transport.options.id.clone();
                     self.devices.work.spawn(async move {
-                        let output =
-                            Box::pin(workspace.execute(&operation.capability, input)).await;
-                        Self::operation_result(
-                            &client_id,
-                            &operation,
-                            output.map_err(OperationError::from),
-                        )
+                        let output = Box::pin(workspace.execute(&operation.capability, input))
+                            .await
+                            .map(OperationOutput::External)
+                            .map_err(OperationError::from);
+                        Self::operation_result(&client_id, &operation, output)
                     });
                 }
                 Err(reason) => {

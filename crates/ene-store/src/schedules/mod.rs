@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod tests;
 
+use crate::row::FromRow;
 use crate::{Store, StoreError, error::Result};
 use jiff::{Timestamp, tz::TimeZone};
 use rusqlite::params;
@@ -256,7 +257,7 @@ impl<'a> ScheduleRepo<'a> {
                 next_run_at,
                 stamp(now)
             ],
-            row_to_schedule,
+            Schedule::from_row,
         )
     }
 
@@ -267,7 +268,7 @@ impl<'a> ScheduleRepo<'a> {
              next_run_at, created_at, last_triggered_at FROM schedules \
              WHERE companion_id = ?1 AND enabled = 1 ORDER BY created_at, id",
             [companion],
-            row_to_schedule,
+            Schedule::from_row,
         )
     }
 
@@ -278,7 +279,7 @@ impl<'a> ScheduleRepo<'a> {
              next_run_at, created_at, last_triggered_at FROM schedules \
              WHERE enabled = 1 AND next_run_at <= ?1 ORDER BY next_run_at, id",
             [stamp(now)],
-            row_to_schedule,
+            Schedule::from_row,
         )
     }
 
@@ -321,7 +322,7 @@ impl<'a> ScheduleRepo<'a> {
                  next_run_at, created_at, last_triggered_at FROM schedules \
                  WHERE enabled = 1 AND next_run_at <= ?1 ORDER BY next_run_at, id",
             )?;
-            stmt.query_map([&now_stamp], row_to_schedule)?
+            stmt.query_map([&now_stamp], Schedule::from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         for schedule in due {
@@ -382,7 +383,7 @@ impl<'a> ScheduleRepo<'a> {
                  FROM schedule_occurrences WHERE status = 'pending' \
                  ORDER BY scheduled_for, occurrence_key",
             )?;
-            stmt.query_map([], row_to_occurrence)?
+            stmt.query_map([], ScheduleOccurrence::from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         Ok(pending)
@@ -397,7 +398,7 @@ impl<'a> ScheduleRepo<'a> {
              FROM schedule_occurrences WHERE status = 'pending' \
              ORDER BY scheduled_for, occurrence_key",
             [],
-            row_to_occurrence,
+            ScheduleOccurrence::from_row,
         )
     }
 
@@ -442,33 +443,37 @@ impl<'a> ScheduleRepo<'a> {
     }
 }
 
-fn row_to_occurrence(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduleOccurrence> {
-    Ok(ScheduleOccurrence {
-        occurrence_key: row.get("occurrence_key")?,
-        schedule_id: row.get("schedule_id")?,
-        companion_id: row.get("companion_id")?,
-        scheduled_for: row.get("scheduled_for")?,
-        title: row.get("title")?,
-        instruction: row.get("instruction")?,
-        status: row.get("status")?,
-        attempts: row.get("attempts")?,
-        last_error: row.get("last_error")?,
-        created_at: row.get("created_at")?,
-        delivered_at: row.get("delivered_at")?,
-    })
+impl FromRow for ScheduleOccurrence {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(ScheduleOccurrence {
+            occurrence_key: row.get("occurrence_key")?,
+            schedule_id: row.get("schedule_id")?,
+            companion_id: row.get("companion_id")?,
+            scheduled_for: row.get("scheduled_for")?,
+            title: row.get("title")?,
+            instruction: row.get("instruction")?,
+            status: row.get("status")?,
+            attempts: row.get("attempts")?,
+            last_error: row.get("last_error")?,
+            created_at: row.get("created_at")?,
+            delivered_at: row.get("delivered_at")?,
+        })
+    }
 }
 
-fn row_to_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
-    Ok(Schedule {
-        id: row.get("id")?,
-        companion_id: row.get("companion_id")?,
-        title: row.get("title")?,
-        instruction: row.get("instruction")?,
-        run_at: row.get("run_at")?,
-        cron_expr: row.get("cron_expr")?,
-        enabled: row.get("enabled")?,
-        next_run_at: row.get("next_run_at")?,
-        created_at: row.get("created_at")?,
-        last_triggered_at: row.get("last_triggered_at")?,
-    })
+impl FromRow for Schedule {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Schedule {
+            id: row.get("id")?,
+            companion_id: row.get("companion_id")?,
+            title: row.get("title")?,
+            instruction: row.get("instruction")?,
+            run_at: row.get("run_at")?,
+            cron_expr: row.get("cron_expr")?,
+            enabled: row.get("enabled")?,
+            next_run_at: row.get("next_run_at")?,
+            created_at: row.get("created_at")?,
+            last_triggered_at: row.get("last_triggered_at")?,
+        })
+    }
 }

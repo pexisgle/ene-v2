@@ -70,7 +70,7 @@ pub(crate) fn register(app: &mut App) {
         "mind_read",
         "Read one memory with its provenance. This counts as using it.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, args| read(world, agent, args)),
+        run_tool(|world, agent, _, args: ReadArgs| read(world, agent, &args)),
     )
     .add_open_tool::<UpdateArgs, _>(
         "mind_update",
@@ -138,7 +138,7 @@ fn complete_recall(mut commands: Commands, mut pending: Query<(Entity, &mut Pend
                 Ok(text) => crate::host::permission::answer(world, call, &text),
                 Err(error) => {
                     if error.is_storage() {
-                        crate::host::fail(world, error.to_string());
+                        crate::host::fail(world, &error.to_string());
                     }
                     crate::host::permission::refuse(world, call, &error.to_string());
                 }
@@ -206,7 +206,7 @@ fn recall_result(
     Ok(json!({"items": items, "semantic": outcome.semantic}).to_string())
 }
 
-fn read(world: &mut World, agent: Entity, args: ReadArgs) -> Result<String> {
+fn read(world: &mut World, agent: Entity, args: &ReadArgs) -> Result<String> {
     let companion = companion_of_any(world, agent)?;
     let store = world.resource::<Store>().clone();
     let memory = store

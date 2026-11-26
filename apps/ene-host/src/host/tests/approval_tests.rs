@@ -175,7 +175,7 @@ fn a_capability_tool_name_over_64_is_rejected_at_registration() {
     let mut harness = Harness::new(Vec::<Vec<MockStreamEvent>>::new());
     let result = client::register(
         harness.app.world_mut(),
-        w::RegisterClientRequest {
+        &w::RegisterClientRequest {
             id: "c1".into(),
             name: "c1".into(),
             platform: "linux".into(),
@@ -262,7 +262,7 @@ fn a_confirm_capability_is_gated_and_delivered_to_the_bound_client() {
     // The client's result answers the waiting tool call.
     let complete = device::complete(
         harness.app.world_mut(),
-        w::DeviceOperationResult {
+        &w::DeviceOperationResult {
             client_id: "c1".into(),
             operation_id: operation.operation_id.clone(),
             success: true,
@@ -280,7 +280,7 @@ fn a_client_is_granted_only_what_the_host_policy_allows() {
     let mut harness = Harness::with_policy([], "body.motion");
     let client = client::register(
         harness.app.world_mut(),
-        w::RegisterClientRequest {
+        &w::RegisterClientRequest {
             id: "c1".into(),
             name: "desk".into(),
             platform: "linux".into(),
@@ -457,7 +457,7 @@ fn the_head_resolves_its_own_pending_approval_with_the_tool() {
         harness.app.world_mut(),
         agent,
         "call-resolve",
-        permission::ResolveApprovalArgs {
+        &permission::ResolveApprovalArgs {
             request_id: request.request_id.clone(),
             decision: "approve".into(),
         },
@@ -514,7 +514,7 @@ fn the_head_cannot_resolve_another_companions_approval() {
             harness.app.world_mut(),
             agent,
             "call-resolve",
-            permission::ResolveApprovalArgs {
+            &permission::ResolveApprovalArgs {
                 request_id: "a1".into(),
                 decision: decision.into(),
             },
@@ -647,7 +647,7 @@ fn moving_the_active_client_moves_the_published_tools() {
     // A perception event from a client that is no longer active is discarded.
     client::report_perception(
         harness.app.world_mut(),
-        w::PerceptionEvent {
+        &w::PerceptionEvent {
             client_id: "c1".into(),
             event: Some(w::perception_event::Event::ActiveWindow(Box::new(
                 w::ActiveWindowChanged {
@@ -671,7 +671,7 @@ fn moving_the_active_client_moves_the_published_tools() {
     // Releasing the client despawns its capability tools.
     client::activate(
         harness.app.world_mut(),
-        w::ActivationRequest {
+        &w::ActivationRequest {
             companion_id: harness.companion.clone(),
             release: true,
             ..Default::default()
@@ -756,7 +756,7 @@ fn a_capability_tool_call_is_dispatched_after_gate_approval() {
     assert_eq!(operation.client_id, "c1");
     device::complete(
         harness.app.world_mut(),
-        w::DeviceOperationResult {
+        &w::DeviceOperationResult {
             client_id: "c1".into(),
             operation_id: operation.id.clone(),
             success: true,

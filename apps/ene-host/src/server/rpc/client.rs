@@ -9,12 +9,16 @@ use futures_util::StreamExt;
 
 #[expect(refining_impl_trait, reason = "Connect boxes futures")]
 impl w::ClientService for Services {
-    request!(
-        register_client,
-        w::RegisterClientRequest,
-        w::Client,
-        client::register
-    );
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "register_client", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn register_client(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::RegisterClientRequest>,
+    ) -> connectrpc::ServiceResult<w::Client> {
+        let request = request.to_owned_message();
+        self.call(move |app| client::register(app.world_mut(), &request))
+            .await
+    }
 
     #[tracing::instrument(
         name = "rpc",
@@ -41,18 +45,26 @@ impl w::ClientService for Services {
         .await
     }
 
-    request!(
-        activate,
-        w::ActivationRequest,
-        w::Activation,
-        client::activate
-    );
-    request!(
-        set_capabilities,
-        w::SetCapabilitiesRequest,
-        w::Client,
-        client::set_capabilities
-    );
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "activate", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn activate(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::ActivationRequest>,
+    ) -> connectrpc::ServiceResult<w::Activation> {
+        let request = request.to_owned_message();
+        self.call(move |app| client::activate(app.world_mut(), &request))
+            .await
+    }
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "set_capabilities", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn set_capabilities(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::SetCapabilitiesRequest>,
+    ) -> connectrpc::ServiceResult<w::Client> {
+        let request = request.to_owned_message();
+        self.call(move |app| client::set_capabilities(app.world_mut(), &request))
+            .await
+    }
 
     #[tracing::instrument(
         name = "rpc",
@@ -129,12 +141,16 @@ impl w::ClientService for Services {
         w::PerceptionEvent,
         client::report_perception
     );
-    request!(
-        complete_operation,
-        w::DeviceOperationResult,
-        w::DeviceOperationState,
-        client::device::complete
-    );
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "complete_operation", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn complete_operation(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::DeviceOperationResult>,
+    ) -> connectrpc::ServiceResult<w::DeviceOperationState> {
+        let request = request.to_owned_message();
+        self.call(move |app| client::device::complete(app.world_mut(), &request))
+            .await
+    }
     request!(read get_operation, w::Id, w::DeviceOperationState, client::device::get);
 }
 

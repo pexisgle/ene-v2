@@ -11,9 +11,7 @@ pub(crate) mod screen;
 #[cfg(test)]
 mod tests;
 
-pub use rules::{
-    IDLE_THRESHOLD, NotifyOn, Observation, Report, Sensor, Watch, WatchParseError, Window,
-};
+pub use rules::{IDLE_THRESHOLD, NotifyOn, Observation, Report, Sensor, Watch, Window};
 #[cfg(windows)]
 pub(crate) use screen::{capture, unlocked};
 

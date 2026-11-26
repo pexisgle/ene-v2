@@ -1,6 +1,7 @@
 // The desktop app performs no FFI itself: every platform call lives in
 // ne-platform-os, which states the invariant each one relies on.
 #![forbid(unsafe_code)]
+#![warn(clippy::needless_pass_by_value)]
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 //! Starts the desktop client: one window, one session, one owner per resource.
@@ -263,7 +264,7 @@ fn run_gpui_app(init: DesktopAppInit) {
                 hub.update(cx, |hub, _cx| hub.windows.pod_mode = PodMode::ExpandedChat);
             }
             bind_actions(cx, hub.clone());
-            if open_pod_window(cx, hub.clone()).is_none() {
+            if open_pod_window(cx, &hub).is_none() {
                 cx.quit();
                 return;
             }

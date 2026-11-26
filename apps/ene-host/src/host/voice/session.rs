@@ -302,10 +302,9 @@ pub(crate) fn on_client_activated(voice: Option<&Voice>, companion: &str, client
 }
 
 fn observe_speak_character_text(
-    trigger: On<crate::host::resources::SpeakCharacterText>,
+    event: &crate::host::resources::SpeakCharacterText,
     mut commands: Commands,
 ) {
-    let event = trigger.event();
     let companion_id = event.companion_id.clone();
     let text = event.text.clone();
     commands.queue(move |world: &mut World| {
@@ -326,6 +325,10 @@ impl Plugin for VoicePlugin {
         let runtime = app.world().resource::<HostRuntime>().0.clone();
         app.init_resource::<delegation::DeliveredClaims>()
             .insert_resource(Voice::new(runtime))
-            .add_observer(observe_speak_character_text);
+            .add_observer(
+                |trigger: On<crate::host::resources::SpeakCharacterText>, commands: Commands| {
+                    observe_speak_character_text(trigger.event(), commands);
+                },
+            );
     }
 }

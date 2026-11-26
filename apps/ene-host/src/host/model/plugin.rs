@@ -56,14 +56,14 @@ pub(crate) fn completion(
     provider: Arc<Running>,
     role: &crate::host::providers::ProviderRole,
     context: ProviderInvocationContext,
-    model: String,
+    model: &str,
     image_input: bool,
 ) -> DynModel<Completion> {
     let endpoint = context.endpoint.clone();
     let provider_id = role.id;
     // An unlisted model is assumed to call tools; the host cannot prove
     // otherwise without a probe. Its limits stay unknown rather than guessed.
-    let mut spec = ModelSpec::new(provider_id, model.clone()).with_tools(true);
+    let mut spec = ModelSpec::new(provider_id, model.to_string()).with_tools(true);
     spec.input.image = image_input;
     // Match the wire descriptor's vendor name to `spec.provider` so
     // `ModelFacts::for_model` returns the bound spec even when a plugin
@@ -76,7 +76,7 @@ pub(crate) fn completion(
             .with_route(Route::Chat),
     );
     config.completion_model(
-        &model,
+        model,
         DynHttpClient::new(GuestClient { provider, context }),
         ModelFacts::new(spec),
     )
@@ -114,7 +114,7 @@ struct Exchange {
     reason = "rig-core's HttpError exceeds clippy's threshold and cannot be boxed here"
 )]
 impl Exchange {
-    fn accept(&mut self, chunk: HttpChunk) -> Result<(), HttpError> {
+    fn accept(&mut self, chunk: &HttpChunk) -> Result<(), HttpError> {
         if self.done {
             return Err(protocol("a chunk arrived after the terminal chunk"));
         }
@@ -177,7 +177,7 @@ impl Exchange {
             }
             if self.invocation_done {
                 match self.events.recv().await {
-                    Some(PluginEvent::Http { chunk }) => self.accept(chunk)?,
+                    Some(PluginEvent::Http { chunk }) => self.accept(&chunk)?,
                     Some(_) => return Err(protocol("the plugin emitted a non-HTTP event")),
                     None => {
                         return Err(protocol("the plugin ended without a terminal chunk"));
@@ -187,7 +187,7 @@ impl Exchange {
             }
             tokio::select! {
                 event = self.events.recv() => match event {
-                    Some(PluginEvent::Http { chunk }) => self.accept(chunk)?,
+                    Some(PluginEvent::Http { chunk }) => self.accept(&chunk)?,
                     Some(_) => return Err(protocol("the plugin emitted a non-HTTP event")),
                     None => {
                         self.invocation_done = true;

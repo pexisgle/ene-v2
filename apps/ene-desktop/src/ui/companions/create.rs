@@ -116,7 +116,7 @@ pub(super) fn render_import_panel(
                     theme,
                     move |_, cx| {
                         hub_import_json.update(cx, |hub, cx| {
-                            hub.import_companion_json(json_text.clone(), cx);
+                            hub.import_companion_json(&json_text, cx);
                         });
                     },
                 )),

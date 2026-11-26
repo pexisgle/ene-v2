@@ -42,18 +42,18 @@ async fn p10_listing_uses_authorized_http_and_connection_credentials() {
         assert_guest_bytes(r#""options":{"fixture_option":"preserved"}"#, true, true),
         assert_guest_bytes(secret, true, false),
         assert_guest_bytes("replacement-secret", true, false),
-        service(json!({"type":"http_open", "request":{
+        service(&json!({"type":"http_open", "request":{
             "method":"GET", "url":format!("{}/models", upstream.base), "headers":{}
         }})),
         assert_guest_bytes(r#""Ok":{"#, false, true),
-        service(json!({"type":"http_read", "handle":"http-1"})),
+        service(&json!({"type":"http_read", "handle":"http-1"})),
         assert_guest_bytes(&format!("\"data_base64\":\"{encoded}\""), false, true),
         assert_guest_bytes(r#""done":true"#, false, true),
         assert_guest_bytes(secret, false, false),
         assert_guest_bytes("replacement-secret", false, false),
         assert_guest_bytes("private-response", false, false),
         assert_guest_bytes("set-cookie", false, false),
-        service(json!({"type":"http_close", "handle":"http-1"})),
+        service(&json!({"type":"http_close", "handle":"http-1"})),
         assert_guest_bytes(r#"{"Ok":null}"#, false, true),
         emit(r#"{"type":"models","models":[{"id":"plugin-http-model","name":"HTTP"}]}"#),
         reply("{}"),
@@ -64,7 +64,7 @@ async fn p10_listing_uses_authorized_http_and_connection_credentials() {
         Extension::Llm,
         &body,
         &upstream.base,
-        json!({"type":"bearer"}),
+        &json!({"type":"bearer"}),
     );
     for key in [secret, "replacement-secret"] {
         credentials.remember(&connection.id, key.into());
@@ -96,7 +96,7 @@ async fn p10_listing_http_failures_never_select_native_or_expand_origins() {
         let destination = if denied { &native.base } else { &approved };
         let body = format!(
             "{} local.get $p call $error i32.const 1 return",
-            service(json!({"type":"http_open", "request":{
+            service(&json!({"type":"http_open", "request":{
                 "method":"GET", "url":destination, "headers":{}
             }}))
         );
@@ -599,7 +599,7 @@ fn p10_listed_providers_cover_installed_plugins_and_their_defaults() {
         Extension::Llm,
         &reply("{}"),
         "https://plugin.example",
-        json!({"type":"none"}),
+        &json!({"type":"none"}),
     );
     let listed = settings::providers(&providers);
     let builtins = [
@@ -656,11 +656,11 @@ async fn b07_embedding_plugin_uses_provider_context_and_broker() {
         assert_guest_bytes(r#""fixture_option":"preserved""#, true, true),
         assert_guest_bytes(r#""tier":"a""#, true, true),
         assert_guest_bytes("secret-a", true, false),
-        service(json!({"type":"http_open", "request":{
+        service(&json!({"type":"http_open", "request":{
             "method":"POST", "url":format!("{}/embeddings", upstream_a.base), "headers":{}
         }})),
         assert_guest_bytes(r#""Ok":{"#, false, true),
-        service(json!({"type":"http_close", "handle":"http-1"})),
+        service(&json!({"type":"http_close", "handle":"http-1"})),
         assert_guest_bytes(r#"{"Ok":null}"#, false, true),
         reply(r#"{"vectors":[[0.1,0.2,0.3]]}"#),
     ]
@@ -670,11 +670,11 @@ async fn b07_embedding_plugin_uses_provider_context_and_broker() {
         assert_guest_bytes(r#""fixture_option":"overridden""#, true, true),
         assert_guest_bytes(r#""tier":"b""#, true, true),
         assert_guest_bytes("secret-b", true, false),
-        service(json!({"type":"http_open", "request":{
+        service(&json!({"type":"http_open", "request":{
             "method":"POST", "url":format!("{}/embeddings", upstream_b.base), "headers":{}
         }})),
         assert_guest_bytes(r#""Ok":{"#, false, true),
-        service(json!({"type":"http_close", "handle":"http-1"})),
+        service(&json!({"type":"http_close", "handle":"http-1"})),
         assert_guest_bytes(r#"{"Ok":null}"#, false, true),
         reply(r#"{"vectors":[[0.4,0.5,0.6]]}"#),
     ]
@@ -685,7 +685,7 @@ async fn b07_embedding_plugin_uses_provider_context_and_broker() {
         Extension::Embedding,
         &body,
         &manifest_unused.base,
-        json!({"type":"bearer"}),
+        &json!({"type":"bearer"}),
     );
     let manifest_path = root
         .path()
