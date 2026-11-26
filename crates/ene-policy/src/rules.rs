@@ -115,6 +115,9 @@ pub struct Approval {
     pub client_id: Option<String>,
     /// The capability the action invokes, when it names one.
     pub capability: Option<String>,
+    /// Display-safe route for an action that sends data to an external service.
+    #[serde(default)]
+    pub external_destination: Option<String>,
 }
 
 /// What the Gate should do with a tool call.

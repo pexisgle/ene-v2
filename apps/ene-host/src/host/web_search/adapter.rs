@@ -245,7 +245,7 @@ fn extract_error_detail(body: &[u8], secret: Option<&str>) -> Option<String> {
     (!trimmed.is_empty() && !contains_credential(trimmed, secret)).then(|| truncate(trimmed, 200))
 }
 
-fn contains_credential(text: &str, secret: Option<&str>) -> bool {
+pub(super) fn contains_credential(text: &str, secret: Option<&str>) -> bool {
     secret.is_some_and(|secret| {
         text.contains(secret)
             || (text.contains('%')

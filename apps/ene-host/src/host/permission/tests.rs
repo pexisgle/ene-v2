@@ -860,13 +860,13 @@ fn a_saved_deny_blocks_operator_approval_on_the_same_client() {
         .unwrap();
     assert_eq!(approval.status, ApprovalStatus::Denied);
     assert!(world.app.world().get::<Approved>(call).is_none());
-    assert!(
+    assert_eq!(
         world
             .store()
             .client_repo()
             .outstanding_operations("c1")
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [ene_domain::DeviceOperation; 0]
     );
     provider.task.abort();
 }

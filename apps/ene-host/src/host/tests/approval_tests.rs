@@ -507,6 +507,7 @@ fn the_head_cannot_resolve_another_companions_approval() {
             resolved_at: None,
             client_id: Some("c2".into()),
             capability: Some("device.files".into()),
+            external_destination: None,
         })
         .unwrap();
     let agent = harness.companion_agent();

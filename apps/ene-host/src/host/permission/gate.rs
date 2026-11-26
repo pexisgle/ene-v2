@@ -374,6 +374,10 @@ fn issue_gate_hold(
     let request_id = uuid::Uuid::new_v4().to_string();
     let (normalized, hash) = canonicalise(&binding.call.tool_name, &binding.call.arguments);
     let arguments_view = truncate(&normalized, DECISION_ARGUMENT_CHARS);
+    let external_destination = world
+        .get::<crate::host::web_search::SearchBinding>(binding.call.entity)
+        .map(|search| search.display_destination.clone());
+    let target = external_destination.clone().unwrap_or(target);
     let approval = Approval {
         request_id: request_id.clone(),
         session_id: binding.companion_id.clone(),
@@ -387,6 +391,7 @@ fn issue_gate_hold(
         resolved_at: None,
         client_id: binding.bound_client_id.clone(),
         capability: binding.bound_capability.clone(),
+        external_destination,
     };
     if let Err(error) = issue_hold(world, store, &approval, binding.call.entity) {
         if error.is_storage() {

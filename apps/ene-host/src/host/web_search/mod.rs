@@ -17,7 +17,7 @@ use super::{
     providers::Providers,
     settings::{Check, Connection, ConnectionConfig, ConnectionKind, endpoint_of},
 };
-use adapter::{parse_adapter_results, read_http_error, send_search_request};
+use adapter::{contains_credential, parse_adapter_results, read_http_error, send_search_request};
 use bevy_ecs::prelude::Component;
 use ene_catalog::SearchAdapter;
 use ene_domain::ConnectionId;
@@ -70,13 +70,14 @@ fn search_endpoint(adapter: SearchAdapter, configured: &str) -> Result<Url, Sear
 
 /// The route the permission gate evaluated. A held call cannot switch to
 /// a replacement connection or to a different revision of the same one.
-#[derive(Clone, Component, Debug, PartialEq, Eq)]
+#[derive(Clone, Component, PartialEq, Eq)]
 pub(crate) struct SearchBinding {
     connection: ConnectionId,
     revision: u64,
     settings_revision: u64,
     credential_generation: Option<u64>,
     pub(crate) endpoint: Url,
+    pub(crate) display_destination: String,
 }
 
 impl SearchBinding {
@@ -184,6 +185,12 @@ pub(crate) fn resolve_connection(
     if provider.key_environment.is_some() && secret.is_none() {
         return Err(SearchConfigError::MissingCredential(provider.name));
     }
+    let display_path = &endpoint[..url::Position::AfterPath];
+    let display_destination = if contains_credential(display_path, secret.as_deref()) {
+        provider.name.to_owned()
+    } else {
+        display_path.to_owned()
+    };
     let provider_name = if connection.name.trim().is_empty() {
         provider.name.to_owned()
     } else {
@@ -200,6 +207,7 @@ pub(crate) fn resolve_connection(
             settings_revision,
             credential_generation: credentials.map(Credentials::generation),
             endpoint,
+            display_destination,
         },
         max_results,
         secret,

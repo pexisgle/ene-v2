@@ -18,6 +18,7 @@ row_fields!(Approval, COLUMNS {
     resolved_at,
     client_id,
     capability,
+    external_destination,
 });
 
 /// Repository managing `approval_requests`.
@@ -33,7 +34,7 @@ impl<'a> ApprovalRepo<'a> {
         self.0
             .conn()
             .prepare_cached(&format!(
-                "INSERT INTO approval_requests ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+                "INSERT INTO approval_requests ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
             ))?
             .execute(params![
                 approval.request_id,
@@ -48,6 +49,7 @@ impl<'a> ApprovalRepo<'a> {
                 approval.resolved_at,
                 approval.client_id,
                 approval.capability,
+                approval.external_destination,
             ])?;
         Ok(())
     }
@@ -129,6 +131,7 @@ mod tests {
             resolved_at: None,
             client_id: Some("c1".into()),
             capability: Some("device.x".into()),
+            external_destination: None,
         }
     }
 

@@ -14,7 +14,7 @@ from_fields! {
         request_id, session_id, run_id, action_payload_hash, tool_name,
         normalized_arguments,
         status.as_known().and_then(|status| status.try_into().ok()),
-        created_at, client_id, capability,
+        created_at, client_id, capability, external_destination,
     }
 }
 

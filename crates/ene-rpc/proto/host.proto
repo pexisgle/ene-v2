@@ -409,6 +409,7 @@ message ApprovalRequest {
   string created_at = 8;
   optional string client_id = 9;             // 承認を束縛したクライアント（音声・端末能力）
   optional string capability = 11;           // device_request の場合の能力名
+  optional string external_destination = 12; // 承認画面に表示する外部送信先。資格情報や URL のクエリは含めない
 }
 message PendingApprovals { repeated ApprovalRequest items = 1; }
 message SubmitApprovalRequest {

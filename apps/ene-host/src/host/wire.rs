@@ -123,6 +123,7 @@ pub(crate) fn approval(value: &Approval) -> w::ApprovalRequest {
         created_at: value.created_at.clone(),
         client_id: value.client_id.clone(),
         capability: value.capability.clone(),
+        external_destination: value.external_destination.clone(),
         ..Default::default()
     }
 }

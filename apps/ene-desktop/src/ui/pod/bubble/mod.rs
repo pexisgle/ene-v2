@@ -170,6 +170,12 @@ impl CompanionPod {
             .flex_col()
             .gap(px(8.))
             .child(render_approval_header(&what, total_pending, risk, theme))
+            .when_some(
+                approval.external_destination.as_deref(),
+                |this, destination| {
+                    this.child(div().text_xs().child(format!("送信先 {destination}")))
+                },
+            )
             .when(!args.is_empty(), |this| {
                 // Collapsed by default: the raw JSON is escaped and long, and
                 // the decision should not be buried under it.
@@ -206,11 +212,17 @@ impl CompanionPod {
                         }),
                 )
             })
-            .child(div().text_xs().child(if args.is_empty() {
-                "常に許可すると、次回からこの操作を引数にかかわらず許可します。"
-            } else {
-                "常に許可すると、次回からこの操作を同じ引数で許可します。"
-            }))
+            .child(
+                div()
+                    .text_xs()
+                    .child(if approval.external_destination.is_some() {
+                        "常に許可すると、次回から同じ送信先への同じ操作を許可します。"
+                    } else if args.is_empty() {
+                        "常に許可すると、次回からこの操作を引数にかかわらず許可します。"
+                    } else {
+                        "常に許可すると、次回からこの操作を同じ引数で許可します。"
+                    }),
+            )
             .child(render_approval_actions(
                 &approval.request_id,
                 &self.hub,

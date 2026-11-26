@@ -849,7 +849,10 @@ async fn a_held_search_cannot_send_the_query_after_its_connection_changes() {
             MockStreamEvent::final_response_with_default_usage(),
         ],
     ]);
-    configure_test_search(&harness, format!("http://{original}/searx"));
+    configure_test_search(
+        &harness,
+        format!("http://{original}/searx?private_option=not_for_display"),
+    );
     harness
         .store()
         .policy_repo()
@@ -874,7 +877,18 @@ async fn a_held_search_cannot_send_the_query_after_its_connection_changes() {
     };
     harness.run_until(|_| approvals().len() == 1);
     assert_eq!(original_hits.load(Ordering::SeqCst), 0);
-    let request_id = approvals()[0].request_id.clone();
+    let destination = format!("http://{original}/searx/search");
+    let pending = approvals().remove(0);
+    assert_eq!(
+        pending.external_destination.as_deref(),
+        Some(destination.as_str())
+    );
+    let card = crate::host::wire::approval(&pending);
+    assert_eq!(
+        card.external_destination.as_deref(),
+        Some(destination.as_str())
+    );
+    let request_id = pending.request_id;
     let companion = harness.companion.clone();
     assert!(
         permission::submit_with_outcome(

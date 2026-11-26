@@ -252,6 +252,7 @@ fn request_permission(
         resolved_at: None,
         client_id,
         capability: Some(tool_name.clone()),
+        external_destination: None,
     };
     let call = world
         .spawn(rig_ecs::tools::ToolRequest {
