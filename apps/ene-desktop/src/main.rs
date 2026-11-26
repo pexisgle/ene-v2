@@ -14,6 +14,8 @@
 
 mod args;
 
+#[cfg(windows)]
+use args::DesktopInitError;
 use args::{DesktopArgs, OpenAt};
 use clap::Parser as _;
 use ene_desktop::{

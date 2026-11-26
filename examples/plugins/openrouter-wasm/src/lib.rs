@@ -89,7 +89,7 @@ mod guest {
 
     /// Reads the provider's model list. This is a JSON document, not an SSE
     /// stream, so it stays a whole-body read.
-    fn list_models(endpoint: String) -> Result<(), extism_pdk::Error> {
+    fn list_models(endpoint: &str) -> Result<(), extism_pdk::Error> {
         let request = HttpRequest {
             method: "GET".into(),
             url: format!("{}/models?providers=openai", endpoint.trim_end_matches('/')),
@@ -158,7 +158,7 @@ mod guest {
     pub fn ene_invoke(Json(operation): Json<Operation>) -> FnResult<Json<Value>> {
         match operation {
             Operation::GenerateHttp { request } => forward(request)?,
-            Operation::ListModels { endpoint, .. } => list_models(endpoint)?,
+            Operation::ListModels { endpoint, .. } => list_models(&endpoint)?,
             _ => return Err(extism_pdk::Error::msg("unsupported operation").into()),
         }
         Ok(Json(json!({})))
