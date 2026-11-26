@@ -12,7 +12,7 @@ use crate::host::{
     resources::HostRuntime,
 };
 use bevy_ecs::prelude::*;
-use ene_policy::{ApprovalDecision, ApprovalStatus, MAX_POLICY_TEXT_CHARS, PolicyRule, PolicyText};
+use ene_policy::{ApprovalDecision, MAX_POLICY_TEXT_CHARS, PolicyRule, PolicyText};
 use ene_store::util::truncate;
 use rig_core::{
     DynModel,
@@ -399,27 +399,21 @@ fn log_model_approval(
     }
 }
 
-/// The approval card and its notice, pushed only if still pending. Returns a
-/// storage error message when the host must stop.
+/// Promotes an unresolved evaluation and publishes its card once.
+/// A persistence failure leaves no safe way to continue the held call.
 pub(super) fn push_card(
     store: &Store,
     notifier: &mut Notifier,
     pending: &Pending,
 ) -> Option<String> {
-    let approval = match store.approval_repo().approval(&pending.request) {
+    let approval = match store
+        .approval_repo()
+        .request_user_approval(&pending.request)
+    {
         Ok(Some(approval)) => approval,
         Ok(None) => return None,
-        Err(error) => {
-            if error.is_storage() {
-                return Some(error.to_string());
-            }
-            tracing::warn!(%error, request = %pending.request, "failed to read approval for card");
-            return None;
-        }
+        Err(error) => return Some(error.to_string()),
     };
-    if approval.status != ApprovalStatus::Pending {
-        return None;
-    }
     notify_approval_card(notifier, &pending.companion, &approval, &pending.target);
     None
 }

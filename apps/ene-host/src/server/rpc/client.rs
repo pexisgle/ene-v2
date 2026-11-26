@@ -220,6 +220,7 @@ mod tests {
 
     #[tokio::test]
     async fn device_guard_cleanup_outside_tokio_preserves_replacement_and_pending_operations() {
+        use ene_domain::{CompanionId, DeviceScope};
         let state = tempfile::tempdir().unwrap();
         let runtime = Runtime::start(state.path()).await.unwrap();
         runtime
@@ -235,9 +236,7 @@ mod tests {
                         client_id: client.into(),
                         capability: "device.files".into(),
                         input: serde_json::json!({}),
-                        scope: ene_domain::DeviceScope::Companion(ene_domain::CompanionId::parse(
-                            "ene",
-                        )?),
+                        scope: DeviceScope::Companion(CompanionId::parse("ene")?),
                         status,
                         output: None,
                         failure: None,

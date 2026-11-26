@@ -365,11 +365,18 @@ impl DecisionWorld {
 
     /// The one pending approval, once the gate has held the call.
     fn pending(&self) -> Approval {
-        self.store()
-            .approval_repo()
+        let store = self.store();
+        let approvals = store.approval_repo();
+        approvals
             .approvals(ApprovalStatus::Pending)
             .unwrap()
             .pop()
+            .or_else(|| {
+                approvals
+                    .approvals(ApprovalStatus::Evaluating)
+                    .unwrap()
+                    .pop()
+            })
             .expect("one held approval")
     }
 
@@ -744,15 +751,7 @@ fn always_approve_persists_allow_rule_and_skips_second_prompt() {
     assert_eq!(provider.bodies.lock().len(), calls_before);
     world.gated_call("/tmp/b");
     world.app.update();
-    assert_eq!(
-        world
-            .store()
-            .approval_repo()
-            .approvals(ApprovalStatus::Pending)
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(world.pending().status, ApprovalStatus::Evaluating);
     provider.task.abort();
 }
 

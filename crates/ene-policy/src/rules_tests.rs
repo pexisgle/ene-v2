@@ -24,6 +24,7 @@ fn effects_and_approval_statuses_keep_their_stored_spellings() {
         (ApprovalStatus::Approved, "approved"),
         (ApprovalStatus::Denied, "denied"),
         (ApprovalStatus::Expired, "expired"),
+        (ApprovalStatus::Evaluating, "evaluating"),
     ] {
         assert_eq!(status.as_str(), text);
         assert_eq!(serde_json::to_value(status).unwrap(), json!(text));

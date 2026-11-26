@@ -57,6 +57,15 @@ fn a_decision_reply_based_on_old_policy_cannot_release_a_call() {
     world.app.update();
     let request = world.pending().request_id;
     assert_eq!(world.app.world().resource::<Decisions>().running.len(), 1);
+    assert_eq!(world.pending().status, ApprovalStatus::Evaluating);
+    assert_eq!(
+        world
+            .store()
+            .approval_repo()
+            .approvals(ApprovalStatus::Pending)
+            .unwrap(),
+        [] as [Approval; 0]
+    );
     world
         .store()
         .policy_repo()
@@ -132,6 +141,7 @@ fn b06_submit_keeps_hold_when_bound_client_loses_grant() {
     let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
     let call = world.gated_call("/tmp/a");
     world.app.update();
+    settle(&mut world.app, &runtime);
     let request = world.pending().request_id;
     world
         .store()

@@ -227,6 +227,7 @@ state_conversion!(
     wire::ApprovalStatus,
     ene_policy::ApprovalStatus,
     "an approval status is required",
+    Evaluating,
     Pending,
     Approved,
     Denied,

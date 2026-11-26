@@ -384,6 +384,7 @@ enum ApprovalStatus {
   APPROVAL_STATUS_APPROVED = 2;
   APPROVAL_STATUS_DENIED = 3;
   APPROVAL_STATUS_EXPIRED = 4;
+  APPROVAL_STATUS_EVALUATING = 5;  // 判定中のため、未決承認の一覧には含めない
 }
 enum ApprovalDecision {
   APPROVAL_DECISION_UNSPECIFIED = 0;

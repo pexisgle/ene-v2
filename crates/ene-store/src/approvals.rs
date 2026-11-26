@@ -72,6 +72,18 @@ impl<'a> ApprovalRepo<'a> {
         )
     }
 
+    /// Moves an automatic evaluation to the user-visible approval queue.
+    pub fn request_user_approval(&self, request_id: &str) -> Result<Option<Approval>> {
+        self.0.fetch(
+            &format!(
+                "UPDATE approval_requests SET status = 'pending'
+                 WHERE request_id = ?1 AND status = 'evaluating' RETURNING {COLUMNS}"
+            ),
+            [request_id],
+            Approval::from_row,
+        )
+    }
+
     /// Resolves a pending approval. Resolving it twice is a conflict, never a
     /// second execution.
     pub fn resolve_approval(&self, request_id: &str, status: ApprovalStatus) -> Result<Approval> {
@@ -90,7 +102,7 @@ impl<'a> ApprovalRepo<'a> {
                 &format!(
                     "UPDATE approval_requests SET status = ?2, resolved_at = ?3, \
                      client_id = COALESCE(?4, client_id) \
-                     WHERE request_id = ?1 AND status = 'pending' RETURNING {COLUMNS}"
+                     WHERE request_id = ?1 AND status IN ('pending','evaluating') RETURNING {COLUMNS}"
                 ),
                 params![request_id, status.as_str(), resolved, client_id],
                 Approval::from_row,
@@ -106,7 +118,7 @@ impl<'a> ApprovalRepo<'a> {
             .conn()
             .prepare_cached(
                 "UPDATE approval_requests SET status = 'expired', resolved_at = ?1 \
-                 WHERE status = 'pending'",
+                 WHERE status IN ('pending','evaluating')",
             )?
             .execute([now()])?;
         Ok(expired)

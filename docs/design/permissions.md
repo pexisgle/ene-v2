@@ -92,7 +92,7 @@ pub struct Approval {
     pub action_payload_hash: Vec<u8>,
     pub tool_name: String,
     pub normalized_arguments: String,
-    pub status: ApprovalStatus, // Pending, Approved, Denied, Expired
+    pub status: ApprovalStatus, // Evaluating, Pending, Approved, Denied, Expired
     pub created_at: String,
     pub resolved_at: Option<String>,
     /// 承認を束縛したクライアント
@@ -104,6 +104,7 @@ pub struct Approval {
 ```
 - **引数変更の無効化**: 引数が変更された場合はハッシュ不一致により旧要求を失効させる。承認は実行中のツール呼び出しにのみ適用し、別の呼び出しへ再生しない。
 - Web検索の承認カードには送信先のオリジンとパスを表示する。資格情報とURLのクエリは表示用の値に含めない。未決承認の再取得でも、要求時に保存した表示用の値を返す。
+- Decision API の判定中は `Evaluating` として保持し、人の確認が必要になったときだけ `Pending` に移して承認カードと未決一覧に出す。
 - **束縛先はクライアントID**: 承認は`client_id`に束縛し、世代（revision）では束縛しない。カード表示後にコンパニオンのアクティブクライアントが移動しても承認は失効せず、保留中の呼び出しは移動後のクライアントへ付け替える。手からの要求は、そのWorkSessionが発注時に束縛した`client_id`に従う。
 
 ### 4.2 「頭」による代理承認と画面カード

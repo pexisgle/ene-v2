@@ -311,8 +311,16 @@ pub(crate) fn submit_with_outcome(
             "this approval belongs to another companion".into(),
         ));
     }
-    if approval.status != ApprovalStatus::Pending {
+    if !matches!(
+        approval.status,
+        ApprovalStatus::Pending | ApprovalStatus::Evaluating
+    ) {
         return Err(HostError::Conflict("approval is no longer pending".into()));
+    }
+    if automated && approval.status != ApprovalStatus::Evaluating {
+        return Err(HostError::Permission(
+            "this operation requires user confirmation".into(),
+        ));
     }
     let Some(&hold) = world.resource::<Approvals>().by_request.get(request_id) else {
         repo.resolve_approval(request_id, ApprovalStatus::Expired)?;

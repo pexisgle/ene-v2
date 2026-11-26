@@ -71,6 +71,8 @@ pub struct PolicyText {
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ApprovalStatus {
+    /// Waiting for an automatic decision. No user-facing card has been issued.
+    Evaluating,
     /// Waiting on a person to answer.
     Pending,
     /// A person allowed the operation.

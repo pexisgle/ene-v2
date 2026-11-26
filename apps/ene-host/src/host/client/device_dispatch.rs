@@ -47,20 +47,7 @@ pub(crate) fn accept(
         .get::<CallBinding>(call)
         .ok_or_else(|| HostError::Internal(("a device call without a binding").into()))?;
     let scope = agent_scope(world, agent)?;
-    if scope.run_id() != binding.work_run.as_deref() {
-        return Err(HostError::Conflict(
-            "the accepted operation belongs to a different work run".into(),
-        ));
-    }
-    if binding
-        .capability
-        .starts_with(super::WORKSPACE_CAPABILITY_PREFIX)
-        && scope.run_id().is_none()
-    {
-        return Err(HostError::Permission(
-            "workspace capabilities require a work session".into(),
-        ));
-    }
+    validate_scope(binding, &scope)?;
     let client = store
         .client_repo()
         .client(&binding.client_id)?
@@ -223,6 +210,24 @@ fn agent_scope(world: &World, agent: Entity) -> Result<DeviceScope> {
         work_id: work.work_id.clone(),
         run_id: work.run_id.clone(),
     })
+}
+
+fn validate_scope(binding: &CallBinding, scope: &DeviceScope) -> Result<()> {
+    if scope.run_id() != binding.work_run.as_deref() {
+        return Err(HostError::Conflict(
+            "the accepted operation belongs to a different work run".into(),
+        ));
+    }
+    if binding
+        .capability
+        .starts_with(super::WORKSPACE_CAPABILITY_PREFIX)
+        && scope.run_id().is_none()
+    {
+        return Err(HostError::Permission(
+            "workspace capabilities require a work session".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) struct DeviceDispatchContext<'a> {

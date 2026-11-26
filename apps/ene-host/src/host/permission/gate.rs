@@ -324,17 +324,23 @@ fn apply_gate_verdict(
         Verdict::Allow => {}
         Verdict::Deny { reason } => refuse(world, binding.call.entity, &reason),
         Verdict::HumanRequired { target } => {
-            let (pending, _) = issue_gate_hold(world, store, binding, target)?;
-            if let Some(fatal) = push_card(store, &mut world.resource_mut::<Notifier>(), &pending) {
-                crate::host::fail(world, &fatal);
-                return std::ops::ControlFlow::Break(());
-            }
+            let (approval, target) =
+                issue_gate_hold(world, store, binding, target, ApprovalStatus::Pending)?;
+            notify_approval_card(
+                &mut world.resource_mut::<Notifier>(),
+                &approval.session_id,
+                &approval,
+                &target,
+            );
         }
         Verdict::NeedsDecision { target } => {
-            let agent = binding.call.agent;
-            let tool_name = binding.call.tool_name.clone();
-            let run_id = binding.run_id.clone();
-            let (pending, arguments_view) = issue_gate_hold(world, store, binding, target)?;
+            let (approval, target) =
+                issue_gate_hold(world, store, binding, target, ApprovalStatus::Evaluating)?;
+            let pending = Pending {
+                request: approval.request_id,
+                companion: approval.session_id,
+                target,
+            };
             let policies = match store.policy_repo().policy_texts() {
                 Ok(policies) => policies,
                 Err(error) => {
@@ -352,10 +358,14 @@ fn apply_gate_verdict(
                 }
             };
             let inputs = DecisionInputs {
-                tool_name,
+                tool_name: approval.tool_name,
                 target: pending.target.clone(),
-                arguments: arguments_view,
-                request: request_context(store, world.get::<Conversation>(agent), &run_id),
+                arguments: truncate(&approval.normalized_arguments, DECISION_ARGUMENT_CHARS),
+                request: request_context(
+                    store,
+                    world.get::<Conversation>(binding.call.agent),
+                    &approval.run_id,
+                ),
                 policies,
                 rules: rules.to_vec(),
             };
@@ -370,23 +380,22 @@ fn issue_gate_hold(
     store: &Store,
     binding: &GateBinding,
     target: String,
-) -> std::ops::ControlFlow<(), (Pending, String)> {
-    let request_id = uuid::Uuid::new_v4().to_string();
+    status: ApprovalStatus,
+) -> std::ops::ControlFlow<(), (Approval, String)> {
     let (normalized, hash) = canonicalise(&binding.call.tool_name, &binding.call.arguments);
-    let arguments_view = truncate(&normalized, DECISION_ARGUMENT_CHARS);
     let external_destination = world
         .get::<crate::host::web_search::SearchBinding>(binding.call.entity)
         .map(|search| search.display_destination.clone());
     let target = external_destination.clone().unwrap_or(target);
     let approval = Approval {
-        request_id: request_id.clone(),
+        request_id: uuid::Uuid::new_v4().to_string(),
         session_id: binding.companion_id.clone(),
         run_id: binding.run_id.clone(),
         work_id: binding.work_id.clone(),
         action_payload_hash: hash,
         tool_name: binding.call.tool_name.clone(),
         normalized_arguments: normalized,
-        status: ApprovalStatus::Pending,
+        status,
         created_at: ene_store::util::now(),
         resolved_at: None,
         client_id: binding.bound_client_id.clone(),
@@ -405,12 +414,7 @@ fn issue_gate_hold(
         );
         return std::ops::ControlFlow::Break(());
     }
-    let pending = Pending {
-        request: request_id,
-        companion: binding.companion_id.clone(),
-        target,
-    };
-    std::ops::ControlFlow::Continue((pending, arguments_view))
+    std::ops::ControlFlow::Continue((approval, target))
 }
 
 #[tracing::instrument(

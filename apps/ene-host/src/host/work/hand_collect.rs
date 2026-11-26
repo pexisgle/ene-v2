@@ -344,7 +344,7 @@ fn take_resolved_approvals(
                 // its call): answer so the guest's turn state does not
                 // dangle.
                 ApprovalStatus::Expired => RequestPermissionOutcome::Cancelled,
-                ApprovalStatus::Pending => return None,
+                ApprovalStatus::Evaluating | ApprovalStatus::Pending => return None,
             };
             Some((adapter.clone(), pending.request.clone(), outcome))
         })
