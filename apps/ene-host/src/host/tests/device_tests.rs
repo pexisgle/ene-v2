@@ -759,6 +759,27 @@ fn a_conflicting_client_tool_declaration_rolls_back_activation_and_replacement()
     let persisted = store.client_repo().client("c2").unwrap().unwrap();
     assert_eq!(persisted.revision, shared.revision);
     assert_eq!(persisted.capability_specs[0].description, "ene moves");
+
+    crate::host::mind::delete(harness.app.world_mut(), &harness.companion).unwrap();
+    assert!(
+        store
+            .client_repo()
+            .activation(&harness.companion)
+            .unwrap()
+            .is_none()
+    );
+    let mut tools = harness
+        .app
+        .world_mut()
+        .query::<&client::dynamic::CapabilityTool>();
+    let tool = tools.single(harness.app.world()).unwrap();
+    assert_eq!(tool.bindings.len(), 1);
+    assert_eq!(tool.bindings[0].companion_id.as_str(), second);
+    client::declare(
+        harness.app.world_mut(),
+        client::Declaration::Replace(&replace(shared.revision, "kai moves")),
+    )
+    .unwrap();
 }
 
 fn unassigned(id: &str) -> crate::host::mind::Companion {

@@ -28,7 +28,7 @@ use rusqlite_migration::{HookResult, M, Migrations};
 pub const BASELINE_VERSION: i64 = 6;
 
 /// Latest database schema version managed by [`ladder_steps`].
-pub const VERSION: i64 = 8;
+pub const VERSION: i64 = 9;
 
 /// Every version this host applies above the baseline, in order. The position
 /// in this table is the version, so adding a row is the only way to add a
@@ -46,6 +46,19 @@ const STEPS_ABOVE_BASELINE: &[(&str, &str)] = &[
         "0008_work_sessions_companion_index",
         "CREATE INDEX IF NOT EXISTS idx_work_sessions_companion
             ON work_sessions(companion_id, updated_at DESC, id);",
+    ),
+    (
+        "0009_activation_companion_fk",
+        "CREATE TABLE activations_v9 (
+            companion_id TEXT NOT NULL PRIMARY KEY REFERENCES companions(id) ON DELETE CASCADE,
+            client_id TEXT,
+            updated_at TEXT NOT NULL
+        );
+        INSERT INTO activations_v9 (companion_id, client_id, updated_at)
+            SELECT a.companion_id, a.client_id, a.updated_at
+            FROM activations a JOIN companions c ON c.id = a.companion_id;
+        DROP TABLE activations;
+        ALTER TABLE activations_v9 RENAME TO activations;",
     ),
 ];
 
@@ -392,6 +405,41 @@ mod tests {
             )
             .unwrap();
         assert_eq!(indexed, 1, "baseline schema and migrations must agree");
+    }
+
+    #[test]
+    fn v8_activation_migration_preserves_live_rows_and_rejects_orphans() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("host.sqlite3");
+        let companion = {
+            let mut conn = Connection::open(&path).unwrap();
+            let companion = seed_v6_database(&mut conn).remove(0).0;
+            let mut steps = ladder_steps();
+            steps.truncate(8);
+            apply_ladder(&mut conn, steps).unwrap();
+            conn.execute(
+                "INSERT INTO activations (companion_id, client_id, updated_at)
+                 VALUES (?1, 'client-v6', '2026-01-01'), ('deleted', 'client-v6', '2026-01-02')",
+                [&companion],
+            )
+            .unwrap();
+            companion
+        };
+
+        let store = Store::open(&path).unwrap();
+        let repo = store.client_repo();
+        let active = repo.activations().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].companion_id.as_str(), companion);
+        assert_eq!(active[0].client_id.as_deref(), Some("client-v6"));
+        let updated_at: String = store
+            .conn()
+            .query_row("SELECT updated_at FROM activations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(updated_at, "2026-01-01");
+        assert!(repo.activate("deleted", Some("client-v6")).is_err());
+        assert!(store.companion_repo().delete_companion(&companion).unwrap());
+        assert!(repo.activations().unwrap().is_empty());
     }
 
     #[test]

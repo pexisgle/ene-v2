@@ -71,6 +71,7 @@ fn test_world() -> World {
 fn store_with_client() -> (tempfile::TempDir, Store) {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
+    store.companion_repo().seed_initial_companion().unwrap();
     store
         .client_repo()
         .register_client(&ClientDeclaration {
