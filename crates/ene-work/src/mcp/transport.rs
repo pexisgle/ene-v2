@@ -139,21 +139,21 @@ async fn open_stdio(
     {
         command.env(&want.secret_env_var, secret);
     }
-    let mut wrap = process_wrap::tokio::CommandWrap::from(command);
+    let mut wrap = process_wrap_rmcp::tokio::CommandWrap::from(command);
     #[cfg(unix)]
-    wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
+    wrap.wrap(process_wrap_rmcp::tokio::ProcessGroup::leader());
     #[cfg(windows)]
     {
         // JobObject::pre_spawn sets the process creation flags from whatever
         // `CreationFlags` wrapper is registered, and zero when none is. The raw
         // `Command::creation_flags` a caller set would be overwritten, so the
         // suppression has to be registered here to survive.
-        wrap.wrap(process_wrap::tokio::CreationFlags(
+        wrap.wrap(process_wrap_rmcp::tokio::CreationFlags(
             windows::Win32::System::Threading::PROCESS_CREATION_FLAGS(CREATE_NO_WINDOW),
         ));
-        wrap.wrap(process_wrap::tokio::JobObject);
+        wrap.wrap(process_wrap_rmcp::tokio::JobObject);
     }
-    wrap.wrap(process_wrap::tokio::KillOnDrop);
+    wrap.wrap(process_wrap_rmcp::tokio::KillOnDrop);
     let transport = TokioChildProcess::new(wrap).map_err(|error| ConnectFailure {
         config_error: error.kind() == std::io::ErrorKind::NotFound,
         reason: error.to_string(),

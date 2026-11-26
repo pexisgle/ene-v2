@@ -39,7 +39,7 @@ impl Cron {
 
     fn next_after(&self, after: Timestamp, zone: &TimeZone) -> Option<Timestamp> {
         self.parsed
-            .find_next_occurrence(&after.to_zoned(zone.clone()), false)
+            .find_next_occurrence(&after.to_zoned_datetime(zone.clone()), false)
             .ok()
             .map(|next| next.timestamp())
     }
@@ -138,7 +138,7 @@ fn parse_run_at(text: &str, zone: &TimeZone) -> Result<Timestamp> {
             "run_at must include a time of day".into(),
         ));
     }
-    zone.to_zoned(local)
+    zone.to_zoned_datetime(local)
         .map(|zoned| zoned.timestamp())
         .map_err(|_| StoreError::Invalid("run_at is outside the supported range".into()))
 }

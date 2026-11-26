@@ -4,7 +4,7 @@ use jiff::civil::date;
 
 fn utc(year: i16, month: i8, day: i8, hour: i8, minute: i8) -> Timestamp {
     TimeZone::UTC
-        .to_zoned(date(year, month, day).at(hour, minute, 0, 0))
+        .to_zoned_datetime(date(year, month, day).at(hour, minute, 0, 0))
         .unwrap()
         .timestamp()
 }

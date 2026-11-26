@@ -410,7 +410,7 @@ mod tests {
     /// A UTC instant at whole-second precision.
     fn utc(year: i16, month: i8, day: i8, hour: i8, minute: i8) -> Timestamp {
         jiff::tz::TimeZone::UTC
-            .to_zoned(date(year, month, day).at(hour, minute, 0, 0))
+            .to_zoned_datetime(date(year, month, day).at(hour, minute, 0, 0))
             .unwrap()
             .timestamp()
     }
@@ -419,7 +419,7 @@ mod tests {
     fn tokyo(year: i16, month: i8, day: i8, hour: i8, minute: i8) -> Timestamp {
         jiff::tz::TimeZone::get("Asia/Tokyo")
             .unwrap()
-            .to_zoned(date(year, month, day).at(hour, minute, 0, 0))
+            .to_zoned_datetime(date(year, month, day).at(hour, minute, 0, 0))
             .unwrap()
             .timestamp()
     }

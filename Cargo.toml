@@ -62,12 +62,11 @@ ene-work = { path = "crates/ene-work" }
 # therefore depends on the types-only crate directly, with a caret requirement
 # so the pinned ACP version can move within 1.x without breaking resolution.
 agent-client-protocol-schema = { version = "1.15.1", default-features = false }
-# `creation-flags` is what lets `CreationFlags` preserve CREATE_NO_WINDOW while
-# `JobObject` temporarily adds CREATE_SUSPENDED; without the wrapper, JobObject's
-# `pre_spawn` overwrites the flags with zero and the console window reappears.
-process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop", "creation-flags"] }
+process-wrap = { version = "11", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
+# TokioChildProcess accepts the CommandWrap from RMCP's process-wrap version.
+process-wrap-rmcp = { package = "process-wrap", version = "10.0.2", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop", "creation-flags"] }
 pulldown-cmark = { version = "0.13", default-features = false }
-parking_lot = "0.12"
+parking_lot = "0.13"
 regex = "1"
 globset = "0.4"
 cap-std = "4.0.3"
@@ -87,12 +86,13 @@ http = "1"
 http-body-util = "0.1"
 hashlink = "0.12"
 hex = "0.4"
-croner = { version = "4", default-features = false, features = ["jiff"] }
+croner = { version = "5", default-features = false, features = ["jiff"] }
 rubato = "5.1"
 wav-codec = "=0.1.0"
-jsonschema = "0.61"
+# Domain validation resolves embedded references without filesystem or HTTP access.
+jsonschema = { version = "0.63", default-features = false, features = ["idna"] }
 serde_json_canonicalizer = "0.4"
-jiff = "0.2"
+jiff = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "multipart"] }
 # The Rig crates share one type set and must move together; v0.46.0 is the
 # surveyed baseline (docs/references.md), so an upgrade bumps all of them at once.
@@ -104,10 +104,9 @@ rig-rmcp = "=0.46.0"
 # The transports rig-rmcp re-exports are behind rmcp features it does not turn on.
 rmcp = { version = "3.5", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "which-command"] }
 rig-reqwest = { version = "=0.46.0", features = ["rustls"] }
-rusqlite = { version = "0.42", features = ["bundled", "fallible_uint"] }
-# `rusqlite_migration` must share `rusqlite`'s `Connection` type, so this is held
-# at the last release built on rusqlite 0.42 (2.9 needs 0.43) and moves with it.
-rusqlite-migration = { package = "rusqlite_migration", version = "=2.8.0" }
+rusqlite = { version = "0.43", features = ["bundled", "fallible_uint"] }
+# Keep the migration library on the rusqlite line used by the store.
+rusqlite-migration = { package = "rusqlite_migration", version = "=2.9.0" }
 rustix = { version = "1", features = ["fs", "process"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
@@ -122,7 +121,7 @@ strum = { version = "0.28", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 which = "8"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-tray-icon = { version = "0.26.1", default-features = false }
+tray-icon = { version = "0.27", default-features = false }
 winit = { version = "0.30.13", default-features = false }
 xcap = { version = "0.9.10", default-features = false }
 

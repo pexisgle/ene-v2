@@ -76,9 +76,9 @@ fn run(initial: TrayState, tx: UnboundedSender<TrayAction>, ready: SyncSender<Tr
         drop(proxy.send_event(Event::Activate(action)));
     }));
     let proxy = handle.events.clone();
-    tray_icon::menu::MenuEvent::set_event_handler(Some(move |event| {
+    tray_icon::menu::MenuEvent::set_event_handler(Some(Arc::new(move |event| {
         drop(proxy.send_event(Event::Menu(event)));
-    }));
+    })));
     let mut tray = Worker {
         handle,
         tx,

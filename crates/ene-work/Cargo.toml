@@ -14,6 +14,7 @@ backon.workspace = true
 ene-domain.workspace = true
 ene-plugin.workspace = true
 process-wrap.workspace = true
+process-wrap-rmcp.workspace = true
 reqwest.workspace = true
 rig-agent.workspace = true
 rig-rmcp.workspace = true
