@@ -269,8 +269,9 @@ impl HttpEngine {
             self.base, self.query_path
         ));
         let mut body: serde_json::Value =
-            serde_json::from_slice(&self.exchange(call, "TTS").await?)
-                .map_err(|_| VoiceHttpError::InvalidAudioQuery)?;
+            serde_json::from_slice(&self.exchange(call, "TTS").await?).map_err(|_| {
+                VoiceHttpError::Decode("the TTS endpoint answered a non-JSON audio query".into())
+            })?;
         if let Some(speed) = self.speed {
             body["speedScale"] = serde_json::json!(speed);
         }
@@ -297,7 +298,9 @@ impl HttpEngine {
         let file = reqwest::multipart::Part::bytes(wav_wrap(&pcm_16k, stt_rate)?)
             .file_name("audio.wav")
             .mime_str("audio/wav")
-            .map_err(|error| VoiceHttpError::SttMultipart(error.to_string()))?;
+            .map_err(|error| {
+                VoiceHttpError::InvalidInput(format!("the STT multipart body: {error}"))
+            })?;
         let mut form = reqwest::multipart::Form::new()
             .part("file", file)
             .text("model", self.model.clone());
@@ -312,8 +315,9 @@ impl HttpEngine {
             .post(format!("{}{}", self.base, self.path))
             .multipart(form);
         let body = self.exchange(call, "STT").await?;
-        let value: serde_json::Value =
-            serde_json::from_slice(&body).map_err(|_| VoiceHttpError::InvalidSttJson)?;
+        let value: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
+            VoiceHttpError::Decode("the STT endpoint answered a non-JSON transcript".into())
+        })?;
         Ok(value["text"].as_str().unwrap_or_default().trim().to_owned())
     }
 
@@ -330,7 +334,9 @@ impl HttpEngine {
             .body(wav_wrap(&pcm_16k, stt_rate)?);
         String::from_utf8(self.exchange(call, "STT").await?)
             .map(|text| text.trim().to_owned())
-            .map_err(|_| VoiceHttpError::InvalidSttUtf8)
+            .map_err(|_| {
+                VoiceHttpError::Decode("the STT endpoint answered a non-UTF-8 transcript".into())
+            })
     }
 }
 
@@ -344,7 +350,9 @@ impl TtsEngine for HttpEngine {
             match self.protocol {
                 Protocol::OpenAiTts => self.openai_tts(text, voice).await,
                 Protocol::Voicevox => self.voicevox(text, voice).await,
-                Protocol::OpenAiStt | Protocol::Raw => Err(VoiceHttpError::TtsProtocolMismatch),
+                Protocol::OpenAiStt | Protocol::Raw => Err(VoiceHttpError::Protocol(
+                    "the TTS engine received an STT protocol".into(),
+                )),
             }
         })
     }
@@ -360,9 +368,9 @@ impl SttEngine for HttpEngine {
             match self.protocol {
                 Protocol::OpenAiStt => self.openai_stt(pcm, sample_rate).await,
                 Protocol::Raw => self.raw_stt(pcm, sample_rate).await,
-                Protocol::OpenAiTts | Protocol::Voicevox => {
-                    Err(VoiceHttpError::SttProtocolMismatch)
-                }
+                Protocol::OpenAiTts | Protocol::Voicevox => Err(VoiceHttpError::Protocol(
+                    "the STT engine received a TTS protocol".into(),
+                )),
             }
         })
     }

@@ -19,7 +19,7 @@ impl TtsEngine for FakeTts {
     ) -> BoxFuture<'a, HttpResult<(Vec<u8>, u32)>> {
         Box::pin(async move {
             if self.fail {
-                return Err(VoiceHttpError::Engine("mock tts failed".into()));
+                return Err(VoiceHttpError::Transport("mock tts failed".into()));
             }
             Ok((
                 text.bytes()
@@ -192,7 +192,7 @@ async fn a_failed_sentence_finishes_the_utterance_after_its_audio() {
         ) -> BoxFuture<'a, HttpResult<(Vec<u8>, u32)>> {
             Box::pin(async move {
                 if text.starts_with("bad") {
-                    return Err(VoiceHttpError::Engine("mock tts failed".into()));
+                    return Err(VoiceHttpError::Transport("mock tts failed".into()));
                 }
                 Ok((pcm_bytes([100; 32]), SAMPLE_RATE))
             })

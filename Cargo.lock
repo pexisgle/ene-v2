@@ -4223,6 +4223,7 @@ dependencies = [
 name = "ene-mind"
 version = "0.1.8"
 dependencies = [
+ "ene-domain",
  "hex",
  "jiff 0.2.46",
  "proptest",
@@ -4231,7 +4232,6 @@ dependencies = [
  "serde_json",
  "serde_json_canonicalizer",
  "sha2 0.11.1",
- "thiserror 2.0.21",
 ]
 
 [[package]]

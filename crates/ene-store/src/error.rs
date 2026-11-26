@@ -47,12 +47,6 @@ impl From<rusqlite::Error> for StoreError {
     }
 }
 
-impl From<ene_mind::MindError> for StoreError {
-    fn from(error: ene_mind::MindError) -> Self {
-        Self::Invalid(error.to_string())
-    }
-}
-
 impl From<ene_domain::DomainError> for StoreError {
     fn from(error: ene_domain::DomainError) -> Self {
         Self::Invalid(error.to_string())

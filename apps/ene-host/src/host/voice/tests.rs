@@ -25,7 +25,7 @@ impl TtsEngine for FakeTts {
     ) -> BoxFuture<'a, HttpResult<(Vec<u8>, u32)>> {
         Box::pin(async move {
             if self.fail {
-                return Err(VoiceHttpError::Engine("mock tts failed".into()));
+                return Err(VoiceHttpError::Transport("mock tts failed".into()));
             }
             Ok((
                 text.bytes()

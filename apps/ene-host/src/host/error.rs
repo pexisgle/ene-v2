@@ -40,7 +40,8 @@ pub(crate) enum HostError {
 ///
 /// One place decides how a failure is named on the wire and whether repeating
 /// it can help, so the wire mapping and the retry decision cannot drift apart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub(crate) enum ErrorCode {
     InvalidArgument,
     NotFound,
@@ -50,26 +51,9 @@ pub(crate) enum ErrorCode {
     ResourceExhausted,
     Unavailable,
     FailedPrecondition,
+    #[strum(serialize = "storage_error")]
     Storage,
     Internal,
-}
-
-impl ErrorCode {
-    /// The stable machine-readable name carried in `Failure.code`.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::InvalidArgument => "invalid_argument",
-            Self::NotFound => "not_found",
-            Self::Aborted => "aborted",
-            Self::AlreadyExists => "already_exists",
-            Self::PermissionDenied => "permission_denied",
-            Self::ResourceExhausted => "resource_exhausted",
-            Self::Unavailable => "unavailable",
-            Self::FailedPrecondition => "failed_precondition",
-            Self::Storage => "storage_error",
-            Self::Internal => "internal",
-        }
-    }
 }
 
 impl HostError {
@@ -127,18 +111,6 @@ impl From<rusqlite::Error> for HostError {
             return Self::Unavailable(format!("the state database is busy: {error}"));
         }
         Self::Storage(error.to_string())
-    }
-}
-
-impl From<ene_mind::MindError> for HostError {
-    fn from(error: ene_mind::MindError) -> Self {
-        Self::Invalid(error.to_string())
-    }
-}
-
-impl From<ene_policy::PolicyError> for HostError {
-    fn from(error: ene_policy::PolicyError) -> Self {
-        Self::Invalid(error.to_string())
     }
 }
 
@@ -220,10 +192,8 @@ mod tests {
         }
     }
 
-    /// Every variant must have a distinct wire code: two failures that map to
-    /// the same string are indistinguishable to a client deciding what to do.
     #[test]
-    fn every_failure_has_its_own_wire_code() {
+    fn every_failure_keeps_its_wire_code() {
         let errors = [
             HostError::Invalid(String::new()),
             HostError::NotFound(String::new()),
@@ -236,10 +206,21 @@ mod tests {
             HostError::Storage(String::new()),
             HostError::Internal(String::new()),
         ];
-        let codes: Vec<&str> = errors.iter().map(|error| error.code().as_str()).collect();
-        let mut unique = codes.clone();
-        unique.sort_unstable();
-        unique.dedup();
-        assert_eq!(unique.len(), codes.len(), "duplicate codes in {codes:?}");
+        let codes: [&str; 10] = errors.map(|error| error.code().into());
+        assert_eq!(
+            codes,
+            [
+                "invalid_argument",
+                "not_found",
+                "aborted",
+                "already_exists",
+                "permission_denied",
+                "resource_exhausted",
+                "unavailable",
+                "failed_precondition",
+                "storage_error",
+                "internal",
+            ]
+        );
     }
 }

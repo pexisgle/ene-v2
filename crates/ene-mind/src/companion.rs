@@ -1,22 +1,8 @@
 //! Companion identity, author profile, mind state, and model role assignments.
-use crate::{
-    error::{MindError, Result},
-    json::JsonDoc,
-};
+use crate::{Result, json::JsonDoc};
+use ene_domain::DomainError;
+pub use ene_domain::validate_id;
 use serde::{Deserialize, Serialize};
-
-/// Checks that an opaque identifier is 1..=128 printable ASCII characters.
-pub fn validate_id(id: &str) -> Result<()> {
-    if id.is_empty()
-        || id.chars().count() > 128
-        || id.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
-    {
-        return Err(MindError::Invalid(
-            "id must be 1-128 printable ASCII characters".into(),
-        ));
-    }
-    Ok(())
-}
 
 /// The seven model roles from the contract. `companion` and `task` are
 /// required to run anything; the rest fall back as documented.
@@ -183,26 +169,26 @@ impl Companion {
     pub fn validate(&self) -> Result<()> {
         validate_id(&self.id)?;
         if self.name.trim().is_empty() || self.name.chars().count() > 128 {
-            return Err(MindError::Invalid(
+            return Err(DomainError::Invalid(
                 "companion name must be 1-128 characters".into(),
             ));
         }
         if self.mind.chars().count() > 8_000 {
-            return Err(MindError::Invalid("companion mind is too long".into()));
+            return Err(DomainError::Invalid("companion mind is too long".into()));
         }
         if self
             .persona
             .as_ref()
             .is_some_and(|text| text.chars().count() > 8_000)
         {
-            return Err(MindError::Invalid("companion persona is too long".into()));
+            return Err(DomainError::Invalid("companion persona is too long".into()));
         }
         if self
             .voice_identifier
             .as_ref()
             .is_some_and(|text| text.chars().count() > 128)
         {
-            return Err(MindError::Invalid("voice identifier is too long".into()));
+            return Err(DomainError::Invalid("voice identifier is too long".into()));
         }
         self.body.validate()?;
         self.voice.validate()?;
@@ -216,7 +202,7 @@ impl Companion {
         .flatten()
         {
             if text.chars().count() > 4_000 {
-                return Err(MindError::Invalid("profile entry is too long".into()));
+                return Err(DomainError::Invalid("profile entry is too long".into()));
             }
         }
         Ok(())

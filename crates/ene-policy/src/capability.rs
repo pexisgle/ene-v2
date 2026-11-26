@@ -1,5 +1,5 @@
 //! Client capability specifications, schema validation and approval targets.
-use crate::error::{PolicyError, Result};
+use crate::{DomainError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -83,9 +83,9 @@ pub(crate) fn parse_schema_object(text: &str) -> Result<Value> {
         return Ok(json!({"type": "object"}));
     }
     let value: Value = serde_json::from_str(text)
-        .map_err(|_| PolicyError::Invalid("input schema must be a JSON object".into()))?;
+        .map_err(|_| DomainError::Invalid("input schema must be a JSON object".into()))?;
     if !value.is_object() {
-        return Err(PolicyError::Invalid(
+        return Err(DomainError::Invalid(
             "input schema must be a JSON object".into(),
         ));
     }
@@ -100,11 +100,11 @@ impl CapabilitySpec {
     /// Checks the name, tool name, schemas and presets this spec declares.
     ///
     /// # Errors
-    /// Returns [`PolicyError::Invalid`] naming the first field that breaks a rule.
+    /// Returns [`DomainError::Invalid`] naming the first field that breaks a rule.
     pub fn validate(&self) -> Result<()> {
         let name = self.name.trim();
         if name.is_empty() || name.chars().count() > 64 || name.contains(char::is_whitespace) {
-            return Err(PolicyError::Invalid(
+            return Err(DomainError::Invalid(
                 "capability names must be 1-64 non-space characters".into(),
             ));
         }
@@ -115,30 +115,30 @@ impl CapabilitySpec {
                     .bytes()
                     .any(|byte| !(byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'))
             {
-                return Err(PolicyError::Invalid(
+                return Err(DomainError::Invalid(
                     "capability tool names must be 1-64 [A-Za-z0-9_-] characters".into(),
                 ));
             }
             if BUILTIN_TOOLS.contains(&self.tool_name.as_str()) {
-                return Err(PolicyError::Invalid(format!(
+                return Err(DomainError::Invalid(format!(
                     "tool name `{}` is reserved by the host",
                     self.tool_name
                 )));
             }
         }
         if self.description.chars().count() > 2_000 {
-            return Err(PolicyError::Invalid(
+            return Err(DomainError::Invalid(
                 "capability description is too long".into(),
             ));
         }
         if self.approval_target.chars().count() > 500 {
-            return Err(PolicyError::Invalid(
+            return Err(DomainError::Invalid(
                 "capability approval target is too long".into(),
             ));
         }
         let schema = parse_schema_object(&self.input_schema)?;
         if !schema.is_object() {
-            return Err(PolicyError::Invalid(
+            return Err(DomainError::Invalid(
                 "capability input schema must be an object".into(),
             ));
         }
@@ -151,7 +151,7 @@ impl CapabilitySpec {
                 .iter()
                 .any(|preset| preset.chars().count() > 64)
         {
-            return Err(PolicyError::Invalid(
+            return Err(DomainError::Invalid(
                 "capability presets are too long".into(),
             ));
         }
@@ -180,21 +180,21 @@ pub fn validate_declarations(capabilities: &[String], specs: &[CapabilitySpec]) 
     let mut tools = HashSet::new();
     for capability in capabilities {
         if !seen.insert(capability.as_str()) {
-            return Err(PolicyError::Invalid(format!(
+            return Err(DomainError::Invalid(format!(
                 "capability `{capability}` is declared twice"
             )));
         }
     }
     for spec in specs {
         if !capabilities.iter().any(|name| name == &spec.name) {
-            return Err(PolicyError::Invalid(format!(
+            return Err(DomainError::Invalid(format!(
                 "capability spec `{}` is not in capabilities",
                 spec.name
             )));
         }
         spec.validate()?;
         if !spec.tool_name.is_empty() && !tools.insert(spec.tool_name.as_str()) {
-            return Err(PolicyError::Invalid(format!(
+            return Err(DomainError::Invalid(format!(
                 "tool name `{}` is declared twice",
                 spec.tool_name
             )));

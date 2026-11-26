@@ -2,20 +2,28 @@
 
 use crate::error::{HttpResult, VoiceHttpError};
 
+const INVALID_WAV: &str = "the TTS endpoint did not return a valid WAV";
+const MISSING_SAMPLE_RATE: &str = "the TTS engine returned audio without a sample rate";
+
 pub const SAMPLE_RATE: u32 = 24_000;
 pub const STT_SAMPLE_RATES: [u32; 2] = [24_000, 16_000];
 pub type ResamplerCache = Option<(u32, u32, rubato::Fft<f32>)>;
 
 pub fn wav_wrap(pcm: &[u8], sample_rate: u32) -> HttpResult<Vec<u8>> {
     if !pcm.len().is_multiple_of(2) {
-        return Err(VoiceHttpError::OddInputPcmBytes);
+        return Err(VoiceHttpError::InvalidInput(
+            "the audio has an odd number of PCM bytes".into(),
+        ));
     }
-    let data_len = u32::try_from(pcm.len()).map_err(|_| VoiceHttpError::WavTooLarge)?;
+    let data_len = u32::try_from(pcm.len())
+        .map_err(|_| VoiceHttpError::LimitExceeded("the audio is too large for a WAV".into()))?;
     if sample_rate == 0
         || sample_rate.checked_mul(2).is_none()
         || data_len.checked_add(36).is_none()
     {
-        return Err(VoiceHttpError::WavInvalidParams);
+        return Err(VoiceHttpError::InvalidInput(
+            "the audio sample rate or length cannot be written to a WAV".into(),
+        ));
     }
     let byte_rate = sample_rate * 2;
     let mut wav = Vec::with_capacity(44 + pcm.len());
@@ -38,7 +46,7 @@ pub fn wav_wrap(pcm: &[u8], sample_rate: u32) -> HttpResult<Vec<u8>> {
 
 pub fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        return Err(VoiceHttpError::InvalidWav);
+        return Err(VoiceHttpError::Decode(INVALID_WAV.into()));
     }
     let mut offset = 12usize;
     let mut channels = 0u16;
@@ -62,7 +70,7 @@ pub fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
         let end = offset
             .checked_add(size)
             .filter(|end| *end <= bytes.len())
-            .ok_or(VoiceHttpError::InvalidWav)?;
+            .ok_or_else(|| VoiceHttpError::Decode(INVALID_WAV.into()))?;
         let chunk = &bytes[offset..end];
         if id == b"fmt " && chunk.len() >= 16 {
             audio_format = u16::from_le_bytes([chunk[0], chunk[1]]);
@@ -77,9 +85,13 @@ pub fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
     }
 
     if audio_format != 1 || bits_per_sample != 16 || channels == 0 || sample_rate == 0 {
-        return Err(VoiceHttpError::UnsupportedWavFormat);
+        return Err(VoiceHttpError::Decode(
+            "the TTS endpoint returned an unsupported WAV format".into(),
+        ));
     }
-    let data = data_slice.ok_or(VoiceHttpError::MissingWavData)?;
+    let data = data_slice.ok_or_else(|| {
+        VoiceHttpError::Decode("the TTS endpoint returned a WAV without audio data".into())
+    })?;
     let ch = usize::from(channels);
     if ch == 1 {
         let even = data.len() - (data.len() % 2);
@@ -100,10 +112,12 @@ pub fn parse_wav(bytes: &[u8]) -> HttpResult<(Vec<u8>, u32)> {
 
 pub fn wire_pcm(pcm: Vec<u8>, sample_rate: u32, cache: &mut ResamplerCache) -> HttpResult<Vec<u8>> {
     if !pcm.len().is_multiple_of(2) {
-        return Err(VoiceHttpError::OddOutputPcmBytes);
+        return Err(VoiceHttpError::Decode(
+            "the TTS engine returned an odd number of PCM bytes".into(),
+        ));
     }
     if sample_rate == 0 {
-        return Err(VoiceHttpError::MissingSampleRate);
+        return Err(VoiceHttpError::Protocol(MISSING_SAMPLE_RATE.into()));
     }
     if sample_rate == SAMPLE_RATE {
         return Ok(pcm);
@@ -119,7 +133,7 @@ pub fn resample_mono(
 ) -> HttpResult<Vec<u8>> {
     use rubato::{Fft, FixedSync, Resampler};
     if from == 0 {
-        return Err(VoiceHttpError::MissingSampleRate);
+        return Err(VoiceHttpError::Protocol(MISSING_SAMPLE_RATE.into()));
     }
     if from == to {
         return Ok(pcm.to_vec());
@@ -140,17 +154,17 @@ pub fn resample_mono(
         }
         slot => {
             let resampler = Fft::<f32>::new(from as usize, to as usize, 1_024, 1, FixedSync::Input)
-                .map_err(|error| VoiceHttpError::Resample(error.to_string()))?;
+                .map_err(resample_error)?;
             &mut slot.insert((from, to, resampler)).2
         }
     };
     let input =
         rubato::audioadapter_buffers::direct::InterleavedSlice::new(&samples, 1, samples.len())
-            .map_err(|error| VoiceHttpError::Resample(error.to_string()))?;
+            .map_err(resample_error)?;
     // `process_all` resets the cached filter between independent sentences.
     let mut resampled = resampler
         .process_all(&input, samples.len(), None)
-        .map_err(|error| VoiceHttpError::Resample(error.to_string()))?
+        .map_err(resample_error)?
         .take_data();
     resampled.truncate(expected);
     let mut pcm = Vec::with_capacity(resampled.len() * 2);
@@ -159,6 +173,10 @@ pub fn resample_mono(
         pcm.extend_from_slice(&value.to_le_bytes());
     }
     Ok(pcm)
+}
+
+fn resample_error(error: impl std::fmt::Display) -> VoiceHttpError {
+    VoiceHttpError::Decode(format!("the TTS sample rate cannot be converted: {error}"))
 }
 
 #[cfg(test)]
@@ -236,7 +254,7 @@ mod tests {
         // Overwrite the `data` chunk size (bytes 40..44) with more than exists.
         lying[40..44].copy_from_slice(&999_999u32.to_le_bytes());
         assert!(
-            matches!(parse_wav(&lying), Err(VoiceHttpError::InvalidWav)),
+            matches!(parse_wav(&lying), Err(VoiceHttpError::Decode(message)) if message == INVALID_WAV),
             "an oversized data chunk must be refused, got {:?}",
             parse_wav(&lying).map(|(pcm, _)| pcm.len())
         );

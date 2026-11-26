@@ -8,7 +8,6 @@
 pub mod companion;
 pub mod consolidate;
 pub mod embedding;
-pub mod error;
 pub mod json;
 pub mod memory;
 
@@ -17,13 +16,14 @@ pub use companion::{
 };
 pub use consolidate::{Batch, Commit, Fact, MemoryContext, Turn, normalize, validate_citations};
 pub use embedding::{PREP_VERSION, PendingEmbedding, dimensions_of_space, space_id};
-pub use error::{MindError, Result};
 pub use json::JsonDoc;
 pub use memory::{
     MAX_IMPORTANCE, Memory, MemoryActionKind, MemoryRecord, MindStateChange, MindUpdate, NewMemory,
     PINNED_BUDGET_CHARS, RecallMode, RecallOutcome, SHARED_SCOPE, Scored, StateUpdate, fuse,
     in_scope, score, tokens,
 };
+
+pub type Result<T> = std::result::Result<T, ene_domain::DomainError>;
 
 #[cfg(test)]
 mod tests {
