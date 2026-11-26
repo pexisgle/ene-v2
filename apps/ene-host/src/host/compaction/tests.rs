@@ -1,8 +1,6 @@
 use super::*;
-use crate::host::{
-    json::JsonDoc,
-    mind::{Assignment, Assignments, Companion, Profile, State},
-};
+use crate::host::mind::{Assignment, Assignments, Companion, Profile, State};
+use ene_mind::JsonDoc;
 use rig_core::catalog::{Catalog, Connector, ModelSpec};
 use rig_core::completion::{AssistantContent, AssistantMessage};
 use rig_core::conversation::TurnEnd;
@@ -551,7 +549,7 @@ fn connection_row(endpoint: &str) -> crate::host::settings::Connection {
 }
 
 fn companion() -> Companion {
-    let now = crate::host::util::now();
+    let now = ene_host_core::util::now();
     Companion {
         id: "ene".into(),
         name: "ene".into(),

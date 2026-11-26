@@ -3,8 +3,8 @@ use super::{
     agent,
     db::{Result, Store},
     error::HostError,
-    util::{digest, now},
 };
+use ene_host_core::util::{digest, now};
 use ene_rpc as w;
 use rig_core::conversation::{Aside, Author, RequestId};
 use rig_ecs::prelude::*;
@@ -33,9 +33,9 @@ pub(crate) fn accept(app: &mut App, request: w::SendMessageRequest) -> Result<w:
     {
         return Err(HostError::Invalid(("the message is too large").into()));
     }
-    super::util::validate_id(&request.companion_id)?;
+    ene_domain::validate_id(&request.companion_id)?;
     if !request.request_key.is_empty() {
-        super::util::validate_id(&request.request_key)?;
+        ene_domain::validate_id(&request.request_key)?;
     }
     let text = request.text.clone();
     let hash = digest(format!("{}:{}", request.companion_id, text).as_bytes());

@@ -14,7 +14,7 @@ pub(crate) fn subscribe(
 )> {
     let store = app.world().resource::<Store>().clone();
     if let Some(client_id) = client_id.filter(|id| !id.is_empty()) {
-        util::validate_id(client_id)?;
+        ene_domain::validate_id(client_id)?;
         if store.client_repo().client(client_id)?.is_none() {
             return Err(HostError::NotFound("client not found".into()));
         }

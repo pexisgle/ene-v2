@@ -103,7 +103,7 @@ impl Services for PluginServices {
         Box::pin(async move {
             match request {
                 ServiceRequest::Log { message } => {
-                    let clipped = crate::host::util::truncate(&message, 4_096);
+                    let clipped = ene_host_core::util::truncate(&message, 4_096);
                     tracing::info!(plugin = %plugin_id, "{clipped}");
                     Ok(Value::Null)
                 }

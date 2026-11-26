@@ -311,7 +311,7 @@ fn b11_companion_voice_binding_selects_bound_tts_connection_without_silent_fallb
         .unwrap();
     let mut comp = crate::host::mind::default_ene_companion("2026-01-01T00:00:00Z");
     store.companion_repo().insert_companion(&comp).unwrap();
-    comp.voice = crate::host::json::JsonDoc::new(
+    comp.voice = ene_mind::JsonDoc::new(
         "ene.voice.v1",
         serde_json::json!({"connection_id": "tts-b", "voice_id": "8"}),
     );
@@ -322,7 +322,7 @@ fn b11_companion_voice_binding_selects_bound_tts_connection_without_silent_fallb
     };
     assert!(matches!(err, SetupError::Disabled(_)), "{err:?}");
 
-    comp.voice = crate::host::json::JsonDoc::new(
+    comp.voice = ene_mind::JsonDoc::new(
         "ene.voice.v1",
         serde_json::json!({"connection_id": "tts-a", "voice_id": "3", "speed": 1.15}),
     );

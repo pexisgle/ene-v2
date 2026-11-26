@@ -11,9 +11,9 @@ use crate::host::{
     error::{HostError, Result},
     notify::Notifier,
     resources::{DeviceHub, Perception},
-    util::truncate,
 };
 use bevy_ecs::prelude::*;
+use ene_host_core::util::truncate;
 use ene_rpc as w;
 use serde_json::{Value, json};
 use std::time::Instant;

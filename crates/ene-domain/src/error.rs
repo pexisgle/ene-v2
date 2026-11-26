@@ -15,3 +15,19 @@ pub fn validate_id(id: &str) -> Result<(), DomainError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::validate_id;
+
+    #[test]
+    fn only_printable_ascii_ids_are_accepted() {
+        assert!(validate_id("client-1").is_ok());
+        for rejected in ["", "has space", "tab\there", "émoji"] {
+            let outcome = validate_id(rejected);
+            assert!(outcome.is_err(), "{rejected:?} must be rejected");
+        }
+        assert!(validate_id(&"a".repeat(128)).is_ok());
+        assert!(validate_id(&"a".repeat(129)).is_err());
+    }
+}

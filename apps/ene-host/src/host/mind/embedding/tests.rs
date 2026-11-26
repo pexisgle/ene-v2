@@ -2,7 +2,7 @@ use super::backfill::{MAX_EMBED_BATCH, fill};
 use super::index::{Space, cosine_similarity, encode};
 use super::*;
 use crate::host::db::memories::MemoryRecord;
-use crate::host::mind::memory::Memory;
+use ene_mind::Memory;
 
 fn test_space(model: &str, dimensions: usize) -> String {
     space_id(
@@ -245,7 +245,7 @@ async fn embedding_credentials_rotate_and_revoke_across_clones() {
     }
     assert_eq!(
         fill(
-            store.open_secondary().unwrap(),
+            &store.open_secondary().unwrap(),
             &store,
             &embeddings,
             Some(&credentials),
@@ -293,15 +293,16 @@ fn memory(content: &str) -> MemoryRecord {
 }
 
 fn embed(store: &Store, memory: &Memory, space: &str, dimensions: usize, vector: &[f32]) {
-    crate::host::db::memories::write_embedding_on(
-        &store.conn(),
-        &memory.id,
-        memory.content_revision,
-        space,
-        dimensions,
-        &encode(vector),
-    )
-    .unwrap();
+    store
+        .memory_repo()
+        .write_embedding(
+            &memory.id,
+            memory.content_revision,
+            space,
+            dimensions,
+            &encode(vector),
+        )
+        .unwrap();
 }
 
 #[test]
@@ -646,7 +647,7 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
     );
 
     fill(
-        store.open_secondary().unwrap(),
+        &store.open_secondary().unwrap(),
         &store,
         &embeddings,
         None,
@@ -670,7 +671,7 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
     );
 
     fill(
-        store.open_secondary().unwrap(),
+        &store.open_secondary().unwrap(),
         &store,
         &embeddings,
         None,

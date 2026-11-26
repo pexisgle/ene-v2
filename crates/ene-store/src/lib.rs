@@ -89,7 +89,7 @@ impl Store {
 
     /// Opens a second read-write connection to the same database file with the
     /// same WAL pragmas, allowing background workers to avoid holding `conn()`.
-    pub fn open_secondary(&self) -> Result<Connection> {
+    pub fn open_secondary(&self) -> Result<Self> {
         let primary = self.conn();
         let path = primary
             .path()
@@ -101,7 +101,31 @@ impl Store {
             })?;
         let connection = open_connection(Path::new(path))?;
         configure_connection(&connection)?;
-        Ok(connection)
+        Ok(Self(Arc::new(Mutex::new(connection))))
+    }
+
+    /// Clears learned state with a durable commit so an interrupted offline reset can resume.
+    pub fn reset_learned_state(&self) -> Result<()> {
+        let mut connection = self.conn();
+        connection.pragma_update(None, "synchronous", "FULL")?;
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(
+            "DELETE FROM memory_edges;
+             DELETE FROM memory_injections;
+             DELETE FROM mind_operations;
+             DELETE FROM memories;
+             DELETE FROM device_operations;
+             DELETE FROM approval_requests;
+             DELETE FROM work_runs;
+             DELETE FROM work_sessions;",
+        )?;
+        let empty = to_json(&ene_mind::State::default())?;
+        transaction.execute(
+            "UPDATE companions SET state = ?1, state_revision = state_revision + 1 WHERE state <> ?1",
+            [empty],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Repository for approval requests.
@@ -400,7 +424,8 @@ mod tests {
     fn primary_and_secondary_connections_share_options_and_transactions() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
-        let mut secondary = store.open_secondary().unwrap();
+        let secondary_store = store.open_secondary().unwrap();
+        let mut secondary = secondary_store.conn();
         let options = |connection: &Connection| {
             let journal: String = connection
                 .pragma_query_value(None, "journal_mode", |row| row.get(0))

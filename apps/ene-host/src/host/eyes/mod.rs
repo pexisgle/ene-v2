@@ -11,9 +11,9 @@ use super::{
     db::Store,
     error::{HostError, Result},
     resources::DeviceHub,
-    util::truncate,
 };
 use bevy_ecs::prelude::*;
+use ene_host_core::util::truncate;
 use ene_rpc as w;
 use rig_core::conversation::{Author, AuthorKind, RequestId};
 use rig_ecs::prelude::*;

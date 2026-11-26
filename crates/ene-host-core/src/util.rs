@@ -1,4 +1,4 @@
-//! Pure host-wide utility helpers: timestamps, digests, ID validation and bounded text.
+//! Pure host-wide utility helpers: timestamps, digests, and bounded text.
 use jiff::Timestamp;
 use sha2::{Digest, Sha256};
 
@@ -14,26 +14,9 @@ pub fn digest(bytes: &[u8]) -> Vec<u8> {
     Sha256::digest(bytes).to_vec()
 }
 
-/// Opaque ids are 1..=128 printable ASCII characters. Anything else is a
-/// client mistake, not a lookup miss.
-pub fn validate_id(id: &str) -> Result<(), ene_domain::DomainError> {
-    ene_domain::validate_id(id)
-}
-
 /// Truncates `value` to at most `limit` characters.
 pub fn truncate(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
-}
-
-/// Reports a cleanup step that failed, without changing the caller's shape.
-///
-/// Rollback and teardown paths cannot do much about a failure, but dropping it
-/// silently is how a host ends up in a state nobody can explain. Callers stay
-/// a single expression, so this does not add a branch to their complexity.
-pub fn log_if_err<T, E: std::fmt::Display>(result: std::result::Result<T, E>, context: &str) {
-    if let Err(error) = result {
-        tracing::warn!(%error, context, "a cleanup step failed");
-    }
 }
 
 #[cfg(test)]
@@ -62,16 +45,5 @@ mod tests {
         assert_eq!(hashed.len(), 32);
         assert_eq!(hashed, digest(b"abc"), "the same bytes must hash the same");
         assert_ne!(hashed, digest(b"abd"));
-    }
-
-    #[test]
-    fn only_printable_ascii_ids_are_accepted() {
-        assert!(validate_id("client-1").is_ok());
-        for rejected in ["", "has space", "tab\there", "émoji"] {
-            let outcome = validate_id(rejected);
-            assert!(outcome.is_err(), "{rejected:?} must be rejected");
-        }
-        assert!(validate_id(&"a".repeat(128)).is_ok());
-        assert!(validate_id(&"a".repeat(129)).is_err());
     }
 }

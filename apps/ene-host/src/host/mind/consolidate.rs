@@ -330,7 +330,7 @@ fn turn_query(turns: &[Turn]) -> String {
         query.push_str(&turn.text);
         query.push('\n');
     }
-    crate::host::util::truncate(&query, MAX_QUERY_CHARS)
+    ene_host_core::util::truncate(&query, MAX_QUERY_CHARS)
 }
 
 #[cfg(test)]
@@ -381,7 +381,7 @@ mod tests {
         }
     }
 
-    fn context(memory: &crate::host::mind::memory::Memory) -> MemoryContext {
+    fn context(memory: &ene_mind::Memory) -> MemoryContext {
         MemoryContext {
             id: memory.id.clone(),
             revision: memory.memory_revision,
@@ -521,8 +521,8 @@ mod tests {
     // === The pass end to end: retrieval, extraction, guard and commit ===
 
     fn companion() -> crate::host::mind::Companion {
-        use crate::host::json::JsonDoc;
         use crate::host::mind::{Assignment, Assignments};
+        use ene_mind::JsonDoc;
         let assignment = Assignment {
             connection_id: "c1".into(),
             model_id: "test-model".into(),
@@ -695,15 +695,12 @@ mod tests {
             );
             // A write that fails means the batch never reached the peer; the
             // caller turns this into a retry, so the reason has to survive.
-            ene_platform_os::warn_if_err(
+            ene_domain::warn_if_err(
                 socket.write_all(head.as_bytes()).await,
                 "recall header write",
             );
-            ene_platform_os::warn_if_err(
-                socket.write_all(body.as_bytes()).await,
-                "recall body write",
-            );
-            ene_platform_os::warn_if_err(socket.flush().await, "recall request flush");
+            ene_domain::warn_if_err(socket.write_all(body.as_bytes()).await, "recall body write");
+            ene_domain::warn_if_err(socket.flush().await, "recall request flush");
         });
         ExtractionServer { base, task }
     }

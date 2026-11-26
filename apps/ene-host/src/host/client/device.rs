@@ -145,7 +145,7 @@ pub(super) fn describe_device_request(
                 }
                 names.push(name.clone());
                 if let Some(spec) = client.spec(name)
-                    && let Ok(schema) = super::json::parse_schema(&spec.input_schema)
+                    && let Ok(schema) = ene_host_core::json::parse_schema(&spec.input_schema)
                 {
                     let _discarded = write!(
                         inputs,

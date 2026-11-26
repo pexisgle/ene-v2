@@ -121,7 +121,7 @@ pub(super) fn notice_model_unavailable(
     notifier.notice(
         Some(companion_id),
         "model_unavailable",
-        &crate::host::util::truncate(&error.to_string(), 300),
+        &ene_host_core::util::truncate(&error.to_string(), 300),
     );
 }
 

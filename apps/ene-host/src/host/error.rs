@@ -97,23 +97,6 @@ impl HostError {
 
 pub(crate) use ene_domain::Failure;
 
-impl From<rusqlite::Error> for HostError {
-    fn from(error: rusqlite::Error) -> Self {
-        // A lock another process holds is transient: the host keeps serving
-        // and the caller can retry. Every other database failure means the
-        // state can no longer be trusted, and the host stops.
-        if let rusqlite::Error::SqliteFailure(code, _) = &error
-            && matches!(
-                code.code,
-                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-            )
-        {
-            return Self::Unavailable(format!("the state database is busy: {error}"));
-        }
-        Self::Storage(error.to_string())
-    }
-}
-
 impl From<ene_domain::DomainError> for HostError {
     fn from(error: ene_domain::DomainError) -> Self {
         Self::Invalid(error.to_string())
@@ -161,36 +144,6 @@ impl From<ene_work::WorkError> for HostError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn sqlite(code: rusqlite::ErrorCode) -> rusqlite::Error {
-        rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error {
-                code,
-                extended_code: 0,
-            },
-            None,
-        )
-    }
-
-    #[test]
-    fn a_busy_database_is_transient_and_a_broken_one_stops_the_host() {
-        for code in [
-            rusqlite::ErrorCode::DatabaseBusy,
-            rusqlite::ErrorCode::DatabaseLocked,
-        ] {
-            let mapped = HostError::from(sqlite(code));
-            assert!(!mapped.is_storage(), "{code:?} must not stop the host");
-            assert!(matches!(mapped, HostError::Unavailable(_)), "{code:?}");
-        }
-        for code in [
-            rusqlite::ErrorCode::DatabaseCorrupt,
-            rusqlite::ErrorCode::DiskFull,
-            rusqlite::ErrorCode::SystemIoFailure,
-        ] {
-            let mapped = HostError::from(sqlite(code));
-            assert!(mapped.is_storage(), "{code:?} must stop the host");
-        }
-    }
 
     #[test]
     fn every_failure_keeps_its_wire_code() {

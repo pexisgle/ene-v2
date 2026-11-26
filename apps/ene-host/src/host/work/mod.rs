@@ -23,10 +23,10 @@ use super::{
     mind::Companion,
     notify::Notifier,
     providers::Providers,
-    util::now,
     wire,
 };
 use bevy_ecs::prelude::*;
+use ene_host_core::util::now;
 use ene_rpc as w;
 use rig_ecs::prelude::*;
 use serde_json::json;
@@ -127,7 +127,7 @@ pub(crate) fn start(world: &mut World, request: w::StartWorkRequest) -> Result<w
         id: uuid::Uuid::new_v4().to_string(),
         companion_id: ene_domain::CompanionId::parse(companion.id.clone())?,
         title: if request.title.trim().is_empty() {
-            super::util::truncate(&request.instruction, 80)
+            ene_host_core::util::truncate(&request.instruction, 80)
         } else {
             request.title.clone()
         },
@@ -212,7 +212,7 @@ pub(crate) fn start_run(
         }
     };
     if let Some(error) = failure {
-        ene_platform_os::warn_if_err(fail_run(&store, &run, &error), "failed run record");
+        ene_domain::warn_if_err(fail_run(&store, &run, &error), "failed run record");
         let _written = store
             .work_repo()
             .set_work_status(&session.id, WorkStatus::Idle);
@@ -257,7 +257,7 @@ fn binding_for(store: &Store, request: &w::StartWorkRequest) -> Result<Option<St
     if request.client_id.is_empty() {
         return Ok(activation.and_then(|activation| activation.client_id));
     }
-    super::util::validate_id(&request.client_id)?;
+    ene_domain::validate_id(&request.client_id)?;
     store
         .client_repo()
         .client(&request.client_id)?
@@ -281,7 +281,8 @@ pub(crate) fn send(world: &mut World, request: w::SendWorkRequest) -> Result<w::
     if session.status == WorkStatus::Closed {
         return Err(HostError::Conflict(("work session is closed").into()));
     }
-    let hash = super::util::digest(format!("{}:{}", request.work_id, request.text).as_bytes());
+    let hash =
+        ene_host_core::util::digest(format!("{}:{}", request.work_id, request.text).as_bytes());
     let agent = agent_of(world, &request.work_id);
     if !request.request_key.is_empty()
         && let Some((stored, request_id)) = receipt(

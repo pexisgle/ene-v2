@@ -241,7 +241,9 @@ impl Session {
                             && matches!(
                                 reason,
                                 OperationError::ComputerUse(
-                                    crate::computer::ComputerUseError::PartialInput,
+                                    crate::computer::ComputerUseError::Input(
+                                        ene_platform_os::input::InputError::Partial,
+                                    ),
                                 )
                             )
                         {

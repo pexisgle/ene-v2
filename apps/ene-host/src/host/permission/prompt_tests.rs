@@ -8,7 +8,7 @@ use super::decision::{
     DECISION_ARGUMENT_CHARS, DECISION_REQUEST_CHARS, DecisionInputs, decision_prompt, run_decision,
 };
 use super::*;
-use crate::host::util::truncate;
+use ene_host_core::util::truncate;
 use rig_core::test_utils::MockCompletionModel;
 use rig_core::{DynModel, operation::Completion};
 

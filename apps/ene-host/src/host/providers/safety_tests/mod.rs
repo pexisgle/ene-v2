@@ -4,7 +4,6 @@ use super::*;
 use crate::host::{
     db::Store,
     error::HostError,
-    json::JsonDoc,
     mind::{Assignment, Assignments, Companion, Profile, Role, State},
     model::{self, Credentials},
     settings::{
@@ -12,6 +11,7 @@ use crate::host::{
         SttConnection, TtsConnection,
     },
 };
+use ene_mind::JsonDoc;
 use rig_core::catalog::Catalog;
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};

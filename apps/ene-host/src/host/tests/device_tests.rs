@@ -724,14 +724,14 @@ fn unassigned(id: &str) -> crate::host::mind::Companion {
         profile_revision: 1,
         state: crate::host::mind::State::default(),
         state_revision: 1,
-        body: crate::host::json::JsonDoc::empty(),
-        voice: crate::host::json::JsonDoc::empty(),
+        body: ene_mind::JsonDoc::empty(),
+        voice: ene_mind::JsonDoc::empty(),
         assignments: crate::host::mind::Assignments::default(),
         persona: None,
         voice_identifier: None,
         revision: 1,
-        created_at: crate::host::util::now(),
-        updated_at: crate::host::util::now(),
+        created_at: ene_host_core::util::now(),
+        updated_at: ene_host_core::util::now(),
     }
 }
 

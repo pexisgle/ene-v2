@@ -4,7 +4,7 @@ pub(super) async fn probe_voicevox_tts(
     connection: &crate::host::settings::Connection,
     voicevox: &crate::host::voice::voicevox::VoicevoxManager,
 ) -> crate::host::settings::Check {
-    let checked_at = crate::host::util::now();
+    let checked_at = ene_host_core::util::now();
     let base = connection.endpoint().endpoint.trim().trim_end_matches('/');
     let base = if base.is_empty() {
         "http://127.0.0.1:50021"
@@ -122,7 +122,7 @@ pub(super) async fn probe_openai_speech(
     credentials: &model::Credentials,
     providers: &crate::host::providers::Providers,
 ) -> crate::host::settings::Check {
-    let checked_at = crate::host::util::now();
+    let checked_at = ene_host_core::util::now();
     let fail = |message: String| speech_probe_failure(&checked_at, message);
     let base = settings::endpoint_of(connection, providers).unwrap_or_else(|| {
         connection
@@ -297,7 +297,7 @@ pub(super) async fn probe_embedding(
     credentials: &model::Credentials,
     providers: &crate::host::providers::Providers,
 ) -> crate::host::settings::Check {
-    let checked_at = crate::host::util::now();
+    let checked_at = ene_host_core::util::now();
     let fail = |message: String, resources: Vec<String>| crate::host::settings::Check {
         healthy: false,
         checked_at: checked_at.clone(),

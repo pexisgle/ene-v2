@@ -6,7 +6,6 @@
 
 use super::binding::{ensure_model, notice_model_unavailable};
 use super::companion_of;
-use super::prompt::{system_prompt, work_prompt};
 use crate::host::{
     db::{Result, Store},
     mind::Companion,
@@ -14,6 +13,7 @@ use crate::host::{
     resources::{CompanionAgent, LastProjectedEntry, WorkAgent},
 };
 use bevy_ecs::prelude::*;
+use ene_host_core::prompt::{system_prompt, work_prompt};
 use rig_ecs::model::Connection as ModelConnection;
 use rig_ecs::prelude::*;
 use std::collections::HashMap;

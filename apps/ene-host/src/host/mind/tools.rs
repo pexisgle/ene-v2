@@ -7,16 +7,14 @@ use crate::host::{
         memories::{MindStateChange, MindUpdate, NewMemory, StateUpdate, detail},
     },
     error::HostError,
-    mind::{
-        embedding::{self, Embeddings},
-        memory::RecallMode,
-    },
+    mind::embedding::{self, Embeddings},
     model::Credentials,
     resources::HostRuntime,
     tools::run_tool,
-    util::now,
 };
 use bevy_ecs::prelude::*;
+use ene_host_core::util::now;
+use ene_mind::RecallMode;
 use rig_ecs::prelude::*;
 use schemars::JsonSchema;
 use serde::Deserialize;

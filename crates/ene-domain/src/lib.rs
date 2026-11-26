@@ -5,6 +5,7 @@
 // reports zero for it. The workspace cannot enable it centrally yet, because a
 // crate cannot override `[lints] workspace = true`.
 #![warn(clippy::needless_pass_by_value)]
+mod best_effort;
 pub mod client;
 pub mod error;
 pub mod failure;
@@ -13,6 +14,7 @@ pub mod json;
 pub mod settings;
 pub mod work;
 
+pub use best_effort::{debug_if_err, warn_if_err};
 pub use client::{Activation, Client, DeviceOperation, DeviceStatus};
 pub use error::{DomainError, validate_id};
 pub use failure::Failure;

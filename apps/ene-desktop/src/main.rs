@@ -96,12 +96,12 @@ fn main() {
     // The window is gone. The session stops serving, kills its child and returns;
     // joining it is what makes the exit orderly rather than a race.
     drop(tray);
-    ene_platform_os::debug_if_err(
+    ene_domain::debug_if_err(
         quit.send(Command::Quit)
             .map_err(|_| "the session already stopped"),
         "quit command",
     );
-    ene_platform_os::warn_if_err(
+    ene_domain::warn_if_err(
         session_runtime
             .worker
             .join()
@@ -218,7 +218,7 @@ fn spawn_shutdown_signal(handle: &tokio::runtime::Handle) -> tokio::sync::onesho
         #[cfg(not(unix))]
         let received = tokio::signal::ctrl_c().await.is_ok();
         if received {
-            ene_platform_os::debug_if_err(
+            ene_domain::debug_if_err(
                 sig_tx.send(()).map_err(|_| "the listener stopped"),
                 "shutdown signal",
             );
@@ -345,7 +345,6 @@ fn discovery_path(local_host: bool) -> Result<PathBuf, DesktopInitError> {
 
 #[cfg(windows)]
 fn local_host_command(host: &std::path::Path) -> std::process::Command {
-    use parking_lot::RwLock;
     use std::{os::windows::process::CommandExt as _, process::Command};
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;

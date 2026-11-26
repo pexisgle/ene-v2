@@ -10,9 +10,9 @@ use crate::host::{
     model::{self, Credentials},
     providers::Providers,
     resources::HostRuntime,
-    util::truncate,
 };
 use bevy_ecs::prelude::*;
+use ene_host_core::util::truncate;
 use ene_policy::{ApprovalDecision, ApprovalStatus, MAX_POLICY_TEXT_CHARS, PolicyRule, PolicyText};
 use rig_core::{
     DynModel,

@@ -54,7 +54,7 @@ async fn probe_mcp_connection(
     if !connection.enabled {
         return Ok(settings::Check {
             healthy: false,
-            checked_at: crate::host::util::now(),
+            checked_at: ene_host_core::util::now(),
             failure: Some(crate::host::error::Failure::new(
                 "connection_check",
                 "MCP 接続が無効化されています。",
@@ -123,14 +123,14 @@ async fn probe_mcp_connection(
     match outcome {
         Ok(Ok(Ok(tools))) => Ok(settings::Check {
             healthy: true,
-            checked_at: crate::host::util::now(),
+            checked_at: ene_host_core::util::now(),
             failure: None,
             capabilities: Vec::new(),
             resources: tools,
         }),
         Ok(Ok(Err(reason))) => Ok(settings::Check {
             healthy: false,
-            checked_at: crate::host::util::now(),
+            checked_at: ene_host_core::util::now(),
             failure: Some(crate::host::error::Failure::new(
                 "connection_check",
                 format!("{default_message} ({reason})"),
@@ -141,7 +141,7 @@ async fn probe_mcp_connection(
         Ok(Err(error)) => Err(error.into()),
         Err(_) => Ok(settings::Check {
             healthy: false,
-            checked_at: crate::host::util::now(),
+            checked_at: ene_host_core::util::now(),
             failure: Some(crate::host::error::Failure::new(
                 "connection_check",
                 default_message,

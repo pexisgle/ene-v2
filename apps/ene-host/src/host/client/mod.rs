@@ -2,7 +2,7 @@
 //! and device operations.
 
 use super::error::{HostError, Result};
-use super::json;
+use ene_host_core::json;
 
 pub(crate) use ene_domain::{Client, DeviceOperation, DeviceStatus};
 #[cfg(test)]
@@ -185,17 +185,17 @@ pub(crate) fn register(world: &mut World, request: w::RegisterClientRequest) -> 
         Ok(view) => Ok(view),
         Err(error) => {
             if let Some(previous) = previous {
-                ene_platform_os::warn_if_err(
+                ene_domain::warn_if_err(
                     store.client_repo().restore_client(&previous),
                     "client declaration rollback",
                 );
             } else {
-                ene_platform_os::warn_if_err(
+                ene_domain::warn_if_err(
                     store.client_repo().delete_client(&request.id),
                     "rejected client cleanup",
                 );
             }
-            super::util::log_if_err(dynamic::sync_tools(world), "tool resync");
+            ene_domain::warn_if_err(dynamic::sync_tools(world), "tool resync");
             Err(error)
         }
     }
@@ -228,12 +228,12 @@ pub(crate) fn set_capabilities(
         Ok(view) => Ok(view),
         Err(error) => {
             if let Some(previous) = previous {
-                ene_platform_os::warn_if_err(
+                ene_domain::warn_if_err(
                     store.client_repo().restore_client(&previous),
                     "client declaration rollback",
                 );
             }
-            super::util::log_if_err(dynamic::sync_tools(world), "tool resync");
+            ene_domain::warn_if_err(dynamic::sync_tools(world), "tool resync");
             Err(error)
         }
     }
@@ -261,7 +261,7 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
         .companion(&request.companion_id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     if !request.release {
-        super::util::validate_id(&request.client_id)?;
+        ene_domain::validate_id(&request.client_id)?;
         store
             .client_repo()
             .client(&request.client_id)?
@@ -276,17 +276,17 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
     // roll the move back before any notification is visible.
     if let Err(error) = dynamic::sync_tools(world) {
         if let Some(previous) = previous.as_ref() {
-            super::util::log_if_err(
+            ene_domain::warn_if_err(
                 store.client_repo().restore_activation(previous),
                 "activation rollback",
             );
         } else {
-            super::util::log_if_err(
+            ene_domain::warn_if_err(
                 store.client_repo().delete_activation(&request.companion_id),
                 "rejected activation cleanup",
             );
         }
-        super::util::log_if_err(dynamic::sync_tools(world), "tool resync");
+        ene_domain::warn_if_err(dynamic::sync_tools(world), "tool resync");
         return Err(error);
     }
     if let Some(previous) = previous.clone()

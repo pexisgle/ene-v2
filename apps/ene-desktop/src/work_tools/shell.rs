@@ -75,7 +75,7 @@ impl Drop for RunningShell {
         // a timed-out command stayed unreaped. `wait` is a future and `Drop`
         // cannot await, so the status is polled for a bounded moment instead.
         if let Some(child) = &mut self.0 {
-            ene_platform_os::warn_if_err(child.start_kill(), "tool process termination");
+            ene_domain::warn_if_err(child.start_kill(), "tool process termination");
             let deadline = std::time::Instant::now() + REAP_TIMEOUT;
             while std::time::Instant::now() < deadline {
                 match child.try_wait() {

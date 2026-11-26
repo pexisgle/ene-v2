@@ -6,15 +6,15 @@ use super::super::{
     db::Store,
     eyes,
     resources::{Perception, PerceptionEvent},
-    util,
 };
 use bevy_ecs::prelude::*;
+use ene_host_core::util;
 use ene_rpc as w;
 
 /// Routes live observations to the eyes and supports legacy passive summaries.
 pub(crate) fn report_perception(world: &mut World, event: w::PerceptionEvent) -> Result<()> {
     let store = world.resource::<Store>().clone();
-    util::validate_id(&event.client_id)?;
+    ene_domain::validate_id(&event.client_id)?;
     let client = store
         .client_repo()
         .client(&event.client_id)?

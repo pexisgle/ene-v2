@@ -2,12 +2,12 @@
 use super::{
     client::{CapabilityApproval, CapabilitySpec, Client, DeviceOperation, DeviceStatus},
     error::Failure,
-    json::JsonDoc,
-    mind::memory::Memory,
     mind::{Assignment, Assignments, Companion, Profile, State},
     permission::{Approval, ApprovalStatus, PolicyEffect, PolicyRule, PolicyText},
     work::{Run, RunState, WorkSession, WorkStatus},
 };
+use ene_mind::JsonDoc;
+use ene_mind::Memory;
 use ene_rpc as w;
 use serde_json::Value;
 

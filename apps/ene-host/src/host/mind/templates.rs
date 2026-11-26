@@ -3,14 +3,13 @@
 //! pre-create conversation preview.
 use super::{Assignments, Companion, State, create, default_ene_companion};
 use crate::host::{
-    agent,
     db::{Result, Store},
     error::HostError,
-    json::JsonDoc,
-    util::now,
     wire,
 };
 use bevy_ecs::prelude::*;
+use ene_host_core::util::now;
+use ene_mind::JsonDoc;
 use ene_rpc as w;
 
 const TEMPLATE_FORMAT_VERSION: u32 = 1;
@@ -209,6 +208,6 @@ pub(crate) fn preview_system_prompt(request: &w::PreviewCompanionRequest) -> Res
     companion.validate()?;
     Ok(format!(
         "{}\nなお、これは作成前の会話プレビューです。ツールは使わず、自然な会話の返答だけを短く返してください。",
-        agent::system_prompt(&companion)
+        ene_host_core::prompt::system_prompt(&companion)
     ))
 }

@@ -14,7 +14,6 @@ pub(crate) mod db;
 pub(crate) mod delegation;
 pub(crate) mod error;
 pub(crate) mod eyes;
-pub(crate) mod json;
 pub(crate) mod mcp;
 pub(crate) mod mind;
 pub(crate) mod model;
@@ -25,7 +24,6 @@ pub(crate) mod providers;
 pub(crate) mod resources;
 pub(crate) mod settings;
 pub(crate) mod tools;
-pub(crate) mod util;
 pub(crate) mod voice;
 pub(crate) mod web_search;
 
@@ -143,9 +141,9 @@ struct Handle {
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        let _shutdown = self.shutdown.try_send(());
+        ene_domain::debug_if_err(self.shutdown.try_send(()), "host shutdown signal");
         if let Some(thread) = self.thread.get_mut().take() {
-            let _joined = thread.join();
+            drop(thread.join());
         }
     }
 }
@@ -240,7 +238,7 @@ impl Runtime {
     pub(crate) async fn begin_shutdown(&self) {
         // A shutdown that cannot mark itself closing still proceeds; the
         // failure is reported so a wedged kernel is visible rather than silent.
-        ene_platform_os::warn_if_err(
+        ene_domain::warn_if_err(
             self.call(|app| {
                 app.world_mut().resource_mut::<HostState>().closing = true;
                 Ok(())
@@ -256,7 +254,7 @@ impl Runtime {
         let thread = self.handle.thread.lock().take();
         tokio::task::spawn_blocking(move || {
             thread.map_or(Ok(()), |thread| {
-                let _shutdown = shutdown.try_send(());
+                ene_domain::debug_if_err(shutdown.try_send(()), "host shutdown signal");
                 thread
                     .join()
                     .map_err(|_| HostError::Internal(("Rig kernel panicked").into()))?

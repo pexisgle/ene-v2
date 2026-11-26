@@ -58,7 +58,7 @@ impl Notifier {
         self.outbox.push(w::Notification {
             kind: kind.into(),
             emitted_at: if matches!(kind, "turn" | "work" | "approval") {
-                super::util::now()
+                ene_host_core::util::now()
             } else {
                 String::new()
             },
@@ -79,7 +79,7 @@ impl Notifier {
     ) {
         self.outbox.push(w::Notification {
             kind: DIAGNOSTIC.into(),
-            emitted_at: super::util::now(),
+            emitted_at: ene_host_core::util::now(),
             companion_id: Some(companion.to_owned()),
             event: Some(w::notification::Event::Generic(Box::new(w::HostEvent {
                 kind: DIAGNOSTIC.into(),
@@ -189,7 +189,7 @@ impl Notifier {
             }))),
             ..Default::default()
         };
-        ene_platform_os::debug_if_err(
+        ene_domain::debug_if_err(
             self.events
                 .send(event)
                 .map_err(|_| "the notification stream has no receiver"),

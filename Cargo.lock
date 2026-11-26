@@ -4068,6 +4068,7 @@ dependencies = [
  "ene-catalog",
  "ene-domain",
  "ene-rpc",
+ "image",
  "proptest",
  "serde",
  "serde_json",
@@ -4096,7 +4097,6 @@ dependencies = [
  "ene-rpc",
  "globset",
  "gpui",
- "image",
  "libc",
  "parking_lot",
  "process-wrap",
@@ -4116,7 +4116,6 @@ dependencies = [
  "wayland-protocols 0.32.13",
  "wayland-protocols-wlr",
  "which 8.0.6",
- "windows 0.62.2",
  "x11rb",
 ]
 
@@ -4135,6 +4134,7 @@ dependencies = [
  "serde_json",
  "strum 0.28.0",
  "thiserror 2.0.21",
+ "tracing",
  "url",
 ]
 
@@ -4155,7 +4155,6 @@ dependencies = [
  "ene-domain",
  "ene-host-core",
  "ene-mind",
- "ene-platform-os",
  "ene-plugin",
  "ene-plugin-runtime",
  "ene-policy",
@@ -4187,7 +4186,6 @@ dependencies = [
  "rig-memory",
  "rig-reqwest",
  "rig-rmcp",
- "rusqlite",
  "rustix 1.1.6",
  "schemars 1.2.3",
  "serde",
@@ -4216,7 +4214,6 @@ dependencies = [
  "jiff 0.2.46",
  "serde_json",
  "sha2 0.11.1",
- "tracing",
 ]
 
 [[package]]
@@ -4249,6 +4246,8 @@ version = "0.1.8"
 dependencies = [
  "image",
  "parking_lot",
+ "serde",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "windows 0.62.2",
@@ -4363,7 +4362,6 @@ dependencies = [
  "ene-catalog",
  "ene-domain",
  "ene-mind",
- "ene-platform-os",
  "futures-util",
  "parking_lot",
  "process-wrap",

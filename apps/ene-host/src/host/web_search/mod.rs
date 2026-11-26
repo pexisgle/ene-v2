@@ -15,9 +15,9 @@ use super::{
     providers::Providers,
     resources::HostRuntime,
     settings::{Check, Connection, ConnectionConfig, ConnectionKind, endpoint_of},
-    util,
 };
 use adapter::{parse_adapter_results, read_http_error, send_search_request};
+use ene_host_core::util;
 use rig_core::{
     completion::ToolAnnotations,
     tool::{Tool, ToolContext, ToolErrorKind, ToolExecutionError},

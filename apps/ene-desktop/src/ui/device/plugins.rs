@@ -312,7 +312,7 @@ fn render_remote_host_form(
                         let ep = ep_val.clone();
                         let tok = tok_val.clone();
                         hub_save_remote.update(cx, |h, cx| {
-                            ene_platform_os::warn_if_err(
+                            ene_domain::warn_if_err(
                                 h.save_remote_host(ep, tok, cx),
                                 "remote host save",
                             );

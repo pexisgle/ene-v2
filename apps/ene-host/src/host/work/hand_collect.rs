@@ -13,9 +13,9 @@ use crate::host::{
     db::Store,
     permission::{self, ApprovalStatus},
     resources::HostRuntime,
-    util::now,
 };
 use bevy_ecs::prelude::*;
+use ene_host_core::util::now;
 use ene_plugin::{
     HarnessEvent, HarnessInput, PermissionOption, RequestPermissionOutcome, ToolCallUpdate,
 };
@@ -276,7 +276,7 @@ fn request_permission(
     }
     let target = format!(
         "{tool_name} {}",
-        crate::host::util::truncate(&approval.normalized_arguments, 200)
+        ene_host_core::util::truncate(&approval.normalized_arguments, 200)
     );
     permission::notify_approval_card(
         &mut world.resource_mut::<crate::host::notify::Notifier>(),

@@ -62,7 +62,7 @@ pub(super) fn open_pod(hub: &mut Hub, mode: Option<PodMode>, cx: &mut Context<Hu
     cx.notify();
 
     cx.spawn(async move |this, cx| {
-        ene_platform_os::debug_if_err(
+        ene_domain::debug_if_err(
             cx.update(|cx| {
                 let Some(hub) = this.upgrade() else {
                     return;
@@ -198,7 +198,7 @@ pub(super) fn open_settings(hub: &mut Hub, section: SettingsSection, cx: &mut Co
     cx.notify();
 
     cx.spawn(async move |this, cx| {
-        ene_platform_os::debug_if_err(
+        ene_domain::debug_if_err(
             cx.update(|cx| {
                 let Some(hub) = this.upgrade() else {
                     return;
@@ -234,7 +234,7 @@ pub(super) fn open_settings(hub: &mut Hub, section: SettingsSection, cx: &mut Co
                 );
                 match opened {
                     Ok(handle) => {
-                        ene_platform_os::debug_if_err(
+                        ene_domain::debug_if_err(
                             handle.update(cx, |_, window, _| window.activate_window()),
                             "window activation",
                         );

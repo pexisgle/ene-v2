@@ -12,6 +12,7 @@ pub mod templates;
 pub mod update;
 pub mod wire;
 
+mod attachments;
 mod notifications;
 
 #[cfg(test)]
@@ -19,6 +20,7 @@ mod choices_tests;
 #[cfg(test)]
 mod state_tests;
 
+pub use attachments::is_attachment_image;
 pub use choices::ModelRoleSlot;
 pub use ene_catalog::{
     GOOGLE_AGENT_PLATFORM, SAKURA_AI_ENDPOINT, default_embedding_dimensions, is_sakura_endpoint,

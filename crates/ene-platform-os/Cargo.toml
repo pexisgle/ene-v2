@@ -12,9 +12,11 @@ workspace = true
 [dependencies]
 parking_lot.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 # JPEG encoding for screen capture; the desktop crate no longer needs it.
 image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 windows = { version = "0.62", features = [

@@ -1,5 +1,5 @@
 //! Offline reset of learned state, serialized by the host's state lock.
-use crate::host::{db::Store, mind::State};
+use ene_store::Store;
 use std::{error::Error, fs, io, path::Path};
 
 pub(super) fn reset(state: &Path, requested: bool) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -24,25 +24,7 @@ pub(super) fn reset(state: &Path, requested: bool) -> Result<(), Box<dyn Error +
         }
     }
 
-    let mut connection = store.conn();
-    connection.pragma_update(None, "synchronous", "FULL")?;
-    let transaction = connection.transaction()?;
-    transaction.execute_batch(
-        "DELETE FROM memory_edges;
-         DELETE FROM memory_injections;
-         DELETE FROM mind_operations;
-         DELETE FROM memories;
-         DELETE FROM device_operations;
-         DELETE FROM approval_requests;
-         DELETE FROM work_runs;
-         DELETE FROM work_sessions;",
-    )?;
-    let empty = serde_json::to_string(&State::default())?;
-    transaction.execute(
-        "UPDATE companions SET state = ?1, state_revision = state_revision + 1 WHERE state <> ?1",
-        [empty],
-    )?;
-    transaction.commit()?;
+    store.reset_learned_state()?;
     fs::remove_dir_all(pending)?;
     Ok(())
 }

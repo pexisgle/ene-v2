@@ -118,7 +118,7 @@ pub(super) fn turn_settled(
                 w::TurnStatus::Failed,
                 Some(w::Failure {
                     code: "turn_failed".into(),
-                    message: crate::host::util::truncate(why, 500),
+                    message: ene_host_core::util::truncate(why, 500),
                     ..Default::default()
                 }),
             ),
@@ -194,7 +194,7 @@ fn eye_report_result(
             .filter_map(|entry| entry_text(&entry))
             .map(|text| crate::host::voice::speech::strip_motion_leak(&text))
             .rfind(|text| !text.is_empty())
-            .map(|text| crate::host::util::truncate(&text, 1500))
+            .map(|text| ene_host_core::util::truncate(&text, 1500))
     });
     let disposition = match (reply.is_some(), watched, completed) {
         (true, _, _) => Disposition::Replied,

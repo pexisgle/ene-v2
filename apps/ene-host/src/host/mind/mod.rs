@@ -1,9 +1,8 @@
 //! The companion: the author's profile, the mind it grew and its model
 //! assignments. Query functions live in `db::companions`.
-pub(crate) mod memory;
 
 use super::error::{HostError, Result};
-use super::json::JsonDoc;
+use ene_mind::JsonDoc;
 pub(crate) use ene_mind::{
     Assignment, Assignments, Companion, Profile, Role, State, default_ene_companion,
 };
@@ -16,8 +15,9 @@ pub(crate) mod plugin;
 pub(crate) mod recall;
 pub(crate) mod tools;
 
-use super::{agent, db::Store, notify::Notifier, util::now, wire};
+use super::{agent, db::Store, notify::Notifier, wire};
 use bevy_ecs::prelude::*;
+use ene_host_core::util::now;
 use ene_rpc as w;
 use rig_ecs::prelude::*;
 

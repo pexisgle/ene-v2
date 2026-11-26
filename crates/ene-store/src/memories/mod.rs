@@ -7,7 +7,7 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-pub use ops::{detail, missing_embeddings_on, profile_lines, write_embedding_on};
+pub use ops::{detail, profile_lines};
 pub(crate) use store::{add_edge, check_content, check_importance, insert_row, row_to_memory};
 
 use crate::{

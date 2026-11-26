@@ -3,12 +3,12 @@ use crate::host::{
     Credentials, HostError, HostRuntime,
     client::{CapabilityApproval, CapabilitySpec},
     db::Store,
-    json::JsonDoc,
     mind::{Assignment, Assignments, Companion, Profile, State},
     notify::Notifier,
     resources::{DeviceHub, DeviceTimeout, Waiting},
 };
 use bevy_ecs::prelude::*;
+use ene_mind::JsonDoc;
 use ene_rpc as w;
 use rig_core::catalog::{Catalog, Connector, ModelSpec};
 use rig_core::completion::Message;
@@ -143,7 +143,7 @@ fn settle(app: &mut App, runtime: &tokio::runtime::Runtime) {
 }
 
 fn companion(assignments: Assignments) -> Companion {
-    let now = crate::host::util::now();
+    let now = ene_host_core::util::now();
     Companion {
         id: "ene".into(),
         name: "ene".into(),

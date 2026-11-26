@@ -359,14 +359,14 @@ mod tests {
             profile_revision: 1,
             state: State::default(),
             state_revision: 1,
-            body: crate::host::json::JsonDoc::new("ene.body.v1", serde_json::json!({})),
-            voice: crate::host::json::JsonDoc::new("ene.voice.v1", serde_json::json!({})),
+            body: ene_mind::JsonDoc::new("ene.body.v1", serde_json::json!({})),
+            voice: ene_mind::JsonDoc::new("ene.voice.v1", serde_json::json!({})),
             assignments: Assignments::default(),
             persona: None,
             voice_identifier: None,
             revision: 1,
-            created_at: crate::host::util::now(),
-            updated_at: crate::host::util::now(),
+            created_at: ene_host_core::util::now(),
+            updated_at: ene_host_core::util::now(),
         }
     }
 

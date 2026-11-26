@@ -5,11 +5,10 @@
 //! companion (or a work run), keeps its model connection current and projects
 //! the conversation into the host's notification stream.
 //!
-//! The pieces are split by responsibility: [`prompt`] is the static persona,
+//! The pieces are split by responsibility: [`ene_host_core::prompt`] is the static persona,
 //! [`spawn`] owns one agent per companion and per open run, [`binding`] keeps
 //! its model current, [`transcript`] and [`turns`] publish what happens to it.
 mod binding;
-mod prompt;
 mod spawn;
 mod transcript;
 mod turns;
@@ -21,7 +20,6 @@ use rig_ecs::prelude::*;
 pub(crate) use super::resources::{CompanionAgent, WorkAgent};
 use binding::Connections;
 pub(crate) use binding::{clear_model_cache, deliver, ensure_model};
-pub(crate) use prompt::system_prompt;
 #[cfg(test)]
 pub(crate) use spawn::companion_agent_id;
 pub(crate) use spawn::{

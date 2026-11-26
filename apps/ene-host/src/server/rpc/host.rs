@@ -410,7 +410,7 @@ mod tests {
             .call(|app| {
                 let store = app.world().resource::<Store>().clone();
                 let mut ene = store.companion_repo().companion("ene")?.unwrap();
-                ene.voice = host::json::JsonDoc::new(
+                ene.voice = ene_mind::JsonDoc::new(
                     "ene.voice.v1",
                     serde_json::json!({
                         "connection_id": "local-secret-conn-1",
@@ -542,11 +542,11 @@ mod tests {
                 body.len(),
                 body
             );
-            ene_platform_os::debug_if_err(
+            ene_domain::debug_if_err(
                 stream.write_all(reply.as_bytes()).await,
                 "event reply write",
             );
-            ene_platform_os::debug_if_err(stream.shutdown().await, "event stream shutdown");
+            ene_domain::debug_if_err(stream.shutdown().await, "event stream shutdown");
         });
         addr
     }

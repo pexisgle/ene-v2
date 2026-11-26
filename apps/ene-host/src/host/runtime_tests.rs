@@ -60,7 +60,8 @@ async fn storage_errors_with_discarded_replies_still_stop_the_host() {
                 app.world()
                     .resource::<Store>()
                     .conn()
-                    .execute_batch("DROP TABLE clients")?;
+                    .execute_batch("DROP TABLE clients")
+                    .map_err(ene_store::StoreError::from)?;
                 Ok(())
             })
             .await

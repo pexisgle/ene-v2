@@ -14,9 +14,9 @@ use crate::host::{
     notify::Notifier,
     resources::{CompanionAgent, WorkAgent},
     tools::run_tool,
-    util::truncate,
 };
 use bevy_ecs::prelude::*;
+use ene_host_core::util::truncate;
 use ene_policy::{
     Approval, ApprovalStatus, PolicyRule, Verdict, canonicalise, decide_action, is_host_tool,
 };
@@ -369,7 +369,7 @@ fn issue_gate_hold(
         tool_name: binding.call.tool_name.clone(),
         normalized_arguments: normalized,
         status: ApprovalStatus::Pending,
-        created_at: crate::host::util::now(),
+        created_at: ene_host_core::util::now(),
         resolved_at: None,
         client_id: binding.bound_client_id.clone(),
         capability: binding.bound_capability.clone(),

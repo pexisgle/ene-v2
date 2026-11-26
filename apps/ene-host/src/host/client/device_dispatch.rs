@@ -15,10 +15,10 @@ use crate::host::{
     notify::Notifier,
     permission::{self, CallBinding},
     resources::{CompanionAgent, DeviceHub, WorkAgent},
-    util::now,
     wire,
 };
 use bevy_ecs::prelude::*;
+use ene_host_core::util::now;
 use ene_rpc as w;
 use rig_ecs::model::Connection;
 use serde_json::{Value, json};

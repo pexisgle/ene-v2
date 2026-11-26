@@ -40,7 +40,6 @@ rubato.workspace = true
 regex = "1"
 unicode-segmentation = "1"
 uuid.workspace = true
-image.workspace = true
 
 # gpui's Linux backends are features, and the workspace pins the crate with
 # default-features off (so its Windows manifest is not embedded twice). A Linux
@@ -60,20 +59,6 @@ x11rb = { version = "0.13", features = ["screensaver"] }
 # Workspace::open finds bash with which on every non-Windows platform.
 [target.'cfg(not(windows))'.dependencies]
 which.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = [
-    "Win32_Foundation",
-    "Win32_Graphics_Gdi",
-    "Win32_System_LibraryLoader",
-    "Win32_System_StationsAndDesktops",
-    "Win32_System_SystemInformation",
-    "Win32_System_Threading",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_HiDpi",
-    "Win32_UI_Shell",
-    "Win32_UI_WindowsAndMessaging",
-] }
 
 # libc is a deliberate transitive-graph pin (see the target section above),
 # not a direct dependency, so nothing in src/ names it.

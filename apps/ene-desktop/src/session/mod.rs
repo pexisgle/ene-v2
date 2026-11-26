@@ -88,7 +88,7 @@ pub fn load_or_create_client_id(path: &Path) -> String {
     {
         use std::io::Write as _;
         if tmp.write_all(id.as_bytes()).is_ok() {
-            ene_platform_os::warn_if_err(tmp.persist(path), "session file persistence");
+            ene_domain::warn_if_err(tmp.persist(path), "session file persistence");
         }
     }
     id

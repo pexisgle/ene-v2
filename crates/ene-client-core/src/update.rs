@@ -176,6 +176,7 @@ pub enum Update {
     EyesEnabled(bool),
     /// The perception status line, when the host reported one.
     EyesStatus(Option<String>),
+    /// Enables or disables Windows desktop input for this client.
     #[cfg(windows)]
     ComputerUseEnabled(bool),
     /// Live STT recognition status from `StreamAudioInput`.

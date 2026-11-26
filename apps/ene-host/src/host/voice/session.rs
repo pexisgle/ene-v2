@@ -8,7 +8,6 @@ use crate::host::{
     error::HostError,
     notify::Notifier,
     resources::HostRuntime,
-    util,
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
@@ -23,7 +22,7 @@ pub(crate) fn bind_input(store: Option<&Store>, client_id: &str) -> Result<Input
             ("client_id is required for audio input").into(),
         ));
     }
-    util::validate_id(client_id)?;
+    ene_domain::validate_id(client_id)?;
     let Some(store) = store else {
         return Err(HostError::Unavailable(
             "the host state is not available".into(),
@@ -66,7 +65,7 @@ pub(crate) fn subscribe_audio(
     if client_id.is_empty() {
         return Err(HostError::Invalid(("client_id is required").into()));
     }
-    util::validate_id(client_id)?;
+    ene_domain::validate_id(client_id)?;
     let Some(store) = store else {
         return Err(HostError::Unavailable(
             "the host state is not available".into(),

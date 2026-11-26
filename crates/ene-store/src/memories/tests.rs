@@ -49,43 +49,26 @@ fn recurring_cached_embedding_writes_keep_bindings_and_revision_guards() {
     let repo = store.memory_repo();
     let first = repo.insert_memory(&new_memory("first", 3)).unwrap();
     let second = repo.insert_memory(&new_memory("second", 4)).unwrap();
-    let connection = store.open_secondary().unwrap();
+    let secondary = store.open_secondary().unwrap();
+    let writer = secondary.memory_repo();
     let a = 1.0_f32.to_le_bytes();
     let b = 2.0_f32.to_le_bytes();
     for (memory, bytes) in [(&first, &a), (&second, &b), (&first, &b)] {
         assert!(
-            write_embedding_on(
-                &connection,
-                &memory.id,
-                memory.content_revision,
-                "fake:1:v1",
-                1,
-                bytes
-            )
-            .unwrap()
+            writer
+                .write_embedding(&memory.id, memory.content_revision, "fake:1:v1", 1, bytes)
+                .unwrap()
         );
     }
     assert!(
-        !write_embedding_on(
-            &connection,
-            &first.id,
-            first.content_revision + 1,
-            "fake:1:v1",
-            1,
-            &a
-        )
-        .unwrap()
+        !writer
+            .write_embedding(&first.id, first.content_revision + 1, "fake:1:v1", 1, &a)
+            .unwrap()
     );
     assert!(
-        write_embedding_on(
-            &connection,
-            &second.id,
-            second.content_revision,
-            "fake:1:v1",
-            1,
-            &a
-        )
-        .unwrap()
+        writer
+            .write_embedding(&second.id, second.content_revision, "fake:1:v1", 1, &a)
+            .unwrap()
     );
     assert_eq!(
         repo.embedding_blob(&first.id, "fake:1:v1").unwrap(),
