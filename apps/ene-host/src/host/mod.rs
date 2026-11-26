@@ -353,7 +353,9 @@ pub(crate) fn stop_on_failure(
 /// operations whose answers can no longer arrive.
 fn restore(store: &Store) -> Result<()> {
     store.approval_repo().expire_pending_approvals()?;
-    store.client_repo().mark_unanswered_operations_uncertain()?;
+    store
+        .client_repo()
+        .mark_unanswered_operations_uncertain(None)?;
     Ok(())
 }
 

@@ -105,7 +105,7 @@ impl w::ClientService for Services {
                     client_id,
                     subscription,
                 };
-                kernel.client_reconnected(&guard.client_id);
+                kernel.client_reconnected(&guard.client_id)?;
                 Ok((guard, receiver))
             })
             .await
@@ -177,10 +177,10 @@ impl Drop for StreamGuard {
             return;
         }
         let client_id = self.client_id.clone();
-        drop(self.runtime.call_kernel(move |kernel| {
-            kernel.client_disconnected(&client_id);
-            Ok(())
-        }));
+        drop(
+            self.runtime
+                .call_kernel(move |kernel| kernel.client_disconnected(&client_id)),
+        );
     }
 }
 
@@ -197,13 +197,14 @@ mod tests {
         runtime
             .read(|app| {
                 let store = app.world().resource::<Store>();
-                for (id, status) in [
-                    ("sent", DeviceStatus::Dispatched),
-                    ("unsent", DeviceStatus::Pending),
+                for (id, client, status) in [
+                    ("sent", "c1", DeviceStatus::Dispatched),
+                    ("unsent", "c1", DeviceStatus::Pending),
+                    ("other-client", "c2", DeviceStatus::Dispatched),
                 ] {
                     store.client_repo().insert_operation(&DeviceOperation {
                         id: id.into(),
-                        client_id: "c1".into(),
+                        client_id: client.into(),
                         capability: "device.files".into(),
                         input: serde_json::json!({}),
                         work_id: None,
@@ -248,7 +249,9 @@ mod tests {
             .unwrap();
         assert_eq!(hub.subscription("c1"), Some(subscription));
         assert_eq!(status, DeviceStatus::Dispatched);
-        assert!(hub.send("c1", w::DeviceEvent::default()));
+        let (owner, permit) = hub.reserve("c1").unwrap();
+        assert_eq!(owner, subscription);
+        let _sender = permit.send(w::DeviceEvent::default());
         assert!(receiver.try_recv().is_ok());
 
         // Drop the current stream and install its replacement in one kernel
@@ -291,11 +294,23 @@ mod tests {
                 Ok((
                     store.client_repo().operation("sent")?.unwrap().status,
                     store.client_repo().operation("unsent")?.unwrap().status,
+                    store
+                        .client_repo()
+                        .operation("other-client")?
+                        .unwrap()
+                        .status,
                 ))
             })
             .await
             .unwrap();
-        assert_eq!(statuses, (DeviceStatus::Uncertain, DeviceStatus::Pending));
+        assert_eq!(
+            statuses,
+            (
+                DeviceStatus::Uncertain,
+                DeviceStatus::Pending,
+                DeviceStatus::Dispatched
+            )
+        );
         runtime.shutdown().await.unwrap();
     }
 }

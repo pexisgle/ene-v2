@@ -274,6 +274,19 @@ impl<'a> ClientRepo<'a> {
         )
     }
 
+    /// Claims a pending operation before it is made visible on a device stream.
+    pub fn mark_operation_dispatched(&self, id: &str) -> Result<bool> {
+        Ok(self
+            .0
+            .conn()
+            .prepare_cached(
+                "UPDATE device_operations SET status = 'dispatched', updated_at = ?2 \
+             WHERE operation_id = ?1 AND status = 'pending'",
+            )?
+            .execute(params![id, now()])?
+            != 0)
+    }
+
     /// Advances an active operation without overwriting a terminal result.
     pub fn set_operation_status(&self, id: &str, status: DeviceStatus) -> Result<()> {
         self.0
@@ -336,18 +349,16 @@ impl<'a> ClientRepo<'a> {
         )
     }
 
-    /// Startup: dispatched operations whose result never arrived are no
-    /// longer trusted. Pending ones wait for the client to reconnect.
-    pub fn mark_unanswered_operations_uncertain(&self) -> Result<usize> {
-        let changed = self
-            .0
+    /// Marks unanswered dispatches uncertain at startup or for one disconnected client.
+    pub fn mark_unanswered_operations_uncertain(&self, client: Option<&str>) -> Result<()> {
+        self.0
             .conn()
             .prepare_cached(
                 "UPDATE device_operations SET status = 'uncertain', updated_at = ?1 \
-                 WHERE status = 'dispatched'",
+             WHERE status = 'dispatched' AND (?2 IS NULL OR client_id = ?2)",
             )?
-            .execute([now()])?;
-        Ok(changed)
+            .execute(params![now(), client])?;
+        Ok(())
     }
 
     /// The companion a client is currently the active client of, if any.

@@ -391,7 +391,20 @@ fn computer_use_sends_a_request_only_image_and_never_replays_input() {
     );
     work::stop(harness.app.world_mut(), &session.id).unwrap();
     let (_, mut replacement) = hub.register("desk");
-    device::resend(harness.app.world_mut(), "desk");
+    crate::host::client::computer::invalidate_client(
+        harness.app.world_mut(),
+        "desk",
+        hub.subscription("desk"),
+    );
+    let context = device::DeviceDispatchContext {
+        store: &harness.store(),
+        hub: &hub,
+        notifier: harness.app.world().resource(),
+    };
+    device::resend(&context, "desk", |_| {
+        panic!("stopped Computer Use operations are already terminal")
+    })
+    .unwrap();
     assert!(replacement.try_recv().is_err());
     let late = device::complete(
         harness.app.world_mut(),

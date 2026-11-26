@@ -244,7 +244,11 @@ pub(crate) fn invalidate_run(world: &mut World, run: &str) {
 }
 
 /// Retain the current stream's state when it replaces an older subscription.
-pub(super) fn invalidate_client(world: &mut World, client: &str, retain: Option<SubscriptionId>) {
+pub(in crate::host) fn invalidate_client(
+    world: &mut World,
+    client: &str,
+    retain: Option<SubscriptionId>,
+) {
     invalidate(world, |operation| {
         operation.client == client && Some(operation.subscription) != retain
     });

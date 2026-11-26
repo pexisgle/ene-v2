@@ -13,10 +13,10 @@ use super::{
     computer::{self, ComputerUse},
 };
 use crate::host::{
-    client::{CapabilitySpec, DeviceStatus},
+    client::DeviceStatus,
     db::{Result, Store},
     error::HostError,
-    permission::{self, CallBinding},
+    permission,
     resources::{CompanionAgent, DeviceHub, DeviceTimeout, Waiting, WaitingOperation, WorkAgent},
     wire,
 };
@@ -27,7 +27,7 @@ use serde_json::json;
 use std::{fmt::Write as _, sync::Arc, time::Instant};
 
 pub(crate) use super::device_dispatch::{
-    DeviceDispatchContext, accept, disconnected, dispatch_direct, resend,
+    DeviceDispatchContext, Invocation, accept, dispatch_direct, resend,
 };
 pub(crate) use super::device_result::complete;
 
@@ -35,17 +35,13 @@ pub(crate) use super::device_result::complete;
 pub(crate) fn on_device_request(called: &ToolCalled<DeviceRequestArgs>, mut commands: Commands) {
     let (call, agent, args) = (called.call, called.agent, called.args.clone());
     commands.queue(move |world: &mut World| {
-        let store = world.resource::<Store>().clone();
-        let binding = world.get::<CallBinding>(call).cloned();
-        let Some(spec) = binding_spec(&store, binding.as_ref(), &args.capability) else {
-            permission::refuse(
-                world,
-                call,
-                &format!("capability `{}` is not declared", args.capability),
-            );
-            return;
-        };
-        match accept(world, call, agent, spec.as_ref(), args.input.clone()) {
+        match accept(
+            world,
+            call,
+            agent,
+            Invocation::Request(&args.capability),
+            args.input,
+        ) {
             Ok((operation_id, _)) => {
                 let target_deadline = deadline(world.resource::<DeviceTimeout>());
                 wait(
@@ -55,7 +51,13 @@ pub(crate) fn on_device_request(called: &ToolCalled<DeviceRequestArgs>, mut comm
                     target_deadline,
                 );
             }
-            Err(error) => refuse_error(world, call, error),
+            Err(error) => {
+                let message = error.to_string();
+                permission::refuse(world, call, &message);
+                if error.is_storage() {
+                    crate::host::fail(world, &message);
+                }
+            }
         }
     });
 }
@@ -168,36 +170,6 @@ pub(super) fn describe_device_request(
     }
 }
 
-/// The declaration the bound client currently carries for `capability`.
-fn binding_spec(
-    store: &Store,
-    binding: Option<&CallBinding>,
-    capability: &str,
-) -> Option<Option<CapabilitySpec>> {
-    let binding = binding?;
-    let client = store
-        .client_repo()
-        .client(&binding.client_id)
-        .ok()
-        .flatten()?;
-    client
-        .capabilities
-        .iter()
-        .any(|name| name == capability)
-        .then(|| client.spec(capability).cloned())
-}
-
-/// A refused device call keeps its specific conflict/permission message and
-/// stringifies anything else.
-fn refuse_error(world: &mut World, call: Entity, error: HostError) {
-    match error {
-        HostError::Conflict(reason) | HostError::Permission(reason) => {
-            permission::refuse(world, call, &reason)
-        }
-        other => permission::refuse(world, call, &other.to_string()),
-    }
-}
-
 pub(crate) fn get_state(
     store: &Store,
     computer_use: Option<&ComputerUse>,
@@ -252,7 +224,7 @@ pub(crate) fn expire(
     });
 }
 
-pub(super) fn uncertain(world: &mut World, operation_id: &str, reason: &str) {
+pub(in crate::host) fn uncertain(world: &mut World, operation_id: &str, reason: &str) {
     if let Some(mut computer) = world.get_resource_mut::<ComputerUse>() {
         computer.operations.remove(operation_id);
     }

@@ -102,14 +102,33 @@ impl<'a> AgentKernel<'a> {
         client::activate(self.app.world_mut(), request)
     }
 
-    pub(crate) fn client_reconnected(&mut self, client_id: &str) {
-        client::device::resend(self.app.world_mut(), client_id);
+    pub(crate) fn client_reconnected(&mut self, client_id: &str) -> Result<()> {
+        let services = self.services;
+        let world = self.app.world_mut();
+        client::computer::invalidate_client(world, client_id, services.hub.subscription(client_id));
+        let context = client::device::DeviceDispatchContext {
+            store: &services.store,
+            hub: &services.hub,
+            notifier: &services.notifier,
+        };
+        client::device::resend(&context, client_id, |operation| {
+            client::device::uncertain(
+                world,
+                operation,
+                "Computer Use operations are never replayed",
+            );
+        })
     }
 
-    pub(crate) fn client_disconnected(&mut self, client_id: &str) {
+    pub(crate) fn client_disconnected(&mut self, client_id: &str) -> Result<()> {
         if !self.services.hub.connected(client_id) {
-            client::device::disconnected(self.app.world_mut(), client_id);
+            client::computer::invalidate_client(self.app.world_mut(), client_id, None);
+            self.services
+                .store
+                .client_repo()
+                .mark_unanswered_operations_uncertain(Some(client_id))?;
         }
+        Ok(())
     }
 
     pub(crate) fn complete_operation(

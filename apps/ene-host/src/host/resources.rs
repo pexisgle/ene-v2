@@ -121,14 +121,16 @@ impl DeviceHub {
             .map(|stream| stream.subscription)
     }
 
-    /// Sends `event` to `client`. `false` means no live stream has it.
-    pub(crate) fn send(&self, client: &str, event: w::DeviceEvent) -> bool {
-        let sender = self
-            .inner
-            .lock()
-            .get(client)
-            .map(|stream| stream.sender.clone());
-        sender.is_some_and(|sender| sender.try_send(event).is_ok())
+    /// Reserves space on a specific stream generation for one dispatch.
+    pub(crate) fn reserve(
+        &self,
+        client: &str,
+    ) -> Option<(
+        SubscriptionId,
+        tokio::sync::mpsc::OwnedPermit<w::DeviceEvent>,
+    )> {
+        let stream = self.inner.lock().get(client).cloned()?;
+        Some((stream.subscription, stream.sender.try_reserve_owned().ok()?))
     }
 }
 

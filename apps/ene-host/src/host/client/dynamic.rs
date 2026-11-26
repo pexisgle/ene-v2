@@ -386,14 +386,8 @@ pub(crate) fn init(world: &mut World) {
 /// matched to its effect and refused unless the gate bound it to the client
 /// generation the tool was published for.
 pub(crate) fn drain(world: &mut World) {
-    let calls: Vec<CapabilityCall> =
-        world.resource_scope(|_world, mut calls: Mut<CapabilityCalls>| {
-            let mut calls_out = Vec::new();
-            while let Ok(call) = calls.receiver.try_recv() {
-                calls_out.push(call);
-            }
-            calls_out
-        });
+    let mut incoming = world.resource_mut::<CapabilityCalls>();
+    let calls: Vec<_> = std::iter::from_fn(|| incoming.receiver.try_recv().ok()).collect();
     for call in calls {
         let reply = forward(world, &call);
         let _discarded = call.reply.send(reply);
@@ -484,7 +478,14 @@ fn forward(
     }
     // The dispatch target is the client the gate bound; a later move does not
     // change it.
-    Ok(device::accept(world, call, agent, Some(&spec), request.input.clone())?.1)
+    Ok(device::accept(
+        world,
+        call,
+        agent,
+        device::Invocation::Capability(&spec),
+        request.input.clone(),
+    )?
+    .1)
 }
 
 /// The effect entity an effect id names.
