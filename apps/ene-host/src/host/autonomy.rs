@@ -90,11 +90,11 @@ pub(crate) fn register(app: &mut App) {
         "Register a reminder or repeating schedule.",
         ToolOptions::default(),
         run_tool(|world, agent, _, args: CreateArgs| {
-            let companion = companion_id(world.get::<CompanionAgent>(agent))?.to_owned();
+            let companion = companion_id(world.get::<CompanionAgent>(agent))?;
             create_schedule(
                 world.resource::<Store>(),
                 world.resource::<ScheduleClock>(),
-                &companion,
+                companion,
                 &args,
             )
         }),
@@ -104,8 +104,8 @@ pub(crate) fn register(app: &mut App) {
         "List your active schedules.",
         ToolOptions::default(),
         run_tool(|world, agent, _, _args: ListArgs| {
-            let companion = companion_id(world.get::<CompanionAgent>(agent))?.to_owned();
-            list_schedules(world.resource::<Store>(), &companion)
+            let companion = companion_id(world.get::<CompanionAgent>(agent))?;
+            list_schedules(world.resource::<Store>(), companion)
         }),
     )
     .add_open_tool::<CancelArgs, _>(
@@ -113,8 +113,8 @@ pub(crate) fn register(app: &mut App) {
         "Remove one of your schedules.",
         ToolOptions::default(),
         run_tool(|world, agent, _, args: CancelArgs| {
-            let companion = companion_id(world.get::<CompanionAgent>(agent))?.to_owned();
-            cancel_schedule(world.resource::<Store>(), &companion, &args.schedule_id)
+            let companion = companion_id(world.get::<CompanionAgent>(agent))?;
+            cancel_schedule(world.resource::<Store>(), companion, &args.schedule_id)
         }),
     );
 }
@@ -208,41 +208,34 @@ fn mark_delivered_if_present(
 
 /// Confirms any pending schedule occurrences that have already landed in their
 /// companion's conversation log.
-fn confirm_delivered_schedules(world: &mut World) {
-    let Some(store) = world.get_resource::<Store>().cloned() else {
-        return;
-    };
-    let pending = match store.schedule_repo().pending_schedule_occurrences() {
-        Ok(pending) => pending,
-        Err(error) => {
-            if error.is_storage() {
-                super::fail(world, &error.to_string());
-            } else {
-                tracing::warn!(%error, "pending schedule occurrences could not be read");
+fn confirm_delivered_schedules(
+    store: Res<Store>,
+    clock: Res<ScheduleClock>,
+    agents: Query<(&CompanionAgent, &Conversation)>,
+    mut commands: Commands,
+) {
+    let store = store.into_inner();
+    let now = clock.into_inner().now();
+    let result = (|| -> Result<()> {
+        for occurrence in store.schedule_repo().pending_schedule_occurrences()? {
+            let conversation = agents.iter().find_map(|(agent, conversation)| {
+                (agent.companion_id == occurrence.companion_id).then_some(conversation)
+            });
+            if let Err(error) =
+                mark_delivered_if_present(store, conversation, &occurrence.occurrence_key, now)
+                && error.is_storage()
+            {
+                return Err(error);
             }
-            return;
         }
-    };
-    if pending.is_empty() {
-        return;
-    }
-    let now = world
-        .get_resource::<ScheduleClock>()
-        .map_or_else(Timestamp::now, ScheduleClock::now);
-    for occ in pending {
-        let Some(agent) = agent::agent_of(world, &occ.companion_id) else {
-            continue;
-        };
-        if let Err(error) = mark_delivered_if_present(
-            &store,
-            world.get::<Conversation>(agent),
-            &occ.occurrence_key,
-            now,
-        ) && error.is_storage()
-        {
-            super::fail(world, &error.to_string());
-            return;
+        Ok(())
+    })();
+    match result {
+        Err(error) if error.is_storage() => {
+            commands.run_system_cached_with(super::stop_on_failure, error.to_string());
         }
+        Err(error) => tracing::warn!(%error, "pending schedule occurrences could not be read"),
+        Ok(()) => {}
     }
 }
 

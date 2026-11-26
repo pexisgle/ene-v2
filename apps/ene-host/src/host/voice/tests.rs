@@ -194,21 +194,16 @@ fn input_binding_validates_first_metadata_and_allows_omitted_followups() {
             expected_revision: 0,
         })
         .unwrap();
-    let world = voice_world(&store);
-    let store_res = world.get_resource::<Store>();
+    assert!(matches!(bind_input(&store, ""), Err(HostError::Invalid(_))));
     assert!(matches!(
-        bind_input(store_res, ""),
-        Err(HostError::Invalid(_))
-    ));
-    assert!(matches!(
-        bind_input(store_res, "missing"),
+        bind_input(&store, "missing"),
         Err(HostError::NotFound(_))
     ));
     assert!(matches!(
-        bind_input(store_res, "c2"),
+        bind_input(&store, "c2"),
         Err(HostError::Conflict(_))
     ));
-    let binding = bind_input(store_res, "c1").unwrap();
+    let binding = bind_input(&store, "c1").unwrap();
     assert!(binding.accepts("c1"));
     assert!(binding.accepts(""));
     assert!(!binding.accepts("c2"));

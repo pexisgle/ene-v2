@@ -99,6 +99,9 @@ impl Discovery {
 /// Why the client could not reach or bind to the host.
 #[derive(Debug, thiserror::Error)]
 pub enum Connect {
+    /// The platform could not provide a configuration directory.
+    #[error("設定ディレクトリを特定できませんでした。")]
+    MissingConfigDir,
     /// No discovery file yet.
     #[error("the host has not published a connection: {0}")]
     Missing(String),

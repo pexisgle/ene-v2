@@ -4079,10 +4079,12 @@ dependencies = [
 name = "ene-domain"
 version = "0.1.8"
 dependencies = [
+ "croner",
  "ene-catalog",
  "ene-policy",
  "hashlink",
  "http",
+ "jiff 1.0.3",
  "jsonschema",
  "parking_lot 0.13.0",
  "rusqlite",
@@ -4291,7 +4293,6 @@ dependencies = [
 name = "ene-store"
 version = "0.1.8"
 dependencies = [
- "croner",
  "ene-catalog",
  "ene-domain",
  "ene-mind",

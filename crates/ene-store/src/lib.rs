@@ -29,9 +29,7 @@ pub use memories::MemoryRepo;
 pub use migrations::{BASELINE_VERSION, VERSION};
 pub use plugins::{PluginEntry, PluginRepo};
 pub use policies::PolicyRepo;
-pub use schedules::{
-    Cron, NewSchedule, Schedule, ScheduleClock, ScheduleOccurrence, ScheduleRepo, next_occurrence,
-};
+pub use schedules::{NewSchedule, Schedule, ScheduleClock, ScheduleOccurrence, ScheduleRepo};
 pub use settings::SettingsRepo;
 pub use skills::{Skill, SkillRepo, validate_skill_name};
 pub use work::{WorkRepo, open_state};

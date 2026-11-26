@@ -53,19 +53,15 @@ CI already cover.
 | 2 | `db_upward_imports` from `apps/ene-host/src/host/db/` | 0 |
 | 3 | `impl_file_spread` (inherent `impl` blocks per type across files) | 0 |
 | 4 | `providers_no_model_import` | 0 |
-| 5 | `host_world_refs` `&World`/`&mut World` in `apps/ene-host` | 125 |
+| 5 | `host_world_refs` `&World`/`&mut World` in `apps/ene-host` | 124 |
 | 6 | `max_prod_file_lines` production files over 500 lines | 0 |
 | 7 | `rpc_no_ecs_resource` `#[derive(Resource)]` under `server/rpc/` | 0 |
 | 8 | `prod_block_on` `block_on`/`block_in_place` in production | 0 |
 
-`needless_pass_by_value` is enforced per crate, not workspace-wide: every crate
-except `ene-vrm` and the three apps carries
-`#![warn(clippy::needless_pass_by_value)]`, so the CI clippy step fails if one of
-those regresses.
-
-`ene-vrm` (4 sites) and `apps/ene-avatar` (14) cannot carry it. Thirteen of avatar's are Bevy `SystemParam` types (`Res<_>`, `On<_>`, `ExWlShellEvent`) which have no reference form, as are three of vrm's; the remainder in both is `HipsRetarget`, whose borrow escapes into a stored closure. Only `apps/ene-host` (55) and `apps/ene-desktop` (50) have sites that can be fixed.
-
-A crate cannot add the lint to `[lints]` while `workspace = true` — cargo rejects the override — so the inner attribute is the only per-crate form. Add it to one of those four only once `cargo clippy -p <crate>` reports zero for it, never as an `#[allow]`.
+`needless_pass_by_value` is enabled by crate attributes, including in both
+`ene-host` and `ene-desktop`. The remaining exceptions are `ene-vrm` and
+`ene-avatar`, where Bevy systems take owned system parameters such as
+`Res<_>` and `On<_>`.
 
 ## GPUI components
 

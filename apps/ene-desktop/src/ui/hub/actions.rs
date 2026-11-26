@@ -11,14 +11,6 @@ use ene_client_core::{
 };
 use gpui::Context;
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum RemoteHostError {
-    #[error("設定ディレクトリを特定できませんでした。")]
-    MissingConfigDir,
-    #[error(transparent)]
-    Save(#[from] crate::host::Connect),
-}
-
 impl Hub {
     /// Queues a command for the session, noting when it has stopped listening.
     ///
@@ -357,10 +349,8 @@ impl Hub {
         endpoint: &str,
         token: &str,
         cx: &mut Context<Self>,
-    ) -> Result<(), RemoteHostError> {
-        let Some(path) = Self::remote_host_config_path() else {
-            return Err(RemoteHostError::MissingConfigDir);
-        };
+    ) -> Result<(), crate::host::Connect> {
+        let path = Self::remote_host_config_path().ok_or(crate::host::Connect::MissingConfigDir)?;
         crate::host::HostTarget::write_remote(&path, endpoint.trim(), token.trim())?;
         self.model.notice(
             NoticeKind::Failed,

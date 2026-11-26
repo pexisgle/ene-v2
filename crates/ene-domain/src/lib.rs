@@ -13,6 +13,7 @@ pub mod error;
 pub mod failure;
 pub mod ids;
 pub mod json;
+pub mod schedule;
 pub mod settings;
 pub mod work;
 

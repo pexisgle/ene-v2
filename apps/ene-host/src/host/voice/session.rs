@@ -15,18 +15,13 @@ use rig_ecs::prelude::*;
 /// Binds an audio input stream to the client that opened it. Only the active
 /// client of a companion may capture: a client that is not active has nothing
 /// the head may answer.
-pub(crate) fn bind_input(store: Option<&Store>, client_id: &str) -> Result<InputBinding> {
+pub(crate) fn bind_input(store: &Store, client_id: &str) -> Result<InputBinding> {
     if client_id.is_empty() {
         return Err(HostError::Invalid(
             ("client_id is required for audio input").into(),
         ));
     }
     ene_domain::validate_id(client_id)?;
-    let Some(store) = store else {
-        return Err(HostError::Unavailable(
-            "the host state is not available".into(),
-        ));
-    };
     if store.client_repo().client(client_id)?.is_none() {
         return Err(HostError::NotFound(("client not found").into()));
     }
@@ -44,52 +39,35 @@ pub(crate) fn bind_input(store: Option<&Store>, client_id: &str) -> Result<Input
     })
 }
 
-pub(crate) fn is_still_active(store: Option<&Store>, binding: &InputBinding) -> bool {
-    let Some(store) = store else {
-        return false;
-    };
-    store
+pub(crate) fn is_still_active(store: &Store, binding: &InputBinding) -> Result<bool> {
+    Ok(store
         .client_repo()
-        .activation_for_client(&binding.client_id)
-        .is_ok_and(|activation| activation.is_some())
+        .activation_for_client(&binding.client_id)?
+        .is_some())
 }
 
 /// Binds an audio output stream to the client that opened it and makes it the
 /// owner of every companion it is the active client of.
 pub(crate) fn subscribe_audio(
-    store: Option<&Store>,
-    voice: Option<&Voice>,
+    store: &Store,
+    voice: &Voice,
     client_id: &str,
 ) -> Result<AudioSubscription> {
     if client_id.is_empty() {
         return Err(HostError::Invalid(("client_id is required").into()));
     }
     ene_domain::validate_id(client_id)?;
-    let Some(store) = store else {
-        return Err(HostError::Unavailable(
-            "the host state is not available".into(),
-        ));
-    };
     if store.client_repo().client(client_id)?.is_none() {
         return Err(HostError::NotFound(("client not found").into()));
     }
-    let owned: Vec<String> = store
+    let owned = store
         .client_repo()
-        .activations()?
-        .into_iter()
-        .filter(|activation| activation.client_id.as_deref() == Some(client_id))
-        .map(|activation| activation.companion_id.as_str().to_owned())
-        .collect();
+        .active_companions_for_client(client_id)?;
     if owned.is_empty() {
         return Err(HostError::Conflict(
             ("the client is not the active client of any companion").into(),
         ));
     }
-    let Some(voice) = voice else {
-        return Err(HostError::Internal(
-            ("the voice plugin is not installed").into(),
-        ));
-    };
     let subscription = voice.register(client_id);
     for companion_id in owned {
         voice.publish(&companion_id, client_id);
@@ -97,20 +75,9 @@ pub(crate) fn subscribe_audio(
     Ok(subscription)
 }
 
-pub(crate) fn unsubscribe_audio(voice: Option<&Voice>, client: &str, subscription: &str) {
-    if let Some(voice) = voice {
-        voice.unregister(client, subscription);
-    }
-}
-
 /// Hands already-synthesized audio to the subscribed client as one utterance.
 /// The speech floor is not taken, so a turn in flight keeps it.
-pub(crate) fn play_once(
-    voice: Option<&Voice>,
-    companion: &str,
-    pcm: Vec<u8>,
-    rate: u32,
-) -> std::result::Result<w::Empty, HostError> {
+pub(crate) fn play_once(voice: &Voice, companion: &str, pcm: Vec<u8>, rate: u32) -> Result<()> {
     let pcm = ene_voice::wire_pcm(pcm, rate, &mut None)
         .map_err(|error| HostError::Unavailable(error.to_string()))?;
     if pcm.is_empty() {
@@ -118,13 +85,7 @@ pub(crate) fn play_once(
             ("the TTS engine returned no audio").into(),
         ));
     }
-    let Some(voice) = voice else {
-        return Err(HostError::Unavailable(
-            ("the voice plugin is not installed").into(),
-        ));
-    };
-    voice.play(companion, &pcm)?;
-    Ok(w::Empty::default())
+    Ok(voice.play(companion, &pcm)?)
 }
 
 pub(crate) fn accept_transcription(
@@ -134,7 +95,16 @@ pub(crate) fn accept_transcription(
     binding: &InputBinding,
 ) -> Result<bool> {
     let text = text.trim();
-    if text.is_empty() || !is_still_active(world.get_resource::<Store>(), binding) {
+    let Some(store) = world.get_resource::<Store>() else {
+        return Ok(false);
+    };
+    if text.is_empty() {
+        return Ok(false);
+    }
+    let companions = store
+        .client_repo()
+        .active_companions_for_client(&binding.client_id)?;
+    if companions.is_empty() {
         return Ok(false);
     }
     if let Some(voice) = world.get_resource::<Voice>()
@@ -147,12 +117,6 @@ pub(crate) fn accept_transcription(
             world.get_resource_or_insert_with(crate::host::delegation::DeliveredClaims::default);
         delegation::record(&mut claims, transcription_id);
     }
-    let Some(store) = world.get_resource::<Store>().cloned() else {
-        return Ok(false);
-    };
-    let companions: Vec<String> = store
-        .client_repo()
-        .active_companions_for_client(&binding.client_id)?;
     let author = Author {
         request: Some(RequestId(transcription_id.to_owned())),
         ..Author::user()

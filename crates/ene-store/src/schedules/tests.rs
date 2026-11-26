@@ -52,6 +52,7 @@ fn jiff_stamps_keep_whole_second_utc_text_and_accepted_inputs() {
 
 #[test]
 fn a_cron_expression_must_name_exactly_five_fields() {
+    let next = |text: &str| next_occurrence(text, Timestamp::UNIX_EPOCH, &TimeZone::UTC);
     for expression in [
         "",
         "* * * *",
@@ -62,11 +63,11 @@ fn a_cron_expression_must_name_exactly_five_fields() {
         "@yearly",
         " @hourly ",
     ] {
-        assert!(Cron::parse(expression).is_err(), "{expression}");
+        assert!(next(expression).is_err(), "{expression}");
     }
-    assert!(Cron::parse(&"* ".repeat(200)).is_err());
-    assert!(Cron::parse("* * * * *").is_ok());
-    assert!(Cron::parse("0 9 * * 1-5").is_ok());
+    assert!(next(&"* ".repeat(200)).is_err());
+    assert!(next("* * * * *").is_ok());
+    assert!(next("0 9 * * 1-5").is_ok());
     let store = store();
     let repo = store.schedule_repo();
     let clock = utc_clock();

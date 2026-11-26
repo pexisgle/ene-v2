@@ -150,32 +150,24 @@ impl w::VoiceService for Services {
         {
             return Err(setup_error(error));
         }
-        let request = request.to_owned_view();
-        let (
-            voice::AudioSubscription {
-                subscription_id,
-                mut receiver,
-                mut control,
-            },
-            client_id,
-        ) = self
+        let client_id = request.client_id.to_owned();
+        let (mut receiver, mut control, guard) = self
             .runtime
             .inspect(move |services| {
-                let request = request.reborrow();
-                let subscription = voice::subscribe_audio(
-                    Some(&services.store),
-                    Some(&services.voice),
-                    request.client_id,
-                )?;
-                Ok((subscription, request.client_id.to_owned()))
+                let voice::AudioSubscription {
+                    subscription_id,
+                    receiver,
+                    control,
+                } = voice::subscribe_audio(&services.store, &services.voice, &client_id)?;
+                let guard = StreamGuard {
+                    voice: services.voice.clone(),
+                    client_id,
+                    subscription: subscription_id,
+                };
+                Ok((receiver, control, guard))
             })
             .await
             .map_err(ConnectError::from)?;
-        let guard = StreamGuard {
-            runtime: self.runtime.clone(),
-            client_id,
-            subscription: subscription_id,
-        };
         let stream = async_stream::stream! {
             loop {
                 let event = tokio::select! {
@@ -272,10 +264,10 @@ impl w::VoiceService for Services {
             .await
             .map_err(|error| ConnectError::unavailable(error.to_string()))?;
         self.runtime
-            .inspect(move |services| voice::play_once(Some(&services.voice), &companion, pcm, rate))
+            .inspect(move |services| voice::play_once(&services.voice, &companion, pcm, rate))
             .await
-            .map_err(ConnectError::from)
-            .map(Response::ok)?
+            .map_err(ConnectError::from)?;
+        Response::ok(w::Empty::default())
     }
 }
 
@@ -348,7 +340,7 @@ impl Recognition {
         let active = runtime
             .inspect({
                 let binding = binding.clone();
-                move |services| Ok(voice::is_still_active(Some(&services.store), &binding))
+                move |services| voice::is_still_active(&services.store, &binding)
             })
             .await
             .map_err(ConnectError::from)?;
@@ -399,9 +391,8 @@ async fn bind_recognition_client(
     client_id: String,
 ) -> std::result::Result<InputBinding, ConnectError> {
     runtime
-        .inspect(move |services| Ok(voice::bind_input(Some(&services.store), &client_id)))
+        .inspect(move |services| voice::bind_input(&services.store, &client_id))
         .await
-        .map_err(ConnectError::from)?
         .map_err(ConnectError::from)
 }
 
@@ -459,18 +450,13 @@ fn voiced(pcm: &[u8], sample_rate: u32) -> bool {
 }
 
 struct StreamGuard {
-    runtime: Runtime,
+    voice: voice::Voice,
     client_id: String,
     subscription: String,
 }
 impl Drop for StreamGuard {
     fn drop(&mut self) {
-        let client_id = self.client_id.clone();
-        let subscription = self.subscription.clone();
-        drop(self.runtime.inspect(move |services| {
-            voice::unsubscribe_audio(Some(&services.voice), &client_id, &subscription);
-            Ok(())
-        }));
+        self.voice.unregister(&self.client_id, &self.subscription);
     }
 }
 
@@ -651,35 +637,31 @@ mod tests {
         };
         let first = request();
         let old = runtime
-            .read(move |app| {
-                let world = app.world();
-                voice::subscribe_audio(
-                    world.get_resource::<Store>(),
-                    world.get_resource::<voice::Voice>(),
-                    &first.client_id,
-                )
+            .inspect(move |services| {
+                voice::subscribe_audio(&services.store, &services.voice, &first.client_id)
             })
             .await
             .unwrap();
         let old_guard = StreamGuard {
-            runtime: runtime.clone(),
+            voice: runtime
+                .inspect(|services| Ok(services.voice.clone()))
+                .await
+                .unwrap(),
             client_id: "c1".into(),
             subscription: old.subscription_id,
         };
         let second = request();
         let mut current = runtime
-            .read(move |app| {
-                let world = app.world();
-                voice::subscribe_audio(
-                    world.get_resource::<Store>(),
-                    world.get_resource::<voice::Voice>(),
-                    &second.client_id,
-                )
+            .inspect(move |services| {
+                voice::subscribe_audio(&services.store, &services.voice, &second.client_id)
             })
             .await
             .unwrap();
         let current_guard = StreamGuard {
-            runtime: runtime.clone(),
+            voice: runtime
+                .inspect(|services| Ok(services.voice.clone()))
+                .await
+                .unwrap(),
             client_id: "c1".into(),
             subscription: current.subscription_id,
         };

@@ -5,55 +5,9 @@ mod tests;
 
 use crate::row::FromRow;
 use crate::{Store, StoreError, error::Result};
+use ene_domain::schedule::{ScheduleTiming, next_occurrence, parse_run_at};
 use jiff::{Timestamp, tz::TimeZone};
 use rusqlite::params;
-
-/// A literal five-field cron expression, without seconds, years or nicknames.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Cron {
-    parsed: croner::Cron,
-}
-
-impl Eq for Cron {}
-
-impl Cron {
-    /// Parses a five-field expression. An invalid expression is a request
-    /// error, not an empty schedule.
-    pub fn parse(expression: &str) -> Result<Self> {
-        if expression.chars().count() > 256 {
-            return Err(StoreError::Invalid("cron_expr is too long".into()));
-        }
-        if expression.contains('@') {
-            return Err(StoreError::Invalid(
-                "cron_expr must use 5 literal fields, not a nickname".into(),
-            ));
-        }
-        let parsed = croner::parser::CronParser::builder()
-            .seconds(croner::parser::Seconds::Disallowed)
-            .year(croner::parser::Year::Disallowed)
-            .build()
-            .parse(expression)
-            .map_err(|error| StoreError::Invalid(format!("cron_expr is invalid: {error}")))?;
-        Ok(Self { parsed })
-    }
-
-    fn next_after(&self, after: Timestamp, zone: &TimeZone) -> Option<Timestamp> {
-        self.parsed
-            .find_next_occurrence(&after.to_zoned_datetime(zone.clone()), false)
-            .ok()
-            .map(|next| next.timestamp())
-    }
-}
-
-/// The first time the five-field `expression` matches after `after`, read on
-/// the wall clock of `zone`.
-pub fn next_occurrence(expression: &str, after: Timestamp, zone: &TimeZone) -> Result<Timestamp> {
-    Cron::parse(expression)?
-        .next_after(after, zone)
-        .ok_or_else(|| {
-            StoreError::Invalid("cron_expr names no time within the search window".into())
-        })
-}
 
 /// The wall clock schedules are read against: the local time zone and the
 /// current instant (optionally frozen in tests for determinism).
@@ -123,24 +77,6 @@ impl ScheduleClock {
 
 fn stamp(at: Timestamp) -> String {
     format!("{at:.0}")
-}
-
-fn parse_run_at(text: &str, zone: &TimeZone) -> Result<Timestamp> {
-    let text = text.trim();
-    if let Ok(at) = text.parse::<Timestamp>() {
-        return Ok(at);
-    }
-    let local: jiff::civil::DateTime = text.parse().map_err(|_| {
-        StoreError::Invalid("run_at must be an RFC 3339 time or a local date and time".into())
-    })?;
-    if !text.chars().any(|c| matches!(c, 'T' | 't' | ' ')) {
-        return Err(StoreError::Invalid(
-            "run_at must include a time of day".into(),
-        ));
-    }
-    zone.to_zoned_datetime(local)
-        .map(|zoned| zoned.timestamp())
-        .map_err(|_| StoreError::Invalid("run_at is outside the supported range".into()))
 }
 
 /// Stored reminder schedule row.
@@ -213,34 +149,18 @@ impl<'a> ScheduleRepo<'a> {
             run_at,
             cron_expr,
         } = input;
-        let run_at = run_at.filter(|value| !value.trim().is_empty());
-        let cron_expr = cron_expr.filter(|value| !value.trim().is_empty());
-        match (run_at, cron_expr) {
-            (None, None) => {
-                return Err(StoreError::Invalid(
-                    "a schedule needs exactly one of run_at or cron_expr".into(),
-                ));
-            }
-            (Some(_), Some(_)) => {
-                return Err(StoreError::Invalid(
-                    "run_at and cron_expr are mutually exclusive".into(),
-                ));
-            }
-            _ => {}
-        }
+        let timing = ScheduleTiming::from_fields(run_at, cron_expr)?;
         if title.chars().count() > 200 || instruction.chars().count() > 4_000 {
             return Err(StoreError::Invalid("schedule text is too long".into()));
         }
         let now = clock.now();
-        let next_run_at = match (run_at, cron_expr) {
-            (Some(run_at), None) => stamp(parse_run_at(run_at, clock.zone())?),
-            (None, Some(cron_expr)) => stamp(next_occurrence(cron_expr, now, clock.zone())?),
-            _ => {
-                return Err(StoreError::Invalid(
-                    "a schedule needs exactly one of run_at or cron_expr".into(),
-                ));
+        let (run_at, cron_expr, first_at) = match timing {
+            ScheduleTiming::Once(text) => (Some(text), None, parse_run_at(text, clock.zone())?),
+            ScheduleTiming::Recurring(text) => {
+                (None, Some(text), next_occurrence(text, now, clock.zone())?)
             }
         };
+        let next_run_at = stamp(first_at);
         let id = uuid::Uuid::new_v4().to_string();
         self.0.write_one(
             "INSERT INTO schedules (id, companion_id, cron_expr, run_at, title, instruction, \
