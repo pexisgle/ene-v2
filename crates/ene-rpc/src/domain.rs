@@ -212,6 +212,15 @@ macro_rules! state_conversion {
 }
 
 state_conversion!(
+    wire::ApprovalStatus,
+    ene_policy::ApprovalStatus,
+    "an approval status is required",
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+);
+state_conversion!(
     wire::WorkStatus,
     domain::WorkStatus,
     "a work status is required",

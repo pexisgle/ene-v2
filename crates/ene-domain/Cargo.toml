@@ -25,6 +25,7 @@ thiserror.workspace = true
 tracing.workspace = true
 rusqlite = { workspace = true, optional = true }
 url.workspace = true
+uuid = { version = "1", default-features = false }
 
 [features]
 # `ene-store` needs `ToSql`/`FromSql` for the branded ids, and the orphan rule

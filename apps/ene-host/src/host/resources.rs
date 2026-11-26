@@ -1,6 +1,7 @@
 //! Shared host resources: health, live device streams and perception.
 use super::error::{HostError, Result};
 use bevy_ecs::prelude::*;
+use ene_domain::{SubscriptionId, client_view::HostHealth};
 use ene_rpc as w;
 use parking_lot::Mutex;
 use std::{
@@ -22,6 +23,14 @@ enum Lifecycle {
 }
 
 impl HostState {
+    pub(crate) fn health(&self) -> HostHealth {
+        match &*self.0.lock() {
+            Lifecycle::Ready => HostHealth::Ready,
+            Lifecycle::Closing => HostHealth::Stopping,
+            Lifecycle::Failed(_) => HostHealth::RecoveryRequired,
+        }
+    }
+
     pub(crate) fn ready(&self) -> Result<()> {
         match &*self.0.lock() {
             Lifecycle::Ready => Ok(()),
@@ -35,10 +44,6 @@ impl HostState {
             Lifecycle::Failed(reason) => Some(reason.clone()),
             _ => None,
         }
-    }
-
-    pub(crate) fn closing(&self) -> bool {
-        matches!(*self.0.lock(), Lifecycle::Closing)
     }
 
     pub(crate) fn close(&self) {
@@ -67,7 +72,7 @@ pub(crate) struct DeviceHub {
 
 #[derive(Clone)]
 struct Stream {
-    subscription: String,
+    subscription: SubscriptionId,
     sender: tokio::sync::mpsc::Sender<w::DeviceEvent>,
 }
 
@@ -77,28 +82,31 @@ impl DeviceHub {
     pub(crate) fn register(
         &self,
         client: &str,
-    ) -> (String, tokio::sync::mpsc::Receiver<w::DeviceEvent>) {
+    ) -> (SubscriptionId, tokio::sync::mpsc::Receiver<w::DeviceEvent>) {
         let (sender, receiver) = tokio::sync::mpsc::channel(64);
-        let subscription = uuid::Uuid::new_v4().to_string();
+        let subscription = SubscriptionId::from(uuid::Uuid::new_v4());
         let mut streams = self.inner.lock();
         streams.insert(
             client.to_owned(),
             Stream {
-                subscription: subscription.clone(),
+                subscription,
                 sender,
             },
         );
         (subscription, receiver)
     }
 
-    pub(crate) fn unregister(&self, client: &str, subscription: &str) {
+    /// Removes only the stream that still owns this generation.
+    pub(crate) fn unregister(&self, client: &str, subscription: SubscriptionId) -> bool {
         let mut streams = self.inner.lock();
         if streams
             .get(client)
             .is_some_and(|stream| stream.subscription == subscription)
         {
             streams.remove(client);
+            return true;
         }
+        false
     }
 
     pub(crate) fn connected(&self, client: &str) -> bool {
@@ -106,11 +114,11 @@ impl DeviceHub {
     }
 
     /// The subscription id of the live stream for `client`.
-    pub(crate) fn subscription(&self, client: &str) -> Option<String> {
+    pub(crate) fn subscription(&self, client: &str) -> Option<SubscriptionId> {
         self.inner
             .lock()
             .get(client)
-            .map(|stream| stream.subscription.clone())
+            .map(|stream| stream.subscription)
     }
 
     /// Sends `event` to `client`. `false` means no live stream has it.
@@ -175,10 +183,10 @@ mod tests {
         let (second, _other) = hub.register("c1");
         assert_ne!(first, second);
         assert!(hub.connected("c1"));
-        assert_eq!(hub.subscription("c1").as_deref(), Some(second.as_str()));
-        hub.unregister("c1", &first);
+        assert_eq!(hub.subscription("c1"), Some(second));
+        assert!(!hub.unregister("c1", first));
         assert!(hub.connected("c1"));
-        hub.unregister("c1", &second);
+        assert!(hub.unregister("c1", second));
         assert!(!hub.connected("c1"));
         assert!(receiver.try_recv().is_err());
     }

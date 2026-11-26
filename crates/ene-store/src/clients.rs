@@ -290,9 +290,7 @@ impl<'a> ClientRepo<'a> {
     pub fn complete_operation(
         &self,
         id: &str,
-        success: bool,
-        output: Option<&serde_json::Value>,
-        failure: Option<&Failure>,
+        outcome: std::result::Result<&serde_json::Value, &Failure>,
     ) -> Result<Option<DeviceOperation>> {
         let Some(operation) = self.operation(id)? else {
             return Ok(None);
@@ -300,10 +298,9 @@ impl<'a> ClientRepo<'a> {
         if operation.status.is_terminal() {
             return Ok(Some(operation));
         }
-        let status = if success {
-            DeviceStatus::Completed
-        } else {
-            DeviceStatus::Failed
+        let (status, output, failure) = match outcome {
+            Ok(output) => (DeviceStatus::Completed, Some(to_json(output)?), None),
+            Err(failure) => (DeviceStatus::Failed, None, Some(to_json(failure)?)),
         };
         let updated = self
             .0
@@ -315,13 +312,7 @@ impl<'a> ClientRepo<'a> {
                  RETURNING {OPERATION_COLUMNS}"
             ))?
             .query_row(
-                params![
-                    id,
-                    status.as_str(),
-                    output.map(to_json).transpose()?,
-                    failure.map(to_json).transpose()?,
-                    now(),
-                ],
+                params![id, status.as_str(), output, failure, now(),],
                 DeviceOperation::from_row,
             );
         match updated.optional()? {
@@ -468,12 +459,12 @@ mod tests {
         repo.set_operation_status("op1", DeviceStatus::Dispatched)
             .unwrap();
         let completed = repo
-            .complete_operation("op1", true, Some(&serde_json::json!({"ok": true})), None)
+            .complete_operation("op1", Ok(&serde_json::json!({"ok": true})))
             .unwrap()
             .unwrap();
         assert_eq!(completed.status, DeviceStatus::Completed);
         let again = repo
-            .complete_operation("op1", false, None, None)
+            .complete_operation("op1", Err(&Failure::new("operation_failed", "late report")))
             .unwrap()
             .unwrap();
         assert_eq!(again.status, DeviceStatus::Completed);

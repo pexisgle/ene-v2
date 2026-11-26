@@ -4,6 +4,7 @@ use crate::host::{Runtime, client, error::HostError, resources::DeviceHub};
 use connectrpc::{
     ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream,
 };
+use ene_domain::SubscriptionId;
 use ene_rpc as w;
 use futures_util::StreamExt;
 
@@ -92,34 +93,27 @@ impl w::ClientService for Services {
         })
         .await?;
 
-        let hub = self.runtime.hub();
-        let (subscription, mut receiver) = hub.register(&client_id);
-        // Replay operations the client has not received yet.
-        if let Err(error) = self
+        let runtime = self.runtime.clone();
+        let (guard, mut receiver) = self
             .runtime
-            .call_kernel({
-                let client_id = client_id.clone();
-                move |kernel| {
-                    kernel.client_reconnected(&client_id);
-                    Ok(())
-                }
+            .call_kernel(move |kernel| {
+                let hub = runtime.hub();
+                let (subscription, receiver) = hub.register(&client_id);
+                let guard = StreamGuard {
+                    runtime,
+                    hub,
+                    client_id,
+                    subscription,
+                };
+                kernel.client_reconnected(&guard.client_id);
+                Ok((guard, receiver))
             })
             .await
-        {
-            hub.unregister(&client_id, &subscription);
-            return Err(ConnectError::from(error));
-        }
-
-        let guard = StreamGuard {
-            runtime: self.runtime.clone(),
-            hub,
-            client_id: client_id.clone(),
-            subscription: subscription.clone(),
-        };
+            .map_err(ConnectError::from)?;
         let stream = async_stream::stream! {
             yield Ok(w::DeviceEvent {
                 event: Some(w::device_event::Event::Ready(Box::new(w::DeviceReady {
-                    subscription_id: subscription,
+                    subscription_id: guard.subscription.to_string(),
                     ..Default::default()
                 }))),
                 ..Default::default()
@@ -174,15 +168,12 @@ struct StreamGuard {
     runtime: Runtime,
     hub: DeviceHub,
     client_id: String,
-    subscription: String,
+    subscription: SubscriptionId,
 }
 
 impl Drop for StreamGuard {
     fn drop(&mut self) {
-        let current =
-            self.hub.subscription(&self.client_id).as_deref() == Some(self.subscription.as_str());
-        self.hub.unregister(&self.client_id, &self.subscription);
-        if !current {
+        if !self.hub.unregister(&self.client_id, self.subscription) {
             return;
         }
         let client_id = self.client_id.clone();
@@ -240,7 +231,7 @@ mod tests {
             runtime: runtime.clone(),
             hub: hub.clone(),
             client_id: "c1".into(),
-            subscription: subscription.clone(),
+            subscription,
         };
         std::thread::spawn(move || drop(old)).join().unwrap();
         let status = runtime
@@ -260,7 +251,39 @@ mod tests {
         assert!(hub.send("c1", w::DeviceEvent::default()));
         assert!(receiver.try_recv().is_ok());
 
-        std::thread::spawn(move || drop(current)).join().unwrap();
+        // Drop the current stream and install its replacement in one kernel
+        // job, before the queued disconnect can run.
+        let runtime_for_guard = runtime.clone();
+        let replacement = runtime
+            .read(move |_| {
+                let hub = current.hub.clone();
+                drop(current);
+                let (subscription, _receiver) = hub.register("c1");
+                Ok(StreamGuard {
+                    runtime: runtime_for_guard,
+                    hub,
+                    client_id: "c1".into(),
+                    subscription,
+                })
+            })
+            .await
+            .unwrap();
+        let status = runtime
+            .read(|app| {
+                Ok(app
+                    .world()
+                    .resource::<Store>()
+                    .client_repo()
+                    .operation("sent")?
+                    .unwrap()
+                    .status)
+            })
+            .await
+            .unwrap();
+        assert_eq!(status, DeviceStatus::Dispatched);
+        std::thread::spawn(move || drop(replacement))
+            .join()
+            .unwrap();
         assert!(!hub.connected("c1"));
         let statuses = runtime
             .read(|app| {

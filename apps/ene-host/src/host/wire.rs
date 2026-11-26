@@ -2,7 +2,7 @@
 use super::{
     client::{CapabilityApproval, CapabilitySpec, Client, DeviceOperation, DeviceStatus},
     mind::{Companion, Profile, State},
-    permission::{Approval, ApprovalStatus},
+    permission::Approval,
     work::{Run, WorkSession},
 };
 use ene_mind::JsonDoc;
@@ -116,10 +116,6 @@ pub(crate) fn memory(value: &Memory) -> w::MemoryItem {
     }
 }
 
-wire_enum!(approval_status: ApprovalStatus => w::ApprovalStatus {
-    Pending, Approved, Denied, Expired
-});
-
 pub(crate) fn approval(value: &Approval) -> w::ApprovalRequest {
     w::ApprovalRequest {
         request_id: value.request_id.clone(),
@@ -128,7 +124,7 @@ pub(crate) fn approval(value: &Approval) -> w::ApprovalRequest {
         action_payload_hash: value.action_payload_hash.clone(),
         tool_name: value.tool_name.clone(),
         normalized_arguments: value.normalized_arguments.clone(),
-        status: approval_status(value.status).into(),
+        status: w::ApprovalStatus::from(value.status).into(),
         created_at: value.created_at.clone(),
         client_id: value.client_id.clone(),
         capability: value.capability.clone(),

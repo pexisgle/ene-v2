@@ -65,8 +65,10 @@ pub(crate) fn ingest_perception(
         {
             return Ok(());
         }
-        if hub.into_inner().subscription(&event.client_id).as_deref()
-            == Some(event.subscription_id.as_str())
+        if hub
+            .into_inner()
+            .subscription(&event.client_id)
+            .is_some_and(|subscription| subscription.matches_wire(&event.subscription_id))
         {
             let notifier = notifier.map(Res::into_inner);
             for companion_id in targets {

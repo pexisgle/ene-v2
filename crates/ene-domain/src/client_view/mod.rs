@@ -20,11 +20,10 @@ pub use connection::{
     EmbeddingConnection, LlmConnection, LlmProvider, McpConnection, ModelInfo, PluginInfo,
     SearchConnection, SettingField, SttConnection, TtsConnection,
 };
-pub use ene_policy::ApprovalDecision;
+pub use ene_policy::{ApprovalDecision, ApprovalStatus};
 pub use policy::{
-    ApprovalRequest, ApprovalStatus, PolicyRulesUpdate, PolicyTextsUpdate,
-    SKIP_FILE_CONFIRMATION_PREFIX, SKIP_TOOL_CONFIRMATION_ID, is_file_confirmation_rule,
-    tool_confirmation_update,
+    ApprovalRequest, PolicyRulesUpdate, PolicyTextsUpdate, SKIP_FILE_CONFIRMATION_PREFIX,
+    SKIP_TOOL_CONFIRMATION_ID, is_file_confirmation_rule, tool_confirmation_update,
 };
 
 /// Schema-tagged JSON payload carried by companion bindings, mind state, and events.
@@ -38,15 +37,18 @@ pub struct JsonDocument {
     pub json: String,
 }
 
-/// Host readiness summary reported in snapshots and health notifications.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct HostHealth {
-    /// Whether the host is up and serving.
-    pub ready: bool,
-    /// Whether the host needs the operator to repair state before it can serve.
-    pub recovery_required: bool,
-    /// Whether the host is shutting down.
-    pub stopping: bool,
+/// Host lifecycle reported in snapshots and health notifications.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HostHealth {
+    /// The host has yet to report that it can serve requests.
+    #[default]
+    Starting,
+    /// The host is serving requests.
+    Ready,
+    /// The host must be repaired before it can serve requests.
+    RecoveryRequired,
+    /// The host is shutting down.
+    Stopping,
 }
 
 /// Registered client device state known to the host.

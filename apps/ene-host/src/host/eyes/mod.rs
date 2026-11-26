@@ -182,7 +182,9 @@ impl Session {
 
     fn valid(&self, hub: &DeviceHub, now: Instant) -> bool {
         now.duration_since(self.seen) <= OBSERVATION_LIFETIME
-            && hub.subscription(&self.client).as_deref() == Some(self.subscription.as_str())
+            && hub
+                .subscription(&self.client)
+                .is_some_and(|id| id.matches_wire(&self.subscription))
     }
 
     fn queue_assessment(

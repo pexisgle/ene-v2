@@ -62,6 +62,32 @@ impl<'de> Deserialize<'de> for CompanionId {
     }
 }
 
+/// The generation of one live device stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SubscriptionId(uuid::Uuid);
+
+impl From<uuid::Uuid> for SubscriptionId {
+    fn from(id: uuid::Uuid) -> Self {
+        Self(id)
+    }
+}
+
+impl SubscriptionId {
+    /// Checks the canonical spelling published when the stream opened.
+    pub fn matches_wire(self, text: &str) -> bool {
+        self.0
+            .hyphenated()
+            .encode_lower(&mut uuid::Uuid::encode_buffer())
+            == text
+    }
+}
+
+impl fmt::Display for SubscriptionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

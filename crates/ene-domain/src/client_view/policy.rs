@@ -1,28 +1,13 @@
 //! Pure permission approval, policy rule, and policy text domain types.
 
 use crate::{PolicyEffect, PolicyRule, PolicyText};
+use ene_policy::ApprovalStatus;
 
 /// Prefix used for per-capability workspace file confirmation policy rules.
 pub const SKIP_FILE_CONFIRMATION_PREFIX: &str = "desktop.skip-file-confirmation:";
 
 /// Policy rule ID enabling automatic approval across all tool calls.
 pub const SKIP_TOOL_CONFIRMATION_ID: &str = "desktop.skip-tool-confirmation";
-
-/// Approval request lifecycle status.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ApprovalStatus {
-    /// The host did not report a status.
-    #[default]
-    Unspecified,
-    /// Waiting on a person to answer.
-    Pending,
-    /// A person allowed the operation.
-    Approved,
-    /// A person refused the operation.
-    Denied,
-    /// Nobody answered in time, so the operation did not run.
-    Expired,
-}
 
 /// Pending or resolved host approval request.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -39,8 +24,8 @@ pub struct ApprovalRequest {
     pub tool_name: String,
     /// Canonical JSON arguments, pinned so the approval cannot be widened.
     pub normalized_arguments: String,
-    /// Where the request is in its lifecycle.
-    pub status: ApprovalStatus,
+    /// The lifecycle status reported by the host, when recognized.
+    pub status: Option<ApprovalStatus>,
     /// Creation time, as the host stamped it.
     pub created_at: String,
     /// The client the action targets, when the action is a device operation.

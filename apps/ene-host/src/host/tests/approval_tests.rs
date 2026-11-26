@@ -257,7 +257,7 @@ fn a_confirm_capability_is_gated_and_delivered_to_the_bound_client() {
     let Some(w::device_event::Event::Operation(operation)) = event.event else {
         panic!("expected an operation");
     };
-    assert_eq!(operation.subscription_id, subscription);
+    assert!(subscription.matches_wire(&operation.subscription_id));
     assert_eq!(operation.capability, "device.files");
     // The client's result answers the waiting tool call.
     let complete = device::complete(

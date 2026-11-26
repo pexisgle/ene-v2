@@ -54,27 +54,16 @@ impl SnapshotReader<'_> {
                 .or_default()
                 .push(session);
         }
-        let mut work_sessions = Vec::new();
-        for companion in &companions {
-            for session in by_companion.remove(&companion.id).unwrap_or_default() {
-                work_sessions.push(w::WorkSession::from(&session));
-            }
-        }
-        let mut seen = std::collections::HashSet::new();
-        let work_sessions = work_sessions
-            .into_iter()
-            .filter(|session| seen.insert(session.id.clone()))
+        let work_sessions = companions
+            .iter()
+            .filter_map(|companion| by_companion.remove(&companion.id))
+            .flatten()
+            .map(|session| w::WorkSession::from(&session))
             .collect();
         let clients = client::clients(store, hub)?;
         Ok(w::Snapshot {
             server_version: env!("CARGO_PKG_VERSION").into(),
-            health: w::HostHealth {
-                ready: health.ready().is_ok(),
-                recovery_required: health.failure().is_some(),
-                stopping: health.closing(),
-                ..Default::default()
-            }
-            .into(),
+            health: w::HostHealth::from(health.health()).into(),
             capabilities: w::HostCapabilities {
                 limits: Some(w::JsonDocument {
                     schema: "ene.limits.v1".into(),

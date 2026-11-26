@@ -4,12 +4,6 @@ use crate as w;
 use ene_domain::client_view as domain;
 
 from_variants! {
-    w::ApprovalStatus => domain::ApprovalStatus [
-        Unspecified, Pending, Approved, Denied, Expired,
-    ]
-}
-
-from_variants! {
     domain::ApprovalDecision => w::ApprovalDecision [
         Unspecified, Approve, AlwaysApprove, Deny,
     ]
@@ -19,7 +13,7 @@ from_fields! {
     w::ApprovalRequest => domain::ApprovalRequest {
         request_id, session_id, run_id, action_payload_hash, tool_name,
         normalized_arguments,
-        status.as_known().map_or_default(Into::into),
+        status.as_known().and_then(|status| status.try_into().ok()),
         created_at, client_id, capability,
     }
 }

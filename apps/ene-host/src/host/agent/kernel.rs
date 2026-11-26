@@ -3,7 +3,7 @@
 use crate::host::{
     HostServices, chat, client,
     error::{HostError, Result},
-    eyes, mind, permission, voice, wire, work,
+    eyes, mind, permission, voice, work,
 };
 use ene_rpc as w;
 use rig_core::catalog::Catalog;
@@ -119,7 +119,9 @@ impl<'a> AgentKernel<'a> {
     }
 
     pub(crate) fn client_disconnected(&mut self, client_id: &str) {
-        client::device::disconnected(self.app.world_mut(), client_id);
+        if !self.services.hub.connected(client_id) {
+            client::device::disconnected(self.app.world_mut(), client_id);
+        }
     }
 
     pub(crate) fn complete_operation(
@@ -168,7 +170,7 @@ impl<'a> AgentKernel<'a> {
         let outcome = permission::submit_with_outcome(self.app.world_mut(), id, decision)?;
         Ok(w::SubmitApprovalResponse {
             acknowledged: true,
-            status: wire::approval_status(outcome.approval.status).into(),
+            status: w::ApprovalStatus::from(outcome.approval.status).into(),
             rule_saved: outcome.rule_saved,
             rule_error: outcome.rule_error,
             ..Default::default()

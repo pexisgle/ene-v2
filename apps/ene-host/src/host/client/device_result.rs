@@ -63,36 +63,46 @@ pub(crate) fn complete(
             );
         }
     };
-    let (base_success, failure, validated) = parse_and_validate_output(&store, &operation, result)?;
-    let (validated, frame) = apply_computer_use_output(
-        world.get_resource_mut::<ComputerUse>().as_deref_mut(),
-        &operation,
-        computer,
-        base_success,
-        validated,
-    );
-    let (success, output, failure) = resolve_operation_outcome(base_success, validated, failure);
+    let client = store.client_repo().client(&operation.client_id)?;
+    if computer.is_some() {
+        world
+            .resource_mut::<ComputerUse>()
+            .operations
+            .remove(&operation.id);
+    }
+    let outcome = match (result.success, result.failure.as_option().cloned()) {
+        (_, Some(failure)) => Err(failure.into()),
+        (false, None) => Err(Failure::new("operation_failed", "the operation failed")),
+        (true, None) => validate_output(
+            client
+                .as_ref()
+                .and_then(|client| client.spec(&operation.capability)),
+            &result.output,
+            computer,
+        ),
+    };
+    let persisted = outcome.as_ref().map(|(output, _)| output);
     let updated = store
         .client_repo()
-        .complete_operation(&operation.id, success, output.as_ref(), failure.as_ref())?
-        .ok_or_else(|| HostError::Storage(("device operation update did not persist").into()))?;
+        .complete_operation(&operation.id, persisted)?
+        .ok_or_else(|| HostError::Storage("device operation update did not persist".into()))?;
     if let Some(waiter) = world
         .resource_mut::<Waiting>()
         .by_operation
         .remove(&operation.id)
     {
-        if success {
-            if let Some(frame) = frame {
-                world.resource_mut::<ComputerUse>().save_frame(frame);
+        match outcome {
+            Ok((output, frame)) => {
+                if let Some(frame) = frame {
+                    world.resource_mut::<ComputerUse>().save_frame(frame);
+                }
+                permission::decide(
+                    world,
+                    waiter.call,
+                    build_waiter_outcome(&operation, &output),
+                );
             }
-            let outcome = build_waiter_outcome(&operation, output.as_ref());
-            permission::decide(world, waiter.call, outcome);
-        } else {
-            let reason = failure.as_ref().map_or_else(
-                || "the operation failed".into(),
-                |failure| failure.message.clone(),
-            );
-            permission::refuse(world, waiter.call, &reason);
+            Err(failure) => permission::refuse(world, waiter.call, &failure.message),
         }
     }
     world.resource_mut::<Notifier>().push(
@@ -119,132 +129,50 @@ fn prepare_computer_use(
     if operation.capability != w::COMPUTER_USE {
         return ComputerUseCheck::Skip;
     }
-    let pending = computer_use.and_then(|state| state.operations.get(&operation.id).cloned());
-    if !pending
-        .as_ref()
-        .is_some_and(|pending| hub.is_some_and(|hub| computer::active(store, hub, pending)))
-        || result
-            .failure
-            .as_option()
-            .is_some_and(|failure| failure.code == "operation_uncertain")
-    {
-        return ComputerUseCheck::MarkUncertain;
-    }
+    let pending = computer_use.and_then(|state| state.operations.get(&operation.id));
     match pending {
-        Some(pending) => ComputerUseCheck::Ready(pending),
-        None => ComputerUseCheck::MarkUncertain,
+        Some(pending)
+            if hub.is_some_and(|hub| computer::active(store, hub, pending))
+                && result
+                    .failure
+                    .as_option()
+                    .is_none_or(|failure| failure.code != "operation_uncertain") =>
+        {
+            ComputerUseCheck::Ready(pending.clone())
+        }
+        _ => ComputerUseCheck::MarkUncertain,
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-enum OutputError {
-    #[error("{0}")]
-    Invalid(#[from] HostError),
-    #[error(transparent)]
-    ComputerResult(#[from] computer::ResultError),
-    #[error("the client returned an invalid Computer Use result")]
-    InvalidComputerUseResult,
-}
-
-type ParsedOutput = (
-    bool,
-    Option<Failure>,
-    Option<std::result::Result<Value, OutputError>>,
-);
-
-fn parse_and_validate_output(
-    store: &Store,
-    operation: &DeviceOperation,
-    result: &w::DeviceOperationResult,
-) -> Result<ParsedOutput> {
-    // A capability without an output schema may answer with anything, even
-    // an empty body; with a schema, validation happens below.
-    let output = if result.output.trim().is_empty() {
-        Some(Value::Null)
-    } else {
-        Some(
-            serde_json::from_str::<Value>(&result.output)
-                .unwrap_or_else(|_| Value::String(result.output.clone())),
-        )
-    };
-    let failure = result.failure.as_option().cloned().map(Into::into);
-    let success = result.success && failure.is_none() && output.is_some();
-    // A capability declared without a spec has no output contract; its
-    // answer is accepted as the client sent it.
-    let spec = store
-        .client_repo()
-        .client(&operation.client_id)?
-        .and_then(|client| client.spec(&operation.capability).cloned());
-    let validated = output.map(|output| match spec {
-        Some(spec) => super::validate_output(&spec, &output)
-            .map(|()| output)
-            .map_err(OutputError::from),
-        None => Ok(output),
-    });
-    Ok((success, failure, validated))
-}
-
-fn apply_computer_use_output(
-    computer_use: Option<&mut ComputerUse>,
-    operation: &DeviceOperation,
+fn validate_output(
+    spec: Option<&super::CapabilitySpec>,
+    output: &str,
     computer: Option<computer::Pending>,
-    success: bool,
-    validated: Option<std::result::Result<Value, OutputError>>,
-) -> (
-    Option<std::result::Result<Value, OutputError>>,
-    Option<computer::Frame>,
-) {
-    let Some(pending) = computer else {
-        return (validated, None);
+) -> std::result::Result<(Value, Option<computer::Frame>), Failure> {
+    // A capability without an output schema may answer with plain text or an empty body.
+    let output = if output.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(output).unwrap_or_else(|_| Value::String(output.to_owned()))
     };
-    if let Some(computer_use) = computer_use {
-        computer_use.operations.remove(&operation.id);
+    if let Some(spec) = spec
+        && let Err(error) = super::validate_output(spec, &output)
+    {
+        let message = if computer.is_some() {
+            "the client returned an invalid Computer Use result".into()
+        } else {
+            error.to_string()
+        };
+        return Err(Failure::new("output_invalid", message));
     }
-    let mut frame = None;
-    let validated = match (success, validated) {
-        (true, Some(Ok(output))) => Some(
-            computer::result(pending, &output)
-                .map(|(metadata, captured)| {
-                    frame = captured;
-                    metadata
-                })
-                .map_err(OutputError::from),
-        ),
-        (_, Some(Err(_))) => Some(Err(OutputError::InvalidComputerUseResult)),
-        (_, validated) => validated,
-    };
-    (validated, frame)
-}
-
-fn resolve_operation_outcome(
-    success: bool,
-    validated: Option<std::result::Result<Value, OutputError>>,
-    failure: Option<Failure>,
-) -> (bool, Option<Value>, Option<Failure>) {
-    match (success, validated) {
-        (true, Some(Ok(output))) => (true, Some(output), failure),
-        (true, Some(Err(error))) => (
-            false,
-            None,
-            Some(Failure::new("output_invalid", error.to_string())),
-        ),
-        (true, None) => (
-            false,
-            None,
-            Some(Failure::new(
-                "output_invalid",
-                "the client declared no output schema",
-            )),
-        ),
-        (false, _) => (
-            false,
-            None,
-            failure.or_else(|| Some(Failure::new("operation_failed", "the operation failed"))),
-        ),
+    match computer {
+        Some(pending) => computer::result(pending, &output)
+            .map_err(|error| Failure::new("output_invalid", error.to_string())),
+        None => Ok((output, None)),
     }
 }
 
-fn build_waiter_outcome(operation: &DeviceOperation, output: Option<&Value>) -> Outcome {
+fn build_waiter_outcome(operation: &DeviceOperation, output: &Value) -> Outcome {
     if let Some(image) = read_image(&operation.capability, output) {
         use rig_core::{
             message::ToolResultContent,
@@ -254,7 +182,7 @@ fn build_waiter_outcome(operation: &DeviceOperation, output: Option<&Value>) -> 
             ToolResultContent::text(
                 json!({
                     "operation_id": operation.id,
-                    "path": output.and_then(|out| out["path"].as_str()),
+                    "path": output["path"].as_str(),
                 })
                 .to_string(),
             ),
@@ -273,13 +201,13 @@ fn build_waiter_outcome(operation: &DeviceOperation, output: Option<&Value>) -> 
     }
 }
 
-fn read_image(capability: &str, output: Option<&Value>) -> Option<rig_core::message::Image> {
+fn read_image(capability: &str, output: &Value) -> Option<rig_core::message::Image> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use rig_core::message::{DocumentSourceKind, Image, ImageMediaType};
     if capability != "work.read" {
         return None;
     }
-    let encoded = output?.get("image_base64")?.as_str()?;
+    let encoded = output.get("image_base64")?.as_str()?;
     const IMAGE_LIMIT: usize = 512 * 1024;
     if encoded.len() > IMAGE_LIMIT.div_ceil(3) * 4 {
         return None;

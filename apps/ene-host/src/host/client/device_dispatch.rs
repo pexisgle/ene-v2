@@ -224,7 +224,7 @@ fn dispatch(
         Some(id) if !id.is_empty() => id.to_owned(),
         _ => resolve_operation_companion(ctx.store, operation)?,
     };
-    let mut wire_operation = wire::device_operation(operation, &subscription);
+    let mut wire_operation = wire::device_operation(operation, &subscription.to_string());
     wire_operation.run_id = computer.map(|pending| pending.run.clone());
     wire_operation.companion_id = resolved_companion;
     let event = w::DeviceEvent {
@@ -305,7 +305,7 @@ fn load_resend_plan(
 /// Replays operations that were never delivered after a client reconnects.
 pub(crate) fn resend(world: &mut World, client: &str) {
     let subscription = world.resource::<DeviceHub>().subscription(client);
-    computer::invalidate_client(world, client, subscription.as_deref());
+    computer::invalidate_client(world, client, subscription);
     let store = world.resource::<Store>().clone();
     let plan = match load_resend_plan(&store, client) {
         Ok(plan) => plan,

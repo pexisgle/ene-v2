@@ -17,9 +17,10 @@ pub(super) fn render_agent_platform_options(
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
 ) -> (Vec<AnyElement>, Option<String>) {
-    let options = endpoint
-        .and_then(|ep| serde_json::from_str::<AgentPlatformOptions>(&ep.options).ok())
-        .unwrap_or_default();
+    let options = endpoint.map_or("", |endpoint| endpoint.options.as_str());
+    let Ok(options) = parse_options::<AgentPlatformOptions>(options) else {
+        return invalid_options(theme);
+    };
     let project = pane.drafts.draft(
         cx,
         format!("conn:{id}:r{rev}:project_id"),
@@ -58,7 +59,9 @@ pub(super) fn render_options_schema(
     let Ok(schema) = serde_json::from_str::<OptionsSchema>(&ep.options_schema) else {
         return (Vec::new(), None);
     };
-    let mut opts: Options = serde_json::from_str(&ep.options).unwrap_or_default();
+    let Ok(mut opts) = parse_options::<Options>(&ep.options) else {
+        return invalid_options(theme);
+    };
     let mut controls = Vec::new();
     for (key, prop) in schema.properties {
         let prop_type = prop.kind.scalar();
@@ -114,6 +117,21 @@ pub(super) fn render_options_schema(
 
     let serialized = (!opts.is_empty()).then(|| serde_json::json!(opts).to_string());
     (controls, serialized)
+}
+
+fn parse_options<T: serde::de::DeserializeOwned + Default>(text: &str) -> serde_json::Result<T> {
+    if text.trim().is_empty() {
+        return Ok(T::default());
+    }
+    serde_json::from_str(text)
+}
+
+fn invalid_options(theme: &Theme) -> (Vec<AnyElement>, Option<String>) {
+    let message = div()
+        .text_xs()
+        .text_color(theme.danger)
+        .child("保存済みの接続オプションを読み込めませんでした。");
+    (vec![message.into_any_element()], None)
 }
 
 fn render_schema_enum_field<'a>(

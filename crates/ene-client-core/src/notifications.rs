@@ -281,7 +281,7 @@ pub fn upsert_approval(approvals: &mut Vec<ApprovalRequest>, request: ApprovalRe
     let present = approvals
         .iter()
         .position(|approval| approval.request_id == request.request_id);
-    if request.status == ApprovalStatus::Pending {
+    if request.status == Some(ApprovalStatus::Pending) {
         match present {
             Some(index) => approvals[index] = request,
             None => approvals.push(request),

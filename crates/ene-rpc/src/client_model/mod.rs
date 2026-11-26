@@ -51,9 +51,28 @@ from_fields! {
     }
 }
 
-from_fields! {
-    w::HostHealth => domain::HostHealth {
-        ready, recovery_required, stopping,
+impl From<w::HostHealth> for domain::HostHealth {
+    fn from(value: w::HostHealth) -> Self {
+        if value.recovery_required {
+            Self::RecoveryRequired
+        } else if value.stopping {
+            Self::Stopping
+        } else if value.ready {
+            Self::Ready
+        } else {
+            Self::Starting
+        }
+    }
+}
+
+impl From<domain::HostHealth> for w::HostHealth {
+    fn from(value: domain::HostHealth) -> Self {
+        Self {
+            ready: value == domain::HostHealth::Ready,
+            recovery_required: value == domain::HostHealth::RecoveryRequired,
+            stopping: value == domain::HostHealth::Stopping,
+            ..Default::default()
+        }
     }
 }
 

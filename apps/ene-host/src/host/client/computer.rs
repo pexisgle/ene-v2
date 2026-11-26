@@ -7,6 +7,7 @@ use crate::host::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bevy_ecs::prelude::*;
+use ene_domain::SubscriptionId;
 use ene_rpc as w;
 use rig_core::{
     conversation::{Author, Entry},
@@ -25,7 +26,7 @@ const FRAME_LIFETIME: Duration = Duration::from_secs(60);
 #[derive(Clone)]
 pub(super) struct Pending {
     pub(super) client: String,
-    pub(super) subscription: String,
+    pub(super) subscription: SubscriptionId,
     pub(super) run: String,
     pub(super) work: String,
     screenshot: bool,
@@ -51,7 +52,7 @@ pub(crate) fn model_supported(connection: Option<&Connection>) -> bool {
 }
 
 pub(super) fn active(store: &Store, hub: &DeviceHub, pending: &Pending) -> bool {
-    hub.subscription(&pending.client).as_deref() == Some(pending.subscription.as_str())
+    hub.subscription(&pending.client) == Some(pending.subscription)
         && store
             .client_repo()
             .client(&pending.client)
@@ -243,9 +244,9 @@ pub(crate) fn invalidate_run(world: &mut World, run: &str) {
 }
 
 /// Retain the current stream's state when it replaces an older subscription.
-pub(super) fn invalidate_client(world: &mut World, client: &str, retain: Option<&str>) {
+pub(super) fn invalidate_client(world: &mut World, client: &str, retain: Option<SubscriptionId>) {
     invalidate(world, |operation| {
-        operation.client == client && Some(operation.subscription.as_str()) != retain
+        operation.client == client && Some(operation.subscription) != retain
     });
 }
 

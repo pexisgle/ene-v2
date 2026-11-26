@@ -52,7 +52,8 @@ fn bind(
         },
     )
     .unwrap();
-    world.resource::<DeviceHub>().register(client_id)
+    let (subscription, receiver) = world.resource::<DeviceHub>().register(client_id);
+    (subscription.to_string(), receiver)
 }
 
 fn report(harness: &mut Harness, client: &str, subscription: &str, event: Event) {

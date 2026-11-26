@@ -52,14 +52,26 @@ pub fn apply_stt_model_to_config(cfg: &mut ConnectionConfig, model_clean: &str) 
     stt.endpoint = Some(ep);
 }
 
+/// Reads a configured STT model, leaving the fallback to the caller.
+pub fn configured_stt_model(endpoint: Option<&ConnectionEndpoint>) -> Option<String> {
+    let model = SpeechOptions::parse(&endpoint?.options).model?;
+    nonempty(&model).map(str::to_owned)
+}
+
+/// Reads the numeric VOICEVOX speaker from the options of an endpoint.
+pub fn configured_voicevox_speaker(endpoint: Option<&ConnectionEndpoint>) -> Option<String> {
+    match SpeechOptions::parse(&endpoint?.options).speaker? {
+        Speaker::Id(id) => Some(id.to_string()),
+        Speaker::Name(_) => None,
+    }
+}
+
 /// Resolves the effective STT model identifier configured on a connection.
 pub fn stt_model_of_connection(conn: &Connection) -> String {
     if let Some(ConnectionConfig::Stt(stt)) = &conn.config
-        && let Some(ep) = &stt.endpoint
-        && let Some(model) = SpeechOptions::parse(&ep.options).model
-        && let Some(model) = nonempty(&model)
+        && let Some(model) = configured_stt_model(stt.endpoint.as_ref())
     {
-        return model.to_owned();
+        return model;
     }
     if conn.is_sakura() {
         "whisper-large-v3-turbo".to_owned()

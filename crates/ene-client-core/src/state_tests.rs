@@ -156,7 +156,7 @@ fn a_resolved_approval_leaves_the_pending_list() {
     model.snapshot = Some(snapshot());
     let pending = |status: ApprovalStatus| ApprovalRequest {
         request_id: "r1".into(),
-        status,
+        status: Some(status),
         ..Default::default()
     };
     model.apply(Update::Notification(Box::new(notification(

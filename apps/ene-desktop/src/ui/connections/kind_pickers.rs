@@ -7,6 +7,7 @@ use crate::input::Draft;
 use crate::ui::default_embedding_dimensions;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::DropdownOption;
+use ene_client_core::connections::{configured_stt_model, configured_voicevox_speaker};
 use ene_client_core::{connections::split_comma, domain::ConnectionEndpoint};
 use gpui::{Context, Entity};
 
@@ -93,12 +94,7 @@ pub(super) fn build_voicevox_picker(
     let current_selected = split_comma(list_d.read(cx).text())
         .into_iter()
         .next()
-        .or_else(|| {
-            endpoint
-                .and_then(|ep| serde_json::from_str::<serde_json::Value>(&ep.options).ok())
-                .and_then(|v| v.get("speaker").and_then(serde_json::Value::as_u64))
-                .map(|n| n.to_string())
-        });
+        .or_else(|| configured_voicevox_speaker(endpoint));
     let options: Vec<DropdownOption> = choices
         .iter()
         .map(|(sid, label)| DropdownOption {
@@ -236,16 +232,8 @@ pub(super) fn build_stt_picker(
         theme,
     );
     let filter_txt = filter_d.read(cx).text().to_owned();
-    let current_selected = endpoint
-        .and_then(|ep| serde_json::from_str::<serde_json::Value>(&ep.options).ok())
-        .and_then(|v| {
-            v.get("model")
-                .and_then(|m| m.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-        })
-        .or_else(|| choices.first().map(|(mid, _)| mid.clone()));
+    let current_selected =
+        configured_stt_model(endpoint).or_else(|| choices.first().map(|(id, _)| id.clone()));
     let options: Vec<DropdownOption> = choices
         .iter()
         .map(|(mid, label)| DropdownOption {
