@@ -405,7 +405,7 @@ fn computer_use_sends_a_request_only_image_and_never_replays_input() {
         hub: &hub,
         notifier: harness.app.world().resource(),
     };
-    device::resend(&context, "desk", |_| {
+    device::resend(&context, "desk", |_, _| {
         panic!("stopped Computer Use operations are already terminal")
     })
     .unwrap();
@@ -421,6 +421,9 @@ fn computer_use_sends_a_request_only_image_and_never_replays_input() {
     .unwrap();
     assert_eq!(late.status, w::DeviceOperationStatus::Uncertain);
 }
+
+#[path = "device_retry_tests.rs"]
+mod device_retry_tests;
 
 fn setup_computer_use_model(harness: &mut Harness, frame_id: &str) -> MockCompletionModel {
     use serde_json::json;

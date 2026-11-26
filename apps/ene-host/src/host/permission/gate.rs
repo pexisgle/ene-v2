@@ -60,7 +60,7 @@ pub(crate) struct Approved;
 pub(crate) struct CallBinding {
     pub(crate) client_id: String,
     pub(crate) capability: String,
-    pub(crate) computer_run: Option<String>,
+    pub(crate) work_run: Option<String>,
 }
 
 /// A held tool call and the marker that keeps it from running.
@@ -299,7 +299,7 @@ fn process_gate_call(
         world.entity_mut(item.entity).insert(CallBinding {
             client_id,
             capability: capability.clone(),
-            computer_run: (capability == w::COMPUTER_USE).then(|| run_id.clone()),
+            work_run: work_id.as_ref().map(|_| run_id.clone()),
         });
     }
     let binding = GateBinding {

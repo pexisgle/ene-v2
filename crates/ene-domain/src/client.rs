@@ -91,6 +91,57 @@ impl DeviceStatus {
     }
 }
 
+/// The agent lifetime a pending device operation is authorized to start in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeviceScope {
+    /// A companion's assignment to the target client.
+    Companion(CompanionId),
+    /// A particular instruction run on the work session's bound client.
+    Work {
+        /// Companion funding the work session.
+        companion_id: CompanionId,
+        /// Session that binds this operation to its client.
+        work_id: String,
+        /// Instruction run that owns this operation.
+        run_id: String,
+    },
+    /// An older recorded operation whose owner could not be established.
+    Legacy {
+        /// Session recorded by the older host, when it was a work operation.
+        work_id: Option<String>,
+    },
+}
+
+impl DeviceScope {
+    /// The addressed companion, when the host recorded it.
+    pub fn companion_id(&self) -> Option<&CompanionId> {
+        match self {
+            Self::Companion(id)
+            | Self::Work {
+                companion_id: id, ..
+            } => Some(id),
+            Self::Legacy { .. } => None,
+        }
+    }
+
+    /// The persisted session identifier, if part of work.
+    pub fn work_id(&self) -> Option<&str> {
+        match self {
+            Self::Work { work_id, .. } => Some(work_id),
+            Self::Legacy { work_id } => work_id.as_deref(),
+            Self::Companion(_) => None,
+        }
+    }
+
+    /// The owning instruction run, if bound to one.
+    pub fn run_id(&self) -> Option<&str> {
+        match self {
+            Self::Work { run_id, .. } => Some(run_id),
+            _ => None,
+        }
+    }
+}
+
 /// Persisted record of a capability operation dispatched to a client.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceOperation {
@@ -102,8 +153,8 @@ pub struct DeviceOperation {
     pub capability: String,
     /// Arguments the host validated and sent.
     pub input: serde_json::Value,
-    /// The work session the operation belongs to, if any.
-    pub work_id: Option<String>,
+    /// The lifetime and authority that own the operation.
+    pub scope: DeviceScope,
     /// Where the operation is in its lifecycle.
     pub status: DeviceStatus,
     /// The client result, once it reported success.

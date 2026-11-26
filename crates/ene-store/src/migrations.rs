@@ -28,7 +28,7 @@ use rusqlite_migration::{HookResult, M, Migrations};
 pub const BASELINE_VERSION: i64 = 6;
 
 /// Latest database schema version managed by [`ladder_steps`].
-pub const VERSION: i64 = 11;
+pub const VERSION: i64 = 12;
 
 /// Every version this host applies above the baseline, in order. The position
 /// in this table is the version, so adding a row is the only way to add a
@@ -67,6 +67,18 @@ const STEPS_ABOVE_BASELINE: &[(&str, &str)] = &[
     (
         "0011_derive_client_grants",
         "ALTER TABLE clients DROP COLUMN granted_capabilities;",
+    ),
+    (
+        "0012_device_operation_scope",
+        "ALTER TABLE device_operations ADD COLUMN companion_id TEXT;
+        ALTER TABLE device_operations ADD COLUMN run_id TEXT;
+        UPDATE device_operations
+            SET status = 'failed',
+                failure = json_object('code', 'operation_owner_unknown', 'message',
+                    'the queued operation has no recorded owner and was not dispatched'),
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE status = 'pending';
+        CREATE INDEX idx_device_pending_run ON device_operations(run_id) WHERE status = 'pending';",
     ),
 ];
 

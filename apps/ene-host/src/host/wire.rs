@@ -235,7 +235,12 @@ pub(crate) fn device_operation(value: &DeviceOperation, subscription: &str) -> w
         input: value.input.to_string(),
         subscription_id: subscription.into(),
         client_id: value.client_id.clone(),
-        work_id: value.work_id.clone(),
+        companion_id: value
+            .scope
+            .companion_id()
+            .map_or_default(ToString::to_string),
+        work_id: value.scope.work_id().map(str::to_owned),
+        run_id: value.scope.run_id().map(str::to_owned),
         ..Default::default()
     }
 }

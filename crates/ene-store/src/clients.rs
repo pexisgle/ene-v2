@@ -3,12 +3,12 @@
 
 use crate::row::{FromRow, row_fields};
 use crate::{
-    Store, StoreError, enum_name_column,
+    Store, StoreError, corrupt, enum_name_column,
     error::Result,
-    json_column, optional_json_column, to_json,
+    id_column, json_column, optional_json_column, to_json,
     util::{now, validate_id},
 };
-use ene_domain::{Activation, Client, DeviceOperation, DeviceStatus, Failure};
+use ene_domain::{Activation, Client, DeviceOperation, DeviceScope, DeviceStatus, Failure};
 use ene_policy::CapabilitySpec;
 use rusqlite::{OptionalExtension, Row, params};
 
@@ -35,7 +35,7 @@ impl FromRow for Client {
 }
 
 const OPERATION_COLUMNS: &str = "operation_id, client_id, capability, input, \
-     work_id, status, output, failure, created_at, updated_at";
+     companion_id, work_id, run_id, status, output, failure, created_at, updated_at";
 
 row_fields!(
     Activation,
@@ -48,12 +48,32 @@ row_fields!(
 impl FromRow for DeviceOperation {
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         let status = enum_name_column(row, "status", "unknown device status")?;
+        let has_companion = row.get::<_, Option<String>>("companion_id")?.is_some();
+        let work_id = row.get("work_id")?;
+        let run_id = row.get("run_id")?;
+        let scope = match (has_companion, work_id, run_id) {
+            (false, work_id, None) => DeviceScope::Legacy { work_id },
+            (true, None, None) => {
+                DeviceScope::Companion(id_column(row, "companion_id", "invalid device owner")?)
+            }
+            (true, Some(work_id), Some(run_id)) => DeviceScope::Work {
+                companion_id: id_column(row, "companion_id", "invalid device owner")?,
+                work_id,
+                run_id,
+            },
+            _ => {
+                return Err(corrupt(
+                    row.as_ref().column_index("run_id")?,
+                    "invalid device scope",
+                ));
+            }
+        };
         Ok(DeviceOperation {
             id: row.get("operation_id")?,
             client_id: row.get("client_id")?,
             capability: row.get("capability")?,
             input: json_column(row, "input", "stored operation JSON is corrupt")?,
-            work_id: row.get("work_id")?,
+            scope,
             status,
             output: optional_json_column(row, "output", "stored operation JSON is corrupt")?,
             failure: optional_json_column(row, "failure", "stored operation JSON is corrupt")?,
@@ -263,22 +283,26 @@ impl<'a> ClientRepo<'a> {
     }
 
     pub fn insert_operation(&self, operation: &DeviceOperation) -> Result<()> {
+        let companion = operation.scope.companion_id().ok_or_else(|| {
+            StoreError::Invalid("a new device operation requires a recorded owner".into())
+        })?;
         let stamp = now();
         self.0
             .conn()
             .prepare_cached(
                 "INSERT INTO device_operations (operation_id, client_id, \
-                 capability, input, work_id, status, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 capability, input, companion_id, work_id, run_id, status, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
             )?
             .execute(params![
                 operation.id,
                 operation.client_id,
                 operation.capability,
                 to_json(&operation.input)?,
-                operation.work_id,
+                companion.as_str(),
+                operation.scope.work_id(),
+                operation.scope.run_id(),
                 operation.status.as_str(),
-                stamp,
                 stamp,
             ])?;
         Ok(())

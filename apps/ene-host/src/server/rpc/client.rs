@@ -235,7 +235,9 @@ mod tests {
                         client_id: client.into(),
                         capability: "device.files".into(),
                         input: serde_json::json!({}),
-                        work_id: None,
+                        scope: ene_domain::DeviceScope::Companion(ene_domain::CompanionId::parse(
+                            "ene",
+                        )?),
                         status,
                         output: None,
                         failure: None,

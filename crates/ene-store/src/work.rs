@@ -7,7 +7,7 @@ use crate::{
     require_found, to_json,
     util::{now, or_stamp},
 };
-use ene_domain::{Run, RunState, WorkSession, WorkStatus};
+use ene_domain::{Failure, Run, RunState, WorkSession, WorkStatus};
 use rusqlite::params;
 
 row_fields!(WorkSession, SESSION_COLUMNS {
@@ -173,20 +173,32 @@ impl<'a> WorkRepo<'a> {
     }
 
     pub fn update_run(&self, run: &Run) -> Result<()> {
-        let changed = self
-            .0
-            .conn()
-            .prepare_cached(
-                "UPDATE work_runs SET state = ?2, pending_request_id = ?3, failure = ?4, \
+        self.0.write_tx(|transaction| {
+            let now = now();
+            let changed = transaction
+                .prepare_cached(
+                    "UPDATE work_runs SET state = ?2, pending_request_id = ?3, failure = ?4, \
                  updated_at = ?5 WHERE run_id = ?1",
-            )?
-            .execute(params![
-                run.run_id,
-                run.state.as_str(),
-                run.pending_request_id,
-                run.failure.as_ref().map(to_json).transpose()?,
-                now(),
-            ])?;
-        require_found(changed, "run not found")
+                )?
+                .execute(params![
+                    run.run_id,
+                    run.state.as_str(),
+                    run.pending_request_id,
+                    run.failure.as_ref().map(to_json).transpose()?,
+                    now,
+                ])?;
+            require_found(changed, "run not found")?;
+            if run.state.is_terminal() {
+                let failure = Failure::new(
+                    "work_run_finished",
+                    "the operation was still queued when its work run ended",
+                );
+                transaction.prepare_cached(
+                    "UPDATE device_operations SET status = 'failed', failure = ?2, updated_at = ?3
+                     WHERE run_id = ?1 AND status = 'pending'",
+                )?.execute(params![run.run_id, to_json(&failure)?, now])?;
+            }
+            Ok(())
+        })
     }
 }

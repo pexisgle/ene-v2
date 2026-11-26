@@ -17,6 +17,7 @@ use crate::host::{
     wire,
 };
 use bevy_ecs::prelude::*;
+use ene_domain::{Client, CompanionId, DeviceScope, Failure};
 use ene_rpc as w;
 use ene_store::util::now;
 use rig_ecs::model::Connection;
@@ -45,8 +46,12 @@ pub(crate) fn accept(
     let binding = world
         .get::<CallBinding>(call)
         .ok_or_else(|| HostError::Internal(("a device call without a binding").into()))?;
-    let (companion_id, work_id) = agent_context(world, agent)
-        .ok_or_else(|| HostError::Internal(("a device call without an agent").into()))?;
+    let scope = agent_scope(world, agent)?;
+    if scope.run_id() != binding.work_run.as_deref() {
+        return Err(HostError::Conflict(
+            "the accepted operation belongs to a different work run".into(),
+        ));
+    }
     let client = store
         .client_repo()
         .client(&binding.client_id)?
@@ -94,9 +99,8 @@ pub(crate) fn accept(
         let work = world.get::<WorkAgent>(agent).ok_or_else(|| {
             HostError::Permission(("Computer Use requires a work session").into())
         })?;
-        let run = binding
-            .computer_run
-            .as_deref()
+        let run = scope
+            .run_id()
             .ok_or_else(|| HostError::Internal(("Computer Use has no bound run").into()))?;
         if spec.is_none() || !computer::model_supported(world.get::<Connection>(agent)) {
             return Err(HostError::Permission(
@@ -125,7 +129,7 @@ pub(crate) fn accept(
         client_id: binding.client_id.clone(),
         capability: binding.capability.clone(),
         input,
-        work_id,
+        scope,
         status: DeviceStatus::Pending,
         output: None,
         failure: None,
@@ -139,7 +143,7 @@ pub(crate) fn accept(
             hub: world.resource::<DeviceHub>(),
             notifier: world.resource::<Notifier>(),
         };
-        dispatch(&ctx, &operation, computer.as_ref(), Some(&companion_id))?
+        dispatch(&ctx, &operation, computer.as_ref())?
     };
     if let Some(computer) = computer {
         if status != DeviceStatus::Dispatched {
@@ -184,7 +188,7 @@ pub(crate) fn dispatch_direct(
         client_id: client_id.to_owned(),
         capability: capability.to_owned(),
         input,
-        work_id: None,
+        scope: DeviceScope::Companion(CompanionId::parse(companion_id)?),
         status: DeviceStatus::Pending,
         output: None,
         failure: None,
@@ -192,18 +196,24 @@ pub(crate) fn dispatch_direct(
         updated_at: now(),
     };
     store.client_repo().insert_operation(&operation)?;
-    let _reply = dispatch(ctx, &operation, None, Some(companion_id))?;
+    let _reply = dispatch(ctx, &operation, None)?;
     Ok(operation_id)
 }
 
-/// `(companion_id, work_id)` for the agent entity that requested the call.
-fn agent_context(world: &World, agent: Entity) -> Option<(String, Option<String>)> {
+fn agent_scope(world: &World, agent: Entity) -> Result<DeviceScope> {
     if let Some(companion) = world.get::<CompanionAgent>(agent) {
-        return Some((companion.companion_id.clone(), None));
+        return Ok(DeviceScope::Companion(CompanionId::parse(
+            &companion.companion_id,
+        )?));
     }
-    world
+    let work = world
         .get::<WorkAgent>(agent)
-        .map(|work| (work.companion_id.clone(), Some(work.work_id.clone())))
+        .ok_or_else(|| HostError::Internal("a device call without an agent".into()))?;
+    Ok(DeviceScope::Work {
+        companion_id: CompanionId::parse(&work.companion_id)?,
+        work_id: work.work_id.clone(),
+        run_id: work.run_id.clone(),
+    })
 }
 
 pub(crate) struct DeviceDispatchContext<'a> {
@@ -219,7 +229,6 @@ fn dispatch(
     ctx: &DeviceDispatchContext<'_>,
     operation: &DeviceOperation,
     computer: Option<&computer::Pending>,
-    companion_id: Option<&str>,
 ) -> Result<DeviceStatus> {
     let Some((subscription, permit)) = ctx.hub.reserve(&operation.client_id) else {
         return Ok(DeviceStatus::Pending);
@@ -227,13 +236,7 @@ fn dispatch(
     if computer.is_some_and(|pending| pending.subscription != subscription) {
         return Ok(DeviceStatus::Pending);
     }
-    let resolved_companion = match companion_id {
-        Some(id) if !id.is_empty() => id.to_owned(),
-        _ => resolve_operation_companion(ctx.store, operation)?,
-    };
-    let mut wire_operation = wire::device_operation(operation, &subscription.to_string());
-    wire_operation.run_id = computer.map(|pending| pending.run.clone());
-    wire_operation.companion_id = resolved_companion;
+    let wire_operation = wire::device_operation(operation, &subscription.to_string());
     // Persist the claim before exposing the event. A crash or stream closure
     // after this point leaves an uncertain dispatch instead of a replayable one.
     if !ctx
@@ -259,36 +262,90 @@ fn dispatch(
     Ok(DeviceStatus::Dispatched)
 }
 
-fn resolve_operation_companion(store: &Store, operation: &DeviceOperation) -> Result<String> {
-    if let Some(work_id) = operation.work_id.as_deref()
-        && let Some(session) = store.work_repo().work_session(work_id)?
-    {
-        return Ok(session.companion_id.as_str().to_owned());
+fn scope_is_live(store: &Store, operation: &DeviceOperation) -> Result<bool> {
+    let target = Some(operation.client_id.as_str());
+    Ok(match &operation.scope {
+        DeviceScope::Companion(id) => store
+            .client_repo()
+            .activation(id.as_str())?
+            .is_some_and(|activation| activation.client_id.as_deref() == target),
+        DeviceScope::Work {
+            companion_id,
+            work_id,
+            run_id,
+        } => {
+            let repo = store.work_repo();
+            store
+                .companion_repo()
+                .companion(companion_id.as_str())?
+                .is_some()
+                && repo.work_session(work_id)?.is_some_and(|work| {
+                    work.companion_id == *companion_id
+                        && work.client_id.as_deref() == target
+                        && work.status != ene_domain::WorkStatus::Closed
+                })
+                && repo
+                    .active_run(work_id)?
+                    .is_some_and(|run| run.run_id == *run_id)
+        }
+        DeviceScope::Legacy { .. } => false,
+    })
+}
+
+fn capability_still_authorized(
+    rules: &[permission::PolicyRule],
+    client: Option<&Client>,
+    operation: &DeviceOperation,
+) -> bool {
+    let Some(client) = client.filter(|client| client.is_granted(&operation.capability)) else {
+        return false;
+    };
+    let spec = client.spec(&operation.capability);
+    if spec.is_some_and(|spec| super::validate_input(spec, &operation.input).is_err()) {
+        return false;
     }
-    Ok(store
-        .client_repo()
-        .activation_for_client(&operation.client_id)?
-        .unwrap_or_default())
+    let arguments = json!({"capability": operation.capability, "input": operation.input});
+    let verdict = ene_policy::decide_capability(
+        rules,
+        spec,
+        &operation.capability,
+        "device_request",
+        &arguments,
+    );
+    !matches!(verdict, ene_policy::Verdict::Deny { .. })
 }
 
 /// Replays operations that were never delivered after a client reconnects.
 pub(crate) fn resend(
     ctx: &DeviceDispatchContext<'_>,
     client: &str,
-    mut invalidate_computer_operation: impl FnMut(&str),
+    mut reject: impl FnMut(&str, Option<&Failure>),
 ) -> Result<()> {
     let repo = ctx.store.client_repo();
-    let active = repo.activation_for_client(client)?;
-    for operation in repo.outstanding_operations(client)? {
-        if operation.status != DeviceStatus::Pending
-            || (operation.work_id.is_none() && active.is_none())
-        {
-            continue;
-        }
+    let mut pending = repo
+        .outstanding_operations(client)?
+        .into_iter()
+        .filter(|operation| operation.status == DeviceStatus::Pending)
+        .peekable();
+    if pending.peek().is_none() {
+        return Ok(());
+    }
+    let declaration = repo.client(client)?;
+    let rules = ctx.store.policy_repo().policy_rules()?;
+    for operation in pending {
         if operation.capability == w::COMPUTER_USE {
-            invalidate_computer_operation(&operation.id);
+            reject(&operation.id, None);
+        } else if scope_is_live(ctx.store, &operation)?
+            && capability_still_authorized(&rules, declaration.as_ref(), &operation)
+        {
+            let _status = dispatch(ctx, &operation, None)?;
         } else {
-            let _status = dispatch(ctx, &operation, None, active.as_deref())?;
+            let failure = Failure::new(
+                "operation_authority_changed",
+                "the operation's owner or permission changed before it was dispatched",
+            );
+            let _saved = repo.complete_operation(&operation.id, Err(&failure))?;
+            reject(&operation.id, Some(&failure));
         }
     }
     Ok(())
@@ -311,7 +368,7 @@ mod tests {
             client_id: "desk".into(),
             capability: "body.motion".into(),
             input: json!({"motion": "nod"}),
-            work_id: None,
+            scope: DeviceScope::Companion(CompanionId::parse("ene").unwrap()),
             status: DeviceStatus::Pending,
             output: None,
             failure: None,
@@ -324,7 +381,7 @@ mod tests {
             hub: &hub,
             notifier: &Notifier::new(),
         };
-        let send = || dispatch(&context, &operation, None, Some("ene"));
+        let send = || dispatch(&context, &operation, None);
         let reserved: Vec<_> = (0..receiver.max_capacity())
             .map(|_| hub.reserve("desk").unwrap())
             .collect();

@@ -285,6 +285,35 @@ fn v8_activation_migration_preserves_live_rows_and_rejects_orphans() {
 }
 
 #[test]
+fn v11_operations_without_a_recorded_owner_are_never_replayed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("host.sqlite3");
+    {
+        let mut conn = Connection::open(&path).unwrap();
+        let mut steps = ladder_steps();
+        steps.truncate(11);
+        apply_ladder(&mut conn, steps).unwrap();
+        conn.execute_batch(
+            "INSERT INTO device_operations
+                (operation_id, client_id, capability, input, work_id, status, created_at, updated_at)
+             VALUES
+                ('queued', 'desk', 'device.files', '{}', 'work-1', 'pending', '2026-01-01', '2026-01-01'),
+                ('sent', 'desk', 'device.files', '{}', 'work-1', 'dispatched', '2026-01-01', '2026-01-01');",
+        )
+        .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let repo = store.client_repo();
+    let queued = repo.operation("queued").unwrap().unwrap();
+    assert_eq!(queued.status, ene_domain::DeviceStatus::Failed);
+    assert_eq!(queued.scope.work_id(), Some("work-1"));
+    assert_eq!(queued.failure.unwrap().code, "operation_owner_unknown");
+    let sent = repo.operation("sent").unwrap().unwrap();
+    assert_eq!(sent.status, ene_domain::DeviceStatus::Dispatched);
+    assert_eq!(sent.scope.work_id(), Some("work-1"));
+}
+
+#[test]
 fn refuses_pre_baseline_versions_without_modifying_database() {
     let mut v0_populated = Connection::open_in_memory().unwrap();
     v0_populated

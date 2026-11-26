@@ -18,7 +18,7 @@ pub mod work;
 
 pub use best_effort::{debug_if_err, warn_if_err};
 pub use binding::{BodyBinding, ModelAssignment, ModelAssignments, VoiceBinding};
-pub use client::{Activation, Client, DeviceOperation, DeviceStatus};
+pub use client::{Activation, Client, DeviceOperation, DeviceScope, DeviceStatus};
 pub use ene_policy::{COMPUTER_USE, PolicyEffect, PolicyRule, PolicyText, RiskLevel};
 pub use error::{DomainError, validate_id};
 pub use failure::Failure;

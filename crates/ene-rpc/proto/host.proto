@@ -757,7 +757,7 @@ message DeviceOperation {
   string subscription_id = 4;
   string client_id = 5;             // 受付時に束縛した対象クライアント
   optional string work_id = 7;      // 手からの操作の場合のWorkSession
-  optional string run_id = 8;       // Computer Use を発行した実行中の Run
+  optional string run_id = 8;       // 手からの操作を発行した Run
   string companion_id = 9;          // 操作を要求したコンパニオン
 }
 message DeviceReady { string subscription_id = 1; }

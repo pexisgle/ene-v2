@@ -162,12 +162,22 @@ impl<'a> AgentKernel<'a> {
             hub: &services.hub,
             notifier: &services.notifier,
         };
-        client::device::resend(&context, client_id, |operation| {
-            client::device::uncertain(
-                world,
-                operation,
-                "Computer Use operations are never replayed",
-            );
+        client::device::resend(&context, client_id, |operation, failure| {
+            if let Some(failure) = failure {
+                let waiter = world
+                    .resource_mut::<crate::host::resources::Waiting>()
+                    .by_operation
+                    .remove(operation);
+                if let Some(waiter) = waiter {
+                    permission::refuse(world, waiter.call, &failure.message);
+                }
+            } else {
+                client::device::uncertain(
+                    world,
+                    operation,
+                    "Computer Use operations are never replayed",
+                );
+            }
         })
     }
 
