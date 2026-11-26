@@ -23,6 +23,7 @@ fn spawn(state: &Path, runtime: &Path) -> Box<dyn ChildWrapper> {
             .env("ENE_HOST_STATE_DIR", state)
             .env("ENE_HOST_RUNTIME_DIR", runtime)
             .env("ENE_HOST_SESSION_CREDENTIALS", "1")
+            .env_remove("ENE_HOST_ALLOWED_CAPABILITIES")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
     })
@@ -461,6 +462,85 @@ async fn process_client_opens_the_bidirectional_voice_stream() {
     .expect("the answer is not a transport failure")
     .expect("the host sends a frame");
     assert!(answered.view().is_speaking);
+    stop(&mut child).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn settings_changes_grant_and_revoke_an_active_clients_capability() {
+    use ene_rpc as w;
+
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    let runtime = temp.path().join("runtime");
+    let mut child = spawn(&state, &runtime);
+    let (endpoint, token) = discovery(&runtime).await;
+    let (transport, config) = w::connect(&endpoint, &token).unwrap();
+    let settings = w::SettingsServiceClient::new(transport.clone(), config.clone());
+    let clients = w::ClientServiceClient::new(transport, config);
+    let registered = clients
+        .register_client(w::RegisterClientRequest {
+            id: "desk".into(),
+            name: "desk".into(),
+            platform: "linux".into(),
+            capabilities: vec!["body.motion".into()],
+            capability_specs: vec![w::ClientCapabilitySpec {
+                name: "body.motion".into(),
+                tool_name: "body_motion".into(),
+                approval: w::CapabilityApproval::Auto.into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let revision = registered.view().revision;
+    assert!(registered.view().granted_capabilities.is_empty());
+    clients
+        .activate(w::ActivationRequest {
+            companion_id: "ene".into(),
+            client_id: "desk".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let rule = w::PolicyRule {
+        id: "motion-grant".into(),
+        tool_name: "client_capability".into(),
+        pattern: "body.motion".into(),
+        effect: w::PolicyEffect::Allow.into(),
+        ..Default::default()
+    };
+    settings
+        .update_policy_rules(w::UpdatePolicyRulesRequest {
+            add_or_update: vec![rule],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let granted = clients.list(w::Empty::default()).await.unwrap();
+    let desk = granted.view().items.iter().next().unwrap();
+    assert_eq!(
+        desk.granted_capabilities
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        ["body.motion"]
+    );
+    assert_eq!(desk.revision, revision);
+
+    settings
+        .update_policy_rules(w::UpdatePolicyRulesRequest {
+            remove_ids: vec!["motion-grant".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let revoked = clients.list(w::Empty::default()).await.unwrap();
+    let desk = revoked.view().items.iter().next().unwrap();
+    assert!(desk.granted_capabilities.is_empty());
+    assert_eq!(desk.revision, revision);
     stop(&mut child).await;
 }
 

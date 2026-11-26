@@ -182,7 +182,8 @@ pub(crate) fn delete(world: &mut World, id: &str) -> Result<()> {
     if let Some(entity) = agent::agent_of(world, id) {
         world.trigger(Retire { entity });
     }
-    ene_domain::warn_if_err(super::client::dynamic::sync_tools(world), "tool resync");
+    use super::client::dynamic::{PublicationChange, sync_tools};
+    ene_domain::warn_if_err(sync_tools(world, PublicationChange::Refresh), "tool resync");
     Ok(())
 }
 

@@ -12,16 +12,27 @@ use ene_domain::{Activation, Client, DeviceOperation, DeviceStatus, Failure};
 use ene_policy::CapabilitySpec;
 use rusqlite::{OptionalExtension, Row, params};
 
-row_fields!(Client, CLIENT_COLUMNS {
-    id,
-    name,
-    platform,
-    capabilities => json_column("stored client JSON is corrupt"),
-    granted_capabilities => json_column("stored client JSON is corrupt"),
-    capability_specs => json_column("stored client JSON is corrupt"),
-    revision,
-    last_seen,
-});
+const CLIENT_COLUMNS: &str =
+    "id, name, platform, capabilities, capability_specs, revision, last_seen";
+
+impl FromRow for Client {
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            name: row.get("name")?,
+            platform: row.get("platform")?,
+            capabilities: json_column(row, "capabilities", "stored client JSON is corrupt")?,
+            capability_specs: json_column(
+                row,
+                "capability_specs",
+                "stored client JSON is corrupt",
+            )?,
+            revision: row.get("revision")?,
+            last_seen: row.get("last_seen")?,
+            granted_capabilities: Vec::new(),
+        })
+    }
+}
 
 const OPERATION_COLUMNS: &str = "operation_id, client_id, capability, input, \
      work_id, status, output, failure, created_at, updated_at";
@@ -73,29 +84,44 @@ impl<'a> ClientRepo<'a> {
     }
 
     pub fn clients(&self) -> Result<Vec<Client>> {
-        self.0.fetch_all(
+        let mut clients = self.0.fetch_all::<Client>(
             &format!("SELECT {CLIENT_COLUMNS} FROM clients ORDER BY last_seen DESC, id"),
             [],
             Client::from_row,
-        )
+        )?;
+        self.project_grants(&mut clients)?;
+        Ok(clients)
     }
 
     pub fn client(&self, id: &str) -> Result<Option<Client>> {
-        self.0.fetch(
+        let mut client = self.0.fetch(
             &format!("SELECT {CLIENT_COLUMNS} FROM clients WHERE id = ?1"),
             [id],
             Client::from_row,
-        )
+        )?;
+        self.project_grants(client.as_mut_slice())?;
+        Ok(client)
     }
 
-    /// Registers or re-registers a client, persisting exactly the grants the
-    /// host's policy decided. `expected_revision` must match what the client
-    /// last saw; the database never derives a grant from a declaration.
-    pub fn register_client_with_grants(
-        &self,
-        declaration: &ClientDeclaration<'_>,
-        granted: &[String],
-    ) -> Result<Client> {
+    fn project_grants(&self, clients: &mut [Client]) -> Result<()> {
+        if !clients.is_empty() {
+            let rules = self.0.policy_repo().capability_rules()?;
+            for client in clients {
+                client.granted_capabilities = self.0.grants.granted(&client.capabilities, &rules);
+            }
+        }
+        Ok(())
+    }
+
+    fn client_revision(&self, id: &str) -> Result<Option<u64>> {
+        self.0
+            .fetch("SELECT revision FROM clients WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+    }
+
+    /// Registers or re-registers a client against the revision it last saw.
+    pub fn register_client(&self, declaration: &ClientDeclaration<'_>) -> Result<Client> {
         let ClientDeclaration {
             id,
             name,
@@ -105,8 +131,7 @@ impl<'a> ClientRepo<'a> {
             expected_revision,
         } = *declaration;
         validate_id(id)?;
-        let existing = self.client(id)?;
-        let current = existing.as_ref().map_or(0, |client| client.revision);
+        let current = self.client_revision(id)?.unwrap_or_default();
         if expected_revision != current {
             return Err(StoreError::Conflict(
                 "client changed since it was registered".into(),
@@ -117,12 +142,12 @@ impl<'a> ClientRepo<'a> {
             .0
             .conn()
             .prepare_cached(&format!(
-                "INSERT INTO clients (id, name, platform, capabilities, granted_capabilities, \
-                 capability_specs, revision, last_seen) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                "INSERT INTO clients (id, name, platform, capabilities, capability_specs, \
+                 revision, last_seen) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
                  ON CONFLICT(id) DO UPDATE SET name = excluded.name, platform = excluded.platform, \
-                 capabilities = excluded.capabilities, granted_capabilities = excluded.granted_capabilities, \
+                 capabilities = excluded.capabilities, \
                  capability_specs = excluded.capability_specs, revision = excluded.revision, \
-                 last_seen = excluded.last_seen WHERE clients.revision = ?9 \
+                 last_seen = excluded.last_seen WHERE clients.revision = ?8 \
                  RETURNING {CLIENT_COLUMNS}"
             ))?
             .query_row(
@@ -131,7 +156,6 @@ impl<'a> ClientRepo<'a> {
                     name,
                     platform,
                     to_json(capabilities)?,
-                    to_json(granted)?,
                     to_json(specs)?,
                     revision,
                     now(),
@@ -139,60 +163,54 @@ impl<'a> ClientRepo<'a> {
                 ],
                 Client::from_row,
             );
-        changed
+        let mut client = changed
             .optional()?
-            .ok_or_else(|| StoreError::Conflict("client changed since it was registered".into()))
+            .ok_or_else(|| StoreError::Conflict("client changed since it was registered".into()))?;
+        self.project_grants(std::slice::from_mut(&mut client))?;
+        Ok(client)
     }
 
-    /// Test helper for registering a client that is granted nothing.
-    /// Production registration passes its policy decision through
-    /// [`register_client_with_grants`](Self::register_client_with_grants).
-    pub fn register_client(&self, declaration: &ClientDeclaration<'_>) -> Result<Client> {
-        self.register_client_with_grants(declaration, &[])
-    }
-
-    /// Replaces the declaration of a client and persists exactly the grants
-    /// the host decided.
+    /// Replaces a client's declaration against the revision it last saw.
     pub fn set_capabilities(
         &self,
         id: &str,
         capabilities: &[String],
-        granted: &[String],
         specs: &[CapabilitySpec],
         revision: u64,
     ) -> Result<Client> {
-        let existing = self
-            .client(id)?
+        let current = self
+            .client_revision(id)?
             .ok_or_else(|| StoreError::NotFound("client not found".into()))?;
-        if revision != existing.revision {
+        if revision != current {
             return Err(StoreError::Conflict(
                 "client changed since it was read".into(),
             ));
         }
-        let next = existing.revision + 1;
+        let next = current + 1;
         let changed = self
             .0
             .conn()
             .prepare_cached(&format!(
-                "UPDATE clients SET capabilities = ?2, granted_capabilities = ?3, \
-                 capability_specs = ?4, revision = ?5, last_seen = ?6 \
-                 WHERE id = ?1 AND revision = ?7 RETURNING {CLIENT_COLUMNS}"
+                "UPDATE clients SET capabilities = ?2, capability_specs = ?3, \
+                 revision = ?4, last_seen = ?5 \
+                 WHERE id = ?1 AND revision = ?6 RETURNING {CLIENT_COLUMNS}"
             ))?
             .query_row(
                 params![
                     id,
                     to_json(capabilities)?,
-                    to_json(granted)?,
                     to_json(specs)?,
                     next,
                     now(),
-                    existing.revision,
+                    current,
                 ],
                 Client::from_row,
             );
-        changed
+        let mut client = changed
             .optional()?
-            .ok_or_else(|| StoreError::Conflict("client changed since it was read".into()))
+            .ok_or_else(|| StoreError::Conflict("client changed since it was read".into()))?;
+        self.project_grants(std::slice::from_mut(&mut client))?;
+        Ok(client)
     }
 
     pub fn activations(&self) -> Result<Vec<Activation>> {
@@ -395,15 +413,14 @@ impl<'a> ClientRepo<'a> {
             .conn()
             .prepare_cached(
                 "INSERT OR REPLACE INTO clients (id, name, platform, capabilities, \
-                 granted_capabilities, capability_specs, revision, last_seen) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 capability_specs, revision, last_seen) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?
             .execute(params![
                 client.id,
                 client.name,
                 client.platform,
                 to_json(&client.capabilities)?,
-                to_json(&client.granted_capabilities)?,
                 to_json(&client.capability_specs)?,
                 client.revision,
                 client.last_seen,
@@ -446,53 +463,5 @@ impl<'a> ClientRepo<'a> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn operations_are_idempotent_and_bound_to_one_client() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
-        let repo = store.client_repo();
-        let operation = DeviceOperation {
-            id: "op1".into(),
-            client_id: "c1".into(),
-            capability: "body.motion".into(),
-            input: serde_json::json!({"motion": "nod"}),
-            work_id: None,
-            status: DeviceStatus::Pending,
-            output: None,
-            failure: None,
-            created_at: String::new(),
-            updated_at: String::new(),
-        };
-        repo.insert_operation(&operation).unwrap();
-        assert_eq!(repo.outstanding_operations("c1").unwrap().len(), 1);
-        repo.set_operation_status("op1", DeviceStatus::Dispatched)
-            .unwrap();
-        let completed = repo
-            .complete_operation("op1", Ok(&serde_json::json!({"ok": true})))
-            .unwrap()
-            .unwrap();
-        assert_eq!(completed.status, DeviceStatus::Completed);
-        let again = repo
-            .complete_operation("op1", Err(&Failure::new("operation_failed", "late report")))
-            .unwrap()
-            .unwrap();
-        assert_eq!(again.status, DeviceStatus::Completed);
-        repo.set_operation_status("op1", DeviceStatus::Uncertain)
-            .unwrap();
-        let saved = repo.operation("op1").unwrap().unwrap();
-        assert_eq!(saved.client_id, "c1");
-        assert_eq!(saved.status, DeviceStatus::Completed);
-        assert_eq!(saved.output, completed.output);
-        let other = DeviceOperation {
-            id: "op2".into(),
-            client_id: "c2".into(),
-            ..operation.clone()
-        };
-        repo.insert_operation(&other).unwrap();
-        assert_eq!(repo.outstanding_operations("c1").unwrap().len(), 0);
-        assert_eq!(repo.outstanding_operations("c2").unwrap().len(), 1);
-    }
-}
+#[path = "clients_tests.rs"]
+mod tests;

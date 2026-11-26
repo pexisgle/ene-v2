@@ -86,7 +86,7 @@ fn seed_v6_database(connection: &mut Connection) -> Vec<(String, String)> {
     .unwrap();
     tx.execute(
         "INSERT INTO clients (id, name, platform, capabilities, granted_capabilities, capability_specs, revision, last_seen) \
-         VALUES ('client-v6', 'Desktop', 'windows', '[]', '[]', '[]', 1, ?1)",
+         VALUES ('client-v6', 'Desktop', 'windows', '[\"device.files\"]', '[\"device.files\"]', '[]', 1, ?1)",
         [stamp],
     )
     .unwrap();
@@ -197,6 +197,8 @@ fn upgrades_v6_database_in_place_preserving_existing_rows() {
 
     let client: Client = store.client_repo().client("client-v6").unwrap().unwrap();
     assert_eq!(client.name, "Desktop");
+    assert_eq!(client.capabilities, ["device.files"]);
+    assert_eq!(client.granted_capabilities, [] as [String; 0]);
 
     let work: WorkSession = store.work_repo().work_session("work-v6").unwrap().unwrap();
     assert_eq!(work.status, WorkStatus::Active);

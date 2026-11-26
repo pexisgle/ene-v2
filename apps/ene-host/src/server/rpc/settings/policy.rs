@@ -39,25 +39,7 @@ pub(super) async fn update_policy_rules(
     }
     let remove_ids = request.remove_ids;
     services
-        .change(move |services| {
-            let store = &services.store;
-            let updated = store
-                .policy_repo()
-                .apply_policy_rules(&rules, &remove_ids)?;
-            let items: Vec<w::PolicyRule> = updated.iter().map(Into::into).collect();
-            services.notifier.push(
-                None,
-                None,
-                w::notification::Event::PolicyRulesUpdated(Box::new(w::PolicyRulesUpdated {
-                    rules: items.clone(),
-                    ..Default::default()
-                })),
-            );
-            Ok(w::PolicyRules {
-                items,
-                ..Default::default()
-            })
-        })
+        .call(move |kernel| kernel.update_policy_rules(&rules, &remove_ids))
         .await
 }
 

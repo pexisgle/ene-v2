@@ -3,7 +3,7 @@
 //! Verified `Target::Client` packages under `<desktop_data_dir>/plugins/<id>/`
 //! declare `Extension::Tool` capabilities exposed to the host as
 //! `plugin.<plugin_id>.<tool_name>` with `CapabilityApproval::Confirm` so every
-//! invocation still traverses the host's `CapabilityPolicy` and `Stage::Gate`.
+//! invocation still traverses the host's capability grants and `Stage::Gate`.
 use ene_plugin::{
     Extension, Operation, PluginToolDefinition, Target, ToolInvokeRequest, ToolInvokeResult,
 };

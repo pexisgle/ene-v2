@@ -278,7 +278,20 @@ fn a_confirm_capability_is_gated_and_delivered_to_the_bound_client() {
 
 #[test]
 fn a_client_is_granted_only_what_the_host_policy_allows() {
-    let mut harness = Harness::with_policy([], "body.motion");
+    let mut harness = Harness::with_policy(
+        [
+            vec![
+                MockStreamEvent::tool_call(
+                    "revoked-motion",
+                    "device_request",
+                    serde_json::json!({"capability": "body.motion", "input": {"motion": "nod"}}),
+                ),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            text_turn("端末の許可がありません"),
+        ],
+        "body.motion",
+    );
     let client = client::declare(
         harness.app.world_mut(),
         client::Declaration::Register(&w::RegisterClientRequest {
@@ -307,6 +320,33 @@ fn a_client_is_granted_only_what_the_host_policy_allows() {
     assert_eq!(
         published_tool(harness.app.world_mut(), "device_files"),
         None
+    );
+
+    let store = harness.store();
+    store
+        .policy_repo()
+        .apply_policy_rules(
+            &[permission::PolicyRule {
+                id: "revoke-motion".into(),
+                tool_name: "client_capability".into(),
+                pattern: "body.motion".into(),
+                effect: permission::PolicyEffect::Deny,
+                created_at: String::new(),
+            }],
+            &[],
+        )
+        .unwrap();
+    client::dynamic::sync_tools(
+        harness.app.world_mut(),
+        client::dynamic::PublicationChange::Refresh,
+    )
+    .unwrap();
+    assert_eq!(published_tool(harness.app.world_mut(), "body_motion"), None);
+    harness.accept("key-1", "うなずいて").unwrap();
+    harness.run_until_text("端末の許可がありません");
+    assert_eq!(
+        store.client_repo().outstanding_operations("c1").unwrap(),
+        [] as [ene_domain::DeviceOperation; 0]
     );
 }
 

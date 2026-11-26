@@ -47,6 +47,14 @@ impl<'a> PolicyRepo<'a> {
         )
     }
 
+    pub(crate) fn capability_rules(&self) -> Result<Vec<PolicyRule>> {
+        self.0.fetch_all(
+            &format!("SELECT {RULE_COLUMNS} FROM policy_rules WHERE tool_name IN ('client_capability', '*')"),
+            [],
+            PolicyRule::from_row,
+        )
+    }
+
     /// Applies an add-or-update and remove batch, then returns the full list.
     pub fn apply_policy_rules(
         &self,

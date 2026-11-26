@@ -54,7 +54,7 @@ WorkViewは親、WorkSession、進行中RunInfoを持つ。runには実行状態
 WorkSessionの実行バックエンドは親のtask接続で選ぶ。接続が`CONNECTION_KIND_ACP`で、その`endpoint.adapter`が名指すハーネスプラグイン（manifest `provides: ["harness"]`）が導入済みなら、そのプラグインが「手」になる（ABI 8: `Start` が `cwd` を運び、`Prompt` が生存中のセッションへ追加ターンを届ける）。それ以外はプロセス内Rigエージェントのままである。ACP接続に必須なのは`endpoint.adapter`だけで、従来の`command`/`args`は任意の外部エージェント起動用に残る。
 ## クライアント能力とデバイス操作
 
-クライアントは`RegisterClient`で、自身が提供できる能力を`capabilities`（能力名の一覧）と`capability_specs`（説明・入力スキーマ・プリセット・ツール名・承認要否）で宣言する。ホストは宣言を検証し、ユーザーの許可に基づいて`granted_capabilities`を決める。クライアントは自分自身へ権限を付与できない。`SetCapabilities`でクライアントが更新できるのは宣言であり、`granted_capabilities`はホストの許可判断の結果としてのみ変化する。
+クライアントは`RegisterClient`で、自身が提供できる能力を`capabilities`（能力名の一覧）と`capability_specs`（説明・入力スキーマ・プリセット・ツール名・承認要否）で宣言する。ホストは宣言を検証し、現在の許可に基づいて`granted_capabilities`を算出する。`SetCapabilities`でクライアントが更新できるのは宣言である。ホストで許可を変更すると、既存の宣言とアクティブな端末にも適用される。宣言のリビジョンは許可の変更で増えない。
 
 能力の許可は、操作ごとの承認を省略する包括許可ではない。`device_request`および`tool_name`経由の端末操作も、ホストの`Stage::Gate`でハード禁止、明示的毎回確認、保存ルール、入力スキーマを検証し、必要な場合は`ApprovalRequest`を発行する。`ClientCapabilitySpec.approval`が`CONFIRM`の能力は操作ごとに承認を要求し、`AUTO`でもハード禁止や「毎回確認」ポリシーを迂回できない。未指定はホストの既定ポリシーに従い、未知の能力は`CONFIRM`相当として扱う。`approval`はクライアントの申告であり、ホストのポリシーが常に優先する。`approval_target`は承認カードの対象説明テンプレートであり、ホストが検証済み入力で埋める。クライアントが自己申告する説明だけを承認の根拠にしない。
 

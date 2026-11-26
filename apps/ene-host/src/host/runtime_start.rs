@@ -13,7 +13,11 @@ impl Runtime {
         state: &Path,
         options: Options,
     ) -> std::result::Result<Self, StartError> {
-        let store = Store::open(&state.join("host.sqlite3"))?;
+        let allowed = std::env::var("ENE_HOST_ALLOWED_CAPABILITIES").unwrap_or_default();
+        let store = Store::open_with_grants(
+            &state.join("host.sqlite3"),
+            ene_policy::CapabilityGrants::parse(&allowed),
+        )?;
         store.companion_repo().seed_initial_companion()?;
         // A unit test has no operator to ask for a keyring, and the machine it
         // runs on may have none. Keeping the store in memory there makes the

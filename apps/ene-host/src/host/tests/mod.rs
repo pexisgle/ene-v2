@@ -70,7 +70,11 @@ impl Harness {
         policy: &str,
     ) -> (App, mpsc::Receiver<()>) {
         let model = MockCompletionModel::from_stream_turns(turns);
-        let store = Store::open(&state.join("host.sqlite3")).unwrap();
+        let store = Store::open_with_grants(
+            &state.join("host.sqlite3"),
+            ene_policy::CapabilityGrants::parse(policy),
+        )
+        .unwrap();
         let logs = DirStore::open(state.join("rig")).unwrap();
         let (sender, wakes) = mpsc::channel();
         let mut app = App::new();
@@ -78,7 +82,6 @@ impl Harness {
             .add_plugins(TaskPoolPlugin::default())
             .insert_resource(store)
             .insert_resource(super::model::Credentials::new(true))
-            .insert_resource(client::CapabilityPolicy::parse(policy))
             .insert_resource(DeviceHub::default())
             .insert_resource(super::HostState::default())
             .insert_resource(super::notify::Notifier::new())

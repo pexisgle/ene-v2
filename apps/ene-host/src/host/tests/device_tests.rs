@@ -175,7 +175,11 @@ fn assert_hand_never_sees_capability_tools(harness: &mut Harness) {
         "run-1",
         "do the task",
     );
-    client::dynamic::sync_tools(harness.app.world_mut()).unwrap();
+    client::dynamic::sync_tools(
+        harness.app.world_mut(),
+        client::dynamic::PublicationChange::Refresh,
+    )
+    .unwrap();
     let access = harness.app.world().get::<ToolAccess>(hand).unwrap();
     assert!(!access.allows("body_motion"));
     assert!(access.allows("report") && access.allows("device_request"));

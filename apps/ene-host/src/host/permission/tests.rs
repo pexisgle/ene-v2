@@ -242,17 +242,14 @@ fn register_files_client(store: &Store) {
     let capability = "device.files".to_owned();
     store
         .client_repo()
-        .register_client_with_grants(
-            &crate::host::db::clients::ClientDeclaration {
-                id: "c1",
-                name: "c1",
-                platform: "linux",
-                capabilities: &[capability],
-                specs: std::slice::from_ref(&files_spec()),
-                expected_revision: 0,
-            },
-            &["device.files".to_owned()],
-        )
+        .register_client(&crate::host::db::clients::ClientDeclaration {
+            id: "c1",
+            name: "c1",
+            platform: "linux",
+            capabilities: &[capability],
+            specs: std::slice::from_ref(&files_spec()),
+            expected_revision: 0,
+        })
         .unwrap();
     store.client_repo().activate("ene", Some("c1")).unwrap();
 }
@@ -271,7 +268,11 @@ struct DecisionWorld {
 impl DecisionWorld {
     fn at(runtime: &tokio::runtime::Runtime, provider: &str, owner: &Companion) -> Self {
         let root = tempfile::tempdir().unwrap();
-        let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
+        let store = Store::open_with_grants(
+            &root.path().join("host.sqlite3"),
+            ene_policy::CapabilityGrants::parse("device.files"),
+        )
+        .unwrap();
         store
             .settings_repo()
             .update_settings(
@@ -795,123 +796,6 @@ fn b20_confirm_rule_is_never_bypassed_by_decision_allow() {
 }
 
 #[test]
-fn a_decision_reply_based_on_old_policy_cannot_release_a_call() {
-    let runtime = paused_runtime();
-    let provider = runtime.block_on(serve(
-        r#"{"decision":"allow","reason":"safe under the previous policy"}"#,
-        Duration::from_secs(1),
-    ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
-    let call = world.gated_call("/tmp/x");
-    world.app.update();
-    let request = world.pending().request_id;
-    assert_eq!(world.app.world().resource::<Decisions>().running.len(), 1);
-    world
-        .store()
-        .policy_repo()
-        .apply_policy_texts(
-            &[PolicyText {
-                id: "policy-changed".into(),
-                text: "ファイル操作は毎回確認する".into(),
-                created_at: String::new(),
-            }],
-            &[],
-        )
-        .unwrap();
-    settle(&mut world.app, &runtime);
-    assert_eq!(provider.bodies.lock().len(), 1);
-    assert_eq!(cards(&world.events()), vec![request]);
-    assert_eq!(world.pending().status, ApprovalStatus::Pending);
-    assert!(world.app.world().get::<Approved>(call).is_none());
-    provider.task.abort();
-}
-
-#[test]
-fn a_saved_deny_blocks_operator_approval_on_the_same_client() {
-    let runtime = paused_runtime();
-    let provider = runtime.block_on(serve("unused", STALL));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
-    let call = world.gated_call("/tmp/x");
-    world.app.update();
-    let request = world.pending().request_id;
-    world
-        .store()
-        .policy_repo()
-        .apply_policy_rules(
-            &[PolicyRule {
-                id: "deny-x".into(),
-                tool_name: "device.files".into(),
-                pattern: "/tmp/x".into(),
-                effect: PolicyEffect::Deny,
-                created_at: String::new(),
-            }],
-            &[],
-        )
-        .unwrap();
-    assert!(matches!(
-        submit(world.app.world_mut(), &request, ApprovalDecision::Approve),
-        Err(HostError::Permission(_))
-    ));
-    let approval = world
-        .store()
-        .approval_repo()
-        .approval(&request)
-        .unwrap()
-        .unwrap();
-    assert_eq!(approval.status, ApprovalStatus::Denied);
-    assert!(world.app.world().get::<Approved>(call).is_none());
-    assert_eq!(
-        world
-            .store()
-            .client_repo()
-            .outstanding_operations("c1")
-            .unwrap(),
-        [] as [ene_domain::DeviceOperation; 0]
-    );
-    provider.task.abort();
-}
-
-#[test]
-fn b06_submit_keeps_hold_when_bound_client_loses_grant() {
-    let runtime = paused_runtime();
-    let provider = runtime.block_on(serve(
-        r#"{"decision":"require_approval","reason":"ask"}"#,
-        Duration::ZERO,
-    ));
-    let mut world = DecisionWorld::at(&runtime, &provider.base, &decision_companion());
-    let call = world.gated_call("/tmp/a");
-    world.app.update();
-    let request = world.pending().request_id;
-    let mut client = world.store().client_repo().client("c1").unwrap().unwrap();
-    client.granted_capabilities.clear();
-    world.store().client_repo().restore_client(&client).unwrap();
-
-    let err = submit(world.app.world_mut(), &request, ApprovalDecision::Approve).unwrap_err();
-    assert!(matches!(err, HostError::Conflict(_)));
-    assert_eq!(
-        world
-            .store()
-            .approval_repo()
-            .approval(&request)
-            .unwrap()
-            .unwrap()
-            .status,
-        ApprovalStatus::Pending
-    );
-    assert!(
-        world
-            .app
-            .world()
-            .resource::<Approvals>()
-            .by_request
-            .contains_key(&request),
-        "hold remains intact after pre-commit failure"
-    );
-    assert!(world.app.world().get::<Approved>(call).is_none());
-    provider.task.abort();
-}
-
-#[test]
 fn b18_large_always_approve_persists_exact_digest_rule_and_skips_second_prompt() {
     let runtime = paused_runtime();
     let provider = runtime.block_on(serve(
@@ -994,3 +878,6 @@ fn b05_policy_read_failure_fails_closed_instead_of_treating_as_empty() {
     assert!(world.app.world().get::<Approved>(call).is_none());
     provider.task.abort();
 }
+
+#[path = "policy_change_tests.rs"]
+mod policy_change_tests;

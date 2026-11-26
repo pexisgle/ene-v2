@@ -5,6 +5,7 @@
 // reports zero for it. The workspace cannot enable it centrally yet, because a
 // crate cannot override `[lints] workspace = true`.
 pub mod capability;
+mod grants;
 mod hard_deny;
 mod risk;
 pub mod rules;
@@ -18,6 +19,7 @@ pub use capability::{
     BUILTIN_TOOLS, COMPUTER_USE, CapabilityApproval, CapabilitySpec, WORKSPACE_CAPABILITY_PREFIX,
     approval_target, validate_declarations,
 };
+pub use grants::CapabilityGrants;
 pub use hard_deny::{hard_denied, hard_denied_action, is_host_tool};
 
 /// Error raised when a pure domain value violates structural or format constraints.

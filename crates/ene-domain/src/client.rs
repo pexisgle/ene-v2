@@ -17,7 +17,7 @@ pub struct Client {
     pub platform: String,
     /// Capabilities the client declared at registration.
     pub capabilities: Vec<String>,
-    /// Declared capabilities the host has since granted.
+    /// Declared capabilities authorized by the host's current policy.
     pub granted_capabilities: Vec<String>,
     /// Schema and approval policy for each declared capability.
     pub capability_specs: Vec<CapabilitySpec>,

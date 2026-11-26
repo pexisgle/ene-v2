@@ -8,8 +8,18 @@ pub(crate) use ene_store::{clients, memories, plugins, schedules, work};
 pub(crate) struct Store(ene_store::Store);
 
 impl Store {
+    #[cfg(test)]
     pub(crate) fn open(path: &std::path::Path) -> Result<Self> {
         ene_store::Store::open(path).map(Self).map_err(Into::into)
+    }
+
+    pub(crate) fn open_with_grants(
+        path: &std::path::Path,
+        grants: ene_policy::CapabilityGrants,
+    ) -> Result<Self> {
+        ene_store::Store::open_with_grants(path, grants)
+            .map(Self)
+            .map_err(Into::into)
     }
 }
 

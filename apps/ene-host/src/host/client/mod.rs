@@ -39,7 +39,6 @@ pub(crate) mod device_dispatch;
 pub(crate) mod device_result;
 pub(crate) mod dynamic;
 mod perception;
-mod policy;
 
 use super::{
     db::Store,
@@ -48,6 +47,7 @@ use super::{
     wire,
 };
 use bevy_ecs::prelude::*;
+use dynamic::PublicationChange;
 use ene_rpc as w;
 use rig_ecs::prelude::*;
 use serde_json::Value;
@@ -55,7 +55,6 @@ use serde_json::Value;
 pub(crate) use perception::ingest_perception;
 #[cfg(test)]
 pub(crate) use perception::report_perception;
-pub(crate) use policy::CapabilityPolicy;
 
 #[derive(Clone, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct DeviceRequestArgs {
@@ -92,7 +91,6 @@ impl Plugin for ClientPlugin {
             device::describe_device_request.in_set(PrepareSystems::Edit),
         )
         .insert_resource(dynamic::CapabilityCalls::new(wake))
-        .init_resource::<CapabilityPolicy>()
         .init_resource::<computer::ComputerUse>()
         .init_resource::<super::eyes::Eyes>()
         .add_systems(
@@ -142,7 +140,7 @@ fn declarations(
     Ok(specs)
 }
 
-/// The host computes grants for both first registration and declaration replacement.
+/// Two ways a client can update its declaration.
 #[derive(Clone, Copy)]
 pub(crate) enum Declaration<'a> {
     Register(&'a w::RegisterClientRequest),
@@ -171,32 +169,27 @@ pub(crate) fn declare(world: &mut World, declaration: Declaration<'_>) -> Result
         ));
     }
     let store = world.resource::<Store>().clone();
-    let rules = store.policy_repo().policy_rules()?;
-    let granted = world
-        .resource::<CapabilityPolicy>()
-        .grants_with_rules(capabilities, &rules);
     let repo = store.client_repo();
     let previous = repo.client(id)?;
     let client = match declaration {
-        Declaration::Register(request) => repo.register_client_with_grants(
-            &super::db::clients::ClientDeclaration {
+        Declaration::Register(request) => {
+            repo.register_client(&super::db::clients::ClientDeclaration {
                 id,
                 name: &request.name,
                 platform: &request.platform,
                 capabilities,
                 specs: &specs,
                 expected_revision: request.expected_revision,
-            },
-            &granted,
-        )?,
+            })?
+        }
         Declaration::Replace(request) => {
-            repo.set_capabilities(id, capabilities, &granted, &specs, request.revision)?
+            repo.set_capabilities(id, capabilities, &specs, request.revision)?
         }
     };
     let result = (|| -> Result<w::Client> {
         let active = repo.active_companions_for_client(id)?;
         let view = wire::client(&client, world.resource::<DeviceHub>().connected(id), active);
-        dynamic::sync_tools(world)?;
+        dynamic::sync_tools(world, PublicationChange::Client(id))?;
         if !client.is_granted(w::COMPUTER_USE) {
             computer::invalidate_client(world, id, None);
         }
@@ -212,12 +205,15 @@ pub(crate) fn declare(world: &mut World, declaration: Declaration<'_>) -> Result
         } else if let Declaration::Register(_) = declaration {
             ene_domain::warn_if_err(repo.delete_client(id), "rejected client cleanup");
         }
-        ene_domain::warn_if_err(dynamic::sync_tools(world), "tool resync");
+        ene_domain::warn_if_err(
+            dynamic::sync_tools(world, PublicationChange::Refresh),
+            "tool resync",
+        );
     }
     result
 }
 
-fn notify_client(notifier: &Notifier, client: &w::Client) {
+pub(super) fn notify_client(notifier: &Notifier, client: &w::Client) {
     notifier.push(
         None,
         Some(&client.id),
@@ -252,7 +248,9 @@ pub(crate) fn activate(world: &mut World, request: &w::ActivationRequest) -> Res
         .activate(&request.companion_id, client)?;
     // Publish the new active client first: a conflicting tool declaration must
     // roll the move back before any notification is visible.
-    if let Err(error) = dynamic::sync_tools(world) {
+    if let Err(error) =
+        dynamic::sync_tools(world, PublicationChange::Companion(&request.companion_id))
+    {
         if let Some(previous) = previous.as_ref() {
             ene_domain::warn_if_err(
                 store.client_repo().restore_activation(previous),
@@ -264,7 +262,10 @@ pub(crate) fn activate(world: &mut World, request: &w::ActivationRequest) -> Res
                 "rejected activation cleanup",
             );
         }
-        ene_domain::warn_if_err(dynamic::sync_tools(world), "tool resync");
+        ene_domain::warn_if_err(
+            dynamic::sync_tools(world, PublicationChange::Refresh),
+            "tool resync",
+        );
         return Err(error);
     }
     if let Some(previous) = previous
@@ -361,43 +362,5 @@ mod tests {
             ..motion()
         };
         assert!(validate_declarations(&["body.motion".into()], &[shadow]).is_err());
-    }
-
-    #[test]
-    fn f11_dynamic_capability_policy_prefix_and_rules() {
-        let mut policy = CapabilityPolicy::parse("body.motion");
-        let declared = vec![
-            "body.motion".to_owned(),
-            "plugin.echo.run".to_owned(),
-            "plugin.other.run".to_owned(),
-        ];
-        assert_eq!(policy.grants(&declared), vec!["body.motion"]);
-        policy.allow_pattern("plugin.echo.*");
-        assert_eq!(
-            policy.grants(&declared),
-            vec!["body.motion", "plugin.echo.run"]
-        );
-        policy.revoke_pattern("plugin.echo.*");
-        assert_eq!(policy.grants(&declared), vec!["body.motion"]);
-        let rules = vec![
-            super::super::permission::PolicyRule {
-                id: "allow-plugins".into(),
-                tool_name: "client_capability".into(),
-                pattern: "plugin.*".into(),
-                effect: super::super::permission::PolicyEffect::Allow,
-                created_at: "2026-11-20T00:00:00Z".into(),
-            },
-            super::super::permission::PolicyRule {
-                id: "deny-other".into(),
-                tool_name: "client_capability".into(),
-                pattern: "plugin.other.*".into(),
-                effect: super::super::permission::PolicyEffect::Deny,
-                created_at: "2026-11-20T00:00:00Z".into(),
-            },
-        ];
-        assert_eq!(
-            policy.grants_with_rules(&declared, &rules),
-            vec!["body.motion", "plugin.echo.run"]
-        );
     }
 }

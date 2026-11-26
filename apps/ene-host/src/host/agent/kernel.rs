@@ -96,6 +96,55 @@ impl<'a> AgentKernel<'a> {
         client::declare(self.app.world_mut(), client::Declaration::Replace(request))
     }
 
+    pub(crate) fn update_policy_rules(
+        &mut self,
+        additions: &[permission::PolicyRule],
+        removals: &[String],
+    ) -> Result<w::PolicyRules> {
+        use client::dynamic::{PublicationChange, sync_tools};
+
+        let services = self.services;
+        let old = client::clients(&services.store, &services.hub)?;
+        let rules = services
+            .store
+            .policy_repo()
+            .apply_policy_rules(additions, removals)?;
+        let world = self.app.world_mut();
+        if let Err(error) = sync_tools(world, PublicationChange::Refresh) {
+            crate::host::fail(world, &error.to_string());
+            return Err(error);
+        }
+        for current in client::clients(&services.store, &services.hub)? {
+            let previous = old.iter().find(|entry| entry.id == current.id);
+            if previous
+                .is_some_and(|entry| entry.granted_capabilities == current.granted_capabilities)
+            {
+                continue;
+            }
+            if !current
+                .granted_capabilities
+                .iter()
+                .any(|name| name == w::COMPUTER_USE)
+            {
+                client::computer::invalidate_client(world, &current.id, None);
+            }
+            client::notify_client(&services.notifier, &current);
+        }
+        let items: Vec<_> = rules.iter().map(Into::into).collect();
+        services.notifier.push(
+            None,
+            None,
+            w::notification::Event::PolicyRulesUpdated(Box::new(w::PolicyRulesUpdated {
+                rules: items.clone(),
+                ..Default::default()
+            })),
+        );
+        Ok(w::PolicyRules {
+            items,
+            ..Default::default()
+        })
+    }
+
     pub(crate) fn activate_client(
         &mut self,
         request: &w::ActivationRequest,

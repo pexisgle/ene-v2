@@ -58,7 +58,10 @@ fn configure_connection(connection: &Connection) -> rusqlite::Result<()> {
 
 /// The relational state store shared across repositories and host systems.
 #[derive(Clone)]
-pub struct Store(Arc<Mutex<Connection>>);
+pub struct Store {
+    connection: Arc<Mutex<Connection>>,
+    grants: Arc<ene_policy::CapabilityGrants>,
+}
 
 impl fmt::Debug for Store {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -69,6 +72,11 @@ impl fmt::Debug for Store {
 impl Store {
     /// Opens `path`, validates/initializes the schema, and applies pending migrations.
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_grants(path, ene_policy::CapabilityGrants::default())
+    }
+
+    /// Opens state with the host's startup capability policy.
+    pub fn open_with_grants(path: &Path, grants: ene_policy::CapabilityGrants) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| StoreError::Storage(format!("state directory: {error}")))?;
@@ -77,12 +85,15 @@ impl Store {
         migrations::validate_open_version(&connection)?;
         configure_connection(&connection)?;
         migrations::apply_migrations(&mut connection)?;
-        Ok(Self(Arc::new(Mutex::new(connection))))
+        Ok(Self {
+            connection: Arc::new(Mutex::new(connection)),
+            grants: Arc::new(grants),
+        })
     }
 
     /// Borrows the primary SQLite connection under its mutual-exclusion lock.
     pub fn conn(&self) -> MutexGuard<'_, Connection> {
-        self.0.lock()
+        self.connection.lock()
     }
 
     /// Opens a second read-write connection to the same database file with the
@@ -99,7 +110,10 @@ impl Store {
             })?;
         let connection = open_connection(Path::new(path))?;
         configure_connection(&connection)?;
-        Ok(Self(Arc::new(Mutex::new(connection))))
+        Ok(Self {
+            connection: Arc::new(Mutex::new(connection)),
+            grants: self.grants.clone(),
+        })
     }
 
     /// Clears learned state with a durable commit so an interrupted offline reset can resume.

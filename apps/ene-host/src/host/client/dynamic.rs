@@ -200,10 +200,12 @@ impl Serve for CapabilityHandler {
 
 /// The capability tools every active client grants, one definition per tool
 /// name. Declarations of a name with a different description or input schema
-/// are an explicit conflict.
-fn desired(store: &Store) -> Result<Vec<(String, CapabilityTool)>> {
+/// are an explicit conflict. A policy change can make a previously dormant
+/// conflict visible; omit its named tool while generic operations remain gated.
+fn desired(store: &Store, change: PublicationChange<'_>) -> Result<Vec<(String, CapabilityTool)>> {
     let mut desired: Vec<(String, CapabilityTool)> = Vec::new();
     let mut by_name: HashMap<String, usize> = HashMap::new();
+    let mut conflicts = HashSet::new();
     for activation in store.client_repo().activations()? {
         let Some(client_id) = activation.client_id else {
             continue;
@@ -226,11 +228,18 @@ fn desired(store: &Store) -> Result<Vec<(String, CapabilityTool)>> {
                     if first.tool_description() != spec.tool_description()
                         || json::parse_schema(&first.input_schema)? != parameters
                     {
-                        return Err(HostError::Conflict(format!(
-                            "tool name `{name}` is declared with a different description or \
-                             input schema by companions `{}` and `{}`",
-                            tool.bindings[0].companion_id, activation.companion_id
-                        )));
+                        if change.affects(&binding)
+                            || tool.bindings.iter().any(|b| change.affects(b))
+                        {
+                            return Err(HostError::Conflict(format!(
+                                "tool name `{name}` is declared with a different description or \
+                                 input schema by companions `{}` and `{}`",
+                                tool.bindings[0].companion_id, activation.companion_id
+                            )));
+                        }
+                        if conflicts.insert(name.clone()) {
+                            tracing::warn!(tool = %name, "conflicting capability tool is unavailable");
+                        }
                     }
                     tool.bindings.push(binding);
                 }
@@ -247,16 +256,48 @@ fn desired(store: &Store) -> Result<Vec<(String, CapabilityTool)>> {
             }
         }
     }
+    desired.retain(|(name, _)| !conflicts.contains(name));
     Ok(desired)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum PublicationChange<'a> {
+    Refresh,
+    Client(&'a str),
+    Companion(&'a str),
+}
+
+impl PublicationChange<'_> {
+    fn affects(self, binding: &CapabilityBinding) -> bool {
+        match self {
+            Self::Refresh => false,
+            Self::Client(id) => binding.client_id == id,
+            Self::Companion(id) => binding.companion_id == id,
+        }
+    }
 }
 
 /// Repairs the published capability tools after any declaration or activation
 /// change. Stale entities are disabled during the swap and only despawned once
 /// every wanted tool exists, so a failed registration leaves the old set live.
-pub(crate) fn sync_tools(world: &mut World) -> Result<()> {
+pub(crate) fn sync_tools(world: &mut World, change: PublicationChange<'_>) -> Result<()> {
     let store = world.resource::<Store>().clone();
+    let other_tools: HashSet<_> = world
+        .query_filtered::<&ToolDef, Without<CapabilityTool>>()
+        .iter(world)
+        .map(|definition| definition.0.name.as_str().to_owned())
+        .collect();
     let mut wanted = Vec::new();
-    for (name, tool) in desired(&store)? {
+    for (name, tool) in desired(&store, change)? {
+        if other_tools.contains(&name) {
+            if tool.bindings.iter().any(|binding| change.affects(binding)) {
+                return Err(HostError::Conflict(format!(
+                    "tool name `{name}` is already registered"
+                )));
+            }
+            tracing::warn!(tool = %name, "capability tool conflicts with a registered tool");
+            continue;
+        }
         let parameters = json::parse_schema(&tool.spec.input_schema)?;
         let tool_name = ToolName::new(name.clone())
             .map_err(|_| HostError::Internal(("a capability tool name was empty").into()))?;
@@ -335,7 +376,7 @@ fn rollback(world: &mut World, spawned: &[Entity], stale: &[Entity]) {
 
 /// Startup: publishes the tools of the clients restored as active.
 pub(crate) fn init(world: &mut World) {
-    if let Err(error) = sync_tools(world) {
+    if let Err(error) = sync_tools(world, PublicationChange::Refresh) {
         crate::host::fail(world, &error.to_string());
     }
 }
