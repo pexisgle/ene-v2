@@ -18,6 +18,7 @@ use std::path::PathBuf;
 /// spelling.
 pub(crate) const STATE_DIR: &str = "ENE_HOST_STATE_DIR";
 pub(crate) const RUNTIME_DIR: &str = "ENE_HOST_RUNTIME_DIR";
+const DEV_HOST_DIR: &str = "ENE_DEV_HOST_DIR";
 pub(crate) const BIND: &str = "ENE_HOST_BIND";
 pub(crate) const ALLOWED_HOSTS: &str = "ENE_HOST_ALLOWED_HOSTS";
 pub(crate) const EXIT_ON_STDIN_EOF: &str = "ENE_HOST_EXIT_ON_STDIN_EOF";
@@ -67,24 +68,29 @@ impl HostConfig {
         get: impl Fn(&str) -> Option<std::ffi::OsString>,
     ) -> Result<Self, ConfigError> {
         let defaults = directories::ProjectDirs::from("", "", "ene");
-        let state_dir = path_from(&get, STATE_DIR).or_else(|| {
-            defaults.as_ref().map(|dirs| {
-                dirs.state_dir()
-                    .unwrap_or_else(|| dirs.data_local_dir())
-                    .to_owned()
-            })
-        });
+        let dev_dir = path_from(&get, DEV_HOST_DIR);
+        let state_dir = path_from(&get, STATE_DIR)
+            .or_else(|| dev_dir.as_ref().map(|dir| dir.join("state")))
+            .or_else(|| {
+                defaults.as_ref().map(|dirs| {
+                    dirs.state_dir()
+                        .unwrap_or_else(|| dirs.data_local_dir())
+                        .to_owned()
+                })
+            });
         let Some(state_dir) = state_dir else {
             return Err(ConfigError::NoDefault(STATE_DIR));
         };
-        let runtime_dir = path_from(&get, RUNTIME_DIR).or_else(|| {
-            defaults.as_ref().map(|dirs| {
-                dirs.runtime_dir().map_or_else(
-                    || dirs.cache_dir().join("runtime"),
-                    std::path::Path::to_path_buf,
-                )
-            })
-        });
+        let runtime_dir = path_from(&get, RUNTIME_DIR)
+            .or_else(|| dev_dir.map(|dir| dir.join("runtime")))
+            .or_else(|| {
+                defaults.as_ref().map(|dirs| {
+                    dirs.runtime_dir().map_or_else(
+                        || dirs.cache_dir().join("runtime"),
+                        std::path::Path::to_path_buf,
+                    )
+                })
+            });
         let Some(runtime_dir) = runtime_dir else {
             return Err(ConfigError::NoDefault(RUNTIME_DIR));
         };
@@ -180,6 +186,23 @@ mod tests {
         let with_blank = load(&[(STATE_DIR, "")])?;
         let with_nothing = load(&[])?;
         assert_eq!(with_blank.state_dir, with_nothing.state_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn development_paths_are_defaults_for_missing_or_empty_overrides() -> Result<(), ConfigError> {
+        let base = PathBuf::from("target/run/host");
+        let config = load(&[(DEV_HOST_DIR, "target/run/host")])?;
+        assert_eq!(config.state_dir, base.join("state"));
+        assert_eq!(config.runtime_dir, base.join("runtime"));
+
+        let config = load(&[
+            (DEV_HOST_DIR, "target/run/host"),
+            (STATE_DIR, ""),
+            (RUNTIME_DIR, "custom-runtime"),
+        ])?;
+        assert_eq!(config.state_dir, base.join("state"));
+        assert_eq!(config.runtime_dir, PathBuf::from("custom-runtime"));
         Ok(())
     }
 

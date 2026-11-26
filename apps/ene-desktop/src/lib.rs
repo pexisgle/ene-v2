@@ -36,7 +36,7 @@
 //! | `ENE_HOST_CONNECTION` | ホストが公開した `connection.json` のパス |
 //! | `ENE_DESKTOP_CLIENT_ID` | ホストに登録するクライアントID（既定 `desktop`）。再起動しても同じIDを使う |
 //! | `ENE_DESKTOP_CLIENT_NAME` | ホストの一覧に出す表示名（既定 `Desktop`） |
-//! | `ENE_DESKTOP_RENDERER` | `ene-avatar` の実行ファイル。未設定なら描画なしで動く |
+//! | `ENE_DESKTOP_RENDERER` | `ene-avatar` の実行ファイル。未設定ならデスクトップの実行ファイルの隣を優先して探す |
 //! | `ENE_DESKTOP_MODEL` | 表示するVRMモデル。未設定なら同梱の `assets/ENE.vrm` を使い、見つからなければ `just fetch-assets` で取得したモデルを使う |
 //! | `ENE_DESKTOP_OPEN_SETTINGS` | 起動時に `SettingsStudio` を同時に開く指定（`1` / `companions` / `connections` / `voice` / `device`） |
 //! | `ENE_DESKTOP_WORKSPACE` | 「手」が操作する既存の作業フォルダー。未設定ならOSのデスクトップフォルダー |

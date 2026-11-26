@@ -40,11 +40,12 @@ rustupと`buf`、そのOSでRustプログラムをリンクするための開発
 
 ```sh
 rustup toolchain install 1.100.0 --profile minimal --component rustfmt --component clippy --component rust-analyzer --component rust-src --target wasm32-unknown-unknown
+cargo install cargo-nextest --locked
 cargo fmt --all -- --check
 cargo check --workspace --all-targets --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo build --release --locked -p ene-reference-wasm -p ene-openrouter-wasm --target wasm32-unknown-unknown
-cargo test --workspace --all-features --locked
+cargo nextest run --workspace --all-features --locked
 cargo build --workspace --all-targets --all-features --locked
 cargo run --locked -p ene-host
 ```
@@ -95,7 +96,7 @@ Wasmプラグイン用の `wasm32-unknown-unknown` ターゲットも共通設�
 | `just fmt-check` | 整形済みかを確認 |
 | `just check` | 全クレート・ターゲット・機能を型検査 |
 | `just clippy` | 全クレート・ターゲット・機能を検査し、警告をエラーにする |
-| `just test` | テスト用Wasmをビルドし、ワークスペースのテストを実行 |
+| `just test` | テスト用Wasmをビルドし、Nextestでワークスペースのテストを実行 |
 | `just build` | 全クレート・ターゲット・機能をビルド |
 | `just installer-windows` | キャラクターとモーションを同梱した Windows x64 インストーラーを生成 |
 | `just fetch-assets` | 開発用の Seed-san VRM モデルを取得。モーションは `assets/vrma` に同梱 |
@@ -106,4 +107,6 @@ Wasmプラグイン用の `wasm32-unknown-unknown` ターゲットも共通設�
 | `just run-desktop` | [ホストへ接続するデスクトップクライアント](apps/ene-desktop/src/lib.rs)を起動 |
 | `just run-avatar` | [JSON Linesで操作する透過描画プロセス](apps/ene-avatar/src/main.rs)を起動 |
 | `just run-avatar-cli` | 本体をビルドし、対話式 CLI からアバターを操作 |
+
+このワークスペースで Cargo から起動するホストは、データを既定で `target/run/host/state` に保存し、接続情報を `target/run/host/runtime` に公開します。保存先は `ENE_HOST_STATE_DIR` と `ENE_HOST_RUNTIME_DIR` で上書きできます。別のホストに接続する場合は `ENE_HOST_CONNECTION` で接続情報ファイルを指定します。
 

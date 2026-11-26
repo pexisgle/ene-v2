@@ -45,15 +45,17 @@ fn main() {
     init_tracing();
     install_panic_hook();
 
-    let local_host = detect_local_host();
-    let path = discovery_path(local_host.is_some()).unwrap_or_else(|reason| {
+    let connection_override = std::env::var_os("ENE_HOST_CONNECTION")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    let local_host = detect_local_host(connection_override.is_some());
+    let path = discovery_path(connection_override).unwrap_or_else(|reason| {
         // Without a runtime directory there is no host to find, so the
         // window could only repeat this sentence.
         tracing::error!(%reason, "could not resolve host discovery path");
         std::process::exit(1);
     });
 
-    #[cfg(windows)]
     let local_host_child = spawn_local_host(local_host.as_deref());
     #[cfg(windows)]
     let history_reset = local_host_child
@@ -111,6 +113,10 @@ fn main() {
     );
     #[cfg(windows)]
     maybe_finish_history_reset(history_reset, local_host, local_host_child);
+    #[cfg(not(windows))]
+    if let Some(mut host) = local_host_child {
+        ene_domain::warn_if_err(host.wait(), "local ene-host shutdown");
+    }
 }
 
 fn init_tracing() {
@@ -144,18 +150,24 @@ fn install_panic_hook() {
     }));
 }
 
-fn detect_local_host() -> Option<PathBuf> {
-    if cfg!(windows) && std::env::var_os("ENE_HOST_CONNECTION").is_none() {
-        std::env::current_exe()
-            .ok()
-            .map(|exe| exe.with_file_name("ene-host.exe"))
-            .filter(|host| host.is_file())
-    } else {
-        None
+fn detect_local_host(has_connection_override: bool) -> Option<PathBuf> {
+    let start_local_host = std::env::args_os()
+        .skip(1)
+        .find_map(|arg| match arg.to_str() {
+            Some("--local-host") => Some(true),
+            Some("--connect-only") => Some(false),
+            _ => None,
+        })
+        .unwrap_or(cfg!(windows));
+    if has_connection_override || !start_local_host {
+        return None;
     }
+    let host = std::env::current_exe()
+        .ok()?
+        .with_file_name(format!("ene-host{}", std::env::consts::EXE_SUFFIX));
+    host.is_file().then_some(host)
 }
 
-#[cfg(windows)]
 fn spawn_local_host(local_host: Option<&std::path::Path>) -> Option<std::process::Child> {
     local_host.and_then(|host| {
         match local_host_command(host)
@@ -329,12 +341,16 @@ enum DesktopInitError {
 
 /// The discovery file: `ENE_HOST_CONNECTION`, or the host's default runtime
 /// directory.
-fn discovery_path(local_host: bool) -> Result<PathBuf, DesktopInitError> {
-    if let Some(path) = std::env::var_os("ENE_HOST_CONNECTION") {
-        return Ok(PathBuf::from(path));
+fn discovery_path(connection_override: Option<PathBuf>) -> Result<PathBuf, DesktopInitError> {
+    if let Some(path) = connection_override {
+        return Ok(path);
     }
-    if local_host && let Some(runtime) = std::env::var_os("ENE_HOST_RUNTIME_DIR") {
+    if let Some(runtime) = std::env::var_os("ENE_HOST_RUNTIME_DIR").filter(|path| !path.is_empty())
+    {
         return Ok(PathBuf::from(runtime).join("connection.json"));
+    }
+    if let Some(dev_dir) = std::env::var_os("ENE_DEV_HOST_DIR").filter(|path| !path.is_empty()) {
+        return Ok(PathBuf::from(dev_dir).join("runtime/connection.json"));
     }
     let dirs =
         directories::ProjectDirs::from("", "", "ene").ok_or(DesktopInitError::MissingRuntimeDir)?;
@@ -344,19 +360,28 @@ fn discovery_path(local_host: bool) -> Result<PathBuf, DesktopInitError> {
     Ok(runtime.join("connection.json"))
 }
 
-#[cfg(windows)]
 fn local_host_command(host: &std::path::Path) -> std::process::Command {
-    use std::{os::windows::process::CommandExt as _, process::Command};
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut command = Command::new(host);
+    let mut command = std::process::Command::new(host);
     if std::env::var_os("ENE_HOST_ALLOWED_CAPABILITIES").is_none() {
         command.env(
             "ENE_HOST_ALLOWED_CAPABILITIES",
             ene_desktop::default_allowed_capabilities(),
         );
     }
-    command.creation_flags(CREATE_NO_WINDOW);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+
+        // Let the desktop close the host's stdin on Ctrl-C.
+        command.process_group(0);
+    }
     command
 }
 
@@ -410,6 +435,7 @@ fn options() -> Options {
         name: std::env::var("ENE_DESKTOP_CLIENT_NAME").unwrap_or(defaults.name),
         platform: defaults.platform,
         renderer: std::env::var_os("ENE_DESKTOP_RENDERER")
+            .filter(|path| !path.is_empty())
             .map(PathBuf::from)
             .or_else(default_renderer),
         model: std::env::var_os("ENE_DESKTOP_MODEL")
