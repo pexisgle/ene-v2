@@ -57,23 +57,6 @@ pub(super) fn companion_of<'a>(
         .or_else(|| work.map(|agent| agent.companion_id.as_str()))
 }
 
-/// Answers device tool calls whose client never responded.
-fn expire_devices(world: &mut World) {
-    let now = std::time::Instant::now();
-    let expired: Vec<String> = {
-        let waiting = world.resource::<super::resources::Waiting>();
-        waiting
-            .by_operation
-            .iter()
-            .filter(|(_, waiter)| waiter.deadline <= now)
-            .map(|(operation, _)| operation.clone())
-            .collect()
-    };
-    for operation in expired {
-        super::client::device::expire(world, &operation);
-    }
-}
-
 /// The host's agent plugin: projection and device timeouts.
 pub(crate) struct AgentPlugin;
 
@@ -100,7 +83,7 @@ impl Plugin for AgentPlugin {
                 (
                     publish_messages.after(AgentLoop),
                     log_tools.after(AgentLoop),
-                    expire_devices.after(AgentLoop),
+                    super::client::device::expire.after(AgentLoop),
                 ),
             )
             .add_systems(AgentPass, stream_deltas.in_set(ReviewSystems::Edit));

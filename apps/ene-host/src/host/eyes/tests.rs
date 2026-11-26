@@ -8,6 +8,7 @@ use rig_core::{
     catalog::Catalog,
     test_utils::{MockCompletionModel, MockStreamEvent, MockTurn},
 };
+use serde_json::json;
 use std::sync::Arc;
 use w::perception_event::Event;
 

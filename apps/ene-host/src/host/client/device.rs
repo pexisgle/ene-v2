@@ -222,27 +222,42 @@ pub(crate) fn get_state(
     Ok(wire::device_state(&operation))
 }
 
-/// The waiting deadline expired: the operation is uncertain, never a success.
-pub(crate) fn expire(world: &mut World, operation_id: &str) {
-    uncertain(
-        world,
-        operation_id,
-        "device operation timed out; its result is unknown",
-    );
+/// Expires device calls that have outlived their response deadline.
+pub(crate) fn expire(
+    store: Res<Store>,
+    mut waiting: ResMut<Waiting>,
+    computer: Option<ResMut<ComputerUse>>,
+    mut decisions: Query<&mut Decision>,
+) {
+    let now = Instant::now();
+    let store = store.into_inner();
+    let mut computer = computer.map(ResMut::into_inner);
+    waiting.by_operation.retain(|operation, waiter| {
+        if waiter.deadline > now {
+            return true;
+        }
+        if let Some(computer) = computer.as_deref_mut() {
+            computer.operations.remove(operation);
+        }
+        if !record_uncertain(store, operation) {
+            return true;
+        }
+        if let Ok(mut decision) = decisions.get_mut(waiter.call) {
+            decision.decide(
+                Decider::plugin("ene-host"),
+                Outcome::refused("device operation timed out; its result is unknown"),
+            );
+        }
+        false
+    });
 }
 
 pub(super) fn uncertain(world: &mut World, operation_id: &str, reason: &str) {
     if let Some(mut computer) = world.get_resource_mut::<ComputerUse>() {
         computer.operations.remove(operation_id);
     }
-    let store = world.resource::<Store>().clone();
-    let Ok(Some(operation)) = store.client_repo().operation(operation_id) else {
+    if !record_uncertain(world.resource::<Store>(), operation_id) {
         return;
-    };
-    if !operation.status.is_terminal() {
-        let _written = store
-            .client_repo()
-            .set_operation_status(operation_id, DeviceStatus::Uncertain);
     }
     let waiter = world
         .resource_mut::<Waiting>()
@@ -251,6 +266,17 @@ pub(super) fn uncertain(world: &mut World, operation_id: &str, reason: &str) {
     if let Some(waiter) = waiter {
         permission::refuse(world, waiter.call, reason);
     }
+}
+
+fn record_uncertain(store: &Store, operation: &str) -> bool {
+    let repo = store.client_repo();
+    let Ok(Some(current)) = repo.operation(operation) else {
+        return false;
+    };
+    if !current.status.is_terminal() {
+        let _written = repo.set_operation_status(operation, DeviceStatus::Uncertain);
+    }
+    true
 }
 
 /// Registers a waiting tool call for an operation.

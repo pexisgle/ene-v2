@@ -69,7 +69,7 @@ pub(super) fn deliver(
 }
 
 pub(super) fn publish_status(
-    world: &mut World,
+    notifier: &Notifier,
     companion: &str,
     session: &mut Session,
     status: &'static str,
@@ -78,7 +78,7 @@ pub(super) fn publish_status(
         return;
     }
     session.status = status;
-    world.resource_mut::<Notifier>().push(
+    notifier.push(
         Some(companion),
         Some(&session.client),
         w::notification::Event::Generic(Box::new(w::HostEvent {

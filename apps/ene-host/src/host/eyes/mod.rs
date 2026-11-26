@@ -10,7 +10,10 @@ use super::{
     agent, background,
     db::Store,
     error::{HostError, Result},
-    resources::DeviceHub,
+    mind::Role,
+    model::{Credentials, ModelFactory},
+    providers::Providers,
+    resources::{DeviceHub, HostRuntime},
 };
 use crate::host::notify::Notifier;
 use bevy_ecs::prelude::*;
@@ -18,12 +21,12 @@ use ene_rpc as w;
 use ene_store::util::truncate;
 use rig_core::conversation::{Author, AuthorKind, RequestId};
 use rig_ecs::prelude::*;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     collections::{HashMap, VecDeque},
     io::Cursor,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const EVALUATION_INTERVAL: Duration = Duration::from_secs(20);
@@ -42,7 +45,7 @@ mod delivery;
 mod events;
 
 use assess::{Assessment, Evaluation, ImportantObservation, evaluate};
-use delivery::{deliver, diagnostic, publish_status};
+use delivery::deliver;
 pub(crate) use events::apply_report;
 
 /// The assessment parser and its model plumbing are `assess`'s own; the tests
@@ -50,7 +53,6 @@ pub(crate) use events::apply_report;
 /// inspect the request the perception model receives.
 #[cfg(test)]
 use {
-    super::{mind::Role, model::ModelFactory, resources::HostRuntime},
     assess::parse_assessment,
     rig_core::message::{Message, UserContent},
 };
@@ -294,6 +296,7 @@ pub(crate) fn poll(world: &mut World) {
     }
     let hub = world.resource::<DeviceHub>().clone();
     let store = world.resource::<Store>().clone();
+    let notifier = world.resource::<Notifier>().clone();
     let now = Instant::now();
     world.resource_scope(|world, mut eyes: Mut<Eyes>| {
         eyes.sessions.retain(|companion_id, session| {
@@ -324,43 +327,7 @@ pub(crate) fn poll(world: &mut World) {
                 .is_some_and(tokio_util::task::AbortOnDropHandle::is_finished)
                 && let Some(result) = session.task.take().and_then(background::take)
             {
-                publish_status(world, companion_id, session, result.status);
-                let (decision, summary) = if let Some(assessment) = result.assessment {
-                    (
-                        session.queue_assessment(now, assessment, result.screen.is_some()),
-                        Some(session.previous.as_str()),
-                    )
-                } else {
-                    (
-                        if result.status == "unavailable" {
-                            "unavailable"
-                        } else {
-                            "failed"
-                        },
-                        None,
-                    )
-                };
-                let frame_id = result.screen.as_ref().map(|screen| screen.id.as_str());
-                let input = match (result.status, frame_id) {
-                    ("unavailable", _) => "model_unavailable",
-                    (_, Some(_)) => "image",
-                    ("image", None) => "no_frame",
-                    _ => "model_text_only",
-                };
-                if let Some(notifier) = world.get_resource::<Notifier>() {
-                    diagnostic(
-                        notifier,
-                        companion_id,
-                        "evaluated",
-                        &json!({
-                            "image": frame_id.is_some(), "input": input, "frame_id": frame_id,
-                            "decision": decision, "summary": summary,
-                        }),
-                    );
-                }
-                if result.screen.is_some() {
-                    session.last_evaluated = result.screen;
-                }
+                result.record(&notifier, companion_id, session, now);
             }
             if let Some(entity) = agent::agent_of(world, companion_id) {
                 let current =
@@ -390,13 +357,54 @@ pub(crate) fn poll(world: &mut World) {
                     session.next_evaluation = now + EVALUATION_INTERVAL;
                     session.dirty = false;
                     if let Ok(Some(companion)) = store.companion_repo().companion(companion_id) {
-                        evaluate(world, entity, &store, &companion, session, now);
+                        let factory = world.resource::<ModelFactory>().clone();
+                        let credentials = world.resource::<Credentials>().clone();
+                        let catalog = world
+                            .resource::<rig_ecs::model::Models>()
+                            .0
+                            .catalog()
+                            .clone();
+                        let providers = world
+                            .get_resource::<Providers>()
+                            .cloned()
+                            .unwrap_or_default();
+                        let store = store.clone();
+                        let since_user = seconds_since_user(world.get::<Conversation>(entity));
+                        let evaluation = evaluate(session, since_user, now, move || {
+                            (factory.0)(
+                                &store,
+                                &credentials,
+                                &catalog,
+                                &companion,
+                                Role::Perception,
+                                &providers,
+                            )
+                        });
+                        session.task = Some(background::spawn(
+                            &world.resource::<HostRuntime>().0,
+                            world.get_resource::<Wake>(),
+                            evaluation,
+                        ));
                     }
                 }
             }
             true
         });
     });
+}
+
+fn seconds_since_user(conversation: Option<&Conversation>) -> Option<u64> {
+    let entry = conversation?
+        .entries()
+        .rev()
+        .find(rig_core::conversation::EntryRef::is_users_own)?;
+    Some(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .saturating_sub(Duration::from_millis(entry.made))
+            .as_secs(),
+    )
 }
 
 pub(crate) fn preview(eyes: &Eyes, hub: &DeviceHub, id: &str) -> Result<w::ScreenFrame> {

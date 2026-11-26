@@ -59,7 +59,7 @@ const BASELINES: Baselines = Baselines {
     ui_rpc_refs: 0,
     db_upward_refs: 0,
     providers_model_refs: 0,
-    host_world_refs: 124,
+    host_world_refs: 120,
     impl_over_default: 0,
     long_prod_files: 0,
     rpc_ecs_resources: 0,

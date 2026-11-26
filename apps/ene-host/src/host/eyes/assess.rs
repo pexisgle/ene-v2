@@ -3,17 +3,12 @@
 //! The prompt is built from the session's live observation window, sent with
 //! the newest screen sample only when the chosen model accepts images, and the
 //! reply is parsed into an [`Assessment`] the caller turns into a reaction.
-use super::{OBSERVATION_LIFETIME, SUMMARY_LIMIT, ScreenSample, Session};
-use crate::host::{
-    background,
-    db::Store,
-    mind::{Companion, Role},
-    model::{Credentials, ModelFactory},
-    providers::Providers,
-    resources::HostRuntime,
+use super::{
+    OBSERVATION_LIFETIME, SUMMARY_LIMIT, ScreenSample, Session,
+    delivery::{diagnostic, publish_status},
 };
+use crate::host::{error::Result, notify::Notifier};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use bevy_ecs::prelude::*;
 use ene_store::util::truncate;
 use rig_core::{
     completion::CompletionRequest,
@@ -21,10 +16,12 @@ use rig_core::{
     message::{ImageMediaType, Message, UserContent},
     operation::Completion,
 };
-use rig_ecs::prelude::*;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    future::Future,
+    time::{Duration, Instant},
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,48 +38,69 @@ pub(super) enum ImportantObservation {
     Finding { summary: String },
 }
 
-pub(super) struct Evaluation {
-    pub(super) status: &'static str,
-    pub(super) screen: Option<ScreenSample>,
-    pub(super) assessment: Option<Assessment>,
+pub(super) enum Evaluation {
+    Unavailable,
+    Events(Option<Assessment>),
+    Screen {
+        sample: Option<ScreenSample>,
+        assessment: Option<Assessment>,
+    },
 }
 
-pub(super) fn evaluate(
-    world: &mut World,
-    entity: Entity,
-    store: &Store,
-    companion: &Companion,
+impl Evaluation {
+    pub(super) fn record(
+        self,
+        notifier: &Notifier,
+        companion: &str,
+        session: &mut Session,
+        now: Instant,
+    ) {
+        let (status, input, sample, assessment) = match self {
+            Self::Unavailable => ("unavailable", "model_unavailable", None, None),
+            Self::Events(assessment) => ("events", "model_text_only", None, assessment),
+            Self::Screen { sample, assessment } => {
+                let input = if sample.is_some() {
+                    "image"
+                } else {
+                    "no_frame"
+                };
+                ("image", input, sample, assessment)
+            }
+        };
+        publish_status(notifier, companion, session, status);
+        let (decision, summary) = match assessment {
+            Some(assessment) => (
+                session.queue_assessment(now, assessment, sample.is_some()),
+                Some(session.previous.as_str()),
+            ),
+            None if status == "unavailable" => ("unavailable", None),
+            None => ("failed", None),
+        };
+        let frame_id = sample.as_ref().map(|sample| sample.id.as_str());
+        diagnostic(
+            notifier,
+            companion,
+            "evaluated",
+            &json!({
+                "image": frame_id.is_some(), "input": input, "frame_id": frame_id,
+                "decision": decision, "summary": summary,
+            }),
+        );
+        if sample.is_some() {
+            session.last_evaluated = sample;
+        }
+    }
+}
+
+pub(super) fn evaluate<F>(
     session: &mut Session,
+    since_user: Option<u64>,
     now: Instant,
-) {
-    let factory = world.resource::<ModelFactory>().clone();
-    let credentials = world.resource::<Credentials>().clone();
-    let catalog = world
-        .resource::<rig_ecs::model::Models>()
-        .0
-        .catalog()
-        .clone();
-    let store = store.clone();
-    let companion = companion.clone();
-    let providers = world
-        .get_resource::<Providers>()
-        .cloned()
-        .unwrap_or_default();
-    let since_user = world
-        .get::<Conversation>(entity)
-        .and_then(|conversation| {
-            conversation
-                .entries()
-                .rev()
-                .find(rig_core::conversation::EntryRef::is_users_own)
-        })
-        .map(|entry| {
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .saturating_sub(Duration::from_millis(entry.made))
-                .as_secs()
-        });
+    load_model: F,
+) -> impl Future<Output = Evaluation> + Send + use<F>
+where
+    F: FnOnce() -> Result<DynModel<Completion>> + Send + 'static,
+{
     let observations = session
         .events
         .iter()
@@ -103,44 +121,20 @@ pub(super) fn evaluate(
         .screen
         .take()
         .filter(|screen| now.duration_since(screen.at) <= OBSERVATION_LIFETIME);
-    session.task = Some(background::spawn(
-        &world.resource::<HostRuntime>().0,
-        world.get_resource::<Wake>(),
-        async move {
-            let model = tokio::task::spawn_blocking(move || {
-                (factory.0)(
-                    &store,
-                    &credentials,
-                    &catalog,
-                    &companion,
-                    Role::Perception,
-                    &providers,
-                )
-            })
-            .await;
-            let Ok(Ok(model)) = model else {
-                return Evaluation {
-                    status: "unavailable",
-                    screen: None,
-                    assessment: None,
-                };
-            };
-            let image = model.spec().is_some_and(|spec| spec.input.image);
-            let status = if image { "image" } else { "events" };
-            let screen = screen.filter(|_| image);
-            let assessment = assess(
-                model,
-                text,
-                screen.as_ref().map(|sample| sample.jpeg.as_ref()),
-            )
-            .await;
-            Evaluation {
-                status,
-                screen,
-                assessment,
+    async move {
+        let Ok(Ok(model)) = tokio::task::spawn_blocking(load_model).await else {
+            return Evaluation::Unavailable;
+        };
+        if model.spec().is_some_and(|spec| spec.input.image) {
+            let jpeg = screen.as_ref().map(|sample| sample.jpeg.as_ref());
+            Evaluation::Screen {
+                assessment: assess(model, text, jpeg).await,
+                sample: screen,
             }
-        },
-    ));
+        } else {
+            Evaluation::Events(assess(model, text, None).await)
+        }
+    }
 }
 
 async fn assess(

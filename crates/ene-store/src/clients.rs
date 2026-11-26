@@ -274,12 +274,13 @@ impl<'a> ClientRepo<'a> {
         )
     }
 
+    /// Advances an active operation without overwriting a terminal result.
     pub fn set_operation_status(&self, id: &str, status: DeviceStatus) -> Result<()> {
         self.0
             .conn()
             .prepare_cached(
                 "UPDATE device_operations SET status = ?2, updated_at = ?3 \
-                 WHERE operation_id = ?1",
+                 WHERE operation_id = ?1 AND status IN ('pending','dispatched')",
             )?
             .execute(params![id, status.as_str(), now()])?;
         Ok(())
@@ -468,10 +469,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(again.status, DeviceStatus::Completed);
-        assert_eq!(
-            repo.operation("op1").unwrap().unwrap().client_id.as_str(),
-            "c1"
-        );
+        repo.set_operation_status("op1", DeviceStatus::Uncertain)
+            .unwrap();
+        let saved = repo.operation("op1").unwrap().unwrap();
+        assert_eq!(saved.client_id, "c1");
+        assert_eq!(saved.status, DeviceStatus::Completed);
+        assert_eq!(saved.output, completed.output);
         let other = DeviceOperation {
             id: "op2".into(),
             client_id: "c2".into(),
