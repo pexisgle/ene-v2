@@ -116,7 +116,7 @@ pub(crate) fn selected(
     let connection = settings
         .connections
         .iter()
-        .find(|connection| connection.id == assignment.connection_id)?;
+        .find(|connection| connection.id.as_str() == assignment.connection_id)?;
     if connection.kind != crate::host::settings::ConnectionKind::Acp {
         return None;
     }

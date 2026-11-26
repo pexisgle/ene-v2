@@ -243,6 +243,15 @@ pub(crate) fn corrupt(index: usize, what: &str) -> rusqlite::Error {
     )
 }
 
+pub(crate) fn id_column<T: TryFrom<String, Error = ene_domain::DomainError>>(
+    row: &rusqlite::Row<'_>,
+    name: &str,
+    what: &str,
+) -> rusqlite::Result<T> {
+    let index = row.as_ref().column_index(name)?;
+    T::try_from(row.get::<_, String>(index)?).map_err(|_| corrupt(index, what))
+}
+
 /// Reads a JSON column.
 pub(crate) fn json_column<T: serde::de::DeserializeOwned>(
     row: &rusqlite::Row<'_>,

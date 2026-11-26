@@ -7,7 +7,7 @@ pub(crate) trait FromRow: Sized {
 /// Declares a projection and its field mapping in the same column order.
 macro_rules! row_fields {
     ($ty:ty, $columns:ident {
-        $first:ident,
+        $first:ident $(=> $first_read:ident($first_error:literal))?,
         $($field:ident $(as $column:ident)? $(=> $read:ident($error:literal))?),+ $(,)?
     }) => {
         const $columns: &str = concat!(
@@ -17,7 +17,9 @@ macro_rules! row_fields {
         impl $crate::row::FromRow for $ty {
             fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
                 Ok(Self {
-                    $first: row.get(stringify!($first))?,
+                    $first: $crate::row::row_fields!(
+                        @read row, stringify!($first) $(, $first_read, $first_error)?
+                    )?,
                     $($field: $crate::row::row_fields!(
                         @read row, $crate::row::row_fields!(@column $field $($column)?)
                         $(, $read, $error)?

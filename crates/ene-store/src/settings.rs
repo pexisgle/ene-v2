@@ -2,10 +2,12 @@
 
 use crate::row::FromRow;
 use crate::{
-    Store, StoreError, corrupt, enum_name_column, error::Result, json_column, optional_json_column,
-    require_found, to_json, util::now,
+    Store, StoreError, corrupt, enum_name_column, error::Result, id_column, json_column,
+    optional_json_column, require_found, to_json, util::now,
 };
-use ene_domain::{Check, Connection, ConnectionConfig, ConnectionKind, CredentialState, Settings};
+use ene_domain::{
+    Check, Connection, ConnectionConfig, ConnectionId, ConnectionKind, CredentialState, Settings,
+};
 use ene_mind::Companion;
 use rusqlite::{Row, params};
 use std::collections::HashSet;
@@ -22,7 +24,7 @@ impl FromRow for Connection {
             ));
         }
         Ok(Connection {
-            id: row.get("id")?,
+            id: id_column(row, "id", "stored connection id is invalid")?,
             name: row.get("name")?,
             enabled: row.get("enabled")?,
             kind,
@@ -115,7 +117,7 @@ impl<'a> SettingsRepo<'a> {
         let mut ids = HashSet::new();
         for (input, _) in inputs {
             input.validate()?;
-            if !ids.insert(input.id.as_str()) {
+            if !ids.insert(&input.id) {
                 return Err(StoreError::Invalid("connection is listed twice".into()));
             }
         }
@@ -162,7 +164,7 @@ impl<'a> SettingsRepo<'a> {
                      WHERE connections.revision = excluded.revision - 1",
                 )?
                 .execute(params![
-                    input.id,
+                    input.id.as_str(),
                     input.name,
                     input.enabled,
                     input.kind.as_str(),
@@ -195,8 +197,8 @@ impl<'a> SettingsRepo<'a> {
         self.settings()
     }
 
-    pub fn set_credential_state(&self, id: &str, state: CredentialState) -> Result<()> {
-        let reset_check = self.connection(id)?.is_some_and(|connection| {
+    pub fn set_credential_state(&self, id: &ConnectionId, state: CredentialState) -> Result<()> {
+        let reset_check = self.connection(id.as_str())?.is_some_and(|connection| {
             connection.kind == ConnectionKind::Search
                 || connection.endpoint().adapter == ene_catalog::GOOGLE_AGENT_PLATFORM
         });
@@ -207,13 +209,13 @@ impl<'a> SettingsRepo<'a> {
                 "UPDATE connections SET credential_state = ?2, updated_at = ?3,
                  last_check = CASE WHEN ?4 THEN NULL ELSE last_check END WHERE id = ?1",
             )?
-            .execute(params![id, state.as_str(), now(), reset_check])?;
+            .execute(params![id.as_str(), state.as_str(), now(), reset_check])?;
         require_found(changed, "connection not found")
     }
 
     pub fn delete_connection<E>(
         &self,
-        id: &str,
+        id: &ConnectionId,
         revision: u64,
         on_delete_secret: impl FnOnce() -> std::result::Result<(), E>,
     ) -> std::result::Result<(Settings, Vec<Companion>), E>
@@ -226,7 +228,7 @@ impl<'a> SettingsRepo<'a> {
         let deleted = tx
             .execute(
                 "DELETE FROM connections WHERE id = ?1 AND revision = ?2",
-                params![id, revision],
+                params![id.as_str(), revision],
             )
             .map_err(StoreError::from)?;
         if deleted == 0 {
@@ -235,7 +237,7 @@ impl<'a> SettingsRepo<'a> {
             )));
         }
         let stamp = now();
-        companions.retain_mut(|companion| companion.assignments.remove_connection(id));
+        companions.retain_mut(|companion| companion.assignments.remove_connection(id.as_str()));
         for companion in &mut companions {
             companion.revision += 1;
             companion.updated_at.clone_from(&stamp);
@@ -259,7 +261,7 @@ impl<'a> SettingsRepo<'a> {
     }
 
     /// Saves a probe only while the checked connection revision still exists.
-    pub fn set_check(&self, id: &str, revision: u64, check: &Check) -> Result<()> {
+    pub fn set_check(&self, id: &ConnectionId, revision: u64, check: &Check) -> Result<()> {
         let changed = self
             .0
             .conn()
@@ -267,7 +269,7 @@ impl<'a> SettingsRepo<'a> {
                 "UPDATE connections SET last_check = ?3, updated_at = ?4
                  WHERE id = ?1 AND revision = ?2",
             )?
-            .execute(params![id, revision, to_json(check)?, now()])?;
+            .execute(params![id.as_str(), revision, to_json(check)?, now()])?;
         if changed == 0 {
             return Err(StoreError::Conflict(
                 "connection changed during the check".into(),
@@ -302,7 +304,7 @@ mod tests {
 
     fn connection(id: &str) -> Connection {
         Connection {
-            id: id.into(),
+            id: ConnectionId::parse(id).unwrap(),
             name: "main".into(),
             enabled: true,
             kind: ConnectionKind::Llm,
@@ -322,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_unknown_credential_state_is_absent_but_invalid_kinds_are_corrupt() {
+    fn legacy_credential_states_are_tolerated_and_invalid_connections_fail_to_load() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
         let repo = store.settings_repo();
@@ -360,6 +362,17 @@ mod tests {
             .execute("UPDATE connections SET kind = 'tts' WHERE id = 'c1'", [])
             .unwrap();
         assert!(matches!(repo.connection("c1"), Err(StoreError::Storage(_))));
+        store
+            .conn()
+            .execute(
+                "UPDATE connections SET kind = 'llm', id = 'bad id' WHERE id = 'c1'",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            repo.connection("bad id"),
+            Err(StoreError::Storage(_))
+        ));
     }
 
     #[test]
@@ -372,11 +385,18 @@ mod tests {
             .unwrap();
         assert_eq!(settings.revision, 2);
         assert!(matches!(
-            repo.set_credential_state("missing", CredentialState::Absent),
+            repo.set_credential_state(
+                &ConnectionId::parse("missing").unwrap(),
+                CredentialState::Absent
+            ),
             Err(StoreError::NotFound(_))
         ));
         assert!(matches!(
-            repo.set_check("missing", 1, &Check::default()),
+            repo.set_check(
+                &ConnectionId::parse("missing").unwrap(),
+                1,
+                &Check::default()
+            ),
             Err(StoreError::Conflict(_))
         ));
         for id in ["c2", "c1", "c2"] {
@@ -390,7 +410,7 @@ mod tests {
             assert_eq!(stored.name, changed.name);
             assert_eq!(stored.revision, expected + 1);
             assert!(matches!(
-                repo.set_check(id, expected, &Check::default()),
+                repo.set_check(&stored.id, expected, &Check::default()),
                 Err(StoreError::Conflict(_))
             ));
             assert!(repo.connection(id).unwrap().unwrap().last_check.is_none());
@@ -400,7 +420,8 @@ mod tests {
             ..Default::default()
         };
         let current = repo.connection("c1").unwrap().unwrap();
-        repo.set_check("c1", current.revision, &check).unwrap();
+        repo.set_check(&current.id, current.revision, &check)
+            .unwrap();
         assert_eq!(
             repo.connection("c1").unwrap().unwrap().last_check,
             Some(check)
@@ -434,10 +455,14 @@ mod tests {
         companions.insert_companion(&companion).unwrap();
 
         assert!(matches!(
-            repo.delete_connection("drop", 2, || -> Result<()> {
-                secrets.remove("drop");
-                Ok(())
-            }),
+            repo.delete_connection(
+                &ConnectionId::parse("drop").unwrap(),
+                2,
+                || -> Result<()> {
+                    secrets.remove("drop");
+                    Ok(())
+                }
+            ),
             Err(StoreError::Conflict(_))
         ));
         assert_eq!(secrets.get("drop").map(String::as_str), Some("discarded"));
@@ -448,9 +473,11 @@ mod tests {
 
         // If secret erasure fails, the SQLite transaction must roll back cleanly.
         assert!(matches!(
-            repo.delete_connection("drop", 1, || -> Result<()> {
-                Err(StoreError::Storage("keyring unavailable".into()))
-            }),
+            repo.delete_connection(
+                &ConnectionId::parse("drop").unwrap(),
+                1,
+                || -> Result<()> { Err(StoreError::Storage("keyring unavailable".into())) }
+            ),
             Err(StoreError::Storage(_))
         ));
         assert!(repo.connection("drop").unwrap().is_some());
@@ -460,10 +487,14 @@ mod tests {
         );
 
         let (next, changed) = repo
-            .delete_connection("drop", 1, || -> Result<()> {
-                secrets.remove("drop");
-                Ok(())
-            })
+            .delete_connection(
+                &ConnectionId::parse("drop").unwrap(),
+                1,
+                || -> Result<()> {
+                    secrets.remove("drop");
+                    Ok(())
+                },
+            )
             .unwrap();
         assert_eq!(next.revision, settings.revision + 1);
         assert_eq!(

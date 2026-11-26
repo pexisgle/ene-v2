@@ -480,7 +480,7 @@ impl Harness {
         let credentials = Credentials::new(true);
         credentials.remember(CONNECTION, SECRET.to_owned());
         let connection = Connection {
-            id: CONNECTION.to_owned(),
+            id: ene_domain::ConnectionId::parse(CONNECTION).unwrap(),
             name: "fixture".into(),
             enabled: true,
             kind: ConnectionKind::Llm,
@@ -726,7 +726,7 @@ async fn a_plugin_model_binds_through_the_agent_path() {
             store.settings_repo().settings_revision().unwrap(),
             &[(
                 Connection {
-                    id: CONNECTION.to_owned(),
+                    id: ene_domain::ConnectionId::parse(CONNECTION).unwrap(),
                     name: "fixture".into(),
                     enabled: true,
                     kind: ConnectionKind::Llm,
@@ -833,7 +833,7 @@ async fn a_plugin_shadowing_a_catalog_vendor_binds_through_ensure_model() {
             store.settings_repo().settings_revision().unwrap(),
             &[(
                 Connection {
-                    id: CONNECTION.to_owned(),
+                    id: ene_domain::ConnectionId::parse(CONNECTION).unwrap(),
                     name: "shadowed-openrouter".into(),
                     enabled: true,
                     kind: ConnectionKind::Llm,

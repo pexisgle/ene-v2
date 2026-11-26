@@ -29,7 +29,7 @@ const OPERATION_COLUMNS: &str = "operation_id, client_id, capability, input, \
 row_fields!(
     Activation,
     ACTIVATION_COLUMNS {
-        companion_id,
+        companion_id => id_column("stored companion id is invalid"),
         client_id,
     }
 );
@@ -429,7 +429,7 @@ impl<'a> ClientRepo<'a> {
                  VALUES (?1, ?2, ?3)",
             )?
             .execute(params![
-                activation.companion_id,
+                activation.companion_id.as_str(),
                 activation.client_id,
                 now(),
             ])?;

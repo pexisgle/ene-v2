@@ -2,7 +2,7 @@
 
 use super::super::Services;
 use super::connection_probe::run_connection_probe;
-use super::{is_builtin_voicevox, notify_settings};
+use super::{is_builtin_voicevox, notify_settings, parse_connection_id};
 use crate::host::error::HostError;
 use crate::host::model;
 use crate::host::permission;
@@ -19,7 +19,7 @@ pub(super) async fn delete_connection(
     _arg1: RequestContext,
     request: ServiceRequest<'_, w::DeleteConnectionRequest>,
 ) -> ServiceResult<w::Settings> {
-    let id = request.id.to_owned();
+    let id = parse_connection_id(request.id)?;
     let revision = request.expected_revision;
     let dependencies = services.runtime.services().clone();
     let response = services
@@ -27,7 +27,7 @@ pub(super) async fn delete_connection(
             let store = &dependencies.store;
             let (settings, companions) =
                 store.settings_repo().delete_connection(&id, revision, || {
-                    crate::host::model::delete_secret(&dependencies.credentials, &id)
+                    crate::host::model::delete_secret(&dependencies.credentials, id.as_str())
                 })?;
             let view = w::Settings::from(&settings);
             notify_settings(&dependencies.notifier, view.clone());
@@ -63,14 +63,14 @@ pub(super) async fn check_connection(
     _arg1: RequestContext,
     request: ServiceRequest<'_, w::CheckRequest>,
 ) -> ServiceResult<w::CheckResult> {
-    let id = request.id.to_owned();
+    let id = parse_connection_id(request.id)?;
     let (connection, credentials, generation) = services
         .runtime
         .inspect(move |services| {
             let connection = services
                 .store
                 .settings_repo()
-                .connection(&id)?
+                .connection(id.as_str())?
                 .ok_or_else(|| HostError::NotFound(("connection not found").into()))?;
             Ok((
                 connection,

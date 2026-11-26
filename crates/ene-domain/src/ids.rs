@@ -1,64 +1,63 @@
 //! Branded domain identifiers.
 //!
-//! The crates pass identifiers around as `String`, so a companion id and a
-//! client id are interchangeable to the compiler. A newtype fixes that at the
-//! boundary where the id is parsed, and costs nothing at runtime.
+//! Parsed identifiers keep companion, client and connection references distinct.
 
 use crate::error::{DomainError, validate_id};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use std::{borrow::Borrow, fmt, sync::Arc};
 
-/// The id of one companion.
-///
-/// Construction is the only validation point: it refuses anything the domain
-/// rules reject, so a value of this type is always a valid id.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CompanionId(String);
+macro_rules! validated_id {
+    ($name:ident, $description:literal) => {
+        #[doc = $description]
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[serde(try_from = "String")]
+        pub struct $name(String);
 
-impl CompanionId {
-    /// Parses and validates a companion id.
-    ///
-    /// # Errors
-    /// Returns [`DomainError::Invalid`] when the id is empty, longer than 128
-    /// characters, or contains anything but printable ASCII.
-    pub fn parse(id: impl Into<String>) -> Result<Self, DomainError> {
-        let id = id.into();
-        validate_id(&id)?;
-        Ok(Self(id))
-    }
+        impl $name {
+            /// Parses an ID of 1–128 printable ASCII characters.
+            ///
+            /// # Errors
+            /// Returns a domain error if the ID is invalid.
+            pub fn parse(id: impl Into<String>) -> Result<Self, DomainError> {
+                Self::try_from(id.into())
+            }
 
-    /// The id as a string slice.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+            /// Returns the ID as a string slice.
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = DomainError;
+
+            fn try_from(id: String) -> Result<Self, Self::Error> {
+                validate_id(&id)?;
+                Ok(Self(id))
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+    };
 }
 
-impl fmt::Display for CompanionId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+validated_id!(CompanionId, "The validated ID of a companion.");
+validated_id!(ConnectionId, "The validated ID of a host connection.");
 
-impl AsRef<str> for CompanionId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Serialize for CompanionId {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for CompanionId {
-    /// Deserialises through `String` and validates, so a wire payload cannot
-    /// carry an id the domain would refuse.
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let id = String::deserialize(deserializer)?;
-        validate_id(&id).map_err(serde::de::Error::custom)?;
-        Ok(Self(id))
+impl From<ConnectionId> for String {
+    fn from(id: ConnectionId) -> Self {
+        id.0
     }
 }
 
@@ -125,6 +124,12 @@ mod tests {
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(json, "\"ene\"");
         assert_eq!(serde_json::from_str::<CompanionId>(&json).unwrap(), id);
+        assert_eq!(
+            serde_json::from_str::<ConnectionId>(&json)
+                .unwrap()
+                .as_str(),
+            "ene"
+        );
     }
 
     #[test]
@@ -133,6 +138,7 @@ mod tests {
         assert!(refused.is_err(), "a space is not printable-id ASCII");
         let empty = serde_json::from_str::<CompanionId>("\"\"");
         assert!(empty.is_err(), "an empty id is refused");
+        assert!(serde_json::from_str::<ConnectionId>("\"bad id\"").is_err());
     }
 
     #[test]
@@ -140,30 +146,5 @@ mod tests {
         assert!(CompanionId::parse("").is_err());
         assert!(CompanionId::parse("a".repeat(129)).is_err());
         assert!(CompanionId::parse("ene").is_ok());
-    }
-}
-
-#[cfg(feature = "sqlite")]
-mod sqlite {
-    use super::CompanionId;
-    use rusqlite::{
-        Result as SqlResult, ToSql, types::FromSql, types::FromSqlResult, types::ToSqlOutput,
-        types::ValueRef,
-    };
-
-    impl ToSql for CompanionId {
-        fn to_sql(&self) -> SqlResult<ToSqlOutput<'_>> {
-            self.as_str().to_sql()
-        }
-    }
-
-    impl FromSql for CompanionId {
-        /// Reads the stored string and re-validates it, so a hand-edited row
-        /// cannot introduce an id the domain would refuse.
-        fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-            let id = String::column_result(value)?;
-            CompanionId::parse(id)
-                .map_err(|error| rusqlite::types::FromSqlError::Other(Box::new(error)))
-        }
     }
 }

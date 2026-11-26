@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[test]
 fn select_connection_prefers_enabled_and_select_by_id_rejects_disabled() {
     let disabled = Connection {
-        id: "stt-disabled".into(),
+        id: ene_domain::ConnectionId::parse("stt-disabled").unwrap(),
         name: "Disabled STT".into(),
         enabled: false,
         kind: ConnectionKind::Stt,
@@ -24,7 +24,7 @@ fn select_connection_prefers_enabled_and_select_by_id_rejects_disabled() {
         last_check: None,
     };
     let enabled = Connection {
-        id: "stt-enabled".into(),
+        id: ene_domain::ConnectionId::parse("stt-enabled").unwrap(),
         name: "Enabled STT".into(),
         enabled: true,
         kind: ConnectionKind::Stt,
@@ -44,7 +44,10 @@ fn select_connection_prefers_enabled_and_select_by_id_rejects_disabled() {
 
     let conns = vec![disabled.clone(), enabled];
     assert_eq!(
-        select_connection(&conns, ConnectionKind::Stt).unwrap().id,
+        select_connection(&conns, ConnectionKind::Stt)
+            .unwrap()
+            .id
+            .as_str(),
         "stt-enabled"
     );
     assert!(matches!(
@@ -62,7 +65,8 @@ fn select_connection_prefers_enabled_and_select_by_id_rejects_disabled() {
     assert_eq!(
         select_connection_by_id(&conns, ConnectionKind::Stt, "stt-enabled")
             .unwrap()
-            .id,
+            .id
+            .as_str(),
         "stt-enabled"
     );
 }
@@ -114,7 +118,7 @@ async fn sakura_tts_sends_wav_request_and_decodes_wav_response() {
 
     let base = format!("http://{addr}/v1");
     let conn = Connection {
-        id: "sakura-tts".into(),
+        id: ene_domain::ConnectionId::parse("sakura-tts").unwrap(),
         name: "Sakura TTS".into(),
         enabled: true,
         kind: ConnectionKind::Tts,
@@ -197,7 +201,7 @@ async fn sakura_tts_voicevox_protocol_uses_tts_v1_paths() {
 
     let base = format!("http://{addr}/v1");
     let conn = Connection {
-        id: "sakura-vv".into(),
+        id: ene_domain::ConnectionId::parse("sakura-vv").unwrap(),
         name: "Sakura VV".into(),
         enabled: true,
         kind: ConnectionKind::Tts,
@@ -282,7 +286,7 @@ async fn sakura_stt_uses_whisper_turbo_and_omits_response_format() {
 
     let base = format!("http://{addr}/v1");
     let conn = Connection {
-        id: "sakura-stt".into(),
+        id: ene_domain::ConnectionId::parse("sakura-stt").unwrap(),
         name: "Sakura STT".into(),
         enabled: true,
         kind: ConnectionKind::Stt,

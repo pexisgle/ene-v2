@@ -4089,7 +4089,6 @@ dependencies = [
  "jiff 1.0.3",
  "jsonschema",
  "parking_lot 0.13.0",
- "rusqlite",
  "serde",
  "serde_json",
  "strum",

@@ -33,7 +33,7 @@ async fn p10_listing_uses_authorized_http_and_connection_credentials() {
     let secret = "listing-host-secret";
     let credentials = Credentials::new(true);
     credentials.remember("another-connection", "wrong-secret".into());
-    credentials.remember(&connection.id, secret.into());
+    credentials.remember(connection.id.as_str(), secret.into());
     let encoded =
         base64::engine::general_purpose::STANDARD.encode(br#"{"data":[{"id":"native-model"}]}"#);
     let body = [
@@ -66,7 +66,7 @@ async fn p10_listing_uses_authorized_http_and_connection_credentials() {
         &json!({"type":"bearer"}),
     );
     for key in [secret, "replacement-secret"] {
-        credentials.remember(&connection.id, key.into());
+        credentials.remember(connection.id.as_str(), key.into());
         let check = model::probe(&credentials, &connection, &providers).await;
         assert!(check.healthy, "{:?}", check.failure);
         assert!(check.resources.contains(&"plugin-http-model".into()));
@@ -152,7 +152,7 @@ async fn p08_absent_plugin_keeps_native_completion_and_listing() {
     let connection = connection(ConnectionKind::Llm, &native.base);
     let store = store(root.path(), &connection);
     let credentials = Credentials::new(true);
-    model::save_secret(&credentials, &connection.id, "test-only").unwrap();
+    model::save_secret(&credentials, connection.id.as_str(), "test-only").unwrap();
     let _failure = construction_failure::Guard::enter();
     let providers = Providers::none();
     let model = model::connect(
@@ -246,7 +246,7 @@ fn p08_actual_grant_binds_origins_and_secret_at_construction() {
     let connection = connection(ConnectionKind::Llm, "https://connection.example");
     let credentials = Credentials::new(true);
     let providers = Providers::none();
-    model::save_secret(&credentials, &connection.id, "host-secret").unwrap();
+    model::save_secret(&credentials, connection.id.as_str(), "host-secret").unwrap();
     let provider: ProviderConfiguration = serde_json::from_value(json!({
         "id":"owner", "endpoint":"https://api.example",
         "auth":{"type":"header", "name":"x-api-key"},
@@ -364,7 +364,7 @@ async fn p08_actual_grant_enforces_transport_policy_and_snapshots_credentials() 
     let providers = Providers::none();
     let connection = connection(ConnectionKind::Llm, &denied.base);
     let credentials = Credentials::new(true);
-    model::save_secret(&credentials, &connection.id, "original-secret").unwrap();
+    model::save_secret(&credentials, connection.id.as_str(), "original-secret").unwrap();
     let provider: ProviderConfiguration = serde_json::from_value(json!({
         "id":"owner", "endpoint":upstream.base,
         "auth":{"type":"bearer"}, "destinations":[upstream.base]
@@ -403,7 +403,7 @@ async fn p08_actual_grant_enforces_transport_policy_and_snapshots_credentials() 
     }
     upstream.assert_requests(0);
     denied.assert_requests(0);
-    model::save_secret(&credentials, &connection.id, "replacement-secret").unwrap();
+    model::save_secret(&credentials, connection.id.as_str(), "replacement-secret").unwrap();
     for provider_argument in ["owner", "foreign-provider"] {
         let opened = broker
             .open(provider_argument, request(&upstream.base))
@@ -430,7 +430,7 @@ async fn p08_actual_grant_enforces_transport_policy_and_snapshots_credentials() 
         upstream.headers.lock().last().unwrap()["authorization"],
         "Bearer replacement-secret"
     );
-    model::delete_secret(&credentials, &connection.id).unwrap();
+    model::delete_secret(&credentials, connection.id.as_str()).unwrap();
     broker.open("owner", request(&upstream.base)).await.unwrap();
     assert_eq!(
         upstream.headers.lock().last().unwrap()["authorization"],
@@ -446,7 +446,7 @@ async fn p08_actual_grant_overwrites_guest_auth_and_refuses_invalid_auth() {
     let connection = connection(ConnectionKind::Llm, &upstream.base);
     let credentials = Credentials::new(true);
     let providers = Providers::none();
-    model::save_secret(&credentials, &connection.id, "host-secret").unwrap();
+    model::save_secret(&credentials, connection.id.as_str(), "host-secret").unwrap();
     let mut provider: ProviderConfiguration = serde_json::from_value(json!({
         "id":"owner", "endpoint":upstream.base,
         "auth":{"type":"header", "name":"x-api-key"}, "destinations":[upstream.base]
@@ -492,7 +492,7 @@ async fn p08_actual_grant_overwrites_guest_auth_and_refuses_invalid_auth() {
         );
     }
     provider.auth = serde_json::from_value(json!({"type":"bearer"})).unwrap();
-    model::save_secret(&credentials, &connection.id, "bad\nsecret").unwrap();
+    model::save_secret(&credentials, connection.id.as_str(), "bad\nsecret").unwrap();
     let broker = http_broker(Arc::new(grant_for(
         &provider,
         &connection,
@@ -705,7 +705,7 @@ async fn b07_embedding_plugin_uses_provider_context_and_broker() {
     let providers = Providers::load(root.path());
 
     let conn_a = Connection {
-        id: "emb-a".into(),
+        id: ene_domain::ConnectionId::parse("emb-a").unwrap(),
         name: "Embed A".into(),
         enabled: true,
         kind: ConnectionKind::Embedding,
@@ -724,7 +724,7 @@ async fn b07_embedding_plugin_uses_provider_context_and_broker() {
         last_check: None,
     };
     let conn_b = Connection {
-        id: "emb-b".into(),
+        id: ene_domain::ConnectionId::parse("emb-b").unwrap(),
         name: "Embed B".into(),
         enabled: true,
         kind: ConnectionKind::Embedding,
@@ -743,8 +743,8 @@ async fn b07_embedding_plugin_uses_provider_context_and_broker() {
         last_check: None,
     };
     let credentials = Credentials::new(true);
-    credentials.remember(&conn_a.id, "secret-a".into());
-    credentials.remember(&conn_b.id, "secret-b".into());
+    credentials.remember(conn_a.id.as_str(), "secret-a".into());
+    credentials.remember(conn_b.id.as_str(), "secret-b".into());
 
     let dims_a = crate::host::mind::embedding::probe_dimensions(&conn_a, &credentials, &providers)
         .await

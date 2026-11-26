@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn llm_connection(adapter: &str, endpoint: &str, models: &[&str]) -> Connection {
     Connection {
-        id: "c1".into(),
+        id: ene_domain::ConnectionId::parse("c1").unwrap(),
         name: "main".into(),
         enabled: true,
         kind: ConnectionKind::Llm,
@@ -38,7 +38,7 @@ fn an_unreadable_credential_store_is_not_an_absent_credential() {
     let connection = connection_for("openai", "http://127.0.0.1:1234");
     let providers = super::super::providers::Providers::none();
     assert!(matches!(
-        credentials.secret(&connection.id),
+        credentials.secret(connection.id.as_str()),
         Err(HostError::Unavailable(_))
     ));
     assert!(connection_secret(&connection, Some(&credentials), &providers).is_err());
@@ -99,7 +99,7 @@ async fn completion_keeps_catalog_overrides_and_unknown_tool_support() {
     let catalog = Catalog::builtin().with_overrides(&overrides);
     for adapter in ["openai", "gemini"] {
         let mut connection = connection_for(adapter, "http://127.0.0.1:1234");
-        connection.id = adapter.into();
+        connection.id = ene_domain::ConnectionId::parse(adapter).unwrap();
         credentials.remember(adapter, "explicit-key".into());
         store
             .settings_repo()
@@ -168,7 +168,7 @@ fn sakura_perception_exposes_vision_only_for_supported_models() {
         ("gpt-oss-120b", false),
     ] {
         companion.assignments.perception = Some(ModelAssignment {
-            connection_id: connection_id.clone(),
+            connection_id: connection_id.as_str().to_owned(),
             model_id: id.into(),
         });
         let model = connect(
@@ -243,7 +243,7 @@ fn all_builtin_providers_bind_through_ensure_model_for_companion_and_task() {
     for (index, (adapter, endpoint, model_id)) in cases.iter().enumerate() {
         let conn_id = format!("conn-{index}");
         let mut connection = llm_connection(adapter, endpoint, &[*model_id]);
-        connection.id = conn_id.clone();
+        connection.id = ene_domain::ConnectionId::parse(&conn_id).unwrap();
         credentials.remember(&conn_id, "test-secret".into());
         store
             .settings_repo()
@@ -356,7 +356,7 @@ async fn sakura_companion_binds_and_answers_over_chat_completions() {
     let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
     let credentials = Credentials::new(true);
     let mut connection = llm_connection("sakura", &format!("http://{addr}/v1"), &[]);
-    connection.id = "sakura-conn".into();
+    connection.id = ene_domain::ConnectionId::parse("sakura-conn").unwrap();
     credentials.remember("sakura-conn", "sakura-key".into());
     store
         .settings_repo()

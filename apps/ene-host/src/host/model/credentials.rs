@@ -136,7 +136,7 @@ pub(crate) fn credential_state(
     credentials: &Credentials,
     loaded: &crate::host::providers::Providers,
 ) -> Result<CredentialState> {
-    if credentials.secret(&connection.id)?.is_some() {
+    if credentials.secret(connection.id.as_str())?.is_some() {
         return Ok(CredentialState::Registered);
     }
     if crate::host::settings::environment_variable(connection, loaded)
@@ -153,7 +153,7 @@ pub(crate) fn connection_secret(
     loaded: &crate::host::providers::Providers,
 ) -> Result<Option<String>> {
     if let Some(credentials) = credentials
-        && let Some(secret) = credentials.secret(&connection.id)?
+        && let Some(secret) = credentials.secret(connection.id.as_str())?
     {
         return Ok(Some(secret));
     }

@@ -92,7 +92,7 @@ pub(super) fn connection(kind: ConnectionKind, base: &str) -> Connection {
         _ => unreachable!(),
     };
     Connection {
-        id: "p08".into(),
+        id: ene_domain::ConnectionId::parse("p08").unwrap(),
         name: "P08".into(),
         enabled: true,
         kind,

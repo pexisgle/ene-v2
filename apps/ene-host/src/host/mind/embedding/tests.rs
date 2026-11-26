@@ -146,7 +146,7 @@ fn credential_embedding_connection(
 ) -> crate::host::settings::Connection {
     use crate::host::settings::{Connection, CredentialState, EmbeddingConnection, Endpoint};
     Connection {
-        id: "credential-embedding".into(),
+        id: ene_domain::ConnectionId::parse("credential-embedding").unwrap(),
         name: "embedding".into(),
         enabled: true,
         kind: ConnectionKind::Embedding,
@@ -210,7 +210,7 @@ async fn embedding_credentials_rotate_and_revoke_across_clones() {
         store
             .settings_repo()
             .set_credential_state(
-                "credential-embedding",
+                &ene_domain::ConnectionId::parse("credential-embedding").unwrap(),
                 if secret.is_some() {
                     CredentialState::Registered
                 } else {
@@ -563,7 +563,7 @@ fn custom_embedding_conn(
 ) -> crate::host::settings::Connection {
     use crate::host::settings::{Connection, CredentialState, EmbeddingConnection, Endpoint};
     Connection {
-        id: id.into(),
+        id: ene_domain::ConnectionId::parse(id).unwrap(),
         name: name.into(),
         enabled: true,
         kind: ConnectionKind::Embedding,
@@ -760,7 +760,7 @@ async fn sakura_embedding_omits_dimensions_and_decodes_without_usage() {
     let credentials = Credentials::new(true);
     credentials.remember("sakura-emb", "uuid:secret".into());
     let connection = Connection {
-        id: "sakura-emb".into(),
+        id: ene_domain::ConnectionId::parse("sakura-emb").unwrap(),
         name: "Sakura Embedding".into(),
         enabled: true,
         kind: ConnectionKind::Embedding,

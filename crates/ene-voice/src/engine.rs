@@ -440,7 +440,7 @@ pub fn select_connection_by_id(
 ) -> Result<Connection, SetupError> {
     let Some(connection) = connections
         .iter()
-        .find(|connection| connection.id == id && connection.kind == kind)
+        .find(|connection| connection.id.as_str() == id && connection.kind == kind)
     else {
         return Err(SetupError::Missing);
     };

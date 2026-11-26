@@ -48,7 +48,7 @@ struct Target {
 struct Models {
     revision: u64,
     credential_generation: Option<u64>,
-    targets: HashMap<(String, String), Target>,
+    targets: HashMap<(ene_domain::ConnectionId, String), Target>,
 }
 
 #[derive(Resource, Clone, Default)]

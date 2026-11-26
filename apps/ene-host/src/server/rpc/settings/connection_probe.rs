@@ -56,7 +56,7 @@ async fn probe_mcp_connection(
     services
         .runtime
         .change(move |services| {
-            services.mcp.request_reconnect(&reconnect_id);
+            services.mcp.request_reconnect(reconnect_id.as_str());
             Ok(())
         })
         .await?;
@@ -82,7 +82,7 @@ async fn probe_mcp_connection(
                     if !services
                         .store
                         .settings_repo()
-                        .connection(&id)?
+                        .connection(id.as_str())?
                         .is_some_and(|current| current.revision == revision)
                     {
                         return Err(HostError::Conflict(
@@ -91,7 +91,7 @@ async fn probe_mcp_connection(
                     }
                     Ok(services
                         .mcp
-                        .check_state(Some(&services.credentials), &id, revision))
+                        .check_state(Some(&services.credentials), id.as_str(), revision))
                 })
                 .await?;
             match state {

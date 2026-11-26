@@ -1,7 +1,7 @@
 //! Settings service.
 
 use super::super::Services;
-use super::{model_item, notify_settings};
+use super::{model_item, notify_settings, parse_connection_id};
 use crate::host::error::HostError;
 use crate::host::model;
 use crate::host::settings;
@@ -30,13 +30,13 @@ pub(super) async fn list_models(
     _arg1: RequestContext,
     request: ServiceRequest<'_, w::ModelsRequest>,
 ) -> ServiceResult<w::Models> {
-    let id = request.id.to_owned();
+    let id = parse_connection_id(request.id)?;
     services
         .inspect(move |services| {
             let connection = services
                 .store
                 .settings_repo()
-                .connection(&id)?
+                .connection(id.as_str())?
                 .ok_or_else(|| HostError::NotFound("connection not found".into()))?;
             Ok(w::Models {
                 items: model::models(&connection, &services.catalog.read())
@@ -54,7 +54,7 @@ pub(super) async fn register_credentials(
     _arg1: RequestContext,
     request: ServiceRequest<'_, w::CredentialRequest>,
 ) -> ServiceResult<w::CredentialResult> {
-    let id = request.id.to_owned();
+    let id = parse_connection_id(request.id)?;
     let secret = request
         .secret
         .filter(|secret| !secret.is_empty())
@@ -63,10 +63,10 @@ pub(super) async fn register_credentials(
     services
         .change(move |services| {
             let store = &services.store;
-            if store.settings_repo().connection(&id)?.is_none() {
+            if store.settings_repo().connection(id.as_str())?.is_none() {
                 return Err(HostError::NotFound("connection not found".into()));
             }
-            model::save_secret(&services.credentials, &id, &secret)?;
+            model::save_secret(&services.credentials, id.as_str(), &secret)?;
             store
                 .settings_repo()
                 .set_credential_state(&id, CredentialState::Registered)?;
@@ -87,15 +87,15 @@ pub(super) async fn revoke_credentials(
     _arg1: RequestContext,
     request: ServiceRequest<'_, w::Id>,
 ) -> ServiceResult<w::Empty> {
-    let id = request.id.to_owned();
+    let id = parse_connection_id(request.id)?;
     services
         .change(move |services| {
             let store = &services.store;
             let connection = store
                 .settings_repo()
-                .connection(&id)?
+                .connection(id.as_str())?
                 .ok_or_else(|| HostError::NotFound("connection not found".into()))?;
-            model::delete_secret(&services.credentials, &id)?;
+            model::delete_secret(&services.credentials, id.as_str())?;
             let state =
                 model::credential_state(&connection, &services.credentials, &services.providers)?;
             store.settings_repo().set_credential_state(&id, state)?;

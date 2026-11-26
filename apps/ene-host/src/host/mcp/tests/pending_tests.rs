@@ -94,7 +94,7 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
         let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
         let mut peer = PendingPeer::new(root.path(), "initial.pid");
         let mut row = Connection {
-            id: "pending-mcp".into(),
+            id: ene_domain::ConnectionId::parse("pending-mcp").unwrap(),
             name: "pending".into(),
             enabled: true,
             kind: ConnectionKind::Mcp,
@@ -115,7 +115,7 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
         sync(&mut world);
         peer.started().await;
         assert!(world.resource::<Mcp>().lock().servers.0.is_empty());
-        let old_launch = world.resource::<Mcp>().lock().connecting.0[&row.id]
+        let old_launch = world.resource::<Mcp>().lock().connecting.0[row.id.as_str()]
             .launch
             .clone();
         let mut replacement = PendingPeer::new(root.path(), "replacement.pid");
@@ -152,7 +152,7 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
         peer.stopped(action).await;
         assert!(world.resource::<Mcp>().lock().servers.0.is_empty());
         if action == "revision" {
-            let new_launch = world.resource::<Mcp>().lock().connecting.0[&row.id]
+            let new_launch = world.resource::<Mcp>().lock().connecting.0[row.id.as_str()]
                 .launch
                 .clone();
             assert_ne!(old_launch, new_launch);
@@ -160,14 +160,14 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
             accept_event(
                 &mut supervisor,
                 &[(
-                    row.id.clone(),
+                    row.id.as_str().to_owned(),
                     Desired {
                         revision: 2,
                         ..want("pending")
                     },
                 )],
                 Event::Failed {
-                    id: row.id.clone(),
+                    id: row.id.as_str().to_owned(),
                     launch: old_launch,
                     reason: "late failure".into(),
                     config_error: false,
@@ -176,7 +176,7 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
             );
             *world.resource::<Mcp>().lock() = supervisor;
             assert_eq!(
-                world.resource::<Mcp>().lock().connecting.0[&row.id].launch,
+                world.resource::<Mcp>().lock().connecting.0[row.id.as_str()].launch,
                 new_launch
             );
             assert!(

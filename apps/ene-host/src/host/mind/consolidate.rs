@@ -496,7 +496,7 @@ mod tests {
                 revision,
                 &[(
                     Connection {
-                        id: "c1".into(),
+                        id: ene_domain::ConnectionId::parse("c1").unwrap(),
                         name: "fixture".into(),
                         enabled: true,
                         kind: ConnectionKind::Llm,

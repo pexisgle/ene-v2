@@ -1,7 +1,7 @@
 //! Wire conversions for connection, provider, model, and plugin types.
 
 use crate as w;
-use ene_domain::{DomainError, client_view as domain, settings};
+use ene_domain::{ConnectionId, DomainError, client_view as domain, settings};
 
 from_variants! {
     w::ConnectionKind => domain::ConnectionKind [
@@ -104,7 +104,7 @@ impl TryFrom<w::ConnectionInput> for settings::Connection {
             .and_then(|config| config.config)
             .ok_or_else(|| DomainError::Invalid("connection config is required".into()))?;
         Ok(Self {
-            id: input.id,
+            id: ConnectionId::try_from(input.id)?,
             name: input.name,
             enabled: input.enabled,
             kind,
@@ -119,7 +119,7 @@ impl TryFrom<w::ConnectionInput> for settings::Connection {
 impl From<&settings::Connection> for w::Connection {
     fn from(value: &settings::Connection) -> Self {
         Self {
-            id: value.id.clone(),
+            id: value.id.as_str().to_owned(),
             name: value.name.clone(),
             enabled: value.enabled,
             credential_state: value.credential_state.as_str().into(),

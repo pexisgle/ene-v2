@@ -18,6 +18,11 @@ use connectrpc::ServiceResult;
 use ene_rpc as w;
 use rig_core::catalog::ModelSpec;
 
+fn parse_connection_id(id: &str) -> Result<ene_domain::ConnectionId, connectrpc::ConnectError> {
+    ene_domain::ConnectionId::parse(id)
+        .map_err(|error| connectrpc::ConnectError::invalid_argument(error.to_string()))
+}
+
 #[expect(refining_impl_trait, reason = "Connect boxes futures")]
 impl w::SettingsService for Services {
     #[tracing::instrument(

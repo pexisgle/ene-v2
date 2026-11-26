@@ -555,7 +555,7 @@ async fn b17_mcp_backoff_prevents_tight_retry_and_recovers_on_reconnect_request(
     let mut harness = crate::host::tests::Harness::new([]);
     let rev = harness.store().settings_repo().settings_revision().unwrap();
     let conn = Connection {
-        id: "mcp-backoff".into(),
+        id: ene_domain::ConnectionId::parse("mcp-backoff").unwrap(),
         name: "notes".into(),
         enabled: true,
         kind: ConnectionKind::Mcp,
@@ -671,7 +671,7 @@ async fn f24_http_mcp_sends_auth_header_and_custom_headers_and_recovers_after_cr
     let mut custom_headers = BTreeMap::new();
     custom_headers.insert("x-tenant".into(), "acme".into());
     let conn = Connection {
-        id: "mcp-auth".into(),
+        id: ene_domain::ConnectionId::parse("mcp-auth").unwrap(),
         name: "authmcp".into(),
         enabled: true,
         kind: ConnectionKind::Mcp,

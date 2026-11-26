@@ -197,7 +197,7 @@ mod tests {
         )
         .unwrap();
         let conn_row = DomainConnection {
-            id: "c-v6".into(),
+            id: ene_domain::ConnectionId::parse("c-v6").unwrap(),
             name: "Legacy v6 OpenAI".into(),
             enabled: true,
             kind: ConnectionKind::Llm,
@@ -218,7 +218,7 @@ mod tests {
             "INSERT INTO connections (id, name, enabled, kind, config, credential_state, revision, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
-                conn_row.id,
+                conn_row.id.as_str(),
                 conn_row.name,
                 conn_row.enabled,
                 conn_row.kind.as_str(),
@@ -249,7 +249,10 @@ mod tests {
         tx.pragma_update(None, "user_version", BASELINE_VERSION)
             .unwrap();
         tx.commit().unwrap();
-        vec![(companion.id, companion.name), (conn_row.id, conn_row.name)]
+        vec![
+            (companion.id, companion.name),
+            (conn_row.id.into(), conn_row.name),
+        ]
     }
 
     #[test]
@@ -331,7 +334,7 @@ mod tests {
         let settings = store.settings_repo().settings().unwrap();
         assert_eq!(settings.revision, 3);
         assert_eq!(settings.connections.len(), 1);
-        assert_eq!(settings.connections[0].id, seeded[1].0);
+        assert_eq!(settings.connections[0].id.as_str(), seeded[1].0);
         assert_eq!(settings.connections[0].name, seeded[1].1);
 
         let companions = store.companion_repo().companions().unwrap();

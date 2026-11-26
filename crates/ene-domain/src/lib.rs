@@ -22,7 +22,7 @@ pub use client::{Activation, Client, DeviceOperation, DeviceStatus};
 pub use ene_policy::{COMPUTER_USE, PolicyEffect, PolicyRule, PolicyText, RiskLevel};
 pub use error::{DomainError, validate_id};
 pub use failure::Failure;
-pub use ids::{ClientId, CompanionId, SubscriptionId};
+pub use ids::{ClientId, CompanionId, ConnectionId, SubscriptionId};
 pub use settings::{
     AcpConnection, Check, Connection, ConnectionConfig, ConnectionKind, CredentialState,
     EmbeddingConnection, Endpoint, LlmConnection, McpConnection, SearchConnection, Settings,

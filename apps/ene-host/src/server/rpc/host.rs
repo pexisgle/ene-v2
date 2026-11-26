@@ -627,7 +627,7 @@ mod tests {
             .call(move |app| {
                 let store = app.world().resource::<Store>().clone();
                 let conn = host::settings::Connection {
-                    id: "llm-preview".into(),
+                    id: ene_domain::ConnectionId::parse("llm-preview").unwrap(),
                     name: "Preview LLM".into(),
                     enabled: true,
                     kind: host::settings::ConnectionKind::Llm,

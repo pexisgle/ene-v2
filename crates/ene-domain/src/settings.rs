@@ -1,6 +1,6 @@
 //! Connections and settings domain models and validation.
 
-use crate::{Failure, error::DomainError, error::validate_id, json};
+use crate::{ConnectionId, Failure, error::DomainError, json};
 use ene_catalog::{GOOGLE_AGENT_PLATFORM, GOOGLE_AGENT_PLATFORM_ENDPOINT};
 use ene_policy::PolicyText;
 use http::header::{HeaderName, HeaderValue};
@@ -426,8 +426,8 @@ impl CredentialState {
 /// Persisted external service connection configuration and health state.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Connection {
-    /// Id of this connection, validated on write.
-    pub id: String,
+    /// Validated ID of this connection.
+    pub id: ConnectionId,
     /// Display name shown to the operator.
     pub name: String,
     /// Whether the host may use the connection.
@@ -448,7 +448,6 @@ pub struct Connection {
 impl Connection {
     /// Validates connection metadata, kind alignment, and config payload.
     pub fn validate(&self) -> Result<(), DomainError> {
-        validate_id(&self.id)?;
         if self.name.trim().is_empty() || self.name.chars().count() > 128 {
             return Err(DomainError::Invalid(
                 "connection name must be 1-128 characters".into(),
@@ -488,7 +487,7 @@ mod tests {
 
     fn llm_conn(adapter: &str, endpoint: &str, options: &str, model: &str) -> Connection {
         Connection {
-            id: "conn-1".into(),
+            id: ConnectionId::parse("conn-1").unwrap(),
             name: "Primary".into(),
             enabled: true,
             kind: ConnectionKind::Llm,
@@ -568,7 +567,7 @@ mod tests {
         assert!(invalid_ap_model.validate().is_err());
 
         let invalid_mcp = Connection {
-            id: "mcp-1".into(),
+            id: ConnectionId::parse("mcp-1").unwrap(),
             name: "MCP".into(),
             enabled: true,
             kind: ConnectionKind::Mcp,

@@ -54,7 +54,7 @@ fn desired(
                     .ok()
                     .flatten();
             Some((
-                connection.id.clone(),
+                connection.id.as_str().to_owned(),
                 Desired {
                     revision: connection.revision,
                     credential_generation,

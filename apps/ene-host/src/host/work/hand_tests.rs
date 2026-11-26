@@ -49,7 +49,7 @@ fn acp_connection() -> crate::host::settings::Connection {
         AcpConnection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint,
     };
     crate::host::settings::Connection {
-        id: "hand-acp".into(),
+        id: ene_domain::ConnectionId::parse("hand-acp").unwrap(),
         name: "reference hand".into(),
         enabled: true,
         kind: ConnectionKind::Acp,
@@ -416,7 +416,7 @@ fn the_rig_hand_stays_the_default_without_an_acp_assignment() {
     // connection is an LLM connection, so the backend stays in-process.
     let store = world.harness.store();
     let llm = crate::host::settings::Connection {
-        id: "llm-main".into(),
+        id: ene_domain::ConnectionId::parse("llm-main").unwrap(),
         name: "main".into(),
         enabled: true,
         kind: crate::host::settings::ConnectionKind::Llm,
@@ -500,7 +500,7 @@ fn an_acp_connection_needs_only_its_adapter() {
     use crate::host::settings;
     assert!(acp_connection().validate().is_ok());
     let legacy = settings::Connection {
-        id: "legacy".into(),
+        id: ene_domain::ConnectionId::parse("legacy").unwrap(),
         name: "legacy".into(),
         enabled: true,
         kind: settings::ConnectionKind::Acp,
@@ -518,7 +518,7 @@ fn an_acp_connection_needs_only_its_adapter() {
     };
     assert!(legacy.validate().is_ok(), "the legacy command stays valid");
     let empty = settings::Connection {
-        id: "empty".into(),
+        id: ene_domain::ConnectionId::parse("empty").unwrap(),
         name: "empty".into(),
         enabled: true,
         kind: settings::ConnectionKind::Acp,

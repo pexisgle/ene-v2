@@ -12,7 +12,7 @@ workspace = true
 [dependencies]
 parking_lot.workspace = true
 ene-catalog.workspace = true
-ene-domain = { workspace = true, features = ["sqlite"] }
+ene-domain.workspace = true
 ene-mind.workspace = true
 ene-policy.workspace = true
 jiff.workspace = true

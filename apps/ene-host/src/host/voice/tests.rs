@@ -235,7 +235,7 @@ fn voice_connection_prefers_enabled_connection_over_earlier_disabled_one() {
     let (_root, store) = store_with_client();
     let rev = store.settings_repo().settings_revision().unwrap();
     let disabled = Connection {
-        id: "stt-disabled".into(),
+        id: ene_domain::ConnectionId::parse("stt-disabled").unwrap(),
         name: "Disabled STT".into(),
         enabled: false,
         kind: ConnectionKind::Stt,
@@ -253,7 +253,7 @@ fn voice_connection_prefers_enabled_connection_over_earlier_disabled_one() {
         last_check: None,
     };
     let enabled = Connection {
-        id: "stt-enabled".into(),
+        id: ene_domain::ConnectionId::parse("stt-enabled").unwrap(),
         name: "Enabled STT".into(),
         enabled: true,
         kind: ConnectionKind::Stt,
@@ -276,7 +276,7 @@ fn voice_connection_prefers_enabled_connection_over_earlier_disabled_one() {
         .unwrap();
     let world = voice_world(&store);
     let selected = voice_connection(world.get_resource::<Store>(), ConnectionKind::Stt).unwrap();
-    assert_eq!(selected.id, "stt-enabled");
+    assert_eq!(selected.id.as_str(), "stt-enabled");
 }
 
 #[test]
@@ -285,7 +285,7 @@ fn b11_companion_voice_binding_selects_bound_tts_connection_without_silent_fallb
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(&root.path().join("host.db")).unwrap();
     let conn_a = Connection {
-        id: "tts-a".into(),
+        id: ene_domain::ConnectionId::parse("tts-a").unwrap(),
         name: "Enabled TTS".into(),
         enabled: true,
         kind: ConnectionKind::Tts,
@@ -303,7 +303,7 @@ fn b11_companion_voice_binding_selects_bound_tts_connection_without_silent_fallb
         last_check: None,
     };
     let conn_b = Connection {
-        id: "tts-b".into(),
+        id: ene_domain::ConnectionId::parse("tts-b").unwrap(),
         name: "Disabled TTS".into(),
         enabled: false,
         kind: ConnectionKind::Tts,

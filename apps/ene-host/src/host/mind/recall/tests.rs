@@ -60,7 +60,7 @@ async fn a_slow_embedding_holds_the_model_call_without_blocking_the_host() {
         .clone();
     let store = world.resource::<Store>().clone();
     let connection = Connection {
-        id: "embedding-test".into(),
+        id: ene_domain::ConnectionId::parse("embedding-test").unwrap(),
         name: "embedding".into(),
         enabled: true,
         kind: ConnectionKind::Embedding,

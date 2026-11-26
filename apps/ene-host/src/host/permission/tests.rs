@@ -203,7 +203,7 @@ fn connection_row(endpoint: &str) -> crate::host::settings::Connection {
         ConnectionConfig, ConnectionKind, CredentialState, Endpoint, LlmConnection,
     };
     crate::host::settings::Connection {
-        id: "c1".into(),
+        id: ene_domain::ConnectionId::parse("c1").unwrap(),
         name: "main".into(),
         enabled: true,
         kind: ConnectionKind::Llm,

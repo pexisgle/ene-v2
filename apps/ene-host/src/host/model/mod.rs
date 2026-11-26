@@ -216,7 +216,7 @@ pub(crate) fn preview_assignment(
             HostError::FailedPrecondition(("no model is available on the LLM connection").into())
         })?;
     Ok(super::mind::ModelAssignment {
-        connection_id: connection.id,
+        connection_id: connection.id.into(),
         model_id,
     })
 }

@@ -12,7 +12,7 @@ use rusqlite::params;
 
 row_fields!(WorkSession, SESSION_COLUMNS {
     id,
-    companion_id,
+    companion_id => id_column("stored companion id is invalid"),
     title,
     status => enum_name_column("unknown work status"),
     client_id,
@@ -91,7 +91,7 @@ impl<'a> WorkRepo<'a> {
             ))?
             .execute(params![
                 session.id,
-                session.companion_id,
+                session.companion_id.as_str(),
                 session.title,
                 session.status.as_str(),
                 session.client_id,

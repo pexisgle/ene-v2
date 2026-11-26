@@ -31,7 +31,7 @@ fn search_test_connection(
     max_results: u32,
 ) -> Connection {
     Connection {
-        id: id.into(),
+        id: ene_domain::ConnectionId::parse(id).unwrap(),
         name: name.into(),
         enabled: true,
         kind: ConnectionKind::Search,
@@ -225,7 +225,7 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
 
     // Missing Exa credential refuses cleanly.
     let exa_no_key = Connection {
-        id: "s-exa-missing".into(),
+        id: ene_domain::ConnectionId::parse("s-exa-missing").unwrap(),
         ..exa_conn.clone()
     };
     let missing_err = resolve_connection(&exa_no_key, Some(&creds), &providers)
@@ -236,7 +236,7 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
 
     // Non-2xx error body detail is surfaced cleanly.
     let exa_bad = Connection {
-        id: "s-exa-bad".into(),
+        id: ene_domain::ConnectionId::parse("s-exa-bad").unwrap(),
         config: ConnectionConfig::Search(SearchConnection {
             endpoint: Endpoint {
                 adapter: "exa".into(),
@@ -268,7 +268,7 @@ fn resolve_skips_unconfigured_enabled_search_when_another_is_ready() {
     let rev = store.settings_repo().settings_revision().unwrap();
     // `a-unconfigured-tavily` sorts before `search-exa` by id, but has no key.
     let unconfigured = Connection {
-        id: "a-unconfigured-tavily".into(),
+        id: ene_domain::ConnectionId::parse("a-unconfigured-tavily").unwrap(),
         name: "Tavily (no key)".into(),
         enabled: true,
         kind: ConnectionKind::Search,
@@ -285,7 +285,7 @@ fn resolve_skips_unconfigured_enabled_search_when_another_is_ready() {
         }),
     };
     let ready_exa = Connection {
-        id: "search-exa".into(),
+        id: ene_domain::ConnectionId::parse("search-exa").unwrap(),
         name: "Web検索 (Exa)".into(),
         enabled: true,
         kind: ConnectionKind::Search,
