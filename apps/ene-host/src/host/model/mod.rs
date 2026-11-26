@@ -71,7 +71,7 @@ pub(crate) fn connect(
     let assignment = companion
         .model(role)
         .ok_or_else(|| HostError::Unavailable(("no model is assigned to this role").into()))?;
-    connect_assignment(store, credentials, catalog, assignment, role, providers)
+    connect_assignment(store, credentials, catalog, assignment, providers)
 }
 
 /// Builds a rig completion model directly from one `ModelAssignment`.
@@ -80,7 +80,6 @@ pub(crate) fn connect_assignment(
     credentials: &Credentials,
     catalog: &Catalog,
     assignment: &super::mind::ModelAssignment,
-    _role: Role,
     providers: &super::providers::Providers,
 ) -> Result<DynModel<Completion>> {
     let connection = store
@@ -116,7 +115,7 @@ pub(crate) fn connect_assignment(
             Arc::clone(&running),
             role,
             context,
-            &assignment.model_id.clone(),
+            &assignment.model_id,
             catalog
                 .resolve(&assignment.model_id)
                 .is_ok_and(|entry| entry.spec.input.image),
@@ -181,7 +180,7 @@ pub(crate) fn connect_assignment(
     // rig is handed the base URL only when it is not the provider's own, so a
     // connection that leaves the field empty keeps the provider default.
     if base != default {
-        options = options.base_url(base.clone());
+        options = options.base_url(base);
     }
     let model = catalog
         .connect_with(spec.as_ref(), options)
@@ -194,10 +193,10 @@ pub(crate) fn connect_assignment(
 pub(crate) fn preview_assignment(
     store: &Store,
     catalog: &Catalog,
-    requested: &super::mind::ModelAssignment,
+    requested: super::mind::ModelAssignment,
 ) -> Result<super::mind::ModelAssignment> {
     if requested.is_set() {
-        return Ok(requested.clone());
+        return Ok(requested);
     }
     let settings = store.settings_repo().settings()?;
     let connection = settings

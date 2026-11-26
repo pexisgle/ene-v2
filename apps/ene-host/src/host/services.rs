@@ -9,12 +9,15 @@ use super::{
     resources::{DeviceHub, HostState},
     voice::{Voice, VoiceEngineContext, voicevox::VoicevoxManager},
 };
-use std::path::PathBuf;
+use parking_lot::RwLock;
+use rig_core::catalog::Catalog;
+use std::{path::PathBuf, sync::Arc};
 
 pub(crate) struct HostServices {
     pub(crate) state_dir: PathBuf,
     pub(crate) store: Store,
     pub(crate) credentials: Credentials,
+    pub(crate) catalog: Arc<RwLock<Catalog>>,
     pub(crate) hub: DeviceHub,
     pub(crate) providers: Providers,
     pub(crate) voice: Voice,

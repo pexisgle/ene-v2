@@ -144,106 +144,82 @@ fn declarations(
     Ok(specs)
 }
 
-/// Publishes the client view, refreshes the capability tools and returns it.
-fn publish(world: &mut World, client: &Client) -> Result<w::Client> {
-    let connected = world.resource::<DeviceHub>().connected(&client.id);
-    let active = world
-        .resource::<Store>()
-        .client_repo()
-        .active_companions_for_client(&client.id)?;
-    let view = wire::client(client, connected, active);
-    dynamic::sync_tools(world)?;
-    if !client.is_granted(w::COMPUTER_USE) {
-        computer::invalidate_client(world, &client.id, None);
-    }
+/// The host computes grants for both first registration and declaration replacement.
+#[derive(Clone, Copy)]
+pub(crate) enum Declaration<'a> {
+    Register(&'a w::RegisterClientRequest),
+    Replace(&'a w::SetCapabilitiesRequest),
+}
+
+pub(crate) fn declare(world: &mut World, declaration: Declaration<'_>) -> Result<w::Client> {
+    let (id, capabilities, wire_specs) = match declaration {
+        Declaration::Register(request) => (
+            &request.id,
+            &request.capabilities,
+            &request.capability_specs,
+        ),
+        Declaration::Replace(request) => (
+            &request.client_id,
+            &request.capabilities,
+            &request.capability_specs,
+        ),
+    };
+    let specs = declarations(wire_specs, capabilities)?;
+    if let Declaration::Replace(request) = declaration
+        && !request.granted_capabilities.is_empty()
     {
-        let mut notifier = world.resource_mut::<Notifier>();
-        notify_client(&mut notifier, &view);
-    }
-    Ok(view)
-}
-
-/// Registers or refreshes a client declaration. A client never sends grants:
-/// the host's [`CapabilityPolicy`] decides them, and the operation-level gate
-/// still decides every call.
-pub(crate) fn register(world: &mut World, request: &w::RegisterClientRequest) -> Result<w::Client> {
-    let store = world.resource::<Store>().clone();
-    let specs = declarations(&request.capability_specs, &request.capabilities)?;
-    let rules = store.policy_repo().policy_rules()?;
-    let granted = world
-        .resource::<CapabilityPolicy>()
-        .grants_with_rules(&request.capabilities, &rules);
-    let previous = store.client_repo().client(&request.id)?;
-    let client = store.client_repo().register_client_with_grants(
-        &super::db::clients::ClientDeclaration {
-            id: &request.id,
-            name: &request.name,
-            platform: &request.platform,
-            capabilities: &request.capabilities,
-            specs: &specs,
-            expected_revision: request.expected_revision,
-        },
-        &granted,
-    )?;
-    match publish(world, &client) {
-        Ok(view) => Ok(view),
-        Err(error) => {
-            if let Some(previous) = previous {
-                ene_domain::warn_if_err(
-                    store.client_repo().restore_client(&previous),
-                    "client declaration rollback",
-                );
-            } else {
-                ene_domain::warn_if_err(
-                    store.client_repo().delete_client(&request.id),
-                    "rejected client cleanup",
-                );
-            }
-            ene_domain::warn_if_err(dynamic::sync_tools(world), "tool resync");
-            Err(error)
-        }
-    }
-}
-
-pub(crate) fn set_capabilities(
-    world: &mut World,
-    request: &w::SetCapabilitiesRequest,
-) -> Result<w::Client> {
-    let store = world.resource::<Store>().clone();
-    let specs = declarations(&request.capability_specs, &request.capabilities)?;
-    if !request.granted_capabilities.is_empty() {
         return Err(HostError::Permission(
-            ("a client cannot grant capabilities to itself").into(),
+            "a client cannot grant capabilities to itself".into(),
         ));
     }
+    let store = world.resource::<Store>().clone();
     let rules = store.policy_repo().policy_rules()?;
     let granted = world
         .resource::<CapabilityPolicy>()
-        .grants_with_rules(&request.capabilities, &rules);
-    let previous = store.client_repo().client(&request.client_id)?;
-    let client = store.client_repo().set_capabilities(
-        &request.client_id,
-        &request.capabilities,
-        &granted,
-        &specs,
-        request.revision,
-    )?;
-    match publish(world, &client) {
-        Ok(view) => Ok(view),
-        Err(error) => {
-            if let Some(previous) = previous {
-                ene_domain::warn_if_err(
-                    store.client_repo().restore_client(&previous),
-                    "client declaration rollback",
-                );
-            }
-            ene_domain::warn_if_err(dynamic::sync_tools(world), "tool resync");
-            Err(error)
+        .grants_with_rules(capabilities, &rules);
+    let repo = store.client_repo();
+    let previous = repo.client(id)?;
+    let client = match declaration {
+        Declaration::Register(request) => repo.register_client_with_grants(
+            &super::db::clients::ClientDeclaration {
+                id,
+                name: &request.name,
+                platform: &request.platform,
+                capabilities,
+                specs: &specs,
+                expected_revision: request.expected_revision,
+            },
+            &granted,
+        )?,
+        Declaration::Replace(request) => {
+            repo.set_capabilities(id, capabilities, &granted, &specs, request.revision)?
         }
+    };
+    let result = (|| -> Result<w::Client> {
+        let active = repo.active_companions_for_client(id)?;
+        let view = wire::client(&client, world.resource::<DeviceHub>().connected(id), active);
+        dynamic::sync_tools(world)?;
+        if !client.is_granted(w::COMPUTER_USE) {
+            computer::invalidate_client(world, id, None);
+        }
+        notify_client(world.resource::<Notifier>(), &view);
+        Ok(view)
+    })();
+    if result.is_err() {
+        if let Some(previous) = previous {
+            ene_domain::warn_if_err(
+                repo.restore_client(&previous),
+                "client declaration rollback",
+            );
+        } else if let Declaration::Register(_) = declaration {
+            ene_domain::warn_if_err(repo.delete_client(id), "rejected client cleanup");
+        }
+        ene_domain::warn_if_err(dynamic::sync_tools(world), "tool resync");
     }
+    result
 }
 
-fn notify_client(notifier: &mut Notifier, client: &w::Client) {
+fn notify_client(notifier: &Notifier, client: &w::Client) {
     notifier.push(
         None,
         Some(&client.id),
@@ -293,7 +269,7 @@ pub(crate) fn activate(world: &mut World, request: &w::ActivationRequest) -> Res
         ene_domain::warn_if_err(dynamic::sync_tools(world), "tool resync");
         return Err(error);
     }
-    if let Some(previous) = previous.clone()
+    if let Some(previous) = previous
         && let Some(old_client) = previous.client_id
         && client != Some(old_client.as_str())
     {
@@ -317,8 +293,7 @@ pub(crate) fn activate(world: &mut World, request: &w::ActivationRequest) -> Res
                 let active = store.client_repo().active_companions_for_client(&old.id)?;
                 wire::client(&old, hub.connected(&old.id), active)
             };
-            let mut notifier = world.resource_mut::<Notifier>();
-            notify_client(&mut notifier, &view);
+            notify_client(world.resource::<Notifier>(), &view);
         }
     }
     if !request.release {
@@ -328,7 +303,7 @@ pub(crate) fn activate(world: &mut World, request: &w::ActivationRequest) -> Res
             &request.client_id,
         );
     }
-    world.resource_mut::<Notifier>().push(
+    world.resource::<Notifier>().push(
         Some(&request.companion_id),
         None,
         w::notification::Event::ActivationUpdated(Box::new((&activation).into())),

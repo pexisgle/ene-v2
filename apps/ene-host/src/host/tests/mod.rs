@@ -376,16 +376,16 @@ pub(super) fn pending_approval(harness: &mut Harness) -> permission::Approval {
 
 pub(super) fn register(world: &mut World, id: &str, spec: w::ClientCapabilitySpec) -> w::Client {
     let capability = spec.name.clone();
-    client::register(
+    client::declare(
         world,
-        &w::RegisterClientRequest {
+        client::Declaration::Register(&w::RegisterClientRequest {
             id: id.into(),
             name: id.into(),
             platform: "linux".into(),
             capabilities: vec![capability],
             capability_specs: vec![spec],
             ..Default::default()
-        },
+        }),
     )
     .unwrap()
 }

@@ -29,7 +29,7 @@ impl Runtime {
         let (commands, command_rx) = crossbeam_channel::bounded::<Job>(QUEUE);
         let (wake_tx, wake_rx) = crossbeam_channel::bounded::<()>(1);
         let (shutdown, shutdown_rx) = crossbeam_channel::bounded::<()>(1);
-        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let (ready_tx, ready_rx) = oneshot::channel();
         let hub = DeviceHub::default();
         // Plugin packages are read and verified once, before the kernel runs,
         // so every path that resolves a connection stays synchronous. The
@@ -42,15 +42,16 @@ impl Runtime {
         if !installed.is_empty() {
             tracing::info!(plugins = %installed.join(","), "provider plugins loaded");
         }
-        let ((), initial_plugin_tools, (models, catalog_refresh)) = tokio::join!(
+        let ((), initial_plugin_tools, (catalog, catalog_refresh)) = tokio::join!(
             providers.start_used(&store),
             providers::extensions::discover_plugin_tools(&providers, &store),
-            model::catalog::Refresh::initial()
+            model::catalog::Refresh::initial(wake_tx.clone())
         );
         let services = Arc::new(HostServices {
             state_dir: state.to_path_buf(),
             store,
             credentials,
+            catalog,
             hub,
             providers,
             voice: voice::Voice::new(tokio::runtime::Handle::current()),
@@ -64,7 +65,6 @@ impl Runtime {
         let thread = spawn_kernel_thread(KernelLaunch {
             resources: KernelResources {
                 services: Arc::clone(&services),
-                models,
                 catalog_refresh,
                 host_runtime: tokio::runtime::Handle::current(),
                 device_timeout: options.device_timeout,
@@ -79,7 +79,7 @@ impl Runtime {
         })
         .map_err(|_| StartError::Kernel)?;
         ready_rx
-            .recv()
+            .await
             .map_err(|_| StartError::Kernel)?
             .map_err(|_| StartError::Kernel)?;
         maybe_auto_start_voicevox(&services.store, &services.providers, &services.voicevox);

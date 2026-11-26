@@ -254,25 +254,23 @@ impl w::HostService for Services {
         let system_prompt = mind::preview_system_prompt(&req).map_err(ConnectError::from)?;
         let requested_model = req
             .model
-            .as_option()
+            .into_option()
             .map_or_default(|m| mind::ModelAssignment {
-                connection_id: m.connection_id.clone(),
-                model_id: m.model_id.clone(),
+                connection_id: m.connection_id,
+                model_id: m.model_id,
             });
         let user_message = req.user_message;
         let model = self
             .runtime
-            .read_kernel(move |kernel| {
-                let services = kernel.services();
-                let catalog = kernel.catalog();
+            .inspect(move |services| {
+                let catalog = services.catalog.read();
                 let assignment =
-                    host::model::preview_assignment(&services.store, catalog, &requested_model)?;
+                    host::model::preview_assignment(&services.store, &catalog, requested_model)?;
                 host::model::connect_assignment(
                     &services.store,
                     &services.credentials,
-                    catalog,
+                    &catalog,
                     &assignment,
-                    mind::Role::Companion,
                     &services.providers,
                 )
             })

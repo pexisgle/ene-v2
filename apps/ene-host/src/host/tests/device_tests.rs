@@ -47,9 +47,9 @@ fn setup_shared_body_motion_companions(harness: &mut Harness) -> String {
     )
     .unwrap()
     .id;
-    client::register(
+    client::declare(
         harness.app.world_mut(),
-        &w::RegisterClientRequest {
+        client::Declaration::Register(&w::RegisterClientRequest {
             id: "c1".into(),
             name: "c1".into(),
             platform: "linux".into(),
@@ -59,7 +59,7 @@ fn setup_shared_body_motion_companions(harness: &mut Harness) -> String {
                 capability_tool("app.focus", "focus_app"),
             ],
             ..Default::default()
-        },
+        }),
     )
     .unwrap();
     register(
@@ -650,7 +650,7 @@ fn a_work_run_reports_back_to_the_parent() {
 }
 
 #[test]
-fn a_conflicting_activation_is_rolled_back_before_side_effects() {
+fn a_conflicting_client_tool_declaration_rolls_back_activation_and_replacement() {
     let mut harness = Harness::with_policy([], "*");
     let second = crate::host::mind::create(
         harness.app.world_mut(),
@@ -677,10 +677,16 @@ fn a_conflicting_activation_is_rolled_back_before_side_effects() {
         }],
         ..Default::default()
     };
-    crate::host::client::register(harness.app.world_mut(), &declaration("c1", "ene moves"))
-        .unwrap();
-    crate::host::client::register(harness.app.world_mut(), &declaration("c2", "kai moves"))
-        .unwrap();
+    client::declare(
+        harness.app.world_mut(),
+        client::Declaration::Register(&declaration("c1", "ene moves")),
+    )
+    .unwrap();
+    let second_client = client::declare(
+        harness.app.world_mut(),
+        client::Declaration::Register(&declaration("c2", "kai moves")),
+    )
+    .unwrap();
     crate::host::client::activate(
         harness.app.world_mut(),
         &w::ActivationRequest {
@@ -715,6 +721,31 @@ fn a_conflicting_activation_is_rolled_back_before_side_effects() {
             .as_deref(),
         Some("c1")
     );
+
+    let replace = |revision, description| {
+        let request = declaration("c2", description);
+        w::SetCapabilitiesRequest {
+            client_id: request.id,
+            capabilities: request.capabilities,
+            capability_specs: request.capability_specs,
+            revision,
+            ..Default::default()
+        }
+    };
+    let shared = client::declare(
+        harness.app.world_mut(),
+        client::Declaration::Replace(&replace(second_client.revision, "ene moves")),
+    )
+    .unwrap();
+    activate(harness.app.world_mut(), &second, "c2");
+    let conflict = client::declare(
+        harness.app.world_mut(),
+        client::Declaration::Replace(&replace(shared.revision, "kai moves")),
+    );
+    assert!(conflict.is_err());
+    let persisted = store.client_repo().client("c2").unwrap().unwrap();
+    assert_eq!(persisted.revision, shared.revision);
+    assert_eq!(persisted.capability_specs[0].description, "ene moves");
 }
 
 fn unassigned(id: &str) -> crate::host::mind::Companion {

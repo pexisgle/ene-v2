@@ -7,7 +7,6 @@ use crate::host::{
     eyes, mind, permission, voice, work,
 };
 use ene_rpc as w;
-use rig_core::catalog::Catalog;
 use rig_ecs::prelude::{App, Aside, Author, Conversation, DeliveryMode, RequestId};
 
 /// The RPC boundary for operations that touch live agents or their tools.
@@ -19,18 +18,6 @@ pub(crate) struct AgentKernel<'a> {
 impl<'a> AgentKernel<'a> {
     pub(crate) fn new(app: &'a mut App, services: &'a HostServices) -> Self {
         Self { app, services }
-    }
-
-    pub(crate) fn services(&self) -> &HostServices {
-        self.services
-    }
-
-    pub(crate) fn catalog(&self) -> &Catalog {
-        self.app
-            .world()
-            .resource::<rig_ecs::model::Models>()
-            .0
-            .catalog()
     }
 
     pub(crate) fn accept(&mut self, request: &w::SendMessageRequest) -> Result<w::Acceptance> {
@@ -98,14 +85,14 @@ impl<'a> AgentKernel<'a> {
         &mut self,
         request: &w::RegisterClientRequest,
     ) -> Result<w::Client> {
-        client::register(self.app.world_mut(), request)
+        client::declare(self.app.world_mut(), client::Declaration::Register(request))
     }
 
     pub(crate) fn set_capabilities(
         &mut self,
         request: &w::SetCapabilitiesRequest,
     ) -> Result<w::Client> {
-        client::set_capabilities(self.app.world_mut(), request)
+        client::declare(self.app.world_mut(), client::Declaration::Replace(request))
     }
 
     pub(crate) fn activate_client(

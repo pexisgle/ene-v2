@@ -59,12 +59,7 @@ use ene_rpc as w;
 use parking_lot::Mutex;
 use rig_ecs::{prelude::*, session_log::SessionLog, session_log::SessionStore};
 use rig_memory::DirStore;
-use std::{
-    path::Path,
-    sync::{Arc, mpsc},
-    thread::JoinHandle,
-    time::Duration,
-};
+use std::{path::Path, sync::Arc, thread::JoinHandle, time::Duration};
 use tokio::sync::{broadcast, oneshot};
 
 const QUEUE: usize = 256;

@@ -173,16 +173,16 @@ fn the_gate_refuses_an_identifier_over_the_length_limit() {
 #[test]
 fn a_capability_tool_name_over_64_is_rejected_at_registration() {
     let mut harness = Harness::new(Vec::<Vec<MockStreamEvent>>::new());
-    let result = client::register(
+    let result = client::declare(
         harness.app.world_mut(),
-        &w::RegisterClientRequest {
+        client::Declaration::Register(&w::RegisterClientRequest {
             id: "c1".into(),
             name: "c1".into(),
             platform: "linux".into(),
             capabilities: vec!["device.files".into()],
             capability_specs: vec![capability_tool("device.files", &"n".repeat(65))],
             ..Default::default()
-        },
+        }),
     );
     assert!(result.is_err());
 }
@@ -278,9 +278,9 @@ fn a_confirm_capability_is_gated_and_delivered_to_the_bound_client() {
 #[test]
 fn a_client_is_granted_only_what_the_host_policy_allows() {
     let mut harness = Harness::with_policy([], "body.motion");
-    let client = client::register(
+    let client = client::declare(
         harness.app.world_mut(),
-        &w::RegisterClientRequest {
+        client::Declaration::Register(&w::RegisterClientRequest {
             id: "c1".into(),
             name: "desk".into(),
             platform: "linux".into(),
@@ -290,7 +290,7 @@ fn a_client_is_granted_only_what_the_host_policy_allows() {
                 capability_tool("device.files", "device_files"),
             ],
             ..Default::default()
-        },
+        }),
     )
     .unwrap();
     assert_eq!(client.capabilities, ["body.motion", "device.files"]);

@@ -30,9 +30,9 @@ fn bind(
     client_id: &str,
 ) -> (String, tokio::sync::mpsc::Receiver<w::DeviceEvent>) {
     let world = harness.app.world_mut();
-    client::register(
+    client::declare(
         world,
-        &w::RegisterClientRequest {
+        client::Declaration::Register(&w::RegisterClientRequest {
             id: client_id.into(),
             capabilities: vec!["eye.watch".into()],
             capability_specs: vec![w::ClientCapabilitySpec {
@@ -41,7 +41,7 @@ fn bind(
                 ..Default::default()
             }],
             ..Default::default()
-        },
+        }),
     )
     .unwrap();
     client::activate(

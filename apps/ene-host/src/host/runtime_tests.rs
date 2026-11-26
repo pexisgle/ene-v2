@@ -2,6 +2,7 @@
 
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 
 #[tokio::test]
 async fn discarded_replies_leave_bounded_nonblocking_actor_jobs() {

@@ -4,7 +4,6 @@ use super::*;
 
 pub(super) struct KernelResources {
     pub(super) services: Arc<HostServices>,
-    pub(super) models: rig_ecs::model::Models,
     pub(super) catalog_refresh: model::catalog::Refresh,
     pub(super) host_runtime: tokio::runtime::Handle,
     pub(super) device_timeout: Duration,
@@ -15,7 +14,7 @@ pub(super) struct KernelResources {
 pub(super) struct KernelLaunch {
     pub(super) resources: KernelResources,
     pub(super) initial_plugin_tools: Vec<(String, ene_plugin::PluginToolDefinition)>,
-    pub(super) ready_tx: mpsc::SyncSender<Result<()>>,
+    pub(super) ready_tx: oneshot::Sender<Result<()>>,
     pub(super) command_rx: crossbeam_channel::Receiver<Job>,
     pub(super) wake_rx: crossbeam_channel::Receiver<()>,
     pub(super) shutdown_rx: crossbeam_channel::Receiver<()>,
@@ -47,8 +46,7 @@ pub(super) fn spawn_kernel_thread(launch: KernelLaunch) -> std::io::Result<JoinH
                 Ok(())
             })();
             let ok = result.is_ok();
-            let _ready = launch.ready_tx.send(result);
-            if !ok {
+            if launch.ready_tx.send(result).is_err() || !ok {
                 return Ok(());
             }
             run_kernel_loop(
@@ -72,7 +70,9 @@ fn build_kernel_app(res: KernelResources) -> App {
         .insert_resource(res.services.store.clone())
         .insert_resource(res.services.providers.clone())
         .insert_resource(res.services.credentials.clone())
-        .insert_resource(res.models)
+        .insert_resource(rig_ecs::model::Models(rig_core::catalog::Connector::new(
+            res.services.catalog.read().clone(),
+        )))
         .insert_resource(res.catalog_refresh)
         .insert_resource(HostRuntime(res.host_runtime))
         .insert_resource(res.services.hub.clone())
@@ -104,7 +104,7 @@ fn build_kernel_app(res: KernelResources) -> App {
             compaction::CompactionPlugin,
             voice::VoicePlugin,
         ))
-        .add_systems(Update, model::catalog::refresh.before(AgentLoop));
+        .add_systems(Update, model::catalog::apply_refresh.before(AgentLoop));
     app.finish();
     if let Some(mut time) = app.world_mut().get_resource_mut::<Time<Virtual>>() {
         time.set_max_delta(Duration::from_secs(60));
