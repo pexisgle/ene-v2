@@ -90,19 +90,19 @@ type ToolAgents<'w, 's> = Query<
 >;
 
 fn update_access(
-    capabilities: Query<&CapabilityTool>,
+    capabilities: Query<(&ToolDef, &CapabilityTool)>,
     external: Query<&ToolDef, With<HostExternalTool>>,
     agents: ToolAgents<'_, '_>,
     mut commands: Commands,
 ) {
     let hand = hand_access(external.iter());
     let mut grants = std::collections::HashMap::<&str, Vec<&str>>::new();
-    for tool in &capabilities {
+    for (definition, tool) in &capabilities {
         for binding in &tool.bindings {
             grants
                 .entry(binding.companion_id.as_str())
                 .or_default()
-                .push(tool.spec.tool_name.as_str());
+                .push(definition.0.name.as_str());
         }
     }
     for (entity, companion, current) in &agents {

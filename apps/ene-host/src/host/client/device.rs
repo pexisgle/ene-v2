@@ -62,7 +62,7 @@ pub(crate) fn on_device_request(called: &ToolCalled<DeviceRequestArgs>, mut comm
     });
 }
 
-type NewTurnCall = (Added<Admitted>, With<TurnCall>);
+pub(super) type NewTurnCall = (Added<Admitted>, With<TurnCall>);
 
 /// Give each model request the capabilities of the same client the gate uses.
 /// Keep each input schema standalone so its local references retain their scope.

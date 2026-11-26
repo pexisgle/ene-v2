@@ -666,9 +666,9 @@ fn moving_the_active_client_moves_the_published_tools() {
     let world = harness.app.world_mut();
     assert!(
         world
-            .query::<&client::dynamic::CapabilityTool>()
+            .query_filtered::<&ToolDef, With<client::dynamic::CapabilityTool>>()
             .iter(world)
-            .all(|tool| !tool.spec.tool_name.starts_with("ene_cap_")),
+            .all(|tool| !tool.0.name.as_str().starts_with("ene_cap_")),
         "the fixed capability slots are gone"
     );
     activate(harness.app.world_mut(), &harness.companion, "c2");

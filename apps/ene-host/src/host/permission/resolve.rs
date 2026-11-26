@@ -191,13 +191,7 @@ pub(super) fn resolve_device_candidate(
         }
     };
     let dynamic_spec = if item.tool_name != "device_request" && !agent_ctx.is_work_agent {
-        match crate::host::client::dynamic::tool_spec_for(world, &client, &item.tool_name) {
-            Ok(spec) => spec,
-            Err(error) => {
-                refuse(world, item.entity, &error.to_string());
-                return None;
-            }
-        }
+        crate::host::client::dynamic::tool_spec_for(&client, &item.tool_name).cloned()
     } else {
         None
     };
@@ -236,9 +230,7 @@ pub(super) fn resolve_device_candidate(
     } else {
         item.arguments.clone()
     };
-    if (capability.starts_with(crate::host::client::WORKSPACE_CAPABILITY_PREFIX)
-        || capability == w::COMPUTER_USE)
-        && let Some(spec) = &spec
+    if let Some(spec) = &spec
         && let Err(error) = crate::host::client::validate_input(spec, &input)
     {
         refuse(world, item.entity, &error.to_string());

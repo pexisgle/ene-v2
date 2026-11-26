@@ -71,6 +71,11 @@ fn validator(schema: &Value) -> std::result::Result<Arc<jsonschema::Validator>, 
     Ok(validator)
 }
 
+/// Compiles a schema for later validation before a caller publishes it.
+pub fn check_schema(schema: &Value) -> std::result::Result<(), SchemaError> {
+    validator(schema).map(|_| ())
+}
+
 /// Validates `instance` against `schema` using a cached JSON Schema validator.
 pub fn validate(schema: &Value, instance: &Value) -> std::result::Result<(), SchemaError> {
     validator(schema)?

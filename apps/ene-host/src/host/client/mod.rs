@@ -88,7 +88,9 @@ impl Plugin for ClientPlugin {
         )
         .add_systems(
             AgentPass,
-            device::describe_device_request.in_set(PrepareSystems::Edit),
+            (device::describe_device_request, dynamic::describe)
+                .chain()
+                .in_set(PrepareSystems::Edit),
         )
         .insert_resource(dynamic::CapabilityCalls::new(wake))
         .init_resource::<computer::ComputerUse>()
@@ -128,6 +130,19 @@ fn declarations(
 ) -> Result<Vec<CapabilitySpec>> {
     let specs: Vec<CapabilitySpec> = specs.iter().map(wire::capability_spec_from).collect();
     super::client::validate_declarations(capabilities, &specs)?;
+    for spec in &specs {
+        for (side, text) in [
+            ("input", &spec.input_schema),
+            ("output", &spec.output_schema),
+        ] {
+            json::check_schema(&json::parse_schema(text)?).map_err(|_| {
+                HostError::Invalid(format!(
+                    "capability `{}` has an invalid {side} schema",
+                    spec.name
+                ))
+            })?;
+        }
+    }
     if capabilities.iter().any(|name| name == w::COMPUTER_USE)
         && !specs
             .iter()
@@ -362,5 +377,37 @@ mod tests {
             ..motion()
         };
         assert!(validate_declarations(&["body.motion".into()], &[shadow]).is_err());
+    }
+
+    #[test]
+    fn a_declaration_rejects_unusable_input_and_output_schemas() {
+        let invalid = r#"{"type":"not-a-valid-json-schema-type"}"#.to_owned();
+        let declared = ["body.motion".to_owned()];
+        let spec = w::ClientCapabilitySpec {
+            name: declared[0].clone(),
+            tool_name: "body_motion".into(),
+            ..Default::default()
+        };
+        let input = w::ClientCapabilitySpec {
+            input_schema: invalid.clone(),
+            ..spec.clone()
+        };
+        let output = w::ClientCapabilitySpec {
+            output_schema: invalid,
+            ..spec.clone()
+        };
+        assert!(
+            declarations(&[input], &declared)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid input schema")
+        );
+        assert!(
+            declarations(&[output], &declared)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid output schema")
+        );
+        assert!(declarations(&[spec], &declared).is_ok());
     }
 }

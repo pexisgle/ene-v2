@@ -186,50 +186,31 @@ fn assert_hand_never_sees_capability_tools(harness: &mut Harness) {
 }
 
 #[test]
-fn a_shared_tool_name_with_different_declarations_is_a_conflict() {
+fn one_client_cannot_publish_two_capabilities_under_one_tool_name() {
     let mut harness = Harness::new([]);
-    let other = crate::host::mind::create(
-        harness.app.world_mut(),
-        w::CreateCompanionRequest {
-            name: "other".into(),
-            mind: "kind".into(),
-            ..Default::default()
-        },
-    )
-    .unwrap()
-    .id;
-    register(
-        harness.app.world_mut(),
-        "c1",
-        capability_tool("body.motion", "body_motion"),
-    );
-    register(
-        harness.app.world_mut(),
-        "c2",
-        w::ClientCapabilitySpec {
-            tool_name: "body_motion".into(),
-            input_schema: r#"{"type":"object","required":["motion"],
-                 "properties":{"motion":{"type":"string"}}}"#
-                .into(),
-            approval: w::CapabilityApproval::Auto.into(),
-            ..spec("body.motion")
-        },
-    );
+    let motion = capability_tool("body.motion", "body_motion");
+    register(harness.app.world_mut(), "c1", motion.clone());
     activate(harness.app.world_mut(), &harness.companion, "c1");
-    let error = client::activate(
+
+    let store = harness.store();
+    let original = store.client_repo().client("c1").unwrap().unwrap();
+    let error = client::declare(
         harness.app.world_mut(),
-        &w::ActivationRequest {
-            companion_id: other,
-            client_id: "c2".into(),
+        client::Declaration::Replace(&w::SetCapabilitiesRequest {
+            client_id: "c1".into(),
+            revision: original.revision,
+            capabilities: vec!["body.motion".into(), "face.expression".into()],
+            capability_specs: vec![motion, capability_tool("face.expression", "body_motion")],
             ..Default::default()
-        },
+        }),
     )
     .unwrap_err();
-    assert!(matches!(
-        error,
-        crate::host::error::HostError::Conflict(ref reason)
-            if reason.contains("different description or input schema")
-    ));
+    assert!(error.to_string().contains("body_motion"));
+    assert_eq!(store.client_repo().client("c1").unwrap(), Some(original));
+    assert_eq!(
+        published_bindings(harness.app.world_mut(), "body_motion").len(),
+        1
+    );
 }
 
 #[test]
@@ -670,8 +651,22 @@ fn a_work_run_reports_back_to_the_parent() {
 }
 
 #[test]
-fn a_conflicting_client_tool_declaration_rolls_back_activation_and_replacement() {
-    let mut harness = Harness::with_policy([], "*");
+fn active_companions_can_use_the_same_tool_name_with_different_schemas() {
+    use serde_json::json;
+
+    let mut harness = Harness::new([]);
+    let model = computer_model(
+        &mut harness,
+        [
+            tool_turn("call-a", "body_motion", json!({"motion": "nod"})),
+            text_turn("A done"),
+            tool_turn("call-b", "body_motion", json!({"motion": "wave"})),
+            text_turn("B done"),
+        ],
+        false,
+    );
+    let first = harness.companion.clone();
+    agent::sync_companion(harness.app.world_mut(), &first).unwrap();
     let second = crate::host::mind::create(
         harness.app.world_mut(),
         w::CreateCompanionRequest {
@@ -682,111 +677,58 @@ fn a_conflicting_client_tool_declaration_rolls_back_activation_and_replacement()
     )
     .unwrap()
     .id;
-    let declaration = |id: &str, description: &str| w::RegisterClientRequest {
-        id: id.into(),
-        name: id.into(),
-        platform: "linux".into(),
-        capabilities: vec!["body.motion".into()],
-        capability_specs: vec![w::ClientCapabilitySpec {
-            name: "body.motion".into(),
-            tool_name: "body_motion".into(),
-            description: description.into(),
-            input_schema: "{}".into(),
-            approval: w::CapabilityApproval::Auto.into(),
-            ..Default::default()
-        }],
-        ..Default::default()
+    let motion_spec = |motion: &str| w::ClientCapabilitySpec {
+        description: format!("Play {motion}"),
+        input_schema: json!({
+            "type": "object", "required": ["motion"],
+            "properties": {"motion": {"enum": [motion]}}
+        })
+        .to_string(),
+        ..capability_tool("body.motion", "body_motion")
     };
-    client::declare(
-        harness.app.world_mut(),
-        client::Declaration::Register(&declaration("c1", "ene moves")),
-    )
-    .unwrap();
-    let second_client = client::declare(
-        harness.app.world_mut(),
-        client::Declaration::Register(&declaration("c2", "kai moves")),
-    )
-    .unwrap();
-    crate::host::client::activate(
-        harness.app.world_mut(),
-        &w::ActivationRequest {
-            companion_id: harness.companion.clone(),
-            client_id: "c1".into(),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    // The second activation would publish the same tool name with a different
-    // declaration: the move is refused and its row must be gone.
-    assert!(
-        crate::host::client::activate(
-            harness.app.world_mut(),
-            &w::ActivationRequest {
-                companion_id: second.clone(),
-                client_id: "c2".into(),
-                ..Default::default()
-            },
-        )
-        .is_err()
-    );
-    let store = harness.store();
-    assert!(store.client_repo().activation(&second).unwrap().is_none());
-    assert_eq!(
-        store
-            .client_repo()
-            .activation(&harness.companion)
-            .unwrap()
-            .unwrap()
-            .client_id
-            .as_deref(),
-        Some("c1")
-    );
-
-    let replace = |revision, description| {
-        let request = declaration("c2", description);
-        w::SetCapabilitiesRequest {
-            client_id: request.id,
-            capabilities: request.capabilities,
-            capability_specs: request.capability_specs,
-            revision,
-            ..Default::default()
-        }
-    };
-    let shared = client::declare(
-        harness.app.world_mut(),
-        client::Declaration::Replace(&replace(second_client.revision, "ene moves")),
-    )
-    .unwrap();
+    register(harness.app.world_mut(), "c1", motion_spec("nod"));
+    register(harness.app.world_mut(), "c2", motion_spec("old_wave"));
+    activate(harness.app.world_mut(), &first, "c1");
     activate(harness.app.world_mut(), &second, "c2");
-    let conflict = client::declare(
-        harness.app.world_mut(),
-        client::Declaration::Replace(&replace(shared.revision, "kai moves")),
-    );
-    assert!(conflict.is_err());
-    let persisted = store.client_repo().client("c2").unwrap().unwrap();
-    assert_eq!(persisted.revision, shared.revision);
-    assert_eq!(persisted.capability_specs[0].description, "ene moves");
-
-    crate::host::mind::delete(harness.app.world_mut(), &harness.companion).unwrap();
-    assert!(
-        store
-            .client_repo()
-            .activation(&harness.companion)
-            .unwrap()
-            .is_none()
-    );
-    let mut tools = harness
-        .app
-        .world_mut()
-        .query::<&client::dynamic::CapabilityTool>();
-    let tool = tools.single(harness.app.world()).unwrap();
-    assert_eq!(tool.bindings.len(), 1);
-    assert_eq!(tool.bindings[0].companion_id.as_str(), second);
+    let store = harness.store();
+    let previous = store.client_repo().client("c2").unwrap().unwrap();
     client::declare(
         harness.app.world_mut(),
-        client::Declaration::Replace(&replace(shared.revision, "kai moves")),
+        client::Declaration::Replace(&w::SetCapabilitiesRequest {
+            client_id: "c2".into(),
+            capabilities: vec!["body.motion".into()],
+            capability_specs: vec![motion_spec("wave")],
+            revision: previous.revision,
+            ..Default::default()
+        }),
     )
     .unwrap();
+    assert_eq!(
+        published_bindings(harness.app.world_mut(), "body_motion").len(),
+        2
+    );
+
+    assert_shared_body_motion_dispatch(&mut harness, &second);
+    let requests = model.requests();
+    assert_eq!(requests.len(), 4);
+    for (request, motion) in [(&requests[0], "nod"), (&requests[2], "wave")] {
+        let motion_tool = request
+            .tools
+            .iter()
+            .find(|tool| tool.name.as_str() == "body_motion")
+            .unwrap();
+        assert_eq!(motion_tool.description, format!("Play {motion}"));
+        assert_eq!(
+            motion_tool.parameters["properties"]["motion"]["enum"],
+            json!([motion])
+        );
+    }
+
+    crate::host::mind::delete(harness.app.world_mut(), &first).unwrap();
+    assert!(store.client_repo().activation(&first).unwrap().is_none());
+    let bindings = published_bindings(harness.app.world_mut(), "body_motion");
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].companion_id, second);
 }
 
 fn unassigned(id: &str) -> crate::host::mind::Companion {
