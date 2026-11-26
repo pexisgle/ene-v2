@@ -7,6 +7,7 @@ use crate::host::{
     permission,
     resources::{DeviceHub, Perception},
 };
+use ene_domain::ClientId;
 use ene_rpc as w;
 use rig_core::test_utils::MockStreamEvent;
 
@@ -21,7 +22,7 @@ async fn a_real_guest_tool_call_is_held_and_denied_by_the_gate() {
         .app
         .world_mut()
         .resource::<DeviceHub>()
-        .register("c1");
+        .register(&ClientId::parse("c1").unwrap());
     let agent = harness.companion_agent();
     let call_entity = harness
         .app
@@ -206,7 +207,7 @@ fn a_confirm_capability_is_gated_and_delivered_to_the_bound_client() {
         .app
         .world_mut()
         .resource::<DeviceHub>()
-        .register("c1");
+        .register(&ClientId::parse("c1").unwrap());
     // The turn parks on the approval before the operation is dispatched.
     harness.accept("key-1", "ファイルに書いて").unwrap();
     harness.run_until(|world| {

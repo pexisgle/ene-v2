@@ -4,8 +4,9 @@ use crate::host::{
     HostServices, chat, client,
     delegation::{self, DeliveredClaims},
     error::{HostError, Result},
-    eyes, mind, permission, voice, work,
+    eyes, mind, permission, work,
 };
+use ene_domain::ClientId;
 use ene_rpc as w;
 use rig_ecs::prelude::{App, Aside, Author, Conversation, DeliveryMode, RequestId};
 
@@ -102,7 +103,8 @@ impl<'a> AgentKernel<'a> {
         client::activate(self.app.world_mut(), request)
     }
 
-    pub(crate) fn client_reconnected(&mut self, client_id: &str) -> Result<()> {
+    pub(crate) fn client_reconnected(&mut self, client: &ClientId) -> Result<()> {
+        let client_id = client.as_str();
         let services = self.services;
         let world = self.app.world_mut();
         client::computer::invalidate_client(world, client_id, services.hub.subscription(client_id));
@@ -120,7 +122,8 @@ impl<'a> AgentKernel<'a> {
         })
     }
 
-    pub(crate) fn client_disconnected(&mut self, client_id: &str) -> Result<()> {
+    pub(crate) fn client_disconnected(&mut self, client: &ClientId) -> Result<()> {
+        let client_id = client.as_str();
         if !self.services.hub.connected(client_id) {
             client::computer::invalidate_client(self.app.world_mut(), client_id, None);
             self.services
@@ -164,7 +167,7 @@ impl<'a> AgentKernel<'a> {
         &mut self,
         id: &str,
         text: &str,
-        binding: &voice::InputBinding,
+        client: &ClientId,
     ) -> Result<bool> {
         let text = text.trim();
         if text.is_empty() {
@@ -174,7 +177,7 @@ impl<'a> AgentKernel<'a> {
             .services
             .store
             .client_repo()
-            .active_companions_for_client(&binding.client_id)?;
+            .active_companions_for_client(client.as_str())?;
         if companions.is_empty() || !self.services.voice.accept_transcription(id) {
             return Ok(false);
         }
@@ -192,7 +195,7 @@ impl<'a> AgentKernel<'a> {
                 conversation.add_aside(Aside::new(
                     "ene.transcription",
                     Author::plugin("ene-host"),
-                    serde_json::json!({"transcription_id": id, "client_id": binding.client_id}),
+                    serde_json::json!({"transcription_id": id, "client_id": client.as_str()}),
                 ));
             }
             super::deliver(

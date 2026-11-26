@@ -223,19 +223,10 @@ fn input_binding_validates_first_metadata_and_allows_omitted_followups() {
             expected_revision: 0,
         })
         .unwrap();
-    assert!(matches!(bind_input(&store, ""), Err(HostError::Invalid(_))));
-    assert!(matches!(
-        bind_input(&store, "missing"),
-        Err(HostError::NotFound(_))
-    ));
-    assert!(matches!(
-        bind_input(&store, "c2"),
-        Err(HostError::Conflict(_))
-    ));
-    let binding = bind_input(&store, "c1").unwrap();
-    assert!(binding.accepts("c1"));
-    assert!(binding.accepts(""));
-    assert!(!binding.accepts("c2"));
+    let lookup = |id| active_companions(&store, &ene_domain::ClientId::parse(id).unwrap());
+    assert!(matches!(lookup("missing"), Err(HostError::NotFound(_))));
+    assert!(matches!(lookup("c2"), Err(HostError::Conflict(_))));
+    assert_eq!(lookup("c1").unwrap(), ["ene"]);
 }
 
 #[test]

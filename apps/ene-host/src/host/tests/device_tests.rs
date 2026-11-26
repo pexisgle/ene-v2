@@ -352,7 +352,7 @@ fn computer_use_sends_a_request_only_image_and_never_replays_input() {
     let frame_id = uuid::Uuid::new_v4().to_string();
     let model = setup_computer_use_model(&mut harness, &frame_id);
     let hub = harness.app.world().resource::<DeviceHub>().clone();
-    let (_, mut stream) = hub.register("desk");
+    let (_, mut stream) = hub.register(&ene_domain::ClientId::parse("desk").unwrap());
     let mut events = harness
         .app
         .world()
@@ -390,7 +390,7 @@ fn computer_use_sends_a_request_only_image_and_never_replays_input() {
         },
     );
     work::stop(harness.app.world_mut(), &session.id).unwrap();
-    let (_, mut replacement) = hub.register("desk");
+    let (_, mut replacement) = hub.register(&ene_domain::ClientId::parse("desk").unwrap());
     crate::host::client::computer::invalidate_client(
         harness.app.world_mut(),
         "desk",
@@ -584,7 +584,7 @@ fn computer_use_respects_the_client_declaration_model_and_host_denial() {
         register(harness.app.world_mut(), "desk", spec);
         activate(harness.app.world_mut(), &harness.companion, "desk");
         let hub = harness.app.world().resource::<DeviceHub>().clone();
-        let (_, mut stream) = hub.register("desk");
+        let (_, mut stream) = hub.register(&ene_domain::ClientId::parse("desk").unwrap());
         if denied {
             harness
                 .store()

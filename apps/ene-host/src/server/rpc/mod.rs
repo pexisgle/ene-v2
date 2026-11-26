@@ -12,6 +12,7 @@ use super::auth;
 use crate::host::{HostServices, Runtime, agent::AgentKernel, error::HostError};
 use axum::middleware;
 use connectrpc::{ConnectError, Response, Router, ServiceResult};
+use ene_domain::ClientId;
 use ene_rpc as w;
 use std::sync::Arc;
 use std::time::Duration;
@@ -111,6 +112,10 @@ impl Services {
         let store = self.store();
         Response::ok(operation(store).map_err(ConnectError::from)?)
     }
+}
+
+fn parse_client_id(id: &str) -> Result<ClientId, ConnectError> {
+    ClientId::parse(id).map_err(|error| ConnectError::invalid_argument(error.to_string()))
 }
 
 impl From<HostError> for ConnectError {

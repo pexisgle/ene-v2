@@ -6,7 +6,7 @@
 
 use crate::error::{DomainError, validate_id};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::fmt;
+use std::{borrow::Borrow, fmt, sync::Arc};
 
 /// The id of one companion.
 ///
@@ -59,6 +59,33 @@ impl<'de> Deserialize<'de> for CompanionId {
         let id = String::deserialize(deserializer)?;
         validate_id(&id).map_err(serde::de::Error::custom)?;
         Ok(Self(id))
+    }
+}
+
+/// The validated id of a client, shared by live device and audio streams.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ClientId(Arc<str>);
+
+impl ClientId {
+    /// Parses a client id using the domain's printable ASCII rules.
+    ///
+    /// # Errors
+    /// Returns [`DomainError::Invalid`] for an invalid id.
+    pub fn parse(id: &str) -> Result<Self, DomainError> {
+        validate_id(id)?;
+        Ok(Self(Arc::from(id)))
+    }
+
+    /// The id as a string slice for storage and protocol adapters.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Borrow<str> for ClientId {
+    fn borrow(&self) -> &str {
+        self.as_str()
     }
 }
 

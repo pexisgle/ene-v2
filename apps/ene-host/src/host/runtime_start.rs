@@ -109,10 +109,6 @@ impl Runtime {
         self.services.credentials.clone()
     }
 
-    pub(crate) fn hub(&self) -> DeviceHub {
-        self.services.hub.clone()
-    }
-
     pub(crate) fn voicevox(&self) -> voice::voicevox::VoicevoxManager {
         self.services.voicevox.clone()
     }

@@ -304,7 +304,8 @@ mod tests {
         let store = Store::open(&state.path().join("host.sqlite3")).unwrap();
         let repo = store.client_repo();
         let hub = DeviceHub::default();
-        let (subscription, mut receiver) = hub.register("desk");
+        let (subscription, mut receiver) =
+            hub.register(&ene_domain::ClientId::parse("desk").unwrap());
         let operation = DeviceOperation {
             id: "motion".into(),
             client_id: "desk".into(),

@@ -26,17 +26,6 @@ pub const MIN_STT_RMS: f32 = 0.004;
 pub const MAX_STT_BYTES: usize = 48_000 * 20;
 pub const VOICE_UNAVAILABLE: &str = "voice requires a configured TTS/STT connection";
 
-#[derive(Clone, Debug)]
-pub struct InputBinding {
-    pub client_id: String,
-}
-
-impl InputBinding {
-    pub fn accepts(&self, client_id: &str) -> bool {
-        client_id.is_empty() || client_id == self.client_id
-    }
-}
-
 #[derive(Debug)]
 pub struct AudioSubscription {
     pub subscription_id: String,

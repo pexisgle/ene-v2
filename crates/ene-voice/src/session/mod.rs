@@ -4,7 +4,7 @@ pub mod events;
 mod turn;
 
 pub use events::{
-    AudioSubscription, Dispatch, EndedUtterance, InputBinding, MAX_PROBE_CHARS, MAX_SENTENCE_CHARS,
+    AudioSubscription, Dispatch, EndedUtterance, MAX_PROBE_CHARS, MAX_SENTENCE_CHARS,
     MAX_STT_BYTES, MIN_STT_BYTES, MIN_STT_RMS, STT_SILENCE_WINDOW, STT_TIMEOUT, VOICE_UNAVAILABLE,
     audio_events, finished_event, flush_event, flush_sentences, split_sentences, synthesize,
     synthesize_for_probe,

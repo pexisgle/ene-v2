@@ -1,6 +1,6 @@
 //! ECS facade and plugin registration for [`super::Voice`].
 
-use super::{AudioSubscription, InputBinding, Voice, companion_tts_source, parse_binding, speech};
+use super::{AudioSubscription, Voice, companion_tts_source, parse_binding, speech};
 use crate::host::{
     agent,
     db::{Result, Store},
@@ -8,68 +8,35 @@ use crate::host::{
     notify::Notifier,
 };
 use bevy_ecs::prelude::*;
+use ene_domain::ClientId;
 use ene_rpc as w;
 use rig_ecs::prelude::*;
 
-/// Binds an audio input stream to the client that opened it. Only the active
-/// client of a companion may capture: a client that is not active has nothing
-/// the head may answer.
-pub(crate) fn bind_input(store: &Store, client_id: &str) -> Result<InputBinding> {
-    if client_id.is_empty() {
-        return Err(HostError::Invalid(
-            ("client_id is required for audio input").into(),
-        ));
+/// Resolves the companions an active client can speak to or hear.
+pub(crate) fn active_companions(store: &Store, client: &ClientId) -> Result<Vec<String>> {
+    let repo = store.client_repo();
+    if repo.client(client.as_str())?.is_none() {
+        return Err(HostError::NotFound("client not found".into()));
     }
-    ene_domain::validate_id(client_id)?;
-    if store.client_repo().client(client_id)?.is_none() {
-        return Err(HostError::NotFound(("client not found").into()));
-    }
-    if store
-        .client_repo()
-        .activation_for_client(client_id)?
-        .is_none()
-    {
+    let owned = repo.active_companions_for_client(client.as_str())?;
+    if owned.is_empty() {
         return Err(HostError::Conflict(
-            ("the client is not the active client of any companion").into(),
+            "the client is not the active client of any companion".into(),
         ));
     }
-    Ok(InputBinding {
-        client_id: client_id.to_owned(),
-    })
+    Ok(owned)
 }
 
-pub(crate) fn is_still_active(store: &Store, binding: &InputBinding) -> Result<bool> {
-    Ok(store
-        .client_repo()
-        .activation_for_client(&binding.client_id)?
-        .is_some())
-}
-
-/// Binds an audio output stream to the client that opened it and makes it the
-/// owner of every companion it is the active client of.
+/// Binds an audio output stream to the client that opened it.
 pub(crate) fn subscribe_audio(
     store: &Store,
     voice: &Voice,
-    client_id: &str,
+    client: &ClientId,
 ) -> Result<AudioSubscription> {
-    if client_id.is_empty() {
-        return Err(HostError::Invalid(("client_id is required").into()));
-    }
-    ene_domain::validate_id(client_id)?;
-    if store.client_repo().client(client_id)?.is_none() {
-        return Err(HostError::NotFound(("client not found").into()));
-    }
-    let owned = store
-        .client_repo()
-        .active_companions_for_client(client_id)?;
-    if owned.is_empty() {
-        return Err(HostError::Conflict(
-            ("the client is not the active client of any companion").into(),
-        ));
-    }
-    let subscription = voice.register(client_id);
-    for companion_id in owned {
-        voice.publish(&companion_id, client_id);
+    let companions = active_companions(store, client)?;
+    let subscription = voice.register(client.as_str());
+    for companion in companions {
+        voice.publish(&companion, client.as_str());
     }
     Ok(subscription)
 }

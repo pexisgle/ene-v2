@@ -1,10 +1,10 @@
 //! Client registration, device streams and perception.
-use super::Services;
+use super::{Services, parse_client_id};
 use crate::host::{Runtime, client, error::HostError, resources::DeviceHub};
 use connectrpc::{
     ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream,
 };
-use ene_domain::SubscriptionId;
+use ene_domain::{ClientId, SubscriptionId};
 use ene_rpc as w;
 use futures_util::StreamExt;
 
@@ -80,24 +80,21 @@ impl w::ClientService for Services {
         _: RequestContext,
         request: ServiceRequest<'_, w::Id>,
     ) -> ServiceResult<ServiceStream<w::DeviceEvent>> {
-        let client_id = request.id.to_owned();
-        self.with_store({
-            let client_id = client_id.clone();
-            move |store| {
-                store
-                    .client_repo()
-                    .client(&client_id)?
-                    .ok_or_else(|| HostError::NotFound(("client not found").into()))?;
-                Ok(())
-            }
-        })
-        .await?;
-
+        let client_id = parse_client_id(request.id)?;
         let runtime = self.runtime.clone();
         let (guard, mut receiver) = self
             .runtime
             .call_kernel(move |kernel| {
-                let hub = runtime.hub();
+                let services = runtime.services();
+                if services
+                    .store
+                    .client_repo()
+                    .client(client_id.as_str())?
+                    .is_none()
+                {
+                    return Err(HostError::NotFound("client not found".into()));
+                }
+                let hub = services.hub.clone();
                 let (subscription, receiver) = hub.register(&client_id);
                 let guard = StreamGuard {
                     runtime,
@@ -167,7 +164,7 @@ impl w::ClientService for Services {
 struct StreamGuard {
     runtime: Runtime,
     hub: DeviceHub,
-    client_id: String,
+    client_id: ClientId,
     subscription: SubscriptionId,
 }
 
@@ -189,6 +186,37 @@ mod tests {
     use super::*;
     use crate::host::client::{DeviceOperation, DeviceStatus};
     use crate::host::db::Store;
+
+    #[tokio::test]
+    async fn a_device_stream_requires_a_valid_registered_client() {
+        use connectrpc::{ErrorCode, StreamMessage};
+        use w::ClientService;
+
+        let state = tempfile::tempdir().unwrap();
+        let runtime = Runtime::start(state.path()).await.unwrap();
+        let service = Services {
+            runtime: runtime.clone(),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+        };
+        for (id, code) in [
+            ("bad id", ErrorCode::InvalidArgument),
+            ("missing", ErrorCode::NotFound),
+        ] {
+            let rpc = StreamMessage::from_message(&w::Id {
+                id: id.into(),
+                ..Default::default()
+            });
+            let result = service
+                .device_stream(
+                    RequestContext::new(http::HeaderMap::new()),
+                    ServiceRequest::from_parts(rpc.view(), rpc.bytes()),
+                )
+                .await;
+            assert_eq!(result.err().unwrap().code, code);
+            assert!(!runtime.services().hub.connected(id));
+        }
+        runtime.shutdown().await.unwrap();
+    }
 
     #[tokio::test]
     async fn device_guard_cleanup_outside_tokio_preserves_replacement_and_pending_operations() {
@@ -219,19 +247,20 @@ mod tests {
             })
             .await
             .unwrap();
-        let hub = runtime.hub();
-        let (old, _old_receiver) = hub.register("c1");
+        let hub = runtime.services().hub.clone();
+        let client_id = ClientId::parse("c1").unwrap();
+        let (old, _old_receiver) = hub.register(&client_id);
         let old = StreamGuard {
             runtime: runtime.clone(),
             hub: hub.clone(),
-            client_id: "c1".into(),
+            client_id: client_id.clone(),
             subscription: old,
         };
-        let (subscription, mut receiver) = hub.register("c1");
+        let (subscription, mut receiver) = hub.register(&client_id);
         let current = StreamGuard {
             runtime: runtime.clone(),
             hub: hub.clone(),
-            client_id: "c1".into(),
+            client_id,
             subscription,
         };
         std::thread::spawn(move || drop(old)).join().unwrap();
@@ -260,12 +289,13 @@ mod tests {
         let replacement = runtime
             .read(move |_| {
                 let hub = current.hub.clone();
+                let client_id = current.client_id.clone();
                 drop(current);
-                let (subscription, _receiver) = hub.register("c1");
+                let (subscription, _receiver) = hub.register(&client_id);
                 Ok(StreamGuard {
                     runtime: runtime_for_guard,
                     hub,
-                    client_id: "c1".into(),
+                    client_id,
                     subscription,
                 })
             })

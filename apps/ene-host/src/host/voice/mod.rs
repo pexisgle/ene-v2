@@ -7,16 +7,16 @@ mod session;
 mod tests;
 
 pub(crate) use ene_voice::{
-    AudioSubscription, BoxFuture, HttpEngine, HttpResult, InputBinding, MAX_PROBE_CHARS,
-    MAX_STT_BYTES, MIN_STT_BYTES, MIN_STT_RMS, SAMPLE_RATE, STT_SAMPLE_RATES, STT_SILENCE_WINDOW,
-    STT_TIMEOUT, SetupError, SttEngine, TtsEngine, VOICE_UNAVAILABLE, VoiceHttpError,
-    parse_binding, speech, synthesize_for_probe, voicevox,
+    AudioSubscription, BoxFuture, HttpEngine, HttpResult, MAX_PROBE_CHARS, MAX_STT_BYTES,
+    MIN_STT_BYTES, MIN_STT_RMS, SAMPLE_RATE, STT_SAMPLE_RATES, STT_SILENCE_WINDOW, STT_TIMEOUT,
+    SetupError, SttEngine, TtsEngine, VOICE_UNAVAILABLE, VoiceHttpError, parse_binding, speech,
+    synthesize_for_probe, voicevox,
 };
 pub(crate) use engine::{Engines, VoiceEngineContext};
 pub(crate) use engine::{companion_tts_source, stt_source, tts_source};
 pub(crate) use session::{
-    VoicePlugin, bind_input, flush, is_still_active, on_client_activated, on_client_moved,
-    on_stream_text, on_turn_end, play_once, subscribe_audio,
+    VoicePlugin, active_companions, flush, on_client_activated, on_client_moved, on_stream_text,
+    on_turn_end, play_once, subscribe_audio,
 };
 
 /// Bevy ECS resource wrapper over [`ene_voice::VoicePipeline`].

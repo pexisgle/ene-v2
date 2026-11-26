@@ -3,17 +3,18 @@
 //! (docs/design/voice-avatar.md §4–§6). `StreamAudioInput` binds the stream to
 //! the client that opened it and recognizes each finished utterance;
 //! `SubscribeAudioOutput` only pumps the host's generation-gated channel.
-use super::Services;
 use super::voice_convert::to_wire_event;
+use super::{Services, parse_client_id};
 use crate::host::{
     Runtime,
     error::HostError,
-    voice::{self, InputBinding, SetupError, SttEngine},
+    voice::{self, SetupError, SttEngine},
 };
 use connectrpc::{
     ConnectError, InboundStream, RequestContext, Response, ServiceRequest, ServiceResult,
     ServiceStream,
 };
+use ene_domain::ClientId;
 use ene_rpc as w;
 use futures_util::StreamExt;
 use std::sync::Arc;
@@ -45,10 +46,7 @@ impl w::VoiceService for Services {
         };
         let runtime = self.runtime.clone();
         let stream = async_stream::stream! {
-            let mut recognition = Recognition {
-                sample_rate: voice::SAMPLE_RATE,
-                ..Default::default()
-            };
+            let mut recognition: Option<Recognition> = None;
             loop {
                 let (flush_after, end) =
                     match tokio::time::timeout(voice::STT_SILENCE_WINDOW, inbound.next()).await {
@@ -59,36 +57,28 @@ impl w::VoiceService for Services {
                             break;
                         }
                         Ok(Some(Ok(message))) => {
-                            if recognition.binding.is_none() {
-                                let client_id = message.view().client_id.to_owned();
-                                match bind_recognition_client(&runtime, client_id).await {
-                                    Ok(binding) => recognition.binding = Some(binding),
+                            let chunk = message.view();
+                            let current = match &mut recognition {
+                                Some(current) => current,
+                                slot @ None => match bind_recognition_client(&runtime, chunk.client_id).await {
+                                    Ok(client) => slot.insert(Recognition { client, sample_rate: voice::SAMPLE_RATE, capture: SpeechCapture::Idle }),
                                     Err(error) => {
                                         yield Err(error);
                                         break;
                                     }
-                                }
-                            }
-                            let chunk = message.view();
-                            if !recognition
-                                .binding
-                                .as_ref()
-                                .is_some_and(|binding| binding.accepts(chunk.client_id))
-                            {
+                                },
+                            };
+                            if !chunk.client_id.is_empty() && chunk.client_id != current.client.as_str() {
                                 continue;
                             }
                             if chunk.barge_in {
-                                if let Some(binding) = recognition.binding.as_ref() {
-                                    flush_barge_in(&runtime, binding.client_id.clone()).await;
-                                }
+                                flush_barge_in(&runtime, current.client.clone()).await;
                             } else if chunk.is_companion_speaking {
-                                recognition.pending.clear();
-                                recognition.speaking = false;
-                                recognition.transcription_id.clear();
+                                current.capture = SpeechCapture::Idle;
                                 continue;
                             }
                             if chunk.sample_rate != 0 {
-                                match validate_and_apply_sample_rate(&mut recognition, &runtime, &engine, chunk.sample_rate).await {
+                                match validate_and_apply_sample_rate(current, &runtime, &engine, chunk.sample_rate).await {
                                     Ok(Some(event)) => yield Ok(event),
                                     Ok(None) => {}
                                     Err(error) => {
@@ -100,22 +90,18 @@ impl w::VoiceService for Services {
                             if chunk.pcm_data.is_empty() {
                                 (true, false)
                             } else {
-                                if let Some(started) = recognition.start_speaking_if_needed() {
+                                if let Some(started) = current.capture.append(chunk.pcm_data) {
                                     yield Ok(started);
                                 }
-                                recognition.pending.extend_from_slice(chunk.pcm_data);
-                                (
-                                    recognition.pending.len() >= voice::MAX_STT_BYTES,
-                                    false,
-                                )
+                                (current.capture.len() >= voice::MAX_STT_BYTES, false)
                             }
                         }
                     };
-                if let Some(event) = if flush_after {
-                    recognition.flush(&runtime, &engine).await?
-                } else {
-                    None
-                } {
+                let event = match (flush_after, &mut recognition) {
+                    (true, Some(recognition)) => recognition.flush(&runtime, &engine).await?,
+                    _ => None,
+                };
+                if let Some(event) = event {
                     yield Ok(event);
                 }
                 if end {
@@ -150,7 +136,7 @@ impl w::VoiceService for Services {
         {
             return Err(setup_error(error));
         }
-        let client_id = request.client_id.to_owned();
+        let client_id = parse_client_id(request.client_id)?;
         let (mut receiver, mut control, guard) = self
             .runtime
             .inspect(move |services| {
@@ -282,70 +268,83 @@ fn setup_error(error: SetupError) -> ConnectError {
 }
 
 #[derive(Default)]
+enum SpeechCapture {
+    #[default]
+    Idle,
+    Speaking {
+        id: String,
+        pcm: Vec<u8>,
+    },
+}
+
+impl SpeechCapture {
+    fn append(&mut self, chunk: &[u8]) -> Option<w::TranscriptionEvent> {
+        match self {
+            Self::Speaking { pcm, .. } => {
+                pcm.extend_from_slice(chunk);
+                None
+            }
+            Self::Idle => {
+                let id = uuid::Uuid::new_v4().to_string();
+                let event = w::TranscriptionEvent {
+                    transcription_id: id.clone(),
+                    is_speaking: true,
+                    ..Default::default()
+                };
+                *self = Self::Speaking {
+                    id,
+                    pcm: chunk.to_vec(),
+                };
+                Some(event)
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Idle => 0,
+            Self::Speaking { pcm, .. } => pcm.len(),
+        }
+    }
+}
+
 struct Recognition {
-    binding: Option<InputBinding>,
-    pending: Vec<u8>,
+    client: ClientId,
     sample_rate: u32,
-    transcription_id: String,
-    speaking: bool,
+    capture: SpeechCapture,
 }
 
 impl Recognition {
-    fn start_speaking_if_needed(&mut self) -> Option<w::TranscriptionEvent> {
-        if self.speaking {
-            return None;
-        }
-        self.speaking = true;
-        if self.transcription_id.is_empty() {
-            self.transcription_id = uuid::Uuid::new_v4().to_string();
-        }
-        Some(w::TranscriptionEvent {
-            transcription_id: self.transcription_id.clone(),
-            is_speaking: true,
-            ..Default::default()
-        })
-    }
-
     async fn flush(
         &mut self,
         runtime: &Runtime,
         engine: &Arc<dyn SttEngine>,
-    ) -> std::result::Result<Option<w::TranscriptionEvent>, ConnectError> {
-        let was_speaking = self.speaking;
-        self.speaking = false;
-        fn clear_speaking(
-            was_speaking: bool,
-            transcription_id: &mut String,
-        ) -> Option<w::TranscriptionEvent> {
-            let id = std::mem::take(transcription_id);
-            was_speaking.then(|| w::TranscriptionEvent {
+    ) -> Result<Option<w::TranscriptionEvent>, ConnectError> {
+        let SpeechCapture::Speaking { id, pcm } = std::mem::take(&mut self.capture) else {
+            return Ok(None);
+        };
+        let stopped = |id| {
+            Some(w::TranscriptionEvent {
                 transcription_id: id,
-                text: String::new(),
-                is_final: false,
-                is_speaking: false,
                 ..Default::default()
             })
-        }
-        if self.pending.len() < voice::MIN_STT_BYTES {
-            self.pending.clear();
-            return Ok(clear_speaking(was_speaking, &mut self.transcription_id));
-        }
-        let pcm = std::mem::take(&mut self.pending);
-        let Some(binding) = self.binding.clone() else {
-            return Ok(clear_speaking(was_speaking, &mut self.transcription_id));
         };
-        if !voiced(&pcm, self.sample_rate) {
-            return Ok(clear_speaking(was_speaking, &mut self.transcription_id));
+        if pcm.len() < voice::MIN_STT_BYTES || !voiced(&pcm, self.sample_rate) {
+            return Ok(stopped(id));
         }
+        let client = self.client.clone();
         let active = runtime
-            .inspect({
-                let binding = binding.clone();
-                move |services| voice::is_still_active(&services.store, &binding)
+            .inspect(move |services| {
+                Ok(services
+                    .store
+                    .client_repo()
+                    .activation_for_client(client.as_str())?
+                    .is_some())
             })
             .await
             .map_err(ConnectError::from)?;
         if !active {
-            return Ok(clear_speaking(was_speaking, &mut self.transcription_id));
+            return Ok(stopped(id));
         }
         let text =
             tokio::time::timeout(voice::STT_TIMEOUT, engine.transcribe(pcm, self.sample_rate))
@@ -356,31 +355,24 @@ impl Recognition {
                 })?;
         let text = text.trim().to_owned();
         if text.is_empty() {
-            return Ok(clear_speaking(was_speaking, &mut self.transcription_id));
+            return Ok(stopped(id));
         }
-        let transcription_id = std::mem::take(&mut self.transcription_id);
         let accepted = runtime
             .call_kernel({
-                let id = transcription_id.clone();
+                let id = id.clone();
                 let text = text.clone();
-                move |kernel| kernel.accept_transcription(&id, &text, &binding)
+                let client = self.client.clone();
+                move |kernel| kernel.accept_transcription(&id, &text, &client)
             })
             .await
             .map_err(ConnectError::from)?;
         if !accepted {
-            return Ok(was_speaking.then(|| w::TranscriptionEvent {
-                transcription_id,
-                text: String::new(),
-                is_final: false,
-                is_speaking: false,
-                ..Default::default()
-            }));
+            return Ok(stopped(id));
         }
         Ok(Some(w::TranscriptionEvent {
-            transcription_id,
+            transcription_id: id,
             text,
             is_final: true,
-            is_speaking: false,
             ..Default::default()
         }))
     }
@@ -388,25 +380,28 @@ impl Recognition {
 
 async fn bind_recognition_client(
     runtime: &Runtime,
-    client_id: String,
-) -> std::result::Result<InputBinding, ConnectError> {
+    client_id: &str,
+) -> Result<ClientId, ConnectError> {
+    let client = parse_client_id(client_id)?;
     runtime
-        .inspect(move |services| voice::bind_input(&services.store, &client_id))
+        .inspect(move |services| {
+            voice::active_companions(&services.store, &client)?;
+            Ok(client)
+        })
         .await
         .map_err(ConnectError::from)
 }
 
-async fn flush_barge_in(runtime: &Runtime, client_id: String) {
+async fn flush_barge_in(runtime: &Runtime, client: ClientId) {
     let _written = runtime
         .change(move |services| {
             let companions = services
                 .store
                 .client_repo()
-                .active_companions_for_client(&client_id)
-                .unwrap_or_default();
-            let voice = Some(&services.voice);
-            for companion_id in companions {
-                let _flushed = voice::flush(voice, &companion_id, w::FlushReason::BargeIn);
+                .active_companions_for_client(client.as_str())?;
+            for companion in companions {
+                let _flushed =
+                    voice::flush(Some(&services.voice), &companion, w::FlushReason::BargeIn);
             }
             Ok(())
         })
@@ -424,7 +419,7 @@ async fn validate_and_apply_sample_rate(
             "audio must be 16 kHz or 24 kHz mono PCM",
         ));
     }
-    let flushed = if sample_rate != recognition.sample_rate && !recognition.pending.is_empty() {
+    let flushed = if sample_rate != recognition.sample_rate {
         recognition.flush(runtime, engine).await?
     } else {
         None
@@ -451,12 +446,13 @@ fn voiced(pcm: &[u8], sample_rate: u32) -> bool {
 
 struct StreamGuard {
     voice: voice::Voice,
-    client_id: String,
+    client_id: ClientId,
     subscription: String,
 }
 impl Drop for StreamGuard {
     fn drop(&mut self) {
-        self.voice.unregister(&self.client_id, &self.subscription);
+        self.voice
+            .unregister(self.client_id.as_str(), &self.subscription);
     }
 }
 
@@ -570,10 +566,19 @@ mod tests {
             )
             .await
             .unwrap();
-        let events: Vec<_> = response.body.collect().await;
+        let events: Vec<_> = response.body.map(Result::unwrap).collect().await;
+        for (index, event) in events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event.is_final)
+        {
+            assert!(
+                events[..index].iter().any(|started| started.is_speaking
+                    && started.transcription_id == event.transcription_id)
+            );
+        }
         let finals: Vec<_> = events
             .into_iter()
-            .map(Result::unwrap)
             .filter(|event| event.is_final)
             .map(|event| event.text)
             .collect();
@@ -631,14 +636,10 @@ mod tests {
             })
             .await
             .unwrap();
-        let request = || w::SubscribeAudioRequest {
-            client_id: "c1".into(),
-            ..Default::default()
-        };
-        let first = request();
+        let first = ClientId::parse("c1").unwrap();
         let old = runtime
             .inspect(move |services| {
-                voice::subscribe_audio(&services.store, &services.voice, &first.client_id)
+                voice::subscribe_audio(&services.store, &services.voice, &first)
             })
             .await
             .unwrap();
@@ -647,13 +648,13 @@ mod tests {
                 .inspect(|services| Ok(services.voice.clone()))
                 .await
                 .unwrap(),
-            client_id: "c1".into(),
+            client_id: ClientId::parse("c1").unwrap(),
             subscription: old.subscription_id,
         };
-        let second = request();
+        let second = ClientId::parse("c1").unwrap();
         let mut current = runtime
             .inspect(move |services| {
-                voice::subscribe_audio(&services.store, &services.voice, &second.client_id)
+                voice::subscribe_audio(&services.store, &services.voice, &second)
             })
             .await
             .unwrap();
@@ -662,7 +663,7 @@ mod tests {
                 .inspect(|services| Ok(services.voice.clone()))
                 .await
                 .unwrap(),
-            client_id: "c1".into(),
+            client_id: ClientId::parse("c1").unwrap(),
             subscription: current.subscription_id,
         };
         std::thread::spawn(move || drop(old_guard)).join().unwrap();

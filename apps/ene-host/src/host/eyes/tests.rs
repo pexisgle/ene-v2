@@ -53,7 +53,9 @@ fn bind(
         },
     )
     .unwrap();
-    let (subscription, receiver) = world.resource::<DeviceHub>().register(client_id);
+    let (subscription, receiver) = world
+        .resource::<DeviceHub>()
+        .register(&ene_domain::ClientId::parse(client_id).unwrap());
     (subscription.to_string(), receiver)
 }
 

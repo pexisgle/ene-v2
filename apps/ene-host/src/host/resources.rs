@@ -1,7 +1,7 @@
 //! Shared host resources: health, live device streams and perception.
 use super::error::{HostError, Result};
 use bevy_ecs::prelude::*;
-use ene_domain::{SubscriptionId, client_view::HostHealth};
+use ene_domain::{ClientId, SubscriptionId, client_view::HostHealth};
 use ene_rpc as w;
 use parking_lot::Mutex;
 use std::{
@@ -67,7 +67,7 @@ impl HostState {
 /// host thread. Registering a new stream for a client supersedes the old one.
 #[derive(Clone, Default, bevy_ecs::prelude::Resource)]
 pub(crate) struct DeviceHub {
-    inner: Arc<Mutex<HashMap<String, Stream>>>,
+    inner: Arc<Mutex<HashMap<ClientId, Stream>>>,
 }
 
 #[derive(Clone)]
@@ -81,13 +81,13 @@ impl DeviceHub {
     /// streams. The previous stream, if any, is closed.
     pub(crate) fn register(
         &self,
-        client: &str,
+        client: &ClientId,
     ) -> (SubscriptionId, tokio::sync::mpsc::Receiver<w::DeviceEvent>) {
         let (sender, receiver) = tokio::sync::mpsc::channel(64);
         let subscription = SubscriptionId::from(uuid::Uuid::new_v4());
         let mut streams = self.inner.lock();
         streams.insert(
-            client.to_owned(),
+            client.clone(),
             Stream {
                 subscription,
                 sender,
@@ -97,7 +97,7 @@ impl DeviceHub {
     }
 
     /// Removes only the stream that still owns this generation.
-    pub(crate) fn unregister(&self, client: &str, subscription: SubscriptionId) -> bool {
+    pub(crate) fn unregister(&self, client: &ClientId, subscription: SubscriptionId) -> bool {
         let mut streams = self.inner.lock();
         if streams
             .get(client)
@@ -181,14 +181,15 @@ mod tests {
     #[tokio::test]
     async fn a_new_stream_supersedes_the_old_one() {
         let hub = DeviceHub::default();
-        let (first, mut receiver) = hub.register("c1");
-        let (second, _other) = hub.register("c1");
+        let client = ClientId::parse("c1").unwrap();
+        let (first, mut receiver) = hub.register(&client);
+        let (second, _other) = hub.register(&client);
         assert_ne!(first, second);
         assert!(hub.connected("c1"));
         assert_eq!(hub.subscription("c1"), Some(second));
-        assert!(!hub.unregister("c1", first));
+        assert!(!hub.unregister(&client, first));
         assert!(hub.connected("c1"));
-        assert!(hub.unregister("c1", second));
+        assert!(hub.unregister(&client, second));
         assert!(!hub.connected("c1"));
         assert!(receiver.try_recv().is_err());
     }
