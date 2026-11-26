@@ -26,7 +26,11 @@ impl CapabilityGrants {
             .filter(|capability| {
                 let mut allowed = self.0.iter().any(|pattern| matches(pattern, capability));
                 for rule in rules.iter().filter(|rule| {
-                    (rule.tool_name == "client_capability" || rule.tool_name == "*")
+                    // Global operation rules cannot grant a capability. Keep
+                    // historical wildcard denials effective for permissions
+                    // such as perception that do not enter the operation gate.
+                    (rule.tool_name == "client_capability"
+                        || (rule.tool_name == "*" && rule.effect == PolicyEffect::Deny))
                         && matches(&rule.pattern, capability)
                 }) {
                     match rule.effect {
@@ -80,6 +84,14 @@ mod tests {
         assert_eq!(
             startup.granted(&declared, &rules),
             ["body.motion", "plugin.echo.run", "plugin.other.run"]
+        );
+        let operation_rule = PolicyRule {
+            tool_name: "*".into(),
+            ..rule("skip-operations", "*", PolicyEffect::Allow)
+        };
+        assert_eq!(
+            startup.granted(&declared, &[operation_rule]),
+            ["body.motion", "plugin.echo.run"]
         );
     }
 }

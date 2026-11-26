@@ -270,7 +270,7 @@ fn resolve_capability(
     tool_name: &str,
     arguments: &Value,
 ) -> Result<Option<(String, Option<CapabilitySpec>)>> {
-    if tool_name == "device_request" {
+    let (capability, spec) = if tool_name == "device_request" {
         let Some(capability) = arguments.get("capability").and_then(Value::as_str) else {
             return Err(HostError::Invalid(
                 ("device_request requires a capability name as a string").into(),
@@ -281,13 +281,6 @@ fn resolve_capability(
                 "capability `{capability}` is not declared by the bound client"
             )));
         }
-        if capability.starts_with(crate::host::client::WORKSPACE_CAPABILITY_PREFIX)
-            && !agent_ctx.is_work_agent
-        {
-            return Err(HostError::Permission(
-                ("workspace capabilities require a work session").into(),
-            ));
-        }
         if capability == w::COMPUTER_USE
             && (!agent_ctx.is_work_agent || !agent_ctx.computer_model_supported)
         {
@@ -295,20 +288,26 @@ fn resolve_capability(
                 ("Computer Use requires an internal work agent with an image and tool capable task model").into(),
             ));
         }
-        return Ok(Some((
-            capability.to_owned(),
-            client.spec(capability).cloned(),
-        )));
-    }
-    if agent_ctx.is_work_agent {
+        (capability.to_owned(), client.spec(capability).cloned())
+    } else {
+        if agent_ctx.is_work_agent {
+            return Err(HostError::Permission(
+                "capability tools are offered to the parent only".into(),
+            ));
+        }
+        let Some(spec) = dynamic_spec else {
+            return Ok(None);
+        };
+        (spec.name.clone(), Some(spec))
+    };
+    if capability.starts_with(crate::host::client::WORKSPACE_CAPABILITY_PREFIX)
+        && !agent_ctx.is_work_agent
+    {
         return Err(HostError::Permission(
-            ("capability tools are offered to the parent only").into(),
+            "workspace capabilities require a work session".into(),
         ));
     }
-    let Some(spec) = dynamic_spec else {
-        return Ok(None);
-    };
-    Ok(Some((spec.name.clone(), Some(spec))))
+    Ok(Some((capability, spec)))
 }
 
 #[cfg(test)]

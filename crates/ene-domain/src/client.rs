@@ -2,7 +2,7 @@
 
 use crate::Failure;
 use crate::ids::CompanionId;
-use ene_policy::CapabilitySpec;
+use ene_policy::{COMPUTER_USE, CapabilitySpec, WORKSPACE_CAPABILITY_PREFIX};
 use serde::{Deserialize, Serialize};
 use strum::{EnumString, IntoStaticStr};
 
@@ -44,9 +44,12 @@ impl Client {
 
     /// The capabilities that give the parent a tool.
     pub fn tool_specs(&self) -> impl Iterator<Item = &CapabilitySpec> {
-        self.capability_specs
-            .iter()
-            .filter(|spec| !spec.tool_name.is_empty() && self.is_granted(&spec.name))
+        self.capability_specs.iter().filter(|spec| {
+            !spec.tool_name.is_empty()
+                && spec.name != COMPUTER_USE
+                && !spec.name.starts_with(WORKSPACE_CAPABILITY_PREFIX)
+                && self.is_granted(&spec.name)
+        })
     }
 }
 
@@ -98,7 +101,7 @@ pub enum DeviceScope {
     Companion(CompanionId),
     /// A particular instruction run on the work session's bound client.
     Work {
-        /// Companion funding the work session.
+        /// Companion that owns the work session.
         companion_id: CompanionId,
         /// Session that binds this operation to its client.
         work_id: String,
@@ -182,11 +185,16 @@ mod tests {
     #[test]
     fn client_tool_specs_filters_by_grant_and_tool_name() {
         let client = Client {
-            granted_capabilities: vec!["body.motion".into(), "eye.watch".into()],
+            granted_capabilities: vec![
+                "body.motion".into(),
+                "eye.watch".into(),
+                "work.write".into(),
+            ],
             capability_specs: vec![
                 spec("body.motion", "device_motion"),
                 spec("eye.watch", ""),
                 spec("computer.mouse", "device_mouse"),
+                spec("work.write", "device_write"),
             ],
             ..Default::default()
         };

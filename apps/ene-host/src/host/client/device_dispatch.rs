@@ -52,6 +52,15 @@ pub(crate) fn accept(
             "the accepted operation belongs to a different work run".into(),
         ));
     }
+    if binding
+        .capability
+        .starts_with(super::WORKSPACE_CAPABILITY_PREFIX)
+        && scope.run_id().is_none()
+    {
+        return Err(HostError::Permission(
+            "workspace capabilities require a work session".into(),
+        ));
+    }
     let client = store
         .client_repo()
         .client(&binding.client_id)?

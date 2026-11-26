@@ -505,6 +505,19 @@ async fn settings_changes_grant_and_revoke_an_active_clients_capability() {
         .await
         .unwrap();
 
+    settings
+        .update_policy_rules(w::UpdatePolicyRulesRequest {
+            add_or_update: vec![w::PolicyRule {
+                id: "desktop.skip-tool-confirmation".into(),
+                tool_name: "*".into(),
+                pattern: "*".into(),
+                effect: w::PolicyEffect::Allow.into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     let rule = w::PolicyRule {
         id: "motion-grant".into(),
         tool_name: "client_capability".into(),
