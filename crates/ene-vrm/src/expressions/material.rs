@@ -35,19 +35,24 @@ struct MaterialTarget<M: bevy::pbr::Material> {
 #[derive(Component)]
 pub(super) struct PendingMaterials<M: bevy::pbr::Material>(std::marker::PhantomData<M>);
 
-pub(super) fn world_ready(
-    ready: On<bevy::world_serialization::WorldInstanceReady>,
-    spawner: Res<bevy::world_serialization::WorldInstanceSpawner>,
-    roots: Query<(), With<Binds>>,
-    mut commands: Commands,
-) {
-    for entity in spawner.iter_instance_entities(ready.instance_id) {
-        if roots.contains(entity) {
-            commands
-                .entity(entity)
-                .insert(MaterialInitializationRequested);
-        }
-    }
+pub(super) fn observe_world_ready(app: &mut App) {
+    app.add_observer(
+        |ready: On<bevy::world_serialization::WorldInstanceReady>,
+         spawner: Res<bevy::world_serialization::WorldInstanceSpawner>,
+         roots: Query<(), With<Binds>>,
+         mut commands: Commands| {
+            for entity in spawner
+                .into_inner()
+                .iter_instance_entities(ready.instance_id)
+            {
+                if roots.contains(entity) {
+                    commands
+                        .entity(entity)
+                        .insert(MaterialInitializationRequested);
+                }
+            }
+        },
+    );
 }
 
 type MaterialInitRoots<'w, 's, M> = Query<

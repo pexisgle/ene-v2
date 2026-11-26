@@ -109,7 +109,6 @@
 //! ```
 //!
 //! 実プロバイダーを呼ぶ受入テストは通常のテストでは無視します。テストは専用の一時stateディレクトリとホストプロセスを使います。
-#![warn(clippy::needless_pass_by_value)]
 
 pub(crate) mod config;
 mod host;

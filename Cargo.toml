@@ -42,6 +42,7 @@ cloned_instead_of_copied = "warn"
 redundant_closure_for_method_calls = "warn"
 manual_let_else = "warn"
 inefficient_to_string = "warn"
+needless_pass_by_value = "warn"
 
 [workspace.dependencies]
 clap = { version = "4.6", features = ["derive", "env"] }

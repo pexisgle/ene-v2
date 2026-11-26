@@ -161,7 +161,6 @@
 // The desktop app performs no FFI itself: every platform call lives in
 // ne-platform-os, which states the invariant each one relies on.
 #![forbid(unsafe_code)]
-#![warn(clippy::needless_pass_by_value)]
 
 mod audio;
 mod avatar;

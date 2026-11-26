@@ -9,7 +9,6 @@
 // have sites. Add this attribute to a crate only once `cargo clippy -p <crate>`
 // reports zero for it. The workspace cannot enable it centrally yet, because a
 // crate cannot override `[lints] workspace = true`.
-#![warn(clippy::needless_pass_by_value)]
 pub mod connections;
 pub mod vendors;
 pub mod voice;

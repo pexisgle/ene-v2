@@ -1,7 +1,6 @@
 // The desktop app performs no FFI itself: every platform call lives in
 // ne-platform-os, which states the invariant each one relies on.
 #![forbid(unsafe_code)]
-#![warn(clippy::needless_pass_by_value)]
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 //! Starts the desktop client: one window, one session, one owner per resource.

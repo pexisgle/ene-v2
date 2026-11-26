@@ -49,7 +49,7 @@ fn update_mode(fps: u32) -> UpdateMode {
 }
 
 fn sync_update_mode(control: Res<control::Control>, mut settings: ResMut<WinitSettings>) {
-    let mode = update_mode(control.fps);
+    let mode = update_mode(control.into_inner().fps);
     settings.focused_mode = mode;
     settings.unfocused_mode = mode;
 }
@@ -58,6 +58,7 @@ fn read_monitors(
     native: Res<WinitMonitors>,
     monitors: Query<Entity, With<Monitor>>,
 ) -> Vec<(Entity, Output)> {
+    let native = native.into_inner();
     monitors
         .iter()
         .filter_map(|entity| {
@@ -87,10 +88,11 @@ fn hit_test(
     let Some(point) = cursor_position() else {
         return;
     };
+    let captured = capture.into_inner().is_captured(&PointerId::Mouse);
     for (output, regions, mask, mut cursor) in &mut windows {
         let local = (point - output.origin) / output.units_per_logical_pixel;
         // shortcut: input switching follows rendering FPS; keep it here unless measured lag is unacceptable.
-        let hit = capture.is_captured(&PointerId::Mouse)
+        let hit = captured
             || if !mask.is_empty() {
                 mask.contains_local(local)
             } else {
@@ -134,7 +136,7 @@ fn cancel_lost_capture(
     capture: Res<PointerCaptureMap>,
     mut commands: Commands,
 ) {
-    if !capture.is_captured(&PointerId::Mouse) {
+    if !capture.into_inner().is_captured(&PointerId::Mouse) {
         return;
     }
     let mut info = GUITHREADINFO {

@@ -121,7 +121,9 @@ impl Character {
 
 pub fn setup(app: &mut App) {
     app.add_message::<Notification>()
-        .add_observer(scene_ready)
+        .add_observer(|event: On<WorldInstanceReady>, params: SceneReadyParams| {
+            scene_ready(event.entity, params);
+        })
         .add_systems(
             PostUpdate,
             (update, advance_fades, motion_change)
@@ -230,8 +232,8 @@ struct SceneReadyParams<'w, 's> {
     commands: Commands<'w, 's>,
 }
 
-fn scene_ready(event: On<WorldInstanceReady>, mut params: SceneReadyParams) {
-    let Ok(parent) = params.parents.get(event.entity) else {
+fn scene_ready(instance: Entity, mut params: SceneReadyParams) {
+    let Ok(parent) = params.parents.get(instance) else {
         return;
     };
     let Ok(mut character) = params.characters.get_mut(parent.parent()) else {
@@ -239,7 +241,7 @@ fn scene_ready(event: On<WorldInstanceReady>, mut params: SceneReadyParams) {
     };
     let Some(root) = params
         .children
-        .iter_descendants(event.entity)
+        .iter_descendants(instance)
         .find(|e| params.players.contains(*e))
     else {
         return;
@@ -390,7 +392,7 @@ fn sync_gaze(characters: Query<&Character>, mut commands: Commands) {
 /// Fades the mouth toward the amplitude the client sent, and the face toward the
 /// expression it asked for, then hands both to ene-vrm as per-frame weights.
 fn expressions(time: Res<Time>, mut characters: Query<&mut Character>, mut commands: Commands) {
-    let dt = time.delta_secs();
+    let dt = time.into_inner().delta_secs();
     for mut c in &mut characters {
         let Some(root) = c.root else { continue };
         // The mouth opens faster than it closes. That asymmetry is what makes

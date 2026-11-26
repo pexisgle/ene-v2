@@ -70,7 +70,7 @@ mod tests {
         #[derive(Resource, Default)]
         struct LiveMonitors(Vec<(Entity, Output)>);
         fn read_monitors(monitors: Res<LiveMonitors>) -> Vec<(Entity, Output)> {
-            monitors.0.clone()
+            monitors.into_inner().0.clone()
         }
         fn output(name: &str) -> Output {
             Output {

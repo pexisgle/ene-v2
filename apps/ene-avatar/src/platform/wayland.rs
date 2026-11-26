@@ -67,7 +67,7 @@ fn run(mut app: App) -> AppExit {
         exit: exit_tx,
     };
     let result = state.running_with_proxy(wake, move |event, state, id| {
-        renderer.handle(event, state, id)
+        renderer.handle(&event, state, id)
     });
     if let Err(error) = result {
         bevy::log::error!(%error, "wayland loop failed");
@@ -129,7 +129,7 @@ struct Renderer {
 impl Renderer {
     fn handle(
         &mut self,
-        event: ExWlShellEvent<(), ()>,
+        event: &ExWlShellEvent<(), ()>,
         state: &mut WindowState<()>,
         id: Option<Id>,
     ) -> ReturnData<()> {
@@ -147,11 +147,11 @@ impl Renderer {
 
     fn dispatch(
         &mut self,
-        event: ExWlShellEvent<(), ()>,
+        event: &ExWlShellEvent<(), ()>,
         state: &mut WindowState<()>,
         id: Option<Id>,
     ) -> Step {
-        match event {
+        match *event {
             ExWlShellEvent::InitRequest => Some(ReturnData::RequestCompositor),
             ExWlShellEvent::CompositorProvide(c, qh) => {
                 self.compositor = Some((c.clone(), qh.clone()));

@@ -83,6 +83,7 @@ pub(super) fn motion_change(
     mut characters: Query<&mut Character>,
     mut roots: Query<(&mut AnimationPlayer, &AnimationGraphHandle)>,
 ) {
+    let server = server.into_inner();
     for mut c in &mut characters {
         let Some(root) = c.root else { continue };
         let Some(pending) = c.pending.take() else {
@@ -141,13 +142,14 @@ pub(super) fn advance_fades(
     mut characters: Query<&mut Character>,
     mut players: Query<&mut AnimationPlayer>,
 ) {
+    let delta = time.into_inner().delta_secs();
     for mut c in &mut characters {
         if c.config.playing
             && c.state == AvatarState::Ready
             && !c.fading.is_empty()
             && let Some(mut player) = c.root.and_then(|root| players.get_mut(root).ok())
         {
-            c.advance_fades(&mut player, time.delta_secs());
+            c.advance_fades(&mut player, delta);
         }
     }
 }

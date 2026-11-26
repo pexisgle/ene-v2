@@ -1,6 +1,5 @@
 //! Headless client state, domain ACL, reducer, command protocol, and connection helpers.
 #![warn(missing_docs)]
-#![warn(clippy::needless_pass_by_value)]
 
 pub mod choices;
 pub mod connections;

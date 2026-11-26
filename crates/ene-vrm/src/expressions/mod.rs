@@ -263,8 +263,8 @@ pub(crate) fn attach(
 }
 
 pub(crate) fn setup(app: &mut App) {
-    app.add_observer(material::world_ready)
-        .register_type::<Binds>()
+    material::observe_world_ready(app);
+    app.register_type::<Binds>()
         .register_type::<MaterialBinds<StandardMaterial>>()
         .register_type::<MaterialBinds<MToonMaterial>>()
         .register_type::<ExpressionWeights>()

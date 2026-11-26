@@ -445,7 +445,7 @@ fn snapshot(
         characters.push(actor);
     }
     let monitors: Vec<_> = outputs.iter().map(|o| json!({"name":o.name,"origin":o.origin.to_array(),"size":o.size.to_array(),"units_per_logical_pixel":o.units_per_logical_pixel})).collect();
-    json!({"characters":characters, "monitors":monitors, "fps":control.fps})
+    json!({"characters":characters, "monitors":monitors, "fps":control.into_inner().fps})
 }
 
 fn write_output(mut writer: impl Write, output: Receiver<Value>) -> std::io::Result<()> {
@@ -462,8 +462,9 @@ fn publish(
     mut events: ResMut<Messages<Notification>>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    let output = &control.into_inner().output;
     for Notification(event) in events.drain() {
-        if let Err(error) = control.output.try_send(event) {
+        if let Err(error) = output.try_send(event) {
             error!("renderer output unavailable: {error}");
             exit.write(AppExit::error());
             break;

@@ -58,10 +58,9 @@ CI already cover.
 | 7 | `rpc_no_ecs_resource` `#[derive(Resource)]` under `server/rpc/` | 0 |
 | 8 | `prod_block_on` `block_on`/`block_in_place` in production | 0 |
 
-`needless_pass_by_value` is enabled by crate attributes, including in both
-`ene-host` and `ene-desktop`. The remaining exceptions are `ene-vrm` and
-`ene-avatar`, where Bevy systems take owned system parameters such as
-`Res<_>` and `On<_>`.
+`needless_pass_by_value` is enabled through the workspace lints. Bevy
+systems extract the value through `Res::into_inner` or translate observer
+events at registration. Generated RPC code has its own lint settings.
 
 ## GPUI components
 

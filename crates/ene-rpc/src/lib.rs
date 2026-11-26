@@ -29,7 +29,6 @@
 //! ネイティブのクライアントは `connect(endpoint, token)` でループバックHTTP/2のBearer設定を作り、生成クライアントへ渡します。Wasmではメッセージ型だけを生成し、Connectのブラウザーruntimeを含めません。
 
 // The generated module keeps its own `#[allow]`; this covers the hand-written code.
-#![warn(clippy::needless_pass_by_value)]
 /// Generated v1 contract, available in every build.
 // Suppresses style and size lints inside generated `_connectrpc.rs`; remove when codegen complies.
 // `redundant_closure_for_method_calls` and `needless_pass_by_value` are

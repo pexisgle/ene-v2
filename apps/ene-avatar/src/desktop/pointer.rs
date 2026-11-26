@@ -251,6 +251,7 @@ fn capture_press(
     mut capture: ResMut<PointerCaptureMap>,
     mut commands: Commands,
 ) {
+    let mouse = map.into_inner().get_entity(PointerId::Mouse);
     for event in events.read().filter(|event| {
         event.pointer.id == PointerId::Mouse && event.button == PointerButton::Primary
     }) {
@@ -269,7 +270,7 @@ fn capture_press(
         let start = desktop_position(screen, event.pointer.position);
         let anchor = Vec2::new(transform.translation.x, -transform.translation.y);
         capture.capture(PointerId::Mouse, event.entity, event.hit.clone());
-        if let Some(pointer_entity) = map.get_entity(PointerId::Mouse) {
+        if let Some(pointer_entity) = mouse {
             commands.entity(pointer_entity).insert(Placement {
                 start,
                 offset: (anchor - start) / screen.units_per_logical_pixel,
@@ -284,7 +285,10 @@ fn place_drag(
     state: Res<PointerState>,
     mut characters: Query<&mut Character>,
 ) {
-    let Some(state) = state.get(PointerId::Mouse, PointerButton::Primary) else {
+    let Some(state) = state
+        .into_inner()
+        .get(PointerId::Mouse, PointerButton::Primary)
+    else {
         return;
     };
     for (placement, location) in &pointers {

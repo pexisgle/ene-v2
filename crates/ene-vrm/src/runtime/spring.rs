@@ -317,7 +317,7 @@ fn simulate(
     parents: Query<&ChildOf>,
     mut transforms: ParamSet<(TransformHelper, Query<&mut Transform>)>,
 ) {
-    let steps = stepper.advance(time.delta());
+    let steps = stepper.advance(time.into_inner().delta());
     for (root, mut rig) in &mut rigs {
         if rig.paused || steps == 0 {
             // A system earlier this frame may have overwritten a joint pose

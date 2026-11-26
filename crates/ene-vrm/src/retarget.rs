@@ -282,10 +282,19 @@ fn validated_channel_curve<'a>(
     Ok(Some((entity, curve)))
 }
 
+#[derive(Clone)]
 struct HipsRetarget {
     parent: bevy::math::Affine3A,
     rest_translation: Vec3,
     height: f32,
+}
+
+impl HipsRetarget {
+    fn normalize(&self, translation: Vec3) -> Vec3 {
+        self.parent
+            .transform_vector3(translation - self.rest_translation)
+            / self.height
+    }
 }
 
 fn add_bone_rotation_curve(
@@ -329,14 +338,13 @@ fn add_hips_translation_curve(
                 pose.translation.get_or_insert(Vec3::ZERO)
             }),
             FunctionCurve::new(domain, move |t| {
-                hips.parent.transform_vector3(
+                hips.normalize(
                     curve
                         .0
                         .sample_clamped(t)
                         .downcast::<Vec3>()
-                        .map_or(Vec3::ZERO, |v| *v)
-                        - hips.rest_translation,
-                ) / hips.height
+                        .map_or(Vec3::ZERO, |v| *v),
+                )
             }),
         ),
     );
