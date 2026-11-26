@@ -90,13 +90,14 @@ pub(crate) fn spawn_companion(world: &mut World, companion: &Companion) -> Entit
     let id = companion_agent_id(&companion.id);
     let entity = match restored_agent(world, &id) {
         Some(entity) => entity,
-        None => world
-            .spawn((
+        None => spawn_root(
+            world,
+            (
                 Name::new(format!("companion:{}", companion.id)),
-                Agent,
                 AgentId(id),
-            ))
-            .id(),
+            ),
+        )
+        .id(),
     };
     let published = published_through(world.get::<Conversation>(entity));
     world.entity_mut(entity).insert((
@@ -128,9 +129,7 @@ pub(crate) fn spawn_work_agent(
     let id = work_agent_id(run_id);
     let entity = match restored_agent(world, &id) {
         Some(entity) => entity,
-        None => world
-            .spawn((Name::new(format!("work:{run_id}")), Agent, AgentId(id)))
-            .id(),
+        None => spawn_root(world, (Name::new(format!("work:{run_id}")), AgentId(id))).id(),
     };
     let published = published_through(world.get::<Conversation>(entity));
     let access = crate::host::tools::sync::hand_tool_access(world);

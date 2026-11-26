@@ -427,7 +427,6 @@ pub(crate) fn stop_with(world: &mut World, work_id: &str, reason: Option<&str>) 
     let Some(run) = store.work_repo().active_run(work_id)? else {
         return Ok(());
     };
-    let reason = reason.unwrap_or("the user stopped the work");
     if hand::owns(world.resource::<hand::Hands>(), work_id) {
         let runtime = world
             .resource::<crate::host::resources::HostRuntime>()
@@ -441,10 +440,11 @@ pub(crate) fn stop_with(world: &mut World, work_id: &str, reason: Option<&str>) 
         }
         *world.resource_mut::<hand::Hands>() = hands;
     } else if let Some(agent) = agent_of(world, work_id) {
-        world.trigger(StopTurn {
-            entity: agent,
-            reason: Some(reason.to_owned()),
-        });
+        let stop = reason.map_or_else(
+            || StopTurn::new(agent),
+            |reason| StopTurn::plugin(agent, "ene-host", reason),
+        );
+        world.trigger(stop);
     }
     finish_run(world, run, RunState::Cancelled, None);
     Ok(())

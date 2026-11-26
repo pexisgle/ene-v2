@@ -13,9 +13,7 @@ workspace = true
 async-stream.workspace = true
 axum.workspace = true
 base64.workspace = true
-# rig-ecs 0.46.0 pins `bevy_ecs =0.20.0` and hands its `App`/`World` to the
-# host, so this exact version is what keeps both sides on one type set.
-bevy_ecs = "=0.20.0"
+bevy_ecs.workspace = true
 bytes.workspace = true
 connectrpc = { workspace = true, features = ["axum"] }
 crossbeam-channel = "0.5"
@@ -73,7 +71,7 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-bevy_time = "=0.20.0"
+bevy_time.workspace = true
 ene-rpc = { workspace = true, features = ["client"] }
 process-wrap.workspace = true
 # `span-locations` lets the architecture test read the line span of a parsed

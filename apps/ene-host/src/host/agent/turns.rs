@@ -181,7 +181,9 @@ fn eye_report_result(
     conversation: Option<&Conversation>,
 ) -> w::EyeReportResult {
     use w::eye_report_result::Disposition;
-    let watched = matches!(outcome, TurnOutcome::Stopped(Some(reason)) if reason == crate::host::eyes::WATCHED);
+    let watched = matches!(outcome, TurnOutcome::Stopped(stop)
+        if matches!(stop.cause(), StopCause::Plugin { by, why }
+            if by == "ene-host" && why == crate::host::eyes::WATCHED));
     let completed = watched || matches!(outcome, TurnOutcome::Answered(_));
     // A tool step can already have published text before the turn ends.
     let reply = conversation.filter(|_| completed).and_then(|conversation| {

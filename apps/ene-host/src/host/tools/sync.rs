@@ -59,15 +59,15 @@ fn hand_names(host: &HashSet<String>) -> Vec<String> {
 
 /// The tools a parent agent can use before any capability tool is published.
 /// Capability tools are added by [`sync_access`]; a work agent uses its
-/// own `ToolAccess::Only`.
+/// own allow-list.
 pub(crate) fn parent_tool_access() -> ToolAccess {
-    ToolAccess::Only(parent_names(&[]))
+    ToolAccess::only(parent_names(&[]).iter().map(String::as_str))
 }
 
 /// Initial `ToolAccess` for a newly spawned or restored work agent.
 pub(crate) fn hand_tool_access(world: &mut World) -> ToolAccess {
     let host = host_tool_names(world);
-    ToolAccess::Only(hand_names(&host))
+    ToolAccess::only(hand_names(&host).iter().map(String::as_str))
 }
 
 fn host_tool_names(world: &mut World) -> HashSet<String> {
@@ -108,12 +108,12 @@ pub(crate) fn sync_access(world: &mut World) {
 
 fn set_access(world: &mut World, entity: Entity, names: &[String]) {
     let current = world.get::<ToolAccess>(entity);
-    if matches!(current, Some(ToolAccess::Only(current)) if current.as_slice() == names) {
+    if current.and_then(ToolAccess::names) == Some(names) {
         return;
     }
     world
         .entity_mut(entity)
-        .insert(ToolAccess::Only(names.to_vec()));
+        .insert(ToolAccess::only(names.iter().map(String::as_str)));
 }
 
 /// Corrects the tools a newly spawned agent may use before its first turn.

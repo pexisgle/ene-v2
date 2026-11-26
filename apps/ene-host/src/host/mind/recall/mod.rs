@@ -28,9 +28,9 @@ use crate::host::{
     resources::{DeviceHub, Perception},
 };
 use bevy_ecs::{prelude::*, system::SystemParam};
+use compaction::RequestStart;
 use rig_core::completion::Message;
 use rig_ecs::prelude::*;
-use rig_memory::{Prepared, RequestStart};
 
 #[derive(Component)]
 struct DynamicTail(String);
@@ -410,29 +410,19 @@ fn fit(
         let Some(view) = history.as_mut() else {
             continue;
         };
-        let fits = compaction::fit(
-            view,
-            &compaction::FitRequest {
-                model: &model,
-                prompt: prompt.as_deref(),
-                tools: &request.tools,
-                anchor: anchor.as_ref(),
-                sent,
-                budget: limit.saturating_sub(reserve),
-            },
-        );
-        // What Start will send, for the next reply's anchor to be checked
-        // against (rig-memory's `RequestStart`).
-        if let Some(agent) = agent {
-            commands.entity(agent).insert(SentRequest(
-                Prepared {
-                    model: &model,
-                    prompt: prompt.as_deref(),
-                    tools: &request.tools,
-                    history: view,
-                }
-                .start(),
-            ));
+        let request = compaction::FitRequest {
+            model: &model,
+            prompt: prompt.as_deref(),
+            tools: &request.tools,
+            anchor: anchor.as_ref(),
+            sent,
+            budget: limit.saturating_sub(reserve),
+        };
+        let fits = compaction::fit(view, &request);
+        if let Some(agent) = agent.filter(|_| fits) {
+            commands
+                .entity(agent)
+                .insert(SentRequest(request.start(view)));
         }
         if !fits {
             decision.decide(

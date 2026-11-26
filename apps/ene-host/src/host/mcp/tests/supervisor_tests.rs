@@ -66,7 +66,10 @@ fn project_servers_now(world: &mut bevy_ecs::prelude::World) {
 
 #[tokio::test]
 async fn registry_refresh_replaces_handlers_and_keeps_pinned_calls() {
-    let (connection, registry, _, task) = connect_echo(Echo::new()).await;
+    let echo = Echo::new();
+    echo.listed
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let (connection, registry, _, task) = connect_echo(echo).await;
     let expected = registry.add_managed_tools(vec![local_tool("echo", 1)]);
     let pinned = registry.snapshot();
     let server = Server {
@@ -114,7 +117,10 @@ async fn registry_refresh_replaces_handlers_and_keeps_pinned_calls() {
         Some("2")
     );
     registry.reconcile_managed_tools(expected, vec![local_tool("echo", 3)]);
-    assert_eq!(registry.snapshot().key("echo"), current.key("echo"));
+    assert_eq!(
+        registry.snapshot().get("echo").unwrap().key(),
+        current.get("echo").unwrap().key(),
+    );
     registry.reconcile_managed_tools(refreshed, Vec::new());
     assert!(project(
         &mut world,

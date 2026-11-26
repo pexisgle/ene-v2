@@ -59,14 +59,14 @@ pub(super) async fn connect_echo(
 ) {
     Box::pin(async move {
         use rig_rmcp::rmcp::{
-            RoleClient, RoleServer, service::serve_directly, transport::async_rw::AsyncRwTransport,
+            RoleClient, RoleServer, ServiceExt, transport::async_rw::AsyncRwTransport,
         };
         let (client_read, server_write) = tokio::io::duplex(64 * 1024);
         let (server_read, client_write) = tokio::io::duplex(64 * 1024);
         let (peer_sender, peer_receiver) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let transport = AsyncRwTransport::<RoleServer, _, _>::new(server_read, server_write);
-            let running = serve_directly(echo, transport, None);
+            let running = echo.serve(transport).await.unwrap();
             let _discarded = peer_sender.send(running.peer().clone());
             let _discarded = running.waiting().await;
         });
@@ -84,7 +84,13 @@ pub(super) async fn connect_echo(
 
 impl rig_rmcp::rmcp::ServerHandler for Echo {
     fn get_info(&self) -> rig_rmcp::rmcp::model::ServerConfig {
-        rig_rmcp::rmcp::model::ServerConfig::default()
+        use rig_rmcp::rmcp::model::{ServerCapabilities, ServerConfig};
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_tool_list_changed()
+                .build(),
+        )
     }
 
     async fn list_tools(

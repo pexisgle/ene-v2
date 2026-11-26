@@ -61,8 +61,12 @@ fn a_session_keeps_one_agent_across_runs_and_retires_it_with_the_session() {
     assert_eq!(agent_of(&mut world, "w1"), Some(kept));
     assert_eq!(world.get::<WorkAgent>(kept).unwrap().run_id, "run-b");
 
-    settle_run(&mut world, "run-a", &TurnOutcome::Stopped(None));
-    assert_eq!(state(&store, "run-a"), RunState::Cancelled);
+    settle_run(
+        &mut world,
+        "run-a",
+        &TurnOutcome::Answered(Message::assistant("done")),
+    );
+    assert_eq!(state(&store, "run-a"), RunState::Completed);
     assert_eq!(
         store
             .work_repo()

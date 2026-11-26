@@ -180,10 +180,7 @@ pub(crate) fn stop(world: &mut World, request: &w::StopRequest) -> Result<()> {
         .companion(&request.companion_id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     if let Some(agent) = agent::agent_of(world, &request.companion_id) {
-        world.trigger(StopTurn {
-            entity: agent,
-            reason: Some("the user stopped the turn".into()),
-        });
+        world.trigger(StopTurn::new(agent));
     }
     // Stop means stop speaking too; stale playback reports are discarded.
     let _discarded = super::voice::flush(

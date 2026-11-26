@@ -171,7 +171,7 @@ impl Exchange {
             if self.done {
                 if !self.invocation_done {
                     self.invocation_done = true;
-                    (&mut self.invocation).await.map_err(HttpError::instance)?;
+                    (&mut self.invocation).await.map_err(HttpError::permanent)?;
                 }
                 return Ok(None);
             }
@@ -193,7 +193,7 @@ impl Exchange {
                         self.invocation_done = true;
                         (&mut self.invocation)
                             .await
-                            .map_err(HttpError::instance)?;
+                            .map_err(HttpError::permanent)?;
                         if !self.done {
                             return Err(protocol("the plugin ended without a terminal chunk"));
                         }
@@ -201,7 +201,7 @@ impl Exchange {
                 },
                 result = &mut self.invocation => {
                     self.invocation_done = true;
-                    result.map_err(HttpError::instance)?;
+                    result.map_err(HttpError::permanent)?;
                 }
             }
         }
@@ -294,23 +294,12 @@ impl GuestClient {
     }
 }
 
-// `HttpClientExt` requires returning `'static` futures while extracting `&self`
-// fields synchronously, so `async fn` cannot be used.
-#[expect(
-    clippy::manual_async_fn,
-    reason = "the trait demands a 'static future, so this cannot be an async fn"
-)]
 impl HttpClientExt for GuestClient {
-    fn send<T, U>(
+    fn send(
         &self,
-        req: Request<T>,
-    ) -> impl Future<Output = Result<Response<LazyBody<U>>, HttpError>> + Send + 'static
-    where
-        T: Into<Bytes> + Send,
-        U: From<Bytes> + Send + 'static,
-    {
+        req: Request<Bytes>,
+    ) -> impl Future<Output = Result<Response<LazyBody>, HttpError>> + Send + 'static {
         let (parts, body) = req.into_parts();
-        let body: Bytes = body.into();
         let exchange = self.exchange(&parts, &body);
         async move {
             let mut exchange = exchange?;
@@ -322,38 +311,26 @@ impl HttpClientExt for GuestClient {
             while let Some(bytes) = exchange.next().await? {
                 body.extend_from_slice(&bytes);
             }
-            let mut response = Response::new(
-                Box::pin(async move { Ok(U::from(Bytes::from(body))) }) as LazyBody<U>,
-            );
+            let mut response =
+                Response::new(Box::pin(async move { Ok(Bytes::from(body)) }) as LazyBody);
             *response.status_mut() = status;
             *response.headers_mut() = headers;
             Ok(response)
         }
     }
 
-    fn send_multipart<U>(
+    fn send_multipart(
         &self,
         _req: Request<MultipartForm>,
-    ) -> impl Future<Output = Result<Response<LazyBody<U>>, HttpError>> + Send + 'static
-    where
-        U: From<Bytes> + Send + 'static,
-    {
-        async {
-            Err(HttpError::Instance(Box::new(std::io::Error::other(
-                "chat completions does not use multipart",
-            ))))
-        }
+    ) -> impl Future<Output = Result<Response<LazyBody>, HttpError>> + Send + 'static {
+        std::future::ready(Err(protocol("chat completions does not use multipart")))
     }
 
-    fn send_streaming<T>(
+    fn send_streaming(
         &self,
-        req: Request<T>,
-    ) -> impl Future<Output = Result<StreamingResponse, HttpError>> + Send
-    where
-        T: Into<Bytes> + Send,
-    {
+        req: Request<Bytes>,
+    ) -> impl Future<Output = Result<StreamingResponse, HttpError>> + Send {
         let (parts, body) = req.into_parts();
-        let body: Bytes = body.into();
         let exchange = self.exchange(&parts, &body);
         async move {
             let mut exchange = exchange?;
@@ -375,5 +352,5 @@ impl HttpClientExt for GuestClient {
 }
 
 fn protocol(message: &str) -> HttpError {
-    HttpError::instance(std::io::Error::other(message.to_owned()))
+    HttpError::permanent(std::io::Error::other(message.to_owned()))
 }

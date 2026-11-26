@@ -291,31 +291,26 @@ impl<C> AgentPlatformHttp<C> {
 }
 
 fn unsupported_request() -> http_client::Error {
-    http_client::Error::Instance(Box::new(std::io::Error::other(
-        "unsupported Agent Platform request",
-    )))
+    http_client::Error::permanent(std::io::Error::other("unsupported Agent Platform request"))
 }
 
 impl<C: HttpClientExt> HttpClientExt for AgentPlatformHttp<C> {
-    fn send<T: Into<Bytes> + Send, U: From<Bytes> + Send + 'static>(
+    fn send(
         &self,
-        req: Request<T>,
-    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + Send + 'static {
+        req: Request<Bytes>,
+    ) -> impl Future<Output = http_client::Result<Response<LazyBody>>> + Send + 'static {
         let sent = self.route(req).map(|req| self.http.send(req));
         async move { sent.ok_or_else(unsupported_request)?.await }
     }
 
-    fn send_multipart<U: From<Bytes> + Send + 'static>(
+    fn send_multipart(
         &self,
         _req: Request<MultipartForm>,
-    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + Send + 'static {
+    ) -> impl Future<Output = http_client::Result<Response<LazyBody>>> + Send + 'static {
         std::future::ready(Err(unsupported_request()))
     }
 
-    async fn send_streaming<T: Into<Bytes> + Send>(
-        &self,
-        req: Request<T>,
-    ) -> http_client::Result<StreamingResponse> {
+    async fn send_streaming(&self, req: Request<Bytes>) -> http_client::Result<StreamingResponse> {
         self.http
             .send_streaming(self.route(req).ok_or_else(unsupported_request)?)
             .await

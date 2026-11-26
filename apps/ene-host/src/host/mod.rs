@@ -348,10 +348,7 @@ pub(crate) fn stop_on_failure(
     }
     tracing::error!(%reason, "the host stopped");
     for entity in &agents {
-        commands.trigger(StopTurn {
-            entity,
-            reason: Some("host failure".into()),
-        });
+        commands.trigger(StopTurn::plugin(entity, "ene-host", "host failure"));
     }
     if let Some(notifier) = notifier {
         notifier.fail(&reason);

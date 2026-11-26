@@ -1,7 +1,7 @@
 //! The ene host: one headless Rig app, one SQLite connection and a small
 //! Connect API.
 //!
-//! AIとの会話、コンパニオンの心と記憶、作業セッション、接続・設定・承認、クライアント能力と端末操作をまとめる常駐ホストです。会話の正本は rig v0.46.0 のセッションログ（`rig-ecs` + `rig-memory::DirStore`）に任せ、SQLite はコンパニオン・設定・承認・受付・作業・クライアント・記憶だけを持ちます。
+//! AIとの会話、コンパニオンの心と記憶、作業セッション、接続・設定・承認、クライアント能力と端末操作をまとめる常駐ホストです。会話の正本は Rig のセッションログ（`rig-ecs` + `rig-memory::DirStore`）に任せ、SQLite はコンパニオン・設定・承認・受付・作業・クライアント・記憶だけを持ちます。
 //!
 //! > このパッケージは [ホストAPI設計](../../../docs/api.md)（§7 のカノニカル Protobuf 定義が正本）と [全体アーキテクチャ](../../../docs/architecture.md) に沿って書き直した実装です。製品としての振る舞いは [docs/features](../../../docs/features/README.md)、知覚・身体・音声の契約は [共通仕様](../../../docs/design/voice-avatar.md) を参照してください。**接続経路の認証はOwner Bearerのみ**です（[ホスト接続の設計](../../../docs/design/host-access.md) の移行は未完了）。外部入口を経由する場合は、`ENE_HOST_ALLOWED_HOSTS` にその入口の名前を設定します。`client_id` は接続端末の区別であり、認証情報ではありません。
 //!
@@ -48,7 +48,7 @@
 //! - **会話ログが正本**: 会話・受信箱・ターン・モデル/ツール呼び出しは `rig-ecs` が所有し、`<state>/rig/` の `DirStore` が正本です。`GetHistory` / `GetMessage` はこのログからの読み取り専用投影です。受理レシート（`ene.accepted`）と要約スナップショット（`ene.summary`）も `Conversation::add_aside` でログ内に置きます。
 //! - **静的な人格と動的な文脈の分離**: 人格の核・作者プロフィールは `SystemPrompt` に固定します。現在時刻・現在の心・Pinned Memory・想起記憶・知覚要約は `PrepareSystems::Edit` で最新ユーザー発話の `ModelRequest.history` にだけ結合し、`SessionLog` には書きません。ターン開始時に一度だけ生成してReAct反復で使い回します。
 //! - **文脈窓の管理**: `PrepareSystems::Fit` で要求全体のトークン数を見積もり、古いツール出力のクリア → 古い完全ターンの削除（ToolCallとToolResultを分断しない）の順で要求ビューを切り詰め、`[System Notice: ...]` を付加します。固定部分だけで上限を超える場合は送信せず `context_exceeded` で拒否します。
-//! - **Compaction**: トークン使用率（75%）がターン境界で閾値を超えたときだけバックグラウンド要約を起動します。要約は `rig-memory` の `CompactionPolicy` / `Summarizer` を使い、`ene.summary` Aside（本文と `through_message_id`）として追記保存し、`GetHistory` には現れません。要約のモデル呼び出しには60秒のタイムアウトを置き、同じジョブが同じ会話区間の記憶整理・関係性・感情/成長の振り返りまで1パスで実行します。間に合わない場合は `recent::view` で古いターンを要求ビューから切り詰めて対話を続けます。
+//! - **Compaction**: トークン使用率（75%）がターン境界で閾値を超えたときだけバックグラウンド要約を起動します。要約は `rig-memory` の `summarization_request` / `summary_text` を使い、`ene.summary` Aside（本文と `through_message_id`）として追記保存し、`GetHistory` には現れません。要約のモデル呼び出しには60秒のタイムアウトを置き、同じジョブが同じ会話区間の記憶整理・関係性・感情/成長の振り返りまで1パスで実行します。間に合わない場合は `recent::view` で古いターンを要求ビューから切り詰めて対話を続けます。
 //! - **承認ゲート**: `Stage::Gate`（排他システム）で、ホスト管理ツール以外の端末操作を対象クライアントに束縛し、ポリシーと能力宣言（`AUTO` / `CONFIRM` / 未指定）から `ApprovalRequest` を作るか拒否します。保留は `HoldOf` で表現し、`SettingsService.SubmitApproval` か「頭」の `resolve_approval` ツールが `Approved` マーカーを付けて解放します。要求の引数ハッシュが変わっていれば承認は失効します。
 //! - **クライアント能力**: `RegisterClient` / `SetCapabilities` の宣言（能力名・JSON Schema・プリセット・ツール名・承認要否・承認対象テンプレート）を検証し、ホストが許可を決めます。`tool_name` を持つ許可済み能力だけが `world.spawn_tool` で親エージェント向けのツールとして動的に登録され、能力変更・有効化の変更・切断に追随して入れ替わります。`tool_name` のない能力は汎用 `device_request` からのみ呼べます。入力・出力スキーマは `jsonschema` で検証し、承認ハッシュは RFC 8785 の canonical JSON で計算します。能力の許可は操作単位の承認を省略しません。
 //! - **端末操作**: `ClientService.DeviceStream` 上の `DeviceOperation` として配送します。対象端末はモデルが指定せず、ホストが配送時点のアクティブクライアント（手からの操作は `StartWork` 時に保存した `client_id`）へ届け、結果は `operation_id` で照合します。端末移動は世代を持たず最後の `Activate` が勝ち、移動済みでも保留中の承認は失効させません。切断では未応答の操作を `uncertain` とし、再接続時に未配送分だけ再送します。

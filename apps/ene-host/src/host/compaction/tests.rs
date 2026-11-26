@@ -1,7 +1,9 @@
+use super::budget::{cut, whole_tokens};
 use super::*;
 use crate::host::mind::{Companion, ModelAssignment, ModelAssignments, Profile, State};
 use ene_mind::JsonDoc;
 use rig_core::catalog::{Catalog, Connector, ModelSpec};
+use rig_core::completion::ToolDefinition;
 use rig_core::completion::{AssistantContent, AssistantMessage};
 use rig_core::conversation::TurnEnd;
 use rig_core::message::{CallId, ToolCall, ToolFunction, ToolName};
@@ -69,7 +71,7 @@ fn every_cut_budget_keeps_a_complete_newest_request() {
         .find(rig_core::conversation::EntryRef::is_request)
         .unwrap()
         .id;
-    for budget in 0..=estimate_tokens(history.messages()) {
+    for budget in 0..=message_tokens(history.messages().iter().map(Arc::as_ref)) {
         if let Some(id) = cut(&history, budget, 0) {
             let at = history.index_of(id).unwrap();
             assert!(history.entries().nth(at).unwrap().is_request());
@@ -86,7 +88,7 @@ fn every_cut_budget_keeps_a_complete_newest_request() {
 fn a_fit_keeps_tool_pairs_and_drops_whole_turns() {
     let mut history = conversation(8);
     history.validate().expect("a canonical fixture");
-    assert!(estimate_tokens(history.messages()) > 550);
+    assert!(message_tokens(history.messages().iter().map(Arc::as_ref)) > 550);
     assert!(fit(
         &mut history,
         &FitRequest {
@@ -98,7 +100,7 @@ fn a_fit_keeps_tool_pairs_and_drops_whole_turns() {
             budget: 550,
         },
     ));
-    assert!(estimate_tokens(history.messages()) <= 550);
+    assert!(message_tokens(history.messages().iter().map(Arc::as_ref)) <= 550);
     history.validate().expect("tool calls keep their results");
     assert!(noticed(&history));
     let mut entries = history.entries();
@@ -126,7 +128,7 @@ fn fitting_clears_large_tool_outputs_only_in_the_request_view() {
             budget: 500,
         },
     ));
-    assert!(estimate_tokens(request.messages()) <= 500);
+    assert!(message_tokens(request.messages().iter().map(Arc::as_ref)) <= 500);
     assert_eq!(request.messages().len(), saved.messages().len());
     assert_ne!(request.messages(), saved.messages());
     assert_eq!(saved.messages(), original);
@@ -153,8 +155,30 @@ fn a_fit_refuses_a_single_oversized_message() {
             budget: 900,
         },
     ));
-    assert!(estimate_tokens(history.messages()) > 900);
+    assert!(message_tokens(history.messages().iter().map(Arc::as_ref)) > 900);
     assert_eq!(history.messages().len(), 2);
+}
+
+#[test]
+fn measured_usage_applies_only_to_the_same_request_prefix() {
+    let mut history = History::from_messages([Arc::new(Message::user("hello"))]);
+    let anchor = rig_memory::Anchor {
+        through: history.id(0).unwrap(),
+        usage: rig_core::completion::Usage::default().total_tokens(501),
+    };
+    let mut request = FitRequest {
+        model: "test/model",
+        prompt: None,
+        tools: &[],
+        anchor: Some(&anchor),
+        sent: None,
+        budget: 500,
+    };
+    request.sent = Some(request.start(&history));
+    assert!(!fit(&mut history, &request));
+
+    request.prompt = Some("A different system prompt");
+    assert!(fit(&mut history, &request));
 }
 
 #[test]
@@ -162,7 +186,7 @@ fn the_fixed_request_weight_counts_against_the_window() {
     let prompt = "あなたはデスクトップ常駐AIコンパニオンです。".repeat(60);
     let tools = [tool(&"t".repeat(2_000))];
     let mut history = conversation(6);
-    assert!(estimate_tokens(history.messages()) <= 1_100);
+    assert!(message_tokens(history.messages().iter().map(Arc::as_ref)) <= 1_100);
     assert!(!fit(
         &mut history,
         &FitRequest {
@@ -187,16 +211,7 @@ fn the_fixed_request_weight_counts_against_the_window() {
             budget: 1_900,
         },
     ));
-    assert!(
-        Prepared {
-            model: "test/model",
-            prompt: Some(&prompt),
-            tools: &tools,
-            history: &history,
-        }
-        .whole_tokens()
-            <= 1_900
-    );
+    assert!(whole_tokens(&history, Some(&prompt), &tools) <= 1_900);
     assert!(noticed(&history));
 }
 
@@ -484,7 +499,7 @@ impl SummaryWorld {
             .spec
             .input_limit()
             .unwrap();
-        estimate_tokens(conversation.0.messages()) as f64 / f64::from(limit)
+        message_tokens(conversation.0.messages().iter().map(Arc::as_ref)) as f64 / f64::from(limit)
     }
 
     /// Whether a summary is in this companion's slot.

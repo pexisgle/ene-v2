@@ -225,10 +225,11 @@ fn try_begin_utterance(world: &mut World, voice: &Voice, companion: &str) -> boo
         .is_some_and(|holder| holder != companion)
     {
         if let Some(agent) = agent::agent_of(world, companion) {
-            world.trigger(StopTurn {
-                entity: agent,
-                reason: Some("speech floor was taken by a peer".to_owned()),
-            });
+            world.trigger(StopTurn::plugin_alone(
+                agent,
+                "ene-host",
+                "speech floor was taken by a peer",
+            ));
         }
         return false;
     }

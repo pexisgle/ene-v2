@@ -246,10 +246,11 @@ fn report(world: &mut World, agent: Entity, args: &ReportArgs) -> Result<String>
                 run_id,
                 format!("[作業質問 (work_id: {work_id})] {}", args.content),
             );
-            world.trigger(StopTurn {
-                entity: agent,
-                reason: Some("the hand asked a question".into()),
-            });
+            world.trigger(StopTurn::plugin_alone(
+                agent,
+                "ene-host",
+                "the hand asked a question",
+            ));
             Ok(json!({"accepted": true, "status": "waiting_for_answer"}).to_string())
         }
         "completed" => {
@@ -266,10 +267,11 @@ fn report(world: &mut World, agent: Entity, args: &ReportArgs) -> Result<String>
                 run_id.clone(),
                 format!("[作業失敗 (work_id: {work_id})] {}", args.content),
             );
-            world.trigger(StopTurn {
-                entity: agent,
-                reason: Some("the hand reported a failure".into()),
-            });
+            world.trigger(StopTurn::plugin_alone(
+                agent,
+                "ene-host",
+                "the hand reported a failure",
+            ));
             super::inform(
                 world,
                 &work.companion_id,

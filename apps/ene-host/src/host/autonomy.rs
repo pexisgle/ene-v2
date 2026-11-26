@@ -76,10 +76,11 @@ pub(crate) fn register(app: &mut App) {
                 .get::<ActiveTurn>(entity)
                 .and_then(|active| world.get::<Turn>(active.turn()));
             if is_eyes_silent_turn(turn, world.get::<Conversation>(entity)) {
-                world.trigger(StopTurn {
+                world.trigger(StopTurn::plugin_alone(
                     entity,
-                    reason: Some(super::eyes::WATCHED.into()),
-                });
+                    "ene-host",
+                    super::eyes::WATCHED,
+                ));
             }
             Ok(json!({"ok": true}).to_string())
         }),

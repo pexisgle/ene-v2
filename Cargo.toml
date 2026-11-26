@@ -74,39 +74,41 @@ cap-fs-ext = "4.0.3"
 tempfile = "3"
 async-stream = "0.3"
 axum = "0.8"
-backon = { version = "~1.6.0", default-features = false, features = ["std"] }
+backon = { version = "1.6.0", default-features = false, features = ["std"] }
 base64 = "0.23"
 bytes = "1"
 buffa = { version = "0.9", features = ["json"] }
 connectrpc = { version = "0.9", default-features = false, features = ["json"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
-# GPUI Kit pins its matching GPUI and platform crates.
-gpui = { package = "gpui-kit", version = "=0.11.0" }
+gpui = { package = "gpui-kit", version = "0.11.0" }
 http = "1"
 http-body-util = "0.1"
 hashlink = "0.12"
 hex = "0.4"
 croner = { version = "5", default-features = false, features = ["jiff"] }
 rubato = "5.1"
-wav-codec = "=0.1.0"
+wav-codec = "0.1.0"
 # Domain validation resolves embedded references without filesystem or HTTP access.
 jsonschema = { version = "0.63", default-features = false, features = ["idna"] }
 serde_json_canonicalizer = "0.4"
 jiff = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "multipart"] }
-# The Rig crates share one type set and must move together; v0.46.0 is the
-# surveyed baseline (docs/references.md), so an upgrade bumps all of them at once.
-rig-core = { version = "=0.46.0", default-features = false }
-rig-agent = "=0.46.0"
-rig-ecs = "=0.46.0"
-rig-memory = { version = "=0.46.0", features = ["fs"] }
-rig-rmcp = "=0.46.0"
+# Rig's adapters share types from rig-core. Update this release line together.
+rig-core = { version = "0.47.1", default-features = false }
+rig-agent = "0.47.1"
+rig-ecs = "0.47.1"
+rig-memory = { version = "0.47.1", features = ["fs"] }
+rig-rmcp = "0.47.1"
 # The transports rig-rmcp re-exports are behind rmcp features it does not turn on.
 rmcp = { version = "3.5", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "which-command"] }
-rig-reqwest = { version = "=0.46.0", features = ["rustls"] }
+rig-reqwest = { version = "0.47.1", features = ["rustls"] }
+# rig-ecs sets the exact versions of the Bevy crates it exposes to the host.
+bevy = { version = "0.20.1", default-features = false }
+bevy_ecs = "0.20.1"
+bevy_time = "0.20.1"
 rusqlite = { version = "0.43", features = ["bundled", "fallible_uint"] }
 # Keep the migration library on the rusqlite line used by the store.
-rusqlite-migration = { package = "rusqlite_migration", version = "=2.9.0" }
+rusqlite-migration = { package = "rusqlite_migration", version = "2.9.0" }
 rustix = { version = "1", features = ["fs", "process"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

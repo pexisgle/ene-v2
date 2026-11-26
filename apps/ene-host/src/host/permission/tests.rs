@@ -319,17 +319,17 @@ impl DecisionWorld {
         // `Agent` and `AgentId` are the kernel's own identity for an
         // agent: without them the start stage finds no agent for the call
         // and drops it, so the gate never runs.
-        let agent = app
-            .world_mut()
-            .spawn((
-                Agent,
+        let agent = spawn_root(
+            app.world_mut(),
+            (
                 AgentId(crate::host::agent::companion_agent_id("ene")),
                 crate::host::agent::CompanionAgent {
                     companion_id: "ene".into(),
                 },
                 Conversation(history),
-            ))
-            .id();
+            ),
+        )
+        .id();
         Self {
             app,
             agent,

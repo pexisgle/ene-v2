@@ -8,7 +8,7 @@
 <a id="alpha-rig"></a>
 ### Rigへの委譲
 
-[S01](research/mind-sources.md#s01)〜[S05](research/mind-sources.md#s05)を基に、調査基準版v0.46.0のrig-ecs、会話保存、ツール、モデル、拡張点を優先する。独自の第二カーネル・受信箱・履歴の複製を作らない。ステップ1の実装でv0.46.0を採用し`Cargo.lock`へ固定した。接続、途中状態の記録、停止、待機時負荷は[全体アーキテクチャ](architecture.md)および[技術スタック](design/tech-stack.md)を基準とする。
+[S01](research/mind-sources.md#s01)〜[S05](research/mind-sources.md#s05)を基に、調査基準版v0.46.0のrig-ecs、会話保存、ツール、モデル、拡張点を優先する。独自の第二カーネル・受信箱・履歴の複製を作らない。実装はv0.46.0から開始し、現在の採用版は`Cargo.lock`で管理する。接続、途中状態の記録、停止、待機時負荷は[全体アーキテクチャ](architecture.md)および[技術スタック](design/tech-stack.md)を基準とする。
 
 <a id="alpha-mind"></a>
 ### 人格・心

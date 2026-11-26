@@ -540,7 +540,7 @@ async fn the_probe_lists_models_for_any_adapter() {
             "gemini",
             "gemini-probe",
             "/v1beta/models",
-            "key=explicit-key",
+            "x-goog-api-key: explicit-key",
         ),
         (
             "custom",
@@ -562,6 +562,7 @@ async fn the_probe_lists_models_for_any_adapter() {
         let request = requests.recv().await.unwrap();
         let uri = request.split_whitespace().nth(1).unwrap();
         assert_eq!(uri.split('?').next().unwrap(), path, "{adapter}");
+        assert!(!uri.contains("explicit-key"), "{adapter}: {uri}");
         assert!(request.contains(authentication), "{adapter}: {request}");
         assert!(
             check.resources.iter().any(|known| known == model),

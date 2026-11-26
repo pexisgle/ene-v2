@@ -53,11 +53,11 @@
 #### 実装例・一次情報
 - **依存定義 (`Cargo.toml`)**:
   ```toml
-  rusqlite = { version = "0.42", features = ["bundled"] }
-  rig-core = "0.46"
-  rig-ecs = "0.46"
-  rig-memory = { version = "0.46", features = ["fs"] }
-  rig-rmcp = "0.46"
+  rusqlite = { version = "0.43", features = ["bundled"] }
+  rig-core = "0.47.1"
+  rig-ecs = "0.47.1"
+  rig-memory = { version = "0.47.1", features = ["fs"] }
+  rig-rmcp = "0.47.1"
   serde = { version = "1", features = ["derive"] }
   serde_json = "1"
   ```
@@ -218,7 +218,7 @@ CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` �
 - **7つの `ModelAssignments` と `rig-core` カタログの最小マッピング**:
   - `rig_core::catalog::Catalog` はモデルメタデータ（`ModelSpec`：コンテキスト長・入出力上限等）を引くための純粋なデータ辞書として利用し、モデル接続はプロバイダークライアントから `rig_ecs::model::Connection` へ直接マッピングする：
     ```rust
-    // rig-core 0.46 公式 ModelAdapter + Connection の最小構成
+    // rig-core 0.47 公式 ModelAdapter + Connection の最小構成
     // Catalog からモデル仕様 (ModelSpec) を取得
     let spec = catalog.get(&assignments.companion.model_id)?;
     // プロバイダークライアント経由で生成したモデルを ErasedHandler で包む
@@ -283,7 +283,7 @@ pub trait TtsEngine: Send + Sync {
 ### E. アバター描画：`apps/ene-avatar`（Bevy + `ene-vrm`）の資産活用と段階的拡張
 
 - **既存実装（`apps/ene-avatar`）で実装済みの機能**:
-  - `apps/ene-avatar` は `bevy = "=0.20.0"` および `crates/ene-vrm` により、以下のコア基盤を完結して実装している：
+  - `apps/ene-avatar` はワークスペースの `bevy`（0.20 系）と `crates/ene-vrm` を使い、以下の機能を備える。
     1. **クロスプラットフォーム透過デスクトップウィンドウ**:
        - Linux: Wayland layer-shell（`exwlshellev = "0.20.1"` による透過・背後クリック透過）。
        - Windows: Win32 API（`windows = "0.62"`）によるレイヤード透過ウィンドウ（Layered Window）。

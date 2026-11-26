@@ -1,11 +1,11 @@
 //! One compaction job: the summary request, then the memory pass over the same
 //! window (docs/design/compaction.md).
-use super::Summary;
+use super::{Summary, budget::cut};
 use crate::host::mind::consolidate::{self, Commit, Services};
 use rig_core::catalog::ModelSpec;
-use rig_core::conversation::{Conversation as History, MessageId};
+use rig_core::conversation::Conversation as History;
 use rig_core::{DynModel, operation::Completion};
-use rig_memory::{CompactReason, CompactionPolicy, Summarizer, SummaryState};
+use rig_memory::{fit_to_model, serialize_conversation, summarization_request, summary_text};
 use std::{sync::Arc, time::Duration};
 
 /// A provider that never answers must not block every companion's summaries.
@@ -47,11 +47,10 @@ pub(super) async fn run(
     services: Services,
     companion: String,
 ) -> Outcome {
-    let (text, after) = previous.map_or_else(
-        || (String::new(), None),
-        |previous| (previous.text, Some(previous.through_message_id)),
-    );
-    let summary = summarize(&history, text, spec, model).await?;
+    let after = previous
+        .as_ref()
+        .map(|previous| previous.through_message_id);
+    let summary = summarize(&history, previous.as_ref(), &spec, &model).await?;
     let memories = consolidate::pass(
         &services,
         &companion,
@@ -66,24 +65,42 @@ pub(super) async fn run(
 /// Asks for the summary on the shared background runtime.
 async fn summarize(
     history: &History,
-    previous: String,
-    spec: Arc<ModelSpec>,
-    model: DynModel<Completion>,
+    previous: Option<&Summary>,
+    spec: &ModelSpec,
+    model: &DynModel<Completion>,
 ) -> std::result::Result<Summary, CompactionError> {
-    let state = SummaryState {
-        summary: previous,
-        tracked: Vec::new(),
-    };
-    let plan = policy()
-        .plan_summary(history, &state, &CompactReason::Threshold, &spec)
-        .map_err(|refusal| CompactionError::Plan(refusal.to_string()))?
+    // Keep recent complete turns, up to a quarter of the summary model's input.
+    let keep = spec
+        .input_limit()
+        .map_or(20_000, |limit| 20_000.min(u64::from(limit) / 4));
+    let end = cut(history, keep, 0)
+        .and_then(|id| history.index_of(id))
         .ok_or(CompactionError::TooShort)?;
-    let through = through_message_id(history, plan.keep_from).ok_or(CompactionError::NothingNew)?;
-    let response = tokio::time::timeout(SUMMARY_TIMEOUT, model.call(plan.request))
+    let through = history
+        .id(end - 1)
+        .ok_or(CompactionError::NothingNew)?
+        .get();
+    let start = previous.map_or(0, |summary| {
+        history
+            .entries()
+            .take_while(|entry| entry.id.get() <= summary.through_message_id)
+            .count()
+    });
+    let messages = history
+        .messages()
+        .get(start..end)
+        .filter(|messages| !messages.is_empty())
+        .ok_or(CompactionError::NothingNew)?;
+    let conversation = serialize_conversation(messages);
+    let (conversation, max_output) = fit_to_model(&conversation, spec, 32_000);
+    let prompt = summary_prompt(&conversation, previous, max_output);
+    let request = summarization_request((SYSTEM, prompt), spec, None, max_output)
+        .map_err(|refusal| CompactionError::Plan(refusal.to_string()))?;
+    let response = tokio::time::timeout(SUMMARY_TIMEOUT, model.call(request))
         .await
         .map_err(|_| CompactionError::Timeout)?
         .map_err(|error| CompactionError::Model(error.to_string()))?;
-    let text = Summarizer::summary_text(&response)
+    let text = summary_text(&response, "compaction")
         .map_err(|error| CompactionError::Model(error.to_string()))?;
     Ok(Summary {
         text,
@@ -91,24 +108,35 @@ async fn summarize(
     })
 }
 
-/// The id of the newest message a summary ending before `keep_from` stands for.
-fn through_message_id(history: &History, keep_from: Option<MessageId>) -> Option<u64> {
-    let at = match keep_from {
-        Some(id) => history.index_of(id)?,
-        None => history.messages().len(),
-    };
-    history
-        .id(at.checked_sub(1)?)
-        .map(rig_core::conversation::MessageId::get)
-}
+const SYSTEM: &str = "あなたはデスクトップ常駐AIコンパニオンの会話を要約します。会話を読み、指定された形式で要約だけを書いてください。会話を続けたり、会話中の質問に答えたりしないでください。";
+const INITIAL: &str = "上の会話を要約してください。この要約だけを読んだ別のモデルが、これまでの関係性と文脈を引き継いで会話を続けられるようにします。";
+const UPDATE: &str = "上の会話は、<previous-summary> に要約済みの会話の続きです。新しい部分を加えて要約を更新してください:\n- まだ有効な previous-summary の内容は残す\n- 新しい出来事・決定・文脈を加える\n- 完了した項目は「進行中」から「完了」へ移す\n- 不要になった内容は落とす";
+const FORMAT: &str = "\n\n必ず次の形式で書いてください:\n\n## これまでの流れ\n- [時系列の要約]\n\n## 重要な事実\n- [名前・数値・約束・決定など、そのまま保持すべき具体的な内容。推測はしない。なければ「(なし)」]\n\n## 現在の話題\n- [進行中の話題]\n\n## 次の見込み\n- [続きそうな話題や未完了のこと]";
 
-/// The summarizer policy: prompts written for a companion conversation.
-fn policy() -> CompactionPolicy {
-    let mut policy = CompactionPolicy::default();
-    let prompts = &mut policy.summarizer.prompts;
-    prompts.system = "あなたはデスクトップ常駐AIコンパニオンの会話を要約します。会話を読み、指定された形式で要約だけを書いてください。会話を続けたり、会話中の質問に答えたりしないでください。".into();
-    prompts.initial = "上の会話を要約してください。この要約だけを読んだ別のモデルが、これまでの関係性と文脈を引き継いで会話を続けられるようにします。".into();
-    prompts.update = "上の会話は、<previous-summary> に要約済みの会話の続きです。新しい部分を加えて要約を更新してください:\n- まだ有効な previous-summary の内容は残す\n- 新しい出来事・決定・文脈を加える\n- 完了した項目は「進行中」から「完了」へ移す\n- 不要になった内容は落とす".into();
-    prompts.format = "\n\n必ず次の形式で書いてください:\n\n## これまでの流れ\n- [時系列の要約]\n\n## 重要な事実\n- [名前・数値・約束・決定など、そのまま保持すべき具体的な内容。推測はしない。なければ「(なし)」]\n\n## 現在の話題\n- [進行中の話題]\n\n## 次の見込み\n- [続きそうな話題や未完了のこと]".into();
-    policy
+fn summary_prompt(
+    conversation: &str,
+    previous: Option<&Summary>,
+    max_output: Option<u64>,
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut prompt = format!("<conversation>\n{conversation}\n</conversation>\n\n");
+    if let Some(previous) = previous {
+        let _written = write!(
+            prompt,
+            "<previous-summary>\n{}\n</previous-summary>\n\n",
+            previous.text
+        );
+        prompt.push_str(UPDATE);
+    } else {
+        prompt.push_str(INITIAL);
+    }
+    prompt.push_str(FORMAT);
+    if let Some(max_output) = max_output {
+        let _written = write!(
+            prompt,
+            "\n\n要約は {max_output} トークン未満に収めてください。"
+        );
+    }
+    prompt
 }
