@@ -148,16 +148,10 @@ impl Theme {
         }
     }
 
-    pub fn field_look(&self, pill: bool, borderless: bool) -> FieldLook {
+    pub fn field_look(&self, borderless: bool) -> FieldLook {
         FieldLook {
             bg: self.bg_input,
-            border: self.border,
-            border_focused: self.accent,
             text: self.ink,
-            placeholder: self.ink_placeholder,
-            caret: self.accent,
-            selection: self.accent.alpha(0.20),
-            pill,
             borderless,
         }
     }
@@ -168,8 +162,37 @@ impl Theme {
             offset: point(px(0.), px(4.)),
             blur_radius: px(10.),
             spread_radius: px(0.),
+            inset: false,
         }]
     }
+}
+
+pub(crate) fn init_components(cx: &mut gpui::App) {
+    gpui::init(cx);
+    let palette = Theme::strawberry_milk();
+    gpui::component::Theme::update(cx, |theme| {
+        let colors = &mut theme.colors;
+        colors.background = gpui::transparent_black();
+        colors.foreground = palette.ink;
+        colors.border = palette.border;
+        colors.window_border = gpui::transparent_black();
+        colors.input = palette.border;
+        colors.ring = palette.accent;
+        colors.caret = palette.accent;
+        colors.selection = palette.accent.alpha(0.20);
+        colors.muted = palette.bg_blush;
+        colors.muted_foreground = palette.ink_placeholder;
+        colors.popover = palette.bg_surface;
+        colors.popover_foreground = palette.ink;
+        colors.accent = palette.accent_soft;
+        colors.accent_foreground = palette.accent_soft_fg;
+        colors.primary = palette.accent;
+        colors.primary_hover = palette.accent_hover;
+        colors.primary_foreground = palette.accent_fg;
+        colors.switch = palette.border_float;
+        colors.switch_thumb = palette.bg_surface;
+        theme.radius = radius::medium();
+    });
 }
 
 /// Picks a palette from an OS dark-mode flag.

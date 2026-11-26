@@ -69,13 +69,12 @@ A crate cannot add the lint to `[lints]` while `workspace = true` — cargo reje
 
 ## GPUI components
 
-`gpui-component` 0.5.1 is compatible with the pinned `gpui =0.2.2` and was
-verified to resolve and compile alongside it in a scratch crate. The only
-obstacle was `xattr 0.2.3` needing `libc::ENOATTR`, which the existing
-`libc = ">=0.2.186, <0.2.190"` pin in `apps/ene-desktop` already solves. Its
-transitive licences are all in `deny.toml`'s allow list. Adopting it is a
-feature change, not a refactor: it replaces `src/input/` and `src/ui/widgets/`
-with library widgets and needs a GUI harness to verify.
+`ene-desktop` uses GPUI Kit through the workspace's `gpui` dependency alias.
+The Kit release pins the matching GPUI crates. Initialize its components before
+opening windows with `gpui::open_window`, which installs the component root.
+Use the desktop palette in `apps/ene-desktop/src/ui/theme.rs`. Verify changes to
+text entry and selection with the GUI test harness and check native IME behavior
+on the affected platforms.
 
 ## OS perception on Linux
 

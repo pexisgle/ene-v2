@@ -137,8 +137,8 @@ impl DraftStore {
                 key: key.into(),
                 placeholder,
                 initial,
-                look: theme.field_look(false, false),
-                context: "TextField",
+                look: theme.field_look(false),
+                multiline: false,
             },
         )
     }
@@ -158,8 +158,8 @@ impl DraftStore {
                 key: key.into(),
                 placeholder,
                 initial,
-                look: theme.field_look(false, false),
-                context: "TextField Multiline",
+                look: theme.field_look(false),
+                multiline: true,
             },
         )
     }
@@ -173,9 +173,7 @@ impl DraftStore {
         theme: &theme::Theme,
     ) -> Entity<crate::input::Draft> {
         let entity = self.draft(cx, key, placeholder, None, theme);
-        if entity.read(cx).is_masked() != masked {
-            entity.update(cx, |draft, cx| draft.set_masked(masked, cx));
-        }
+        entity.update(cx, |draft, cx| draft.set_masked(masked, cx));
         entity
     }
 
@@ -202,7 +200,7 @@ pub(crate) struct DraftSpec<'a> {
     pub placeholder: &'static str,
     pub initial: Option<&'a str>,
     pub look: crate::input::FieldLook,
-    pub context: &'static str,
+    pub multiline: bool,
 }
 
 /// Keeps a per-window draft entity map synced with the active field theme.
@@ -215,7 +213,7 @@ pub(crate) fn window_draft(
         .entry(spec.key)
         .or_insert_with(|| {
             cx.new(|cx| {
-                let mut draft = crate::input::Draft::new(cx, spec.placeholder, spec.context);
+                let mut draft = crate::input::Draft::new(spec.placeholder, spec.multiline);
                 if let Some(value) = spec.initial {
                     draft.set(value.to_owned(), cx);
                 }
@@ -223,8 +221,6 @@ pub(crate) fn window_draft(
             })
         })
         .clone();
-    if entity.read(cx).look() != &spec.look {
-        entity.update(cx, |draft, _| draft.apply_look(spec.look));
-    }
+    entity.update(cx, |draft, cx| draft.apply_look(spec.look, cx));
     entity
 }

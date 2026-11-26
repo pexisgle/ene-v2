@@ -82,9 +82,8 @@ bytes = "1"
 buffa = { version = "0.9", features = ["json"] }
 connectrpc = { version = "0.9", default-features = false, features = ["json"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
-# Pre-1.0 and explicitly unstable (docs/references.md), so the desktop client
-# pins the exact version its observed API was written against.
-gpui = { version = "=0.2.2", default-features = false }
+# GPUI Kit pins its matching GPUI and platform crates.
+gpui = { package = "gpui-kit", version = "=0.11.0" }
 http = "1"
 http-body-util = "0.1"
 hashlink = "0.12"

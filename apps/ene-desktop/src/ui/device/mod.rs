@@ -250,7 +250,7 @@ fn render_history_reset_card(
                         cx.spawn(async move |cx| {
                             if answer.await == Ok(1) {
                                 requested.store(true, std::sync::atomic::Ordering::Relaxed);
-                                let _discarded =  cx.update(|cx| cx.quit());
+                                cx.update(|cx| cx.quit());
                             }
                         })
                         .detach();

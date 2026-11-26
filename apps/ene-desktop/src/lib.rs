@@ -156,7 +156,7 @@
 //!
 //! ## 注意
 //!
-//! GPUIは `comctl32!TaskDialogIndirect` をインポートします。これはマニフェストで要求したCommon-Controls 6にしか無いため、`build.rs` が `ene-desktop.rc` からアプリケーションマニフェストを埋め込みます。これが無い実行ファイルは `main` より前に `STATUS_ENTRYPOINT_NOT_FOUND` で落ちます。
+//! GPUI Kit がリンクする Windows マニフェストは、`comctl32!TaskDialogIndirect` の解決に必要な Common Controls 6 を要求します。`build.rs` はアプリのアイコンを埋め込みます。
 
 // The desktop app performs no FFI itself: every platform call lives in
 // ne-platform-os, which states the invariant each one relies on.

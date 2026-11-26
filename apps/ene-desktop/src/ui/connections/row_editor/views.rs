@@ -326,7 +326,7 @@ pub(super) fn render_editor_actions(
                 );
                 cx.spawn(async move |cx| {
                     if answer.await == Ok(1) {
-                        let _discarded =  cx.update(|cx| {
+                        cx.update(|cx| {
                             hub.update(cx, |hub, cx| hub.delete_connection(id, rev, cx));
                         });
                     }

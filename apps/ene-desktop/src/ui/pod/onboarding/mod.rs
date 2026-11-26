@@ -67,8 +67,8 @@ pub(super) fn render_connection_onboarding(
         .cloned();
     let provider_chips = build_provider_chips(&providers, picked.as_ref(), theme, cx);
 
-    let look = theme.field_look(false, false);
-    pod.onboard_key.update(cx, |d, _| d.apply_look(look));
+    let look = theme.field_look(false);
+    pod.onboard_key.update(cx, |d, cx| d.apply_look(look, cx));
     let secret = pod.onboard_key.read(cx).text().trim().to_owned();
     let needs_key = picked.as_ref().is_some_and(|p| p.requires_credentials);
     let can_connect = picked.is_some() && (!needs_key || !secret.is_empty());
@@ -128,10 +128,12 @@ pub(super) fn render_model_voice_onboarding(
     theme: &Theme,
     cx: &mut Context<CompanionPod>,
 ) -> AnyElement {
-    let look = theme.field_look(false, false);
-    pod.onboard_name.update(cx, |d, _| d.apply_look(look));
-    pod.setup_model_filter.update(cx, |d, _| d.apply_look(look));
-    pod.setup_voice_filter.update(cx, |d, _| d.apply_look(look));
+    let look = theme.field_look(false);
+    pod.onboard_name.update(cx, |d, cx| d.apply_look(look, cx));
+    pod.setup_model_filter
+        .update(cx, |d, cx| d.apply_look(look, cx));
+    pod.setup_voice_filter
+        .update(cx, |d, cx| d.apply_look(look, cx));
     let companions_empty = pod
         .hub
         .read(cx)

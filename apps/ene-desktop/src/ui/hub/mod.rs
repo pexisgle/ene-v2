@@ -21,7 +21,7 @@ use crate::{
 };
 use ene_client_core::domain::ConnectionKind;
 use ene_platform_os::TrayAction;
-use gpui::{App, Context, Task, WeakEntity, WindowHandle};
+use gpui::{AnyWindowHandle, App, Context, Task, WeakEntity};
 use state::ApplyFlags;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -299,7 +299,7 @@ impl Hub {
 
     pub(crate) fn register_pod_window(
         &mut self,
-        handle: WindowHandle<CompanionPod>,
+        handle: AnyWindowHandle,
         view: WeakEntity<CompanionPod>,
         cx: &mut Context<Self>,
     ) {

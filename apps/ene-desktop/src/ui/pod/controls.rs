@@ -26,8 +26,9 @@ pub(super) fn render_capsule_dock(
         )
     };
 
-    let look = theme.field_look(true, true);
-    pod.chat_input.update(cx, |draft, _| draft.apply_look(look));
+    let look = theme.field_look(true);
+    pod.chat_input
+        .update(cx, |draft, cx| draft.apply_look(look, cx));
 
     let draft_text = pod.chat_input.read(cx).text().to_owned();
     let too_long = draft_text.chars().count() > MAX_INPUT;
@@ -130,8 +131,8 @@ fn render_input_capsule(
                         .hover(|this| this.bg(theme.accent_hover))
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                                this.submit(cx);
+                            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                this.submit(window, cx);
                             }),
                         )
                 })

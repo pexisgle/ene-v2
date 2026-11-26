@@ -10,7 +10,7 @@ use crate::{
 };
 use ene_platform_os::{TrayAction, TrayHandle, TrayMode, TraySection, TrayState};
 use gpui::{
-    App, AppContext as _, Bounds, Context, Entity, WeakEntity, WindowBounds, WindowHandle,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, WeakEntity, WindowBounds,
     WindowKind, WindowOptions, px, size,
 };
 
@@ -31,7 +31,7 @@ pub(super) fn pod_view(hub: &Hub) -> Option<WeakEntity<CompanionPod>> {
 
 pub(super) fn register_pod_window(
     hub: &mut Hub,
-    handle: WindowHandle<CompanionPod>,
+    handle: AnyWindowHandle,
     view: WeakEntity<CompanionPod>,
     cx: &mut Context<Hub>,
 ) {
@@ -57,35 +57,33 @@ pub(super) fn open_pod(hub: &mut Hub, mode: Option<PodMode>, cx: &mut Context<Hu
         }
     }
     hub.windows.pod_visible = true;
-    let existing = hub.windows.pod_window;
+    let existing = hub.windows.pod_window.zip(hub.pod_view());
     sync_tray_state(hub);
     cx.notify();
 
     cx.spawn(async move |this, cx| {
-        ene_domain::debug_if_err(
-            cx.update(|cx| {
-                let Some(hub) = this.upgrade() else {
-                    return;
-                };
-                if let Some(handle) = existing
-                    && handle
-                        .update(cx, |view, window, cx| {
-                            pod::set_pod_window_visible(true);
+        cx.update(|cx| {
+            let Some(hub) = this.upgrade() else {
+                return;
+            };
+            if let Some((handle, pod_view)) = existing
+                && handle
+                    .update(cx, |_, window, cx| {
+                        pod::set_pod_window_visible(true);
+                        let _updated = pod_view.update(cx, |view, cx| {
                             view.sync_mode_and_focus(window, cx);
-                            window.activate_window();
-                            cx.activate(true);
-                            cx.notify();
-                        })
-                        .is_ok()
-                {
-                    return;
-                }
-                if open_pod_window(cx, hub).is_some() {
-                    cx.activate(true);
-                }
-            }),
-            "window update",
-        );
+                        });
+                        window.activate_window();
+                        cx.activate(true);
+                    })
+                    .is_ok()
+            {
+                return;
+            }
+            if open_pod_window(cx, hub).is_some() {
+                cx.activate(true);
+            }
+        });
     })
     .detach();
 }
@@ -103,14 +101,14 @@ pub(super) fn sync_window_closed(hub: &mut Hub, cx: &mut App) {
     if hub
         .windows
         .settings_window
-        .is_some_and(|handle| !windows.contains(&handle.into()))
+        .is_some_and(|handle| !windows.contains(&handle))
     {
         hub.windows.settings_window = None;
     }
     if hub
         .windows
         .pod_window
-        .is_some_and(|handle| !windows.contains(&handle.into()))
+        .is_some_and(|handle| !windows.contains(&handle))
     {
         hub.windows.pod_window = None;
         hub.windows.pod_view = None;
@@ -198,65 +196,60 @@ pub(super) fn open_settings(hub: &mut Hub, section: SettingsSection, cx: &mut Co
     cx.notify();
 
     cx.spawn(async move |this, cx| {
-        ene_domain::debug_if_err(
-            cx.update(|cx| {
-                let Some(hub) = this.upgrade() else {
-                    return;
-                };
-                let existing = hub.read(cx).windows.settings_window;
-                if let Some(handle) = existing
-                    && handle
-                        .update(cx, |_, window, cx| {
-                            window.activate_window();
-                            cx.notify();
-                        })
-                        .is_ok()
-                {
-                    return;
-                }
+        cx.update(|cx| {
+            let Some(hub) = this.upgrade() else {
+                return;
+            };
+            let existing = hub.read(cx).windows.settings_window;
+            if let Some(handle) = existing
+                && handle
+                    .update(cx, |_, window, _| window.activate_window())
+                    .is_ok()
+            {
+                return;
+            }
 
-                let hub_for_view = hub.clone();
-                let bounds = settings_window_bounds(cx);
-                let opened = cx.open_window(
-                    WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(bounds)),
-                        window_min_size: Some(size(px(680.), px(480.))),
-                        window_decorations: Some(gpui::WindowDecorations::Client),
-                        app_id: Some("ene-desktop".into()),
-                        titlebar: Some(gpui::TitlebarOptions {
-                            title: Some("設定 — ene".into()),
-                            appears_transparent: true,
-                            ..Default::default()
-                        }),
+            let hub_for_view = hub.clone();
+            let bounds = settings_window_bounds(cx);
+            let opened = gpui::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(680.), px(480.))),
+                    window_decorations: Some(gpui::WindowDecorations::Client),
+                    app_id: Some("ene-desktop".into()),
+                    titlebar: Some(gpui::TitlebarOptions {
+                        title: Some("設定 — ene".into()),
+                        appears_transparent: true,
                         ..Default::default()
-                    },
-                    move |_window, cx| cx.new(|cx| SettingsStudio::new(hub_for_view.clone(), cx)),
-                );
-                match opened {
-                    Ok(handle) => {
-                        ene_domain::debug_if_err(
-                            handle.update(cx, |_, window, _| window.activate_window()),
-                            "window activation",
-                        );
-                        let _activated = this.update(cx, |hub, cx| {
-                            hub.windows.settings_window = Some(handle);
-                            cx.notify();
-                        });
-                    }
-                    Err(error) => {
-                        let _activated = this.update(cx, |hub, cx| {
-                            hub.model.notice(
-                                NoticeKind::Failed,
-                                "設定ウィンドウを開く",
-                                error.to_string(),
-                            );
-                            cx.notify();
-                        });
-                    }
+                    }),
+                    ..Default::default()
+                },
+                cx,
+                move |_window, cx| cx.new(|cx| SettingsStudio::new(hub_for_view, cx)),
+            );
+            match opened {
+                Ok((handle, _)) => {
+                    ene_domain::debug_if_err(
+                        handle.update(cx, |_, window, _| window.activate_window()),
+                        "window activation",
+                    );
+                    let _activated = this.update(cx, |hub, cx| {
+                        hub.windows.settings_window = Some(handle);
+                        cx.notify();
+                    });
                 }
-            }),
-            "window update",
-        );
+                Err(error) => {
+                    let _activated = this.update(cx, |hub, cx| {
+                        hub.model.notice(
+                            NoticeKind::Failed,
+                            "設定ウィンドウを開く",
+                            error.to_string(),
+                        );
+                        cx.notify();
+                    });
+                }
+            }
+        });
     })
     .detach();
 }
@@ -281,11 +274,11 @@ fn settings_window_bounds(cx: &gpui::App) -> Bounds<gpui::Pixels> {
 }
 
 /// Opens the floating companion pod window and registers it with `Hub`.
-pub fn open_pod_window(cx: &mut App, hub: Entity<Hub>) -> Option<WindowHandle<CompanionPod>> {
+pub fn open_pod_window(cx: &mut App, hub: Entity<Hub>) -> Option<AnyWindowHandle> {
     let mode = hub.read(cx).windows.pod_mode;
     let bounds = initial_pod_bounds_for_mode(mode, cx);
     let hub_for_pod = hub.clone();
-    let opened = cx.open_window(
+    let opened = gpui::open_window(
         WindowOptions {
             #[cfg(windows)]
             kind: WindowKind::PopUp,
@@ -301,13 +294,14 @@ pub fn open_pod_window(cx: &mut App, hub: Entity<Hub>) -> Option<WindowHandle<Co
             titlebar: None,
             ..Default::default()
         },
-        move |_window, cx| cx.new(|cx| CompanionPod::new(hub_for_pod.clone(), cx)),
+        cx,
+        move |window, cx| cx.new(|cx| CompanionPod::new(hub_for_pod, window, cx)),
     );
     match opened {
-        Ok(window) => {
+        Ok((window, view)) => {
             let hub_close = hub.clone();
-            if let Ok(view) = window.update(cx, |view, window, cx| {
-                focus_chat(view, window, cx);
+            let did_open = window.update(cx, |_, window, cx| {
+                view.update(cx, |view, cx| focus_chat(view, window, cx));
                 window.on_window_should_close(cx, move |_window, cx| {
                     let should_hide = hub_close.read(cx).is_tray_resident()
                         || hub_close.read(cx).windows.settings_window.is_some();
@@ -318,9 +312,11 @@ pub fn open_pod_window(cx: &mut App, hub: Entity<Hub>) -> Option<WindowHandle<Co
                         true
                     }
                 });
-                cx.entity().downgrade()
-            }) {
-                hub.update(cx, |hub, cx| hub.register_pod_window(window, view, cx));
+            });
+            if did_open.is_ok() {
+                hub.update(cx, |hub, cx| {
+                    hub.register_pod_window(window, view.downgrade(), cx)
+                });
             }
             Some(window)
         }

@@ -1,25 +1,17 @@
-//! Embeds the Windows application manifest and Strawberry-Milk `ene` icon.
+//! Embeds the Strawberry-Milk `ene` icon for Windows.
 //!
-//! GPUI imports `comctl32!TaskDialogIndirect`, which only resolves against the
-//! Common-Controls version 6 side-by-side assembly. A process that does not ask
-//! for it in its manifest loads the version 5 stub and dies at load time with
-//! `STATUS_ENTRYPOINT_NOT_FOUND`, before `main`. GPUI ships a manifest of its
-//! own, but a dependency's link arguments do not reach this crate's binary, so
-//! the client embeds it here alongside resource ID `1` (`ICON`) loaded by GPUI
-//! and the taskbar notification tray.
+//! GPUI Kit links GPUI's manifest with Common Controls 6 and per-monitor DPI.
+//! Resource ID `1` (`ICON`) is used by the window and taskbar notification tray.
 
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("cargo:rerun-if-changed=ene-desktop.manifest");
-    println!("cargo:rerun-if-changed=ene-desktop.rc");
     println!("cargo:rerun-if-changed=build.rs");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return Ok(());
     }
 
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("OUT_DIR is not set")?);
-    let manifest_bytes = std::fs::read("ene-desktop.manifest")?;
     let sizes = [16u32, 32, 48];
     let images: Vec<(u32, Vec<u8>)> = sizes
         .iter()
@@ -30,23 +22,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(&ico_path, build_ico(&images))?;
 
     let res_path = out_dir.join("ene-desktop.lib");
-    std::fs::write(&res_path, build_win32_res(&manifest_bytes, &images))?;
+    std::fs::write(&res_path, build_win32_res(&images))?;
 
     println!("cargo:rustc-link-arg-bins={}", res_path.display());
     Ok(())
 }
 
-fn build_win32_res(manifest: &[u8], images: &[(u32, Vec<u8>)]) -> Vec<u8> {
+fn build_win32_res(images: &[(u32, Vec<u8>)]) -> Vec<u8> {
     const RT_ICON: u16 = 3;
     const RT_GROUP_ICON: u16 = 14;
-    const RT_MANIFEST: u16 = 24;
     const RES_FLAGS: u16 = 0x0030;
     const LANG_EN_US: u16 = 0x0409;
 
     let mut res = Vec::new();
     // 32-byte Win32 .res file header record.
     append_res_record(&mut res, 0, 0, 0, 0, &[]);
-    append_res_record(&mut res, RT_MANIFEST, 1, RES_FLAGS, LANG_EN_US, manifest);
 
     let mut group = Vec::with_capacity(6 + images.len() * 14);
     group.extend_from_slice(&0u16.to_le_bytes());

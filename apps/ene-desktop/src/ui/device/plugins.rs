@@ -127,7 +127,7 @@ fn render_add_plugin_panel(
                                 && let Some(path) = paths.into_iter().next()
                             {
                                 let path_str = path.to_string_lossy().into_owned();
-                                let _updated = cx.update(|cx| {
+                                cx.update(|cx| {
                                     draft.update(cx, |d, cx| d.set(path_str, cx));
                                 });
                             }

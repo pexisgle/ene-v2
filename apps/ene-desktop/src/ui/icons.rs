@@ -157,15 +157,23 @@ impl AssetSource for EmbeddedAssets {
             .into_iter()
             .find(|icon| icon.path() == path)
             .map(|icon| Cow::Borrowed(icon.svg_bytes()));
-        Ok(found)
+        match found {
+            Some(icon) => Ok(Some(icon)),
+            None => gpui::assets::Assets.load(path),
+        }
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        Ok(Icon::ALL
-            .into_iter()
-            .filter(|icon| icon.path().starts_with(path))
-            .map(|icon| SharedString::from(icon.path()))
-            .collect())
+        let mut assets = gpui::assets::Assets.list(path)?;
+        assets.extend(
+            Icon::ALL
+                .into_iter()
+                .filter(|icon| icon.path().starts_with(path))
+                .map(|icon| SharedString::from(icon.path())),
+        );
+        assets.sort_unstable();
+        assets.dedup();
+        Ok(assets)
     }
 }
 
@@ -185,7 +193,9 @@ mod tests {
     #[test]
     fn every_embedded_icon_loads_valid_svg() {
         let assets = EmbeddedAssets;
+        let paths = assets.list("icons/").unwrap();
         for kind in Icon::ALL {
+            assert!(paths.contains(&SharedString::from(kind.path())));
             let bytes = assets
                 .load(kind.path())
                 .expect("asset load does not error")
@@ -197,6 +207,10 @@ mod tests {
                 kind.path()
             );
         }
-        assert_eq!(assets.list("icons/").unwrap().len(), Icon::ALL.len());
+        let kit_path = paths
+            .iter()
+            .find(|path| !Icon::ALL.iter().any(|icon| icon.path() == path.as_str()))
+            .expect("the asset source exposes GPUI Kit icons");
+        assert!(assets.load(kit_path).unwrap().is_some());
     }
 }

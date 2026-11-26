@@ -16,7 +16,7 @@ use ene_desktop::{
     Command, Connection, EmbeddedAssets, Hub, Options, PodMode, Session, Tray, TrayAction,
     TrayState, bind_actions, default_renderer, open_pod_window,
 };
-use gpui::{App, AppContext as _, Application};
+use gpui::{App, AppContext as _};
 use parking_lot::RwLock;
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -228,7 +228,7 @@ fn spawn_shutdown_signal(handle: &tokio::runtime::Handle) -> tokio::sync::onesho
 }
 
 fn run_gpui_app(init: DesktopAppInit) {
-    Application::new()
+    gpui::application()
         .with_assets(EmbeddedAssets)
         .run(move |cx: &mut App| {
             #[cfg(windows)]
@@ -238,7 +238,7 @@ fn run_gpui_app(init: DesktopAppInit) {
             let shutdown_rx = init.shutdown_rx;
             cx.spawn(async move |cx| {
                 if shutdown_rx.await.is_ok() {
-                    let _quit = cx.update(|cx| cx.quit());
+                    cx.update(|cx| cx.quit());
                 }
             })
             .detach();
@@ -268,7 +268,7 @@ fn run_gpui_app(init: DesktopAppInit) {
                 return;
             }
             let hub_closed = hub.clone();
-            cx.on_window_closed(move |cx| {
+            cx.on_window_closed(move |cx, _| {
                 hub_closed.update(cx, |hub, cx| hub.sync_window_closed(cx));
             })
             .detach();

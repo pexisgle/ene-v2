@@ -3,11 +3,10 @@
 
 use super::{CompanionPod, PodMode, SettingsSection};
 use crate::session::{Connection, Options};
-use crate::ui::SettingsStudio;
 use crate::update::{Command, Update};
 use ene_client_core::domain::NotificationEvent;
 use ene_platform_os::{TrayAction, TrayHandle};
-use gpui::{WeakEntity, WindowHandle};
+use gpui::{AnyWindowHandle, WeakEntity};
 use std::collections::{BTreeMap, HashSet};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -16,8 +15,8 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 pub struct WindowState {
     pub pod_mode: PodMode,
     pub settings_section: SettingsSection,
-    pub settings_window: Option<WindowHandle<SettingsStudio>>,
-    pub pod_window: Option<WindowHandle<CompanionPod>>,
+    pub settings_window: Option<AnyWindowHandle>,
+    pub pod_window: Option<AnyWindowHandle>,
     pub(crate) pod_view: Option<WeakEntity<CompanionPod>>,
     pub(crate) pod_visible: bool,
     pub pod_scroll_ping: u64,

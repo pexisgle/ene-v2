@@ -39,23 +39,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 cpal = "0.18"
 earshot = "1.2.2"
 regex = "1"
-unicode-segmentation = "1"
 uuid.workspace = true
 
-# gpui's Linux backends are features, and the workspace pins the crate with
-# default-features off (so its Windows manifest is not embedded twice). A Linux
-# window therefore needs them named here.
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
-gpui = { workspace = true, features = ["wayland", "x11"] }
-# gpui 0.2.2 pulls zed-async-tar -> xattr 0.2.3, which uses libc::ENOATTR
-# removed on Linux in libc 0.2.190.
-libc = ">=0.2.186, <0.2.190"
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 
 # Workspace::open finds bash with which on every non-Windows platform.
 [target.'cfg(not(windows))'.dependencies]
 which.workspace = true
-
-# libc is a deliberate transitive-graph pin (see the target section above),
-# not a direct dependency, so nothing in src/ names it.
-[package.metadata.cargo-machete]
-ignored = ["libc"]
