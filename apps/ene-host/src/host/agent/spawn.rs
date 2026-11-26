@@ -13,7 +13,7 @@ use crate::host::{
     resources::{CompanionAgent, LastProjectedEntry, WorkAgent},
 };
 use bevy_ecs::prelude::*;
-use ene_host_core::prompt::{system_prompt, work_prompt};
+use ene_mind::prompt::{system_prompt, work_prompt};
 use rig_ecs::model::Connection as ModelConnection;
 use rig_ecs::prelude::*;
 use std::collections::HashMap;
@@ -248,7 +248,7 @@ pub(crate) fn reconcile(world: &mut World) -> Result<()> {
             notice_model_unavailable(&mut world.resource_mut::<Notifier>(), &companion, &error);
         }
     }
-    let mut notifier = world.resource_mut::<Notifier>();
+    let notifier = world.resource_mut::<Notifier>();
     notifier.notice(None, "host_ready", "the host restored its state");
     Ok(())
 }

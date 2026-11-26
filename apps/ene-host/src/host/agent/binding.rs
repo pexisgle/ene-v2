@@ -19,15 +19,17 @@ use rig_ecs::prelude::*;
 use std::collections::HashMap;
 
 #[derive(Resource, Default)]
-pub(super) struct Connections {
+pub(crate) struct Connections {
     revision: u64,
     credential_generation: u64,
     factory: Option<ModelFactory>,
     models: HashMap<(String, String), ModelConnection>,
 }
 
-pub(crate) fn clear_model_cache(world: &mut World) {
-    world.resource_mut::<Connections>().models.clear();
+impl Connections {
+    pub(crate) fn clear_models(&mut self) {
+        self.models.clear();
+    }
 }
 
 /// Binds the agent's model when its assignment or the settings changed.
@@ -121,7 +123,7 @@ pub(super) fn notice_model_unavailable(
     notifier.notice(
         Some(companion_id),
         "model_unavailable",
-        &ene_host_core::util::truncate(&error.to_string(), 300),
+        &ene_store::util::truncate(&error.to_string(), 300),
     );
 }
 

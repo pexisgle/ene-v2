@@ -3,7 +3,6 @@
 use super::super::Services;
 use super::connection_probe::run_connection_probe;
 use super::{is_builtin_voicevox, notify_settings};
-use crate::host::db::Store;
 use crate::host::error::HostError;
 use crate::host::model;
 use crate::host::permission;
@@ -22,44 +21,35 @@ pub(super) async fn delete_connection(
 ) -> ServiceResult<w::Settings> {
     let id = request.id.to_owned();
     let revision = request.expected_revision;
-    let credentials = services.runtime.credentials();
+    let dependencies = services.runtime.services().clone();
     let response = services
-        .call(move |app| {
-            let store = app.world().resource::<Store>().clone();
+        .call(move |kernel| {
+            let store = &dependencies.store;
             let (settings, companions) =
                 store.settings_repo().delete_connection(&id, revision, || {
-                    crate::host::model::delete_secret(&credentials, &id)
+                    crate::host::model::delete_secret(&dependencies.credentials, &id)
                 })?;
             let view = wire::settings(&settings);
-            notify_settings(app, view.clone());
+            notify_settings(&dependencies.notifier, view.clone());
             for companion in companions {
-                if let Err(error) =
-                    crate::host::agent::sync_companion(app.world_mut(), &companion.id)
-                {
+                if let Err(error) = kernel.rebind_companion(&companion.id) {
                     tracing::warn!(%error, "could not rebind companion after connection removal");
                 }
-                crate::host::mind::notify(
-                    &mut app
-                        .world_mut()
-                        .resource_mut::<crate::host::notify::Notifier>(),
-                    &companion,
-                );
+                crate::host::mind::notify(&dependencies.notifier, &companion);
             }
             Ok(view)
         })
         .await?;
-    let providers = services.runtime.providers();
     let has_voicevox = services
         .runtime
-        .read(move |app| {
-            Ok(app
-                .world()
-                .resource::<Store>()
+        .inspect(|services| {
+            Ok(services
+                .store
                 .settings_repo()
                 .settings()?
                 .connections
                 .iter()
-                .any(|connection| is_builtin_voicevox(connection, &providers)))
+                .any(|connection| is_builtin_voicevox(connection, &services.providers)))
         })
         .await;
     if matches!(has_voicevox, Ok(false)) {
@@ -76,8 +66,8 @@ pub(super) async fn check_connection(
     let id = request.id.to_owned();
     let (connection, store) = services
         .runtime
-        .read(move |app| {
-            let store = app.world().resource::<Store>().clone();
+        .inspect(move |services| {
+            let store = services.store.clone();
             let connection = store
                 .settings_repo()
                 .connection(&id)?
@@ -99,8 +89,8 @@ pub(super) async fn check_connection(
     let resource_id = request.resource_id.map(str::to_owned);
     let id = connection.id;
     services
-        .call(move |app| {
-            let store = app.world().resource::<Store>().clone();
+        .change(move |services| {
+            let store = &services.store;
             if let Some(revision) = checked_revision
                 && (checked_credentials
                     .is_some_and(|generation| credentials.generation() != generation)
@@ -115,7 +105,10 @@ pub(super) async fn check_connection(
             }
             store.settings_repo().set_check(&id, &check)?;
             if checked_revision.is_some() {
-                notify_settings(app, wire::settings(&store.settings_repo().settings()?));
+                notify_settings(
+                    &services.notifier,
+                    wire::settings(&store.settings_repo().settings()?),
+                );
             }
             Ok(w::CheckResult {
                 request_id,
@@ -134,8 +127,7 @@ pub(super) async fn list_pending_approvals(
     _arg2: ServiceRequest<'_, w::Empty>,
 ) -> ServiceResult<w::PendingApprovals> {
     services
-        .read(|app| {
-            let store = app.world().resource::<Store>();
+        .with_store(|store| {
             Ok(w::PendingApprovals {
                 items: store
                     .approval_repo()
@@ -162,15 +154,6 @@ pub(super) async fn submit_approval(
     };
     let request_id = request.request_id.to_owned();
     services
-        .call(move |app| {
-            let outcome = permission::submit_with_outcome(app.world_mut(), &request_id, decision)?;
-            Ok(w::SubmitApprovalResponse {
-                acknowledged: true,
-                status: wire::approval_status(outcome.approval.status).into(),
-                rule_saved: outcome.rule_saved,
-                rule_error: outcome.rule_error,
-                ..Default::default()
-            })
-        })
+        .call(move |kernel| kernel.submit_approval(&request_id, decision))
         .await
 }

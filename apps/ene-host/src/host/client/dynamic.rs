@@ -31,7 +31,7 @@ use crate::host::{
     resources::{CompanionAgent, GrantedCompanionTools},
 };
 use bevy_ecs::prelude::*;
-use ene_host_core::json;
+use ene_domain::json;
 use rig_core::{
     effect::{Answered, EffectId, EffectKind, HandlerDescriptor, family},
     error::{ErrorKind, ErrorReport},

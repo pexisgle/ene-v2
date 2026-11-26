@@ -34,7 +34,7 @@ fn attach_now(
     registry: rig_agent::tool::server::ToolServerHandle,
     want: &Desired,
 ) {
-    let mut supervisor = std::mem::take(&mut *world.resource_mut::<McpSupervisor>());
+    let mut supervisor = std::mem::take(&mut *world.resource::<Mcp>().lock());
     attach(
         world,
         &mut supervisor,
@@ -46,22 +46,22 @@ fn attach_now(
         },
         want,
     );
-    *world.resource_mut::<McpSupervisor>() = supervisor;
+    *world.resource::<Mcp>().lock() = supervisor;
 }
 
 /// Retires one server from the world's own supervisor.
 fn retire_one_now(world: &mut bevy_ecs::prelude::World, id: &str) {
-    let mut supervisor = std::mem::take(&mut *world.resource_mut::<McpSupervisor>());
+    let mut supervisor = std::mem::take(&mut *world.resource::<Mcp>().lock());
     retire_one(world, &mut supervisor, id);
-    *world.resource_mut::<McpSupervisor>() = supervisor;
+    *world.resource::<Mcp>().lock() = supervisor;
 }
 
 /// Runs the projection against the world's own supervisor, which `project_servers`
 /// needs borrowed while the world is also borrowed mutably.
 fn project_servers_now(world: &mut bevy_ecs::prelude::World) {
-    let supervisor = std::mem::take(&mut *world.resource_mut::<McpSupervisor>());
+    let supervisor = std::mem::take(&mut *world.resource::<Mcp>().lock());
     project_servers(world, &supervisor);
-    *world.resource_mut::<McpSupervisor>() = supervisor;
+    *world.resource::<Mcp>().lock() = supervisor;
 }
 
 #[tokio::test]
@@ -155,7 +155,7 @@ async fn projection_refuses_collisions_and_retires_only_owned_entities() {
     registry.add_managed_tools(vec![local_tool("other", 1), local_tool("bad.name", 1)]);
     let mut harness = crate::host::tests::Harness::new([]);
     let world = harness.app.world_mut();
-    world.init_resource::<McpSupervisor>();
+    world.init_resource::<Mcp>();
     world.insert_resource(HostRuntime(tokio::runtime::Handle::current()));
     let (definition, handler, _) = local_tool("mcp_notes_echo", 0).into_parts();
     let foreign = world
@@ -229,11 +229,11 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
     assert_ne!(old_launch, new_launch);
     let mut harness = crate::host::tests::Harness::new([]);
     let world = harness.app.world_mut();
-    world.init_resource::<McpSupervisor>();
+    world.init_resource::<Mcp>();
 
     let runtime = tokio::runtime::Handle::current();
     world.insert_resource(HostRuntime(runtime.clone()));
-    let mut supervisor = std::mem::take(&mut *world.resource_mut::<McpSupervisor>());
+    let mut supervisor = std::mem::take(&mut *world.resource::<Mcp>().lock());
     supervisor.connecting.0.insert(
         "c1".into(),
         Pending {
@@ -283,8 +283,8 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
         &runtime,
     );
     // accept_event worked on the local copy; publish it before projecting.
-    *world.resource_mut::<McpSupervisor>() = std::mem::take(&mut supervisor);
-    assert!(world.resource::<McpSupervisor>().connecting.0.is_empty());
+    *world.resource::<Mcp>().lock() = std::mem::take(&mut supervisor);
+    assert!(world.resource::<Mcp>().lock().connecting.0.is_empty());
     project_servers_now(world);
     let current = tool_entity(world, "mcp_notes_echo").unwrap();
     old_generation.store(99, std::sync::atomic::Ordering::SeqCst);
@@ -351,7 +351,7 @@ fn setup_gate_mcp_harness(
         ],
     ]);
     let world = harness.app.world_mut();
-    world.init_resource::<McpSupervisor>();
+    world.init_resource::<Mcp>();
     attach_now(
         world,
         "c1",
@@ -574,7 +574,7 @@ async fn b17_mcp_backoff_prevents_tight_retry_and_recovers_on_reconnect_request(
         .unwrap();
     let world = harness.app.world_mut();
     world.insert_resource(HostRuntime(tokio::runtime::Handle::current()));
-    world.init_resource::<McpSupervisor>();
+    world.init_resource::<Mcp>();
 
     // First attempt hits server and enters transient backoff.
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
@@ -583,7 +583,8 @@ async fn b17_mcp_backoff_prevents_tight_retry_and_recovers_on_reconnect_request(
             if harness
                 .app
                 .world()
-                .resource::<McpSupervisor>()
+                .resource::<Mcp>()
+                .lock()
                 .failures
                 .0
                 .contains_key("mcp-backoff")
@@ -606,14 +607,14 @@ async fn b17_mcp_backoff_prevents_tight_retry_and_recovers_on_reconnect_request(
     // Recovery via explicit reconnect request connects immediately once healthy.
     fail_requests.store(false, Ordering::SeqCst);
     request_reconnect(
-        &mut harness.app.world_mut().resource_mut::<McpSupervisor>(),
+        &mut harness.app.world_mut().resource::<Mcp>().lock(),
         "mcp-backoff",
     );
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             sync(harness.app.world_mut());
             if matches!(
-                check_state(harness.app.world(), "mcp-backoff", 1),
+                harness.app.world().resource::<Mcp>().check_state( harness.app.world().get_resource::<Credentials>(), "mcp-backoff", 1),
                 CheckState::Connected(ref names) if names == &["ping".to_owned()]
             ) {
                 break;
@@ -690,14 +691,18 @@ async fn f24_http_mcp_sends_auth_header_and_custom_headers_and_recovers_after_cr
         .unwrap();
     let world = harness.app.world_mut();
     world.insert_resource(HostRuntime(tokio::runtime::Handle::current()));
-    world.init_resource::<McpSupervisor>();
+    world.init_resource::<Mcp>();
 
     // Without credentials, 401 places the connection on ConfigHold.
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             sync(harness.app.world_mut());
             if matches!(
-                check_state(harness.app.world(), "mcp-auth", 1),
+                harness.app.world().resource::<Mcp>().check_state(
+                    harness.app.world().get_resource::<Credentials>(),
+                    "mcp-auth",
+                    1
+                ),
                 CheckState::Failed(_)
             ) {
                 break;
@@ -716,7 +721,7 @@ async fn f24_http_mcp_sends_auth_header_and_custom_headers_and_recovers_after_cr
         loop {
             sync(harness.app.world_mut());
             if matches!(
-                check_state(harness.app.world(), "mcp-auth", 1),
+                harness.app.world().resource::<Mcp>().check_state( harness.app.world().get_resource::<Credentials>(), "mcp-auth", 1),
                 CheckState::Connected(ref names) if names == &["secret_tool".to_owned()]
             ) {
                 break;

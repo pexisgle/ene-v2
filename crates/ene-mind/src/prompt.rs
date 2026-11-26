@@ -3,7 +3,7 @@
 //! Static persona only. Everything that changes per turn is injected into the
 //! request view instead, so the saved conversation keeps a stable prefix.
 
-use ene_mind::Companion;
+use crate::Companion;
 
 pub const SPOKEN_RESPONSE: &str = "ユーザーに届く発言はすべて、そのまま音声で読み上げられます。聞くだけで伝わる自然な文章にしてください。\n\
     発言にはファイルやフォルダーのパス、URL、コマンド、コード、内部ID、JSON、Markdown、絵文字を含めません。\n\
@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn both_roles_follow_the_same_spoken_response_rules() {
-        let companion = ene_mind::default_ene_companion("");
+        let companion = crate::default_ene_companion("");
         for prompt in [
             system_prompt(&companion),
             work_prompt(&companion, "資料をまとめる"),

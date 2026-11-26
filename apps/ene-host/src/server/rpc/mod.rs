@@ -1,123 +1,5 @@
 //! Connect service implementations and the owner-authentication boundary.
 
-/// Declares a host operation. `read_view` retains the byte owner until the
-/// queued read borrows it. `read` materializes an owned message, `app` passes
-/// the `App`, and the bare form writes to the world.
-macro_rules! request {
-    (read_view $name:ident, $request:ty, $response:ty, $op:path) => {
-        #[tracing::instrument(name = "rpc", skip_all, fields(method = stringify!($name), companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
-        async fn $name(
-            &self,
-            _: connectrpc::RequestContext,
-            request: connectrpc::ServiceRequest<'_, $request>,
-        ) -> connectrpc::ServiceResult<$response> {
-            let request = request.to_owned_view();
-            self.read(move |app| $op(app.world_mut(), request.reborrow()))
-                .await
-        }
-    };
-    (read $name:ident, $request:ty, $response:ty, $op:path) => {
-        #[tracing::instrument(name = "rpc", skip_all, fields(method = stringify!($name), companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
-        async fn $name(
-            &self,
-            _: connectrpc::RequestContext,
-            request: connectrpc::ServiceRequest<'_, $request>,
-        ) -> connectrpc::ServiceResult<$response> {
-            let request = request.to_owned_message();
-            self.read(move |app| $op(app.world_mut(), &request)).await
-        }
-    };
-    (store $name:ident, $request:ty, $response:ty, $op:path) => {
-        #[tracing::instrument(name = "rpc", skip_all, fields(method = stringify!($name), companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
-        async fn $name(
-            &self,
-            _: connectrpc::RequestContext,
-            request: connectrpc::ServiceRequest<'_, $request>,
-        ) -> connectrpc::ServiceResult<$response> {
-            let request = request.to_owned_message();
-            // `$op` takes only the store, so this never needs the actor thread.
-            self.with_store(move |store| $op(&store, &request)).await
-        }
-    };
-    (app $name:ident, $request:ty, $response:ty, $op:path) => {
-        #[tracing::instrument(name = "rpc", skip_all, fields(method = stringify!($name), companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
-        async fn $name(
-            &self,
-            _: connectrpc::RequestContext,
-            request: connectrpc::ServiceRequest<'_, $request>,
-        ) -> connectrpc::ServiceResult<$response> {
-            let request = request.to_owned_message();
-            self.call(move |app| $op(app, &request)).await
-        }
-    };
-    ($name:ident, $request:ty, $response:ty, $op:path) => {
-        #[tracing::instrument(name = "rpc", skip_all, fields(method = stringify!($name), companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
-        async fn $name(
-            &self,
-            _: connectrpc::RequestContext,
-            request: connectrpc::ServiceRequest<'_, $request>,
-        ) -> connectrpc::ServiceResult<$response> {
-            let request = request.to_owned_message();
-            self.call(move |app| $op(app.world_mut(), request)).await
-        }
-    };
-}
-
-/// Declares a write method that answers `Empty` once the operation succeeded.
-macro_rules! discard {
-    ($name:ident, $request:ty, $op:path) => {
-        #[tracing::instrument(name = "rpc", skip_all, fields(method = stringify!($name), companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
-        async fn $name(
-            &self,
-            _: connectrpc::RequestContext,
-            request: connectrpc::ServiceRequest<'_, $request>,
-        ) -> connectrpc::ServiceResult<ene_rpc::Empty> {
-            let request = request.to_owned_message();
-            self.call(move |app| {
-                $op(app.world_mut(), &request)?;
-                Ok(ene_rpc::Empty::default())
-            })
-            .await
-        }
-    };
-}
-
-/// Declares a read method addressed by `Id` that hands the id to one store
-/// operation.
-macro_rules! read_id {
-    ($name:ident, $response:ty, $op:path) => {
-        #[tracing::instrument(name = "rpc", skip_all, fields(method = stringify!($name), companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
-        async fn $name(
-            &self,
-            _: connectrpc::RequestContext,
-            request: connectrpc::ServiceRequest<'_, ene_rpc::Id>,
-        ) -> connectrpc::ServiceResult<$response> {
-            let id = request.id.to_owned();
-            // `$op` takes only the store, so this never needs the actor thread.
-            self.with_store(move |store| $op(&store, &id)).await
-        }
-    };
-}
-
-/// Declares a write method addressed by one id field that answers `Empty`.
-macro_rules! discard_id {
-    ($name:ident, $request:ty, $field:ident, $op:path) => {
-        #[tracing::instrument(name = "rpc", skip_all, fields(method = stringify!($name), companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
-        async fn $name(
-            &self,
-            _: connectrpc::RequestContext,
-            request: connectrpc::ServiceRequest<'_, $request>,
-        ) -> connectrpc::ServiceResult<ene_rpc::Empty> {
-            let id = request.$field.to_owned();
-            self.call(move |app| {
-                $op(app.world_mut(), &id)?;
-                Ok(ene_rpc::Empty::default())
-            })
-            .await
-        }
-    };
-}
-
 mod chat;
 mod client;
 mod host;
@@ -128,13 +10,13 @@ mod work;
 
 use super::auth;
 use crate::host::{
-    Runtime,
+    HostServices, Runtime,
+    agent::AgentKernel,
     error::{ErrorCode, HostError},
 };
 use axum::middleware;
 use connectrpc::{ConnectError, Response, Router, ServiceResult};
 use ene_rpc as w;
-use rig_ecs::prelude::App;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -173,11 +55,11 @@ impl Services {
 
     pub(super) async fn call<T: Send + 'static>(
         &self,
-        operation: impl FnOnce(&mut App) -> crate::host::error::Result<T> + Send + 'static,
+        operation: impl FnOnce(&mut AgentKernel<'_>) -> crate::host::error::Result<T> + Send + 'static,
     ) -> ServiceResult<T> {
         Response::ok(
             self.runtime
-                .call(operation)
+                .call_kernel(operation)
                 .await
                 .map_err(ConnectError::from)?,
         )
@@ -185,11 +67,35 @@ impl Services {
 
     pub(super) async fn read<T: Send + 'static>(
         &self,
-        operation: impl FnOnce(&mut App) -> crate::host::error::Result<T> + Send + 'static,
+        operation: impl FnOnce(&mut AgentKernel<'_>) -> crate::host::error::Result<T> + Send + 'static,
     ) -> ServiceResult<T> {
         Response::ok(
             self.runtime
-                .read(operation)
+                .read_kernel(operation)
+                .await
+                .map_err(ConnectError::from)?,
+        )
+    }
+
+    pub(super) async fn change<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&HostServices) -> crate::host::error::Result<T> + Send + 'static,
+    ) -> ServiceResult<T> {
+        Response::ok(
+            self.runtime
+                .change(operation)
+                .await
+                .map_err(ConnectError::from)?,
+        )
+    }
+
+    pub(super) async fn inspect<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&HostServices) -> crate::host::error::Result<T> + Send + 'static,
+    ) -> ServiceResult<T> {
+        Response::ok(
+            self.runtime
+                .inspect(operation)
                 .await
                 .map_err(ConnectError::from)?,
         )
@@ -205,7 +111,7 @@ impl Services {
         &self,
         operation: impl FnOnce(crate::host::db::Store) -> crate::host::error::Result<T> + Send + 'static,
     ) -> ServiceResult<T> {
-        self.runtime.ready().await.map_err(ConnectError::from)?;
+        self.runtime.ready().map_err(ConnectError::from)?;
         let store = self.store();
         Response::ok(operation(store).map_err(ConnectError::from)?)
     }
@@ -245,7 +151,7 @@ async fn healthz() -> axum::http::StatusCode {
 async fn readyz(
     axum::extract::State(services): axum::extract::State<Arc<Services>>,
 ) -> axum::http::StatusCode {
-    match services.runtime.ready().await {
+    match services.runtime.ready() {
         Ok(()) => axum::http::StatusCode::OK,
         Err(error) => {
             tracing::debug!(%error, "readiness probe failed");

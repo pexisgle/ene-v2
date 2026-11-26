@@ -4136,7 +4136,6 @@ dependencies = [
  "directories",
  "ene-catalog",
  "ene-domain",
- "ene-host-core",
  "ene-mind",
  "ene-plugin",
  "ene-plugin-runtime",
@@ -4186,17 +4185,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
-]
-
-[[package]]
-name = "ene-host-core"
-version = "0.1.8"
-dependencies = [
- "ene-domain",
- "ene-mind",
- "jiff 0.2.46",
- "serde_json",
- "sha2 0.11.1",
 ]
 
 [[package]]

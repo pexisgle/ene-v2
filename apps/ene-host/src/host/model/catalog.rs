@@ -36,28 +36,29 @@ impl Refresh {
     }
 }
 
-pub(crate) fn refresh(world: &mut World) {
-    let finished = world
-        .resource_mut::<Refresh>()
-        .task
-        .take_if(|task| task.is_finished());
-    if let Some(task) = finished {
+pub(crate) fn refresh(
+    mut refresh: ResMut<Refresh>,
+    mut models: ResMut<Models>,
+    mut connections: ResMut<agent::Connections>,
+    runtime: Res<HostRuntime>,
+    wake: Option<Res<Wake>>,
+) {
+    if let Some(task) = refresh.task.take_if(|task| task.is_finished()) {
         let updated = background::take(task).flatten();
-        world.resource_mut::<Refresh>().next = Some(next_attempt(updated.is_some()));
+        refresh.next = Some(next_attempt(updated.is_some()));
         if let Some(catalog) = updated {
-            *world.resource_mut::<Models>().0.catalog_mut() = catalog;
-            agent::clear_model_cache(world);
+            *models.0.catalog_mut() = catalog;
+            connections.clear_models();
         }
         return;
     }
-    let state = world.resource::<Refresh>();
-    if state.task.is_some() || !state.next.is_some_and(|next| next <= Instant::now()) {
-        return;
+    if refresh.task.is_none() && refresh.next.is_some_and(|next| next <= Instant::now()) {
+        refresh.task = Some(background::spawn(
+            &runtime.into_inner().0,
+            wake.map(Res::into_inner),
+            fetch(),
+        ));
     }
-    let runtime = world.resource::<HostRuntime>().0.clone();
-    let wake = world.get_resource::<Wake>().cloned();
-    world.resource_mut::<Refresh>().task =
-        Some(background::spawn(&runtime, wake.as_ref(), fetch()));
 }
 
 fn next_attempt(succeeded: bool) -> Instant {

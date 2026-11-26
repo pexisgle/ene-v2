@@ -4,8 +4,8 @@ use super::{
     db::{Result, Store},
     error::HostError,
 };
-use ene_host_core::util::{digest, now};
 use ene_rpc as w;
+use ene_store::util::{digest, now};
 use rig_core::conversation::{Aside, Author, RequestId};
 use rig_ecs::prelude::*;
 use serde_json::json;
@@ -91,8 +91,7 @@ pub(crate) fn accept(app: &mut App, request: &w::SendMessageRequest) -> Result<w
     if let Some(reason) = app
         .world()
         .resource::<super::resources::HostState>()
-        .failed
-        .clone()
+        .failure()
     {
         return Err(HostError::Unavailable(reason));
     }

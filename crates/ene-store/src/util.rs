@@ -37,3 +37,32 @@ pub fn or_stamp(value: &str, fallback: &str) -> String {
 pub fn truncate(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_counts_characters_not_bytes() {
+        assert_eq!(truncate("あいうえお", 3), "あいう");
+        assert_eq!(truncate("abc", 10), "abc");
+        assert_eq!(truncate("abc", 0), "");
+    }
+
+    /// The stored columns are compared as text, so a stamp that grew a
+    /// fractional part would stop matching the rows written before it.
+    #[test]
+    fn a_stamp_keeps_whole_second_precision() {
+        let stamp = now();
+        assert!(stamp.ends_with('Z'), "{stamp:?}");
+        assert!(!stamp.contains('.'), "{stamp:?}");
+    }
+
+    #[test]
+    fn digest_is_a_sha256_over_the_exact_bytes() {
+        let hashed = digest(b"abc");
+        assert_eq!(hashed.len(), 32);
+        assert_eq!(hashed, digest(b"abc"), "the same bytes must hash the same");
+        assert_ne!(hashed, digest(b"abd"));
+    }
+}

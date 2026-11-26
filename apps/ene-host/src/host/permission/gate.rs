@@ -16,11 +16,11 @@ use crate::host::{
     tools::run_tool,
 };
 use bevy_ecs::prelude::*;
-use ene_host_core::util::truncate;
 use ene_policy::{
     Approval, ApprovalStatus, PolicyRule, Verdict, canonicalise, decide_action, is_host_tool,
 };
 use ene_rpc as w;
+use ene_store::util::truncate;
 use rig_core::effect::EffectId;
 use rig_ecs::prelude::*;
 use schemars::JsonSchema;
@@ -371,7 +371,7 @@ fn issue_gate_hold(
         tool_name: binding.call.tool_name.clone(),
         normalized_arguments: normalized,
         status: ApprovalStatus::Pending,
-        created_at: ene_host_core::util::now(),
+        created_at: ene_store::util::now(),
         resolved_at: None,
         client_id: binding.bound_client_id.clone(),
         capability: binding.bound_capability.clone(),

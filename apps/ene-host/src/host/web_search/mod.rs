@@ -17,7 +17,7 @@ use super::{
     settings::{Check, Connection, ConnectionConfig, ConnectionKind, endpoint_of},
 };
 use adapter::{parse_adapter_results, read_http_error, send_search_request};
-use ene_host_core::util;
+use ene_store::util;
 use rig_core::{
     completion::ToolAnnotations,
     tool::{Tool, ToolContext, ToolErrorKind, ToolExecutionError},

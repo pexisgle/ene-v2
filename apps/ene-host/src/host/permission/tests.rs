@@ -144,7 +144,7 @@ fn settle(app: &mut App, runtime: &tokio::runtime::Runtime) {
 }
 
 fn companion(assignments: ModelAssignments) -> Companion {
-    let now = ene_host_core::util::now();
+    let now = ene_store::util::now();
     Companion {
         id: "ene".into(),
         name: "ene".into(),
@@ -906,7 +906,7 @@ fn b05_policy_read_failure_fails_closed_instead_of_treating_as_empty() {
             .app
             .world()
             .resource::<crate::host::HostState>()
-            .failed
+            .failure()
             .is_some(),
         "corrupted policy rules must fail the host instead of returning empty rules"
     );

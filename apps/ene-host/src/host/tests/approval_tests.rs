@@ -502,7 +502,7 @@ fn the_head_cannot_resolve_another_companions_approval() {
             tool_name: "device_request".into(),
             normalized_arguments: r#"{"capability":"device.files"}"#.into(),
             status: permission::ApprovalStatus::Pending,
-            created_at: ene_host_core::util::now(),
+            created_at: ene_store::util::now(),
             resolved_at: None,
             client_id: Some("c2".into()),
             capability: Some("device.files".into()),

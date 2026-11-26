@@ -365,8 +365,8 @@ mod tests {
             persona: None,
             voice_identifier: None,
             revision: 1,
-            created_at: ene_host_core::util::now(),
-            updated_at: ene_host_core::util::now(),
+            created_at: ene_store::util::now(),
+            updated_at: ene_store::util::now(),
         }
     }
 

@@ -549,7 +549,7 @@ fn connection_row(endpoint: &str) -> crate::host::settings::Connection {
 }
 
 fn companion() -> Companion {
-    let now = ene_host_core::util::now();
+    let now = ene_store::util::now();
     Companion {
         id: "ene".into(),
         name: "ene".into(),

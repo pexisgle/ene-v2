@@ -2,7 +2,6 @@
 
 use super::super::Services;
 use super::{model_item, notify_settings};
-use crate::host::db::Store;
 use crate::host::error::HostError;
 use crate::host::model;
 use crate::host::settings;
@@ -33,14 +32,14 @@ pub(super) async fn list_models(
 ) -> ServiceResult<w::Models> {
     let id = request.id.to_owned();
     services
-        .read(move |app| {
-            let world = app.world();
-            let connection = world
-                .resource::<Store>()
+        .read(move |kernel| {
+            let connection = kernel
+                .services()
+                .store
                 .settings_repo()
                 .connection(&id)?
-                .ok_or_else(|| HostError::NotFound(("connection not found").into()))?;
-            let catalog = world.resource::<rig_ecs::model::Models>().0.catalog();
+                .ok_or_else(|| HostError::NotFound("connection not found".into()))?;
+            let catalog = kernel.catalog();
             Ok(w::Models {
                 items: model::models(&connection, catalog)
                     .into_iter()
@@ -63,18 +62,20 @@ pub(super) async fn register_credentials(
         .filter(|secret| !secret.is_empty())
         .ok_or_else(|| ConnectError::invalid_argument("secret is required"))?
         .to_owned();
-    let credentials = services.runtime.credentials();
     services
-        .call(move |app| {
-            let store = app.world().resource::<Store>().clone();
+        .change(move |services| {
+            let store = &services.store;
             if store.settings_repo().connection(&id)?.is_none() {
                 return Err(HostError::NotFound("connection not found".into()));
             }
-            model::save_secret(&credentials, &id, &secret)?;
+            model::save_secret(&services.credentials, &id, &secret)?;
             store
                 .settings_repo()
                 .set_credential_state(&id, CredentialState::Registered)?;
-            notify_settings(app, wire::settings(&store.settings_repo().settings()?));
+            notify_settings(
+                &services.notifier,
+                wire::settings(&store.settings_repo().settings()?),
+            );
             Ok(w::CredentialResult {
                 credential_state: CredentialState::Registered.as_str().into(),
                 ..Default::default()
@@ -89,19 +90,21 @@ pub(super) async fn revoke_credentials(
     request: ServiceRequest<'_, w::Id>,
 ) -> ServiceResult<w::Empty> {
     let id = request.id.to_owned();
-    let credentials = services.runtime.credentials();
-    let providers = services.runtime.providers();
     services
-        .call(move |app| {
-            let store = app.world().resource::<Store>().clone();
+        .change(move |services| {
+            let store = &services.store;
             let connection = store
                 .settings_repo()
                 .connection(&id)?
                 .ok_or_else(|| HostError::NotFound("connection not found".into()))?;
-            model::delete_secret(&credentials, &id)?;
-            let state = model::credential_state(&connection, &credentials, &providers)?;
+            model::delete_secret(&services.credentials, &id)?;
+            let state =
+                model::credential_state(&connection, &services.credentials, &services.providers)?;
             store.settings_repo().set_credential_state(&id, state)?;
-            notify_settings(app, wire::settings(&store.settings_repo().settings()?));
+            notify_settings(
+                &services.notifier,
+                wire::settings(&store.settings_repo().settings()?),
+            );
             Ok(w::Empty::default())
         })
         .await

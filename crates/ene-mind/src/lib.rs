@@ -10,6 +10,7 @@ pub mod consolidate;
 pub mod embedding;
 pub mod json;
 pub mod memory;
+pub mod prompt;
 
 pub use companion::{Companion, Profile, Role, State, default_ene_companion, validate_id};
 pub use consolidate::{Batch, Commit, Fact, MemoryContext, Turn, normalize, validate_citations};

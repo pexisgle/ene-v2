@@ -25,8 +25,8 @@ use super::{
     providers::Providers,
 };
 use bevy_ecs::prelude::*;
-use ene_host_core::util::now;
 use ene_rpc as w;
+use ene_store::util::now;
 use rig_ecs::prelude::*;
 use serde_json::json;
 
@@ -126,7 +126,7 @@ pub(crate) fn start(world: &mut World, request: &w::StartWorkRequest) -> Result<
         id: uuid::Uuid::new_v4().to_string(),
         companion_id: ene_domain::CompanionId::parse(companion.id.clone())?,
         title: if request.title.trim().is_empty() {
-            ene_host_core::util::truncate(&request.instruction, 80)
+            ene_store::util::truncate(&request.instruction, 80)
         } else {
             request.title.clone()
         },
@@ -280,8 +280,7 @@ pub(crate) fn send(world: &mut World, request: &w::SendWorkRequest) -> Result<w:
     if session.status == WorkStatus::Closed {
         return Err(HostError::Conflict(("work session is closed").into()));
     }
-    let hash =
-        ene_host_core::util::digest(format!("{}:{}", request.work_id, request.text).as_bytes());
+    let hash = ene_store::util::digest(format!("{}:{}", request.work_id, request.text).as_bytes());
     let agent = agent_of(world, &request.work_id);
     if !request.request_key.is_empty()
         && let Some((stored, request_id)) = receipt(

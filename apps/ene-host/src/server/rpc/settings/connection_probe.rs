@@ -54,7 +54,7 @@ async fn probe_mcp_connection(
     if !connection.enabled {
         return Ok(settings::Check {
             healthy: false,
-            checked_at: ene_host_core::util::now(),
+            checked_at: ene_store::util::now(),
             failure: Some(crate::host::error::Failure::new(
                 "connection_check",
                 "MCP 接続が無効化されています。",
@@ -65,13 +65,8 @@ async fn probe_mcp_connection(
     }
     let reconnect_id = connection.id.clone();
     services
-        .call(move |app| {
-            if let Some(mut supervisor) = app
-                .world_mut()
-                .get_resource_mut::<crate::host::mcp::McpSupervisor>()
-            {
-                crate::host::mcp::request_reconnect(&mut supervisor, &reconnect_id);
-            }
+        .change(move |services| {
+            services.mcp.request_reconnect(&reconnect_id);
             Ok(())
         })
         .await?;
@@ -87,10 +82,9 @@ async fn probe_mcp_connection(
             let revision = connection.revision;
             let state = services
                 .runtime
-                .read(move |app| {
-                    let world = app.world();
-                    if !world
-                        .resource::<Store>()
+                .inspect(move |services| {
+                    if !services
+                        .store
                         .settings_repo()
                         .connection(&id)?
                         .is_some_and(|current| current.revision == revision)
@@ -99,7 +93,9 @@ async fn probe_mcp_connection(
                             "MCP connection changed during the check".into(),
                         ));
                     }
-                    Ok(crate::host::mcp::check_state(world, &id, revision))
+                    Ok(services
+                        .mcp
+                        .check_state(Some(&services.credentials), &id, revision))
                 })
                 .await?;
             match state {
@@ -123,14 +119,14 @@ async fn probe_mcp_connection(
     match outcome {
         Ok(Ok(Ok(tools))) => Ok(settings::Check {
             healthy: true,
-            checked_at: ene_host_core::util::now(),
+            checked_at: ene_store::util::now(),
             failure: None,
             capabilities: Vec::new(),
             resources: tools,
         }),
         Ok(Ok(Err(reason))) => Ok(settings::Check {
             healthy: false,
-            checked_at: ene_host_core::util::now(),
+            checked_at: ene_store::util::now(),
             failure: Some(crate::host::error::Failure::new(
                 "connection_check",
                 format!("{default_message} ({reason})"),
@@ -141,7 +137,7 @@ async fn probe_mcp_connection(
         Ok(Err(error)) => Err(error.into()),
         Err(_) => Ok(settings::Check {
             healthy: false,
-            checked_at: ene_host_core::util::now(),
+            checked_at: ene_store::util::now(),
             failure: Some(crate::host::error::Failure::new(
                 "connection_check",
                 default_message,

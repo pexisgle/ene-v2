@@ -18,8 +18,8 @@ use crate::host::{
     wire,
 };
 use bevy_ecs::prelude::*;
-use ene_host_core::util::now;
 use ene_rpc as w;
+use ene_store::util::now;
 use rig_ecs::model::Connection;
 use serde_json::{Value, json};
 
@@ -125,13 +125,13 @@ pub(crate) fn accept(
     store.client_repo().insert_operation(&operation)?;
     let status = {
         let hub = world.resource::<DeviceHub>().clone();
-        let mut notifier = world.resource_mut::<Notifier>();
-        let mut ctx = DeviceDispatchContext {
+        let notifier = world.resource::<Notifier>();
+        let ctx = DeviceDispatchContext {
             store: &store,
             hub: &hub,
-            notifier: &mut notifier,
+            notifier,
         };
-        dispatch(&mut ctx, &operation, computer.as_ref(), Some(&companion_id))?
+        dispatch(&ctx, &operation, computer.as_ref(), Some(&companion_id))?
     };
     if let Some(computer) = computer {
         if status != DeviceStatus::Dispatched {
@@ -154,13 +154,13 @@ pub(crate) fn accept(
 /// `Extension::Character` expression/motion action) directly to `client_id`
 /// when the client has declared and been granted `capability`.
 pub(crate) fn dispatch_direct(
-    world: &mut World,
+    ctx: &DeviceDispatchContext<'_>,
     companion_id: &str,
     client_id: &str,
     capability: &str,
     input: Value,
 ) -> Result<String> {
-    let store = world.resource::<Store>().clone();
+    let store = ctx.store;
     let client = store
         .client_repo()
         .client(client_id)?
@@ -184,14 +184,7 @@ pub(crate) fn dispatch_direct(
         updated_at: now(),
     };
     store.client_repo().insert_operation(&operation)?;
-    let hub = world.resource::<DeviceHub>().clone();
-    let mut notifier = world.resource_mut::<Notifier>();
-    let mut ctx = DeviceDispatchContext {
-        store: &store,
-        hub: &hub,
-        notifier: &mut notifier,
-    };
-    let _reply = dispatch(&mut ctx, &operation, None, Some(companion_id))?;
+    let _reply = dispatch(ctx, &operation, None, Some(companion_id))?;
     Ok(operation_id)
 }
 
@@ -205,17 +198,17 @@ fn agent_context(world: &World, agent: Entity) -> Option<(String, Option<String>
         .map(|work| (work.companion_id.clone(), Some(work.work_id.clone())))
 }
 
-struct DeviceDispatchContext<'a> {
-    store: &'a Store,
-    hub: &'a DeviceHub,
-    notifier: &'a mut Notifier,
+pub(crate) struct DeviceDispatchContext<'a> {
+    pub(crate) store: &'a Store,
+    pub(crate) hub: &'a DeviceHub,
+    pub(crate) notifier: &'a Notifier,
 }
 
 /// Writes the operation to the client's live stream. A missing stream leaves
 /// the operation pending for the reconnect and is reported as such; a sent
 /// operation is `dispatched`.
 fn dispatch(
-    ctx: &mut DeviceDispatchContext<'_>,
+    ctx: &DeviceDispatchContext<'_>,
     operation: &DeviceOperation,
     computer: Option<&computer::Pending>,
     companion_id: Option<&str>,
@@ -331,13 +324,13 @@ pub(crate) fn resend(world: &mut World, client: &str) {
                 "Computer Use operations are never replayed",
             );
         } else {
-            let mut notifier = world.resource_mut::<Notifier>();
-            let mut ctx = DeviceDispatchContext {
+            let notifier = world.resource::<Notifier>();
+            let ctx = DeviceDispatchContext {
                 store: &store,
                 hub: &hub,
-                notifier: &mut notifier,
+                notifier,
             };
-            let _reply = dispatch(&mut ctx, &operation, None, plan.active_companion.as_deref());
+            let _reply = dispatch(&ctx, &operation, None, plan.active_companion.as_deref());
         }
     }
 }

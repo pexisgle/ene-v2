@@ -2,7 +2,7 @@
 //! and device operations.
 
 use super::error::{HostError, Result};
-use ene_host_core::json;
+use ene_domain::json;
 
 pub(crate) use ene_domain::{Client, DeviceOperation, DeviceStatus};
 #[cfg(test)]
@@ -53,6 +53,8 @@ use rig_ecs::prelude::*;
 use serde_json::Value;
 
 pub(crate) use dynamic::CapabilityTools;
+pub(crate) use perception::ingest_perception;
+#[cfg(test)]
 pub(crate) use perception::report_perception;
 pub(crate) use policy::CapabilityPolicy;
 

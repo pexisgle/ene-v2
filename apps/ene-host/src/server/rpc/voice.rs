@@ -7,7 +7,6 @@ use super::Services;
 use super::voice_convert::to_wire_event;
 use crate::host::{
     Runtime,
-    db::Store,
     error::HostError,
     voice::{self, InputBinding, SetupError, SttEngine},
 };
@@ -37,7 +36,7 @@ impl w::VoiceService for Services {
     ) -> ServiceResult<ServiceStream<w::TranscriptionEvent>> {
         let engine = match self
             .runtime
-            .read(|app| Ok(voice::stt_source(app.world())))
+            .inspect(|services| Ok(voice::stt_source(&services.voice_context())))
             .await
             .map_err(ConnectError::from)?
         {
@@ -145,7 +144,7 @@ impl w::VoiceService for Services {
     ) -> ServiceResult<ServiceStream<w::AudioOutputEvent>> {
         if let Err(error) = self
             .runtime
-            .read(|app| Ok(voice::tts_source(app.world())))
+            .inspect(|services| Ok(voice::tts_source(&services.voice_context())))
             .await
             .map_err(ConnectError::from)?
         {
@@ -161,12 +160,11 @@ impl w::VoiceService for Services {
             client_id,
         ) = self
             .runtime
-            .read(move |app| {
+            .inspect(move |services| {
                 let request = request.reborrow();
-                let world = app.world();
                 let subscription = voice::subscribe_audio(
-                    world.get_resource::<Store>(),
-                    world.get_resource::<voice::Voice>(),
+                    Some(&services.store),
+                    Some(&services.voice),
                     request.client_id,
                 )?;
                 Ok((subscription, request.client_id.to_owned()))
@@ -230,11 +228,11 @@ impl w::VoiceService for Services {
         // ECS thread; only the store lookups and the dispatch run inside it.
         let (source, voice_name, companion) = self
             .runtime
-            .read({
+            .inspect({
                 let client_id = client_id.clone();
                 let requested_companion = requested_companion.clone();
-                move |app| {
-                    let store = app.world().resource::<Store>();
+                move |services| {
+                    let store = &services.store;
                     let companion = match requested_companion {
                         Some(id) => id,
                         None => store
@@ -247,18 +245,20 @@ impl w::VoiceService for Services {
                             })?,
                     };
                     let companion_record = store.companion_repo().companion(&companion)?;
-                    let source =
-                        voice::companion_tts_source(app.world(), companion_record.as_ref())
-                            .map_err(|error| match error {
-                                SetupError::Missing => {
-                                    HostError::FailedPrecondition(voice::VOICE_UNAVAILABLE.into())
-                                }
-                                SetupError::Disabled(message)
-                                | SetupError::Broken(message)
-                                | SetupError::Unsupported(message) => {
-                                    HostError::FailedPrecondition(message)
-                                }
-                            })?;
+                    let source = voice::companion_tts_source(
+                        &services.voice_context(),
+                        companion_record.as_ref(),
+                    )
+                    .map_err(|error| match error {
+                        SetupError::Missing => {
+                            HostError::FailedPrecondition(voice::VOICE_UNAVAILABLE.into())
+                        }
+                        SetupError::Disabled(message)
+                        | SetupError::Broken(message)
+                        | SetupError::Unsupported(message) => {
+                            HostError::FailedPrecondition(message)
+                        }
+                    })?;
                     let voice = companion_record
                         .as_ref()
                         .and_then(|record| voice::parse_binding(record).voice_id)
@@ -272,14 +272,7 @@ impl w::VoiceService for Services {
             .await
             .map_err(|error| ConnectError::unavailable(error.to_string()))?;
         self.runtime
-            .read(move |app| {
-                voice::play_once(
-                    app.world().get_resource::<voice::Voice>(),
-                    &companion,
-                    pcm,
-                    rate,
-                )
-            })
+            .inspect(move |services| voice::play_once(Some(&services.voice), &companion, pcm, rate))
             .await
             .map_err(ConnectError::from)
             .map(Response::ok)?
@@ -353,14 +346,9 @@ impl Recognition {
             return Ok(clear_speaking(was_speaking, &mut self.transcription_id));
         }
         let active = runtime
-            .read({
+            .inspect({
                 let binding = binding.clone();
-                move |app| {
-                    Ok(voice::is_still_active(
-                        app.world().get_resource::<Store>(),
-                        &binding,
-                    ))
-                }
+                move |services| Ok(voice::is_still_active(Some(&services.store), &binding))
             })
             .await
             .map_err(ConnectError::from)?;
@@ -380,10 +368,10 @@ impl Recognition {
         }
         let transcription_id = std::mem::take(&mut self.transcription_id);
         let accepted = runtime
-            .call({
+            .call_kernel({
                 let id = transcription_id.clone();
                 let text = text.clone();
-                move |app| voice::accept_transcription(app.world_mut(), &id, &text, &binding)
+                move |kernel| kernel.accept_transcription(&id, &text, &binding)
             })
             .await
             .map_err(ConnectError::from)?;
@@ -411,12 +399,7 @@ async fn bind_recognition_client(
     client_id: String,
 ) -> std::result::Result<InputBinding, ConnectError> {
     runtime
-        .read(move |app| {
-            Ok(voice::bind_input(
-                app.world().get_resource::<Store>(),
-                &client_id,
-            ))
-        })
+        .inspect(move |services| Ok(voice::bind_input(Some(&services.store), &client_id)))
         .await
         .map_err(ConnectError::from)?
         .map_err(ConnectError::from)
@@ -424,14 +407,13 @@ async fn bind_recognition_client(
 
 async fn flush_barge_in(runtime: &Runtime, client_id: String) {
     let _written = runtime
-        .call(move |app| {
-            let companions = app
-                .world()
-                .resource::<Store>()
+        .change(move |services| {
+            let companions = services
+                .store
                 .client_repo()
                 .active_companions_for_client(&client_id)
                 .unwrap_or_default();
-            let voice = app.world().get_resource::<voice::Voice>();
+            let voice = Some(&services.voice);
             for companion_id in companions {
                 let _flushed = voice::flush(voice, &companion_id, w::FlushReason::BargeIn);
             }
@@ -485,12 +467,8 @@ impl Drop for StreamGuard {
     fn drop(&mut self) {
         let client_id = self.client_id.clone();
         let subscription = self.subscription.clone();
-        drop(self.runtime.read(move |app| {
-            voice::unsubscribe_audio(
-                app.world().get_resource::<voice::Voice>(),
-                &client_id,
-                &subscription,
-            );
+        drop(self.runtime.inspect(move |services| {
+            voice::unsubscribe_audio(Some(&services.voice), &client_id, &subscription);
             Ok(())
         }));
     }
@@ -538,8 +516,8 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let runtime = Runtime::start(state.path()).await.unwrap();
         runtime
-            .read(move |app| {
-                let store = app.world().resource::<Store>();
+            .inspect(move |services| {
+                let store = &services.store;
                 store.client_repo().register_client(&ClientDeclaration {
                     id: "c1",
                     name: "desk",
@@ -549,10 +527,7 @@ mod tests {
                     expected_revision: 0,
                 })?;
                 store.client_repo().activate("ene", Some("c1"))?;
-                app.world_mut().insert_resource(voice::Engines {
-                    stt: Some(Arc::new(recording)),
-                    ..Default::default()
-                });
+                services.engine_overrides.write().stt = Some(Arc::new(recording));
                 Ok(())
             })
             .await
@@ -789,8 +764,8 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let runtime = Runtime::start(state.path()).await.unwrap();
         runtime
-            .read(|app| {
-                let store = app.world().resource::<Store>();
+            .inspect(|services| {
+                let store = &services.store;
                 store.client_repo().register_client(&ClientDeclaration {
                     id: "c1",
                     name: "desk",
@@ -800,10 +775,7 @@ mod tests {
                     expected_revision: 0,
                 })?;
                 store.client_repo().activate("ene", Some("c1"))?;
-                app.world_mut().insert_resource(voice::Engines {
-                    stt: Some(Arc::new(EmptyStt)),
-                    ..Default::default()
-                });
+                services.engine_overrides.write().stt = Some(Arc::new(EmptyStt));
                 Ok(())
             })
             .await

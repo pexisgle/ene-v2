@@ -39,10 +39,11 @@ pub(crate) mod work;
 // keep their `host::` paths for the RPC layer.
 mod kernel;
 mod runtime_start;
+mod services;
+pub(crate) use services::HostServices;
 mod snapshot;
 
-pub(crate) use kernel::subscribe;
-pub(crate) use snapshot::snapshot;
+pub(crate) use snapshot::SnapshotReader;
 #[cfg(test)]
 mod runtime_tests;
 
@@ -123,14 +124,7 @@ enum Step {
 #[derive(Clone)]
 pub(crate) struct Runtime {
     handle: Arc<Handle>,
-    state_dir: std::path::PathBuf,
-    /// The relational store, held directly so an operation that needs only
-    /// storage does not have to reach through the world for it.
-    store: Store,
-    credentials: Credentials,
-    hub: DeviceHub,
-    providers: providers::Providers,
-    voicevox: voice::voicevox::VoicevoxManager,
+    services: Arc<HostServices>,
 }
 
 struct Handle {
@@ -160,20 +154,17 @@ impl Runtime {
     where
         F: FnOnce(&mut App) -> Result<T> + Send + 'static,
     {
+        let services = Arc::clone(&self.services);
         self.send(move |reply| {
             Box::new(move |app| {
-                let result = app
-                    .world()
-                    .resource::<HostState>()
-                    .ready()
-                    .and_then(|()| operation(app));
+                let result = services.health.ready().and_then(|()| operation(app));
                 if let Err(error) = &result
                     && error.is_storage()
                 {
                     fail(app.world_mut(), &error.to_string());
                 }
                 tick(app);
-                let result = app.world().resource::<HostState>().ready().and(result);
+                let result = services.health.ready().and(result);
                 let _reply = reply.send(result);
             })
         })
@@ -188,13 +179,10 @@ impl Runtime {
     where
         F: FnOnce(&mut App) -> Result<T> + Send + 'static,
     {
+        let services = Arc::clone(&self.services);
         self.send(move |reply| {
             Box::new(move |app| {
-                let result = app
-                    .world()
-                    .resource::<HostState>()
-                    .ready()
-                    .and_then(|()| operation(app));
+                let result = services.health.ready().and_then(|()| operation(app));
                 if let Err(error) = &result
                     && error.is_storage()
                 {
@@ -203,6 +191,54 @@ impl Runtime {
                 let _reply = reply.send(result);
             })
         })
+    }
+
+    /// Runs an operation on live agents, then advances the kernel.
+    pub(crate) fn call_kernel<T: Send + 'static, F>(
+        &self,
+        operation: F,
+    ) -> impl Future<Output = Result<T>> + Send + use<T, F>
+    where
+        F: FnOnce(&mut agent::AgentKernel<'_>) -> Result<T> + Send + 'static,
+    {
+        let services = Arc::clone(&self.services);
+        self.call(move |app| operation(&mut agent::AgentKernel::new(app, &services)))
+    }
+
+    /// Reads live agent state between ticks.
+    pub(crate) fn read_kernel<T: Send + 'static, F>(
+        &self,
+        operation: F,
+    ) -> impl Future<Output = Result<T>> + Send + use<T, F>
+    where
+        F: FnOnce(&mut agent::AgentKernel<'_>) -> Result<T> + Send + 'static,
+    {
+        let services = Arc::clone(&self.services);
+        self.read(move |app| operation(&mut agent::AgentKernel::new(app, &services)))
+    }
+
+    /// Serializes a service mutation with kernel ticks without exposing ECS.
+    pub(crate) fn change<T: Send + 'static, F>(
+        &self,
+        operation: F,
+    ) -> impl Future<Output = Result<T>> + Send + use<T, F>
+    where
+        F: FnOnce(&HostServices) -> Result<T> + Send + 'static,
+    {
+        let services = Arc::clone(&self.services);
+        self.call(move |_| operation(&services))
+    }
+
+    /// Groups a read with the current notification cursor on the kernel thread.
+    pub(crate) fn inspect<T: Send + 'static, F>(
+        &self,
+        operation: F,
+    ) -> impl Future<Output = Result<T>> + Send + use<T, F>
+    where
+        F: FnOnce(&HostServices) -> Result<T> + Send + 'static,
+    {
+        let services = Arc::clone(&self.services);
+        self.read(move |_| operation(&services))
     }
 
     fn send<T: Send + 'static, F>(
@@ -227,20 +263,16 @@ impl Runtime {
     }
 
     /// The same readiness predicate the RPC layer applies, for `/readyz`.
-    ///
-    /// It reads the world rather than a separate flag, so a host that answers
-    /// `/readyz` with 200 is one whose RPC calls would also be accepted.
-    pub(crate) async fn ready(&self) -> Result<()> {
-        self.read(|app| app.world().resource::<HostState>().ready())
-            .await
+    pub(crate) fn ready(&self) -> Result<()> {
+        self.services.health.ready()
     }
 
     pub(crate) async fn begin_shutdown(&self) {
         // A shutdown that cannot mark itself closing still proceeds; the
         // failure is reported so a wedged kernel is visible rather than silent.
         ene_domain::warn_if_err(
-            self.call(|app| {
-                app.world_mut().resource_mut::<HostState>().closing = true;
+            self.inspect(|services| {
+                services.health.close();
                 Ok(())
             })
             .await,
@@ -249,7 +281,7 @@ impl Runtime {
     }
 
     pub(crate) async fn shutdown(&self) -> Result<()> {
-        self.voicevox.stop().await;
+        self.services.voicevox.stop().await;
         let shutdown = self.handle.shutdown.clone();
         let thread = self.handle.thread.lock().take();
         tokio::task::spawn_blocking(move || {
@@ -289,44 +321,46 @@ pub(crate) fn tick(app: &mut App) {
     if let Some(reason) = app.world().resource::<SessionLog>().failure() {
         fail(app.world_mut(), &reason);
     }
-    if app.world().resource::<HostState>().failed.is_some() {
-        app.world_mut().resource_mut::<Notifier>().clear();
+    if app.world().resource::<HostState>().failure().is_some() {
+        app.world().resource::<Notifier>().clear();
         return;
     }
-    app.world_mut().resource_mut::<Notifier>().flush();
+    app.world().resource::<Notifier>().flush();
 }
 
-/// A sticky host failure: it stops the agent loop and refuses new work.
+/// Applies a fatal error at the same boundary as queued ECS work.
 pub(crate) fn fail(world: &mut World, reason: &str) {
-    if world
-        .get_resource::<HostState>()
-        .is_some_and(|state| state.failed.is_some())
-    {
+    ene_domain::debug_if_err(
+        world.run_system_cached_with(stop_on_failure, reason.to_owned()),
+        "stop agents after host failure",
+    );
+}
+
+pub(crate) fn stop_on_failure(
+    In(reason): In<String>,
+    state: Option<Res<HostState>>,
+    notifier: Option<Res<Notifier>>,
+    agents: Query<Entity, With<Agent>>,
+    mut commands: Commands,
+) {
+    if state.is_some_and(|state| !state.fail(&reason)) {
         return;
     }
     tracing::error!(%reason, "the host stopped");
-    let agents: Vec<Entity> = world
-        .query_filtered::<Entity, With<Agent>>()
-        .iter(world)
-        .collect();
-    for agent in agents {
-        world.trigger(StopTurn {
-            entity: agent,
+    for entity in &agents {
+        commands.trigger(StopTurn {
+            entity,
             reason: Some("host failure".into()),
         });
     }
-    if let Some(mut state) = world.get_resource_mut::<HostState>() {
-        state.failed = Some(reason.to_string());
-    }
-    if let Some(mut notifier) = world.get_resource_mut::<Notifier>() {
-        notifier.fail(reason);
+    if let Some(notifier) = notifier {
+        notifier.fail(&reason);
     }
 }
 
 /// Restores state that must not wait for the ECS frame: stale approvals and
 /// operations whose answers can no longer arrive.
-fn restore(world: &mut World) -> Result<()> {
-    let store = world.resource::<Store>().clone();
+fn restore(store: &Store) -> Result<()> {
     store.approval_repo().expire_pending_approvals()?;
     store.client_repo().mark_unanswered_operations_uncertain()?;
     Ok(())

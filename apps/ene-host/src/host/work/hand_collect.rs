@@ -15,10 +15,10 @@ use crate::host::{
     resources::HostRuntime,
 };
 use bevy_ecs::prelude::*;
-use ene_host_core::util::now;
 use ene_plugin::{
     HarnessEvent, HarnessInput, PermissionOption, RequestPermissionOutcome, ToolCallUpdate,
 };
+use ene_store::util::now;
 use ene_work::harness::{arguments_of, select_permission_outcome, stop_outcome};
 use rig_core::message::{CallId, ToolCall as RequestedCall, ToolFunction, ToolName};
 use rig_ecs::prelude::*;
@@ -276,7 +276,7 @@ fn request_permission(
     }
     let target = format!(
         "{tool_name} {}",
-        ene_host_core::util::truncate(&approval.normalized_arguments, 200)
+        ene_store::util::truncate(&approval.normalized_arguments, 200)
     );
     permission::notify_approval_card(
         &mut world.resource_mut::<crate::host::notify::Notifier>(),

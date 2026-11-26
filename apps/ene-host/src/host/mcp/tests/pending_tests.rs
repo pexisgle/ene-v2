@@ -111,11 +111,11 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
         world.insert_resource(store.clone());
         world.insert_resource(HostRuntime(tokio::runtime::Handle::current()));
         world.init_resource::<HostState>();
-        world.init_resource::<McpSupervisor>();
+        world.init_resource::<Mcp>();
         sync(&mut world);
         peer.started().await;
-        assert!(world.resource::<McpSupervisor>().servers.0.is_empty());
-        let old_launch = world.resource::<McpSupervisor>().connecting.0[&row.id]
+        assert!(world.resource::<Mcp>().lock().servers.0.is_empty());
+        let old_launch = world.resource::<Mcp>().lock().connecting.0[&row.id]
             .launch
             .clone();
         let mut replacement = PendingPeer::new(root.path(), "replacement.pid");
@@ -134,8 +134,10 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
                     .update_settings(2, &[(row.clone(), 1)])
                     .unwrap();
             }
-            "shutdown" => world.resource_mut::<HostState>().closing = true,
-            "failure" => world.resource_mut::<HostState>().failed = Some("test failure".into()),
+            "shutdown" => world.resource::<HostState>().close(),
+            "failure" => {
+                assert!(world.resource::<HostState>().fail("test failure"));
+            }
             "world drop" => {
                 drop(world);
                 peer.stopped(action).await;
@@ -148,13 +150,13 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
             replacement.started().await;
         }
         peer.stopped(action).await;
-        assert!(world.resource::<McpSupervisor>().servers.0.is_empty());
+        assert!(world.resource::<Mcp>().lock().servers.0.is_empty());
         if action == "revision" {
-            let new_launch = world.resource::<McpSupervisor>().connecting.0[&row.id]
+            let new_launch = world.resource::<Mcp>().lock().connecting.0[&row.id]
                 .launch
                 .clone();
             assert_ne!(old_launch, new_launch);
-            let mut supervisor = std::mem::take(&mut *world.resource_mut::<McpSupervisor>());
+            let mut supervisor = std::mem::take(&mut *world.resource::<Mcp>().lock());
             accept_event(
                 &mut world,
                 &mut supervisor,
@@ -173,18 +175,18 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
                 },
                 &tokio::runtime::Handle::current(),
             );
-            *world.resource_mut::<McpSupervisor>() = supervisor;
+            *world.resource::<Mcp>().lock() = supervisor;
             assert_eq!(
-                world.resource::<McpSupervisor>().connecting.0[&row.id].launch,
+                world.resource::<Mcp>().lock().connecting.0[&row.id].launch,
                 new_launch
             );
             assert!(
                 rustix::process::test_kill_process(replacement.process.as_ref().unwrap().0).is_ok()
             );
-            world.resource_mut::<HostState>().closing = true;
+            world.resource::<HostState>().close();
             sync(&mut world);
             replacement.stopped("replacement shutdown").await;
         }
-        assert!(world.resource::<McpSupervisor>().connecting.0.is_empty());
+        assert!(world.resource::<Mcp>().lock().connecting.0.is_empty());
     }
 }

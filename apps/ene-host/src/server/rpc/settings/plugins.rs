@@ -1,7 +1,6 @@
 //! Settings service.
 
 use super::super::Services;
-use crate::host::db::Store;
 use crate::host::error::HostError;
 use connectrpc::RequestContext;
 use connectrpc::ServiceRequest;
@@ -13,10 +12,10 @@ pub(super) async fn list_plugins(
     _arg1: RequestContext,
     _arg2: ServiceRequest<'_, w::Empty>,
 ) -> ServiceResult<w::PluginList> {
-    let providers = services.runtime.providers();
     services
-        .read(move |app| {
-            let store = app.world().resource::<Store>();
+        .inspect(|services| {
+            let store = &services.store;
+            let providers = &services.providers;
             let entries = store.plugin_repo().plugin_entries()?;
             let mut by_id: std::collections::BTreeMap<String, w::PluginInfo> = entries
                 .into_iter()
@@ -75,13 +74,12 @@ pub(super) async fn install_plugin(
     request: ServiceRequest<'_, w::InstallPluginRequest>,
 ) -> ServiceResult<w::PluginInfo> {
     let source_path = request.to_owned_message().source_path;
-    let state_dir = services.runtime.state_dir().to_path_buf();
     services
-        .call(move |app| {
-            let store = app.world().resource::<Store>().clone();
+        .change(move |services| {
+            let store = &services.store;
             let (entry, manifest) = crate::host::providers::install_local_package(
-                &store,
-                &state_dir,
+                store,
+                &services.state_dir,
                 std::path::Path::new(&source_path),
             )?;
             let extensions = manifest
@@ -112,8 +110,8 @@ pub(super) async fn set_plugin_enabled(
 ) -> ServiceResult<w::PluginInfo> {
     let req = request.to_owned_message();
     services
-        .call(move |app| {
-            let store = app.world().resource::<Store>();
+        .change(move |services| {
+            let store = &services.store;
             if !store
                 .plugin_repo()
                 .set_plugin_enabled(&req.plugin_id, req.enabled)?
@@ -148,11 +146,14 @@ pub(super) async fn remove_plugin(
     request: ServiceRequest<'_, w::RemovePluginRequest>,
 ) -> ServiceResult<w::Empty> {
     let plugin_id = request.to_owned_message().plugin_id;
-    let state_dir = services.runtime.state_dir().to_path_buf();
     services
-        .call(move |app| {
-            let store = app.world().resource::<Store>();
-            if !crate::host::providers::remove_local_package(store, &state_dir, &plugin_id)? {
+        .change(move |services| {
+            let store = &services.store;
+            if !crate::host::providers::remove_local_package(
+                store,
+                &services.state_dir,
+                &plugin_id,
+            )? {
                 return Err(HostError::NotFound(format!(
                     "plugin `{plugin_id}` not found"
                 )));

@@ -1,42 +1,12 @@
 //! Starting the kernel thread and subscribing a client to notifications.
 
-use super::snapshot::snapshot;
 use super::*;
 
-pub(crate) fn subscribe(
-    app: &mut App,
-    client_id: Option<&str>,
-    cursor: Option<&w::Cursor>,
-) -> Result<(
-    w::Snapshot,
-    broadcast::Receiver<w::Notification>,
-    Option<Vec<w::Notification>>,
-)> {
-    let store = app.world().resource::<Store>().clone();
-    if let Some(client_id) = client_id.filter(|id| !id.is_empty()) {
-        ene_domain::validate_id(client_id)?;
-        if store.client_repo().client(client_id)?.is_none() {
-            return Err(HostError::NotFound("client not found".into()));
-        }
-    }
-    let (receiver, replayed) = {
-        let notifier = app.world().resource::<Notifier>();
-        (
-            notifier.subscribe(),
-            cursor.and_then(|cursor| notifier.replay(cursor)),
-        )
-    };
-    Ok((snapshot(app)?, receiver, replayed))
-}
-
 pub(super) struct KernelResources {
-    pub(super) store: Store,
-    pub(super) providers: providers::Providers,
-    pub(super) credentials: Credentials,
+    pub(super) services: Arc<HostServices>,
     pub(super) models: rig_ecs::model::Models,
     pub(super) catalog_refresh: model::catalog::Refresh,
     pub(super) host_runtime: tokio::runtime::Handle,
-    pub(super) hub: DeviceHub,
     pub(super) device_timeout: Duration,
     pub(super) wake: crossbeam_channel::Sender<()>,
     pub(super) logs: DirStore,
@@ -51,13 +21,23 @@ pub(super) struct KernelLaunch {
     pub(super) shutdown_rx: crossbeam_channel::Receiver<()>,
 }
 
+struct MarkClosed(HostState);
+
+impl Drop for MarkClosed {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 pub(super) fn spawn_kernel_thread(launch: KernelLaunch) -> std::io::Result<JoinHandle<Result<()>>> {
     std::thread::Builder::new()
         .name("ene-host-rig".into())
         .spawn(move || {
+            let services = Arc::clone(&launch.resources.services);
+            let _close = MarkClosed(services.health.clone());
             let mut app = build_kernel_app(launch.resources);
             let result = (|| -> Result<()> {
-                restore(app.world_mut())?;
+                restore(&services.store)?;
                 providers::extensions::register_plugin_tools(
                     app.world_mut(),
                     launch.initial_plugin_tools,
@@ -89,15 +69,17 @@ fn build_kernel_app(res: KernelResources) -> App {
                 ..Default::default()
             },
         })
-        .insert_resource(res.store)
-        .insert_resource(res.providers)
-        .insert_resource(res.credentials)
+        .insert_resource(res.services.store.clone())
+        .insert_resource(res.services.providers.clone())
+        .insert_resource(res.services.credentials.clone())
         .insert_resource(res.models)
         .insert_resource(res.catalog_refresh)
         .insert_resource(HostRuntime(res.host_runtime))
-        .insert_resource(res.hub)
-        .insert_resource(HostState::default())
-        .insert_resource(Notifier::new())
+        .insert_resource(res.services.hub.clone())
+        .insert_resource(res.services.health.clone())
+        .insert_resource(res.services.notifier.clone())
+        .insert_resource(res.services.voice.clone())
+        .insert_resource(res.services.mcp.clone())
         .insert_resource(Waiting::default())
         .insert_resource(Perception::default())
         .insert_resource(Approvals::default())
@@ -116,7 +98,7 @@ fn build_kernel_app(res: KernelResources) -> App {
             work::WorkPlugin,
             mind::MindPlugin,
             mcp::McpPlugin,
-            providers::extensions::ExtensionPlugin,
+            providers::character::CharacterPlugin,
             autonomy::AutonomyPlugin,
             compaction::CompactionPlugin,
             voice::VoicePlugin,
@@ -140,10 +122,10 @@ fn run_kernel_loop(
             Step::Job(job) => job(app),
             Step::Wake => tick(app),
             Step::Stop => {
-                app.world_mut().resource_mut::<HostState>().closing = true;
+                app.world().resource::<HostState>().close();
                 app.world_mut().write_message(AppExit::Success);
                 tick(app);
-                return match &app.world().resource::<HostState>().failed {
+                return match app.world().resource::<HostState>().failure() {
                     Some(reason) => Err(HostError::Unavailable(reason.clone())),
                     None => Ok(()),
                 };

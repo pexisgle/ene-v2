@@ -14,7 +14,7 @@ use crate::host::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bevy_ecs::prelude::*;
-use ene_host_core::util::truncate;
+use ene_store::util::truncate;
 use rig_core::{
     completion::CompletionRequest,
     driver::DynModel,

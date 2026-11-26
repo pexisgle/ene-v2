@@ -13,8 +13,8 @@ use crate::host::{
     tools::run_tool,
 };
 use bevy_ecs::prelude::*;
-use ene_host_core::util::now;
 use ene_mind::RecallMode;
+use ene_store::util::now;
 use rig_ecs::prelude::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -57,12 +57,29 @@ pub(crate) fn register(app: &mut App) {
         ToolOptions::default(),
         |called: On<ToolCalled<RecallArgs>>, mut commands: Commands| {
             let (call, agent, args) = (called.call, called.agent, called.args.clone());
-            commands.queue(move |world: &mut World| match recall(world, agent, args) {
-                Ok(RecallWork::Running(task)) => {
-                    world.entity_mut(call).insert(PendingRecall(Some(task)));
+            commands.queue(move |world: &mut World| {
+                let result = companion_of_any(world, agent).and_then(|companion| {
+                    recall(
+                        &RecallServices {
+                            store: world.resource(),
+                            embeddings: world.resource(),
+                            credentials: world.get_resource(),
+                            runtime: world.get_resource(),
+                            wake: world.get_resource(),
+                        },
+                        companion,
+                        args,
+                    )
+                });
+                match result {
+                    Ok(RecallWork::Running(task)) => {
+                        world.entity_mut(call).insert(PendingRecall(Some(task)));
+                    }
+                    Ok(RecallWork::Ready(text)) => {
+                        crate::host::permission::answer(world, call, &text)
+                    }
+                    Err(error) => crate::host::permission::refuse(world, call, &error.to_string()),
                 }
-                Ok(RecallWork::Ready(text)) => crate::host::permission::answer(world, call, &text),
-                Err(error) => crate::host::permission::refuse(world, call, &error.to_string()),
             });
         },
     )
@@ -70,14 +87,23 @@ pub(crate) fn register(app: &mut App) {
         "mind_read",
         "Read one memory with its provenance. This counts as using it.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, args: ReadArgs| read(world, agent, &args)),
+        run_tool(|world, agent, _, args: ReadArgs| {
+            read(world.resource(), &companion_of_any(world, agent)?, &args)
+        }),
     )
     .add_open_tool::<UpdateArgs, _>(
         "mind_update",
         "Record, correct or forget memories and update the current mind. \
          The host binds the scope and commits everything atomically.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, args| update(world, agent, args)),
+        run_tool(|world, agent, _, args| {
+            update(
+                world.resource(),
+                world.get_resource(),
+                &companion(world, agent)?,
+                args,
+            )
+        }),
     )
     .add_systems(Update, complete_recall.after(AgentLoop));
 }
@@ -147,20 +173,31 @@ fn complete_recall(mut commands: Commands, mut pending: Query<(Entity, &mut Pend
     }
 }
 
-fn recall(world: &mut World, agent: Entity, args: RecallArgs) -> Result<RecallWork> {
-    let companion = companion_of_any(world, agent)?;
+struct RecallServices<'a> {
+    store: &'a Store,
+    embeddings: &'a Embeddings,
+    credentials: Option<&'a Credentials>,
+    runtime: Option<&'a HostRuntime>,
+    wake: Option<&'a Wake>,
+}
+
+fn recall(
+    services: &RecallServices<'_>,
+    companion: String,
+    args: RecallArgs,
+) -> Result<RecallWork> {
     if args.query.chars().count() > 4_000 {
         return Err(HostError::Invalid(("query is too long").into()));
     }
-    let store = world.resource::<Store>().clone();
-    let embeddings = world.resource::<Embeddings>().clone();
-    let credentials = world.get_resource::<Credentials>().cloned();
-    let Some(runtime) = world.get_resource::<HostRuntime>() else {
-        return recall_result(&store, &companion, &args, &[]).map(RecallWork::Ready);
+    let Some(runtime) = services.runtime else {
+        return recall_result(services.store, &companion, &args, &[]).map(RecallWork::Ready);
     };
+    let store = services.store.clone();
+    let embeddings = services.embeddings.clone();
+    let credentials = services.credentials.cloned();
     Ok(RecallWork::Running(background::spawn(
         &runtime.0,
-        world.get_resource::<Wake>(),
+        services.wake,
         async move {
             let semantic = embedding::semantic_ids(
                 &store,
@@ -206,14 +243,12 @@ fn recall_result(
     Ok(json!({"items": items, "semantic": outcome.semantic}).to_string())
 }
 
-fn read(world: &mut World, agent: Entity, args: &ReadArgs) -> Result<String> {
-    let companion = companion_of_any(world, agent)?;
-    let store = world.resource::<Store>().clone();
+fn read(store: &Store, companion: &str, args: &ReadArgs) -> Result<String> {
     let memory = store
         .memory_repo()
         .memory(&args.id)?
         .ok_or_else(|| HostError::NotFound(("memory not found").into()))?;
-    if !memory.visible_to(&companion) {
+    if !memory.visible_to(companion) {
         return Err(HostError::Permission(
             ("this memory belongs to another companion").into(),
         ));
@@ -239,9 +274,12 @@ fn read(world: &mut World, agent: Entity, args: &ReadArgs) -> Result<String> {
     Ok(detail(&memory, &relations).to_string())
 }
 
-fn update(world: &mut World, agent: Entity, args: UpdateArgs) -> Result<String> {
-    let companion = companion(world, agent)?;
-    let store = world.resource::<Store>().clone();
+fn update(
+    store: &Store,
+    notifier: Option<&crate::host::notify::Notifier>,
+    companion: &str,
+    args: UpdateArgs,
+) -> Result<String> {
     let request = json!({
         "operation_id": &args.operation_id,
         "memories": &args.memories,
@@ -252,7 +290,7 @@ fn update(world: &mut World, agent: Entity, args: UpdateArgs) -> Result<String> 
         Some(patch) => {
             let current = store
                 .companion_repo()
-                .companion(&companion)?
+                .companion(companion)?
                 .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
             let mut next = current.state.clone();
             patch.apply(&mut next);
@@ -266,11 +304,13 @@ fn update(world: &mut World, agent: Entity, args: UpdateArgs) -> Result<String> 
     };
     let result = store.memory_repo().apply_mind_update(&MindUpdate {
         operation_id: args.operation_id,
-        companion_id: companion.clone(),
+        companion_id: companion.to_owned(),
         request_hash: hash,
         memories: args.memories,
         state,
     })?;
-    super::notify_mind(world, &companion);
+    if let Some(notifier) = notifier {
+        super::notify_mind(notifier, &super::mind_view(store, companion)?);
+    }
     Ok(result.to_string())
 }

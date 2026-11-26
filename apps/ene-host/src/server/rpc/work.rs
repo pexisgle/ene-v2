@@ -1,6 +1,6 @@
 //! Work-session services.
 use super::Services;
-use crate::host::{db::Store, work};
+use crate::host::work;
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 use ene_rpc as w;
 
@@ -21,11 +21,8 @@ impl w::WorkService for Services {
         request: ServiceRequest<'_, w::ListWorksRequest>,
     ) -> ServiceResult<w::WorkViews> {
         let companion = request.companion_id.to_owned();
-        self.read(move |app| {
-            let store = app.world().resource::<Store>().clone();
-            work::list(&store, &companion)
-        })
-        .await
+        self.with_store(move |store| work::list(&store, &companion))
+            .await
     }
 
     #[tracing::instrument(
@@ -44,11 +41,7 @@ impl w::WorkService for Services {
         request: ServiceRequest<'_, w::WorkRequest>,
     ) -> ServiceResult<w::WorkView> {
         let id = request.work_id.to_owned();
-        self.read(move |app| {
-            let store = app.world().resource::<Store>().clone();
-            work::get(&store, &id)
-        })
-        .await
+        self.with_store(move |store| work::get(&store, &id)).await
     }
 
     #[tracing::instrument(name = "rpc", skip_all, fields(method = "start_work", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
@@ -58,8 +51,7 @@ impl w::WorkService for Services {
         request: connectrpc::ServiceRequest<'_, w::StartWorkRequest>,
     ) -> connectrpc::ServiceResult<w::WorkSession> {
         let request = request.to_owned_message();
-        self.call(move |app| work::start(app.world_mut(), &request))
-            .await
+        self.call(move |kernel| kernel.start_work(&request)).await
     }
     #[tracing::instrument(name = "rpc", skip_all, fields(method = "send_work", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn send_work(
@@ -68,9 +60,32 @@ impl w::WorkService for Services {
         request: connectrpc::ServiceRequest<'_, w::SendWorkRequest>,
     ) -> connectrpc::ServiceResult<w::WorkAcceptance> {
         let request = request.to_owned_message();
-        self.call(move |app| work::send(app.world_mut(), &request))
-            .await
+        self.call(move |kernel| kernel.send_work(&request)).await
     }
-    discard_id!(stop_work, w::StopWorkRequest, work_id, work::stop);
-    discard_id!(close_work, w::WorkRequest, work_id, work::close);
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "stop_work", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn stop_work(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::StopWorkRequest>,
+    ) -> connectrpc::ServiceResult<ene_rpc::Empty> {
+        let id = request.work_id.to_owned();
+        self.call(move |kernel| {
+            kernel.stop_work(&id)?;
+            Ok(ene_rpc::Empty::default())
+        })
+        .await
+    }
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "close_work", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn close_work(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::WorkRequest>,
+    ) -> connectrpc::ServiceResult<ene_rpc::Empty> {
+        let id = request.work_id.to_owned();
+        self.call(move |kernel| {
+            kernel.close_work(&id)?;
+            Ok(ene_rpc::Empty::default())
+        })
+        .await
+    }
 }

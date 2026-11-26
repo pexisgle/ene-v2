@@ -74,7 +74,7 @@ pub(super) fn backfill(mut commands: Commands, params: BackfillParams<'_>) {
                     notifier.notice(
                         Some(&companion),
                         "embedding_failed",
-                        &ene_host_core::util::truncate(&error.to_string(), 300),
+                        &ene_store::util::truncate(&error.to_string(), 300),
                     );
                 }
             }
@@ -93,9 +93,7 @@ pub(super) fn backfill(mut commands: Commands, params: BackfillParams<'_>) {
         Err(error) => {
             if error.is_storage() {
                 let message = error.to_string();
-                commands.queue(move |world: &mut World| {
-                    crate::host::fail(world, &message);
-                });
+                commands.run_system_cached_with(crate::host::stop_on_failure, message);
             }
             return;
         }
@@ -117,9 +115,7 @@ pub(super) fn backfill(mut commands: Commands, params: BackfillParams<'_>) {
             Err(error) => {
                 if error.is_storage() {
                     let message = error.to_string();
-                    commands.queue(move |world: &mut World| {
-                        crate::host::fail(world, &message);
-                    });
+                    commands.run_system_cached_with(crate::host::stop_on_failure, message);
                     return;
                 }
                 continue;

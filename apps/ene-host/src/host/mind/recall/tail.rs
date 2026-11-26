@@ -11,8 +11,8 @@ use crate::host::{
     model::Credentials,
     resources::Perception,
 };
-use ene_host_core::util::now;
 use ene_mind::{RecallMode, Scored};
+use ene_store::util::now;
 use rig_ecs::prelude::{Conversation, MessageId};
 
 /// The tail's opening: the clock is part of every request, companion or not.

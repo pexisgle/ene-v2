@@ -75,13 +75,36 @@ impl Default for EventChannel {
     }
 }
 
+/// Owns the upstream connection state shared by the actor and connection probes.
+#[derive(Clone, Default, Resource)]
+pub(crate) struct Mcp(std::sync::Arc<parking_lot::Mutex<McpSupervisor>>);
+
+impl Mcp {
+    pub(crate) fn lock(&self) -> parking_lot::MutexGuard<'_, McpSupervisor> {
+        self.0.lock()
+    }
+
+    pub(crate) fn request_reconnect(&self, id: &str) {
+        request_reconnect(&mut self.lock(), id);
+    }
+
+    pub(crate) fn check_state(
+        &self,
+        credentials: Option<&Credentials>,
+        id: &str,
+        revision: u64,
+    ) -> CheckState {
+        check_state(&self.lock(), credentials, id, revision)
+    }
+}
+
 /// Everything the MCP supervisor owns between frames.
 ///
-/// This is the single ECS resource the MCP layer declares: the server map, the
+/// The server map, the
 /// in-flight connects, the backoff bookkeeping, the event channel and the
 /// settings snapshot all live here, so nothing else in the host can observe
 /// them in an inconsistent combination.
-#[derive(Resource, Default)]
+#[derive(Default)]
 pub(crate) struct McpSupervisor {
     pub(super) servers: McpServers,
     pub(super) connecting: Connecting,
@@ -104,15 +127,14 @@ impl McpSupervisor {
 pub(super) fn sync(world: &mut World) {
     let closing = world
         .get_resource::<crate::host::resources::HostState>()
-        .is_some_and(|state| state.closing || state.failed.is_some());
-    let mut supervisor = std::mem::take(&mut *world.resource_mut::<McpSupervisor>());
+        .is_some_and(|state| state.ready().is_err());
+    let mcp = world.resource::<Mcp>().clone();
+    let mut supervisor = mcp.lock();
     if closing {
         handle_closing_servers(world, &mut supervisor);
-        *world.resource_mut::<McpSupervisor>() = supervisor;
         return;
     }
     let Some(runtime) = world.get_resource::<HostRuntime>().map(|it| it.0.clone()) else {
-        *world.resource_mut::<McpSupervisor>() = supervisor;
         return;
     };
     let store = world.resource::<Store>().clone();
@@ -122,7 +144,6 @@ pub(super) fn sync(world: &mut World) {
             if error.is_storage() {
                 crate::host::fail(world, &error.to_string());
             }
-            *world.resource_mut::<McpSupervisor>() = supervisor;
             return;
         }
     };
@@ -135,11 +156,9 @@ pub(super) fn sync(world: &mut World) {
     ) {
         ReloadOutcome::Ready => {}
         ReloadOutcome::Skip => {
-            *world.resource_mut::<McpSupervisor>() = supervisor;
             return;
         }
         ReloadOutcome::Fail(message) => {
-            *world.resource_mut::<McpSupervisor>() = supervisor;
             crate::host::fail(world, &message);
             return;
         }
@@ -164,7 +183,6 @@ pub(super) fn sync(world: &mut World) {
     );
     if targets.is_empty() {
         project_servers(world, &supervisor);
-        *world.resource_mut::<McpSupervisor>() = supervisor;
         return;
     }
     let sender = supervisor.sender();
@@ -172,7 +190,6 @@ pub(super) fn sync(world: &mut World) {
     let launched = spawn_connect_tasks(targets, &sender, wake, &runtime);
     supervisor.connecting.0.extend(launched);
     project_servers(world, &supervisor);
-    *world.resource_mut::<McpSupervisor>() = supervisor;
 }
 
 fn handle_closing_servers(world: &mut World, supervisor: &mut McpSupervisor) {
@@ -372,7 +389,7 @@ pub(super) async fn open(
 
 /// Clears any backoff or configuration hold on `id` so the supervisor attempts
 /// a fresh connection on the next frame (used by `CheckConnection`).
-pub(crate) fn request_reconnect(supervisor: &mut McpSupervisor, id: &str) {
+pub(super) fn request_reconnect(supervisor: &mut McpSupervisor, id: &str) {
     supervisor.failures.0.remove(id);
 }
 
@@ -385,16 +402,18 @@ struct CheckContext<'a> {
 
 /// Inspects the current MCP supervisor state for a specific connection revision
 /// and credential generation.
-pub(crate) fn check_state(world: &World, id: &str, revision: u64) -> CheckState {
-    let supervisor = world.get_resource::<McpSupervisor>();
+fn check_state(
+    supervisor: &McpSupervisor,
+    credentials: Option<&Credentials>,
+    id: &str,
+    revision: u64,
+) -> CheckState {
     check_state_from(
         &CheckContext {
-            cred_gen: world
-                .get_resource::<Credentials>()
-                .map(Credentials::generation),
-            servers: supervisor.map(|supervisor| &supervisor.servers),
-            connecting: supervisor.map(|supervisor| &supervisor.connecting),
-            failures: supervisor.map(|supervisor| &supervisor.failures),
+            cred_gen: credentials.map(Credentials::generation),
+            servers: Some(&supervisor.servers),
+            connecting: Some(&supervisor.connecting),
+            failures: Some(&supervisor.failures),
         },
         id,
         revision,

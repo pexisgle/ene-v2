@@ -67,9 +67,10 @@ type UnpublishedMessages = Or<(Changed<Conversation>, Added<LastProjectedEntry>)
 /// and speaks the entries that are a companion's own reply.
 pub(crate) fn publish_messages(
     mut agents: Query<AgentRows, UnpublishedMessages>,
-    mut notifier: ResMut<Notifier>,
+    notifier: ResMut<Notifier>,
     mut commands: Commands,
 ) {
+    let notifier = notifier.into_inner();
     for (_, conversation, companion, work, mut published) in &mut agents {
         let Some(companion_id) = companion_of(companion, work) else {
             continue;
@@ -108,13 +109,12 @@ pub(crate) fn publish_messages(
                         notifier.as_deref_mut(),
                         &voice_companion,
                     );
-                    crate::host::providers::extensions::trigger_character_event(
-                        world,
-                        &voice_companion,
-                        ene_plugin::CharacterEvent::ConversationFinished {
+                    world.trigger(crate::host::resources::TriggerCharacterEvent {
+                        companion_id: voice_companion,
+                        event: ene_plugin::CharacterEvent::ConversationFinished {
                             text: finished_text,
                         },
-                    );
+                    });
                 });
             }
             notifier.push(
@@ -139,8 +139,9 @@ pub(super) fn stream_deltas(
     mut deltas: MessageReader<StreamDelta>,
     calls: Query<(), (With<TurnCall>, Without<Settled>)>,
     agents: Query<(&AgentId, Option<&CompanionAgent>)>,
-    mut notifier: ResMut<Notifier>,
+    notifier: ResMut<Notifier>,
 ) {
+    let notifier = notifier.into_inner();
     for delta in deltas.read() {
         if !calls.contains(delta.effect) {
             continue;

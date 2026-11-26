@@ -36,7 +36,6 @@ impl Runtime {
         // instances the stored connections reference start here too, for the
         // same reason: a frame cannot await a load.
         let providers = providers::Providers::load(state);
-        let runtime_providers = providers.clone();
         // An operator who installed a plugin that did not load has no other
         // way to find out: the connection it named simply resolves to nothing.
         let installed: Vec<&str> = providers.adapters().collect();
@@ -48,16 +47,26 @@ impl Runtime {
             providers::extensions::discover_plugin_tools(&providers, &store),
             model::catalog::Refresh::initial()
         );
-        let store_for_runtime = store.clone();
+        let services = Arc::new(HostServices {
+            state_dir: state.to_path_buf(),
+            store,
+            credentials,
+            hub,
+            providers,
+            voice: voice::Voice::new(tokio::runtime::Handle::current()),
+            #[cfg(test)]
+            engine_overrides: Default::default(),
+            voicevox: voice::voicevox::VoicevoxManager::with_auto_start(!cfg!(test)),
+            notifier: Notifier::new(),
+            health: HostState::default(),
+            mcp: mcp::Mcp::default(),
+        });
         let thread = spawn_kernel_thread(KernelLaunch {
             resources: KernelResources {
-                store: store.clone(),
-                providers,
-                credentials: credentials.clone(),
+                services: Arc::clone(&services),
                 models,
                 catalog_refresh,
                 host_runtime: tokio::runtime::Handle::current(),
-                hub: hub.clone(),
                 device_timeout: options.device_timeout,
                 wake: wake_tx,
                 logs,
@@ -73,44 +82,38 @@ impl Runtime {
             .recv()
             .map_err(|_| StartError::Kernel)?
             .map_err(|_| StartError::Kernel)?;
-        let voicevox = voice::voicevox::VoicevoxManager::with_auto_start(!cfg!(test));
-        maybe_auto_start_voicevox(&store, &runtime_providers, &voicevox);
+        maybe_auto_start_voicevox(&services.store, &services.providers, &services.voicevox);
         Ok(Self {
             handle: Arc::new(Handle {
                 commands,
                 shutdown,
                 thread: Mutex::new(Some(thread)),
             }),
-            state_dir: state.to_path_buf(),
-            store: store_for_runtime,
-            credentials,
-            hub,
-            providers: runtime_providers,
-            voicevox,
+            services,
         })
     }
 
-    pub(crate) fn state_dir(&self) -> &Path {
-        &self.state_dir
+    pub(crate) fn services(&self) -> &Arc<HostServices> {
+        &self.services
     }
 
     pub(crate) fn providers(&self) -> providers::Providers {
-        self.providers.clone()
+        self.services.providers.clone()
     }
 
     pub(crate) fn store(&self) -> Store {
-        self.store.clone()
+        self.services.store.clone()
     }
 
     pub(crate) fn credentials(&self) -> Credentials {
-        self.credentials.clone()
+        self.services.credentials.clone()
     }
 
     pub(crate) fn hub(&self) -> DeviceHub {
-        self.hub.clone()
+        self.services.hub.clone()
     }
 
     pub(crate) fn voicevox(&self) -> voice::voicevox::VoicevoxManager {
-        self.voicevox.clone()
+        self.services.voicevox.clone()
     }
 }

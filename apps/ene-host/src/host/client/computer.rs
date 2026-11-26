@@ -203,6 +203,10 @@ pub(super) fn result(
 }
 
 impl ComputerUse {
+    pub(super) fn save_frame(&mut self, frame: Frame) {
+        self.frames.insert(frame.owner.client.clone(), frame);
+    }
+
     /// Only the model-request view contains screen pixels.
     pub(super) fn attach_frame(
         &self,
@@ -263,11 +267,4 @@ fn invalidate(world: &mut World, matches: impl Fn(&Pending) -> bool) {
             "the Computer Use operation is no longer active; its result is unknown",
         );
     }
-}
-
-pub(super) fn save_frame(world: &mut World, frame: Frame) {
-    world
-        .resource_mut::<ComputerUse>()
-        .frames
-        .insert(frame.owner.client.clone(), frame);
 }

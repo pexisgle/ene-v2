@@ -2,9 +2,7 @@
 
 use super::super::Services;
 use super::{is_builtin_voicevox, notify_settings};
-use crate::host::db::Store;
 use crate::host::wire;
-use connectrpc::ConnectError;
 use connectrpc::RequestContext;
 use connectrpc::ServiceRequest;
 use connectrpc::ServiceResult;
@@ -16,11 +14,7 @@ pub(super) async fn get_settings(
     _arg2: ServiceRequest<'_, w::Empty>,
 ) -> ServiceResult<w::Settings> {
     services
-        .read(|app| {
-            Ok(wire::settings(
-                &app.world().resource::<Store>().settings_repo().settings()?,
-            ))
-        })
+        .with_store(|store| Ok(wire::settings(&store.settings_repo().settings()?)))
         .await
 }
 
@@ -63,34 +57,31 @@ pub(super) async fn update_settings(
             .await;
     }
     let view = services
-        .call(move |app| {
-            let store = app.world().resource::<Store>().clone();
+        .change(move |services| {
+            let store = &services.store;
             let settings = store
                 .settings_repo()
                 .update_settings(expected_revision, &inputs)?;
             let view = wire::settings(&settings);
-            notify_settings(app, view.clone());
+            notify_settings(&services.notifier, view.clone());
             Ok(view)
         })
         .await?;
     // The save lands first. A plugin starts because a stored connection
     // names it. `start_used` logs a plugin that will not start and carries
     // on, the same policy as startup, so the save still succeeds.
-    let store = services
-        .runtime
-        .read(|app| Ok(app.world().resource::<Store>().clone()))
-        .await
-        .map_err(ConnectError::from)?;
-    services.runtime.providers().start_used(&store).await;
+    let services = services.runtime.services();
+    let store = &services.store;
+    services.providers.start_used(store).await;
     if let Ok(current) = store.settings_repo().settings() {
-        let providers = services.runtime.providers();
+        let providers = &services.providers;
         let active_vv = current
             .connections
             .iter()
-            .find(|conn| is_builtin_voicevox(conn, &providers));
+            .find(|conn| is_builtin_voicevox(conn, providers));
         if let Some(vv) = active_vv {
             if !cfg!(test) {
-                let mgr = services.runtime.voicevox();
+                let mgr = services.voicevox.clone();
                 let base = vv.endpoint().endpoint.clone();
                 let options = vv.endpoint().options.clone();
                 tokio::spawn(async move {
@@ -100,7 +91,7 @@ pub(super) async fn update_settings(
                 });
             }
         } else {
-            services.runtime.voicevox().stop().await;
+            services.voicevox.stop().await;
         }
     }
     Ok(view)

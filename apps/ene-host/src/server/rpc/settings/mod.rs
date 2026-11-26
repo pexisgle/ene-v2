@@ -17,7 +17,6 @@ use connectrpc::ServiceRequest;
 use connectrpc::ServiceResult;
 use ene_rpc as w;
 use rig_core::catalog::ModelSpec;
-use rig_ecs::prelude::App;
 
 #[expect(refining_impl_trait, reason = "Connect boxes futures")]
 impl w::SettingsService for Services {
@@ -335,8 +334,8 @@ impl w::SettingsService for Services {
     }
 }
 
-fn notify_settings(app: &mut App, settings: w::Settings) {
-    app.world_mut().resource_mut::<Notifier>().push(
+fn notify_settings(notifier: &Notifier, settings: w::Settings) {
+    notifier.push(
         None,
         None,
         w::notification::Event::SettingsUpdated(Box::new(w::SettingsUpdated {

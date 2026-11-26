@@ -330,7 +330,7 @@ fn turn_query(turns: &[Turn]) -> String {
         query.push_str(&turn.text);
         query.push('\n');
     }
-    ene_host_core::util::truncate(&query, MAX_QUERY_CHARS)
+    ene_store::util::truncate(&query, MAX_QUERY_CHARS)
 }
 
 #[cfg(test)]

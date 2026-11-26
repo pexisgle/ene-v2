@@ -7,7 +7,7 @@
 use super::{
     DeviceOperation,
     computer::{self, ComputerUse},
-    device::{get, uncertain},
+    device::{get_state, uncertain},
 };
 use crate::host::{
     db::{Result, Store},
@@ -55,12 +55,11 @@ pub(crate) fn complete(
                 &operation.id,
                 "the Computer Use operation's result is unknown; do not retry it",
             );
-            return get(
-                world,
-                &w::Id {
-                    id: operation.id.clone(),
-                    ..Default::default()
-                },
+            return get_state(
+                &store,
+                world.get_resource::<ComputerUse>(),
+                world.resource::<DeviceHub>(),
+                &operation.id,
             );
         }
     };
@@ -84,7 +83,7 @@ pub(crate) fn complete(
     {
         if success {
             if let Some(frame) = frame {
-                computer::save_frame(world, frame);
+                world.resource_mut::<ComputerUse>().save_frame(frame);
             }
             let outcome = build_waiter_outcome(&operation, output.as_ref());
             permission::decide(world, waiter.call, outcome);

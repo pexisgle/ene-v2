@@ -448,5 +448,10 @@ fn q05_storage_fault_in_tail_marks_host_failed_instead_of_empty_state() {
     .unwrap_err();
     assert!(err.is_storage(), "expected storage error, got {err:?}");
     let _discarded = harness.accept("k-fault", "こんにちは");
-    harness.run_until(|world| world.resource::<crate::host::HostState>().failed.is_some());
+    harness.run_until(|world| {
+        world
+            .resource::<crate::host::HostState>()
+            .failure()
+            .is_some()
+    });
 }

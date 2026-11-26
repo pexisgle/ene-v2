@@ -127,8 +127,8 @@ impl CapabilityPolicy {
     }
 }
 
-impl FromWorld for CapabilityPolicy {
-    fn from_world(_world: &mut World) -> Self {
+impl Default for CapabilityPolicy {
+    fn default() -> Self {
         std::env::var(ALLOWED_CAPABILITIES_ENV)
             .map_or_else(|_| Self::none(), |text| Self::parse(&text))
     }

@@ -17,8 +17,8 @@ pub(crate) mod tools;
 
 use super::{agent, db::Store, notify::Notifier, wire};
 use bevy_ecs::prelude::*;
-use ene_host_core::util::now;
 use ene_rpc as w;
+use ene_store::util::now;
 use rig_ecs::prelude::*;
 
 /// Registers the parent's memory tools and the dynamic-context systems.
@@ -89,8 +89,8 @@ pub(crate) fn create(
     agent::spawn_companion(world, &companion);
     agent::sync_companion(world, &companion.id)?;
     {
-        let mut notifier = world.resource_mut::<Notifier>();
-        notify(&mut notifier, &companion);
+        let notifier = world.resource_mut::<Notifier>();
+        notify(&notifier, &companion);
     }
     Ok(wire::companion(&companion))
 }
@@ -168,8 +168,8 @@ pub(crate) fn update(
         .update_companion(&companion, request.revision)?;
     agent::sync_companion(world, &companion.id)?;
     {
-        let mut notifier = world.resource_mut::<Notifier>();
-        notify(&mut notifier, &companion);
+        let notifier = world.resource_mut::<Notifier>();
+        notify(&notifier, &companion);
     }
     Ok(wire::companion(&companion))
 }
@@ -185,7 +185,7 @@ pub(crate) fn delete(world: &mut World, id: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn notify(notifier: &mut Notifier, companion: &Companion) {
+pub(crate) fn notify(notifier: &Notifier, companion: &Companion) {
     let view = wire::companion(companion);
     notifier.push(
         Some(&companion.id),
@@ -208,10 +208,10 @@ pub(crate) fn mind_view(store: &Store, id: &str) -> Result<w::MindView> {
 }
 
 pub(crate) fn update_profile(
-    world: &mut World,
+    store: &Store,
+    notifier: &Notifier,
     request: &w::UpdateMindProfileRequest,
 ) -> Result<w::MindView> {
-    let store = world.resource::<Store>().clone();
     store
         .companion_repo()
         .companion(&request.companion_id)?
@@ -225,15 +225,16 @@ pub(crate) fn update_profile(
         request.expected_revision,
         &profile,
     )?;
-    notify_mind(world, &request.companion_id);
-    mind_view(&store, &request.companion_id)
+    let view = mind_view(store, &request.companion_id)?;
+    notify_mind(notifier, &view);
+    Ok(view)
 }
 
 pub(crate) fn control_memory(
-    world: &mut World,
+    store: &Store,
+    notifier: &Notifier,
     request: &w::MemoryControlRequest,
 ) -> Result<w::MemoryControlResult> {
-    let store = world.resource::<Store>().clone();
     let action = match request.action.as_known() {
         Some(w::MemoryAction::Forget) => super::db::memories::MemoryActionKind::Forget,
         Some(w::MemoryAction::Remember) => super::db::memories::MemoryActionKind::Remember,
@@ -256,7 +257,7 @@ pub(crate) fn control_memory(
         store
             .memory_repo()
             .control_memory(&request.memory_id, action, &request.companion_id)?;
-    notify_mind(world, &request.companion_id);
+    notify_mind(notifier, &mind_view(store, &request.companion_id)?);
     Ok(w::MemoryControlResult {
         memory_id: memory.id,
         importance: u32::from(memory.importance),
@@ -289,11 +290,8 @@ pub(crate) fn list_memories(
     })
 }
 
-fn notify_mind(world: &mut World, companion: &str) {
-    let store = world.resource::<Store>().clone();
-    let Ok(view) = mind_view(&store, companion) else {
-        return;
-    };
+fn notify_mind(notifier: &Notifier, view: &w::MindView) {
+    let companion = &view.companion_id;
     let profile = view
         .profile
         .as_option()
@@ -302,7 +300,6 @@ fn notify_mind(world: &mut World, companion: &str) {
         .state
         .as_option()
         .map_or_default(|state| state.revision);
-    let mut notifier = world.resource_mut::<Notifier>();
     notifier.push(
         Some(companion),
         None,

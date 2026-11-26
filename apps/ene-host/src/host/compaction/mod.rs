@@ -314,7 +314,7 @@ fn summarize_at_turn_boundary(
         wake,
         providers,
     } = resources;
-    if state.is_running() || host.is_some_and(|host| host.failed.is_some() || host.closing) {
+    if state.is_running() || host.is_some_and(|host| host.ready().is_err()) {
         return;
     }
     let (Some(store), Some(credentials), Some(models), Some(embeddings), Some(runtime)) =

@@ -1,9 +1,7 @@
 //! Settings service.
 
 use super::super::Services;
-use crate::host::db::Store;
 use crate::host::error::HostError;
-use crate::host::notify::Notifier;
 use connectrpc::RequestContext;
 use connectrpc::ServiceRequest;
 use connectrpc::ServiceResult;
@@ -15,8 +13,7 @@ pub(super) async fn list_policy_rules(
     _arg2: ServiceRequest<'_, w::Empty>,
 ) -> ServiceResult<w::PolicyRules> {
     services
-        .read(|app| {
-            let store = app.world().resource::<Store>();
+        .with_store(|store| {
             Ok(w::PolicyRules {
                 items: store
                     .policy_repo()
@@ -42,13 +39,13 @@ pub(super) async fn update_policy_rules(
     }
     let remove_ids = request.remove_ids;
     services
-        .call(move |app| {
-            let store = app.world().resource::<Store>().clone();
+        .change(move |services| {
+            let store = &services.store;
             let updated = store
                 .policy_repo()
                 .apply_policy_rules(&rules, &remove_ids)?;
             let items: Vec<w::PolicyRule> = updated.iter().map(Into::into).collect();
-            app.world_mut().resource_mut::<Notifier>().push(
+            services.notifier.push(
                 None,
                 None,
                 w::notification::Event::PolicyRulesUpdated(Box::new(w::PolicyRulesUpdated {
@@ -70,8 +67,7 @@ pub(super) async fn list_policy_texts(
     _arg2: ServiceRequest<'_, w::Empty>,
 ) -> ServiceResult<w::PolicyTexts> {
     services
-        .read(|app| {
-            let store = app.world().resource::<Store>();
+        .with_store(|store| {
             Ok(w::PolicyTexts {
                 items: store
                     .policy_repo()
@@ -94,13 +90,13 @@ pub(super) async fn update_policy_texts(
     let texts: Vec<_> = request.add_or_update.into_iter().map(Into::into).collect();
     let remove_ids = request.remove_ids;
     services
-        .call(move |app| {
-            let store = app.world().resource::<Store>().clone();
+        .change(move |services| {
+            let store = &services.store;
             let updated = store
                 .policy_repo()
                 .apply_policy_texts(&texts, &remove_ids)?;
             let items: Vec<w::PolicyText> = updated.iter().map(Into::into).collect();
-            app.world_mut().resource_mut::<Notifier>().push(
+            services.notifier.push(
                 None,
                 None,
                 w::notification::Event::PolicyTextsUpdated(Box::new(w::PolicyTextsUpdated {

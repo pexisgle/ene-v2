@@ -114,7 +114,14 @@ async fn the_head_can_stay_silent_on_routine_reports_and_answer_the_important_fa
     let frame_id =
         assert_eye_notifications_and_dispositions(&mut harness, &mut notifications, &head);
     report(&mut harness, "desktop", &sub, Event::Enabled(false));
-    assert!(preview(harness.app.world(), &frame_id).is_err());
+    assert!(
+        preview(
+            harness.app.world().resource::<Eyes>(),
+            harness.app.world().resource::<DeviceHub>(),
+            &frame_id
+        )
+        .is_err()
+    );
     assert_eq!(eye.requests().len(), 4);
 }
 
@@ -355,7 +362,13 @@ fn assert_eye_notifications_and_dispositions(
     let frame_id = received_frame.unwrap();
     assert_eq!(evaluated_frame.as_deref(), Some(frame_id.as_str()));
     assert_eq!(
-        preview(harness.app.world(), &frame_id).unwrap().jpeg,
+        preview(
+            harness.app.world().resource::<Eyes>(),
+            harness.app.world().resource::<DeviceHub>(),
+            &frame_id
+        )
+        .unwrap()
+        .jpeg,
         jpeg(8, 8)
     );
     assert_eq!(delivered.len(), 4);
@@ -404,9 +417,25 @@ fn previews_keep_recent_frames_after_new_captures() {
             (session.recent_screens.back().unwrap().id.clone(), jpeg)
         })
         .collect();
-    assert!(preview(harness.app.world(), &frames[0].0).is_err());
+    assert!(
+        preview(
+            harness.app.world().resource::<Eyes>(),
+            harness.app.world().resource::<DeviceHub>(),
+            &frames[0].0
+        )
+        .is_err()
+    );
     for (id, jpeg) in &frames[1..] {
-        assert_eq!(preview(harness.app.world(), id).unwrap().jpeg, *jpeg);
+        assert_eq!(
+            preview(
+                harness.app.world().resource::<Eyes>(),
+                harness.app.world().resource::<DeviceHub>(),
+                id
+            )
+            .unwrap()
+            .jpeg,
+            *jpeg
+        );
     }
     harness
         .app
@@ -419,8 +448,22 @@ fn previews_keep_recent_frames_after_new_captures() {
         .front_mut()
         .unwrap()
         .at = Instant::now() - PREVIEW_LIFETIME - Duration::from_secs(1);
-    assert!(preview(harness.app.world(), &frames[1].0).is_err());
-    assert!(preview(harness.app.world(), &frames[2].0).is_ok());
+    assert!(
+        preview(
+            harness.app.world().resource::<Eyes>(),
+            harness.app.world().resource::<DeviceHub>(),
+            &frames[1].0
+        )
+        .is_err()
+    );
+    assert!(
+        preview(
+            harness.app.world().resource::<Eyes>(),
+            harness.app.world().resource::<DeviceHub>(),
+            &frames[2].0
+        )
+        .is_ok()
+    );
 }
 
 #[test]

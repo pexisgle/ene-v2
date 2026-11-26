@@ -131,9 +131,13 @@ async fn p08_speech_construction_failure_never_selects_native() {
         world.insert_resource(providers);
         let _failure = construction_failure::Guard::enter();
         let error = if kind == ConnectionKind::Tts {
-            voice::tts_source(&world).err().expect("TTS must fail")
+            voice::tts_source(&voice::VoiceEngineContext::for_test(&world))
+                .err()
+                .expect("TTS must fail")
         } else {
-            voice::stt_source(&world).err().expect("STT must fail")
+            voice::stt_source(&voice::VoiceEngineContext::for_test(&world))
+                .err()
+                .expect("STT must fail")
         };
         assert!(
             matches!(error, SetupError::Broken(ref message) if message.starts_with("plugin HTTP transport: ")),
@@ -189,9 +193,13 @@ async fn p08_absent_plugin_leaves_speech_unavailable() {
         world.insert_resource(store(root.path(), &connection));
         world.insert_resource(Providers::none());
         let error = if kind == ConnectionKind::Tts {
-            voice::tts_source(&world).err().expect("TTS must fail")
+            voice::tts_source(&voice::VoiceEngineContext::for_test(&world))
+                .err()
+                .expect("TTS must fail")
         } else {
-            voice::stt_source(&world).err().expect("STT must fail")
+            voice::stt_source(&voice::VoiceEngineContext::for_test(&world))
+                .err()
+                .expect("STT must fail")
         };
         let SetupError::Unsupported(message) = &error else {
             panic!("expected an unsupported adapter, got {error:?}")
@@ -224,7 +232,7 @@ async fn p08_plugin_serves_tts() {
     let mut world = World::new();
     world.insert_resource(store(root.path(), &connection));
     world.insert_resource(providers);
-    let engine = voice::tts_source(&world).unwrap();
+    let engine = voice::tts_source(&voice::VoiceEngineContext::for_test(&world)).unwrap();
     for _ in 0..2 {
         let (pcm, rate) = engine.synthesize("hello".into(), "v".into()).await.unwrap();
         assert_eq!(pcm, [7, 0]);
@@ -303,7 +311,7 @@ async fn p08_plugin_serves_stt() {
     let mut world = World::new();
     world.insert_resource(store(root.path(), &connection));
     world.insert_resource(providers);
-    let engine = voice::stt_source(&world).unwrap();
+    let engine = voice::stt_source(&voice::VoiceEngineContext::for_test(&world)).unwrap();
     for _ in 0..2 {
         assert_eq!(
             engine.transcribe(vec![0, 0], 24_000).await.unwrap(),

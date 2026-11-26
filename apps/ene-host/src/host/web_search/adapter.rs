@@ -7,7 +7,7 @@
 //! [`SearchAdapter`] instead of a trait with five implementors.
 use super::{ResolvedSearch, SearchAdapter};
 use crate::host::net;
-use ene_host_core::util::truncate;
+use ene_store::util::truncate;
 use rig_core::tool::ToolExecutionError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

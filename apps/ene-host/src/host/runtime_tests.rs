@@ -96,7 +96,10 @@ async fn storage_errors_with_discarded_replies_still_stop_the_host() {
 async fn fresh_runtime_seeds_ene_once_and_does_not_resurrect_after_delete() {
     let state = tempfile::tempdir().unwrap();
     let runtime = Runtime::start(state.path()).await.unwrap();
-    let snap = runtime.read(snapshot).await.unwrap();
+    let snap = runtime
+        .inspect(|services| SnapshotReader::from(services).get())
+        .await
+        .unwrap();
     assert!(
         snap.companions
             .iter()
@@ -113,7 +116,10 @@ async fn fresh_runtime_seeds_ene_once_and_does_not_resurrect_after_delete() {
     runtime.shutdown().await.unwrap();
 
     let restarted = Runtime::start(state.path()).await.unwrap();
-    let snap = restarted.read(snapshot).await.unwrap();
+    let snap = restarted
+        .inspect(|services| SnapshotReader::from(services).get())
+        .await
+        .unwrap();
     assert!(
         snap.companions.is_empty(),
         "deleted initial companion must stay deleted after restart"

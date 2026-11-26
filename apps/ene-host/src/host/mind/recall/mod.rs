@@ -97,9 +97,7 @@ fn collect_tails(mut commands: Commands, mut pending: Query<(Entity, &HoldOf, &m
             Some(Err(error)) => {
                 if error.is_storage() {
                     let message = error.to_string();
-                    commands.queue(move |world: &mut World| {
-                        crate::host::fail(world, &message);
-                    });
+                    commands.run_system_cached_with(crate::host::stop_on_failure, message);
                 } else {
                     tracing::warn!(%error, "dynamic tail could not be rendered");
                 }
@@ -278,9 +276,7 @@ fn compute_or_spawn_tail(
         Err(error) => {
             if error.is_storage() {
                 let message = error.to_string();
-                commands.queue(move |world: &mut World| {
-                    crate::host::fail(world, &message);
-                });
+                commands.run_system_cached_with(crate::host::stop_on_failure, message);
             } else {
                 tracing::warn!(%error, "dynamic tail could not be rendered");
             }

@@ -9,7 +9,7 @@ use super::decision::{
 };
 use super::*;
 use ene_domain::PolicyText;
-use ene_host_core::util::truncate;
+use ene_store::util::truncate;
 use rig_core::test_utils::MockCompletionModel;
 use rig_core::{DynModel, operation::Completion};
 

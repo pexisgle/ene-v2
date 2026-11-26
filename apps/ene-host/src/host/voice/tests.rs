@@ -317,7 +317,7 @@ fn b11_companion_voice_binding_selects_bound_tts_connection_without_silent_fallb
     );
     world.insert_resource(store);
 
-    let Err(err) = companion_tts_source(&world, Some(&comp)) else {
+    let Err(err) = companion_tts_source(&VoiceEngineContext::for_test(&world), Some(&comp)) else {
         panic!("bound disabled TTS connection must not fall back to another connection");
     };
     assert!(matches!(err, SetupError::Disabled(_)), "{err:?}");
@@ -326,5 +326,5 @@ fn b11_companion_voice_binding_selects_bound_tts_connection_without_silent_fallb
         "ene.voice.v1",
         serde_json::json!({"connection_id": "tts-a", "voice_id": "3", "speed": 1.15}),
     );
-    assert!(companion_tts_source(&world, Some(&comp)).is_ok());
+    assert!(companion_tts_source(&VoiceEngineContext::for_test(&world), Some(&comp)).is_ok());
 }

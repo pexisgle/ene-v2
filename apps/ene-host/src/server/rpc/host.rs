@@ -1,6 +1,6 @@
 //! Host snapshot, subscription and companion/mind services.
 use super::Services;
-use crate::host::{self, db::Store, mind};
+use crate::host::{self, mind};
 use connectrpc::{
     ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream,
 };
@@ -23,7 +23,8 @@ impl w::HostService for Services {
         _: RequestContext,
         _: ServiceRequest<'_, w::Empty>,
     ) -> ServiceResult<w::Snapshot> {
-        self.read(host::snapshot).await
+        self.inspect(|services| host::SnapshotReader::from(services).get())
+            .await
     }
 
     #[tracing::instrument(
@@ -55,7 +56,10 @@ impl w::HostService for Services {
         // an event between them.
         let (snapshot, mut events, replayed) = self
             .runtime
-            .read(move |app| host::subscribe(app, subscriber.as_deref(), cursor.as_ref()))
+            .inspect(move |services| {
+                host::SnapshotReader::from(services)
+                    .subscribe(subscriber.as_deref(), cursor.as_ref())
+            })
             .await
             .map_err(ConnectError::from)?;
         let target_cursor = snapshot.cursor.clone();
@@ -123,8 +127,7 @@ impl w::HostService for Services {
         request: ServiceRequest<'_, w::Id>,
     ) -> ServiceResult<w::ScreenFrame> {
         let id = request.id.to_owned();
-        self.read(move |app| host::eyes::preview(app.world(), &id))
-            .await
+        self.read(move |kernel| kernel.screen_preview(&id)).await
     }
 
     #[tracing::instrument(
@@ -141,29 +144,58 @@ impl w::HostService for Services {
         _: RequestContext,
         _: ServiceRequest<'_, w::Empty>,
     ) -> ServiceResult<w::Companions> {
-        self.read(|app| {
+        self.with_store(|store| {
             Ok(w::Companions {
-                items: mind::list(app.world().resource::<Store>())?,
+                items: mind::list(&store)?,
                 ..Default::default()
             })
         })
         .await
     }
 
-    read_id!(get_companion, w::Companion, mind::get);
-    request!(
-        create_companion,
-        w::CreateCompanionRequest,
-        w::Companion,
-        mind::create
-    );
-    request!(
-        update_companion,
-        w::UpdateCompanionRequest,
-        w::Companion,
-        mind::update
-    );
-    discard_id!(delete_companion, w::Id, id, mind::delete);
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "get_companion", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn get_companion(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, ene_rpc::Id>,
+    ) -> connectrpc::ServiceResult<w::Companion> {
+        let id = request.id.to_owned();
+        // `mind::get` takes only the store, so this never needs the actor thread.
+        self.with_store(move |store| mind::get(&store, &id)).await
+    }
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "create_companion", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn create_companion(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::CreateCompanionRequest>,
+    ) -> connectrpc::ServiceResult<w::Companion> {
+        let request = request.to_owned_message();
+        self.call(move |kernel| kernel.create_companion(request))
+            .await
+    }
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "update_companion", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn update_companion(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::UpdateCompanionRequest>,
+    ) -> connectrpc::ServiceResult<w::Companion> {
+        let request = request.to_owned_message();
+        self.call(move |kernel| kernel.update_companion(request))
+            .await
+    }
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "delete_companion", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn delete_companion(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::Id>,
+    ) -> connectrpc::ServiceResult<ene_rpc::Empty> {
+        let id = request.id.to_owned();
+        self.call(move |kernel| {
+            kernel.delete_companion(&id)?;
+            Ok(ene_rpc::Empty::default())
+        })
+        .await
+    }
 
     #[tracing::instrument(
         name = "rpc",
@@ -182,17 +214,27 @@ impl w::HostService for Services {
         Response::ok(mind::list_templates())
     }
 
-    read_id!(
-        export_companion,
-        w::CompanionTemplate,
-        mind::export_template
-    );
-    request!(
-        import_companion,
-        w::ImportCompanionRequest,
-        w::Companion,
-        mind::import_template
-    );
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "export_companion", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn export_companion(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, ene_rpc::Id>,
+    ) -> connectrpc::ServiceResult<w::CompanionTemplate> {
+        let id = request.id.to_owned();
+        // `mind::export_template` takes only the store, so this never needs the actor thread.
+        self.with_store(move |store| mind::export_template(&store, &id))
+            .await
+    }
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "import_companion", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn import_companion(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::ImportCompanionRequest>,
+    ) -> connectrpc::ServiceResult<w::Companion> {
+        let request = request.to_owned_message();
+        self.call(move |kernel| kernel.import_companion(request))
+            .await
+    }
 
     #[tracing::instrument(
         name = "rpc",
@@ -220,28 +262,18 @@ impl w::HostService for Services {
         let user_message = req.user_message;
         let model = self
             .runtime
-            .read(move |app| {
-                let world = app.world();
-                let store = world.resource::<Store>();
-                let catalog = world
-                    .resource::<rig_ecs::model::Models>()
-                    .0
-                    .catalog()
-                    .clone();
-                let credentials = world.resource::<host::model::Credentials>();
-                let providers = world
-                    .get_resource::<host::providers::Providers>()
-                    .cloned()
-                    .unwrap_or_default();
+            .read_kernel(move |kernel| {
+                let services = kernel.services();
+                let catalog = kernel.catalog();
                 let assignment =
-                    host::model::preview_assignment(store, &catalog, &requested_model)?;
+                    host::model::preview_assignment(&services.store, catalog, &requested_model)?;
                 host::model::connect_assignment(
-                    store,
-                    credentials,
-                    &catalog,
+                    &services.store,
+                    &services.credentials,
+                    catalog,
                     &assignment,
                     mind::Role::Companion,
-                    &providers,
+                    &services.providers,
                 )
             })
             .await
@@ -255,7 +287,17 @@ impl w::HostService for Services {
         })
     }
 
-    read_id!(get_mind, w::MindView, mind::mind_view);
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "get_mind", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn get_mind(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, ene_rpc::Id>,
+    ) -> connectrpc::ServiceResult<w::MindView> {
+        let id = request.id.to_owned();
+        // `mind::mind_view` takes only the store, so this never needs the actor thread.
+        self.with_store(move |store| mind::mind_view(&store, &id))
+            .await
+    }
     #[tracing::instrument(name = "rpc", skip_all, fields(method = "update_mind_profile", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn update_mind_profile(
         &self,
@@ -263,8 +305,10 @@ impl w::HostService for Services {
         request: connectrpc::ServiceRequest<'_, w::UpdateMindProfileRequest>,
     ) -> connectrpc::ServiceResult<w::MindView> {
         let request = request.to_owned_message();
-        self.call(move |app| mind::update_profile(app.world_mut(), &request))
-            .await
+        self.change(move |services| {
+            mind::update_profile(&services.store, &services.notifier, &request)
+        })
+        .await
     }
     #[tracing::instrument(name = "rpc", skip_all, fields(method = "control_memory", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn control_memory(
@@ -273,10 +317,22 @@ impl w::HostService for Services {
         request: connectrpc::ServiceRequest<'_, w::MemoryControlRequest>,
     ) -> connectrpc::ServiceResult<w::MemoryControlResult> {
         let request = request.to_owned_message();
-        self.call(move |app| mind::control_memory(app.world_mut(), &request))
+        self.change(move |services| {
+            mind::control_memory(&services.store, &services.notifier, &request)
+        })
+        .await
+    }
+    #[tracing::instrument(name = "rpc", skip_all, fields(method = "list_memories", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
+    async fn list_memories(
+        &self,
+        _: connectrpc::RequestContext,
+        request: connectrpc::ServiceRequest<'_, w::ListMemoriesRequest>,
+    ) -> connectrpc::ServiceResult<w::Memories> {
+        let request = request.to_owned_message();
+        // `mind::list_memories` takes only the store, so this never needs the actor thread.
+        self.with_store(move |store| mind::list_memories(&store, &request))
             .await
     }
-    request!(store list_memories, w::ListMemoriesRequest, w::Memories, mind::list_memories);
 }
 
 /// How a subscription starts: replayed events, or a snapshot when resuming is
@@ -300,6 +356,7 @@ fn visible(event: &w::Notification, subscriber: Option<&str>, diagnostics: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::db::Store;
     use crate::host::{Runtime, db::clients::ClientDeclaration, notify::Notifier};
     use connectrpc::StreamMessage;
     use tokio_util::sync::CancellationToken;
@@ -338,7 +395,7 @@ mod tests {
             .unwrap();
         runtime
             .call(|app| {
-                let mut notifier = app.world_mut().resource_mut::<Notifier>();
+                let notifier = app.world_mut().resource_mut::<Notifier>();
                 notifier.push(None, Some("other"), event("hidden"));
                 notifier.diagnostic(
                     "ene",
@@ -396,7 +453,7 @@ mod tests {
         }
         runtime
             .call(|app| {
-                let mut notifier = app.world_mut().resource_mut::<Notifier>();
+                let notifier = app.world_mut().resource_mut::<Notifier>();
                 notifier.push(None, Some("other"), event("hidden live"));
                 notifier.push(None, Some("c1"), event("live"));
                 Ok(())
