@@ -51,72 +51,69 @@ impl Workspace {
         let mut remaining_bytes = GREP_BYTES;
         let mut output_bytes = 0;
         let mut scanned = 0;
-        let mut truncated = false;
+        let mut clipped_line = false;
         let mut skipped = 0;
         let glob = match search {
             Search::List => None,
             Search::Find(glob) => Some(glob),
             Search::Grep { glob, .. } => glob,
         };
-        let start = path;
-        let mut visit = |path: &Path, kind: FileType| -> bool {
+        let mut push = |path: &Path, directory: bool, matched: Option<(usize, &str)>| {
+            output_bytes += path.as_os_str().len() + matched.map_or(0, |(_, line)| line.len());
+            if entries.len() == limit || output_bytes > OUTPUT_LIMIT {
+                return false;
+            }
+            let path = path.to_string_lossy();
+            entries.push(match matched {
+                Some((line, text)) => json!({"path": path, "line": line, "text": text}),
+                None => json!({"path": path, "directory": directory}),
+            });
+            true
+        };
+        let mut visit = |entry: &Path, kind: FileType| -> bool {
             scanned += 1;
             if scanned > SCAN_LIMIT {
-                truncated = true;
                 return false;
             }
             if glob.is_some_and(|(glob, nested)| {
                 let candidate = if *nested {
-                    path.strip_prefix(start).unwrap_or(path)
+                    entry.strip_prefix(path).unwrap_or(entry)
                 } else {
-                    Path::new(path.file_name().unwrap_or_default())
+                    Path::new(entry.file_name().unwrap_or_default())
                 };
                 !glob.is_match(candidate)
             }) {
                 return true;
             }
-            if let Search::Grep { regex, .. } = search {
-                if !kind.is_file() {
-                    return true;
-                }
-                let Ok(bytes) = self.load(path) else {
-                    skipped += 1;
-                    return true;
-                };
-                if bytes.len() > remaining_bytes {
-                    truncated = true;
-                    return false;
-                }
-                remaining_bytes -= bytes.len();
-                let Ok(text) = text(&bytes) else { return true };
-                for (index, line) in text.lines().enumerate() {
-                    if regex.is_match(line) {
-                        let prefix = &line[..line.floor_char_boundary(2048)];
-                        truncated |= prefix.len() < line.len();
-                        let line = prefix;
-                        output_bytes += path.as_os_str().len() + line.len();
-                        if entries.len() == limit || output_bytes > OUTPUT_LIMIT {
-                            truncated = true;
-                            return false;
-                        }
-                        entries.push(json!({"path": path.to_string_lossy(), "line": index + 1, "text": line}));
-                    }
-                }
-            } else {
-                output_bytes += path.as_os_str().len();
-                if entries.len() == limit || output_bytes > OUTPUT_LIMIT {
-                    truncated = true;
-                    return false;
-                }
-                entries.push(json!({"path": path.to_string_lossy(), "directory": kind.is_dir()}));
+            let Search::Grep { regex, .. } = search else {
+                return push(entry, kind.is_dir(), None);
+            };
+            if !kind.is_file() {
+                return true;
             }
-            true
+            let Ok(bytes) = self.load(entry) else {
+                skipped += 1;
+                return true;
+            };
+            let Some(budget) = remaining_bytes.checked_sub(bytes.len()) else {
+                return false;
+            };
+            remaining_bytes = budget;
+            let Ok(text) = text(&bytes) else { return true };
+            text.lines()
+                .enumerate()
+                .filter(|(_, line)| regex.is_match(line))
+                .all(|(index, line)| {
+                    let prefix = &line[..line.floor_char_boundary(2048)];
+                    clipped_line |= prefix.len() < line.len();
+                    push(entry, false, Some((index + 1, prefix)))
+                })
         };
-        if matches!(search, Search::Grep { .. })
+        let finished = if matches!(search, Search::Grep { .. })
             && let Ok(metadata) = self.dir.symlink_metadata(path)
             && metadata.is_file()
         {
-            visit(path, metadata.file_type());
+            visit(path, metadata.file_type())
         } else {
             let dir = self.dir.open_dir(path)?;
             let prefix = if path == Path::new(".") {
@@ -129,8 +126,9 @@ impl Workspace {
             } else {
                 64
             };
-            let _finished = walk(&dir, prefix, depth, &mut visit)?;
-        }
+            walk(&dir, prefix, depth, &mut visit)?
+        };
+        let truncated = clipped_line || !finished;
         entries.sort_by(|left, right| {
             left["path"]
                 .as_str()

@@ -1,6 +1,6 @@
 use super::{
-    COMMAND_TIMEOUT, FILE_LIMIT, IMAGE_LIMIT, MAX_RESULTS, OUTPUT_LIMIT, PREFIX, SHELL,
-    WorkToolError,
+    COMMAND_TIMEOUT, FILE_LIMIT, IMAGE_LIMIT, MAX_RESULTS, OUTPUT_LIMIT, SHELL,
+    WORKSPACE_SHELL_CAPABILITY, WorkToolError,
     helpers::{Edit, edit, glob, relative, text},
     search::{Browse, Search, max_results},
 };
@@ -34,15 +34,6 @@ struct Request<T> {
     workspace: String,
     #[serde(flatten)]
     tool: T,
-}
-
-enum FileTool {
-    Read(ReadArgs),
-    Write(WriteArgs),
-    Edit(EditArgs),
-    Grep(GrepArgs),
-    Find(FindArgs),
-    Ls(Browse),
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -104,6 +95,49 @@ enum FileChange<'a> {
     Edit(&'a [Edit]),
 }
 
+struct FileTool {
+    name: &'static str,
+    spec: fn(&Workspace) -> w::ClientCapabilitySpec,
+    run: fn(&Workspace, Value) -> Result<Value, WorkToolError>,
+}
+
+// Declare each tool's advertised schema and parser together.
+macro_rules! file_tools {
+    ($prefix:literal; $($name:literal: $args:ty, $description:literal, $run:expr;)+) => {
+        pub(crate) const PREFIX: &str = $prefix;
+        pub const WORKSPACE_FILE_CAPABILITIES: &[&str] = &[$(concat!($prefix, $name)),+];
+        const FILE_TOOLS: &[FileTool] = &[$(FileTool {
+            name: concat!($prefix, $name),
+            spec: |workspace| workspace.spec::<$args>($name, $description, "{path}"),
+            run: |workspace, input| ($run)(workspace, workspace.arguments::<$args>(input)?),
+        }),+];
+    };
+}
+
+file_tools! {
+    "work.";
+    "read": ReadArgs, "Read text by line or a PNG, JPEG, GIF or WebP image.",
+        |workspace: &Workspace, ReadArgs { path, offset, limit }| {
+            workspace.read(relative(&path)?, offset, limit.get().min(MAX_RESULTS))
+        };
+    "write": WriteArgs, "Create or replace a UTF-8 text file. Creates missing parent folders.",
+        |workspace: &Workspace, WriteArgs { path, content }| {
+            workspace.change(relative(&path)?, FileChange::Write(&content))
+        };
+    "edit": EditArgs, "Apply exact replacements in order. Each oldText must match exactly once. Save only if all replacements succeed.",
+        |workspace: &Workspace, EditArgs { path, edits }| {
+            workspace.change(relative(&path)?, FileChange::Edit(&edits))
+        };
+    "grep": GrepArgs, "Search UTF-8 files for matching lines. Pattern is a Rust regular expression. Path defaults to the workspace.",
+        Workspace::grep;
+    "find": FindArgs, "Find paths matching a glob, for example **/*.rs. Path defaults to the workspace.",
+        |workspace: &Workspace, FindArgs { browse, pattern }| {
+            workspace.search(&browse, Search::Find(&glob(&pattern)?))
+        };
+    "ls": Browse, "List a directory. Path defaults to the workspace.",
+        |workspace: &Workspace, browse| workspace.search(&browse, Search::List);
+}
+
 fn first_line() -> NonZeroUsize {
     NonZeroUsize::MIN
 }
@@ -141,14 +175,7 @@ impl Workspace {
     }
 
     pub(crate) fn specs(&self) -> Vec<w::ClientCapabilitySpec> {
-        let mut specs = vec![
-            self.spec::<ReadArgs>("read", "Read text by line or a PNG, JPEG, GIF or WebP image.", "{path}"),
-            self.spec::<WriteArgs>("write", "Create or replace a UTF-8 text file. Creates missing parent folders.", "{path}"),
-            self.spec::<EditArgs>("edit", "Apply exact replacements in order. Each oldText must match exactly once. Save only if all replacements succeed.", "{path}"),
-            self.spec::<GrepArgs>("grep", "Search UTF-8 files for matching lines. Pattern is a Rust regular expression. Path defaults to the workspace.", "{path}"),
-            self.spec::<FindArgs>("find", "Find paths matching a glob, for example **/*.rs. Path defaults to the workspace.", "{path}"),
-            self.spec::<Browse>("ls", "List a directory. Path defaults to the workspace.", "{path}"),
-        ];
+        let mut specs: Vec<_> = FILE_TOOLS.iter().map(|tool| (tool.spec)(self)).collect();
         if self.shell.is_some() {
             specs.push(self.spec::<ShellArgs>(
                 SHELL,
@@ -191,20 +218,15 @@ impl Workspace {
         capability: &str,
         input: Value,
     ) -> Result<Value, WorkToolError> {
-        let tool = match capability.strip_prefix(PREFIX) {
-            Some("read") => FileTool::Read(self.arguments(input)?),
-            Some("write") => FileTool::Write(self.arguments(input)?),
-            Some("edit") => FileTool::Edit(self.arguments(input)?),
-            Some("grep") => FileTool::Grep(self.arguments(input)?),
-            Some("find") => FileTool::Find(self.arguments(input)?),
-            Some("ls") => FileTool::Ls(self.arguments(input)?),
-            Some(SHELL) => {
-                let ShellArgs { command } = self.arguments(input)?;
-                return Box::pin(self.shell(&command)).await;
-            }
-            _ => return Err(WorkToolError::UnknownTool),
-        };
-        tokio::task::spawn_blocking(move || self.file_tool(tool)).await?
+        if capability == WORKSPACE_SHELL_CAPABILITY {
+            let ShellArgs { command } = self.arguments(input)?;
+            return Box::pin(self.shell(&command)).await;
+        }
+        let tool = FILE_TOOLS
+            .iter()
+            .find(|tool| tool.name == capability)
+            .ok_or(WorkToolError::UnknownTool)?;
+        tokio::task::spawn_blocking(move || (tool.run)(&self, input)).await?
     }
 
     fn arguments<T: DeserializeOwned>(&self, input: Value) -> Result<T, WorkToolError> {
@@ -215,48 +237,30 @@ impl Workspace {
         Ok(request.tool)
     }
 
-    fn file_tool(&self, tool: FileTool) -> Result<Value, WorkToolError> {
-        match tool {
-            FileTool::Read(ReadArgs {
-                path,
-                offset,
-                limit,
-            }) => self.read(relative(&path)?, offset, limit.get().min(MAX_RESULTS)),
-            FileTool::Write(WriteArgs { path, content }) => {
-                self.change(relative(&path)?, FileChange::Write(&content))
-            }
-            FileTool::Edit(EditArgs { path, edits }) => {
-                self.change(relative(&path)?, FileChange::Edit(&edits))
-            }
-            FileTool::Ls(browse) => self.search(&browse, Search::List),
-            FileTool::Find(FindArgs { browse, pattern }) => {
-                self.search(&browse, Search::Find(&glob(&pattern)?))
-            }
-            FileTool::Grep(GrepArgs {
-                browse,
-                pattern,
-                ignore_case,
-                literal,
-                glob: filter,
-            }) => {
-                let pattern = if literal {
-                    regex::escape(&pattern)
-                } else {
-                    pattern
-                };
-                let regex = regex::RegexBuilder::new(&pattern)
-                    .case_insensitive(ignore_case)
-                    .build()?;
-                let filter = filter.as_deref().map(glob).transpose()?;
-                self.search(
-                    &browse,
-                    Search::Grep {
-                        regex: &regex,
-                        glob: filter.as_ref(),
-                    },
-                )
-            }
-        }
+    fn grep(&self, arguments: GrepArgs) -> Result<Value, WorkToolError> {
+        let GrepArgs {
+            browse,
+            pattern,
+            ignore_case,
+            literal,
+            glob: filter,
+        } = arguments;
+        let pattern = if literal {
+            regex::escape(&pattern)
+        } else {
+            pattern
+        };
+        let regex = regex::RegexBuilder::new(&pattern)
+            .case_insensitive(ignore_case)
+            .build()?;
+        let filter = filter.as_deref().map(glob).transpose()?;
+        self.search(
+            &browse,
+            Search::Grep {
+                regex: &regex,
+                glob: filter.as_ref(),
+            },
+        )
     }
 
     fn change(&self, path: &Path, change: FileChange<'_>) -> Result<Value, WorkToolError> {
@@ -269,17 +273,17 @@ impl Workspace {
         Ok(json!({"path": path, "bytes": content.len()}))
     }
 
-    pub(super) fn load(&self, path: &Path) -> io::Result<Vec<u8>> {
+    pub(super) fn load(&self, path: &Path) -> Result<Vec<u8>, WorkToolError> {
         // Check before opening so named pipes and device files are not read.
         let metadata = self.dir.metadata(path)?;
         if !metadata.is_file() {
-            return Err(io::Error::other("path must name a regular file"));
+            return Err(io::Error::other("path must name a regular file").into());
         }
         if metadata.len() > FILE_LIMIT as u64 {
-            return Err(io::Error::other("file exceeds the 4 MiB limit"));
+            return Err(WorkToolError::FileTooLarge);
         }
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        let mut file = {
+        let file = {
             use cap_std::fs::{OpenOptions, OpenOptionsExt as _};
             // A replacement FIFO between metadata and open must not block before fstat.
             self.dir.open_with(
@@ -288,16 +292,14 @@ impl Workspace {
             )?
         };
         #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-        let mut file = self.dir.open(path)?;
+        let file = self.dir.open(path)?;
         if !file.metadata()?.is_file() {
-            return Err(io::Error::other("path must name a regular file"));
+            return Err(io::Error::other("path must name a regular file").into());
         }
         let mut bytes = Vec::new();
-        (&mut file)
-            .take(FILE_LIMIT as u64 + 1)
-            .read_to_end(&mut bytes)?;
+        file.take(FILE_LIMIT as u64 + 1).read_to_end(&mut bytes)?;
         if bytes.len() > FILE_LIMIT {
-            return Err(io::Error::other("file exceeds the 4 MiB limit"));
+            return Err(WorkToolError::FileTooLarge);
         }
         Ok(bytes)
     }
@@ -323,22 +325,28 @@ impl Workspace {
         let mut content = String::new();
         let mut next_line = offset;
         for _ in 0..limit {
-            let Some(line) = lines.next() else { break };
+            let Some(&line) = lines.peek() else { break };
             if content.len() + line.len() > OUTPUT_LIMIT {
                 if content.is_empty() {
                     return Err(WorkToolError::LineTooLong);
                 }
-                return Ok(json!({"path": path, "text": content, "next_offset": next_line}));
+                break;
             }
             content.push_str(line);
+            lines.next();
             next_line += 1;
         }
         Ok(json!({"path": path, "text": content, "next_offset": lines.peek().map(|_| next_line)}))
     }
 
-    pub(super) fn save(&self, path: &Path, content: &str, create: bool) -> io::Result<()> {
+    pub(super) fn save(
+        &self,
+        path: &Path,
+        content: &str,
+        create: bool,
+    ) -> Result<(), WorkToolError> {
         if content.len() > FILE_LIMIT {
-            return Err(io::Error::other("file exceeds the 4 MiB limit"));
+            return Err(WorkToolError::FileTooLarge);
         }
         let name = path
             .file_name()
@@ -353,9 +361,9 @@ impl Workspace {
         let folder = self.dir.open_dir(folder)?;
         let permissions = match folder.symlink_metadata(name) {
             Ok(meta) if meta.is_file() => Some(meta.permissions()),
-            Ok(_) => return Err(io::Error::other("refusing to replace a directory or link")),
+            Ok(_) => return Err(io::Error::other("refusing to replace a directory or link").into()),
             Err(error) if create && error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
         let mut temp = TempFile::new(&folder)?;
         let file = temp.as_file_mut();
@@ -364,6 +372,6 @@ impl Workspace {
             file.set_permissions(permissions)?;
         }
         file.sync_all()?;
-        temp.replace(name)
+        Ok(temp.replace(name)?)
     }
 }

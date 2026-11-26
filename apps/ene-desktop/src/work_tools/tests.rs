@@ -1,4 +1,6 @@
-use super::{OUTPUT_LIMIT, SHELL, WORKSPACE_FILE_CAPABILITIES, workspace::Workspace};
+use super::{
+    OUTPUT_LIMIT, SHELL, WORKSPACE_FILE_CAPABILITIES, WorkToolError, workspace::Workspace,
+};
 use ene_domain::json::validate;
 use serde_json::{Value, json};
 #[cfg(unix)]
@@ -131,15 +133,59 @@ async fn workspace_tools_read_search_and_edit_only_the_bound_workspace() {
     }
 }
 
+#[tokio::test]
+async fn read_and_grep_keep_the_first_unreturned_line_and_mark_truncated_text() {
+    let directory = tempfile::tempdir().unwrap();
+    let long_line = "日".repeat(OUTPUT_LIMIT / 3 + 1);
+    std::fs::write(
+        directory.path().join("book"),
+        format!("head\n{long_line}\n日\n"),
+    )
+    .unwrap();
+    let workspace = Arc::new(Workspace::open(directory.path()).unwrap());
+    let call = |tool, mut input: Value| {
+        input["workspace"] = json!(workspace.root.to_string_lossy());
+        workspace.clone().execute(tool, input)
+    };
+
+    let first = call("work.read", json!({"path": "book"})).await.unwrap();
+    assert_eq!(first["text"], "head\n");
+    assert_eq!(first["next_offset"], 2);
+    assert!(matches!(
+        call("work.read", json!({"path": "book", "offset": 2})).await,
+        Err(WorkToolError::LineTooLong)
+    ));
+    let grep = call(
+        "work.grep",
+        json!({"path": "book", "pattern": "日", "limit": 1}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(grep["truncated"], true);
+    assert_eq!(
+        grep["entries"],
+        json!([{"path":"book","line":2,"text":"日".repeat(2048 / 3)}])
+    );
+}
+
 #[cfg(unix)]
-#[test]
-fn file_operations_cannot_follow_a_link_out_of_the_workspace() {
+#[tokio::test]
+async fn file_operations_cannot_follow_a_link_out_of_the_workspace() {
     let directory = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("secret"), "secret").unwrap();
     std::os::unix::fs::symlink(outside.path(), directory.path().join("link")).unwrap();
-    let workspace = Workspace::open(directory.path()).unwrap();
+    let workspace = Arc::new(Workspace::open(directory.path()).unwrap());
     assert!(workspace.load(Path::new("link/secret")).is_err());
     assert!(workspace.save(Path::new("link/new"), "bad", true).is_err());
     assert!(!outside.path().join("new").exists());
+    let input = json!({"workspace": workspace.root.to_string_lossy(), "pattern": "secret"});
+    let output = workspace
+        .clone()
+        .execute("work.grep", input.clone())
+        .await
+        .unwrap();
+    assert_eq!(output["entries"], json!([]));
+    let output = workspace.execute("work.find", input).await.unwrap();
+    assert_eq!(output["entries"], json!([]));
 }

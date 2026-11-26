@@ -14,7 +14,8 @@ mod shell;
 mod tests;
 mod workspace;
 
-pub(crate) use workspace::Workspace;
+pub use workspace::WORKSPACE_FILE_CAPABILITIES;
+pub(crate) use workspace::{PREFIX, Workspace};
 
 const FILE_LIMIT: usize = 4 * 1024 * 1024;
 const IMAGE_LIMIT: usize = 512 * 1024;
@@ -74,16 +75,6 @@ pub(crate) enum WorkToolError {
     #[error(transparent)]
     Join(#[from] tokio::task::JoinError),
 }
-
-pub(crate) const PREFIX: &str = "work.";
-pub const WORKSPACE_FILE_CAPABILITIES: &[&str] = &[
-    "work.read",
-    "work.write",
-    "work.edit",
-    "work.grep",
-    "work.find",
-    "work.ls",
-];
 
 #[cfg(windows)]
 const SHELL: &str = "powershell";
