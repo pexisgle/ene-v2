@@ -352,7 +352,7 @@ pub(super) fn collect_decisions(world: &mut World) {
     {
         let result = submit_with_outcome(
             world,
-            ApprovalRequest::Companion {
+            ApprovalRequest::DecisionModel {
                 request: &pending.request,
                 companion: &pending.companion,
             },
@@ -362,10 +362,13 @@ pub(super) fn collect_decisions(world: &mut World) {
             && error.is_storage()
         {
             crate::host::fail(world, &error.to_string());
-        } else {
-            log_model_approval(pending, &flight.engine, &decision.reason, result);
+            return;
         }
-        return;
+        let accepted = result.is_ok();
+        log_model_approval(pending, &flight.engine, &decision.reason, result);
+        if accepted {
+            return;
+        }
     }
     if let Err(why) = outcome {
         tracing::warn!(%why, request = %pending.request, "the decision failed");

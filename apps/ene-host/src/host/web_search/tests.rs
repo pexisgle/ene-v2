@@ -8,17 +8,25 @@ fn search_keeps_citable_results_and_reports_invalid_responses() {
         {"title":"Rust","url":"https://www.rust-lang.org/","content":"Official site"},
         {"title":"Other","url":"https://example.org/","content":"beyond the limit"}
     ]}"#;
-    let output = parse_adapter_results(SearchAdapter::Mwmbl, "Mwmbl", body, 1).unwrap();
+    let output = parse_adapter_results(SearchAdapter::Mwmbl, "Mwmbl", body, 1, None).unwrap();
     assert_eq!(
         output["results"],
         json!([{"title":"Rust","url":"https://www.rust-lang.org/","snippet":"Official site"}])
     );
     assert_eq!(
-        parse_adapter_results(SearchAdapter::Mwmbl, "Mwmbl", br#"{"results":[]}"#, 5).unwrap()["results"],
+        parse_adapter_results(SearchAdapter::Mwmbl, "Mwmbl", br#"{"results":[]}"#, 5, None)
+            .unwrap()["results"],
         json!([])
     );
     assert!(
-        parse_adapter_results(SearchAdapter::Mwmbl, "Mwmbl", b"service unavailable", 5).is_err()
+        parse_adapter_results(
+            SearchAdapter::Mwmbl,
+            "Mwmbl",
+            b"service unavailable",
+            5,
+            None
+        )
+        .is_err()
     );
 }
 
@@ -100,6 +108,10 @@ async fn spawn_mock_search_adapters() -> (std::net::SocketAddr, tokio::task::Joi
                 Json(json!({
                     "results": [
                         {
+                            "url": "https://exa.example/?token=exa%2Dsecret",
+                            "title": "a result that reflects the credential"
+                        },
+                        {
                             "url": "https://exa.example/1",
                             "title": "Exa Hit",
                             "highlights": ["exa highlight 1", "exa highlight 2"]
@@ -118,7 +130,7 @@ async fn spawn_mock_search_adapters() -> (std::net::SocketAddr, tokio::task::Joi
             post(|| async {
                 (
                     http::StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": "Invalid API key"})),
+                    Json(json!({"error": "Rejected API key: wrong-key"})),
                 )
             }),
         );
@@ -149,8 +161,8 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
         CredentialState::Absent,
         5,
     );
-    let resolved_mwmbl = resolve_connection(&mwmbl_conn, Some(&creds), &providers).unwrap();
-    assert!(resolved_mwmbl.binding.endpoint.ends_with('/'));
+    let resolved_mwmbl = resolve_connection(&mwmbl_conn, Some(&creds), &providers, 0).unwrap();
+    assert!(resolved_mwmbl.binding.endpoint.path().ends_with('/'));
     let out = execute(&resolved_mwmbl, "rust", 5, &throttle)
         .await
         .unwrap();
@@ -164,7 +176,7 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
         CredentialState::Absent,
         3,
     );
-    let resolved_searx = resolve_connection(&searx_conn, Some(&creds), &providers).unwrap();
+    let resolved_searx = resolve_connection(&searx_conn, Some(&creds), &providers, 0).unwrap();
     let out = execute(&resolved_searx, "rust", 5, &throttle)
         .await
         .unwrap();
@@ -178,7 +190,7 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
         CredentialState::Registered,
         5,
     );
-    let resolved_brave = resolve_connection(&brave_conn, Some(&creds), &providers).unwrap();
+    let resolved_brave = resolve_connection(&brave_conn, Some(&creds), &providers, 0).unwrap();
     let out = execute(&resolved_brave, "rust", 5, &throttle)
         .await
         .unwrap();
@@ -192,7 +204,7 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
         CredentialState::Registered,
         5,
     );
-    let resolved_tavily = resolve_connection(&tavily_conn, Some(&creds), &providers).unwrap();
+    let resolved_tavily = resolve_connection(&tavily_conn, Some(&creds), &providers, 0).unwrap();
     let out = execute(&resolved_tavily, "rust", 5, &throttle)
         .await
         .unwrap();
@@ -214,8 +226,10 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
         crate::host::settings::environment_variable(&tavily_conn, &providers).as_deref(),
         Some("TAVILY_API_KEY")
     );
-    let resolved_exa = resolve_connection(&exa_conn, Some(&creds), &providers).unwrap();
+    let resolved_exa = resolve_connection(&exa_conn, Some(&creds), &providers, 0).unwrap();
     let out = execute(&resolved_exa, "rust", 5, &throttle).await.unwrap();
+    assert_eq!(out["results"].as_array().unwrap().len(), 2);
+    assert!(!out.to_string().contains("exa%2Dsecret"));
     assert_eq!(out["results"][0]["title"], "Exa Hit");
     assert_eq!(
         out["results"][0]["snippet"],
@@ -228,13 +242,13 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
         id: ene_domain::ConnectionId::parse("s-exa-missing").unwrap(),
         ..exa_conn.clone()
     };
-    let missing_err = resolve_connection(&exa_no_key, Some(&creds), &providers)
+    let missing_err = resolve_connection(&exa_no_key, Some(&creds), &providers, 0)
         .err()
         .expect("missing Exa credential must fail")
         .to_string();
     assert!(missing_err.contains("requires an API key credential"));
 
-    // Non-2xx error body detail is surfaced cleanly.
+    // Report the status without forwarding reflected credentials.
     let exa_bad = Connection {
         id: ene_domain::ConnectionId::parse("s-exa-bad").unwrap(),
         config: ConnectionConfig::Search(SearchConnection {
@@ -247,12 +261,12 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
         }),
         ..exa_conn
     };
-    let resolved_bad = resolve_connection(&exa_bad, Some(&creds), &providers).unwrap();
+    let resolved_bad = resolve_connection(&exa_bad, Some(&creds), &providers, 0).unwrap();
     let err = execute(&resolved_bad, "rust", 5, &throttle)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("HTTP 401"));
-    assert!(err.to_string().contains("Invalid API key"));
+    assert!(!err.to_string().contains("wrong-key"));
 
     server.abort();
 }
@@ -278,7 +292,11 @@ fn resolve_skips_unconfigured_enabled_search_when_another_is_ready() {
         config: ConnectionConfig::Search(SearchConnection {
             endpoint: Endpoint {
                 adapter: "tavily".into(),
-                endpoint: TAVILY_DEFAULT_ENDPOINT.into(),
+                endpoint: SearchAdapter::Tavily
+                    .provider()
+                    .default_endpoint
+                    .unwrap()
+                    .into(),
                 ..Default::default()
             },
             max_results: 5,
@@ -295,7 +313,11 @@ fn resolve_skips_unconfigured_enabled_search_when_another_is_ready() {
         config: ConnectionConfig::Search(SearchConnection {
             endpoint: Endpoint {
                 adapter: "exa".into(),
-                endpoint: EXA_DEFAULT_ENDPOINT.into(),
+                endpoint: SearchAdapter::Exa
+                    .provider()
+                    .default_endpoint
+                    .unwrap()
+                    .into(),
                 ..Default::default()
             },
             max_results: 5,
@@ -308,7 +330,10 @@ fn resolve_skips_unconfigured_enabled_search_when_another_is_ready() {
 
     let resolved = resolve(&store, Some(&creds), &providers).unwrap();
     assert_eq!(resolved.adapter, SearchAdapter::Exa);
-    assert_eq!(resolved.binding.endpoint, EXA_DEFAULT_ENDPOINT);
+    assert_eq!(
+        resolved.binding.endpoint.as_str(),
+        SearchAdapter::Exa.provider().default_endpoint.unwrap()
+    );
 }
 
 fn search_result_contains<A: bevy_ecs::prelude::Component>(
@@ -699,7 +724,7 @@ fn adapters_parse_their_config_spellings_and_label_themselves() {
         (SearchAdapter::Tavily, "tavily", "Tavily"),
         (SearchAdapter::Exa, "exa", "Exa"),
     ] {
-        assert_eq!(adapter.display_name(), label);
+        assert_eq!(adapter.provider().name, label);
         assert_eq!(SearchAdapter::parse(key), Some(adapter));
         // The old parser trimmed and lowercased, so padded or upper case
         // configuration still resolved.
@@ -777,7 +802,7 @@ async fn a_companion_answers_a_quick_search_in_its_own_turn() {
             &[ene_policy::PolicyRule {
                 id: "allow-fixture".into(),
                 tool_name: NAME.into(),
-                pattern: "127.0.0.1".into(),
+                pattern: format!("http://{address}/searx/search"),
                 effect: ene_policy::PolicyEffect::Allow,
                 created_at: util::now(),
             }],
@@ -849,8 +874,21 @@ async fn a_held_search_cannot_send_the_query_after_its_connection_changes() {
     };
     harness.run_until(|_| approvals().len() == 1);
     assert_eq!(original_hits.load(Ordering::SeqCst), 0);
-    configure_test_search(&harness, format!("http://{replacement}/searx"));
     let request_id = approvals()[0].request_id.clone();
+    let companion = harness.companion.clone();
+    assert!(
+        permission::submit_with_outcome(
+            harness.app.world_mut(),
+            permission::ApprovalRequest::DecisionModel {
+                request: &request_id,
+                companion: &companion,
+            },
+            permission::ApprovalDecision::Approve,
+        )
+        .is_err()
+    );
+    assert_eq!(approvals().len(), 1);
+    configure_test_search(&harness, format!("http://{replacement}/searx"));
     let error = permission::submit_with_outcome(
         harness.app.world_mut(),
         permission::ApprovalRequest::Operator(&request_id),

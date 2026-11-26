@@ -3,6 +3,7 @@
 
 use super::model::agent_platform;
 use crate::host::providers::Providers;
+use ene_catalog::SearchAdapter;
 pub(crate) use ene_catalog::{SAKURA_AI_API_KEY_ENV, SAKURA_AI_ENDPOINT};
 #[cfg(test)]
 pub(crate) use ene_domain::settings::{
@@ -18,18 +19,9 @@ use ene_rpc as w;
 /// Resolves the environment-variable name that may supply the secret for `connection`.
 pub(crate) fn environment_variable(connection: &Connection, loaded: &Providers) -> Option<String> {
     if connection.kind == ConnectionKind::Search {
-        return match connection
-            .endpoint()
-            .adapter
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "exa" => Some("EXA_API_KEY".into()),
-            "tavily" => Some("TAVILY_API_KEY".into()),
-            "brave" => Some("BRAVE_API_KEY".into()),
-            _ => None,
-        };
+        return SearchAdapter::parse(&connection.endpoint().adapter)
+            .and_then(|adapter| adapter.provider().key_environment)
+            .map(str::to_owned);
     }
     provider(&connection.endpoint().adapter, loaded)
         .and_then(|provider| provider.environment_variable)

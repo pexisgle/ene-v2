@@ -3,7 +3,7 @@
 use super::{Hub, presets, voice_roles};
 use crate::rpc;
 use ene_client_core::{
-    ModelRoleSlot,
+    ModelRoleSlot, SearchAdapter,
     connections::{
         ConnectionResource, build_connection_enabled_input, build_embedding_model_input,
     },
@@ -266,7 +266,7 @@ impl Hub {
 
     pub(crate) fn save_search_provider_key(
         &mut self,
-        adapter: &'static str,
+        adapter: SearchAdapter,
         secret: &str,
         activate: bool,
         cx: &mut Context<Self>,

@@ -99,7 +99,7 @@
 //! - **手順スキルとプラグイン**: 手順スキル（`skill_list` / `skill_read` / `skill_save`）は `skills` テーブルに永続化され、作業エージェントから再利用できます。Wasm プラグインはプロバイダーだけでなく `character` / `hook` / `tool` 拡張および `target = "client"`（デスクトップ側ツール実行）をサポートし、`ListPlugins` / `InstallPlugin` / `SetPluginEnabled` / `RemovePlugin` RPC でライフサイクルを管理します。外部 ACP プロセスとは `ene-work`（`acp` モジュール）の stdio JSON-RPC 2.0 ブリッジで連携します。
 //! - **スケジュール配送**: `schedule_occurrences` テーブルへ予定発生を実体化してから会話キューへ配送し、モデル未接続時にも一回限りの予定を失わず、復旧後に重複なく1回だけ届けます。
 //! - **音声と割込み**: VAD に加え Push-to-Talk（PTT）と再生エコー抑止付き自動 Barge-in（`AudioInputChunk.barge_in`）、および逐次 TTS/STT ストリーミングイベント（`Event::Audio` / `Event::Transcription`）に対応します。双方向低遅延の Realtime 音声セッション（WebRTC/WebSocket 単一セッション）は今後の拡張対象です。
-//! - **クライアント能力と検索**: クライアント能力ツールは `world.spawn_tool` で動的登録し、能力変更・有効化変更・切断に追随して入れ替えます（`body.motion` / `body.look_at` / `body.perch` / `eye.watch` / ワークスペース操作 / クライアントプラグイン）。組み込みの「手」は `report`、`device_request`、`mind_read`、`mind_recall`、`skill_list`、`skill_read`、`skill_save`、`web_search` と、接続済みの MCP ツールを使えます。`web_search` は権限パイプラインを通過し、利用者が有効な検索接続（`CONNECTION_KIND_SEARCH`）を設定している場合のみその接続先へ送信し、未設定・無効・拒否時は外部 HTTP 送信を行わず拒否します。
+//! - **クライアント能力と検索**: クライアント能力ツールは `world.spawn_tool` で動的登録し、能力変更・有効化変更・切断に追随して入れ替えます（`body.motion` / `body.look_at` / `body.perch` / `eye.watch` / ワークスペース操作 / クライアントプラグイン）。「頭」は短い事実確認を同じターンの `web_search` で行います。組み込みの「手」は `report`、`device_request`、`mind_read`、`mind_recall`、`skill_list`、`skill_read`、`skill_save`、`web_search` と、接続済みの MCP ツールを使えます。`web_search` は権限パイプラインを通過し、利用者が有効な検索接続（`CONNECTION_KIND_SEARCH`）を設定している場合のみその接続先へ送信し、未設定・無効・拒否時は外部 HTTP 送信を行わず拒否します。
 //!
 //! ## 検証
 //!

@@ -4061,6 +4061,7 @@ dependencies = [
  "globset",
  "gpui-kit",
  "libc",
+ "object",
  "parking_lot 0.13.0",
  "process-wrap",
  "regex",

@@ -411,8 +411,12 @@ fn matches_action(rule: &PolicyRule, action: &ActionMatch<'_>) -> bool {
     if rule.pattern == "*" {
         return true;
     }
+    // Legacy argument-only search allows do not establish consent to a
+    // destination. A newly approved search stores a destination-scoped rule.
+    let argument_allow_is_unscoped =
+        action.tool_name == WEB_SEARCH_TOOL && rule.effect == PolicyEffect::Allow;
     if let Some(expected_hex) = rule.pattern.strip_prefix("exact_sha256:") {
-        return expected_hex == action.raw_hash_hex;
+        return !argument_allow_is_unscoped && expected_hex == action.raw_hash_hex;
     }
     if rule.pattern.starts_with("search_sha256:") {
         return action.tool_name == WEB_SEARCH_TOOL
@@ -420,9 +424,12 @@ fn matches_action(rule: &PolicyRule, action: &ActionMatch<'_>) -> bool {
                 if rule.pattern == approved_search_pattern(url, action.raw_arguments));
     }
     if rule.pattern.starts_with('{') {
-        return serde_json::from_str::<Value>(&rule.pattern)
-            .ok()
-            .is_some_and(|saved| canonical_json(&saved) == canonical_json(action.raw_arguments));
+        return !argument_allow_is_unscoped
+            && serde_json::from_str::<Value>(&rule.pattern)
+                .ok()
+                .is_some_and(|saved| {
+                    canonical_json(&saved) == canonical_json(action.raw_arguments)
+                });
     }
     action.typed_target.matches_pattern(&rule.pattern)
 }

@@ -267,6 +267,16 @@ fn a_saved_search_approval_is_exact_to_destination_and_arguments() {
         ),
         Verdict::Allow
     );
+    let (canonical, digest) = canonicalise("web_search", &arguments);
+    for legacy in [canonical, format!("exact_sha256:{}", hex_digest(&digest))] {
+        assert!(matches!(
+            decide_action(
+                &[rule(PolicyEffect::Allow, "web_search", &legacy)],
+                &search(endpoint, arguments.clone()),
+            ),
+            Verdict::NeedsDecision { .. }
+        ));
+    }
     for changed in [
         search("https://search.example:9443/query", arguments),
         search(endpoint, json!({"query": "different"})),

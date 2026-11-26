@@ -6,14 +6,13 @@ use crate::rpc::{
     connections::{QuickConnectRequest, SetupSelection},
 };
 use ene_client_core::{
-    ModelRoleSlot, SAKURA_AI_ENDPOINT as SAKURA_ENDPOINT,
+    ModelRoleSlot, SAKURA_AI_ENDPOINT as SAKURA_ENDPOINT, SearchAdapter,
     domain::LlmProvider,
     presets::{
         EmbeddingPresetSpec, SearchPresetSpec, SttPresetSpec, build_embedding_preset_input,
         build_llm_provider_input, build_openai_tts_preset_input, build_sakura_tts_preset_input,
         build_search_assignment_inputs, build_search_preset_inputs, build_stt_preset_input,
         build_voicevox_preset_input, find_reusable_quick_connect_connection,
-        search_provider_defaults,
     },
 };
 use gpui::Context;
@@ -67,13 +66,14 @@ pub(super) fn add_search_preset(
 
 pub(super) fn save_search_provider_key(
     hub: &mut Hub,
-    adapter: &'static str,
+    adapter: SearchAdapter,
     secret: &str,
     activate: bool,
     cx: &mut Context<Hub>,
 ) {
     let secret = secret.trim().to_owned();
-    let Some((preset_id, name, endpoint)) = search_provider_defaults(adapter) else {
+    let provider = adapter.provider();
+    let (Some(_), Some(endpoint)) = (provider.key_environment, provider.default_endpoint) else {
         return;
     };
     if secret.is_empty() || hub.rpc.host().is_none() {
@@ -83,9 +83,9 @@ pub(super) fn save_search_provider_key(
         return;
     };
     let spec = SearchPresetSpec {
-        preset_id,
-        name,
-        adapter,
+        preset_id: provider.preset_id,
+        name: provider.connection_name,
+        adapter: provider.adapter_id,
         endpoint,
         activate,
     };

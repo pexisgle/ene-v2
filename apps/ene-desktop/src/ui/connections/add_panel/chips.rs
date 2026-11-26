@@ -8,7 +8,7 @@ use crate::ui::SearchPresetSpec;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button};
-use ene_client_core::domain::ConnectionKind;
+use ene_client_core::{SearchAdapter, domain::ConnectionKind};
 use gpui::{AnyElement, Context, Entity, SharedString};
 
 #[derive(Clone, Copy)]
@@ -137,88 +137,53 @@ pub(super) fn build_search_preset_chips(
     theme: &Theme,
     cx: &Context<ConnectionsPane>,
 ) -> Vec<AnyElement> {
-    let search_presets = [
+    [
+        (SearchAdapter::Exa, "Exa（APIキー）", Tone::Soft),
+        (SearchAdapter::Tavily, "Tavily（APIキー）", Tone::Soft),
+        (SearchAdapter::Brave, "Brave Search（APIキー）", Tone::Ghost),
+        (SearchAdapter::Mwmbl, "Mwmbl（キー不要）", Tone::Mint),
         (
-            "add-preset-search-exa",
-            "search-exa",
-            "Exa（APIキー）",
-            "Web検索 (Exa)",
-            "exa",
-            "https://api.exa.ai/search",
-            Tone::Soft,
-        ),
-        (
-            "add-preset-search-tavily",
-            "search-tavily",
-            "Tavily（APIキー）",
-            "Web検索 (Tavily)",
-            "tavily",
-            "https://api.tavily.com/search",
-            Tone::Soft,
-        ),
-        (
-            "add-preset-search-brave",
-            "search-brave",
-            "Brave Search（APIキー）",
-            "Web検索 (Brave)",
-            "brave",
-            "https://api.search.brave.com/res/v1/web/search",
-            Tone::Ghost,
-        ),
-        (
-            "add-preset-search-mwmbl",
-            "search-mwmbl",
-            "Mwmbl（キー不要）",
-            "Web検索 (Mwmbl)",
-            "mwmbl",
-            "https://api.mwmbl.org/api/v2/search/",
-            Tone::Mint,
-        ),
-        (
-            "add-preset-search-searxng",
-            "search-searxng",
+            SearchAdapter::Searxng,
             "SearXNG（自前・ローカル）",
-            "Web検索 (SearXNG)",
-            "searxng",
-            "http://127.0.0.1:8080/search",
             Tone::Ghost,
         ),
-    ];
-    search_presets
-        .into_iter()
-        .map(
-            |(btn_id, preset_id, label, conn_name, adapter, url, tone)| {
-                let hub_s = hub.clone();
-                let pane_s = cx.entity();
-                pill_button(
-                    btn_id,
-                    label,
-                    tone.icon(Icon::Search).enabled(live),
-                    theme,
-                    move |_, cx| {
-                        let target_id = hub_s.update(cx, |hub, cx| {
-                            hub.add_search_preset(
-                                &SearchPresetSpec {
-                                    preset_id,
-                                    name: conn_name,
-                                    adapter,
-                                    endpoint: url,
-                                    activate: true,
-                                },
-                                cx,
-                            )
-                        });
-                        pane_s.update(cx, |this, cx| {
-                            this.form.add = AddFlow::Closed;
-                            this.form.open_editor(target_id);
-                            this.open_dropdown = None;
-                            cx.notify();
-                        });
-                    },
-                )
+    ]
+    .into_iter()
+    .map(|(adapter, label, tone)| {
+        let provider = adapter.provider();
+        let button = SharedString::from(format!("add-preset-{}", provider.preset_id));
+        let hub_s = hub.clone();
+        let pane_s = cx.entity();
+        pill_button(
+            button,
+            label,
+            tone.icon(Icon::Search).enabled(live),
+            theme,
+            move |_, cx| {
+                let target_id = hub_s.update(cx, |hub, cx| {
+                    hub.add_search_preset(
+                        &SearchPresetSpec {
+                            preset_id: provider.preset_id,
+                            name: provider.connection_name,
+                            adapter: provider.adapter_id,
+                            endpoint: provider
+                                .default_endpoint
+                                .unwrap_or("http://127.0.0.1:8080/search"),
+                            activate: true,
+                        },
+                        cx,
+                    )
+                });
+                pane_s.update(cx, |this, cx| {
+                    this.form.add = AddFlow::Closed;
+                    this.form.open_editor(target_id);
+                    this.open_dropdown = None;
+                    cx.notify();
+                });
             },
         )
-        .collect()
+    })
+    .collect()
 }
 
 pub(super) fn build_custom_kind_chips(

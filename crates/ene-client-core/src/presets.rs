@@ -55,26 +55,6 @@ pub struct EmbeddingPresetSpec<'a> {
     pub dimensions: u32,
 }
 
-/// Returns `(preset_id, display_name, default_endpoint)` for a known search provider adapter.
-pub fn search_provider_defaults(
-    adapter: &str,
-) -> Option<(&'static str, &'static str, &'static str)> {
-    match adapter {
-        "exa" => Some(("search-exa", "Web検索 (Exa)", "https://api.exa.ai/search")),
-        "tavily" => Some((
-            "search-tavily",
-            "Web検索 (Tavily)",
-            "https://api.tavily.com/search",
-        )),
-        "brave" => Some((
-            "search-brave",
-            "Web検索 (Brave)",
-            "https://api.search.brave.com/res/v1/web/search",
-        )),
-        _ => None,
-    }
-}
-
 fn search_connection_input(
     id: String,
     name: String,

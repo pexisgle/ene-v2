@@ -77,6 +77,10 @@ pub(crate) enum ApprovalRequest<'a> {
         request: &'a str,
         companion: &'a str,
     },
+    DecisionModel {
+        request: &'a str,
+        companion: &'a str,
+    },
 }
 
 #[derive(Debug)]
@@ -194,7 +198,8 @@ fn search_approval_pattern(
     credentials: Option<&crate::host::model::Credentials>,
     providers: &crate::host::providers::Providers,
     arguments: &Value,
-) -> Result<String> {
+    automated: bool,
+) -> Result<Option<String>> {
     let changed = || HostError::Conflict(SearchConfigError::ConnectionChanged.to_string());
     let binding = binding.ok_or_else(changed)?;
     binding
@@ -204,10 +209,14 @@ fn search_approval_pattern(
             _ => changed(),
         })?;
     let rules = store.policy_repo().policy_rules()?;
-    if let Verdict::Deny { reason } = decide_action(&rules, &binding.action(arguments)) {
-        return Err(HostError::Permission(reason));
+    match decide_action(&rules, &binding.action(arguments)) {
+        Verdict::Deny { reason } => Err(HostError::Permission(reason)),
+        Verdict::HumanRequired { .. } if automated => Ok(None),
+        _ => Ok(Some(approved_search_pattern(
+            binding.endpoint.as_str(),
+            arguments,
+        ))),
     }
-    Ok(approved_search_pattern(&binding.endpoint, arguments))
 }
 
 fn approve_call(
@@ -215,9 +224,10 @@ fn approve_call(
     store: &Store,
     approval: &Approval,
     call: Entity,
-    name: &str,
     arguments: Value,
+    automated: bool,
 ) -> Result<(Approval, Option<String>)> {
+    let name = approval.tool_name.as_str();
     let repo = store.approval_repo();
     let request_id = &approval.request_id;
     let pattern = if name == web_search::NAME {
@@ -228,8 +238,14 @@ fn approve_call(
             world.get_resource(),
             world.get_resource().unwrap_or(&fallback),
             &arguments,
+            automated,
         ) {
-            Ok(pattern) => Some(pattern),
+            Ok(Some(pattern)) => Some(pattern),
+            Ok(None) => {
+                return Err(HostError::Permission(
+                    "this search now requires user confirmation".into(),
+                ));
+            }
             Err(error) => {
                 let status = match error {
                     HostError::Conflict(_) => ApprovalStatus::Expired,
@@ -276,9 +292,11 @@ pub(crate) fn submit_with_outcome(
     request: ApprovalRequest<'_>,
     decision: ApprovalDecision,
 ) -> Result<SubmitOutcome> {
+    let automated = matches!(request, ApprovalRequest::DecisionModel { .. });
     let (request_id, owner) = match request {
         ApprovalRequest::Operator(id) => (id, None),
-        ApprovalRequest::Companion { request, companion } => (request, Some(companion)),
+        ApprovalRequest::Companion { request, companion }
+        | ApprovalRequest::DecisionModel { request, companion } => (request, Some(companion)),
     };
     let store = world.resource::<Store>().clone();
     let repo = store.approval_repo();
@@ -300,12 +318,12 @@ pub(crate) fn submit_with_outcome(
         ));
     };
     let snapshot = world.get::<ToolRequest>(hold.call).and_then(|request| {
-        let name = request.call.function.name.clone();
+        let name = request.call.function.name.as_str();
         let args = Value::Object(request.call.function.arguments.clone());
-        (canonicalise(name.as_str(), &args).1 == approval.action_payload_hash)
-            .then_some((name, args))
+        (name == approval.tool_name && canonicalise(name, &args).1 == approval.action_payload_hash)
+            .then_some(args)
     });
-    let Some((name, args)) = snapshot else {
+    let Some(args) = snapshot else {
         repo.resolve_approval(request_id, ApprovalStatus::Expired)?;
         release(world, request_id);
         refuse(
@@ -320,7 +338,7 @@ pub(crate) fn submit_with_outcome(
 
     let (approval, saved_pattern) = match decision {
         ApprovalDecision::Approve | ApprovalDecision::AlwaysApprove => {
-            approve_call(world, &store, &approval, hold.call, name.as_str(), args)?
+            approve_call(world, &store, &approval, hold.call, args, automated)?
         }
         ApprovalDecision::Deny | ApprovalDecision::Unspecified => {
             let approval = repo.resolve_approval(request_id, ApprovalStatus::Denied)?;

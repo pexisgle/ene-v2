@@ -3,30 +3,27 @@ use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button, status_pill};
 use crate::ui::{Hub, search_adapter_requires_key};
-use ene_client_core::domain::{Connection, ConnectionCheck, ConnectionKind};
+use ene_client_core::{
+    SearchAdapter,
+    domain::{Connection, ConnectionCheck, ConnectionKind},
+};
 use ene_domain::CredentialState;
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 use std::collections::BTreeMap;
 
 struct SearchProviderSpec {
-    adapter: &'static str,
-    display_name: &'static str,
+    adapter: SearchAdapter,
     placeholder: &'static str,
-    env_hint: &'static str,
 }
 
 const SEARCH_PROVIDERS: [SearchProviderSpec; 2] = [
     SearchProviderSpec {
-        adapter: "exa",
-        display_name: "Exa",
+        adapter: SearchAdapter::Exa,
         placeholder: "Exa API キーを入力…",
-        env_hint: "EXA_API_KEY",
     },
     SearchProviderSpec {
-        adapter: "tavily",
-        display_name: "Tavily",
+        adapter: SearchAdapter::Tavily,
         placeholder: "Tavily API キーを入力… (tvly-...)",
-        env_hint: "TAVILY_API_KEY",
     },
 ];
 
@@ -87,9 +84,10 @@ fn render_search_provider_row(
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
 ) -> AnyElement {
+    let provider = spec.adapter.provider();
     let existing = search_conns.iter().copied().find(|c| {
         c.search_adapter()
-            .is_some_and(|a| a.eq_ignore_ascii_case(spec.adapter))
+            .is_some_and(|a| a.eq_ignore_ascii_case(provider.adapter_id))
     });
     let conn_id = existing.map(|c| c.id.clone());
     let has_cred = existing.is_some_and(|c| c.credential_state.is_configured());
@@ -99,11 +97,11 @@ fn render_search_provider_row(
         .is_some_and(|id| pane.hub.read(cx).setup.checking_connections.contains(id));
     let check = existing.and_then(|c| checks.get(&c.id).or(c.last_check.as_ref()));
 
-    let field = SecretField::Search(spec.adapter);
-    let revealed = pane.form.revealed_search == Some(spec.adapter);
+    let field = SecretField::Search(provider.adapter_id);
+    let revealed = pane.form.revealed_search == Some(provider.adapter_id);
     let draft = pane.drafts.masked_draft(
         cx,
-        format!("search-card:secret:{}", spec.adapter),
+        format!("search-card:secret:{}", provider.adapter_id),
         spec.placeholder,
         !revealed,
         theme,
@@ -132,7 +130,7 @@ fn render_search_provider_row(
     let adapter = spec.adapter;
     let hub_save = pane.hub.clone();
     let input_row = secret_row(
-        format!("search-card-eye-{adapter}"),
+        format!("search-card-eye-{}", provider.adapter_id),
         field,
         draft,
         revealed,
@@ -140,7 +138,7 @@ fn render_search_provider_row(
         cx,
     )
     .child(pill_button(
-        SharedString::from(format!("search-card-save-{adapter}")),
+        SharedString::from(format!("search-card-save-{}", provider.adapter_id)),
         if has_cred {
             "キーを更新"
         } else {
@@ -167,12 +165,14 @@ fn render_search_provider_row(
         .gap(px(8.))
         .child(header)
         .child(input_row)
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme.ink_muted)
-                .child(format!("環境変数 {} でも設定できます", spec.env_hint)),
-        )
+        .when_some(provider.key_environment, |this, environment| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.ink_muted)
+                    .child(format!("環境変数 {environment} でも設定できます")),
+            )
+        })
         .when_some(err_msg, |this, msg| {
             this.child(
                 div()
@@ -292,7 +292,7 @@ fn render_provider_header(
                         .text_xs()
                         .font_weight(FontWeight::BOLD)
                         .text_color(theme.ink)
-                        .child(spec.display_name),
+                        .child(spec.adapter.provider().name),
                 )
                 .child(status_pill(cred_label, None, cred_bg, cred_fg))
                 .when_some(check_badge, |this, (label, bg, fg)| {
@@ -317,7 +317,10 @@ fn render_provider_header(
                     use_id.filter(|_| meta.has_cred && !meta.is_active),
                     |this, cid| {
                         this.child(pill_button(
-                            SharedString::from(format!("search-card-use-{}", spec.adapter)),
+                            SharedString::from(format!(
+                                "search-card-use-{}",
+                                spec.adapter.provider().adapter_id
+                            )),
                             "この検索を使う",
                             Tone::Soft.icon(Icon::Check).enabled(meta.live),
                             theme,
@@ -331,7 +334,10 @@ fn render_provider_header(
                 )
                 .when_some(check_id.filter(|_| meta.has_cred), |this, cid| {
                     this.child(pill_button(
-                        SharedString::from(format!("search-card-check-{}", spec.adapter)),
+                        SharedString::from(format!(
+                            "search-card-check-{}",
+                            spec.adapter.provider().adapter_id
+                        )),
                         if meta.is_checking {
                             "確認中…"
                         } else {

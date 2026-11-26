@@ -13,7 +13,7 @@ pub mod connections;
 pub mod vendors;
 pub mod voice;
 
-pub use connections::search_adapter_requires_key;
+pub use connections::{SearchAdapter, SearchProvider, search_adapter_requires_key};
 pub use vendors::{
     GOOGLE_AGENT_PLATFORM, GOOGLE_AGENT_PLATFORM_DEFAULT_MODEL, GOOGLE_AGENT_PLATFORM_ENDPOINT,
     GOOGLE_AGENT_PLATFORM_VERIFIED_MODEL_LIST, SAKURA_AI_API_KEY_ENV, SAKURA_AI_ENDPOINT,

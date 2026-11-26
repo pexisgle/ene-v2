@@ -26,7 +26,13 @@ impl Plugin for SearchPlugin {
                 ToolOptions {
                     footprint: Some(Touches::Independent),
                 },
-                search,
+                |called: On<ToolCalled<SearchArgs>>,
+                 bindings: Query<&SearchBinding>,
+                 decisions: Query<&mut Decision>,
+                 services: SearchServices<'_>,
+                 commands: Commands| {
+                    search(called.event(), bindings, decisions, &services, commands);
+                },
             );
     }
 }
@@ -59,14 +65,13 @@ struct SearchServices<'w> {
 }
 
 fn search(
-    called: On<ToolCalled<SearchArgs>>,
+    called: &ToolCalled<SearchArgs>,
     bindings: Query<&SearchBinding>,
     mut decisions: Query<&mut Decision>,
-    services: SearchServices<'_>,
+    services: &SearchServices<'_>,
     mut commands: Commands,
 ) {
-    let called = called.event();
-    match start(bindings.get(called.call).ok(), &called.args, &services) {
+    match start(bindings.get(called.call).ok(), &called.args, services) {
         Ok(running) => {
             commands.entity(called.call).insert(running);
         }

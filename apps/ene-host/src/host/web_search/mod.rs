@@ -19,86 +19,53 @@ use super::{
 };
 use adapter::{parse_adapter_results, read_http_error, send_search_request};
 use bevy_ecs::prelude::Component;
+use ene_catalog::SearchAdapter;
 use ene_domain::ConnectionId;
 use ene_policy::CandidateAction;
 use ene_store::util;
 use rig_core::tool::{ToolErrorKind, ToolExecutionError};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
-use strum::{EnumString, IntoStaticStr};
 use tokio::{sync::Mutex, time::Instant};
+use url::Url;
 
 // `tests.rs` reaches `json!` through `use super::*`, as it did before the split.
 #[cfg(test)]
 use serde_json::json;
 
 pub(crate) const NAME: &str = "web_search";
-const MWMBL_DEFAULT_ENDPOINT: &str = "https://api.mwmbl.org/api/v2/search/";
-const BRAVE_DEFAULT_ENDPOINT: &str = "https://api.search.brave.com/res/v1/web/search";
-const TAVILY_DEFAULT_ENDPOINT: &str = "https://api.tavily.com/search";
-const EXA_DEFAULT_ENDPOINT: &str = "https://api.exa.ai/search";
 const MAX_QUERY_CHARS: usize = 500;
 const MAX_RESULTS: usize = 20;
 const DEFAULT_RESULTS: usize = 5;
 const MAX_BODY_BYTES: usize = 512 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(25);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, EnumString, IntoStaticStr)]
-#[strum(ascii_case_insensitive)]
-pub(crate) enum SearchAdapter {
-    /// The parse key is the lowercase configuration spelling; the label is what
-    /// the user-facing error text and the search result header show.
-    #[strum(serialize = "mwmbl", to_string = "Mwmbl")]
-    Mwmbl,
-    #[strum(serialize = "searxng", to_string = "SearXNG")]
-    Searxng,
-    #[strum(serialize = "brave", to_string = "Brave")]
-    Brave,
-    #[strum(serialize = "tavily", to_string = "Tavily")]
-    Tavily,
-    #[strum(serialize = "exa", to_string = "Exa")]
-    Exa,
-}
-
-impl SearchAdapter {
-    fn parse(raw: &str) -> Option<Self> {
-        raw.trim().parse().ok()
+fn search_endpoint(adapter: SearchAdapter, configured: &str) -> Result<Url, SearchConfigError> {
+    let provider = adapter.provider().name;
+    let invalid = || SearchConfigError::InvalidEndpoint(provider);
+    let mut url = Url::parse(configured).map_err(|_| invalid())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(invalid());
     }
 
-    fn display_name(self) -> &'static str {
-        self.into()
-    }
-
-    fn default_endpoint(self) -> Option<&'static str> {
-        match self {
-            Self::Mwmbl => Some(MWMBL_DEFAULT_ENDPOINT),
-            Self::Searxng => None,
-            Self::Brave => Some(BRAVE_DEFAULT_ENDPOINT),
-            Self::Tavily => Some(TAVILY_DEFAULT_ENDPOINT),
-            Self::Exa => Some(EXA_DEFAULT_ENDPOINT),
+    // Resolve provider-specific request paths before policy sees the destination.
+    match adapter {
+        SearchAdapter::Mwmbl if !url.path().ends_with('/') => {
+            url.path_segments_mut().map_err(|()| invalid())?.push("");
         }
-    }
-
-    fn requires_api_key(self) -> bool {
-        matches!(self, Self::Brave | Self::Tavily | Self::Exa)
-    }
-}
-
-fn normalize_endpoint(adapter: SearchAdapter, raw: String) -> String {
-    if adapter != SearchAdapter::Mwmbl {
-        return raw;
-    }
-    // `endpoint_of` strips trailing slashes, while Mwmbl's Django endpoint
-    // redirects `/api/v2/search` -> `/api/v2/search/` with HTTP 301 and the
-    // host HTTP client intentionally keeps redirects off.
-    if let Ok(mut url) = url::Url::parse(&raw) {
-        if !url.path().ends_with('/') {
-            let path = format!("{}/", url.path());
-            url.set_path(&path);
+        SearchAdapter::Searxng if !url.path().ends_with("/search") => {
+            url.path_segments_mut()
+                .map_err(|()| invalid())?
+                .pop_if_empty()
+                .push("search");
         }
-        return url.into();
+        _ => {}
     }
-    raw
+    url.set_fragment(None);
+    Ok(url)
 }
 
 /// The route the permission gate evaluated. A held call cannot switch to
@@ -107,13 +74,15 @@ fn normalize_endpoint(adapter: SearchAdapter, raw: String) -> String {
 pub(crate) struct SearchBinding {
     connection: ConnectionId,
     revision: u64,
-    pub(crate) endpoint: String,
+    settings_revision: u64,
+    credential_generation: Option<u64>,
+    pub(crate) endpoint: Url,
 }
 
 impl SearchBinding {
     pub(crate) fn action(&self, arguments: &Value) -> CandidateAction {
         CandidateAction::WebSearch {
-            endpoint: self.endpoint.clone(),
+            endpoint: self.endpoint.to_string(),
             query: arguments
                 .get("query")
                 .and_then(Value::as_str)
@@ -159,6 +128,8 @@ pub(crate) enum SearchConfigError {
     UnsupportedAdapter(String),
     #[error("search_unconfigured: `{0}` connection requires an endpoint URL")]
     MissingEndpoint(&'static str),
+    #[error("search_unconfigured: invalid {0} HTTP(S) endpoint")]
+    InvalidEndpoint(&'static str),
     #[error("search_unconfigured: `{0}` search connection requires an API key credential")]
     MissingCredential(&'static str),
     #[error(transparent)]
@@ -181,10 +152,12 @@ pub(crate) fn resolve(
         .iter()
         .filter(|connection| connection.enabled && connection.kind == ConnectionKind::Search);
     let first = enabled.next().ok_or(SearchConfigError::Unconfigured)?;
-    match resolve_connection(first, credentials, providers) {
+    let resolve_one =
+        |connection| resolve_connection(connection, credentials, providers, settings.revision);
+    match resolve_one(first) {
         Ok(resolved) => Ok(resolved),
         Err(error) => enabled
-            .find_map(|connection| resolve_connection(connection, credentials, providers).ok())
+            .find_map(|connection| resolve_one(connection).ok())
             .ok_or(error),
     }
 }
@@ -193,24 +166,26 @@ pub(crate) fn resolve_connection(
     connection: &Connection,
     credentials: Option<&Credentials>,
     providers: &Providers,
+    settings_revision: u64,
 ) -> Result<ResolvedSearch, SearchConfigError> {
     let ConnectionConfig::Search(cfg) = &connection.config else {
         return Err(SearchConfigError::WrongKind);
     };
     let adapter = SearchAdapter::parse(&cfg.endpoint.adapter)
         .ok_or_else(|| SearchConfigError::UnsupportedAdapter(cfg.endpoint.adapter.clone()))?;
+    let provider = adapter.provider();
     let endpoint = endpoint_of(connection, providers)
-        .or_else(|| adapter.default_endpoint().map(str::to_owned))
-        .map(|raw| normalize_endpoint(adapter, raw))
-        .ok_or_else(|| SearchConfigError::MissingEndpoint(adapter.display_name()))?;
+        .or_else(|| provider.default_endpoint.map(str::to_owned))
+        .ok_or(SearchConfigError::MissingEndpoint(provider.name))?;
+    let endpoint = search_endpoint(adapter, &endpoint)?;
     let secret = connection_secret(connection, credentials, providers)?
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
-    if adapter.requires_api_key() && secret.is_none() {
-        return Err(SearchConfigError::MissingCredential(adapter.display_name()));
+    if provider.key_environment.is_some() && secret.is_none() {
+        return Err(SearchConfigError::MissingCredential(provider.name));
     }
     let provider_name = if connection.name.trim().is_empty() {
-        adapter.display_name().to_owned()
+        provider.name.to_owned()
     } else {
         connection.name.clone()
     };
@@ -222,6 +197,8 @@ pub(crate) fn resolve_connection(
         binding: SearchBinding {
             connection: connection.id.clone(),
             revision: connection.revision,
+            settings_revision,
+            credential_generation: credentials.map(Credentials::generation),
             endpoint,
         },
         max_results,
@@ -236,7 +213,7 @@ pub(crate) async fn probe(
     providers: &Providers,
 ) -> Check {
     let checked_at = util::now();
-    let resolved = match resolve_connection(connection, Some(credentials), providers) {
+    let resolved = match resolve_connection(connection, Some(credentials), providers, 0) {
         Ok(resolved) => resolved,
         Err(error) => {
             return Check {
@@ -281,17 +258,23 @@ async fn execute(
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(ToolExecutionError::other(format!(
                 "{} quota or rate limit reached",
-                resolved.adapter.display_name()
+                resolved.adapter.provider().name
             )));
         }
         if !status.is_success() {
-            return Err(read_http_error(response, resolved.adapter, status).await);
+            return Err(read_http_error(response, resolved, status).await);
         }
         let body =
-            net::read_response_body(response, MAX_BODY_BYTES, resolved.adapter.display_name())
+            net::read_response_body(response, MAX_BODY_BYTES, resolved.adapter.provider().name)
                 .await
                 .map_err(|error| ToolExecutionError::other(error.to_string()))?;
-        parse_adapter_results(resolved.adapter, &resolved.provider_name, &body, limit)
+        parse_adapter_results(
+            resolved.adapter,
+            &resolved.provider_name,
+            &body,
+            limit,
+            resolved.secret.as_deref(),
+        )
     })
     .await
     .map_err(|_| ToolExecutionError::new(ToolErrorKind::Timeout, "Web search timed out"))?

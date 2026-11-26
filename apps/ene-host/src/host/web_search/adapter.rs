@@ -105,20 +105,14 @@ pub(super) async fn send_search_request(
         SearchAdapter::Mwmbl => {
             send_mwmbl_request(
                 client,
-                &resolved.binding.endpoint,
+                resolved.binding.endpoint.clone(),
                 query,
                 mwmbl_next_request,
             )
             .await?
         }
         SearchAdapter::Searxng => {
-            let mut url = url::Url::parse(&resolved.binding.endpoint)
-                .map_err(|_| ToolExecutionError::other("invalid SearXNG endpoint URL"))?;
-            if !url.path().ends_with("/search")
-                && let Ok(mut segments) = url.path_segments_mut()
-            {
-                segments.pop_if_empty().push("search");
-            }
+            let mut url = resolved.binding.endpoint.clone();
             url.query_pairs_mut()
                 .append_pair("q", query)
                 .append_pair("format", "json");
@@ -130,8 +124,7 @@ pub(super) async fn send_search_request(
                 .await
         }
         SearchAdapter::Brave => {
-            let mut url = url::Url::parse(&resolved.binding.endpoint)
-                .map_err(|_| ToolExecutionError::other("invalid Brave Search URL"))?;
+            let mut url = resolved.binding.endpoint.clone();
             url.query_pairs_mut()
                 .append_pair("q", query)
                 .append_pair("count", &limit.to_string());
@@ -145,11 +138,9 @@ pub(super) async fn send_search_request(
                 .await
         }
         SearchAdapter::Tavily => {
-            let url = url::Url::parse(&resolved.binding.endpoint)
-                .map_err(|_| ToolExecutionError::other("invalid Tavily Search URL"))?;
             let key = resolved.secret.as_deref().unwrap_or_default().trim();
             client
-                .post(url)
+                .post(resolved.binding.endpoint.clone())
                 .header(reqwest::header::USER_AGENT, SEARCH_USER_AGENT)
                 .header(reqwest::header::ACCEPT, "application/json")
                 .bearer_auth(key)
@@ -162,11 +153,9 @@ pub(super) async fn send_search_request(
                 .await
         }
         SearchAdapter::Exa => {
-            let url = url::Url::parse(&resolved.binding.endpoint)
-                .map_err(|_| ToolExecutionError::other("invalid Exa Search URL"))?;
             let key = resolved.secret.as_deref().unwrap_or_default().trim();
             client
-                .post(url)
+                .post(resolved.binding.endpoint.clone())
                 .header(reqwest::header::USER_AGENT, SEARCH_USER_AGENT)
                 .header(reqwest::header::ACCEPT, "application/json")
                 .header("x-api-key", key)
@@ -187,7 +176,7 @@ pub(super) async fn send_search_request(
     sent.map_err(|error| {
         ToolExecutionError::other(format!(
             "could not reach {}: {}",
-            resolved.adapter.display_name(),
+            resolved.adapter.provider().name,
             error.without_url()
         ))
     })
@@ -195,16 +184,10 @@ pub(super) async fn send_search_request(
 
 async fn send_mwmbl_request(
     client: &reqwest::Client,
-    endpoint: &str,
+    mut url: url::Url,
     query: &str,
     mwmbl_next_request: &Arc<Mutex<Option<Instant>>>,
 ) -> Result<Result<reqwest::Response, reqwest::Error>, ToolExecutionError> {
-    let mut url = url::Url::parse(endpoint)
-        .map_err(|_| ToolExecutionError::other("invalid search endpoint URL"))?;
-    if !url.path().ends_with('/') {
-        let path = format!("{}/", url.path());
-        url.set_path(&path);
-    }
     if url
         .host_str()
         .is_some_and(|host| host.eq_ignore_ascii_case("api.mwmbl.org"))
@@ -234,29 +217,23 @@ async fn send_mwmbl_request(
 
 pub(super) async fn read_http_error(
     response: reqwest::Response,
-    adapter: SearchAdapter,
+    resolved: &ResolvedSearch,
     status: reqwest::StatusCode,
 ) -> ToolExecutionError {
-    let detail = net::read_response_body(response, MAX_ERROR_BODY_BYTES, adapter.display_name())
+    let provider = resolved.adapter.provider().name;
+    let detail = net::read_response_body(response, MAX_ERROR_BODY_BYTES, provider)
         .await
         .ok()
-        .and_then(|bytes| extract_error_detail(&bytes));
+        .and_then(|bytes| extract_error_detail(&bytes, resolved.secret.as_deref()));
+    let status = status.as_u16();
     let message = match detail {
-        Some(detail) => format!(
-            "{} returned HTTP {}: {detail}",
-            adapter.display_name(),
-            status.as_u16()
-        ),
-        None => format!(
-            "{} returned HTTP {}",
-            adapter.display_name(),
-            status.as_u16()
-        ),
+        Some(detail) => format!("{provider} returned HTTP {status}: {detail}"),
+        None => format!("{provider} returned HTTP {status}"),
     };
     ToolExecutionError::other(message)
 }
 
-fn extract_error_detail(body: &[u8]) -> Option<String> {
+fn extract_error_detail(body: &[u8], secret: Option<&str>) -> Option<String> {
     let parsed: Value = serde_json::from_slice(body).ok()?;
     let detail = parsed
         .pointer("/detail/error")
@@ -265,7 +242,16 @@ fn extract_error_detail(body: &[u8]) -> Option<String> {
         .or_else(|| parsed.get("error").and_then(Value::as_str))
         .or_else(|| parsed.get("message").and_then(Value::as_str))?;
     let trimmed = detail.trim();
-    (!trimmed.is_empty()).then(|| truncate(trimmed, 200))
+    (!trimmed.is_empty() && !contains_credential(trimmed, secret)).then(|| truncate(trimmed, 200))
+}
+
+fn contains_credential(text: &str, secret: Option<&str>) -> bool {
+    secret.is_some_and(|secret| {
+        text.contains(secret)
+            || (text.contains('%')
+                && url::form_urlencoded::parse(text.as_bytes())
+                    .any(|(name, value)| name.contains(secret) || value.contains(secret)))
+    })
 }
 
 pub(super) fn parse_adapter_results(
@@ -273,13 +259,14 @@ pub(super) fn parse_adapter_results(
     provider_label: &str,
     body: &[u8],
     limit: usize,
+    secret: Option<&str>,
 ) -> Result<Value, ToolExecutionError> {
     let raw_hits: Vec<(String, Option<String>, Option<String>)> = match adapter {
         SearchAdapter::Mwmbl | SearchAdapter::Searxng | SearchAdapter::Tavily => {
             let parsed: MwmblOrSearxngResponse = serde_json::from_slice(body).map_err(|_| {
                 ToolExecutionError::other(format!(
                     "{} returned invalid search results",
-                    adapter.display_name()
+                    adapter.provider().name
                 ))
             })?;
             parsed
@@ -319,6 +306,13 @@ pub(super) fn parse_adapter_results(
                 || !url.username().is_empty()
                 || url.password().is_some()
                 || url.as_str().len() > 2048
+                || [
+                    raw_url.as_str(),
+                    title.as_deref().unwrap_or(""),
+                    content.as_deref().unwrap_or(""),
+                ]
+                .into_iter()
+                .any(|text| contains_credential(text, secret))
             {
                 return None;
             }

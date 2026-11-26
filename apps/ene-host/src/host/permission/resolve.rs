@@ -99,7 +99,7 @@ type CandidateResolution = (CandidateAction, Option<String>, Option<String>);
 
 pub(super) enum CandidateOutcome {
     Resolved(Box<CandidateResolution>),
-    Search(CandidateAction, crate::host::web_search::SearchBinding),
+    Search(Box<(CandidateAction, crate::host::web_search::SearchBinding)>),
     NeedsDeviceClient,
     Refuse(String),
 }
@@ -132,10 +132,10 @@ pub(super) fn build_candidate_action(ctx: &GateContext, item: &GateCall) -> Cand
             Ok(resolved) => resolved,
             Err(reason) => return CandidateOutcome::Refuse(reason.to_string()),
         };
-        return CandidateOutcome::Search(
+        return CandidateOutcome::Search(Box::new((
             resolved.binding.action(&item.arguments),
             resolved.binding,
-        );
+        )));
     }
     CandidateOutcome::NeedsDeviceClient
 }

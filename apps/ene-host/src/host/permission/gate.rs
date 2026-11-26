@@ -264,7 +264,8 @@ fn process_gate_call(
     }
     let candidate = match build_candidate_action(ctx, &item) {
         CandidateOutcome::Resolved(candidate) => Some(*candidate),
-        CandidateOutcome::Search(action, binding) => {
+        CandidateOutcome::Search(resolved) => {
+            let (action, binding) = *resolved;
             world.entity_mut(item.entity).insert(binding);
             Some((action, None, None))
         }
