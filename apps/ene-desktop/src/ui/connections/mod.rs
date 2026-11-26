@@ -3,7 +3,6 @@
 //! and bottom collapsed disclosure for model-role & voice slot overrides.
 
 mod add_panel;
-mod kind_pickers;
 pub(crate) mod mcp_add;
 mod mcp_editor;
 mod pickers;
@@ -125,6 +124,24 @@ impl std::fmt::Debug for ConnectionsPane {
             .field("initialized", &self.initialized)
             .finish_non_exhaustive()
     }
+}
+
+fn toggle_pane_dropdown(pane: &Entity<ConnectionsPane>, key: &str, cx: &mut gpui::App) {
+    pane.update(cx, |this, cx| {
+        this.open_dropdown = if this.open_dropdown.as_deref() == Some(key) {
+            None
+        } else {
+            Some(key.to_owned())
+        };
+        cx.notify();
+    });
+}
+
+fn close_pane_dropdown(pane: &Entity<ConnectionsPane>, cx: &mut gpui::App) {
+    pane.update(cx, |this, cx| {
+        this.open_dropdown = None;
+        cx.notify();
+    });
 }
 
 impl ConnectionsPane {

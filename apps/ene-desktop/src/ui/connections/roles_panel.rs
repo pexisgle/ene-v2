@@ -1,7 +1,7 @@
-use super::ConnectionsPane;
 use super::roles_voice_search::{
     collect_roles_context, render_search_role_row, render_voice_role_row, voice_role_specs,
 };
+use super::{ConnectionsPane, close_pane_dropdown, toggle_pane_dropdown};
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{DropdownOption, DropdownSpec, Tone, dropdown_select, pill_button};
@@ -292,22 +292,4 @@ pub(super) fn render_role_row_header(title: &str, current_text: &str, theme: &Th
                 .truncate()
                 .child(current_text.to_owned()),
         )
-}
-
-pub(super) fn toggle_pane_dropdown(pane: &Entity<ConnectionsPane>, key: &str, cx: &mut gpui::App) {
-    pane.update(cx, |this, cx| {
-        this.open_dropdown = if this.open_dropdown.as_deref() == Some(key) {
-            None
-        } else {
-            Some(key.to_owned())
-        };
-        cx.notify();
-    });
-}
-
-pub(super) fn close_pane_dropdown(pane: &Entity<ConnectionsPane>, cx: &mut gpui::App) {
-    pane.update(cx, |this, cx| {
-        this.open_dropdown = None;
-        cx.notify();
-    });
 }

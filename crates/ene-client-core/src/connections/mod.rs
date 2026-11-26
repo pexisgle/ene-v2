@@ -19,7 +19,71 @@ use crate::domain::{
     Connection, ConnectionConfig, ConnectionEndpoint, ConnectionInput, ConnectionKind,
 };
 
+use crate::state::Model;
 use options::{Speaker, SpeechOptions, nonempty};
+
+/// A resource the operator can choose on a connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionResource {
+    /// A language model that generates replies.
+    ChatModel,
+    /// A speech synthesizer's numeric speaker.
+    Speaker,
+    /// A speech synthesis voice identified by model and style.
+    Voice,
+    /// A model that transcribes audio.
+    TranscriptionModel,
+    /// A model that produces embeddings.
+    EmbeddingModel,
+}
+
+impl ConnectionResource {
+    /// Returns the resource this connection exposes for direct selection.
+    pub fn for_connection(connection: &Connection) -> Option<Self> {
+        Some(match connection.kind {
+            ConnectionKind::Llm => Self::ChatModel,
+            ConnectionKind::Tts if connection.is_sakura() => Self::Voice,
+            ConnectionKind::Tts
+                if connection
+                    .endpoint()
+                    .is_some_and(|endpoint| endpoint.adapter.eq_ignore_ascii_case("voicevox")) =>
+            {
+                Self::Speaker
+            }
+            ConnectionKind::Stt => Self::TranscriptionModel,
+            ConnectionKind::Embedding => Self::EmbeddingModel,
+            _ => return None,
+        })
+    }
+
+    /// Lists candidate identifiers and display names using the connection's cached capabilities.
+    pub fn choices(self, model: &Model, id: &str) -> Vec<(String, String)> {
+        match self {
+            Self::ChatModel => model.available_models_for_connection(id),
+            Self::Speaker | Self::Voice => model.voice_choices_for_connection(id),
+            Self::TranscriptionModel => model.stt_model_choices_for_connection(id),
+            Self::EmbeddingModel => model.embedding_model_choices_for_connection(id),
+        }
+    }
+
+    /// Resolves the selected identifier from editor input, endpoint options and the first candidate.
+    pub fn selected(
+        self,
+        draft: &str,
+        endpoint: Option<&ConnectionEndpoint>,
+        first: Option<&str>,
+    ) -> Option<String> {
+        let first_draft = || draft.split(',').find_map(nonempty).map(str::to_owned);
+        let first_choice = || first.map(str::to_owned);
+        match self {
+            Self::ChatModel => first_draft(),
+            Self::Speaker => first_draft().or_else(|| configured_voicevox_speaker(endpoint)),
+            Self::Voice => first_draft().or_else(first_choice),
+            Self::TranscriptionModel => configured_stt_model(endpoint).or_else(first_choice),
+            Self::EmbeddingModel => nonempty(draft).map(str::to_owned).or_else(first_choice),
+        }
+    }
+}
 
 /// Applies TTS voice settings onto a domain `ConnectionConfig`.
 pub fn apply_tts_voice_to_config(cfg: &mut ConnectionConfig, is_sakura: bool, voice_clean: &str) {
@@ -241,6 +305,40 @@ mod tests {
         ConnectionCheck, EmbeddingConnection, LlmConnection, LlmProvider, SearchConnection,
         SttConnection, TtsConnection,
     };
+
+    #[test]
+    fn connection_resources_preserve_configured_values_without_catalog_entries() {
+        let speaker = tts_conn(
+            "tts",
+            true,
+            "VOICEVOX",
+            "",
+            vec![],
+            &serde_json::json!({"speaker": 7}),
+        );
+        let resource = ConnectionResource::for_connection(&speaker).unwrap();
+        assert_eq!(resource, ConnectionResource::Speaker);
+        assert_eq!(
+            resource.selected("", speaker.endpoint(), None).as_deref(),
+            Some("7")
+        );
+        assert_eq!(
+            resource
+                .selected(" , 3, 9", speaker.endpoint(), None)
+                .as_deref(),
+            Some("3")
+        );
+
+        let stt = stt_conn("stt", true, "openai", "", "stored-model");
+        let resource = ConnectionResource::for_connection(&stt).unwrap();
+        assert_eq!(resource, ConnectionResource::TranscriptionModel);
+        assert_eq!(
+            resource
+                .selected("ja, en", stt.endpoint(), Some("fetched-model"))
+                .as_deref(),
+            Some("stored-model")
+        );
+    }
 
     fn endpoint(adapter: &str, endpoint: &str, options: &str) -> ConnectionEndpoint {
         ConnectionEndpoint {

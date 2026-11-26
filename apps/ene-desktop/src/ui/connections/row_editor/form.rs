@@ -13,7 +13,7 @@ use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button, status_pill};
 use crate::ui::{GOOGLE_AGENT_PLATFORM, Hub, default_embedding_dimensions};
 use ene_client_core::{
-    connections::{extract_kind_list_init, parse_process_args},
+    connections::{ConnectionResource, extract_kind_list_init, parse_process_args},
     domain::{Connection, ConnectionCheck, ConnectionConfig, ConnectionEndpoint, ConnectionKind},
 };
 use gpui::{Context, Entity, FontWeight, SharedString, div, prelude::*, px};
@@ -117,12 +117,6 @@ pub(super) fn embedding_dim_draft(
         Some(&init),
         theme,
     ))
-}
-
-pub(crate) fn is_voicevox_tts(conn: &Connection, endpoint: Option<&ConnectionEndpoint>) -> bool {
-    conn.kind == ConnectionKind::Tts
-        && !conn.is_sakura()
-        && endpoint.is_some_and(|ep| ep.adapter.eq_ignore_ascii_case("voicevox"))
 }
 
 pub(super) fn build_editor_save_payload(
@@ -348,8 +342,7 @@ pub(super) fn should_auto_probe_connection(
     needs_key_flag: bool,
 ) -> bool {
     let kind = conn.kind;
-    let ep = conn.endpoint();
-    let is_voicevox = is_voicevox_tts(conn, ep);
+    let is_voicevox = ConnectionResource::for_connection(conn) == Some(ConnectionResource::Speaker);
     let agent_platform = conn
         .llm_endpoint()
         .is_some_and(|e| e.adapter == GOOGLE_AGENT_PLATFORM);

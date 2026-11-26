@@ -3,7 +3,7 @@
 use super::ConnectionsPane;
 use crate::ui::connections::SecretField;
 use crate::ui::connections::mcp_editor::{append_mcp_extra_fields, render_mcp_tools_strip};
-use crate::ui::connections::pickers::{PickerInput, render_kind_dropdown_picker};
+use crate::ui::connections::pickers::{PickerInput, render_resource_picker};
 use crate::ui::connections::schema_form::{render_agent_platform_options, render_options_schema};
 use crate::ui::icons::Icon;
 use crate::ui::studio::labeled_field;
@@ -11,7 +11,9 @@ use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button, toggle_switch};
 use crate::ui::{GOOGLE_AGENT_PLATFORM, Hub};
 use ene_client_core::{
-    connections::{ConnectionEditSpec, apply_connection_edits, apply_mcp_extra_edits},
+    connections::{
+        ConnectionEditSpec, ConnectionResource, apply_connection_edits, apply_mcp_extra_edits,
+    },
     domain::{Connection, ConnectionCheck, ConnectionKind},
 };
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
@@ -33,18 +35,22 @@ pub(super) fn render_connection_editor(
 
     let drafts = collect_editor_drafts(pane, conn, endpoint, theme, cx);
     let mcp_tools_strip = render_mcp_tools_strip(pane, conn, check, &drafts.list_d, theme, cx);
-    let dropdown_picker = render_kind_dropdown_picker(
-        pane,
-        &PickerInput {
-            conn,
-            endpoint,
-            list_d: &drafts.list_d,
-            dim_d: drafts.dim_d.as_ref(),
-            live,
-        },
-        theme,
-        cx,
-    );
+    let resource = ConnectionResource::for_connection(conn);
+    let dropdown_picker = resource.map(|resource| {
+        render_resource_picker(
+            pane,
+            &PickerInput {
+                id: &conn.id,
+                resource,
+                endpoint,
+                list_d: &drafts.list_d,
+                dim_d: drafts.dim_d.as_ref(),
+                live,
+            },
+            theme,
+            cx,
+        )
+    });
     let (schema_controls, next_options_json) = if agent_platform {
         render_agent_platform_options(pane, &id, conn.revision, endpoint, theme, cx)
     } else {
@@ -64,9 +70,10 @@ pub(super) fn render_connection_editor(
                 .copied()
         });
     let show_list_field = agent_platform
-        || (!is_voicevox_tts(conn, endpoint)
-            && !(conn.kind == ConnectionKind::Tts && conn.is_sakura())
-            && !matches!(conn.kind, ConnectionKind::Llm | ConnectionKind::Embedding));
+        || matches!(
+            resource,
+            None | Some(ConnectionResource::TranscriptionModel)
+        );
 
     let cred_strip = render_credentials_strip(pane, conn, live, theme, cx);
     let actions = render_editor_actions(conn, payload, &pane.hub, theme);

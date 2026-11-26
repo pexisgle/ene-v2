@@ -347,17 +347,6 @@ impl Hub {
         self.model.voice_choices_for_connection(conn_id)
     }
 
-    pub(crate) fn stt_model_choices_for_connection(&self, conn_id: &str) -> Vec<(String, String)> {
-        self.model.stt_model_choices_for_connection(conn_id)
-    }
-
-    pub(crate) fn embedding_model_choices_for_connection(
-        &self,
-        conn_id: &str,
-    ) -> Vec<(String, String)> {
-        self.model.embedding_model_choices_for_connection(conn_id)
-    }
-
     pub(crate) fn available_models_for_connection(&self, conn_id: &str) -> Vec<(String, String)> {
         self.model.available_models_for_connection(conn_id)
     }

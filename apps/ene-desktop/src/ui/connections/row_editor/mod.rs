@@ -6,10 +6,10 @@ use super::ConnectionsPane;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, kind_pill, pill_button, status_pill};
+use ene_client_core::connections::ConnectionResource;
 use ene_client_core::domain::{Connection, ConnectionCheck};
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
-pub(crate) use form::is_voicevox_tts;
 use form::*;
 use views::*;
 
@@ -78,8 +78,7 @@ fn render_row_header(
     let kind = conn.kind;
     let hub_check = pane.hub.clone();
     let is_checking = hub_check.read(cx).setup.checking_connections.contains(id);
-    let ep = conn.endpoint();
-    let is_voicevox = is_voicevox_tts(conn, ep);
+    let is_voicevox = ConnectionResource::for_connection(conn) == Some(ConnectionResource::Speaker);
     let hub_expand_probe = hub_check.clone();
     let check_id = id.clone();
     let expand_id = id.clone();

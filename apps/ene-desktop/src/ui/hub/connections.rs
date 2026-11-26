@@ -4,7 +4,9 @@ use super::{Hub, presets, voice_roles};
 use crate::rpc;
 use ene_client_core::{
     ModelRoleSlot,
-    connections::{build_connection_enabled_input, build_embedding_model_input},
+    connections::{
+        ConnectionResource, build_connection_enabled_input, build_embedding_model_input,
+    },
     domain::{Connection, ConnectionInput, ConnectionKind, LlmProvider},
     presets::SearchPresetSpec,
 };
@@ -109,40 +111,25 @@ impl Hub {
         cx.notify();
     }
 
-    pub(crate) fn select_connection_model(
+    pub(crate) fn select_connection_resource(
         &mut self,
-        connection_id: &str,
-        model_id: &str,
+        id: &str,
+        resource: ConnectionResource,
+        value: &str,
         cx: &mut Context<Self>,
     ) {
-        voice_roles::select_connection_model(self, connection_id, model_id, cx);
-    }
-
-    pub(crate) fn select_voicevox_speaker(
-        &mut self,
-        connection_id: &str,
-        speaker_id: &str,
-        cx: &mut Context<Self>,
-    ) {
-        voice_roles::select_voicevox_speaker(self, connection_id, speaker_id, cx);
-    }
-
-    pub(crate) fn select_tts_voice(
-        &mut self,
-        connection_id: &str,
-        voice_id: &str,
-        cx: &mut Context<Self>,
-    ) {
-        voice_roles::select_tts_voice(self, connection_id, voice_id, cx);
-    }
-
-    pub(crate) fn select_stt_model(
-        &mut self,
-        connection_id: &str,
-        model_id: &str,
-        cx: &mut Context<Self>,
-    ) {
-        voice_roles::select_stt_model(self, connection_id, model_id, cx);
+        match resource {
+            ConnectionResource::ChatModel => {
+                voice_roles::select_connection_model(self, id, value, cx)
+            }
+            ConnectionResource::Speaker | ConnectionResource::Voice => {
+                voice_roles::select_tts_voice(self, id, value, cx)
+            }
+            ConnectionResource::TranscriptionModel => {
+                voice_roles::select_stt_model(self, id, value, cx)
+            }
+            ConnectionResource::EmbeddingModel => self.select_embedding_model(id, value, cx),
+        }
     }
 
     /// Assigns the active STT connection and model atomically across all STT connections.
@@ -164,7 +151,7 @@ impl Hub {
         voice_roles::assign_tts_voice(self, selection, cx);
     }
 
-    pub(crate) fn select_embedding_model(
+    fn select_embedding_model(
         &mut self,
         connection_id: &str,
         model_id: &str,

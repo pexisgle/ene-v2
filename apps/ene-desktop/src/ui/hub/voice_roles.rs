@@ -59,15 +59,6 @@ pub(super) fn select_connection_model(
     }
 }
 
-pub(super) fn select_voicevox_speaker(
-    hub: &mut Hub,
-    connection_id: &str,
-    speaker_id: &str,
-    cx: &mut Context<Hub>,
-) {
-    select_tts_voice(hub, connection_id, speaker_id, cx);
-}
-
 pub(super) fn select_tts_voice(
     hub: &mut Hub,
     connection_id: &str,

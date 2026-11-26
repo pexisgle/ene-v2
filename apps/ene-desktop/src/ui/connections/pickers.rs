@@ -1,124 +1,84 @@
-use super::ConnectionsPane;
-use super::kind_pickers;
-use super::row_editor::is_voicevox_tts;
+use super::{ConnectionsPane, close_pane_dropdown, toggle_pane_dropdown};
 use crate::input::Draft;
-use crate::ui::Hub;
+use crate::ui::default_embedding_dimensions;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{
     DropdownOption, DropdownSpec, Tone, dropdown_select, kind_pill, pill_button,
 };
-use ene_client_core::domain::{Connection, ConnectionEndpoint, ConnectionKind};
-use gpui::{Context, Entity, FontWeight, SharedString, div, prelude::*, px};
-use std::rc::Rc;
+use ene_client_core::{connections::ConnectionResource, domain::ConnectionEndpoint};
+use gpui::{App, Context, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
+use std::borrow::Cow;
 
-#[derive(Clone, Copy)]
 pub(super) struct PickerInput<'a> {
-    pub(super) conn: &'a Connection,
+    pub(super) id: &'a str,
+    pub(super) resource: ConnectionResource,
     pub(super) endpoint: Option<&'a ConnectionEndpoint>,
     pub(super) list_d: &'a Entity<Draft>,
     pub(super) dim_d: Option<&'a Entity<Draft>>,
     pub(super) live: bool,
 }
 
-pub(super) struct ResourcePickerSpec<'a> {
-    pub(super) dd_key: String,
-    pub(super) fetch_btn_id: String,
-    pub(super) title: &'static str,
-    pub(super) badge_label: Option<String>,
-    pub(super) fetch_label: &'static str,
-    pub(super) placeholder: &'static str,
-    pub(super) empty_label: &'static str,
-    pub(super) hint: Option<&'static str>,
-    pub(super) list_height: f32,
-    pub(super) current_selected: Option<&'a str>,
-    pub(super) selected_label: Option<&'a str>,
-    pub(super) options: &'a [DropdownOption],
-    pub(super) filter_d: Entity<Draft>,
-    pub(super) filter_txt: &'a str,
-    pub(super) is_checking: bool,
-    pub(super) live: bool,
-}
-
-pub(super) fn render_kind_dropdown_picker(
+pub(super) fn render_resource_picker(
     pane: &mut ConnectionsPane,
     input: &PickerInput<'_>,
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
-) -> Option<gpui::Div> {
-    let id = input.conn.id.clone();
-    let is_checking = pane.hub.read(cx).setup.checking_connections.contains(&id);
-    let kind = input.conn.kind;
-    if kind == ConnectionKind::Llm {
-        return Some(kind_pickers::build_llm_picker(
-            pane,
-            &id,
-            input.list_d,
-            (is_checking, input.live),
-            theme,
-            cx,
-        ));
-    }
-    if is_voicevox_tts(input.conn, input.endpoint) {
-        return Some(kind_pickers::build_voicevox_picker(
-            pane,
-            (&id, input.endpoint, input.list_d),
-            (is_checking, input.live),
-            theme,
-            cx,
-        ));
-    }
-    if kind == ConnectionKind::Tts && input.conn.is_sakura() {
-        return Some(kind_pickers::build_sakura_tts_picker(
-            pane,
-            &id,
-            input.list_d,
-            (is_checking, input.live),
-            theme,
-            cx,
-        ));
-    }
-    if kind == ConnectionKind::Stt {
-        return Some(kind_pickers::build_stt_picker(
-            pane,
-            &id,
-            input.endpoint,
-            (is_checking, input.live),
-            theme,
-            cx,
-        ));
-    }
-    if kind == ConnectionKind::Embedding {
-        return Some(kind_pickers::build_embedding_picker(
-            pane,
-            &id,
-            (input.list_d, input.dim_d),
-            (is_checking, input.live),
-            theme,
-            cx,
-        ));
-    }
-    None
-}
-pub(super) fn render_resource_picker<F>(
-    pane: &ConnectionsPane,
-    spec: ResourcePickerSpec<'_>,
-    conn_id: &str,
-    theme: &Theme,
-    cx: &Context<ConnectionsPane>,
-    on_select: F,
-) -> gpui::Div
-where
-    F: Fn(&mut Hub, String, &mut Context<Hub>) + 'static,
-{
-    let dd_open = pane.open_dropdown.as_deref() == Some(spec.dd_key.as_str());
-    let pane_toggle = cx.entity();
-    let pane_pick = cx.entity();
-    let hub_refresh = pane.hub.clone();
-    let hub_select = pane.hub.clone();
-    let refresh_id = conn_id.to_owned();
-    let toggle_key = spec.dd_key.clone();
-    let on_select = Rc::new(on_select);
+) -> gpui::Div {
+    let PickerInput {
+        id,
+        resource,
+        endpoint,
+        list_d,
+        dim_d,
+        live,
+    } = *input;
+    let labels = PickerLabels::for_resource(resource);
+    let hub = pane.hub.read(cx);
+    let checking = hub.setup.checking_connections.contains(id);
+    let choices = resource.choices(&hub.model, id);
+    let selected = resource.selected(
+        list_d.read(cx).text(),
+        endpoint,
+        choices.first().map(|(value, _)| value.as_str()),
+    );
+    let options: Vec<_> = choices
+        .into_iter()
+        .map(|(value, label)| DropdownOption {
+            detail: match resource {
+                ConnectionResource::Speaker => Some(format!("ID: {value}")),
+                ConnectionResource::EmbeddingModel => Some(format!(
+                    "推奨次元: {}",
+                    default_embedding_dimensions(&value)
+                )),
+                _ => (label != value).then(|| value.clone()),
+            },
+            value,
+            label,
+        })
+        .collect();
+    let selected_label = selected
+        .as_deref()
+        .map(|value| selected_label(resource, value, &options));
+    let key = format!("{}:{id}", labels.dropdown);
+    let open = pane.open_dropdown.as_deref() == Some(key.as_str());
+    let filter = pane.drafts.draft(
+        cx,
+        format!("conn:{id}:{}-filter", labels.filter),
+        labels.search,
+        None,
+        theme,
+    );
+    let filter_text = filter.read(cx).text().to_owned();
+    let pane_entity = cx.entity();
+    let toggle = pane_entity.clone();
+    let toggle_key = key.clone();
+    let hub = pane.hub.clone();
+    let refresh_hub = hub.clone();
+    let id = id.to_owned();
+    let refresh_id = id.clone();
+    let list_d = (resource != ConnectionResource::TranscriptionModel).then(|| list_d.clone());
+    let dim_d = dim_d.cloned();
 
     div()
         .w_full()
@@ -126,79 +86,201 @@ where
         .flex()
         .flex_col()
         .gap(px(6.))
+        .child(picker_header(
+            &labels,
+            &id,
+            options.len(),
+            (checking, live),
+            theme,
+            move |_, cx| {
+                refresh_hub.update(cx, |hub, cx| hub.check_connection(refresh_id.clone(), cx));
+            },
+        ))
+        .child(dropdown_select(
+            DropdownSpec {
+                id: key,
+                selected_value: selected.as_deref(),
+                selected_label: selected_label.as_deref(),
+                placeholder: labels.placeholder,
+                options: &options,
+                open,
+                enabled: live,
+                max_list_height: labels.height,
+                filter_draft: Some(filter),
+                filter_text: &filter_text,
+                empty_label: labels.empty,
+            },
+            theme,
+            move |_, cx| toggle_pane_dropdown(&toggle, &toggle_key, cx),
+            move |picked, _, cx| {
+                if let Some(draft) = &list_d {
+                    draft.update(cx, |draft, cx| draft.set(picked.clone(), cx));
+                }
+                if let Some(dimensions) = &dim_d {
+                    dimensions.update(cx, |draft, cx| {
+                        draft.set(default_embedding_dimensions(&picked).to_string(), cx)
+                    });
+                }
+                hub.update(cx, |hub, cx| {
+                    hub.select_connection_resource(&id, resource, &picked, cx)
+                });
+                close_pane_dropdown(&pane_entity, cx);
+            },
+        ))
+        .when_some(labels.hint, |this, hint| {
+            this.child(div().text_xs().text_color(theme.ink_muted).child(hint))
+        })
+}
+
+fn selected_label<'a>(
+    resource: ConnectionResource,
+    value: &'a str,
+    options: &'a [DropdownOption],
+) -> Cow<'a, str> {
+    let option = options.iter().find(|option| option.value == value);
+    match (resource, option) {
+        (ConnectionResource::Speaker, Some(option)) => {
+            Cow::Owned(format!("{} (ID: {value})", option.label))
+        }
+        (ConnectionResource::ChatModel | ConnectionResource::Voice, Some(option)) => {
+            Cow::Borrowed(&option.label)
+        }
+        _ => Cow::Borrowed(value),
+    }
+}
+
+fn picker_header(
+    labels: &PickerLabels,
+    id: &str,
+    count: usize,
+    (checking, live): (bool, bool),
+    theme: &Theme,
+    refresh: impl Fn(&mut Window, &mut App) + 'static,
+) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(8.))
         .child(
             div()
                 .flex()
-                .flex_row()
                 .items_center()
-                .justify_between()
                 .gap(px(8.))
                 .child(
                     div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(theme.ink_muted)
-                                .child(spec.title),
-                        )
-                        .when_some(spec.badge_label, |this, badge| {
-                            this.child(kind_pill(badge, theme))
-                        }),
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(theme.ink_muted)
+                        .child(labels.title),
                 )
-                .child(pill_button(
-                    SharedString::from(spec.fetch_btn_id),
-                    spec.fetch_label,
-                    Tone::Ghost
-                        .icon(Icon::Refresh)
-                        .enabled(spec.live && !spec.is_checking),
-                    theme,
-                    move |_, cx| {
-                        hub_refresh
-                            .update(cx, |hub, cx| hub.check_connection(refresh_id.clone(), cx));
-                    },
-                )),
+                .when(count > 0, |this| {
+                    this.child(kind_pill(format!("{count}{}", labels.count), theme))
+                }),
         )
-        .child(dropdown_select(
-            DropdownSpec {
-                id: spec.dd_key,
-                selected_value: spec.current_selected,
-                selected_label: spec.selected_label,
-                placeholder: spec.placeholder,
-                options: spec.options,
-                open: dd_open,
-                enabled: spec.live,
-                max_list_height: spec.list_height,
-                filter_draft: Some(spec.filter_d),
-                filter_text: spec.filter_txt,
-                empty_label: spec.empty_label,
+        .child(pill_button(
+            SharedString::from(format!("conn-fetch-{}-{id}", labels.fetch)),
+            if checking {
+                labels.checking
+            } else {
+                labels.refresh
             },
+            Tone::Ghost.icon(Icon::Refresh).enabled(live && !checking),
             theme,
-            move |_, cx| {
-                pane_toggle.update(cx, |this, cx| {
-                    this.open_dropdown =
-                        if this.open_dropdown.as_deref() == Some(toggle_key.as_str()) {
-                            None
-                        } else {
-                            Some(toggle_key.clone())
-                        };
-                    cx.notify();
-                });
-            },
-            move |picked, _, cx| {
-                let cb = Rc::clone(&on_select);
-                hub_select.update(cx, move |hub, cx| cb(hub, picked, cx));
-                pane_pick.update(cx, |this, cx| {
-                    this.open_dropdown = None;
-                    cx.notify();
-                });
-            },
+            refresh,
         ))
-        .when_some(spec.hint, |this, hint| {
-            this.child(div().text_xs().text_color(theme.ink_muted).child(hint))
-        })
+}
+
+struct PickerLabels {
+    dropdown: &'static str,
+    fetch: &'static str,
+    filter: &'static str,
+    title: &'static str,
+    count: &'static str,
+    checking: &'static str,
+    refresh: &'static str,
+    placeholder: &'static str,
+    search: &'static str,
+    empty: &'static str,
+    hint: Option<&'static str>,
+    height: f32,
+}
+
+impl PickerLabels {
+    fn for_resource(resource: ConnectionResource) -> Self {
+        match resource {
+            ConnectionResource::ChatModel => Self {
+                dropdown: "conn-model",
+                fetch: "models",
+                filter: "model",
+                title: "使用するモデル",
+                count: "件の候補",
+                checking: "取得中…",
+                refresh: "モデル一覧を取得",
+                placeholder: "モデルを選択…",
+                search: "モデル名で絞り込み…",
+                empty: "「モデル一覧を取得」を押して利用可能なモデルを読み込んでください",
+                hint: None,
+                height: 240.,
+            },
+            ConnectionResource::Speaker => Self {
+                dropdown: "conn-vv-speaker",
+                fetch: "vv",
+                filter: "vv",
+                title: "既定の話者",
+                count: "件取得済み",
+                checking: "起動・取得中…",
+                refresh: "話者一覧を取得",
+                placeholder: "話者を選択…",
+                search: "話者名・IDで絞り込み…",
+                empty: "「話者一覧を取得」を押すとVOICEVOXを起動して話者一覧を読み込みます",
+                hint: None,
+                height: 240.,
+            },
+            ConnectionResource::Voice => Self {
+                dropdown: "conn-sakura-tts",
+                fetch: "sakura-tts",
+                filter: "sakura-tts",
+                title: "話者モデル・スタイル",
+                count: "件利用可能",
+                checking: "取得中…",
+                refresh: "話者一覧を取得",
+                placeholder: "話者を選択…",
+                search: "話者名・モデルIDで絞り込み…",
+                empty: "話者候補がありません",
+                hint: Some(
+                    "※ さくらのクラウドのコントロールパネルで各音声モデルの利用規約に同意してください",
+                ),
+                height: 240.,
+            },
+            ConnectionResource::TranscriptionModel => Self {
+                dropdown: "conn-stt-model",
+                fetch: "stt",
+                filter: "stt",
+                title: "音声認識モデル",
+                count: "件取得済み",
+                checking: "取得中…",
+                refresh: "モデル一覧を取得",
+                placeholder: "文字起こしモデルを選択…",
+                search: "文字起こしモデルを検索…",
+                empty: "利用可能なSTTモデルがありません",
+                hint: None,
+                height: 200.,
+            },
+            ConnectionResource::EmbeddingModel => Self {
+                dropdown: "conn-emb-model",
+                fetch: "emb",
+                filter: "emb",
+                title: "埋め込みモデル",
+                count: "件利用可能",
+                checking: "確認・取得中…",
+                refresh: "接続確認・取得",
+                placeholder: "埋め込みモデルを選択…",
+                search: "埋め込みモデルを検索…",
+                empty: "利用可能な埋め込みモデルがありません",
+                hint: None,
+                height: 200.,
+            },
+        }
+    }
 }

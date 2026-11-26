@@ -1,7 +1,7 @@
 //! Role rows backed by a connection rather than a model slot: STT, TTS and web search.
 
-use super::ConnectionsPane;
-use super::roles_panel::{close_pane_dropdown, render_role_row_header, toggle_pane_dropdown};
+use super::roles_panel::render_role_row_header;
+use super::{ConnectionsPane, close_pane_dropdown, toggle_pane_dropdown};
 use crate::ui::Hub;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
