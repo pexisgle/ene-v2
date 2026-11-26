@@ -1,9 +1,10 @@
 use super::resampler::{
-    Filter, WIRE_RATE, encode, i16_to_f32, pick_input, u16_to_f32, validate_default_config,
+    WIRE_RATE, encode, i16_to_f32, pick_input, u16_to_f32, validate_default_config,
 };
 use super::vad::VoiceGate;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ene_client_core::CaptureMode;
+use ene_voice::pcm::StreamingResampler;
 use parking_lot::Mutex;
 use std::{
     collections::VecDeque,
@@ -122,7 +123,7 @@ pub struct CaptureOutput {
 pub struct Microphone {
     _stream: cpal::Stream,
     frames: Arc<Mutex<VecDeque<f32>>>,
-    filter: Option<Filter>,
+    filter: Option<StreamingResampler>,
     muted: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
     voice_gate: VoiceGate,
@@ -266,7 +267,7 @@ impl Microphone {
             _stream: stream,
             frames,
             filter: (rate != WIRE_RATE)
-                .then(|| Filter::new(rate, WIRE_RATE))
+                .then(|| StreamingResampler::new(rate, WIRE_RATE))
                 .transpose()?,
             muted,
             level,
@@ -363,7 +364,7 @@ impl Microphone {
                 .evaluate(companion_speaking, near_rms, far_end_level);
         if allow_capture {
             let samples = match self.filter.as_mut() {
-                Some(filter) => filter.push(&samples),
+                Some(filter) => filter.push(&samples).map_err(super::AudioError::from),
                 None => Ok(samples),
             };
             match samples.and_then(|samples| self.voice_gate.process(&samples)) {

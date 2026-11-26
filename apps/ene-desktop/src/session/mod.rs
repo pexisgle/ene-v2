@@ -39,6 +39,7 @@ use crate::{
     state::{Device, Devices, Link},
     update::{Command, Update},
 };
+use backon::{BackoffBuilder as _, ExponentialBackoff, ExponentialBuilder};
 use buffa::view::MessageView;
 use ene_rpc as w;
 use parking_lot::RwLock;
@@ -49,9 +50,12 @@ use std::{
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-/// The first wait before a retry, doubled up to [`MAX_RETRY`].
-const FIRST_RETRY: Duration = Duration::from_secs(1);
 const MAX_RETRY: Duration = Duration::from_secs(30);
+/// The first wait is one second, doubled up to [`MAX_RETRY`].
+const RECONNECT_BACKOFF: ExponentialBuilder = ExponentialBuilder::new()
+    .with_min_delay(Duration::from_secs(1))
+    .with_max_delay(MAX_RETRY)
+    .without_max_times();
 /// How often the client samples the OS for perception.
 pub(super) const SAMPLE: Duration = Duration::from_secs(1);
 pub(super) const SCREEN_SAMPLE: Duration = Duration::from_secs(20);
@@ -218,7 +222,7 @@ impl Session {
             &self.updates,
             Update::ComputerUseEnabled(self.devices.computer_enabled),
         );
-        let mut retry = FIRST_RETRY;
+        let mut retry = RECONNECT_BACKOFF.build();
         loop {
             let outcome = Box::pin(self.attempt()).await;
             if !self.handle_attempt_outcome(outcome, &mut retry).await {
@@ -228,7 +232,11 @@ impl Session {
         self.devices.shutdown().await;
     }
 
-    async fn handle_attempt_outcome(&mut self, outcome: Outcome, retry: &mut Duration) -> bool {
+    async fn handle_attempt_outcome(
+        &mut self,
+        outcome: Outcome,
+        retry: &mut ExponentialBackoff,
+    ) -> bool {
         match outcome {
             Outcome::Closed => false,
             Outcome::Resync(reason) => {
@@ -236,13 +244,12 @@ impl Session {
                 // cursor is dropped so the next attempt resnapshots.
                 self.transport.cursor = None;
                 tracing::info!("resubscribing: {reason}");
-                *retry = FIRST_RETRY;
+                *retry = RECONNECT_BACKOFF.build();
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 true
             }
             Outcome::Dropped(reason) => {
-                let retry_in = *retry;
-                *retry = (*retry * 2).min(MAX_RETRY);
+                let retry_in = retry.next().unwrap_or(MAX_RETRY);
                 tracing::warn!("the link dropped: {reason}");
                 self.report_phase(ConnectionPhase::Lost { reason, retry_in })
                     .await;

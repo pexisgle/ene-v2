@@ -76,6 +76,7 @@ cap-fs-ext = "4.0.3"
 tempfile = "3"
 async-stream = "0.3"
 axum = "0.8"
+backon = { version = "~1.6.0", default-features = false, features = ["std"] }
 base64 = "0.23"
 bytes = "1"
 buffa = { version = "0.9", features = ["json"] }
@@ -90,6 +91,7 @@ hashlink = "0.12"
 hex = "0.4"
 croner = { version = "4", default-features = false, features = ["jiff"] }
 rubato = "5.1"
+wav-codec = "=0.1.0"
 jsonschema = "0.61"
 serde_json_canonicalizer = "0.4"
 jiff = "0.2"

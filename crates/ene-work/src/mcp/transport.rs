@@ -1,5 +1,6 @@
 //! ECS-free MCP transport connection opening, backoff calculation, and tool naming helpers.
 
+use backon::{BackoffBuilder as _, ExponentialBuilder};
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use rig_agent::tool::server::ToolServerHandle;
 use rig_rmcp::{McpClientHandler, McpConnection};
@@ -59,13 +60,19 @@ pub struct ConnectFailure {
     pub config_error: bool,
 }
 
+/// Jitters retries within the second half of the exponential delay window.
 pub fn backoff_delay(attempts: u32) -> Duration {
-    // The shift is bounded so the multiplication cannot overflow, but bounding
-    // it at 5 capped the delay at 32s and made MAX_BACKOFF unreachable: the
-    // schedule went 1, 2, 4, 8, 16, 32, 32, ... forever. Fourteen doublings
-    // reach the 60s ceiling from 1s, so that is the bound.
-    let exp = attempts.saturating_sub(1).min(14);
-    INITIAL_BACKOFF.saturating_mul(1u32 << exp).min(MAX_BACKOFF)
+    // Backon adds up to the base delay as jitter. Halving the bounds keeps
+    // the first retry within 0.5–1s and the capped retry within 30–60s.
+    ExponentialBuilder::new()
+        .with_min_delay(INITIAL_BACKOFF / 2)
+        .with_max_delay(MAX_BACKOFF / 2)
+        .with_jitter()
+        .without_max_times()
+        .build()
+        // The seventh attempt reaches the cap.
+        .nth(attempts.saturating_sub(1).min(6) as usize)
+        .unwrap_or(MAX_BACKOFF)
 }
 
 pub fn is_config_error_message(message: &str) -> bool {
@@ -285,16 +292,21 @@ mod tests {
     }
 
     #[test]
-    fn backoff_config_errors_and_exposed_names_behave_deterministically() {
-        assert_eq!(backoff_delay(1), Duration::from_secs(1));
-        assert_eq!(backoff_delay(2), Duration::from_secs(2));
-        assert_eq!(backoff_delay(6), Duration::from_secs(32));
-        // The delay keeps growing until it reaches the 60s ceiling instead of
-        // stopping at 32s, and stays there.
-        assert_eq!(backoff_delay(7), Duration::from_secs(60));
-        assert_eq!(backoff_delay(10), Duration::from_secs(60));
-        assert_eq!(backoff_delay(u32::MAX), Duration::from_secs(60));
+    fn retry_jitter_stays_inside_the_backoff_window() {
+        for (attempt, upper) in [(1, 1), (2, 2), (6, 32), (7, 60), (10, 60), (u32::MAX, 60)] {
+            let upper = Duration::from_secs(upper);
+            for _ in 0..32 {
+                let delay = backoff_delay(attempt);
+                assert!(
+                    (upper / 2..=upper).contains(&delay),
+                    "attempt {attempt}: {delay:?}"
+                );
+            }
+        }
+    }
 
+    #[test]
+    fn config_errors_and_exposed_names_behave_deterministically() {
         assert!(is_config_error_message("HTTP 401 Unauthorized"));
         assert!(is_config_error_message("ENOENT: no such file"));
         assert!(!is_config_error_message("connection reset by peer"));

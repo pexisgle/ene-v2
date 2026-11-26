@@ -1,7 +1,7 @@
 use super::capture::{CaptureSink, EchoSuppressor, PttController, push_captured_with};
 use super::playback::{Deck, PlaybackSink, PlayerQueue, fill_with};
 use super::resampler::{
-    CHUNK, Filter, WIRE_RATE, decode, encode, f32_to_i16, i16_to_f32, pick_config_from_ranges,
+    WIRE_RATE, decode, encode, f32_to_i16, i16_to_f32, pick_config_from_ranges,
 };
 use super::vad::{
     VAD_FRAME_SAMPLES, VAD_HANGOVER_FRAMES, VAD_MAX_ACTIVE_FRAMES, VAD_START_FRAMES, VoiceGate,
@@ -164,26 +164,6 @@ fn wire_pcm_round_trips_through_samples() {
 #[test]
 fn an_odd_byte_count_is_rejected_rather_than_truncated() {
     assert!(decode(&[0, 1, 2]).is_err());
-}
-
-#[test]
-fn a_streamed_conversion_preserves_the_sample_count_across_chunks() {
-    let mut up = Filter::new(WIRE_RATE, 48_000).unwrap();
-    let mut produced = 0usize;
-    let mut fed = 0usize;
-    for chunk in [100usize, 500, 37, 900, 480, 211, 300] {
-        let samples: Vec<f32> = (0..chunk)
-            .map(|index| (index as f32 * 0.01).sin())
-            .collect();
-        fed += chunk;
-        produced += up.push(&samples).unwrap().len();
-    }
-    let expected = (fed as f64 * 2.).round() as usize;
-    assert!(
-        produced + CHUNK * 2 >= expected,
-        "produced {produced} against about {expected}"
-    );
-    assert!(produced <= expected, "no more than the input produces");
 }
 
 #[test]

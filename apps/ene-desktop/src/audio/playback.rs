@@ -1,8 +1,9 @@
 use super::{
     AudioError,
-    resampler::{Filter, U16_SILENCE, WIRE_RATE, decode, f32_to_i16, f32_to_u16, pick_output},
+    resampler::{U16_SILENCE, WIRE_RATE, decode, f32_to_i16, f32_to_u16, pick_output},
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use ene_voice::pcm::StreamingResampler;
 use parking_lot::Mutex;
 use std::{
     collections::VecDeque,
@@ -22,7 +23,7 @@ pub(super) struct Deck {
 
 pub(super) struct PlayerQueue {
     pub(super) deck: Arc<Mutex<Deck>>,
-    filter: Option<Filter>,
+    filter: Option<StreamingResampler>,
     flushed: Arc<AtomicU64>,
 }
 
@@ -31,7 +32,7 @@ impl PlayerQueue {
         Ok(Self {
             deck: Arc::new(Mutex::new(Deck::default())),
             filter: (device_rate != WIRE_RATE)
-                .then(|| Filter::new(WIRE_RATE, device_rate))
+                .then(|| StreamingResampler::new(WIRE_RATE, device_rate))
                 .transpose()?,
             flushed: Arc::new(AtomicU64::new(0)),
         })

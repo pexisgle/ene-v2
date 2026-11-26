@@ -895,6 +895,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backon"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
+dependencies = [
+ "fastrand 2.5.0",
+]
+
+[[package]]
 name = "base64"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4081,6 +4090,7 @@ dependencies = [
 name = "ene-desktop"
 version = "0.1.8"
 dependencies = [
+ "backon",
  "base64 0.23.1",
  "buffa",
  "cap-std",
@@ -4095,13 +4105,13 @@ dependencies = [
  "ene-plugin",
  "ene-plugin-runtime",
  "ene-rpc",
+ "ene-voice",
  "globset",
  "gpui",
  "libc",
  "parking_lot",
  "process-wrap",
  "regex",
- "rubato",
  "serde",
  "serde_json",
  "tempfile",
@@ -4378,6 +4388,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "wav-codec",
  "which 8.0.6",
 ]
 
@@ -4397,6 +4408,7 @@ dependencies = [
 name = "ene-work"
 version = "0.1.8"
 dependencies = [
+ "backon",
  "ene-domain",
  "ene-plugin",
  "process-wrap",
@@ -12084,6 +12096,12 @@ checksum = "bbc9c5aca783b3f1838be89f3f9937c528b90ec5faa6fb62d809726c16a7d8f7"
 dependencies = [
  "wast 263.0.0",
 ]
+
+[[package]]
+name = "wav-codec"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73c7ca5602a58c74474e2479cacfb5a032757c81e8759551098c42aeec1f027f"
 
 [[package]]
 name = "waycrate_xkbkeycode"

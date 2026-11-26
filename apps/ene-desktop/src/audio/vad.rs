@@ -1,4 +1,5 @@
-use super::resampler::{Filter, WIRE_RATE, encode};
+use super::resampler::{WIRE_RATE, encode};
+use ene_voice::pcm::StreamingResampler;
 use std::collections::VecDeque;
 
 const VAD_RATE: u32 = 16_000;
@@ -26,7 +27,7 @@ fn is_single_tone(frame: &[f32]) -> bool {
 
 pub(super) struct VoiceGate {
     detector: earshot::Detector,
-    vad_filter: Filter,
+    vad_filter: StreamingResampler,
     pub(super) active: bool,
     speech_frames: u16,
     hangover: u16,
@@ -39,7 +40,7 @@ impl VoiceGate {
     pub(super) fn new() -> Result<Self, super::AudioError> {
         Ok(Self {
             detector: earshot::Detector::default(),
-            vad_filter: Filter::with_chunk(WIRE_RATE, VAD_RATE, VAD_FRAME_SAMPLES)?,
+            vad_filter: StreamingResampler::with_chunk(WIRE_RATE, VAD_RATE, VAD_FRAME_SAMPLES)?,
             active: false,
             speech_frames: 0,
             hangover: 0,
