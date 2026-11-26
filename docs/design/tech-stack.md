@@ -212,7 +212,7 @@ CLIコーディングエージェント用の `rig-basics`（`ApprovalPlugin` �
   - これにより、親エージェントがトリガーしたサイドLLM呼び出し（Compaction要約や記憶整理）の出力がTTSに混入する事故を完全に防ぐ。
   - さらに **`matches!(delta.event, StreamEvent::Text { .. })` で思考トークン（Reasoning / Thinking）を確実に除外**し、親コンパニオンのユーザー向け発話テキストのみを句点（`。`、`！`、`？`、改行）ごとに切り出してTTSタスクへ送出する。
 - **MCPツールの動的ECS登録（`rig-rmcp`）**:
-  - 外部ファイル自動探索（`rig-mcp-client` の暗黙読み込み）を排し、公式の **`rig-rmcp`**（`McpConnection` / `ManagedToolSink`）または `rig_mcp_client::McpCorePlugin` を採用。
+  - `rig-rmcp` の `McpConnection` を使い、登録済みの接続設定に従って MCP サーバーに接続する。`rmcp` が標準入出力と Streamable HTTP のトランスポートを提供する。
   - ツール一覧のライフサイクル（接続時の取得、`notifications/tools/list_changed` での再取得、登録ごとの世代トークン、切断済みツールの掃除）は `McpClientHandler` が所有する。eneは `ManagedToolSink` を実装したアダプタを渡し、モデル向け名（`mcp_<server>_<tool>`）への改名と、スレッド境界を越える受け渡しだけを行う。
   - eneの設定DBで認可されたMCPサーバーのみを明示的に接続・再接続管理し、得られたツール定義を `world.spawn_tool(tool_def, tool_handler, opts)`（Pure ECSツール登録）で動的エンティティとしてWorldへ追加・削除する。ツールエンティティを書くのはホストスレッドだけで、フレーム中に届いた更新は次フレームで適用する。設定の正本はeneが単一所有する。
 - **7つの `ModelAssignments` と `rig-core` カタログの最小マッピング**:
@@ -314,40 +314,9 @@ pub trait TtsEngine: Send + Sync {
 
 ### G. 外部ACPエージェント接続（プラグイン側）と Connect-RPC サーバー設定
 
-- **ACP外部ハーネス接続の最小イディオム**:
-  - ホストはACPプロセスを起動しない。ACPはプラグインが包み、ホストは`CONNECTION_KIND_ACP`の接続設定（`command` / `args`）だけを保持してプラグインへ渡す。以下はプラグイン実装側の最小構成。
-  - `agent-client-protocol = "5.2.0"` を採用し、型定義は公式Docsの安定性規約に従い `agent_client_protocol::v1::schema` 経由で参照する（`agent-client-protocol-schema` への直接依存はマイナーバージョンの固定ピン破損を防ぐため禁止）。
-    - 例外は Wasm ゲストSDK（`crates/ene-plugin`）のみ。ACP SDK は `wasm32-unknown-unknown` 向けにビルドできない（`uuid` の乱数源が未指定になる）ため、型定義だけを提供する `agent-client-protocol-schema` に直接依存する。その際もバージョンはキャレット要件（`"1.15.1"`）とし、SDK 側のピンが 1.x 内で動いても解決が壊れないようにする。ホスト側はこの例外を使わない。
-  - `process-wrap` の `TokioCommandWrap` で起動した子プロセスの標準入出力を `Client::v1()` トランスポートへ接続する最小構成：
-    ```rust
-    use agent_client_protocol::{ByteStreams, Client, schema::ProtocolVersion, v1::schema::InitializeRequest};
-    use process_wrap::tokio::*;
-    use tokio::process::Command;
-    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-
-    let mut wrap = CommandWrap::with_new("opencode", |cmd| {
-        cmd.stdin(std::process::Stdio::piped())
-           .stdout(std::process::Stdio::piped());
-    });
-    #[cfg(unix)]
-    wrap.wrap(ProcessGroup::leader());
-    #[cfg(windows)]
-    wrap.wrap(JobObject);
-    wrap.wrap(KillOnDrop);
-
-    let mut child = wrap.spawn()?;
-    let stdin = child.stdin().take().expect("stdin").compat_write();
-    let stdout = child.stdout().take().expect("stdout").compat();
-
-    Client.v1()
-        .name("ene-host")
-        .connect_with(ByteStreams::new(stdin, stdout), async |cx| {
-            cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
-            // プラグインがセッション (cx.build_session_cwd() 等) を維持して prompt / cancel を実行
-            Ok(())
-        })
-        .await?;
-    ```
+- **ACP 外部ハーネス接続**
+  - ホストは `CONNECTION_KIND_ACP` の接続設定（`command` / `args`）をハーネスプラグインへ渡す。Wasm ゲストとホストで共有する ACP v1 の型は、`ene-plugin` が `agent-client-protocol-schema` から再公開する。
+  - `ene-work` のネイティブ ACP ブリッジは標準入出力の JSON-RPC で初期化、セッション作成、プロンプト送信、権限要求を扱う。子プロセスの管理には `process-wrap` を使う。
 
 - **Connect-RPC サーバーの HTTP/2（h2c）設定**:
   - `VoiceService.StreamAudioInput` 等の双方向ストリーミングを平文ローカル通信（h2c）で安定動作させるため、`connectrpc::Server` または axum / hyper において明示的に HTTP/2 prior knowledge（h2c）を有効化して起動する（デフォルトの HTTP/1.1 単一受付によるストリーミング遮断を防止）。

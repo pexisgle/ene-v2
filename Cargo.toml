@@ -57,11 +57,8 @@ ene-plugin-runtime = { path = "crates/ene-plugin-runtime" }
 ene-store = { path = "crates/ene-store" }
 ene-voice = { path = "crates/ene-voice" }
 ene-work = { path = "crates/ene-work" }
-# A Wasm guest cannot depend on the full ACP SDK, because the SDK pulls `uuid`
-# without a randomness source for `wasm32-unknown-unknown`. `crates/ene-plugin`
-# therefore depends on the types-only crate directly, with a caret requirement
-# so the pinned ACP version can move within 1.x without breaking resolution.
-agent-client-protocol-schema = { version = "1.15.1", default-features = false }
+# Share the ACP wire types with Wasm guests without pulling in the native SDK.
+agent-client-protocol-schema = { version = "1.22.0", default-features = false }
 process-wrap = { version = "11", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
 # TokioChildProcess accepts the CommandWrap from RMCP's process-wrap version.
 process-wrap-rmcp = { package = "process-wrap", version = "10.0.2", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop", "creation-flags"] }
@@ -100,7 +97,7 @@ rig-ecs = "0.47.1"
 rig-memory = { version = "0.47.1", features = ["fs"] }
 rig-rmcp = "0.47.1"
 # The transports rig-rmcp re-exports are behind rmcp features it does not turn on.
-rmcp = { version = "3.5", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "which-command"] }
+rmcp = { version = "3.11.0", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "which-command"] }
 rig-reqwest = { version = "0.47.1", features = ["rustls"] }
 # rig-ecs sets the exact versions of the Bevy crates it exposes to the host.
 bevy = { version = "0.20.1", default-features = false }
