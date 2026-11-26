@@ -1,5 +1,5 @@
 //! Background Decision API evaluation for pending tool approvals.
-use super::approval::submit;
+use super::approval::{ApprovalRequest, SubmitOutcome, submit_with_outcome};
 use super::gate::{MAX_TOOL_IDENTIFIER_BYTES, notify_approval_card};
 use crate::host::{
     Notifier,
@@ -339,132 +339,62 @@ fn prepare_decision_task(
     DecisionSpawn::Spawned
 }
 
-enum PendingApprovalState {
-    Pending,
-    Dropped,
-    Error(crate::host::error::HostError),
-}
-
-fn check_decision_approval_pending(store: &Store, pending: &Pending) -> PendingApprovalState {
-    let request = &pending.request;
-    let approval = match store.approval_repo().approval(request) {
-        Ok(Some(approval)) => approval,
-        Ok(None) => {
-            tracing::debug!(%request, "a late decision dropped: no such approval");
-            return PendingApprovalState::Dropped;
-        }
-        Err(error) => return PendingApprovalState::Error(error.into()),
+/// Lands one finished decision. Submission and card publication each check that
+/// the approval is still pending before acting.
+pub(super) fn collect_decisions(world: &mut World) {
+    let Some(flight) = world.resource_mut::<Decisions>().take_finished() else {
+        return;
     };
-    if approval.status != ApprovalStatus::Pending {
-        tracing::debug!(
-            %request,
-            "a late decision dropped: the approval was already answered"
+    let pending = &flight.pending;
+    let outcome = background::take(flight.task).unwrap_or(Err(DecisionError::TaskMissingResult));
+    if let Ok(decision) = &outcome
+        && decision.allow
+    {
+        let result = submit_with_outcome(
+            world,
+            ApprovalRequest::Companion {
+                request: &pending.request,
+                companion: &pending.companion,
+            },
+            ApprovalDecision::Approve,
         );
-        return PendingApprovalState::Dropped;
+        if let Err(error) = &result
+            && error.is_storage()
+        {
+            crate::host::fail(world, &error.to_string());
+        } else {
+            log_model_approval(pending, &flight.engine, &decision.reason, result);
+        }
+        return;
     }
-    PendingApprovalState::Pending
+    if let Err(why) = outcome {
+        tracing::warn!(%why, request = %pending.request, "the decision failed");
+    }
+    let store = world.resource::<Store>().clone();
+    if let Some(fatal) = push_card(&store, &mut world.resource_mut::<Notifier>(), pending) {
+        crate::host::fail(world, &fatal);
+    }
 }
 
-fn handle_pending_check_error(
-    store: &Store,
-    notifier: &mut Notifier,
-    pending: &Pending,
-    error: &crate::host::error::HostError,
-) -> Option<String> {
-    if error.is_storage() {
-        return Some(error.to_string());
-    }
-    tracing::warn!(
-        %error,
-        request = %pending.request,
-        "decision collection failed to read approval"
-    );
-    push_card(store, notifier, pending)
-}
-
-fn log_approve_result<T>(
+fn log_model_approval(
     pending: &Pending,
     engine: &str,
     reason: &str,
-    result: crate::host::db::Result<T>,
+    result: crate::host::db::Result<SubmitOutcome>,
 ) {
     match result {
         Ok(_) => tracing::info!(
             companion = %pending.companion,
-            engine = %engine,
-            reason = %reason,
+            engine,
+            reason,
             request = %pending.request,
             "the decision engine allowed the operation"
         ),
         Err(error) => tracing::debug!(
             %error,
             request = %pending.request,
-            "a late decision dropped: the approval was already answered"
+            "the decision could not approve the operation"
         ),
-    }
-}
-
-fn handle_non_approve_outcome(
-    store: &Store,
-    notifier: &mut Notifier,
-    pending: &Pending,
-    engine: &str,
-    outcome: DecisionOutcome,
-) -> Option<String> {
-    match outcome {
-        Ok(decision) => tracing::info!(
-            companion = %pending.companion,
-            engine = %engine,
-            reason = %decision.reason,
-            request = %pending.request,
-            "the decision engine requires the user's approval"
-        ),
-        Err(why) => tracing::warn!(
-            %why,
-            request = %pending.request,
-            "the decision failed; the card is shown"
-        ),
-    }
-    push_card(store, notifier, pending)
-}
-
-/// Lands one finished decision.
-pub(super) fn collect_decisions(world: &mut World) {
-    let Some(flight) = world.resource_mut::<Decisions>().take_finished() else {
-        return;
-    };
-    let store = world.resource::<Store>().clone();
-    match check_decision_approval_pending(&store, &flight.pending) {
-        PendingApprovalState::Pending => {}
-        PendingApprovalState::Dropped => return,
-        PendingApprovalState::Error(error) => {
-            if let Some(fatal) = handle_pending_check_error(
-                &store,
-                &mut world.resource_mut::<Notifier>(),
-                &flight.pending,
-                &error,
-            ) {
-                crate::host::fail(world, &fatal);
-            }
-            return;
-        }
-    }
-    let outcome = background::take(flight.task).unwrap_or(Err(DecisionError::TaskMissingResult));
-    if let Ok(decision) = &outcome
-        && decision.allow
-    {
-        let result = submit(world, &flight.pending.request, ApprovalDecision::Approve);
-        log_approve_result(&flight.pending, &flight.engine, &decision.reason, result);
-        return;
-    }
-    if let Some(fatal) = handle_non_approve_outcome(
-        &store,
-        &mut world.resource_mut::<Notifier>(),
-        &flight.pending,
-        &flight.engine,
-        outcome,
-    ) {
-        crate::host::fail(world, &fatal);
     }
 }
 

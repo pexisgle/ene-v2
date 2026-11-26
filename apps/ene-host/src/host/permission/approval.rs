@@ -1,5 +1,5 @@
 //! Approval submission, hold release, rule persistence, and orphan expiration.
-use super::gate::{Approvals, Approved, CallBinding, Hold, ResolveApprovalArgs, SubmitOutcome};
+use super::gate::{Approvals, Approved, CallBinding, ResolveApprovalArgs};
 use crate::host::{
     db::Store,
     error::{HostError, Result},
@@ -35,102 +35,68 @@ pub(crate) fn refuse(world: &mut World, call: Entity, reason: &str) {
     decide(world, call, Outcome::refused(reason));
 }
 
-/// Takes a held call out of the map and despawns its hold marker.
-fn release(world: &mut World, request: &str) -> Option<Hold> {
-    let hold = world
-        .resource_mut::<Approvals>()
-        .by_request
-        .remove(request)?;
-    if world.get_entity(hold.hold).is_ok() {
-        world.entity_mut(hold.hold).despawn();
+/// Removes a held call and despawns its hold marker.
+fn release(world: &mut World, request: &str) {
+    if let Some(hold) = world.resource_mut::<Approvals>().by_request.remove(request) {
+        let _despawned = world.try_despawn(hold.hold);
     }
-    Some(hold)
 }
 
 /// The client an approval is bound to.
 fn bound_client(store: &Store, approval: &Approval) -> Result<Option<String>> {
-    if let Some(work_id) = approval.work_id.as_deref().filter(|id| !id.is_empty()) {
-        let Some(session) = store.work_repo().work_session(work_id)? else {
-            return Ok(None);
-        };
-        if session.companion_id.as_str() != approval.session_id {
-            return Ok(None);
+    let work = store.work_repo();
+    let run;
+    let work_id = match approval.work_id.as_deref().filter(|id| !id.is_empty()) {
+        Some(id) => id,
+        None if approval.run_id.is_empty() => {
+            return Ok(store
+                .client_repo()
+                .activation(&approval.session_id)?
+                .and_then(|activation| activation.client_id));
         }
-        return Ok(session.client_id);
-    }
-    if approval.run_id.is_empty() {
-        return Ok(store
-            .client_repo()
-            .activation(&approval.session_id)?
-            .and_then(|activation| activation.client_id));
-    }
-    let Some(run) = store.work_repo().run(&approval.run_id)? else {
-        return Ok(None);
+        None => {
+            let Some(saved) = work.run(&approval.run_id)? else {
+                return Ok(None);
+            };
+            run = saved;
+            &run.work_id
+        }
     };
-    let Some(session) = store.work_repo().work_session(&run.work_id)? else {
-        return Ok(None);
-    };
-    if session.companion_id.as_str() != approval.session_id {
-        return Ok(None);
-    }
-    Ok(session.client_id)
+    Ok(work
+        .work_session(work_id)?
+        .filter(|session| session.companion_id.as_str() == approval.session_id)
+        .and_then(|session| session.client_id))
 }
 
-/// Approves or denies a pending request. Validates hash, client binding,
-/// grants, and DB state before mutating the ECS hold or granting execution.
+#[derive(Clone, Copy)]
+pub(crate) enum ApprovalRequest<'a> {
+    Operator(&'a str),
+    Companion {
+        request: &'a str,
+        companion: &'a str,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) enum RuleSave {
+    NotRequested,
+    Saved,
+    Failed(String),
+}
+
+pub(crate) struct SubmitOutcome {
+    pub(crate) approval: Approval,
+    pub(crate) rule: RuleSave,
+}
+
+#[cfg(test)]
 pub(crate) fn submit(
     world: &mut World,
     request_id: &str,
     decision: ApprovalDecision,
 ) -> Result<Approval> {
-    submit_with_outcome(world, request_id, decision).map(|outcome| outcome.approval)
-}
-
-enum HoldVerification {
-    Valid {
-        hold: Hold,
-        snapshot: Option<(String, Value)>,
-    },
-    Mismatch(Hold),
-}
-
-fn verify_hold_snapshot(
-    store: &Store,
-    request_id: &str,
-    hold: Option<Hold>,
-    request_snapshot: Option<(String, Value)>,
-) -> Result<HoldVerification> {
-    let approval = store
-        .approval_repo()
-        .approval(request_id)?
-        .ok_or_else(|| HostError::NotFound(("approval not found").into()))?;
-    if approval.status != ApprovalStatus::Pending {
-        return Err(HostError::Conflict(
-            ("approval is no longer pending").into(),
-        ));
-    }
-    let Some(hold) = hold else {
-        store
-            .approval_repo()
-            .resolve_approval(request_id, ApprovalStatus::Expired)?;
-        return Err(HostError::Conflict(
-            ("approval is not attached to a live tool call").into(),
-        ));
-    };
-    let changed = request_snapshot
-        .as_ref()
-        .map(|(name, args)| canonicalise(name, args).1)
-        .is_none_or(|hash| hash != approval.action_payload_hash);
-    if changed {
-        store
-            .approval_repo()
-            .resolve_approval(request_id, ApprovalStatus::Expired)?;
-        return Ok(HoldVerification::Mismatch(hold));
-    }
-    Ok(HoldVerification::Valid {
-        hold,
-        snapshot: request_snapshot,
-    })
+    submit_with_outcome(world, ApprovalRequest::Operator(request_id), decision)
+        .map(|outcome| outcome.approval)
 }
 
 enum BoundClientCheck {
@@ -140,73 +106,57 @@ enum BoundClientCheck {
 
 fn validate_bound_approval_client(
     store: &Store,
-    request_id: &str,
+    approval: &Approval,
     binding: Option<&CallBinding>,
-    request_snapshot: Option<&(String, Value)>,
+    tool_name: &str,
+    raw_arguments: Value,
 ) -> Result<BoundClientCheck> {
     let Some(binding) = binding else {
         return Ok(BoundClientCheck::Allowed(None));
     };
-    let approval = store
-        .approval_repo()
-        .approval(request_id)?
-        .ok_or_else(|| HostError::NotFound(("approval not found").into()))?;
-    let target_id = bound_client(store, &approval)?.unwrap_or_else(|| binding.client_id.clone());
+    let target_id = bound_client(store, approval)?.unwrap_or_else(|| binding.client_id.clone());
     let client = store
         .client_repo()
         .client(&target_id)?
-        .ok_or_else(|| HostError::Conflict(("the bound client is not registered").into()))?;
+        .ok_or_else(|| HostError::Conflict("the bound client is not registered".into()))?;
     if !client.is_granted(&binding.capability) {
         return Err(HostError::Conflict(format!(
             "capability `{}` is no longer granted on `{target_id}`",
             binding.capability
         )));
     }
-    if let Some((tool_name, raw_args)) = request_snapshot {
-        let empty = serde_json::json!({});
-        let input = if tool_name == "device_request" {
-            raw_args.get("input").unwrap_or(&empty).clone()
-        } else {
-            raw_args.clone()
-        };
-        let action = CandidateAction::DeviceCapability {
-            capability: binding.capability.clone(),
-            spec: client.spec(&binding.capability).cloned().map(Box::new),
-            tool_name: tool_name.clone(),
-            input,
-            raw_arguments: raw_args.clone(),
-        };
-        let typed_target = extract_target(&action);
-        if let Some(reason) = hard_denied_action(&action, &typed_target) {
-            store
-                .approval_repo()
-                .resolve_approval(request_id, ApprovalStatus::Denied)?;
-            return Ok(BoundClientCheck::Denied(reason));
-        }
-        if approval.client_id.as_deref() != Some(target_id.as_str()) {
-            let rules = store.policy_repo().policy_rules()?;
-            if let Verdict::Deny { reason } = decide_action(&rules, &action) {
-                store
-                    .approval_repo()
-                    .resolve_approval(request_id, ApprovalStatus::Denied)?;
-                return Ok(BoundClientCheck::Denied(reason));
-            }
-        }
+    let input = if tool_name == "device_request" {
+        raw_arguments
+            .get("input")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}))
+    } else {
+        raw_arguments.clone()
+    };
+    let action = CandidateAction::DeviceCapability {
+        capability: binding.capability.clone(),
+        spec: client.spec(&binding.capability).cloned().map(Box::new),
+        tool_name: tool_name.to_owned(),
+        input,
+        raw_arguments,
+    };
+    if let Some(reason) = hard_denied_action(&action, &extract_target(&action)) {
+        return Ok(BoundClientCheck::Denied(reason));
+    }
+    if approval.client_id.as_deref() != Some(target_id.as_str())
+        && let Verdict::Deny { reason } =
+            decide_action(&store.policy_repo().policy_rules()?, &action)
+    {
+        return Ok(BoundClientCheck::Denied(reason));
     }
     Ok(BoundClientCheck::Allowed(Some(target_id)))
-}
-
-struct PersistRuleOutcome {
-    saved: bool,
-    error: Option<String>,
-    fatal_storage: Option<String>,
 }
 
 fn persist_always_allow_rule(
     store: &Store,
     notifier: &mut Notifier,
     approval: &Approval,
-) -> PersistRuleOutcome {
+) -> Result<()> {
     let pattern = if approval.normalized_arguments.trim().is_empty() {
         "*".to_owned()
     } else if approval.normalized_arguments.chars().count() <= 4_000 {
@@ -221,136 +171,123 @@ fn persist_always_allow_rule(
         effect: PolicyEffect::Allow,
         created_at: String::new(),
     };
-    match store.policy_repo().apply_policy_rules(&[rule], &[]) {
-        Ok(rules) => {
-            let wire_rules = rules.iter().map(Into::into).collect();
-            notifier.push(
-                None,
-                None,
-                w::notification::Event::PolicyRulesUpdated(Box::new(w::PolicyRulesUpdated {
-                    rules: wire_rules,
-                    ..Default::default()
-                })),
-            );
-            PersistRuleOutcome {
-                saved: true,
-                error: None,
-                fatal_storage: None,
-            }
-        }
-        Err(error) => {
-            let fatal_storage = error.is_storage().then(|| error.to_string());
-            let msg = error.to_string();
-            tracing::warn!(%error, "failed to persist AlwaysApprove policy rule");
-            notifier.notice(
-                Some(&approval.session_id),
-                "policy_rule_save_failed",
-                &format!("承認は実行されましたが、常時許可ルールの保存に失敗しました: {msg}"),
-            );
-            PersistRuleOutcome {
-                saved: false,
-                error: Some(msg),
-                fatal_storage,
-            }
-        }
-    }
+    let rules = store.policy_repo().apply_policy_rules(&[rule], &[])?;
+    notifier.push(
+        None,
+        None,
+        w::notification::Event::PolicyRulesUpdated(Box::new(w::PolicyRulesUpdated {
+            rules: rules.iter().map(Into::into).collect(),
+            ..Default::default()
+        })),
+    );
+    Ok(())
 }
 
+/// Checks the approval scope, live call hash and current grants before committing the decision.
 pub(crate) fn submit_with_outcome(
     world: &mut World,
-    request_id: &str,
+    request: ApprovalRequest<'_>,
     decision: ApprovalDecision,
 ) -> Result<SubmitOutcome> {
+    let (request_id, owner) = match request {
+        ApprovalRequest::Operator(id) => (id, None),
+        ApprovalRequest::Companion { request, companion } => (request, Some(companion)),
+    };
     let store = world.resource::<Store>().clone();
-    let hold_entry = world
-        .resource::<Approvals>()
-        .by_request
-        .get(request_id)
-        .copied();
-    let request_snapshot = hold_entry.and_then(|hold| {
-        world.get::<ToolRequest>(hold.call).map(|request| {
-            (
-                request.call.function.name.as_str().to_owned(),
-                Value::Object(request.call.function.arguments.clone()),
-            )
-        })
+    let repo = store.approval_repo();
+    let approval = repo
+        .approval(request_id)?
+        .ok_or_else(|| HostError::NotFound("approval not found".into()))?;
+    if owner.is_some_and(|owner| owner != approval.session_id) {
+        return Err(HostError::Permission(
+            "this approval belongs to another companion".into(),
+        ));
+    }
+    if approval.status != ApprovalStatus::Pending {
+        return Err(HostError::Conflict("approval is no longer pending".into()));
+    }
+    let Some(&hold) = world.resource::<Approvals>().by_request.get(request_id) else {
+        repo.resolve_approval(request_id, ApprovalStatus::Expired)?;
+        return Err(HostError::Conflict(
+            "approval is not attached to a live tool call".into(),
+        ));
+    };
+    let snapshot = world.get::<ToolRequest>(hold.call).and_then(|request| {
+        let name = request.call.function.name.as_str();
+        let args = Value::Object(request.call.function.arguments.clone());
+        (canonicalise(name, &args).1 == approval.action_payload_hash).then_some((name, args))
     });
-    let (hold, request_snapshot) =
-        match verify_hold_snapshot(&store, request_id, hold_entry, request_snapshot)? {
-            HoldVerification::Valid { hold, snapshot } => (hold, snapshot),
-            HoldVerification::Mismatch(hold) => {
-                release(world, request_id);
-                refuse(
-                    world,
-                    hold.call,
-                    "the operation arguments changed after the approval was requested",
-                );
-                return Err(HostError::Conflict(
-                    ("approval no longer matches the call arguments").into(),
-                ));
-            }
-        };
-    match decision {
+    let Some((name, args)) = snapshot else {
+        repo.resolve_approval(request_id, ApprovalStatus::Expired)?;
+        release(world, request_id);
+        refuse(
+            world,
+            hold.call,
+            "the operation arguments changed after the approval was requested",
+        );
+        return Err(HostError::Conflict(
+            "approval no longer matches the call arguments".into(),
+        ));
+    };
+
+    let approval = match decision {
         ApprovalDecision::Approve | ApprovalDecision::AlwaysApprove => {
-            let binding = world.get::<CallBinding>(hold.call).cloned();
-            let rebound_client = match validate_bound_approval_client(
-                &store,
-                request_id,
-                binding.as_ref(),
-                request_snapshot.as_ref(),
-            )? {
-                BoundClientCheck::Allowed(rebound_client) => rebound_client,
-                BoundClientCheck::Denied(reason) => {
-                    release(world, request_id);
-                    refuse(world, hold.call, &reason);
-                    return Err(HostError::Permission(reason));
-                }
-            };
-            let approval = store.approval_repo().resolve_approval_with_client(
+            let binding = world.get::<CallBinding>(hold.call);
+            let rebound_client =
+                match validate_bound_approval_client(&store, &approval, binding, name, args)? {
+                    BoundClientCheck::Allowed(client) => client,
+                    BoundClientCheck::Denied(reason) => {
+                        repo.resolve_approval(request_id, ApprovalStatus::Denied)?;
+                        release(world, request_id);
+                        refuse(world, hold.call, &reason);
+                        return Err(HostError::Permission(reason));
+                    }
+                };
+            let approval = repo.resolve_approval_with_client(
                 request_id,
                 ApprovalStatus::Approved,
                 rebound_client.as_deref(),
             )?;
             release(world, request_id);
-            if let Some(target_id) = rebound_client
+            if let Some(target) = rebound_client
                 && let Some(mut binding) = world.get_mut::<CallBinding>(hold.call)
             {
-                binding.client_id = target_id;
+                binding.client_id = target;
             }
             world.entity_mut(hold.call).insert(Approved);
-            let rule_outcome = if matches!(decision, ApprovalDecision::AlwaysApprove) {
-                persist_always_allow_rule(&store, &mut world.resource_mut::<Notifier>(), &approval)
-            } else {
-                PersistRuleOutcome {
-                    saved: false,
-                    error: None,
-                    fatal_storage: None,
-                }
-            };
-            if let Some(fatal) = rule_outcome.fatal_storage {
-                crate::host::fail(world, &fatal);
-            }
-            notify_resolved(&mut world.resource_mut::<Notifier>(), &approval);
-            Ok(SubmitOutcome {
-                approval,
-                rule_saved: rule_outcome.saved,
-                rule_error: rule_outcome.error,
-            })
+            approval
         }
         ApprovalDecision::Deny | ApprovalDecision::Unspecified => {
-            let approval = store
-                .approval_repo()
-                .resolve_approval(request_id, ApprovalStatus::Denied)?;
+            let approval = repo.resolve_approval(request_id, ApprovalStatus::Denied)?;
             release(world, request_id);
             refuse(world, hold.call, "the user denied this operation");
-            notify_resolved(&mut world.resource_mut::<Notifier>(), &approval);
-            Ok(SubmitOutcome {
-                approval,
-                rule_saved: false,
-                rule_error: None,
-            })
+            approval
         }
-    }
+    };
+    let rule = if matches!(decision, ApprovalDecision::AlwaysApprove) {
+        match persist_always_allow_rule(&store, &mut world.resource_mut::<Notifier>(), &approval) {
+            Ok(()) => RuleSave::Saved,
+            Err(error) => {
+                let message = error.to_string();
+                tracing::warn!(%error, "failed to persist AlwaysApprove policy rule");
+                world.resource_mut::<Notifier>().notice(
+                    Some(&approval.session_id),
+                    "policy_rule_save_failed",
+                    &format!(
+                        "承認は実行されましたが、常時許可ルールの保存に失敗しました: {message}"
+                    ),
+                );
+                if error.is_storage() {
+                    crate::host::fail(world, &message);
+                }
+                RuleSave::Failed(message)
+            }
+        }
+    } else {
+        RuleSave::NotRequested
+    };
+    notify_resolved(&mut world.resource_mut::<Notifier>(), &approval);
+    Ok(SubmitOutcome { approval, rule })
 }
 
 fn notify_resolved(notifier: &mut Notifier, approval: &Approval) {
@@ -381,17 +318,15 @@ pub(crate) fn resolve_approval(
             )));
         }
     };
-    let store = world.resource::<Store>().clone();
-    let approval = store
-        .approval_repo()
-        .approval(&args.request_id)?
-        .ok_or_else(|| HostError::NotFound(("approval not found").into()))?;
-    if approval.session_id != companion_id {
-        return Err(HostError::Permission(
-            ("this approval belongs to another companion").into(),
-        ));
-    }
-    let approval = submit(world, &args.request_id, decision)?;
+    let approval = submit_with_outcome(
+        world,
+        ApprovalRequest::Companion {
+            request: &args.request_id,
+            companion: &companion_id,
+        },
+        decision,
+    )?
+    .approval;
     Ok(serde_json::json!({
         "request_id": approval.request_id,
         "status": approval.status.as_str(),
@@ -400,25 +335,19 @@ pub(crate) fn resolve_approval(
 }
 
 /// A stopped turn takes its held calls with it; the approval must not become reusable.
-pub(super) fn expire_orphaned_approvals(world: &mut World) {
-    let orphans: Vec<String> = {
-        let approvals = world.resource::<Approvals>();
-        approvals
-            .by_request
-            .iter()
-            .filter(|(_, hold)| world.get_entity(hold.call).is_err())
-            .map(|(request, _)| request.clone())
-            .collect()
-    };
-    for request in orphans {
-        release(world, &request);
-        if let Ok(store) = world.resource::<Store>().approval_repo().approval(&request)
-            && store.is_some_and(|approval| approval.status == ApprovalStatus::Pending)
-        {
-            let store = world.resource::<Store>().clone();
-            let _discarded = store
-                .approval_repo()
-                .resolve_approval(&request, ApprovalStatus::Expired);
+pub(super) fn expire_orphaned_approvals(
+    mut approvals: ResMut<Approvals>,
+    entities: Query<()>,
+    store: Res<Store>,
+    mut commands: Commands,
+) {
+    let repo = store.into_inner().approval_repo();
+    approvals.by_request.retain(|request, hold| {
+        if entities.contains(hold.call) {
+            return true;
         }
-    }
+        commands.entity(hold.hold).try_despawn();
+        let _expired = repo.resolve_approval(request, ApprovalStatus::Expired);
+        false
+    });
 }

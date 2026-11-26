@@ -215,12 +215,21 @@ impl<'a> AgentKernel<'a> {
         id: &str,
         decision: permission::ApprovalDecision,
     ) -> Result<w::SubmitApprovalResponse> {
-        let outcome = permission::submit_with_outcome(self.app.world_mut(), id, decision)?;
+        let outcome = permission::submit_with_outcome(
+            self.app.world_mut(),
+            permission::ApprovalRequest::Operator(id),
+            decision,
+        )?;
+        let (rule_saved, rule_error) = match outcome.rule {
+            permission::RuleSave::Saved => (true, None),
+            permission::RuleSave::NotRequested => (false, None),
+            permission::RuleSave::Failed(error) => (false, Some(error)),
+        };
         Ok(w::SubmitApprovalResponse {
             acknowledged: true,
             status: w::ApprovalStatus::from(outcome.approval.status).into(),
-            rule_saved: outcome.rule_saved,
-            rule_error: outcome.rule_error,
+            rule_saved,
+            rule_error,
             ..Default::default()
         })
     }

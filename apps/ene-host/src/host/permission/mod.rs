@@ -9,7 +9,7 @@ mod resolve;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use approval::{answer, decide, refuse, submit_with_outcome};
+pub(crate) use approval::{ApprovalRequest, RuleSave, answer, decide, refuse, submit_with_outcome};
 #[cfg(test)]
 pub(crate) use approval::{resolve_approval, submit};
 pub(crate) use ene_policy::{

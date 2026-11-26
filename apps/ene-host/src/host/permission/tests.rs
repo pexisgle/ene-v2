@@ -848,11 +848,15 @@ fn b18_large_always_approve_persists_exact_digest_rule_and_skips_second_prompt()
     let request = world.pending().request_id;
     let outcome = submit_with_outcome(
         world.app.world_mut(),
-        &request,
+        ApprovalRequest::Operator(&request),
         ApprovalDecision::AlwaysApprove,
     )
     .unwrap();
-    assert!(outcome.rule_saved, "{:?}", outcome.rule_error);
+    assert!(
+        matches!(outcome.rule, RuleSave::Saved),
+        "{:?}",
+        outcome.rule
+    );
     assert!(world.app.world().get::<Approved>(call1).is_some());
 
     let rules = world.store().policy_repo().policy_rules().unwrap();

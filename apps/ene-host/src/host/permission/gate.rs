@@ -70,13 +70,6 @@ pub(crate) struct Hold {
     pub(crate) hold: Entity,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct SubmitOutcome {
-    pub(crate) approval: Approval,
-    pub(crate) rule_saved: bool,
-    pub(crate) rule_error: Option<String>,
-}
-
 /// The approvals that are currently attached to a live tool call.
 #[derive(Resource, Default)]
 pub(crate) struct Approvals {
