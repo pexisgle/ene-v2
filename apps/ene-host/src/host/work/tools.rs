@@ -287,7 +287,7 @@ fn report(world: &mut World, agent: Entity, args: ReportArgs) -> Result<String> 
 mod tests {
     use super::*;
     use crate::host::delegation::DeliveredClaims;
-    use crate::host::mind::{Assignments, Companion, Profile, State};
+    use crate::host::mind::{Companion, ModelAssignments, Profile, State};
     use crate::host::model::{Credentials, ModelFactory};
     use crate::host::notify::Notifier;
     use crate::host::tests::bound;
@@ -361,7 +361,7 @@ mod tests {
             state_revision: 1,
             body: ene_mind::JsonDoc::new("ene.body.v1", serde_json::json!({})),
             voice: ene_mind::JsonDoc::new("ene.voice.v1", serde_json::json!({})),
-            assignments: Assignments::default(),
+            assignments: ModelAssignments::default(),
             persona: None,
             voice_identifier: None,
             revision: 1,

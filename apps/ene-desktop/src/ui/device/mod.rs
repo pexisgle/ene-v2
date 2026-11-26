@@ -362,7 +362,7 @@ mod tests {
                 .iter()
                 .all(|id| is_file_confirmation_rule(&PolicyRule {
                     id: id.clone(),
-                    ..Default::default()
+                    ..rule.clone()
                 }))
         );
         assert_eq!(
@@ -376,7 +376,7 @@ mod tests {
         assert!(!is_file_confirmation_rule(&PolicyRule {
             id: "manual-write-rule".into(),
             tool_name: "work.write".into(),
-            ..Default::default()
+            ..rule.clone()
         }));
     }
 }

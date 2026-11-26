@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn removing_a_connection_checks_revision_and_clears_only_its_bindings_and_secret() {
-        use ene_mind::{Assignment, default_ene_companion};
+        use ene_mind::{ModelAssignment, default_ene_companion};
         use std::collections::HashMap;
 
         let dir = tempfile::tempdir().unwrap();
@@ -395,7 +395,7 @@ mod tests {
             ("keep".to_owned(), "preserved".to_owned()),
         ]);
         let mut companion = default_ene_companion(&now());
-        let assignment = |id: &str| Assignment {
+        let assignment = |id: &str| ModelAssignment {
             connection_id: id.into(),
             model_id: "gpt-5".into(),
         };

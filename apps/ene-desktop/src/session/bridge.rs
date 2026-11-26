@@ -87,7 +87,7 @@ impl DeviceBridge {
         if self.avatar.is_none() {
             return;
         }
-        let resident: Vec<(String, w::BodyBinding, Option<PathBuf>)> = transport
+        let resident: Vec<(String, ene_domain::BodyBinding, Option<PathBuf>)> = transport
             .bindings
             .keys()
             .map(|id| {
@@ -387,7 +387,7 @@ impl DeviceBridge {
 
 async fn remove_stale_avatars(
     avatar: &mut Avatar,
-    resident: &[(String, w::BodyBinding, Option<PathBuf>)],
+    resident: &[(String, ene_domain::BodyBinding, Option<PathBuf>)],
 ) {
     let shown = avatar.shown_characters();
     for stale in shown {

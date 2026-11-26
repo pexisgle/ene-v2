@@ -4,7 +4,7 @@
 use super::error::{HostError, Result};
 use ene_mind::JsonDoc;
 pub(crate) use ene_mind::{
-    Assignment, Assignments, Companion, Profile, Role, State, default_ene_companion,
+    Companion, ModelAssignment, ModelAssignments, Profile, Role, State, default_ene_companion,
 };
 
 // === Host operations ======================================================
@@ -66,10 +66,7 @@ pub(crate) fn create(
         .profile
         .as_option()
         .map_or_default(wire::profile_from);
-    let assignments = request
-        .assignments
-        .as_option()
-        .map_or_default(wire::assignments_from);
+    let assignments = request.assignments.into_option().map_or_default(Into::into);
     let companion = Companion {
         id: uuid::Uuid::new_v4().to_string(),
         name: request.name.clone(),
@@ -98,27 +95,16 @@ pub(crate) fn create(
     Ok(wire::companion(&companion))
 }
 
-fn set_assignment(target: &mut Option<Assignment>, patch: Option<&w::AssignmentPatch>) {
-    match patch.and_then(|patch| patch.change.as_ref()) {
-        Some(w::assignment_patch::Change::Set(set)) => {
-            *target = Some(Assignment {
-                connection_id: set.connection_id.clone(),
-                model_id: set.model_id.clone(),
-            });
-        }
-        Some(w::assignment_patch::Change::Clear(_)) => *target = None,
-        None => {}
+fn set_assignment(target: &mut Option<ModelAssignment>, patch: Option<&w::AssignmentPatch>) {
+    if let Some(change) = patch.and_then(|patch| patch.change.as_ref()) {
+        *target = change.into();
     }
 }
 
-fn required_assignment(patch: Option<&w::AssignmentPatch>) -> Option<Assignment> {
-    match patch.and_then(|patch| patch.change.as_ref()) {
-        Some(w::assignment_patch::Change::Set(set)) => Some(Assignment {
-            connection_id: set.connection_id.clone(),
-            model_id: set.model_id.clone(),
-        }),
-        _ => None,
-    }
+fn required_assignment(patch: Option<&w::AssignmentPatch>) -> Option<ModelAssignment> {
+    patch
+        .and_then(|patch| patch.change.as_ref())
+        .and_then(Into::into)
 }
 
 pub(crate) fn update(

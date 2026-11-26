@@ -726,7 +726,7 @@ fn unassigned(id: &str) -> crate::host::mind::Companion {
         state_revision: 1,
         body: ene_mind::JsonDoc::empty(),
         voice: ene_mind::JsonDoc::empty(),
-        assignments: crate::host::mind::Assignments::default(),
+        assignments: crate::host::mind::ModelAssignments::default(),
         persona: None,
         voice_identifier: None,
         revision: 1,

@@ -28,9 +28,7 @@ pub(super) fn render_policy_rule_row(
             theme.accent_soft,
             theme.accent_soft_fg,
         ),
-        PolicyEffect::Confirm | PolicyEffect::Unspecified => {
-            ("確認", theme.amber, theme.amber_soft, theme.amber_fg)
-        }
+        PolicyEffect::Confirm => ("確認", theme.amber, theme.amber_soft, theme.amber_fg),
     };
     let armed = pane.form.delete_armed_policy.as_deref() == Some(rule.id.as_str());
     let pane_arm = cx.entity();

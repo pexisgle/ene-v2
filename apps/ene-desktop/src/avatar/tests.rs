@@ -316,10 +316,10 @@ async fn an_explicit_body_placement_beats_the_renderer_snapshot() {
     let (mut avatar, renderer) = Avatar::for_test(HashMap::from([("ene".to_owned(), shown)]));
     let sent = fake_renderer(renderer, move |_| renderer_state.clone());
 
-    let body = ene_rpc::BodyBinding {
+    let body = ene_domain::BodyBinding {
         monitor: Some("HDMI-1".into()),
         position: Some([300., 400.]),
-        ..ene_rpc::BodyBinding::default()
+        ..ene_domain::BodyBinding::default()
     };
     avatar
         .show_with_body("ene", model, None, &body, 100.)

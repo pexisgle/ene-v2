@@ -68,7 +68,7 @@ fn http_engine(
     ctx: &VoiceEngineContext<'_>,
     connection: Connection,
     kind: ConnectionKind,
-    binding: Option<&ene_voice::VoiceBinding>,
+    binding: Option<&ene_domain::VoiceBinding>,
 ) -> std::result::Result<HttpEngine, SetupError> {
     let resolved_base = resolve_base(&connection, ctx.providers);
     let secret = load_connection_secret(&connection, ctx.credentials, ctx.providers)?;

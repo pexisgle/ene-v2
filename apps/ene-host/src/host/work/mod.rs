@@ -23,7 +23,6 @@ use super::{
     mind::Companion,
     notify::Notifier,
     providers::Providers,
-    wire,
 };
 use bevy_ecs::prelude::*;
 use ene_host_core::util::now;
@@ -145,7 +144,7 @@ pub(crate) fn start(world: &mut World, request: w::StartWorkRequest) -> Result<w
         return Err(error);
     }
     let stored = require_session(&store, &session.id)?;
-    Ok(wire::work_session(&stored))
+    Ok(w::WorkSession::from(&stored))
 }
 
 pub(crate) fn start_run(

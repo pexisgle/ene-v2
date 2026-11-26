@@ -170,7 +170,7 @@ impl HttpEngine {
         })
     }
 
-    pub fn with_binding(mut self, binding: &crate::protocol::VoiceBinding) -> Self {
+    pub fn with_binding(mut self, binding: &ene_domain::VoiceBinding) -> Self {
         if let Some(speed) = binding.speed
             && speed.is_finite()
         {
@@ -390,9 +390,9 @@ fn parse_options<T: DeserializeOwned + Default>(
     })
 }
 
-pub fn parse_binding(companion: &Companion) -> crate::protocol::VoiceBinding {
+pub fn parse_binding(companion: &Companion) -> ene_domain::VoiceBinding {
     let mut binding =
-        serde_json::from_value::<crate::protocol::VoiceBinding>(companion.voice.json.clone())
+        serde_json::from_value::<ene_domain::VoiceBinding>(companion.voice.json.clone())
             .unwrap_or_default();
     if binding
         .voice_id

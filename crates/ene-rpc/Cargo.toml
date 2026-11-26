@@ -20,6 +20,7 @@ serde.workspace = true
 buffa.workspace = true
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
+ene-domain.workspace = true
 http = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
@@ -29,7 +30,7 @@ connectrpc.workspace = true
 buffa-build = "0.9"
 connectrpc-build = "0.9"
 
-# `OUT_DIR/_connectrpc.rs` (included via `include!`) uses `buffa` and `serde_json`.
+# The generated Protobuf/Connect code uses `buffa`, `serde`, and `serde_json`.
 # `*-build` are build-script only, which cargo-machete does not scan.
 [package.metadata.cargo-machete]
-ignored = ["buffa", "serde_json", "buffa-build", "connectrpc-build"]
+ignored = ["buffa", "serde", "serde_json", "buffa-build", "connectrpc-build"]

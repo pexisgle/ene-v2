@@ -4,7 +4,7 @@ use super::*;
 use crate::host::{
     db::Store,
     error::HostError,
-    mind::{Assignment, Assignments, Companion, Profile, Role, State},
+    mind::{Companion, ModelAssignment, ModelAssignments, Profile, Role, State},
     model::{self, Credentials},
     settings::{
         Connection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint, LlmConnection,
@@ -124,8 +124,8 @@ pub(super) fn companion() -> Companion {
         state_revision: 1,
         body: JsonDoc::empty(),
         voice: JsonDoc::empty(),
-        assignments: Assignments {
-            companion: Assignment {
+        assignments: ModelAssignments {
+            companion: ModelAssignment {
                 connection_id: "p08".into(),
                 model_id: "m".into(),
             },

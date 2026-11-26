@@ -193,7 +193,7 @@ async fn embedding_credentials_rotate_and_revoke_across_clones() {
         .companion(&harness.companion)
         .unwrap()
         .unwrap();
-    companion.assignments.embedding = Some(super::super::Assignment {
+    companion.assignments.embedding = Some(super::super::ModelAssignment {
         connection_id: "credential-embedding".into(),
         model_id: "credential-model".into(),
     });
@@ -606,7 +606,7 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
         .companion(&harness.companion)
         .unwrap()
         .unwrap();
-    comp_a.assignments.embedding = Some(super::super::Assignment {
+    comp_a.assignments.embedding = Some(super::super::ModelAssignment {
         connection_id: "emb-alpha".into(),
         model_id: "shared-name".into(),
     });
@@ -618,7 +618,7 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
     let mut comp_b = comp_a.clone();
     comp_b.id = "beta".into();
     comp_b.name = "Beta".into();
-    comp_b.assignments.embedding = Some(super::super::Assignment {
+    comp_b.assignments.embedding = Some(super::super::ModelAssignment {
         connection_id: "emb-beta".into(),
         model_id: "shared-name".into(),
     });
@@ -796,7 +796,7 @@ async fn sakura_embedding_omits_dimensions_and_decodes_without_usage() {
         .companion(&harness.companion)
         .unwrap()
         .unwrap();
-    comp.assignments.embedding = Some(super::super::Assignment {
+    comp.assignments.embedding = Some(super::super::ModelAssignment {
         connection_id: "sakura-emb".into(),
         model_id: "multilingual-e5-large".into(),
     });

@@ -33,7 +33,7 @@ impl Avatar {
         character: &str,
         model: &Path,
         motion: Option<&Path>,
-        body: &ene_rpc::BodyBinding,
+        body: &ene_domain::BodyBinding,
         default_scale: f32,
     ) -> Result<bool, AvatarError> {
         let existing = self.shown.get(character).cloned();

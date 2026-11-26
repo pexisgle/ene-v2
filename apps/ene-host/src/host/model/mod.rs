@@ -74,12 +74,12 @@ pub(crate) fn connect(
     connect_assignment(store, credentials, catalog, assignment, role, providers)
 }
 
-/// Builds a rig completion model directly from one `Assignment`.
+/// Builds a rig completion model directly from one `ModelAssignment`.
 pub(crate) fn connect_assignment(
     store: &Store,
     credentials: &Credentials,
     catalog: &Catalog,
-    assignment: &super::mind::Assignment,
+    assignment: &super::mind::ModelAssignment,
     _role: Role,
     providers: &super::providers::Providers,
 ) -> Result<DynModel<Completion>> {
@@ -189,13 +189,13 @@ pub(crate) fn connect_assignment(
     Ok(model)
 }
 
-/// Picks either the requested `Assignment` or the first enabled LLM connection + model
+/// Picks either the requested `ModelAssignment` or the first enabled LLM connection + model
 /// for ephemeral preview without mutating companion/session state.
 pub(crate) fn preview_assignment(
     store: &Store,
     catalog: &Catalog,
-    requested: &super::mind::Assignment,
-) -> Result<super::mind::Assignment> {
+    requested: &super::mind::ModelAssignment,
+) -> Result<super::mind::ModelAssignment> {
     if requested.is_set() {
         return Ok(requested.clone());
     }
@@ -216,7 +216,7 @@ pub(crate) fn preview_assignment(
         .ok_or_else(|| {
             HostError::FailedPrecondition(("no model is available on the LLM connection").into())
         })?;
-    Ok(super::mind::Assignment {
+    Ok(super::mind::ModelAssignment {
         connection_id: connection.id,
         model_id,
     })

@@ -72,11 +72,11 @@ impl SessionTransport {
             .and_then(|id| self.bindings.get(id))
     }
 
-    pub(super) fn body_binding_for(&self, companion_id: &str) -> w::BodyBinding {
+    pub(super) fn body_binding_for(&self, companion_id: &str) -> ene_domain::BodyBinding {
         self.companions
             .get(companion_id)
             .and_then(|companion| companion.body.as_option())
-            .and_then(|doc| serde_json::from_str::<w::BodyBinding>(&doc.json).ok())
+            .and_then(|doc| serde_json::from_str::<ene_domain::BodyBinding>(&doc.json).ok())
             .unwrap_or_default()
     }
 

@@ -14,7 +14,7 @@ pub(crate) use approval::{answer, decide, refuse, submit_with_outcome};
 pub(crate) use approval::{resolve_approval, submit};
 pub(crate) use ene_policy::{
     Approval, ApprovalDecision, ApprovalStatus, CandidateAction, PolicyEffect, PolicyRule,
-    PolicyText, canonicalise, extract_target, hard_denied, hard_denied_action,
+    canonicalise, extract_target, hard_denied, hard_denied_action,
 };
 #[cfg(test)]
 pub(crate) use gate::ResolveApprovalArgs;

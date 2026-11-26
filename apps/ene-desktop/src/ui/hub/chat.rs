@@ -6,6 +6,7 @@ use crate::{
     state::{Chat, NoticeKind},
     update::Command,
 };
+use ene_domain::CompanionId;
 use gpui::Context;
 
 pub(super) fn select_companion(hub: &mut Hub, companion_id: &str, cx: &mut Context<Hub>) {
@@ -14,7 +15,7 @@ pub(super) fn select_companion(hub: &mut Hub, companion_id: &str, cx: &mut Conte
     }
     hub.model.companions.selected = Some(companion_id.to_owned());
     hub.model.companions.chat = Chat {
-        companion_id: rpc::chat::parse_companion_id(companion_id),
+        companion_id: CompanionId::parse(companion_id).ok(),
         loading: true,
         ..Default::default()
     };
@@ -42,7 +43,7 @@ pub(super) fn load_history(hub: &mut Hub, _cx: &mut Context<Hub>) {
     ) {
         return;
     }
-    let target = rpc::chat::parse_companion_id(&companion_id);
+    let target = CompanionId::parse(&companion_id).ok();
     if hub
         .model
         .companions

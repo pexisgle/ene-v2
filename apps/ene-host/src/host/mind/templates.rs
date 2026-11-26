@@ -1,7 +1,7 @@
 //! Companion templates: the built-ins, and the export/import pair that carries
 //! one companion between machines with host-local state stripped, plus the
 //! pre-create conversation preview.
-use super::{Assignments, Companion, State, create, default_ene_companion};
+use super::{Companion, ModelAssignments, State, create, default_ene_companion};
 use crate::host::{
     db::{Result, Store},
     error::HostError,
@@ -110,7 +110,8 @@ pub(crate) fn export_template(store: &Store, id: &str) -> Result<w::CompanionTem
         .companion(id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     let mut voice_binding =
-        serde_json::from_value::<w::VoiceBinding>(companion.voice.json.clone()).unwrap_or_default();
+        serde_json::from_value::<ene_domain::VoiceBinding>(companion.voice.json.clone())
+            .unwrap_or_default();
     // Host-local connection IDs must not leak across machines on export.
     voice_binding.connection_id = None;
     let voice_json = serde_json::to_string(&voice_binding).unwrap_or_else(|_| "{}".into());
@@ -156,7 +157,7 @@ pub(crate) fn import_template(
             json: "{}".into(),
             ..Default::default()
         });
-    if let Ok(mut binding) = serde_json::from_str::<w::VoiceBinding>(&voice_doc.json) {
+    if let Ok(mut binding) = serde_json::from_str::<ene_domain::VoiceBinding>(&voice_doc.json) {
         binding.connection_id = None;
         if let Ok(cleaned) = serde_json::to_string(&binding) {
             voice_doc.json = cleaned;
@@ -193,7 +194,7 @@ pub(crate) fn preview_system_prompt(request: &w::PreviewCompanionRequest) -> Res
         state_revision: 1,
         body: JsonDoc::empty(),
         voice: JsonDoc::empty(),
-        assignments: Assignments::default(),
+        assignments: ModelAssignments::default(),
         persona: request
             .persona
             .as_deref()

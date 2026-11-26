@@ -521,9 +521,9 @@ mod tests {
     // === The pass end to end: retrieval, extraction, guard and commit ===
 
     fn companion() -> crate::host::mind::Companion {
-        use crate::host::mind::{Assignment, Assignments};
+        use crate::host::mind::{ModelAssignment, ModelAssignments};
         use ene_mind::JsonDoc;
-        let assignment = Assignment {
+        let assignment = ModelAssignment {
             connection_id: "c1".into(),
             model_id: "test-model".into(),
         };
@@ -537,7 +537,7 @@ mod tests {
             state_revision: 1,
             body: JsonDoc::empty(),
             voice: JsonDoc::empty(),
-            assignments: Assignments {
+            assignments: ModelAssignments {
                 companion: assignment.clone(),
                 task: assignment.clone(),
                 consolidation: Some(assignment),

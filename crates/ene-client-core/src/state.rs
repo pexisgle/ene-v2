@@ -399,7 +399,7 @@ impl Model {
             .as_ref()?
             .activations
             .iter()
-            .find(|activation| activation.companion_id == id)
+            .find(|activation| activation.companion_id.as_str() == id)
     }
 
     /// Whether this client is the shown companion's active device.
@@ -416,7 +416,7 @@ impl Model {
                 .activations
                 .iter()
                 .filter(|activation| activation.client_id.as_deref() == Some(client_id))
-                .map(|activation| activation.companion_id.clone())
+                .map(|activation| activation.companion_id.to_string())
                 .collect()
         })
     }
@@ -425,7 +425,7 @@ impl Model {
     pub fn is_resident(&self, companion_id: &str, client_id: &str) -> bool {
         self.snapshot.as_ref().is_some_and(|snapshot| {
             snapshot.activations.iter().any(|activation| {
-                activation.companion_id == companion_id
+                activation.companion_id.as_str() == companion_id
                     && activation.client_id.as_deref() == Some(client_id)
             })
         })

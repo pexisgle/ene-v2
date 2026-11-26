@@ -75,7 +75,7 @@ fn registry_configs_keep_native_defaults_and_custom_endpoints() {
 
 #[tokio::test]
 async fn completion_keeps_catalog_overrides_and_unknown_tool_support() {
-    use crate::host::{mind::Assignment, tests::Harness};
+    use crate::host::{mind::ModelAssignment, tests::Harness};
     use rig_core::catalog::Pricing;
 
     let harness = Harness::new([]);
@@ -109,7 +109,7 @@ async fn completion_keeps_catalog_overrides_and_unknown_tool_support() {
             )
             .unwrap();
         for id in ["gpt-4o-mini", "ene-unlisted-model"] {
-            companion.assignments.companion = Assignment {
+            companion.assignments.companion = ModelAssignment {
                 connection_id: adapter.into(),
                 model_id: id.into(),
             };
@@ -145,7 +145,7 @@ async fn completion_keeps_catalog_overrides_and_unknown_tool_support() {
 
 #[test]
 fn sakura_perception_exposes_vision_only_for_supported_models() {
-    use crate::host::{mind::Assignment, tests::Harness};
+    use crate::host::{mind::ModelAssignment, tests::Harness};
 
     let harness = Harness::new([]);
     let store = harness.store();
@@ -167,7 +167,7 @@ fn sakura_perception_exposes_vision_only_for_supported_models() {
         ("preview/DeepSeek-V4.1-Flash-1017", true),
         ("gpt-oss-120b", false),
     ] {
-        companion.assignments.perception = Some(Assignment {
+        companion.assignments.perception = Some(ModelAssignment {
             connection_id: connection_id.clone(),
             model_id: id.into(),
         });
@@ -195,7 +195,7 @@ fn sakura_perception_exposes_vision_only_for_supported_models() {
 /// provider-specific models returned by model listing.
 #[test]
 fn all_builtin_providers_bind_through_ensure_model_for_companion_and_task() {
-    use crate::host::{agent, mind::Assignment, notify::Notifier};
+    use crate::host::{agent, mind::ModelAssignment, notify::Notifier};
     use rig_ecs::model::{Connection as ModelConnection, Models};
 
     let temp = tempfile::tempdir().unwrap();
@@ -253,7 +253,7 @@ fn all_builtin_providers_bind_through_ensure_model_for_companion_and_task() {
             )
             .unwrap();
 
-        let assignment = Assignment {
+        let assignment = ModelAssignment {
             connection_id: conn_id,
             model_id: (*model_id).to_owned(),
         };
@@ -270,8 +270,8 @@ fn all_builtin_providers_bind_through_ensure_model_for_companion_and_task() {
             ene_rpc::CreateCompanionRequest {
                 name: format!("Ene-{index}"),
                 mind: "helpful".into(),
-                assignments: Some(crate::host::wire::assignments(
-                    &crate::host::mind::Assignments {
+                assignments: Some(ene_rpc::ModelAssignments::from(
+                    &crate::host::mind::ModelAssignments {
                         companion: assignment.clone(),
                         task: assignment,
                         ..Default::default()
@@ -313,7 +313,7 @@ fn all_builtin_providers_bind_through_ensure_model_for_companion_and_task() {
 
 #[tokio::test]
 async fn sakura_companion_binds_and_answers_over_chat_completions() {
-    use crate::host::{agent, mind::Assignment, notify::Notifier};
+    use crate::host::{agent, mind::ModelAssignment, notify::Notifier};
     use rig_core::{
         completion::CompletionRequest,
         effect::{Answered, EffectKind},
@@ -366,7 +366,7 @@ async fn sakura_companion_binds_and_answers_over_chat_completions() {
         )
         .unwrap();
 
-    let assignment = Assignment {
+    let assignment = ModelAssignment {
         connection_id: "sakura-conn".into(),
         model_id: "gpt-oss-120b".into(),
     };
@@ -383,8 +383,8 @@ async fn sakura_companion_binds_and_answers_over_chat_completions() {
         ene_rpc::CreateCompanionRequest {
             name: "Ene".into(),
             mind: "helpful".into(),
-            assignments: Some(crate::host::wire::assignments(
-                &crate::host::mind::Assignments {
+            assignments: Some(ene_rpc::ModelAssignments::from(
+                &crate::host::mind::ModelAssignments {
                     companion: assignment.clone(),
                     task: assignment,
                     ..Default::default()

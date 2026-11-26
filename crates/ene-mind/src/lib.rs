@@ -11,11 +11,10 @@ pub mod embedding;
 pub mod json;
 pub mod memory;
 
-pub use companion::{
-    Assignment, Assignments, Companion, Profile, Role, State, default_ene_companion, validate_id,
-};
+pub use companion::{Companion, Profile, Role, State, default_ene_companion, validate_id};
 pub use consolidate::{Batch, Commit, Fact, MemoryContext, Turn, normalize, validate_citations};
 pub use embedding::{PREP_VERSION, PendingEmbedding, dimensions_of_space, space_id};
+pub use ene_domain::{ModelAssignment, ModelAssignments};
 pub use json::JsonDoc;
 pub use memory::{
     MAX_IMPORTANCE, Memory, MemoryActionKind, MemoryRecord, MindStateChange, MindUpdate, NewMemory,
@@ -34,11 +33,11 @@ mod tests {
         let mut companion = default_ene_companion("2026-11-21T00:00:00Z");
         assert!(companion.validate().is_ok());
 
-        companion.assignments.companion = Assignment {
+        companion.assignments.companion = ModelAssignment {
             connection_id: "conn-1".into(),
             model_id: "gpt-5.4-mini".into(),
         };
-        companion.assignments.task = Assignment {
+        companion.assignments.task = ModelAssignment {
             connection_id: "conn-2".into(),
             model_id: "gpt-5.4".into(),
         };

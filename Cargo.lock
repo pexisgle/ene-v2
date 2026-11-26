@@ -4314,6 +4314,7 @@ dependencies = [
  "buffa-build",
  "connectrpc",
  "connectrpc-build",
+ "ene-domain",
  "ene-policy",
  "http",
  "rustls-native-certs",

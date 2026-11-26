@@ -327,9 +327,9 @@ pub(crate) fn activate(world: &mut World, request: w::ActivationRequest) -> Resu
     world.resource_mut::<Notifier>().push(
         Some(&request.companion_id),
         None,
-        w::notification::Event::ActivationUpdated(Box::new(wire::activation(&activation))),
+        w::notification::Event::ActivationUpdated(Box::new((&activation).into())),
     );
-    Ok(wire::activation(&activation))
+    Ok((&activation).into())
 }
 
 #[cfg(test)]

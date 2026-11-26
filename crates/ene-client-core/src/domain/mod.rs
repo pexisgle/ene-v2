@@ -4,37 +4,27 @@ pub mod companion;
 pub mod connection;
 pub mod policy;
 
+pub use ene_domain::{
+    Activation, BodyBinding, COMPUTER_USE, Check as ConnectionCheck,
+    Endpoint as ConnectionEndpoint, Failure, ModelAssignment, ModelAssignments, PolicyEffect,
+    PolicyRule, PolicyText, RiskLevel, RunState, VoiceBinding, WorkSession, WorkStatus,
+};
+
 pub use companion::{
-    AutoAssignModelPatch, BodyBinding, Companion, CompanionProfilePatch, CompanionTemplate,
-    Message, MessageRole, MindIndexStatus, MindProfile, MindState, MindView, ModelAssignment,
-    ModelAssignments, NewCompanionSpec, TurnEvent, TurnStatus, VoiceBinding,
+    AutoAssignModelPatch, Companion, CompanionProfilePatch, CompanionTemplate, Message,
+    MessageRole, MindIndexStatus, MindProfile, MindState, MindView, NewCompanionSpec, TurnEvent,
+    TurnStatus,
 };
 pub use connection::{
-    AcpConnection, Connection, ConnectionCheck, ConnectionConfig, ConnectionEndpoint,
-    ConnectionInput, ConnectionKind, EmbeddingConnection, LlmConnection, LlmProvider,
-    McpConnection, ModelInfo, PluginInfo, SearchConnection, SettingField, SttConnection,
-    TtsConnection,
+    AcpConnection, Connection, ConnectionConfig, ConnectionInput, ConnectionKind,
+    EmbeddingConnection, LlmConnection, LlmProvider, McpConnection, ModelInfo, PluginInfo,
+    SearchConnection, SettingField, SttConnection, TtsConnection,
 };
-/// Re-exported from the policy crate so the UI reaches it through the domain
-/// module it already imports rather than depending on `ene-policy` directly.
-pub use ene_rpc::RiskLevel;
 pub use policy::{
-    ApprovalDecision, ApprovalRequest, ApprovalStatus, PolicyEffect, PolicyRule, PolicyRulesUpdate,
-    PolicyText, PolicyTextsUpdate, SKIP_FILE_CONFIRMATION_PREFIX, SKIP_TOOL_CONFIRMATION_ID,
-    is_file_confirmation_rule, tool_confirmation_update,
+    ApprovalDecision, ApprovalRequest, ApprovalStatus, PolicyRulesUpdate, PolicyTextsUpdate,
+    SKIP_FILE_CONFIRMATION_PREFIX, SKIP_TOOL_CONFIRMATION_ID, is_file_confirmation_rule,
+    tool_confirmation_update,
 };
-
-/// Desktop GUI capability executed by a work agent on its bound client.
-pub const COMPUTER_USE: &str = "computer.use";
-
-/// Structured host failure payload surfaced on connection checks, turns, and runs.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Failure {
-    /// Stable machine-readable code the window branches on.
-    pub code: String,
-    /// Short human-readable message carrying no secret.
-    pub message: String,
-}
 
 /// Schema-tagged JSON payload carried by companion bindings, mind state, and events.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -81,68 +71,6 @@ pub struct ClientInfo {
     pub active_companions: Vec<String>,
 }
 
-/// Active client binding for a companion.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Activation {
-    /// The companion the client is bound to.
-    pub companion_id: String,
-    /// The bound client, or `None` when no client is active.
-    pub client_id: Option<String>,
-}
-
-/// Lifecycle state of a host work session.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum WorkStatus {
-    /// The host did not report a state.
-    #[default]
-    Unspecified,
-    /// The session exists but no run is in flight.
-    Idle,
-    /// A run is in flight.
-    Active,
-    /// The session is finished and takes no further runs.
-    Closed,
-}
-
-/// Execution state of a work run.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RunStatus {
-    /// The host did not report a state.
-    #[default]
-    Unspecified,
-    /// Accepted but not yet dispatched to the agent.
-    Starting,
-    /// The agent is working on the instruction.
-    Running,
-    /// Blocked on an approval the run cannot proceed without.
-    WaitingInput,
-    /// The agent finished and reported.
-    Completed,
-    /// A stop reached its final state.
-    Cancelled,
-    /// The agent stopped with an error; see `WorkEventDetail::RunFinished`.
-    Failed,
-}
-
-/// Work session summary retained in host snapshots.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct WorkSession {
-    /// Row id of this session.
-    pub id: String,
-    /// The companion the work is commissioned for.
-    pub companion_id: String,
-    /// Operator-facing title.
-    pub title: String,
-    /// Where the session is in its lifecycle.
-    pub status: WorkStatus,
-    /// Creation time, as the host stamped it.
-    pub created_at: String,
-    /// Last update, as the host stamped it.
-    pub updated_at: String,
-    /// The client the work was commissioned from; empty when none was active.
-    pub client_id: String,
-}
-
 /// Detail payload for a work notification event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkEventDetail {
@@ -153,7 +81,7 @@ pub enum WorkEventDetail {
     /// A run ended, for whatever reason.
     RunFinished {
         /// The state the run ended in.
-        state: RunStatus,
+        state: Option<RunState>,
         /// Why the run failed, when it did.
         failure: Option<Failure>,
         /// The approval the run stopped on, when it is waiting for one.

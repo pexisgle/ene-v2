@@ -6,7 +6,7 @@ use crate::host::{
     agent::{self, WorkAgent},
     db::Store,
     mind,
-    mind::{Assignment, Assignments as MindAssignments},
+    mind::{ModelAssignment, ModelAssignments as MindAssignments},
     permission,
     permission::{ApprovalDecision, ApprovalStatus},
     providers::Providers,
@@ -133,8 +133,8 @@ impl HandWorld {
             w::CreateCompanionRequest {
                 name: "Mio".into(),
                 mind: "kind".into(),
-                assignments: Some(crate::host::wire::assignments(&MindAssignments {
-                    task: Assignment {
+                assignments: Some(w::ModelAssignments::from(&MindAssignments {
+                    task: ModelAssignment {
                         connection_id: "hand-acp".into(),
                         model_id: "reference".into(),
                     },
@@ -445,8 +445,8 @@ fn the_rig_hand_stays_the_default_without_an_acp_assignment() {
         w::CreateCompanionRequest {
             name: "Kai".into(),
             mind: "calm".into(),
-            assignments: Some(crate::host::wire::assignments(&MindAssignments {
-                task: Assignment {
+            assignments: Some(w::ModelAssignments::from(&MindAssignments {
+                task: ModelAssignment {
                     connection_id: "llm-main".into(),
                     model_id: "deepseek/deepseek-flash".into(),
                 },

@@ -48,6 +48,7 @@ impl Hub {
             context,
             settings.revision,
             vec![input],
+            None,
         );
         cx.notify();
     }
@@ -82,13 +83,13 @@ impl Hub {
             return;
         }
         self.setup.checking_connections.insert(conn_id.clone());
-        rpc::connections::update_settings_and_probe(
+        rpc::connections::update_settings(
             &self.rpc,
             self.model.connections.link_epoch,
             "接続状態の更新",
             settings.revision,
             vec![input],
-            conn_id,
+            Some(conn_id),
         );
         cx.notify();
     }
@@ -227,6 +228,7 @@ impl Hub {
             connection_id.to_owned(),
             secret.to_owned(),
             is_search,
+            None,
         );
         cx.notify();
     }

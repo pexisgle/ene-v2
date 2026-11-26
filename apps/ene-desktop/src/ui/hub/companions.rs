@@ -12,12 +12,18 @@ use ene_client_core::{
 };
 use gpui::Context;
 
-pub(super) fn create_companion(hub: &mut Hub, spec: NewCompanionSpec, cx: &mut Context<Hub>) {
-    let default_model = hub
-        .model_choices()
+fn default_model(hub: &Hub) -> Option<ModelAssignment> {
+    hub.model_choices()
         .into_iter()
         .next()
-        .map(|(conn_id, model_id, _)| (conn_id, model_id));
+        .map(|(connection_id, model_id, _)| ModelAssignment {
+            connection_id,
+            model_id,
+        })
+}
+
+pub(super) fn create_companion(hub: &mut Hub, spec: NewCompanionSpec, cx: &mut Context<Hub>) {
+    let default_model = default_model(hub);
     let voice = spec
         .voice_identifier
         .clone()
@@ -88,11 +94,7 @@ pub(super) fn import_companion_template(
     template: CompanionTemplate,
     cx: &mut Context<Hub>,
 ) {
-    let default_model = hub
-        .model_choices()
-        .into_iter()
-        .next()
-        .map(|(conn_id, model_id, _)| (conn_id, model_id));
+    let default_model = default_model(hub);
     rpc::companions::import_companion(
         &hub.rpc,
         hub.model.connections.link_epoch,

@@ -1,11 +1,29 @@
 //! Host RPC orchestration and epoch-scoped update dispatch for the desktop client.
 
+// Captures the request while keeping connection acquisition in the dispatcher.
+macro_rules! request {
+    ($service:ident . $method:ident($request:expr)) => {
+        |host| async move { host.$service.$method($request).await }
+    };
+}
+
+// Empty unary reads differ only by method, label, and update mapping.
+macro_rules! load {
+    ($($name:ident: $service:ident.$method:ident($context:literal) => $done:expr;)+) => {
+        $(pub(crate) fn $name(rpc: &$crate::rpc::RpcDispatcher, epoch: u64) {
+            rpc.call_owned(epoch, $context, request!($service.$method(::ene_rpc::Empty::default())), $done);
+        })+
+    };
+}
+
 pub mod chat;
 pub mod companions;
 pub mod connections;
 pub mod policy;
 
 use crate::{host::Host, session::Connection, update::Update};
+use buffa::view::{MessageView, OwnedView};
+use connectrpc::{ConnectError, client::UnaryResponse};
 use ene_client_core::domain::HostNotification;
 use ene_rpc as w;
 use std::future::Future;
@@ -49,72 +67,75 @@ impl RpcDispatcher {
         self.updates.clone()
     }
 
-    pub(crate) fn spawn<T, D>(
+    /// Runs a unary request with the default failure update.
+    pub(crate) fn call<T, F>(
         &self,
         epoch: u64,
         context: &'static str,
-        future: impl Future<Output = Result<T, connectrpc::ConnectError>> + Send + 'static,
-        done: D,
+        run: impl FnOnce(Host) -> F,
+        done: impl FnOnce(T) -> Update + Send + 'static,
     ) where
         T: Send + 'static,
-        D: FnOnce(T) -> Update + Send + 'static,
+        F: Future<Output = Result<T, ConnectError>> + Send + 'static,
     {
-        self.spawn_with(epoch, context, future, done, failure);
+        self.call_with(epoch, context, run, done, failure);
     }
 
-    pub(crate) fn spawn_with<T, D, E>(
+    /// Opens a unary response's owned message only if the update uses it.
+    pub(crate) fn call_owned<V, F>(
         &self,
         epoch: u64,
         context: &'static str,
-        future: impl Future<Output = Result<T, connectrpc::ConnectError>> + Send + 'static,
-        done: D,
-        error: E,
+        run: impl FnOnce(Host) -> F,
+        done: impl FnOnce(V::Owned) -> Update + Send + 'static,
     ) where
-        T: Send + 'static,
-        D: FnOnce(T) -> Update + Send + 'static,
-        E: FnOnce(&'static str, connectrpc::ConnectError) -> Update + Send + 'static,
+        V: MessageView<'static> + Send + 'static,
+        F: Future<Output = Result<UnaryResponse<OwnedView<V>>, ConnectError>> + Send + 'static,
     {
-        let updates = self.updates.clone();
-        let seq = self.request_seq.fetch_add(1, Ordering::Relaxed);
-        self.runtime.spawn(async move {
-            // Without a deadline a request the host accepted but never answers
-            // leaves the UI waiting for the life of the process; the
-            // transport's timeout covers connection setup, not this.
-            let outcome = match tokio::time::timeout(RPC_TIMEOUT, future).await {
-                Ok(result) => result,
-                Err(_) => Err(connectrpc::ConnectError::deadline_exceeded(
-                    "the host did not answer in time",
-                )),
-            };
-            let inner = match outcome {
-                Ok(value) => done(value),
-                Err(failed) => error(context, failed),
-            };
-            crate::session::notify_ui(
-                &updates,
-                Update::Scoped {
-                    epoch,
-                    seq,
-                    inner: Box::new(inner),
-                },
-            );
+        self.call(epoch, context, run, move |response| {
+            done(response.into_owned())
         });
     }
 
-    pub(crate) fn spawn_update(
+    pub(crate) fn call_with<T, F>(
         &self,
         epoch: u64,
-        future: impl Future<Output = Update> + Send + 'static,
-    ) {
+        context: &'static str,
+        run: impl FnOnce(Host) -> F,
+        done: impl FnOnce(T) -> Update + Send + 'static,
+        error: impl FnOnce(&'static str, ConnectError) -> Update + Send + 'static,
+    ) -> bool
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, ConnectError>> + Send + 'static,
+    {
+        let Some(host) = self.host() else {
+            return false;
+        };
+        self.dispatch(epoch, context, run(host), done, error);
+        true
+    }
+
+    fn dispatch<T>(
+        &self,
+        epoch: u64,
+        context: &'static str,
+        future: impl Future<Output = Result<T, ConnectError>> + Send + 'static,
+        done: impl FnOnce(T) -> Update + Send + 'static,
+        error: impl FnOnce(&'static str, ConnectError) -> Update + Send + 'static,
+    ) where
+        T: Send + 'static,
+    {
         let updates = self.updates.clone();
         let seq = self.request_seq.fetch_add(1, Ordering::Relaxed);
         self.runtime.spawn(async move {
             let inner = match tokio::time::timeout(RPC_TIMEOUT, future).await {
-                Ok(inner) => inner,
-                Err(_) => Update::Failed {
-                    context: "host request",
-                    message: "ホストが時間内に応答しませんでした。接続を確認してください。".into(),
-                },
+                Ok(Ok(value)) => done(value),
+                Ok(Err(failed)) => error(context, failed),
+                Err(_) => error(
+                    context,
+                    ConnectError::deadline_exceeded("the host did not answer in time"),
+                ),
             };
             crate::session::notify_ui(
                 &updates,
@@ -126,28 +147,36 @@ impl RpcDispatcher {
             );
         });
     }
-}
 
-pub(crate) fn decode(error: buffa::DecodeError) -> connectrpc::ConnectError {
-    connectrpc::ConnectError::internal(error.to_string())
-}
-
-pub(crate) fn failure(context: &'static str, error: connectrpc::ConnectError) -> Update {
-    match error.code {
-        connectrpc::ErrorCode::Aborted => Update::Conflict {
-            context,
-            message: error.to_string(),
-        },
-        connectrpc::ErrorCode::Unauthenticated | connectrpc::ErrorCode::PermissionDenied => {
-            Update::Denied {
+    pub(crate) fn call_update<F>(&self, epoch: u64, run: impl FnOnce(Host) -> F) -> bool
+    where
+        F: Future<Output = Update> + Send + 'static,
+    {
+        self.call_with(
+            epoch,
+            "host request",
+            |host| {
+                let future = run(host);
+                async move { Ok(future.await) }
+            },
+            std::convert::identity,
+            |context, _| Update::Failed {
                 context,
-                message: error.to_string(),
-            }
+                message: "ホストが時間内に応答しませんでした。接続を確認してください。".into(),
+            },
+        )
+    }
+}
+
+pub(crate) fn failure(context: &'static str, error: ConnectError) -> Update {
+    use connectrpc::ErrorCode;
+    let message = error.to_string();
+    match error.code {
+        ErrorCode::Aborted => Update::Conflict { context, message },
+        ErrorCode::Unauthenticated | ErrorCode::PermissionDenied => {
+            Update::Denied { context, message }
         }
-        _ => Update::Failed {
-            context,
-            message: error.to_string(),
-        },
+        _ => Update::Failed { context, message },
     }
 }
 
@@ -159,4 +188,11 @@ pub(crate) fn settings_update(settings: w::Settings) -> Update {
 
 pub(crate) fn companion_update(companion: w::Companion) -> Update {
     Update::Notification(Box::new(HostNotification::companion(companion.into())))
+}
+
+fn id_request(id: String) -> w::Id {
+    w::Id {
+        id,
+        ..Default::default()
+    }
 }

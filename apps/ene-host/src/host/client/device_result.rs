@@ -169,11 +169,7 @@ fn parse_and_validate_output(
                 .unwrap_or_else(|_| Value::String(result.output.clone())),
         )
     };
-    let failure = result
-        .failure
-        .as_option()
-        .cloned()
-        .map(|failure| wire::failure_from(&failure));
+    let failure = result.failure.as_option().cloned().map(Into::into);
     let success = result.success && failure.is_none() && output.is_some();
     // A capability declared without a spec has no output contract; its
     // answer is accepted as the client sent it.

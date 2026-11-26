@@ -223,7 +223,7 @@ fn persist_always_allow_rule(
     };
     match store.policy_repo().apply_policy_rules(&[rule], &[]) {
         Ok(rules) => {
-            let wire_rules = rules.iter().map(crate::host::wire::policy_rule).collect();
+            let wire_rules = rules.iter().map(Into::into).collect();
             notifier.push(
                 None,
                 None,

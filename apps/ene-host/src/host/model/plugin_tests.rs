@@ -761,7 +761,7 @@ async fn a_plugin_model_binds_through_the_agent_path() {
     world.insert_resource(super::ModelFactory::default());
     world.insert_resource(Models::default());
     world.insert_resource(Notifier::new());
-    let assignment = crate::host::mind::Assignment {
+    let assignment = crate::host::mind::ModelAssignment {
         connection_id: CONNECTION.into(),
         model_id: "test-unlisted".into(),
     };
@@ -770,8 +770,8 @@ async fn a_plugin_model_binds_through_the_agent_path() {
         ene_rpc::CreateCompanionRequest {
             name: "Mio".into(),
             mind: "kind".into(),
-            assignments: Some(crate::host::wire::assignments(
-                &crate::host::mind::Assignments {
+            assignments: Some(ene_rpc::ModelAssignments::from(
+                &crate::host::mind::ModelAssignments {
                     companion: assignment.clone(),
                     task: assignment,
                     ..Default::default()
@@ -868,7 +868,7 @@ async fn a_plugin_shadowing_a_catalog_vendor_binds_through_ensure_model() {
     world.insert_resource(super::ModelFactory::default());
     world.insert_resource(Models::default());
     world.insert_resource(Notifier::new());
-    let assignment = crate::host::mind::Assignment {
+    let assignment = crate::host::mind::ModelAssignment {
         connection_id: CONNECTION.into(),
         model_id: "vendor/test-unlisted".into(),
     };
@@ -877,8 +877,8 @@ async fn a_plugin_shadowing_a_catalog_vendor_binds_through_ensure_model() {
         ene_rpc::CreateCompanionRequest {
             name: "Mio".into(),
             mind: "kind".into(),
-            assignments: Some(crate::host::wire::assignments(
-                &crate::host::mind::Assignments {
+            assignments: Some(ene_rpc::ModelAssignments::from(
+                &crate::host::mind::ModelAssignments {
                     companion: assignment.clone(),
                     task: assignment,
                     ..Default::default()

@@ -1,5 +1,5 @@
 use super::*;
-use crate::host::mind::{Assignment, Assignments, Companion, Profile, State};
+use crate::host::mind::{Companion, ModelAssignment, ModelAssignments, Profile, State};
 use ene_mind::JsonDoc;
 use rig_core::catalog::{Catalog, Connector, ModelSpec};
 use rig_core::completion::{AssistantContent, AssistantMessage};
@@ -560,12 +560,12 @@ fn companion() -> Companion {
         state_revision: 1,
         body: JsonDoc::empty(),
         voice: JsonDoc::empty(),
-        assignments: Assignments {
-            compaction: Some(Assignment {
+        assignments: ModelAssignments {
+            compaction: Some(ModelAssignment {
                 connection_id: "c1".into(),
                 model_id: "gpt-4o-mini".into(),
             }),
-            consolidation: Some(Assignment {
+            consolidation: Some(ModelAssignment {
                 connection_id: "c1".into(),
                 model_id: "gpt-4o-mini".into(),
             }),

@@ -217,7 +217,7 @@ impl Hub {
             tool_name,
             pattern,
             effect,
-            ..Default::default()
+            created_at: String::new(),
         };
         self.update_policy_rules(
             "許可ルールの追加",

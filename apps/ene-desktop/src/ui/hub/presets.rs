@@ -36,6 +36,7 @@ pub(super) fn assign_search_connection(
         "Web 検索接続の割当",
         settings.revision,
         inputs,
+        None,
     );
     cx.notify();
 }
@@ -58,6 +59,7 @@ pub(super) fn add_search_preset(
         "Web 検索接続の追加",
         settings.revision,
         inputs,
+        None,
     );
     cx.notify();
     target_id
@@ -89,13 +91,13 @@ pub(super) fn save_search_provider_key(
     };
     let (target_id, inputs) = build_search_preset_inputs(&settings.connections, &spec, false);
     hub.setup.checking_connections.insert(target_id.clone());
-    rpc::connections::save_search_provider_key(
+    rpc::connections::register_secret(
         &hub.rpc,
         hub.model.connections.link_epoch,
-        settings.revision,
-        inputs,
         target_id,
         secret,
+        true,
+        Some((settings.revision, inputs)),
     );
     cx.notify();
 }
@@ -218,13 +220,13 @@ pub(super) fn add_voicevox_preset(
         .map_or(0, |c| c.revision);
     let input = build_voicevox_preset_input(existing_rev, speaker, speed);
     hub.setup.checking_connections.insert("voicevox".into());
-    rpc::connections::update_settings_and_probe(
+    rpc::connections::update_settings(
         &hub.rpc,
         hub.model.connections.link_epoch,
         "VOICEVOX接続の追加",
         settings.revision,
         vec![input],
-        "voicevox".into(),
+        Some("voicevox".into()),
     );
     cx.notify();
 }

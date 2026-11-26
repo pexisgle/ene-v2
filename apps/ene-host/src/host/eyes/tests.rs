@@ -1,7 +1,7 @@
 use super::*;
 use crate::host::{
     client,
-    mind::Assignment,
+    mind::ModelAssignment,
     tests::{Harness, bound, text_turn},
 };
 use rig_core::{
@@ -129,7 +129,7 @@ fn setup_eye_and_head_harness(
         .companion(&harness.companion)
         .unwrap()
         .unwrap();
-    companion.assignments.companion = Assignment {
+    companion.assignments.companion = ModelAssignment {
         connection_id: "head".into(),
         model_id: "shared".into(),
     };

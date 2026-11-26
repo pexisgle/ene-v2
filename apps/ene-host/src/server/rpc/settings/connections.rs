@@ -121,7 +121,7 @@ pub(super) async fn check_connection(
                 request_id,
                 success: check.healthy,
                 resource_id,
-                check: Some(wire::check(&check)).into(),
+                check: Some((&check).into()).into(),
                 ..Default::default()
             })
         })

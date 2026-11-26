@@ -3,11 +3,12 @@ use crate::host::{
     Credentials, HostError, HostRuntime,
     client::{CapabilityApproval, CapabilitySpec},
     db::Store,
-    mind::{Assignment, Assignments, Companion, Profile, State},
+    mind::{Companion, ModelAssignment, ModelAssignments, Profile, State},
     notify::Notifier,
     resources::{DeviceHub, DeviceTimeout, Waiting},
 };
 use bevy_ecs::prelude::*;
+use ene_domain::PolicyText;
 use ene_mind::JsonDoc;
 use ene_rpc as w;
 use rig_core::catalog::{Catalog, Connector, ModelSpec};
@@ -142,7 +143,7 @@ fn settle(app: &mut App, runtime: &tokio::runtime::Runtime) {
     panic!("the decision did not settle in time");
 }
 
-fn companion(assignments: Assignments) -> Companion {
+fn companion(assignments: ModelAssignments) -> Companion {
     let now = ene_host_core::util::now();
     Companion {
         id: "ene".into(),
@@ -165,11 +166,11 @@ fn companion(assignments: Assignments) -> Companion {
 
 /// The Decision role assigned, so the gate asks the model at `provider`.
 fn decision_companion() -> Companion {
-    let assignment = Assignment {
+    let assignment = ModelAssignment {
         connection_id: "c1".into(),
         model_id: "gpt-4o-mini".into(),
     };
-    companion(Assignments {
+    companion(ModelAssignments {
         task: assignment.clone(),
         decision: Some(assignment),
         ..Default::default()
@@ -178,8 +179,8 @@ fn decision_companion() -> Companion {
 
 /// Only the task model assigned: the Decision role falls back to it.
 fn task_only_companion() -> Companion {
-    companion(Assignments {
-        task: Assignment {
+    companion(ModelAssignments {
+        task: ModelAssignment {
             connection_id: "c1".into(),
             model_id: "gpt-4o-mini".into(),
         },

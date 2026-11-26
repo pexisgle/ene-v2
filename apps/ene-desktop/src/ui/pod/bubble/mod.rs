@@ -251,8 +251,7 @@ impl CompanionPod {
             .model
             .companion()
             .and_then(|c| c.assignments.as_ref())
-            .and_then(|a| a.companion.as_ref())
-            .is_some();
+            .is_some_and(|a| a.companion.is_set());
         let transcription = hub.model.audio.transcription.clone();
 
         div()

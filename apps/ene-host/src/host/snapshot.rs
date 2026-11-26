@@ -33,7 +33,7 @@ pub(crate) fn snapshot(app: &mut App) -> Result<w::Snapshot> {
     let mut work_sessions = Vec::new();
     for companion in &companions {
         for session in by_companion.remove(&companion.id).unwrap_or_default() {
-            work_sessions.push(wire::work_session(&session));
+            work_sessions.push(w::WorkSession::from(&session));
         }
     }
     let mut seen = std::collections::HashSet::new();
@@ -108,9 +108,9 @@ pub(crate) fn snapshot(app: &mut App) -> Result<w::Snapshot> {
             .policy_repo()
             .policy_rules()?
             .iter()
-            .map(wire::policy_rule)
+            .map(Into::into)
             .collect(),
-        activations: activations.iter().map(wire::activation).collect(),
+        activations: activations.iter().map(Into::into).collect(),
         ..Default::default()
     })
 }

@@ -1,72 +1,7 @@
 //! Pure companion, mind, chat message, turn, and binding domain types.
 
-use super::{Failure, JsonDocument};
+use super::{BodyBinding, Failure, JsonDocument, ModelAssignment, ModelAssignments, VoiceBinding};
 use ene_domain::CompanionId;
-
-/// Binding from a companion role slot to a connection and model identifier.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ModelAssignment {
-    /// The connection the model is reached through.
-    pub connection_id: String,
-    /// The model to call on that connection.
-    pub model_id: String,
-}
-
-/// Per-role model assignments for a companion.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ModelAssignments {
-    /// The model that speaks as the companion.
-    pub companion: Option<ModelAssignment>,
-    /// The model that runs commissioned work.
-    pub task: Option<ModelAssignment>,
-    /// The model that reads screens and other perception input.
-    pub perception: Option<ModelAssignment>,
-    /// The model that condenses long history.
-    pub compaction: Option<ModelAssignment>,
-    /// The model that folds history into memory.
-    pub consolidation: Option<ModelAssignment>,
-    /// The model that rules on policy decisions.
-    pub decision: Option<ModelAssignment>,
-    /// The model that produces embeddings.
-    pub embedding: Option<ModelAssignment>,
-}
-
-/// Structured payload for `Companion.body` (`schema = "ene.body.v1"`).
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct BodyBinding {
-    /// Avatar model to render.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// Monitor the avatar appears on.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub monitor: Option<String>,
-    /// Screen position of the avatar.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub position: Option<[f32; 2]>,
-    /// Avatar size as a percentage of its natural size.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_percent: Option<f32>,
-}
-
-/// Structured payload for `Companion.voice` (`schema = "ene.voice.v1"`).
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct VoiceBinding {
-    /// The connection that synthesises the voice.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_id: Option<String>,
-    /// Provider voice id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub voice_id: Option<String>,
-    /// Speaking rate multiplier.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub speed: Option<f32>,
-    /// Pitch multiplier.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pitch: Option<f32>,
-    /// Speaking style the provider understands.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub style: Option<String>,
-}
 
 /// Structured personality profile stored on a companion's mind.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
