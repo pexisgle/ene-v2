@@ -1,7 +1,7 @@
 //! The connection editor's visual parts.
 
 use super::ConnectionsPane;
-use crate::ui::connections::SecretField;
+use crate::ui::connections::EditorMode;
 use crate::ui::connections::mcp_editor::{append_mcp_extra_fields, render_mcp_tools_strip};
 use crate::ui::connections::pickers::{PickerInput, render_resource_picker};
 use crate::ui::connections::schema_form::{render_agent_platform_options, render_options_schema};
@@ -16,6 +16,7 @@ use ene_client_core::{
     },
     domain::{Connection, ConnectionCheck, ConnectionKind},
 };
+use ene_domain::CredentialState;
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 
 use super::form::*;
@@ -129,7 +130,9 @@ pub(super) fn render_credentials_strip(
     cx: &mut Context<ConnectionsPane>,
 ) -> gpui::Div {
     let id = conn.id.clone();
-    let revealed = pane.form.revealed == Some(SecretField::Connection(id.clone()));
+    let editor = pane.form.editor(&id);
+    let revealed = editor.is_some_and(|editor| editor.key_visible);
+    let mode = editor.map_or_default(|editor| editor.mode);
     let secret_d = pane.drafts.masked_draft(
         cx,
         format!("conn:secret:{id}"),
@@ -138,17 +141,13 @@ pub(super) fn render_credentials_strip(
         theme,
     );
     let secret_val = secret_d.read(cx).text().trim().to_owned();
-    let has_cred = conn.credential_state == "registered" || conn.credential_state == "environment";
-    let cred_label = match conn.credential_state.as_str() {
-        "registered" => "登録済み",
-        "environment" => "環境変数",
-        _ => "未登録",
+    let has_cred = conn.credential_state.is_configured();
+    let cred_label = match conn.credential_state {
+        CredentialState::Registered => "登録済み",
+        CredentialState::Environment => "環境変数",
+        CredentialState::Absent => "未登録",
     };
     let sakura_ids = collect_sakura_conn_ids(conn, pane.hub.read(cx));
-    let revoke_armed = pane
-        .form
-        .editor(&id)
-        .is_some_and(|editor| editor.revoke_armed);
 
     div()
         .rounded(crate::ui::theme::radius::medium())
@@ -170,9 +169,10 @@ pub(super) fn render_credentials_strip(
             theme,
             cx,
         ))
-        .when(conn.credential_state == "registered", |this| {
-            this.child(render_revoke_controls(&id, revoke_armed, live, theme, cx))
-        })
+        .when(
+            conn.credential_state == CredentialState::Registered,
+            |this| this.child(render_revoke_controls(&id, mode, live, theme, cx)),
+        )
 }
 
 pub(super) fn render_schema_box(schema_controls: Vec<AnyElement>, theme: &Theme) -> gpui::Div {
@@ -188,14 +188,15 @@ pub(super) fn render_schema_box(schema_controls: Vec<AnyElement>, theme: &Theme)
 
 fn render_revoke_controls(
     id: &str,
-    revoke_armed: bool,
+    mode: EditorMode,
     live: bool,
     theme: &Theme,
     cx: &Context<ConnectionsPane>,
 ) -> gpui::Div {
     let pane = cx.entity();
     let cancel_id = id.to_owned();
-    let cancel = revoke_armed.then(|| {
+    let confirming = mode == EditorMode::ConfirmRevoke;
+    let cancel = confirming.then(|| {
         let pane = pane.clone();
         pill_button(
             SharedString::from(format!("conn-rev-cancel-{id}")),
@@ -204,20 +205,15 @@ fn render_revoke_controls(
             theme,
             move |_, cx| {
                 pane.update(cx, |this, cx| {
-                    if let Some(editor) = this
-                        .form
-                        .expanded
-                        .as_mut()
-                        .filter(|editor| editor.id == cancel_id)
-                    {
-                        editor.revoke_armed = false;
+                    if let Some(editor) = this.form.editor_mut(&cancel_id) {
+                        editor.mode = EditorMode::Editing;
                         cx.notify();
                     }
                 });
             },
         )
     });
-    let button = if revoke_armed { "exec" } else { "arm" };
+    let button = if confirming { "exec" } else { "arm" };
     let id = id.to_owned();
     div()
         .flex()
@@ -232,18 +228,23 @@ fn render_revoke_controls(
             theme,
             move |_, cx| {
                 pane.update(cx, |this, cx| {
-                    if let Some(editor) =
-                        this.form.expanded.as_mut().filter(|editor| editor.id == id)
+                    if let Some(editor) = this
+                        .form
+                        .editor_mut(&id)
+                        .filter(|editor| editor.mode == mode)
                     {
-                        if revoke_armed && editor.revoke_armed {
+                        editor.mode = if confirming {
+                            EditorMode::Editing
+                        } else {
+                            EditorMode::ConfirmRevoke
+                        };
+                        if confirming {
                             this.hub
                                 .update(cx, |hub, cx| hub.revoke_secret(id.clone(), cx));
-                        } else if !revoke_armed {
-                            editor.revoke_armed = true;
-                            cx.notify();
                         }
+                        cx.notify();
                     }
-                })
+                });
             },
         ))
 }

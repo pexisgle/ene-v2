@@ -4,6 +4,7 @@ use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button, status_pill};
 use crate::ui::{Hub, search_adapter_requires_key};
 use ene_client_core::domain::{Connection, ConnectionCheck, ConnectionKind};
+use ene_domain::CredentialState;
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 use std::collections::BTreeMap;
 
@@ -44,7 +45,7 @@ pub(super) fn render_web_search_card(
     let active_conn = search_conns.iter().copied().find(|c| {
         c.enabled
             && (!c.search_adapter().is_some_and(search_adapter_requires_key)
-                || matches!(c.credential_state.as_str(), "registered" | "environment"))
+                || c.credential_state.is_configured())
     });
     let active_fallback = active_conn.or_else(|| search_conns.iter().copied().find(|c| c.enabled));
 
@@ -91,8 +92,7 @@ fn render_search_provider_row(
             .is_some_and(|a| a.eq_ignore_ascii_case(spec.adapter))
     });
     let conn_id = existing.map(|c| c.id.clone());
-    let has_cred = existing
-        .is_some_and(|c| matches!(c.credential_state.as_str(), "registered" | "environment"));
+    let has_cred = existing.is_some_and(|c| c.credential_state.is_configured());
     let is_active = existing.is_some_and(|c| c.enabled);
     let is_checking = conn_id
         .as_ref()
@@ -100,7 +100,7 @@ fn render_search_provider_row(
     let check = existing.and_then(|c| checks.get(&c.id).or(c.last_check.as_ref()));
 
     let field = SecretField::Search(spec.adapter);
-    let revealed = pane.form.revealed.as_ref() == Some(&field);
+    let revealed = pane.form.revealed_search == Some(spec.adapter);
     let draft = pane.drafts.masked_draft(
         cx,
         format!("search-card:secret:{}", spec.adapter),
@@ -254,10 +254,11 @@ fn render_provider_header(
     hub: &Entity<Hub>,
     theme: &Theme,
 ) -> gpui::Div {
-    let (cred_label, cred_bg, cred_fg) = match meta.existing.map(|c| c.credential_state.as_str()) {
-        Some("registered") => ("キー登録済み", theme.mint_soft, theme.mint_fg),
-        Some("environment") => ("環境変数", theme.mint_soft, theme.mint_fg),
-        _ => ("未登録", theme.bg_surface, theme.ink_muted),
+    let (cred_label, cred_bg, cred_fg) = match meta.existing.map_or_default(|c| c.credential_state)
+    {
+        CredentialState::Registered => ("キー登録済み", theme.mint_soft, theme.mint_fg),
+        CredentialState::Environment => ("環境変数", theme.mint_soft, theme.mint_fg),
+        CredentialState::Absent => ("未登録", theme.bg_surface, theme.ink_muted),
     };
     let check_badge = if meta.is_checking {
         Some(("確認中…", theme.amber_soft, theme.amber_fg))

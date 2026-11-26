@@ -407,6 +407,11 @@ pub enum CredentialState {
 }
 
 impl CredentialState {
+    /// Whether the service has a configured credential source.
+    pub fn is_configured(self) -> bool {
+        self != Self::Absent
+    }
+
     /// Returns the canonical snake-case wire/database representation.
     pub fn as_str(self) -> &'static str {
         self.into()

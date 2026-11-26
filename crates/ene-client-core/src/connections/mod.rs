@@ -305,6 +305,7 @@ mod tests {
         ConnectionCheck, EmbeddingConnection, LlmConnection, LlmProvider, SearchConnection,
         SttConnection, TtsConnection,
     };
+    use ene_domain::CredentialState::{Absent, Environment, Registered};
 
     #[test]
     fn connection_resources_preserve_configured_values_without_catalog_entries() {
@@ -558,7 +559,7 @@ mod tests {
         };
         let catalog = std::slice::from_ref(&provider);
         assert!(!conn.can_start_chat(catalog));
-        conn.credential_state = "registered".into();
+        conn.credential_state = Registered;
         assert!(conn.can_start_chat(catalog));
         conn.last_check = Some(ConnectionCheck::default());
         assert!(!conn.can_start_chat(catalog));
@@ -566,12 +567,12 @@ mod tests {
 
     #[test]
     fn search_connections_detect_key_requirements_for_exa_and_tavily() {
-        let make_search = |adapter: &str, ep: &str, cred_state: &str| Connection {
+        let make_search = |adapter: &str, ep: &str, credential_state| Connection {
             id: format!("search-{adapter}"),
             name: format!("Web検索 ({adapter})"),
             enabled: true,
             revision: 1,
-            credential_state: cred_state.into(),
+            credential_state,
             kind: ConnectionKind::Search,
             last_check: None,
             config: Some(ConnectionConfig::Search(SearchConnection {
@@ -580,11 +581,11 @@ mod tests {
             })),
         };
 
-        let exa_absent = make_search("exa", "https://api.exa.ai/search", "absent");
-        let exa_registered = make_search("exa", "https://api.exa.ai/search", "registered");
-        let tavily_absent = make_search("tavily", "https://api.tavily.com/search", "absent");
-        let tavily_env = make_search("tavily", "https://api.tavily.com/search", "environment");
-        let mwmbl_absent = make_search("mwmbl", "https://api.mwmbl.org/api/v2/search/", "absent");
+        let exa_absent = make_search("exa", "https://api.exa.ai/search", Absent);
+        let exa_registered = make_search("exa", "https://api.exa.ai/search", Registered);
+        let tavily_absent = make_search("tavily", "https://api.tavily.com/search", Absent);
+        let tavily_env = make_search("tavily", "https://api.tavily.com/search", Environment);
+        let mwmbl_absent = make_search("mwmbl", "https://api.mwmbl.org/api/v2/search/", Absent);
 
         assert_eq!(exa_absent.search_adapter(), Some("exa"));
         assert_eq!(tavily_absent.search_adapter(), Some("tavily"));

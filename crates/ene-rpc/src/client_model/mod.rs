@@ -260,10 +260,15 @@ mod tests {
             revision: wire_input.expected_revision,
             kind: wire_input.kind,
             config: wire_input.config,
+            credential_state: "environment".into(),
             ..Default::default()
         };
         let round_trip: domain::Connection = wire_conn.into();
         assert_eq!(round_trip.to_input(), domain_input);
+        assert_eq!(
+            round_trip.credential_state,
+            ene_domain::CredentialState::Environment
+        );
 
         let rules_update = domain::PolicyRulesUpdate {
             add_or_update: vec![domain::PolicyRule {

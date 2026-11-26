@@ -146,7 +146,7 @@ impl From<&settings::Settings> for w::Settings {
 
 from_fields! {
     w::Connection => domain::Connection {
-        id, name, enabled, credential_state, revision,
+        id, name, enabled, credential_state.parse().unwrap_or_default(), revision,
         kind.as_known().map_or_default(Into::into),
         last_check.into_option().map(Into::into),
         config.into_option().and_then(|cfg| cfg.config.map(Into::into)),

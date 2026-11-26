@@ -1,7 +1,7 @@
 //! Pure connection, provider, model, and plugin domain types.
 
 use super::{ConnectionCheck, ConnectionEndpoint};
-use crate::settings;
+use crate::{CredentialState, settings};
 
 /// Configuration received from a host that may omit its endpoint metadata.
 pub type ConnectionConfig = settings::ConnectionConfig<Option<ConnectionEndpoint>>;
@@ -92,8 +92,8 @@ pub struct Connection {
     pub name: String,
     /// Whether the host may use the connection.
     pub enabled: bool,
-    /// Whether a secret is stored, in the host's own spelling.
-    pub credential_state: String,
+    /// Whether a credential source is configured.
+    pub credential_state: CredentialState,
     /// Optimistic-concurrency counter, bumped on every write.
     pub revision: u64,
     /// Which kind of service this connection reaches.
@@ -155,7 +155,7 @@ impl Connection {
 
     /// Returns true when the connection requires an unregistered credential.
     pub fn needs_key(&self, providers: &[LlmProvider]) -> bool {
-        if matches!(self.credential_state.as_str(), "registered" | "environment") {
+        if self.credential_state.is_configured() {
             return false;
         }
         if self

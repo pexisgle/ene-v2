@@ -32,15 +32,22 @@ enum AddFlow {
     Mcp(mcp_add::Form),
 }
 
-#[derive(Clone, PartialEq, Eq)]
 enum SecretField {
     Connection(String),
     Search(&'static str),
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum EditorMode {
+    #[default]
+    Editing,
+    ConfirmRevoke,
+}
+
 struct ExpandedConnection {
     id: String,
-    revoke_armed: bool,
+    mode: EditorMode,
+    key_visible: bool,
 }
 
 #[derive(Default)]
@@ -48,10 +55,10 @@ struct ConnectionFormState {
     add: AddFlow,
     pending_mcp: Option<String>,
     expanded: Option<ExpandedConnection>,
-    revealed: Option<SecretField>,
+    revealed_search: Option<&'static str>,
     advanced_roles_open: bool,
     auto_probed_connections: HashSet<String>,
-    last_cleared_secret_seq: u64,
+    last_cleared_secret_seq: Option<u64>,
 }
 
 impl ConnectionFormState {
@@ -59,18 +66,36 @@ impl ConnectionFormState {
         self.expanded.as_ref().filter(|editor| editor.id == id)
     }
 
+    fn editor_mut(&mut self, id: &str) -> Option<&mut ExpandedConnection> {
+        self.expanded.as_mut().filter(|editor| editor.id == id)
+    }
+
     fn open_editor(&mut self, id: String) {
-        self.close_editor();
         self.expanded = Some(ExpandedConnection {
             id,
-            revoke_armed: false,
+            mode: EditorMode::Editing,
+            key_visible: false,
         });
     }
 
     fn close_editor(&mut self) {
         self.expanded = None;
-        if matches!(self.revealed, Some(SecretField::Connection(_))) {
-            self.revealed = None;
+    }
+
+    fn toggle_secret(&mut self, field: &SecretField) {
+        match field {
+            SecretField::Connection(id) => {
+                if let Some(editor) = self.editor_mut(id) {
+                    editor.key_visible = !editor.key_visible;
+                    self.revealed_search = None;
+                }
+            }
+            SecretField::Search(adapter) => {
+                if let Some(editor) = &mut self.expanded {
+                    editor.key_visible = false;
+                }
+                self.revealed_search = (self.revealed_search != Some(adapter)).then_some(adapter);
+            }
         }
     }
 }
@@ -95,13 +120,7 @@ fn secret_row(
             theme,
             move |_, cx| {
                 pane.update(cx, |this, cx| {
-                    if let SecretField::Connection(id) = &field
-                        && this.form.editor(id).is_none()
-                    {
-                        return;
-                    }
-                    this.form.revealed =
-                        (this.form.revealed.as_ref() != Some(&field)).then(|| field.clone());
+                    this.form.toggle_secret(&field);
                     cx.notify();
                 });
             },
@@ -114,15 +133,12 @@ pub(crate) struct ConnectionsPane {
     pub(super) drafts: DraftStore,
     form: ConnectionFormState,
     pub(super) open_dropdown: Option<String>,
-    initialized: bool,
     _observe: Subscription,
 }
 
 impl std::fmt::Debug for ConnectionsPane {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ConnectionsPane")
-            .field("initialized", &self.initialized)
-            .finish_non_exhaustive()
+        f.debug_struct("ConnectionsPane").finish_non_exhaustive()
     }
 }
 
@@ -152,16 +168,16 @@ impl ConnectionsPane {
             drafts: DraftStore::default(),
             form: ConnectionFormState::default(),
             open_dropdown: None,
-            initialized: false,
             _observe,
         }
     }
 
     pub(crate) fn on_leave(&mut self) {
         self.open_dropdown = None;
-        self.form.revealed = None;
+        self.form.revealed_search = None;
         if let Some(editor) = &mut self.form.expanded {
-            editor.revoke_armed = false;
+            editor.mode = EditorMode::Editing;
+            editor.key_visible = false;
         }
     }
 
@@ -171,15 +187,11 @@ impl ConnectionsPane {
 
     fn sync_hub_events(&mut self, cx: &mut Context<Self>) {
         let cleared = self.hub.read(cx).setup.cleared_secret_for.clone();
-        if !self.initialized {
-            self.initialized = true;
-            self.form.last_cleared_secret_seq = cleared.as_ref().map_or(0, |(_, seq)| *seq);
-            return;
-        }
+        let current = cleared.as_ref().map_or(0, |(_, seq)| *seq);
+        let previous = self.form.last_cleared_secret_seq.replace(current);
         if let Some((conn_id, seq)) = cleared
-            && seq != self.form.last_cleared_secret_seq
+            && previous.is_some_and(|previous| previous != seq)
         {
-            self.form.last_cleared_secret_seq = seq;
             let adapter = self.hub.read(cx).model.settings().and_then(|s| {
                 s.connections
                     .iter()
@@ -196,27 +208,22 @@ impl ConnectionsPane {
             ];
             self.drafts
                 .clear_keys(cx, keys.iter().flatten().map(String::as_str));
-            if self
-                .form
-                .revealed
-                .as_ref()
-                .is_some_and(|field| match field {
-                    SecretField::Connection(id) => id == &conn_id,
-                    SecretField::Search(adapter) => Some(*adapter) == search_adapter,
-                })
-            {
-                self.form.revealed = None;
+            if let Some(editor) = self.form.editor_mut(&conn_id) {
+                editor.key_visible = false;
+                editor.mode = EditorMode::Editing;
             }
+            self.form.revealed_search = self
+                .form
+                .revealed_search
+                .filter(|&adapter| Some(adapter) != search_adapter);
         }
     }
 
     fn consume_pending_mcp_probe(&mut self, connections: &[Connection], cx: &mut Context<Self>) {
-        if self
+        if let Some(id) = self
             .form
             .pending_mcp
-            .as_ref()
-            .is_some_and(|id| connections.iter().any(|connection| &connection.id == id))
-            && let Some(id) = self.form.pending_mcp.take()
+            .take_if(|id| connections.iter().any(|connection| &connection.id == id))
         {
             self.clear_mcp_drafts();
             let hub = self.hub.clone();

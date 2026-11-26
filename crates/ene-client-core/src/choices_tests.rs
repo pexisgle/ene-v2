@@ -16,7 +16,7 @@ fn llm_conn(id: &str, adapter: &str, model_ids: Vec<&str>, healthy: bool) -> Con
         name: id.into(),
         enabled: true,
         kind: ConnectionKind::Llm,
-        credential_state: "registered".into(),
+        credential_state: ene_domain::CredentialState::Registered,
         last_check: Some(ConnectionCheck {
             healthy,
             ..Default::default()
