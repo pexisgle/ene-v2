@@ -4,14 +4,14 @@
 //! composes them into the element tree.
 
 use super::{preview_text, reply_view};
-use crate::state::{Link, Model, Notice, NoticeKind};
+use crate::state::{Link, Model};
 use crate::ui::Hub;
 use crate::ui::icons::{Icon, icon};
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button, status_pill, window_drag_area};
 use ene_client_core::domain::RiskLevel;
 use ene_client_core::domain::{ApprovalDecision, MessageRole, TurnStatus};
-use gpui::{AnyElement, Entity, MouseButton, MouseDownEvent, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, Entity, SharedString, div, prelude::*, px};
 
 pub(super) fn compute_badge_label(
     hub: &Hub,
@@ -47,68 +47,6 @@ pub(super) fn compute_status_word(
         Link::Live { .. } if model.audio.transcription.is_some() => "音声入力中",
         Link::Live { .. } => "待機中",
     }
-}
-
-pub(super) fn render_notice_strip(notice: &Notice, hub: &Entity<Hub>, theme: &Theme) -> gpui::Div {
-    let hub_dismiss = hub.clone();
-    let hub_resync = hub.clone();
-    let is_conflict = notice.kind == NoticeKind::Conflict;
-    let fg = if is_conflict {
-        theme.amber_fg
-    } else {
-        theme.danger_fg
-    };
-    div()
-        .w_full()
-        .rounded(crate::ui::theme::radius::large())
-        .bg(if is_conflict {
-            theme.amber_soft
-        } else {
-            theme.danger_soft
-        })
-        .px(px(10.))
-        .py(px(6.))
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap(px(8.))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_xs()
-                .text_color(fg)
-                .truncate()
-                .child(format!("{}: {}", notice.context, notice.message)),
-        )
-        .when(is_conflict, |this| {
-            this.child(pill_button(
-                "pod-notice-reload",
-                "再読み込み",
-                Tone::Soft.icon(Icon::RefreshCw),
-                theme,
-                move |_, cx| {
-                    hub_resync.update(cx, |hub, cx| {
-                        hub.refresh_active_data(cx);
-                        hub.dismiss_notice(0, cx);
-                    });
-                },
-            ))
-        })
-        .child(
-            div()
-                .id("pod-notice-close")
-                .flex_none()
-                .p(px(4.))
-                .rounded_full()
-                .cursor_pointer()
-                .hover(|this| this.bg(theme.bg_surface.alpha(0.6)))
-                .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _, cx| {
-                    hub_dismiss.update(cx, |hub, cx| hub.dismiss_notice(0, cx));
-                })
-                .child(icon(Icon::Close, 11., fg)),
-        )
 }
 
 pub(super) fn render_drag_strip(expanded_chat: bool, theme: &Theme) -> gpui::Div {

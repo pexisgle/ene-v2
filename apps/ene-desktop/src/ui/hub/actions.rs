@@ -1,7 +1,11 @@
 //! Chat, audio, device, approval, policy, plugin, remote-host, and companion actions on [`Hub`].
 
 use super::{Hub, chat, companions};
-use crate::{rpc, state::NoticeKind, update::Command};
+use crate::{
+    rpc,
+    state::{Notice, NoticeKind},
+    update::Command,
+};
 use ene_client_core::{
     ModelRoleSlot,
     domain::{
@@ -11,6 +15,7 @@ use ene_client_core::{
     },
 };
 use gpui::Context;
+use std::sync::Arc;
 
 impl Hub {
     /// Queues a command for the session, noting when it has stopped listening.
@@ -168,9 +173,16 @@ impl Hub {
         cx.notify();
     }
 
-    pub(crate) fn dismiss_notice(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.model.notices.len() {
-            self.model.notices.remove(index);
+    pub(crate) fn dismiss_notice(
+        &mut self,
+        notice: &Arc<Notice>,
+        reload: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.model.dismiss_notice(notice) {
+            if reload {
+                self.refresh_active_data(cx);
+            }
             cx.notify();
         }
     }

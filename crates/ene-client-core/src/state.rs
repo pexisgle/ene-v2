@@ -10,6 +10,7 @@ use crate::domain::{
 use crate::update::{CaptureMode, ReplyTarget};
 use std::{
     collections::{BTreeMap, HashMap},
+    sync::Arc,
     time::Duration,
 };
 
@@ -301,7 +302,7 @@ pub struct Model {
     /// The last authoritative host snapshot.
     pub snapshot: Option<Snapshot>,
     /// Recent user-visible failures, oldest first.
-    pub notices: Vec<Notice>,
+    pub notices: Vec<Arc<Notice>>,
     /// Link, provider, model and device state.
     pub connections: ConnectionViewState,
     /// Companion selection, chat and templates.
@@ -449,13 +450,26 @@ impl Model {
         context: impl Into<String>,
         message: impl Into<String>,
     ) {
-        self.notices.push(Notice {
+        self.notices.push(Arc::new(Notice {
             context: context.into(),
             message: message.into(),
             kind,
-        });
+        }));
         if self.notices.len() > 8 {
             self.notices.remove(0);
         }
+    }
+
+    /// Dismisses the notice shown to the operator, even if the list has moved.
+    pub fn dismiss_notice(&mut self, notice: &Arc<Notice>) -> bool {
+        let Some(index) = self
+            .notices
+            .iter()
+            .position(|shown| Arc::ptr_eq(shown, notice))
+        else {
+            return false;
+        };
+        self.notices.remove(index);
+        true
     }
 }

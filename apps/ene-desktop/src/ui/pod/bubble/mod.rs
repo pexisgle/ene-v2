@@ -9,7 +9,7 @@ use super::CompanionPod;
 use crate::state::Link;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
-use crate::ui::widgets::{Tone, pill_button};
+use crate::ui::widgets::{Tone, notice_strip, pill_button};
 use crate::ui::{PodMode, SettingsSection};
 use ene_client_core::domain::{ApprovalRequest, RiskLevel};
 use gpui::{AnyElement, Context, SharedString, div, prelude::*, px};
@@ -25,7 +25,6 @@ impl CompanionPod {
         let live = hub.live();
         let expanded = hub.windows.pod_mode == PodMode::ExpandedChat;
         let approvals = hub.model.approvals().to_vec();
-        let notice = hub.model.notices.first().cloned();
         let streaming_preview: String = hub
             .model
             .companions
@@ -46,9 +45,11 @@ impl CompanionPod {
         let is_busy = speaking || !streaming_preview.is_empty() || stop_requested;
         let in_onboarding = self.needs_connection(cx) || self.in_model_setup(cx);
         let badge_label = compute_badge_label(hub, &streaming_preview, in_onboarding);
-        let notice_strip = notice
-            .as_ref()
-            .map(|n| render_notice_strip(n, &self.hub, &theme));
+        let notice = hub
+            .model
+            .notices
+            .first()
+            .map(|notice| notice_strip(notice, true, &self.hub, &theme));
         let body: AnyElement = if !live {
             self.render_offline_body(&hub.model.connections.link, &theme)
         } else if let Some(approval) = approvals.first().cloned() {
@@ -80,7 +81,7 @@ impl CompanionPod {
             .flex_col()
             .gap(px(6.))
             .child(render_drag_strip(expanded_chat, &theme))
-            .when_some(notice_strip, gpui::ParentElement::child)
+            .when_some(notice, gpui::ParentElement::child)
             .child(body);
 
         div()

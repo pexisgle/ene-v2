@@ -7,10 +7,9 @@ use super::device::DevicePane;
 use super::icons::Icon;
 use super::theme::{Theme, resolve_ui_font_family, ui_font_fallbacks};
 use super::widgets::{
-    CircleButtonStyle, Tone, circle_icon_button, navigation_button, pill_button, window_drag_area,
+    CircleButtonStyle, Tone, circle_icon_button, navigation_button, notice_strip, window_drag_area,
 };
 use super::{Hub, SettingsSection};
-use crate::state::NoticeKind;
 use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*, px};
 
 /// Settings window managing companions, connections and local device permissions.
@@ -131,71 +130,11 @@ impl SettingsStudio {
             .into_any_element()
     }
 
-    fn render_notices(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let notices = self.hub.read(cx).model.notices.clone();
+    fn render_notices(&self, theme: &Theme, cx: &Context<Self>) -> Option<AnyElement> {
+        let notices = &self.hub.read(cx).model.notices;
         if notices.is_empty() {
             return None;
         }
-        let mut strips: Vec<AnyElement> = Vec::new();
-        for (idx, notice) in notices.into_iter().enumerate() {
-            let is_conflict = notice.kind == NoticeKind::Conflict;
-            let hub_reload = self.hub.clone();
-            let hub_dismiss = self.hub.clone();
-            strips.push(
-                div()
-                    .w_full()
-                    .rounded(crate::ui::theme::radius::large())
-                    .bg(if is_conflict {
-                        theme.amber_soft
-                    } else {
-                        theme.danger_soft
-                    })
-                    .px(px(12.))
-                    .py(px(8.))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_xs()
-                            .text_color(if is_conflict {
-                                theme.amber_fg
-                            } else {
-                                theme.danger_fg
-                            })
-                            .child(format!("{}: {}", notice.context, notice.message)),
-                    )
-                    .when(is_conflict, |this| {
-                        this.child(pill_button(
-                            SharedString::from(format!("studio-notice-reload-{idx}")),
-                            "再読み込み",
-                            Tone::Soft.icon(Icon::RefreshCw),
-                            theme,
-                            move |_, cx| {
-                                hub_reload.update(cx, |hub, cx| {
-                                    hub.refresh_active_data(cx);
-                                    hub.dismiss_notice(idx, cx);
-                                });
-                            },
-                        ))
-                    })
-                    .child(circle_icon_button(
-                        SharedString::from(format!("studio-notice-close-{idx}")),
-                        "通知を閉じる",
-                        CircleButtonStyle::new(Icon::Close, 22., 11.),
-                        theme,
-                        move |_, cx| {
-                            hub_dismiss.update(cx, |hub, cx| hub.dismiss_notice(idx, cx));
-                        },
-                    ))
-                    .into_any_element(),
-            );
-        }
-
         Some(
             div()
                 .flex_none()
@@ -204,7 +143,11 @@ impl SettingsStudio {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .children(strips)
+                .children(
+                    notices
+                        .iter()
+                        .map(|notice| notice_strip(notice, false, &self.hub, theme)),
+                )
                 .into_any_element(),
         )
     }

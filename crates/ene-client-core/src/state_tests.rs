@@ -5,7 +5,7 @@ use crate::{
         PolicyText, Settings, Snapshot, TurnEvent, TurnStatus, WorkStatus,
     },
     reducer::is_user_facing_message,
-    state::{Link, Model, Sending},
+    state::{Link, Model, NoticeKind, Sending},
     update::Update,
 };
 use ene_domain::CompanionId;
@@ -733,4 +733,20 @@ fn scoped_model_lists_replace_only_the_same_connections_older_reply() {
     assert_eq!(model.connections.models["b"][0].id, "first");
     model.apply(scoped(4, "a", "newer"));
     assert_eq!(model.connections.models["a"][0].id, "newer");
+}
+#[test]
+fn dismissing_a_notice_uses_the_rendered_identity_after_the_list_moves() {
+    let mut model = Model::new("conn.json".into());
+    for _ in 0..8 {
+        model.notice(NoticeKind::Failed, "chat", "same failure");
+    }
+    let expired = model.notices[0].clone();
+    let shown = model.notices[1].clone();
+    model.notice(NoticeKind::Failed, "chat", "same failure");
+
+    assert!(!model.dismiss_notice(&expired));
+    assert_eq!(model.notices.len(), 8);
+    assert!(model.dismiss_notice(&shown));
+    assert!(!model.dismiss_notice(&shown));
+    assert_eq!(model.notices.len(), 7);
 }
