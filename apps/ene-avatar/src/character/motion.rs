@@ -11,6 +11,11 @@ const MOTION_FADE_SECS: f32 = 0.3;
 pub(super) enum Pending {
     /// The client asked for this clip; it is loaded and faded in when ready.
     Fade(Handle<AnimationClip>),
+    /// The leaf was written this frame. Bevy threads it on the next frame.
+    Play {
+        clip: Handle<AnimationClip>,
+        node: AnimationNodeIndex,
+    },
     /// The client asked for no clip; the character returns to its rest pose.
     Rest,
 }
@@ -23,7 +28,7 @@ pub(super) struct FadingMotion {
 
 impl Character {
     pub(super) fn play_motion(&mut self, player: &mut AnimationPlayer, node: AnimationNodeIndex) {
-        if !self.config.playing {
+        if !self.config.playing || self.state != AvatarState::Ready {
             player.stop_all();
             self.fading.clear();
         } else if let Some(previous) = self.main
@@ -93,12 +98,18 @@ pub(super) fn motion_change(
             c.pending = Some(pending);
             continue;
         };
-        match pending {
+        let (clip, node) = match pending {
             Pending::Rest => {
                 player.stop_all();
                 c.motion = None;
                 c.main = None;
                 c.fading.clear();
+                if let Some(mut graph) = graphs.get_mut(&handle.0)
+                    && graph.nodes().count() > 1
+                {
+                    *graph = AnimationGraph::new();
+                }
+                continue;
             }
             Pending::Fade(clip) => {
                 if server
@@ -112,29 +123,53 @@ pub(super) fn motion_change(
                     c.pending = Some(Pending::Fade(clip));
                     continue;
                 }
-                let Some(mut graph) = graphs.get_mut(&handle.0) else {
+                let Some((node, rebuild)) = motion_node(&mut graphs, &handle.0, &player, &clip)
+                else {
                     c.pending = Some(Pending::Fade(clip));
                     continue;
                 };
-                let node = motion_node(&mut graph, &player, &clip);
-                c.play_motion(&mut player, node);
-                c.motion = Some(clip);
+                if rebuild {
+                    c.pending = Some(Pending::Play { clip, node });
+                    continue;
+                }
+                (clip, node)
             }
-        }
+            Pending::Play { clip, node } => (clip, node),
+        };
+        c.play_motion(&mut player, node);
+        c.motion = Some(clip);
     }
 }
 
 pub(super) fn motion_node(
-    graph: &mut AnimationGraph,
+    graphs: &mut Assets<AnimationGraph>,
+    handle: &Handle<AnimationGraph>,
     player: &AnimationPlayer,
     clip: &Handle<AnimationClip>,
-) -> AnimationNodeIndex {
+) -> Option<(AnimationNodeIndex, bool)> {
     // An active instance may still supply the outgoing pose of a replayed clip.
-    let unused = graph.nodes().find(|&node| {
-        !player.is_playing_animation(node)
-            && matches!(graph.get(node).map(|entry| &entry.node_type), Some(AnimationNodeType::Clip(handle)) if handle == clip)
-    });
-    unused.unwrap_or_else(|| graph.add_clip(clip.clone(), 1., graph.root))
+    let graph = graphs.get(handle)?;
+    let mut idle = None;
+    for node in graph
+        .nodes()
+        .filter(|&node| !player.is_playing_animation(node))
+    {
+        if let AnimationNodeType::Clip(previous) = &graph.get(node)?.node_type {
+            if previous == clip {
+                return Some((node, false));
+            }
+            idle.get_or_insert(node);
+        }
+    }
+    let mut graph = graphs.get_mut(handle)?;
+    let node = if let Some(node) = idle {
+        graph.get_mut(node)?.node_type = AnimationNodeType::Clip(clip.clone());
+        node
+    } else {
+        let root = graph.root;
+        graph.add_clip(clip.clone(), 1., root)
+    };
+    Some((node, true))
 }
 
 pub(super) fn advance_fades(

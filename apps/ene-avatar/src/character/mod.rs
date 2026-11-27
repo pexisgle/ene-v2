@@ -440,6 +440,8 @@ mod tests {
         let second = clips.add(AnimationClip::default());
         let (mut graph, a) = AnimationGraph::from_clip(first.clone());
         let b = graph.add_clip(second, 1., graph.root);
+        let mut graphs = Assets::<AnimationGraph>::default();
+        let graph = graphs.add(graph);
         let mut player = AnimationPlayer::default();
         let mut character = Character {
             state: AvatarState::Ready,
@@ -455,7 +457,8 @@ mod tests {
         let prior_b = *player.animation(b).unwrap();
         assert!(prior_a.weight() > 0. && prior_b.weight() > 0.);
 
-        let a_replay = motion_node(&mut graph, &player, &first);
+        let (a_replay, rebuild) = motion_node(&mut graphs, &graph, &player, &first).unwrap();
+        assert!(rebuild);
         assert_ne!(a_replay, a);
         character.play_motion(&mut player, a_replay);
         character.advance_fades(&mut player, 0.);
@@ -476,6 +479,19 @@ mod tests {
         character.advance_fades(&mut player, 0.1);
         assert_eq!(player.playing_animations().count(), 1);
         assert_eq!(player.animation(a_replay).unwrap().weight(), 1.);
-        assert_eq!(motion_node(&mut graph, &player, &first), a);
+        assert_eq!(
+            motion_node(&mut graphs, &graph, &player, &first),
+            Some((a, false))
+        );
+
+        for _ in 0..70 {
+            let next = clips.add(AnimationClip::default());
+            let (node, rebuild) = motion_node(&mut graphs, &graph, &player, &next).unwrap();
+            assert!(rebuild);
+            character.play_motion(&mut player, node);
+            character.advance_fades(&mut player, 0.31);
+            assert_eq!(player.playing_animations().count(), 1);
+            assert_eq!(graphs.get(&graph).unwrap().nodes().count(), 4);
+        }
     }
 }
