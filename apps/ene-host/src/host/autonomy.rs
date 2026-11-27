@@ -191,11 +191,13 @@ fn scheduled_request_key(author: &Author) -> Option<&str> {
     }
 }
 
-fn conversation_has_occurrence(conversation: Option<&Conversation>, occurrence_key: &str) -> bool {
-    conversation.is_some_and(|conv| {
-        conv.entries()
-            .any(|entry| entry.author.and_then(scheduled_request_key) == Some(occurrence_key))
-    })
+pub(crate) fn conversation_has_occurrence(
+    conversation: &rig_core::conversation::Conversation,
+    occurrence_key: &str,
+) -> bool {
+    conversation
+        .entries()
+        .any(|entry| entry.author.and_then(scheduled_request_key) == Some(occurrence_key))
 }
 
 /// Confirms occurrences after Rig has written the companion's conversation log.
@@ -217,7 +219,9 @@ fn confirm_delivered_schedules(
                 (agent.companion_id == occurrence.companion_id && conversation.unsaved().is_empty())
                     .then_some(conversation)
             });
-            if conversation_has_occurrence(conversation, &occurrence.occurrence_key) {
+            if conversation.is_some_and(|conversation| {
+                conversation_has_occurrence(conversation, &occurrence.occurrence_key)
+            }) {
                 schedules.mark_occurrence_delivered(&occurrence.occurrence_key, now)?;
             }
         }
@@ -307,7 +311,11 @@ fn dispatch_due_occurrence(
         return OccurrenceOutcome::Skipped;
     };
     if queued_inbox.contains(&(agent, occ.occurrence_key.clone()))
-        || conversation_has_occurrence(world.get::<Conversation>(agent), &occ.occurrence_key)
+        || world
+            .get::<Conversation>(agent)
+            .is_some_and(|conversation| {
+                conversation_has_occurrence(conversation, &occ.occurrence_key)
+            })
     {
         return OccurrenceOutcome::Skipped;
     }
@@ -727,7 +735,11 @@ mod tests {
         harness.app.add_systems(
             Persist,
             (move |agents: Query<&Conversation>| {
-                if !conversation_has_occurrence(agents.get(agent).ok(), &key) || blocked.is_dir() {
+                if !agents
+                    .get(agent)
+                    .is_ok_and(|conversation| conversation_has_occurrence(conversation, &key))
+                    || blocked.is_dir()
+                {
                     return;
                 }
                 if blocked.exists() {

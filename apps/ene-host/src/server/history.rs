@@ -1,4 +1,5 @@
 //! Offline reset of learned state, serialized by the host's state lock.
+use crate::host::{agent::companion_agent_id, autonomy::conversation_has_occurrence};
 use ene_store::Store;
 use private_fs::PrivateDir;
 use std::{error::Error, fs, io, path::Path};
@@ -27,10 +28,35 @@ pub(super) fn reset(state: &Path, requested: bool) -> Result<(), Box<dyn Error +
     }
 
     directory.sync_all()?;
+    reconcile_schedule_receipts(&store, &pending)?;
     store.reset_learned_state()?;
     drop(store);
     fs::remove_dir_all(pending)?;
     directory.sync_all()?;
+    Ok(())
+}
+
+fn reconcile_schedule_receipts(
+    store: &Store,
+    history: &Path,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let schedules = store.schedule_repo();
+    let mut pending = schedules.pending_schedule_occurrences()?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let logs = rig_memory::DirStore::open(history)?;
+    let now = jiff::Timestamp::now();
+    pending.sort_unstable_by(|a, b| a.companion_id.cmp(&b.companion_id));
+    for occurrences in pending.chunk_by(|a, b| a.companion_id == b.companion_id) {
+        let id = companion_agent_id(&occurrences[0].companion_id);
+        let conversation = rig_memory::load(&logs, &id)?;
+        for occurrence in occurrences {
+            if conversation_has_occurrence(&conversation, &occurrence.occurrence_key) {
+                schedules.mark_occurrence_delivered(&occurrence.occurrence_key, now)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -49,6 +75,10 @@ fn directory_exists(path: &Path) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rig_core::{
+        conversation::{Author, Entry, RequestId},
+        message::Message,
+    };
 
     #[test]
     fn interrupted_history_reset_keeps_connections_and_policies() {
@@ -69,14 +99,28 @@ mod tests {
              INSERT INTO schedule_occurrences
                  (occurrence_key, schedule_id, companion_id, scheduled_for, title, instruction, status, created_at)
                  VALUES ('done', 'old', 'ene', '', '', 'RecallFixturezq9v2p7m5n3w8t1a6', 'delivered', ''),
-                        ('next', 'existing', 'ene', '', '', 'Future instruction', 'pending', '');",
+                        ('rec', 'old', 'ene', '', '', 'Logged instruction', 'pending', ''),
+                        ('next', 'existing', 'ene', '', '', 'Future instruction', 'pending', '');
+             INSERT INTO skills VALUES ('ene', 'learned', 'Learned steps', 'Learned instructions', '');",
             )
             .unwrap();
         drop(store);
 
         let pending = state.join("rig-reset-pending");
         fs::create_dir(&pending).unwrap();
-        fs::write(pending.join("old-log"), b"conversation history").unwrap();
+        let logs = rig_memory::DirStore::open(&pending).unwrap();
+        let log_id = companion_agent_id("ene");
+        let mut conversation = rig_memory::load(&logs, &log_id).unwrap();
+        let author = Author {
+            request: Some(RequestId("rec".into())),
+            ..Author::plugin("ene-host")
+        };
+        conversation.splice(
+            0..0,
+            [Entry::new(Message::user("Logged instruction")).by(author.clone())],
+            author,
+        );
+        rig_memory::save(&logs, &log_id, &mut conversation).unwrap();
         reset(state, false).unwrap();
         assert!(!pending.exists());
 
@@ -101,6 +145,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(occurrences, (1, "Future instruction".into()));
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM skills", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
         assert_eq!(
             connection
                 .query_row(

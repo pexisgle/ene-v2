@@ -127,6 +127,7 @@ impl Store {
              DELETE FROM memory_injections;
              DELETE FROM mind_operations;
              DELETE FROM compaction_checkpoints;
+             DELETE FROM skills;
              DELETE FROM memories;
              INSERT INTO memories_fts(memories_fts) VALUES ('delete-all');
              DELETE FROM device_operations;
