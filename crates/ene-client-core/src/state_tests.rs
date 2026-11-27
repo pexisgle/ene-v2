@@ -399,8 +399,12 @@ fn a_late_failure_does_not_clobber_new_text() {
         text: "前の入力".into(),
     });
     model.apply(Update::SendFailed {
+        request_key: "other".into(),
+        reason: "別の会話から遅れて届きました".into(),
+    });
+    assert_eq!(model.companions.chat.unsent, []);
+    model.apply(Update::SendFailed {
         request_key: "key".into(),
-        text: "前の入力".into(),
         reason: "保存されませんでした".into(),
     });
     assert!(
@@ -415,20 +419,65 @@ fn a_late_failure_does_not_clobber_new_text() {
 }
 
 #[test]
-fn a_recorded_user_message_closes_its_pending_row() {
+fn only_the_matching_acknowledgement_closes_a_pending_send() {
     let mut model = with_chat();
-    model.companions.chat.sending.push(Sending {
-        request_key: "key".into(),
-        text: "こんにちは".into(),
-    });
+    for request_key in ["first", "second"] {
+        model.companions.chat.sending.push(Sending {
+            request_key: request_key.into(),
+            text: "こんにちは".into(),
+        });
+    }
     model.apply(Update::History {
         companion_id: "ene".to_owned(),
         messages: vec![message("a", 1, MessageRole::User, "こんにちは")],
+        observed_at: None,
     });
-    assert!(
-        model.companions.chat.sending.is_empty(),
-        "the host recorded the input"
-    );
+    assert_eq!(model.companions.chat.sending.len(), 2);
+    model.apply(Update::Accepted {
+        request_key: "first".into(),
+    });
+    assert_eq!(model.companions.chat.sending.len(), 1);
+    assert_eq!(model.companions.chat.sending[0].request_key, "second");
+}
+
+#[test]
+fn a_late_history_reply_preserves_live_messages_and_refetches() {
+    let mut model = with_chat();
+    let cursor = |seq| HostCursor {
+        epoch: "fixture".into(),
+        seq,
+    };
+    let old = message("a", 1, MessageRole::User, "こんにちは");
+    let latest = message("b", 2, MessageRole::User, "[Output of the survey] Good.");
+    model.apply(Update::Notification(Box::new(HostNotification {
+        cursor: Some(cursor(2)),
+        event: Some(NotificationEvent::MessageCreated(Box::new(latest.clone()))),
+    })));
+    let effects = model.apply(Update::History {
+        companion_id: "ene".to_owned(),
+        messages: vec![old.clone()],
+        observed_at: Some(cursor(1)),
+    });
+    assert!(effects.history);
+    assert_eq!(model.companions.chat.messages, vec![latest.clone()]);
+
+    for observed_at in [None, Some(cursor(2))] {
+        let messages = if observed_at.is_some() {
+            vec![old.clone(), latest.clone()]
+        } else {
+            vec![old.clone()]
+        };
+        let effects = model.apply(Update::History {
+            companion_id: "ene".to_owned(),
+            messages,
+            observed_at,
+        });
+        assert!(!effects.history);
+        assert_eq!(
+            model.companions.chat.messages,
+            vec![old.clone(), latest.clone()]
+        );
+    }
 }
 
 #[test]
@@ -505,6 +554,7 @@ fn internal_work_messages_do_not_appear_in_chat() {
     model.apply(Update::History {
         companion_id: "ene".to_owned(),
         messages: vec![internal, message("u1", 2, MessageRole::User, "調べて")],
+        observed_at: None,
     });
     assert_eq!(model.companions.chat.messages.len(), 1);
     assert_eq!(model.companions.chat.messages[0].text, "調べて");

@@ -1,7 +1,7 @@
 //! Pure state reducer folding [`Update`] messages and host notifications into [`Model`].
 
 use crate::{
-    domain::{Message, MessageRole},
+    domain::{HostCursor, Message, MessageRole},
     notifications,
     state::{
         AudioState, Chat, Effects, Link, LiveTranscription, Model, NoticeKind, PerceptionState,
@@ -99,6 +99,7 @@ fn apply_link(model: &mut Model, link: Link, effects: &mut Effects) {
     }
     if was_live && !is_live {
         model.connections.order = Default::default();
+        model.companions.chat.latest_live_message = None;
     }
     model.connections.link = link;
     if !model.connections.link.is_live() {
@@ -130,7 +131,7 @@ fn apply_domain_update(model: &mut Model, update: Update, effects: &mut Effects)
         | Update::MindLoaded { .. }
         | Update::CompanionTemplates(_)
         | Update::CompanionExported { .. }
-        | Update::CompanionPreview { .. } => apply_companion_update(model, update),
+        | Update::CompanionPreview { .. } => apply_companion_update(model, update, effects),
         Update::Gone { companion_id } => {
             notifications::remove_companion(model, &companion_id, effects);
         }
@@ -160,10 +161,10 @@ fn apply_domain_update(model: &mut Model, update: Update, effects: &mut Effects)
     }
 }
 
-fn apply_companion_update(model: &mut Model, update: Update) {
+fn apply_companion_update(model: &mut Model, update: Update, effects: &mut Effects) {
     let companions = &mut model.companions;
     match update {
-        Update::Accepted { request_key, .. } => {
+        Update::Accepted { request_key } => {
             companions
                 .chat
                 .sending
@@ -171,23 +172,33 @@ fn apply_companion_update(model: &mut Model, update: Update) {
         }
         Update::SendFailed {
             request_key,
-            text,
             reason,
         } => {
-            companions
-                .chat
+            let chat = &mut companions.chat;
+            if let Some(index) = chat
                 .sending
-                .retain(|sending| sending.request_key != request_key);
-            companions.chat.unsent.push(Unsent {
-                request_key,
-                text,
-                reason,
-            });
+                .iter()
+                .position(|item| item.request_key == request_key)
+            {
+                let sent = chat.sending.remove(index);
+                chat.unsent.push(Unsent {
+                    request_key,
+                    text: sent.text,
+                    reason,
+                });
+            }
         }
         Update::History {
             companion_id,
             messages,
-        } => apply_history(&mut companions.chat, &companion_id, messages),
+            observed_at,
+        } => apply_history(
+            &mut companions.chat,
+            &companion_id,
+            messages,
+            observed_at,
+            effects,
+        ),
         Update::HistoryFailed {
             companion_id,
             message,
@@ -231,7 +242,13 @@ fn apply_companion_update(model: &mut Model, update: Update) {
     }
 }
 
-fn apply_history(chat: &mut Chat, companion_id: &str, messages: Vec<Message>) {
+fn apply_history(
+    chat: &mut Chat,
+    companion_id: &str,
+    mut messages: Vec<Message>,
+    observed_at: Option<HostCursor>,
+    effects: &mut Effects,
+) {
     if chat
         .companion_id
         .as_ref()
@@ -239,18 +256,29 @@ fn apply_history(chat: &mut Chat, companion_id: &str, messages: Vec<Message>) {
     {
         return;
     }
-    chat.messages = messages
-        .into_iter()
-        .filter(is_user_facing_message)
-        .collect();
+    if let Some(live) = &chat.latest_live_message {
+        if let Some(observed) = observed_at {
+            if live.epoch != observed.epoch {
+                return;
+            }
+            if live.seq > observed.seq {
+                effects.history = true;
+                return;
+            }
+        } else {
+            // Older hosts omit the cursor. Keep the visible tail they may have missed.
+            let through = messages.last().map(|message| message.sequence);
+            messages.extend(
+                chat.messages
+                    .drain(..)
+                    .filter(|message| through.is_none_or(|through| message.sequence > through)),
+            );
+        }
+    }
+    messages.retain(is_user_facing_message);
+    chat.messages = messages;
     chat.loading = false;
     chat.error = None;
-    chat.sending.retain(|sending| {
-        !chat
-            .messages
-            .iter()
-            .any(|message| message.role == MessageRole::User && message.text == sending.text)
-    });
 }
 
 fn apply_audio_update(audio: &mut AudioState, update: Update) {
@@ -346,6 +374,9 @@ fn apply_perception_update(perception: &mut PerceptionState, update: Update) {
 pub fn is_user_facing_message(message: &Message) -> bool {
     if !message.work_id.trim().is_empty() {
         return false;
+    }
+    if message.role == MessageRole::User {
+        return true;
     }
     if matches!(message.role, MessageRole::Agent | MessageRole::Context) {
         return false;

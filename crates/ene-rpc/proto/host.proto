@@ -296,7 +296,10 @@ message HistoryRequest {
   optional uint32 limit = 3;
   optional bool include_context = 4;
 }
-message History { repeated Message items = 1; }
+message History {
+  repeated Message items = 1;
+  Cursor observed_at = 2;
+}
 message MessageRequest { string companion_id = 1; string message_id = 2; }
 
 // Work ---------------------------------------------------------------------

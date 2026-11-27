@@ -26,16 +26,19 @@ pub(crate) fn load_history(rpc: &RpcDispatcher, epoch: u64, companion_id: String
                 })
                 .await?
                 .into_owned();
-            history
+            let observed_at = w::client_model::host_cursor(history.observed_at.into_option());
+            let messages = history
                 .items
                 .into_iter()
                 .map(Message::try_from)
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| connectrpc::ConnectError::internal(error.to_string()))
+                .map_err(|error| connectrpc::ConnectError::internal(error.to_string()))?;
+            Ok((messages, observed_at))
         },
-        move |messages| Update::History {
+        move |(messages, observed_at)| Update::History {
             companion_id: target,
             messages,
+            observed_at,
         },
         move |_, error| Update::HistoryFailed {
             companion_id: failed_target,
@@ -51,29 +54,30 @@ pub(crate) fn send_message(
     request_key: String,
     text: String,
 ) -> bool {
-    rpc.call_update(epoch, |host| async move {
-        match host
-            .chat
-            .send_message(w::SendMessageRequest {
-                companion_id,
-                request_key: request_key.clone(),
-                text: text.clone(),
-                client_id: String::new(),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(response) => Update::Accepted {
-                request_key,
-                request_id: response.view().request_id.to_owned(),
-            },
-            Err(error) => Update::SendFailed {
-                request_key,
-                text,
-                reason: error.to_string(),
-            },
-        }
-    })
+    let accepted_key = request_key.clone();
+    let failed_key = request_key.clone();
+    rpc.call_with(
+        epoch,
+        "メッセージの送信",
+        |host| async move {
+            host.chat
+                .send_message(w::SendMessageRequest {
+                    companion_id,
+                    request_key,
+                    text,
+                    ..Default::default()
+                })
+                .await?;
+            Ok(())
+        },
+        move |()| Update::Accepted {
+            request_key: accepted_key,
+        },
+        move |_, error| Update::SendFailed {
+            request_key: failed_key,
+            reason: error.to_string(),
+        },
+    )
 }
 
 pub(crate) fn stop(rpc: &RpcDispatcher, epoch: u64, companion_id: String) {

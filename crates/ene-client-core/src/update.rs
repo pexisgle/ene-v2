@@ -2,7 +2,8 @@
 //! reports to the window, and the window asks the session to act.
 
 use crate::domain::{
-    CompanionTemplate, HostNotification, LlmProvider, Message, MindView, ModelInfo, PluginInfo,
+    CompanionTemplate, HostCursor, HostNotification, LlmProvider, Message, MindView, ModelInfo,
+    PluginInfo,
 };
 use crate::state::{Devices, Link, Notice};
 
@@ -52,15 +53,11 @@ pub enum Update {
     Accepted {
         /// Client-side key that makes a retry idempotent.
         request_key: String,
-        /// The approval that was answered.
-        request_id: String,
     },
-    /// A message was not accepted; the text stays with the operator.
+    /// The send failed or its acceptance is uncertain.
     SendFailed {
         /// Client-side key that makes a retry idempotent.
         request_key: String,
-        /// The text that was not accepted.
-        text: String,
         /// Why the host refused it.
         reason: String,
     },
@@ -82,6 +79,8 @@ pub enum Update {
         companion_id: String,
         /// The conversation, oldest first.
         messages: Vec<Message>,
+        /// Host notification cursor at the time of the history read.
+        observed_at: Option<HostCursor>,
     },
     /// The conversation fetch failed.
     HistoryFailed {

@@ -5,8 +5,8 @@
 
 use crate::{
     domain::{
-        Activation, ApprovalRequest, ApprovalStatus, ConnectionKind, HostEvent, HostNotification,
-        Message, NotificationEvent, TurnEvent, TurnStatus, WorkStatus,
+        Activation, ApprovalRequest, ApprovalStatus, ConnectionKind, HostCursor, HostEvent,
+        HostNotification, Message, NotificationEvent, TurnEvent, TurnStatus, WorkStatus,
     },
     reducer::is_user_facing_message,
     state::{Chat, Effects, Model, NoticeKind},
@@ -85,7 +85,7 @@ pub(crate) fn merge_notification(
             | NotificationEvent::MessageDelta(_)
             | NotificationEvent::TurnEvent(_)
             | NotificationEvent::ResyncRequired { .. }),
-        ) => merge_chat_event(model, event),
+        ) => merge_chat_event(model, event, notification.cursor),
         Some(
             event @ (NotificationEvent::ApprovalRequested(_)
             | NotificationEvent::PolicyRulesUpdated(_)
@@ -207,7 +207,7 @@ fn merge_snapshot_event(model: &mut Model, event: NotificationEvent) {
     }
 }
 
-fn merge_chat_event(model: &mut Model, event: NotificationEvent) {
+fn merge_chat_event(model: &mut Model, event: NotificationEvent, cursor: Option<HostCursor>) {
     let companions = &mut model.companions;
     match event {
         NotificationEvent::MessageCreated(message) => {
@@ -221,6 +221,9 @@ fn merge_chat_event(model: &mut Model, event: NotificationEvent) {
                         .as_ref()
                         .is_none_or(|id| companion != id.as_str())
                 });
+                if cursor.is_some() {
+                    companions.chat.latest_live_message = cursor;
+                }
                 merge_message(&mut companions.chat.messages, *message);
             }
         }

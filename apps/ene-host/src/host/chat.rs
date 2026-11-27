@@ -205,28 +205,23 @@ pub(crate) fn history(
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     let agent = agent::agent_of(world, request.companion_id)
         .ok_or_else(|| HostError::NotFound(("companion agent not found").into()))?;
-    let after = request
-        .cursor
-        .and_then(|cursor| cursor.parse::<u64>().ok())
-        .map(|after| after + 1);
+    let after = request.cursor.and_then(|cursor| cursor.parse::<u64>().ok());
     let limit = request.limit.unwrap_or(100).clamp(1, 200) as usize;
-    let mut items = Vec::new();
-    if let Some(conversation) = world.get::<Conversation>(agent) {
-        for entry in conversation.entries() {
-            if after.is_some_and(|after| entry.id.get() < after) {
-                continue;
-            }
-            let Some(text) = agent::entry_text(&entry) else {
-                continue;
-            };
-            items.push(message(request.companion_id, "", &entry, text));
-        }
-    }
-    if items.len() > limit {
-        items = items.split_off(items.len() - limit);
-    }
+    let mut items: Vec<_> = world
+        .get::<Conversation>(agent)
+        .into_iter()
+        .flat_map(|conversation| conversation.entries().rev())
+        .filter(|entry| after.is_none_or(|after| entry.id.get() > after))
+        .filter_map(|entry| {
+            let text = agent::entry_text(&entry)?;
+            Some(message(request.companion_id, "", &entry, text))
+        })
+        .take(limit)
+        .collect();
+    items.reverse();
     Ok(w::History {
         items,
+        observed_at: Some(world.resource::<super::notify::Notifier>().cursor()).into(),
         ..Default::default()
     })
 }

@@ -95,46 +95,25 @@ pub(super) fn send_keyed(
         cx.notify();
         return false;
     };
-    if hub.rpc.host().is_none() {
-        return false;
-    }
-    hub.model
-        .companions
-        .chat
-        .sending
-        .push(crate::state::Sending {
-            request_key: request_key.clone(),
-            text: text.clone(),
-        });
-    tracing::info!(
-        companion = %companion,
-        key = %request_key,
-        chars = text.chars().count(),
-        "message sent"
-    );
     if !rpc::chat::send_message(
         &hub.rpc,
         hub.model.connections.link_epoch,
         companion,
-        request_key,
-        text,
+        request_key.clone(),
+        text.clone(),
     ) {
-        // No host is bound, so nothing was queued; the composer keeps the
-        // text and the caller's `false` return tells the window to stay.
-        tracing::debug!("no host is connected; the message was not queued");
         return false;
     }
+    let chat = &mut hub.model.companions.chat;
+    chat.unsent.retain(|item| item.request_key != request_key);
+    chat.sending
+        .push(crate::state::Sending { request_key, text });
     hub.windows.pod_scroll_ping = hub.windows.pod_scroll_ping.saturating_add(1);
     cx.notify();
     true
 }
 
 pub(super) fn retry_unsent(hub: &mut Hub, request_key: &str, text: &str, cx: &mut Context<Hub>) {
-    hub.model
-        .companions
-        .chat
-        .unsent
-        .retain(|item| item.request_key != request_key);
     let _discarded = hub.send_keyed(text, request_key.to_owned(), cx);
 }
 

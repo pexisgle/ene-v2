@@ -145,7 +145,8 @@ impl From<w::Snapshot> for domain::HostNotification {
     }
 }
 
-fn host_cursor(cursor: Option<w::Cursor>) -> Option<domain::HostCursor> {
+/// Converts a usable host notification position to the client model.
+pub fn host_cursor(cursor: Option<w::Cursor>) -> Option<domain::HostCursor> {
     cursor
         .filter(|item| !item.epoch.is_empty())
         .map(|item| domain::HostCursor {

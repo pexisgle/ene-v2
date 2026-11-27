@@ -162,25 +162,6 @@ impl RpcDispatcher {
             );
         });
     }
-
-    pub(crate) fn call_update<F>(&self, epoch: u64, run: impl FnOnce(Host) -> F) -> bool
-    where
-        F: Future<Output = Update> + Send + 'static,
-    {
-        self.call_with(
-            epoch,
-            "host request",
-            |host| {
-                let future = run(host);
-                async move { Ok(future.await) }
-            },
-            std::convert::identity,
-            |context, _| Update::Failed {
-                context,
-                message: "ホストが時間内に応答しませんでした。接続を確認してください。".into(),
-            },
-        )
-    }
 }
 
 pub(crate) fn failure(context: &'static str, error: &ConnectError) -> Update {
