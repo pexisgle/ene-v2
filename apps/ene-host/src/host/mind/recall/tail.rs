@@ -1,9 +1,7 @@
 //! Building the dynamic tail's text.
 //!
-//! [`TurnCause`] decides what the turn is asking for, and the rest renders the
-//! clock, the user profile, perception, the companion's state, pinned memories
-//! and automatic recall within a fixed character budget. The ECS side that
-//! decides *when* a tail is built stays in the parent module.
+//! Renders the clock, profile, perception, mind and selected memories for the
+//! current turn. The parent module applies the tail to an unsaved request view.
 use crate::host::{
     agent,
     db::Store,
@@ -23,78 +21,21 @@ pub(super) fn opening() -> String {
     )
 }
 
-/// The dynamic tail a request carries: the clock, the user profile, perception,
-/// the companion's state, pinned memories and automatic recall. It is injected
-/// into the request view only and never saved with the conversation, so a call
-/// that is not a kernel turn (a heartbeat tick) attaches the same tail an
-/// ordinary turn would get. `turn` is the companion turn the automatic recall is
-/// recorded under; a work run or a call that is not a turn passes `None` and
-/// records nothing.
-/// What triggered the current turn, derived exclusively from `conversation.asked(turn_start)`
-/// so non-user turns (schedules, work reports, eye reports) never recycle a stale user message
-/// from an earlier turn (`B13`, `R09`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum TurnCause {
-    UserMessage(String),
-    EyeReportOnly,
-    WorkReport(String),
-    Scheduled(String),
-    Other(Option<String>),
-}
-
-impl TurnCause {
-    pub(super) fn classify(
-        conversation: Option<&Conversation>,
-        turn_start: MessageId,
-        has_eye_report: bool,
-    ) -> Self {
-        let Some(conversation) = conversation else {
-            return if has_eye_report {
-                Self::EyeReportOnly
-            } else {
-                Self::Other(None)
-            };
-        };
-        let asked: Vec<_> = conversation.asked(turn_start).collect();
-        if let Some(text) = asked
-            .iter()
-            .rev()
-            .find(|entry| entry.is_users_own())
-            .and_then(agent::entry_text)
-        {
-            return Self::UserMessage(text);
-        }
-        if has_eye_report {
-            return Self::EyeReportOnly;
-        }
-        for entry in asked.iter().rev() {
-            let Some(text) = agent::entry_text(entry) else {
-                continue;
-            };
-            match entry.author.map(|author| &author.kind) {
-                Some(rig_core::conversation::AuthorKind::Agent) => {
-                    return Self::WorkReport(text);
-                }
-                Some(rig_core::conversation::AuthorKind::Plugin(_))
-                    if text.starts_with("[スケジュール実行:") =>
-                {
-                    return Self::Scheduled(text);
-                }
-                _ => return Self::Other(Some(text)),
-            }
-        }
-        Self::Other(None)
+/// Search the current turn's input, prioritizing the latest user message.
+pub(super) fn recall_query(
+    conversation: Option<&Conversation>,
+    turn_start: MessageId,
+    has_eye_report: bool,
+) -> Option<String> {
+    let asked: Vec<_> = conversation?.asked(turn_start).collect();
+    let user = asked.iter().rev().find(|entry| entry.is_users_own());
+    if let Some(text) = user.and_then(agent::entry_text) {
+        return Some(text);
     }
-
-    pub(super) fn recall_query(&self) -> Option<&str> {
-        match self {
-            Self::UserMessage(text) | Self::WorkReport(text) | Self::Scheduled(text) => {
-                Some(text.as_str())
-            }
-            Self::EyeReportOnly => None,
-            Self::Other(text) => text.as_deref(),
-        }
+    if has_eye_report {
+        return None;
     }
+    asked.iter().rev().find_map(agent::entry_text)
 }
 
 pub(super) const TAIL_BUDGET_CHARS: usize = 6_000;
@@ -215,24 +156,16 @@ pub(crate) async fn dynamic_tail(req: DynamicTailQuery<'_>) -> crate::host::db::
         }
         None => Vec::new(),
     };
-    let providers = req.embeddings.providers();
-    let hook_notes = if !providers
-        .with_extension(ene_plugin::Extension::Hook)
-        .is_empty()
-    {
-        let outcome = crate::host::providers::extensions::run_hooks(
-            &providers,
-            req.store,
-            ene_plugin::HookEvent::PreTurn {
-                companion_id: req.companion.to_owned(),
-                query: req.query.map(str::to_owned),
-            },
-        )
-        .await;
-        outcome.injected_context
-    } else {
-        Vec::new()
-    };
+    let hook_notes = crate::host::providers::extensions::run_hooks(
+        &req.embeddings.providers(),
+        req.store,
+        ene_plugin::HookEvent::PreTurn {
+            companion_id: req.companion.to_owned(),
+            query: req.query.map(str::to_owned),
+        },
+    )
+    .await
+    .injected_context;
     render_tail_full(&TailRenderRequest {
         store: req.store,
         perception: req.perception,

@@ -13,7 +13,7 @@ mod tail;
 pub(crate) use tail::{DynamicTailQuery, dynamic_tail};
 #[cfg(test)]
 use tail::{TAIL_BUDGET_CHARS, TailRenderRequest, render_tail_full};
-use tail::{TurnCause, opening, render_tail};
+use tail::{opening, recall_query, render_tail};
 
 use super::embedding::Embeddings;
 #[cfg(test)]
@@ -220,8 +220,7 @@ fn compute_or_spawn_tail(
         has_eye_report,
     } = *target;
     let view = agent_view(agents, conversation, agent)?;
-    let cause = TurnCause::classify(view.conversation, turn_start, has_eye_report);
-    let query = cause.recall_query().map(str::to_owned);
+    let query = recall_query(view.conversation, turn_start, has_eye_report);
     let empty_perception = Perception::default();
     let perception = if has_eye_report {
         &empty_perception
@@ -330,20 +329,19 @@ fn apply_tail_to_history(
         }
     }
     let at = history.start_of(tail_entry);
+    let mut tail = Some(tail);
     history.edit_each(Author::plugin("ene-host"), |entry| {
-        (entry.index == at).then(|| with_tail(entry.message, &tail))
+        if entry.index != at {
+            return None;
+        }
+        let Message::User { content } = entry.message else {
+            return None;
+        };
+        let mut content = content.clone();
+        content.push(UserContent::text(tail.take()?));
+        Some(Message::User { content })
     });
     commands.entity(call_entity).insert(TailInjected);
-}
-
-/// `message` with the dynamic tail appended, as a request view carries it.
-pub(crate) fn with_tail(message: &Message, tail: &str) -> Message {
-    let Message::User { content } = message else {
-        return message.clone();
-    };
-    let mut content = content.clone();
-    content.push(UserContent::text(tail.to_owned()));
-    Message::User { content }
 }
 
 struct AgentView<'a> {

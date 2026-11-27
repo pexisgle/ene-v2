@@ -61,7 +61,7 @@ pub(crate) fn summary_of(conversation: &History) -> Option<Summary> {
         .asides()
         .rev()
         .find(|(_, aside)| aside.kind == SUMMARY)
-        .and_then(|(_, aside)| serde_json::from_value(aside.value.clone()).ok())
+        .and_then(|(_, aside)| Summary::deserialize(&aside.value).ok())
 }
 
 /// Injects `summary` at the head of the request view, in place of the messages
