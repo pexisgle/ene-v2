@@ -6,6 +6,7 @@ use crate::host::{
     error::{HostError, Result},
     mcp::CheckState,
     model,
+    providers::Providers,
     settings::{Check, Connection, ConnectionConfig},
     voice::is_builtin_voicevox,
 };
@@ -44,8 +45,26 @@ pub(super) async fn run_connection_probe(
             )
             .await
         }
+        ConnectionConfig::Acp(_) => probe_harness(connection, &providers).await,
         _ => model::probe(credentials, connection, &providers).await,
     })
+}
+
+async fn probe_harness(connection: &Connection, providers: &Providers) -> Check {
+    let checked_at = now();
+    if !connection.enabled {
+        return failed(checked_at, "ハーネス接続が無効化されています。");
+    }
+    let adapter = &connection.endpoint().adapter;
+    let start = providers.start(adapter, ene_plugin::Extension::Harness);
+    match tokio::time::timeout(Duration::from_secs(10), start).await {
+        Ok(Ok(_)) => Check {
+            capabilities: vec!["harness".into()],
+            ..healthy(checked_at, Vec::new())
+        },
+        Ok(Err(error)) => failed(checked_at, error.to_string()),
+        Err(_) => failed(checked_at, "ハーネスの起動確認がタイムアウトしました。"),
+    }
 }
 
 async fn probe_mcp_connection(

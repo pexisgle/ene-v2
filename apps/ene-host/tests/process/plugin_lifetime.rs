@@ -115,6 +115,59 @@ async fn pending_request(work: &w::WorkServiceClient<HttpClient>, id: &str) -> S
     .expect("the installed harness reaches its approval")
 }
 
+async fn check_hand(settings: &w::SettingsServiceClient<HttpClient>) -> w::ConnectionCheck {
+    settings
+        .check_connection(w::CheckRequest {
+            id: "hand".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_owned()
+        .check
+        .into_option()
+        .unwrap()
+}
+
+async fn external_agent_is_explicitly_unavailable(settings: &w::SettingsServiceClient<HttpClient>) {
+    let source = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(source.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let marker = source.path().join("external-agent-ran");
+    std::fs::write(
+        source.path().join("manifest.json"),
+        serde_json::json!({
+            "contract_version": ene_plugin::CONTRACT_VERSION,
+            "id": "reference", "name": "External fixture", "version": "1",
+            "entrypoints": [{
+                "id": "main",
+                "target": "acp",
+                "command": ["touch", marker],
+                "provides": ["harness"]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    settings
+        .install_plugin(w::InstallPluginRequest {
+            source_path: source.path().display().to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let check = check_hand(settings).await;
+    assert!(!check.healthy);
+    assert!(
+        check
+            .failure
+            .into_option()
+            .unwrap()
+            .message
+            .contains("外部 ACP")
+    );
+    assert!(!marker.exists());
+}
+
 #[tokio::test]
 async fn disabling_a_live_harness_survives_restart_and_expires_its_approval() {
     let temp = tempfile::tempdir().unwrap();
@@ -129,6 +182,8 @@ async fn disabling_a_live_harness_survives_restart_and_expires_its_approval() {
     let settings = w::SettingsServiceClient::new(transport.clone(), config.clone());
     let work = w::WorkServiceClient::new(transport, config);
     let companion = assign_reference(&host, &settings).await;
+    assert!(!check_hand(&settings).await.healthy);
+    external_agent_is_explicitly_unavailable(&settings).await;
 
     settings
         .install_plugin(w::InstallPluginRequest {
@@ -137,6 +192,9 @@ async fn disabling_a_live_harness_survives_restart_and_expires_its_approval() {
         })
         .await
         .unwrap();
+    let check = check_hand(&settings).await;
+    assert!(check.healthy, "{check:?}");
+    assert_eq!(check.capabilities, ["harness"]);
     let start = w::StartWorkRequest {
         companion_id: companion,
         instruction: "Inspect the reference fixture".into(),
@@ -160,6 +218,7 @@ async fn disabling_a_live_harness_survives_restart_and_expires_its_approval() {
         .await
         .unwrap();
     assert!(!result.view().enabled);
+    assert!(!check_hand(&settings).await.healthy);
     let detail = work
         .get_work(w::WorkRequest {
             work_id: id,

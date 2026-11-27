@@ -1,7 +1,7 @@
 //! One admitted plugin instance and its invocation lifetime.
 use super::Loaded;
 use crate::host::error::HostError;
-use ene_plugin::{Extension, PluginToolDefinition, ProviderConfiguration};
+use ene_plugin::{Extension, PluginToolDefinition, ProviderConfiguration, Target};
 use ene_plugin_runtime::instance::{Instance, Services};
 use parking_lot::Mutex;
 use rig_core::providers::registry::ProviderId;
@@ -83,6 +83,17 @@ impl Running {
                 })),
             )
         };
+        if loaded
+            .package
+            .manifest
+            .entrypoints
+            .iter()
+            .any(|entry| entry.id == entrypoint && entry.target == Target::Acp)
+        {
+            return Err(HostError::Unavailable(
+                "このホストは外部 ACP エージェントの起動に対応していません。Host 用 Wasm ハーネスを選択してください。".into(),
+            ));
+        }
         // `Instance::load` runs the guest's initialization hook, so this is the
         // one place `ene_initialize` is called for an instance.
         let instance = Instance::load(loaded.package.clone(), entrypoint.clone(), &cancel)

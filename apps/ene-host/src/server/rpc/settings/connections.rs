@@ -68,7 +68,7 @@ pub(super) async fn check_connection(
 ) -> ServiceResult<w::CheckResult> {
     let id = parse_connection_id(request.id)?;
     let expected = request.expected_settings_revision;
-    let (connection, created, credentials, generation) = services
+    let (connection, created, credentials, generation, plugin_revision) = services
         .runtime
         .inspect(move |services| {
             let repo = services.store.settings_repo();
@@ -76,11 +76,14 @@ pub(super) async fn check_connection(
             let (connection, created) = repo
                 .connection_with_creation(id.as_str())?
                 .ok_or_else(|| HostError::NotFound(("connection not found").into()))?;
+            let plugin_revision = (connection.kind == settings::ConnectionKind::Acp)
+                .then(|| services.providers.revision());
             Ok((
                 connection,
                 created,
                 services.credentials.clone(),
                 services.credentials.generation_of(id.as_str()),
+                plugin_revision,
             ))
         })
         .await
@@ -101,6 +104,11 @@ pub(super) async fn check_connection(
             if services.credentials.generation_of(id.as_str()) != generation {
                 return Err(HostError::Conflict(
                     "credentials changed during the check".into(),
+                ));
+            }
+            if plugin_revision.is_some_and(|revision| revision != services.providers.revision()) {
+                return Err(HostError::Conflict(
+                    "plugins changed during the check".into(),
                 ));
             }
             let store = &services.store;
