@@ -7,6 +7,7 @@ use crate::host::{
     db::Store,
     error::{HostError, Result},
     notify::Notifier,
+    providers::extensions::PluginToolOwner,
     web_search::{self, PreparedSearch, SearchConfigError},
 };
 use bevy_ecs::prelude::*;
@@ -229,35 +230,43 @@ fn approve_call(
     let name = approval.tool_name.as_str();
     let repo = store.approval_repo();
     let request_id = &approval.request_id;
-    let scoped_rule = if name == web_search::NAME {
+    let verdict = if world
+        .get::<PluginToolOwner>(call)
+        .is_some_and(|owner| owner.running.revoked())
+    {
+        Err(HostError::Conflict(
+            "the tool plugin was replaced or disabled".into(),
+        ))
+    } else if name == web_search::NAME {
         let fallback = crate::host::providers::Providers::default();
-        match revalidate_search(
+        revalidate_search(
             world.get::<PreparedSearch>(call),
             store,
             world.get_resource(),
             world.get_resource().unwrap_or(&fallback),
-        ) {
-            Ok((Verdict::HumanRequired { .. }, _)) if automated => {
-                return Err(HostError::Permission(
-                    "this search now requires user confirmation".into(),
-                ));
-            }
-            Ok((_, rule)) => rule,
-            Err(error) => {
-                let status = match error {
-                    HostError::Conflict(_) => ApprovalStatus::Expired,
-                    HostError::Permission(_) => ApprovalStatus::Denied,
-                    _ => return Err(error),
-                };
-                let resolved = repo.resolve_approval(request_id, status)?;
-                release(world, request_id);
-                refuse(world, call, &error.to_string());
-                notify_resolved(&mut world.resource_mut::<Notifier>(), &resolved);
-                return Err(error);
-            }
-        }
+        )
     } else {
-        None
+        Ok((Verdict::Allow, None))
+    };
+    let scoped_rule = match verdict {
+        Ok((Verdict::HumanRequired { .. }, _)) if automated => {
+            return Err(HostError::Permission(
+                "this operation now requires user confirmation".into(),
+            ));
+        }
+        Ok((_, rule)) => rule,
+        Err(error) => {
+            let status = match error {
+                HostError::Conflict(_) => ApprovalStatus::Expired,
+                HostError::Permission(_) => ApprovalStatus::Denied,
+                _ => return Err(error),
+            };
+            let resolved = repo.resolve_approval(request_id, status)?;
+            release(world, request_id);
+            refuse(world, call, &error.to_string());
+            notify_resolved(&mut world.resource_mut::<Notifier>(), &resolved);
+            return Err(error);
+        }
     };
     let binding = world.get::<CallBinding>(call);
     let rebound =
@@ -429,7 +438,7 @@ fn notify_resolved(notifier: &mut Notifier, approval: &Approval) {
 /// A stopped turn takes its held calls with it; the approval must not become reusable.
 pub(super) fn expire_orphaned_approvals(
     mut approvals: ResMut<Approvals>,
-    entities: Query<()>,
+    mut calls: Query<(Option<&PluginToolOwner>, Option<&mut Decision>)>,
     store: Res<Store>,
     mut notifier: ResMut<Notifier>,
     mut decisions: ResMut<Decisions>,
@@ -437,8 +446,16 @@ pub(super) fn expire_orphaned_approvals(
 ) {
     let repo = store.into_inner().approval_repo();
     approvals.by_request.retain(|request, hold| {
-        if entities.contains(hold.call) {
-            return true;
+        if let Ok((owner, decision)) = calls.get_mut(hold.call) {
+            if owner.is_none_or(|owner| !owner.running.revoked()) {
+                return true;
+            }
+            if let Some(mut decision) = decision {
+                decision.decide(
+                    Decider::plugin("ene-host"),
+                    Outcome::refused("the tool plugin was replaced or disabled"),
+                );
+            }
         }
         commands.entity(hold.hold).try_despawn();
         decisions.running.remove(request);

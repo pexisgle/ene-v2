@@ -7,12 +7,14 @@ use super::decision::{
 };
 use super::resolve::{
     AgentCapabilityContext, CandidateOutcome, PreToolChecked, binding_of, build_candidate_action,
-    collect_pre_tool_hooks, load_gate_rules, resolve_device_candidate, start_pre_tool_hooks,
+    collect_pre_tool_hooks, count_reply_calls, load_gate_rules, resolve_device_candidate,
+    start_pre_tool_hooks,
 };
 use crate::host::{
     db::Store,
     error::Result,
     notify::Notifier,
+    providers::extensions::PluginToolOwner,
     resources::{HostExternalTool, WorkAgent},
 };
 use bevy_ecs::prelude::*;
@@ -168,7 +170,12 @@ fn collect_pending_gate_calls(world: &mut World) -> Vec<GateCall> {
     >();
     query
         .iter(world)
-        .filter(|(call, _, _, _)| world.get::<Approved>(*call).is_none())
+        .filter(|(call, _, _, _)| {
+            world.get::<Approved>(*call).is_none()
+                || world
+                    .get::<PluginToolOwner>(*call)
+                    .is_some_and(|owner| owner.running.revoked())
+        })
         .filter(|(call, _, _, _)| {
             world
                 .get::<Decision>(*call)
@@ -185,17 +192,6 @@ fn collect_pending_gate_calls(world: &mut World) -> Vec<GateCall> {
         .collect()
 }
 
-fn count_reply_calls(world: &mut World) -> HashMap<EffectId, usize> {
-    let mut reply_calls = HashMap::new();
-    let mut spawned = world.query::<(&Effect, &ToolRequest)>();
-    for (effect, _) in spawned.iter(world) {
-        if let Some(parent) = effect.parent {
-            *reply_calls.entry(parent).or_default() += 1;
-        }
-    }
-    reply_calls
-}
-
 #[tracing::instrument(
     name = "permission.gate",
     skip_all,
@@ -210,6 +206,17 @@ fn process_gate_call(
     ctx: &mut GateContext,
     item: GateCall,
 ) -> std::ops::ControlFlow<()> {
+    if world
+        .get::<PluginToolOwner>(item.entity)
+        .is_some_and(|owner| owner.running.revoked())
+    {
+        refuse(
+            world,
+            item.entity,
+            "the tool plugin was replaced or disabled",
+        );
+        return std::ops::ControlFlow::Continue(());
+    }
     let asked = item
         .parent
         .and_then(|parent| ctx.reply_calls.get(&parent).copied())
@@ -258,6 +265,17 @@ fn process_gate_call(
             }
             Ok(None) => {}
         }
+    }
+    if let Some(HostExternalTool::Plugin(owner)) = ctx.external_tools.get(&item.tool_name) {
+        if owner.running.revoked() {
+            refuse(
+                world,
+                item.entity,
+                "the tool plugin was replaced or disabled",
+            );
+            return std::ops::ControlFlow::Continue(());
+        }
+        world.entity_mut(item.entity).insert(owner.clone());
     }
     let candidate = match build_candidate_action(ctx, &item) {
         CandidateOutcome::Resolved(candidate) => Some(*candidate),

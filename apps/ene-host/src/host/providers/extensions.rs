@@ -8,11 +8,8 @@ mod hooks;
 
 pub(crate) use hooks::run_hooks;
 
-use super::{PluginServices, Providers};
-use crate::host::{
-    db::Store,
-    resources::{HostExternalTool, HostRuntime},
-};
+use super::{PluginServices, Providers, Running};
+use crate::host::{db::Store, error::HostError, resources::HostExternalTool};
 use bevy_ecs::prelude::*;
 use ene_plugin::{Extension, Operation, PluginToolDefinition, ToolInvokeRequest, ToolInvokeResult};
 use rig_core::{
@@ -25,7 +22,7 @@ use rig_core::{
 };
 use rig_ecs::prelude::*;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 /// Aggregated result from invoking all installed `Extension::Hook` plugins.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -34,12 +31,33 @@ pub(crate) struct HookOutcome {
     pub(crate) injected_context: Vec<String>,
 }
 
-struct PluginToolHandler {
-    plugin_id: String,
+/// A discovered tool can only execute on the admission that supplied its schema.
+#[derive(Clone, Component)]
+pub(crate) struct PluginToolOwner {
+    pub(crate) plugin_id: String,
+    pub(crate) running: Arc<Running>,
+}
+
+impl PluginToolOwner {
+    fn same_registration(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.running, &other.running)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct PluginTools {
+    revision: u64,
+    entries: Vec<DiscoveredTool>,
+}
+
+struct DiscoveredTool {
+    owner: PluginToolOwner,
     definition: PluginToolDefinition,
-    providers: Providers,
+}
+
+struct PluginToolHandler {
+    tool: DiscoveredTool,
     store: Store,
-    runtime: tokio::runtime::Handle,
 }
 
 impl Serve for PluginToolHandler {
@@ -47,9 +65,9 @@ impl Serve for PluginToolHandler {
 
     fn descriptor(&self) -> HandlerDescriptor {
         HandlerDescriptor::tool(
-            &self.definition.name,
-            self.definition.description.clone(),
-            self.definition.parameters.clone(),
+            &self.tool.definition.name,
+            self.tool.definition.description.clone(),
+            self.tool.definition.parameters.clone(),
         )
     }
 
@@ -69,40 +87,32 @@ impl Serve for PluginToolHandler {
                 )));
             }
         };
-        let plugin_id = self.plugin_id.clone();
-        let tool_name = self.definition.name.clone();
-        let providers = self.providers.clone();
-        let store = self.store.clone();
-        let joined = self
-            .runtime
-            .spawn(async move {
-                let running = providers
-                    .start(&plugin_id, Extension::Tool)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let services = PluginServices::new(plugin_id, store);
-                let raw = running
-                    .invoke(
-                        Operation::InvokeTool {
-                            request: ToolInvokeRequest {
-                                name: tool_name,
-                                arguments,
-                            },
-                        },
-                        services,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?;
-                serde_json::from_value::<ToolInvokeResult>(raw)
-                    .map_err(|e| format!("invalid plugin tool result: {e}"))
-            })
-            .await;
-        match joined {
-            Ok(Ok(result)) if result.is_error => Reply::Outcome(Err(ErrorReport::new(
+        let tool = &self.tool;
+        let services = PluginServices::new(tool.owner.plugin_id.clone(), self.store.clone());
+        let outcome = tool
+            .owner
+            .running
+            .invoke(
+                Operation::InvokeTool {
+                    request: ToolInvokeRequest {
+                        name: tool.definition.name.clone(),
+                        arguments,
+                    },
+                },
+                services,
+            )
+            .await
+            .and_then(|raw| {
+                serde_json::from_value::<ToolInvokeResult>(raw).map_err(|error| {
+                    HostError::Invalid(format!("invalid plugin tool result: {error}"))
+                })
+            });
+        match outcome {
+            Ok(result) if result.is_error => Reply::Outcome(Err(ErrorReport::new(
                 ErrorKind::Tool(ToolErrorKind::Other),
                 result.output.to_string(),
             ))),
-            Ok(Ok(result)) => {
+            Ok(result) => {
                 let text = match result.output {
                     Value::String(s) => s,
                     other => other.to_string(),
@@ -111,31 +121,25 @@ impl Serve for PluginToolHandler {
                     result: ToolResult::success(ToolOutput::text(text)),
                 }))
             }
-            Ok(Err(message)) => Reply::Outcome(Err(ErrorReport::new(
+            Err(error) => Reply::Outcome(Err(ErrorReport::new(
                 ErrorKind::Tool(ToolErrorKind::Other),
-                message,
-            ))),
-            Err(_) => Reply::Outcome(Err(ErrorReport::new(
-                ErrorKind::HandlerUnavailable,
-                "plugin tool task cancelled",
+                error.to_string(),
             ))),
         }
     }
 }
 
 /// Discovers tool definitions from all installed `Extension::Tool` plugins (`F20`).
-pub(crate) async fn discover_plugin_tools(
-    providers: &Providers,
-    store: &Store,
-) -> Vec<(String, PluginToolDefinition)> {
-    let mut discovered = Vec::new();
+pub(crate) async fn discover_plugin_tools(providers: &Providers, store: &Store) -> PluginTools {
+    let revision = providers.revision();
+    let mut entries = Vec::new();
     let mut seen_names = HashSet::new();
     for plugin_id in providers.with_extension(Extension::Tool) {
-        let mut tools =
-            discover_tools_from_plugin(providers, store, &plugin_id, &mut seen_names).await;
-        discovered.append(&mut tools);
+        entries.extend(
+            discover_tools_from_plugin(providers, store, &plugin_id, &mut seen_names).await,
+        );
     }
-    discovered
+    PluginTools { revision, entries }
 }
 
 async fn discover_tools_from_plugin(
@@ -143,36 +147,30 @@ async fn discover_tools_from_plugin(
     store: &Store,
     plugin_id: &str,
     seen_names: &mut HashSet<String>,
-) -> Vec<(String, PluginToolDefinition)> {
+) -> Vec<DiscoveredTool> {
     let Ok(running) = providers.start(plugin_id, Extension::Tool).await.map_err(
         |error| tracing::warn!(plugin = %plugin_id, %error, "tool plugin failed to start"),
     ) else {
         return Vec::new();
     };
-    let services = PluginServices::new(plugin_id.to_owned(), store.clone());
-    let Ok(raw) = running
-        .invoke(Operation::ListTools, services)
+    let Ok(defs) = running
+        .tools
+        .get_or_try_init(|| async {
+            let services = PluginServices::new(plugin_id.to_owned(), store.clone());
+            let value = running.invoke(Operation::ListTools, services).await?;
+            serde_json::from_value::<Vec<PluginToolDefinition>>(value)
+                .map_err(|error| HostError::Invalid(format!("invalid ListTools payload: {error}")))
+        })
         .await
-        .map_err(
-            |error| tracing::warn!(plugin = %plugin_id, %error, "tool plugin ListTools failed"),
-        )
+        .map_err(|error| tracing::warn!(plugin = %plugin_id, %error, "tool discovery failed"))
     else {
         return Vec::new();
     };
-    filter_plugin_tool_defs(plugin_id, raw, seen_names)
-}
-
-fn filter_plugin_tool_defs(
-    plugin_id: &str,
-    raw: Value,
-    seen_names: &mut HashSet<String>,
-) -> Vec<(String, PluginToolDefinition)> {
-    let Ok(defs) = serde_json::from_value::<Vec<PluginToolDefinition>>(raw).map_err(|error| {
-        tracing::warn!(plugin = %plugin_id, %error, "tool plugin returned invalid ListTools payload");
-    }) else {
-        return Vec::new();
+    let owner = PluginToolOwner {
+        plugin_id: plugin_id.to_owned(),
+        running: Arc::clone(&running),
     };
-    defs.into_iter()
+    defs.iter()
         .filter(|def| {
             let valid = !def.name.trim().is_empty()
                 && !ene_rpc::BUILTIN_TOOLS.contains(&def.name.as_str())
@@ -186,36 +184,49 @@ fn filter_plugin_tool_defs(
             }
             valid
         })
-        .map(|def| (plugin_id.to_owned(), def))
+        .map(|definition| DiscoveredTool {
+            definition: definition.clone(),
+            owner: owner.clone(),
+        })
         .collect()
 }
 
 /// Spawns discovered plugin tools as ECS tool entities and refreshes agent `ToolAccess`.
-pub(crate) fn register_plugin_tools(world: &mut World, tools: Vec<(String, PluginToolDefinition)>) {
-    let Some(runtime) = world
-        .get_resource::<HostRuntime>()
-        .map(|r| r.0.clone())
-        .or_else(|| tokio::runtime::Handle::try_current().ok())
-    else {
-        return;
-    };
-    let providers = world
+pub(crate) fn register_plugin_tools(world: &mut World, tools: PluginTools) {
+    let revision = world
         .get_resource::<Providers>()
-        .cloned()
-        .unwrap_or_default();
-    let store = world.resource::<Store>().clone();
-    // Despawn any stale plugin tools before spawning the refreshed set.
-    let existing: Vec<_> = world
-        .query::<(Entity, &HostExternalTool)>()
-        .iter(world)
-        .filter(|(_, owner)| matches!(owner, HostExternalTool::Plugin(_)))
-        .map(|(entity, _)| entity)
-        .collect();
-    let mut changed = !existing.is_empty();
-    for entity in existing {
-        let _despawned = world.try_despawn(entity);
+        .map_or(0, Providers::revision);
+    if tools.revision != revision {
+        return;
     }
-    for (plugin_id, def) in tools {
+    let store = world.resource::<Store>().clone();
+    let existing: Vec<_> = world
+        .query::<(Entity, &ToolDef, &HostExternalTool)>()
+        .iter(world)
+        .filter_map(|(entity, definition, owner)| match owner {
+            HostExternalTool::Plugin(owner) => {
+                Some((entity, definition.0.name.clone(), owner.clone()))
+            }
+            HostExternalTool::Mcp { .. } => None,
+        })
+        .collect();
+    let mut entries = tools.entries;
+    let mut changed = false;
+    for (entity, name, owner) in existing {
+        if let Some(unchanged) = entries.iter().position(|entry| {
+            entry.definition.name == name.as_str() && entry.owner.same_registration(&owner)
+        }) {
+            entries.swap_remove(unchanged);
+        } else {
+            let _despawned = world.try_despawn(entity);
+            changed = true;
+        }
+    }
+    for tool in entries {
+        if tool.owner.running.revoked() {
+            continue;
+        }
+        let def = &tool.definition;
         let Ok(name) = ToolName::new(def.name.clone()) else {
             continue;
         };
@@ -228,17 +239,15 @@ pub(crate) fn register_plugin_tools(world: &mut World, tools: Vec<(String, Plugi
                 ..Default::default()
             },
         };
+        let owner = tool.owner.clone();
         let handler = ErasedHandler::new(PluginToolHandler {
-            plugin_id: plugin_id.clone(),
-            definition: def,
-            providers: providers.clone(),
+            tool,
             store: store.clone(),
-            runtime: runtime.clone(),
         });
         if let Some(entity) = world.spawn_tool(tool_def, handler, ToolOptions::default()) {
             world
                 .entity_mut(entity)
-                .insert(HostExternalTool::Plugin(plugin_id));
+                .insert(HostExternalTool::Plugin(owner));
             changed = true;
         }
     }
@@ -251,6 +260,7 @@ pub(crate) fn register_plugin_tools(world: &mut World, tools: Vec<(String, Plugi
 mod tests {
     use super::*;
     use crate::host::providers::{PLUGINS_DIR, Providers, character::dispatch_character_event};
+    use crate::host::resources::HostRuntime;
     use crate::host::tests::Harness;
     use ene_plugin::{CharacterAction, CharacterEvent, CharacterTarget, HookEvent};
     use std::path::{Path, PathBuf};
@@ -465,8 +475,8 @@ mod tests {
             .app
             .insert_resource(HostRuntime(tokio::runtime::Handle::current()));
         let discovered = discover_plugin_tools(&providers, &harness.store()).await;
-        assert_eq!(discovered.len(), 1);
-        assert_eq!(discovered[0].1.name, "reference_echo");
+        assert_eq!(discovered.entries.len(), 1);
+        assert_eq!(discovered.entries[0].definition.name, "reference_echo");
         register_plugin_tools(harness.app.world_mut(), discovered);
 
         let companion_id = harness.companion.clone();
@@ -537,7 +547,13 @@ mod tests {
                 .unwrap()
                 .allows("reference_echo")
         );
-        register_plugin_tools(world, Vec::new());
+        register_plugin_tools(
+            world,
+            PluginTools {
+                revision: providers.revision(),
+                entries: Vec::new(),
+            },
+        );
         assert!(
             !world
                 .get::<ToolAccess>(agent)

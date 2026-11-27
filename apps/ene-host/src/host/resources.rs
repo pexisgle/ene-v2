@@ -249,13 +249,13 @@ pub(crate) struct WorkAgent {
 pub(crate) struct WorkTurn(pub(crate) String);
 
 /// Identifies the source of an external tool for permission checks and refreshes.
-#[derive(Component, Clone, Debug)]
+#[derive(Component, Clone)]
 pub(crate) enum HostExternalTool {
     Mcp {
         server: String,
         key: rig_core::effect::Key<rig_core::effect::family::Tool>,
     },
-    Plugin(String),
+    Plugin(super::providers::extensions::PluginToolOwner),
 }
 
 /// Dispatches a character lifecycle event to installed `Extension::Character` plugins.

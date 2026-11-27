@@ -13,7 +13,10 @@ use crate::host::{
 use bevy_ecs::prelude::*;
 use ene_policy::{CandidateAction, CapabilitySpec, PolicyRule};
 use ene_rpc as w;
-use rig_ecs::prelude::{CallOf, Decider, Decision, HoldOf, Outcome, SupersededBy};
+use rig_core::effect::EffectId;
+use rig_ecs::prelude::{
+    CallOf, Decider, Decision, Effect, HoldOf, Outcome, SupersededBy, ToolRequest,
+};
 use serde_json::Value;
 use tokio::sync::oneshot::{self, error::TryRecvError};
 
@@ -48,6 +51,17 @@ pub(super) fn binding_of(
             None
         }
     }
+}
+
+pub(super) fn count_reply_calls(world: &mut World) -> std::collections::HashMap<EffectId, usize> {
+    let mut reply_calls = std::collections::HashMap::new();
+    let mut spawned = world.query::<(&Effect, &ToolRequest)>();
+    for (effect, _) in spawned.iter(world) {
+        if let Some(parent) = effect.parent {
+            *reply_calls.entry(parent).or_default() += 1;
+        }
+    }
+    reply_calls
 }
 
 pub(super) fn load_gate_rules(
@@ -148,7 +162,7 @@ pub(super) fn build_candidate_action(ctx: &GateContext, item: &GateCall) -> Cand
                 input,
             },
             HostExternalTool::Plugin(plugin) => CandidateAction::PluginTool {
-                plugin_id: plugin.clone(),
+                plugin_id: plugin.plugin_id.clone(),
                 tool_name,
                 input,
             },

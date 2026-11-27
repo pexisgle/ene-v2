@@ -13,7 +13,7 @@ pub(super) struct KernelResources {
 
 pub(super) struct KernelLaunch {
     pub(super) resources: KernelResources,
-    pub(super) initial_plugin_tools: Vec<(String, ene_plugin::PluginToolDefinition)>,
+    pub(super) initial_plugin_tools: providers::extensions::PluginTools,
     pub(super) ready_tx: oneshot::Sender<Result<()>>,
     pub(super) command_rx: crossbeam_channel::Receiver<Job>,
     pub(super) wake_rx: crossbeam_channel::Receiver<()>,

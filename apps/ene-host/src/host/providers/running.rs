@@ -1,7 +1,7 @@
 //! One admitted plugin instance and its invocation lifetime.
 use super::Loaded;
 use crate::host::error::HostError;
-use ene_plugin::{Extension, ProviderConfiguration};
+use ene_plugin::{Extension, PluginToolDefinition, ProviderConfiguration};
 use ene_plugin_runtime::instance::{Instance, Services};
 use parking_lot::Mutex;
 use rig_core::providers::registry::ProviderId;
@@ -32,6 +32,7 @@ pub(crate) struct Running {
     runtime: Handle,
     cancel: CancellationToken,
     restart: Mutex<Restart>,
+    pub(super) tools: tokio::sync::OnceCell<Vec<PluginToolDefinition>>,
 }
 
 #[derive(Default)]
@@ -93,6 +94,7 @@ impl Running {
             runtime,
             cancel,
             restart: Mutex::new(Restart::Keep),
+            tools: tokio::sync::OnceCell::new(),
         })
     }
 

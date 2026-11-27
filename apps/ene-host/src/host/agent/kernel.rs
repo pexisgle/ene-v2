@@ -66,6 +66,13 @@ impl<'a> AgentKernel<'a> {
         super::sync_companion(self.app.world_mut(), id)
     }
 
+    pub(crate) fn register_plugin_tools(
+        &mut self,
+        tools: crate::host::providers::extensions::PluginTools,
+    ) {
+        crate::host::providers::extensions::register_plugin_tools(self.app.world_mut(), tools);
+    }
+
     pub(crate) fn start_work(&mut self, request: &w::StartWorkRequest) -> Result<w::WorkSession> {
         work::start(self.app.world_mut(), request)
     }
