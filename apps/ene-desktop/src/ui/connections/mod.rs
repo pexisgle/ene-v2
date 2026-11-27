@@ -5,6 +5,7 @@
 mod add_panel;
 pub(crate) mod mcp_add;
 mod mcp_editor;
+mod mcp_fields;
 mod pickers;
 mod roles_panel;
 mod roles_voice;

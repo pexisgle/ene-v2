@@ -1,22 +1,16 @@
-use super::ConnectionsPane;
+use super::{
+    ConnectionsPane,
+    mcp_fields::{FieldMode, McpFields},
+};
 use crate::input::Draft;
 use crate::ui::icons::Icon;
-use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button};
 use ene_client_core::{
-    connections::{McpExtraConfig, format_kv_lines, parse_mcp_kv, split_comma, toggle_comma_item},
+    connections::{split_comma, toggle_comma_item},
     domain::{Connection, ConnectionCheck, ConnectionConfig, ConnectionKind},
 };
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
-
-pub(super) struct McpDraftGroup {
-    pub(super) cwd_d: Entity<Draft>,
-    pub(super) secret_env_d: Entity<Draft>,
-    pub(super) auth_hdr_d: Entity<Draft>,
-    pub(super) env_d: Entity<Draft>,
-    pub(super) headers_d: Entity<Draft>,
-}
 
 pub(super) fn process_command_draft(
     pane: &mut ConnectionsPane,
@@ -65,49 +59,19 @@ pub(super) fn mcp_extra_drafts(
     cfg: Option<&ConnectionConfig>,
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
-) -> Option<McpDraftGroup> {
+) -> Option<McpFields> {
     let Some(ConnectionConfig::Mcp(mcp)) = cfg else {
         return None;
     };
-    let env_init = format_kv_lines(&mcp.env, '=');
-    let headers_init = format_kv_lines(&mcp.headers, ':');
-    Some(McpDraftGroup {
-        cwd_d: pane.drafts.draft(
-            cx,
-            format!("conn:{id}:r{rev}:mcp-cwd"),
-            "作業ディレクトリ (cwd)",
-            Some(&mcp.cwd),
-            theme,
-        ),
-        secret_env_d: pane.drafts.draft(
-            cx,
-            format!("conn:{id}:r{rev}:mcp-secret-env"),
-            "例: GITHUB_TOKEN",
-            Some(&mcp.secret_env_var),
-            theme,
-        ),
-        auth_hdr_d: pane.drafts.draft(
-            cx,
-            format!("conn:{id}:r{rev}:mcp-auth-header"),
-            "例: Authorization / X-Api-Key",
-            Some(&mcp.auth_header),
-            theme,
-        ),
-        env_d: pane.drafts.description_draft(
-            cx,
-            format!("conn:{id}:r{rev}:mcp-env"),
-            "KEY=VALUE（1行に1つ）",
-            Some(&env_init),
-            theme,
-        ),
-        headers_d: pane.drafts.description_draft(
-            cx,
-            format!("conn:{id}:r{rev}:mcp-headers"),
-            "Header-Name: value（1行に1つ）",
-            Some(&headers_init),
-            theme,
-        ),
-    })
+    let prefix = format!("conn:{id}:r{rev}:mcp-");
+    Some(McpFields::new(
+        &mut pane.drafts,
+        &prefix,
+        FieldMode::Both,
+        Some(mcp),
+        theme,
+        cx,
+    ))
 }
 
 pub(super) fn render_mcp_tools_strip(
@@ -176,59 +140,15 @@ pub(super) fn render_mcp_tools_strip(
     )
 }
 
-pub(super) fn read_mcp_extra(
-    group: &McpDraftGroup,
-    cx: &gpui::App,
-) -> Result<McpExtraConfig, &'static str> {
-    let env = parse_mcp_kv(group.env_d.read(cx).text(), '=').map_err(|error| error.message('='))?;
-    let headers =
-        parse_mcp_kv(group.headers_d.read(cx).text(), ':').map_err(|error| error.message(':'))?;
-    Ok(McpExtraConfig {
-        cwd: group.cwd_d.read(cx).text().trim().to_owned(),
-        secret_env_var: group.secret_env_d.read(cx).text().trim().to_owned(),
-        auth_header: group.auth_hdr_d.read(cx).text().trim().to_owned(),
-        env,
-        headers,
-    })
-}
-
 pub(super) fn append_mcp_extra_fields(
     panel: gpui::Div,
     id: &str,
-    group: McpDraftGroup,
+    group: McpFields,
     mcp_kv_error: Option<&'static str>,
     theme: &Theme,
 ) -> gpui::Div {
-    panel
-        .child(labeled_field("作業ディレクトリ (cwd)", group.cwd_d, theme))
-        .child(labeled_field(
-            "認証シークレット環境変数名 (stdio)",
-            group.secret_env_d,
-            theme,
-        ))
-        .child(labeled_field(
-            "認証ヘッダー名 (HTTP・空欄時は Bearer)",
-            group.auth_hdr_d,
-            theme,
-        ))
-        .child(labeled_field(
-            "環境変数（KEY=VALUE を1行ずつ）",
-            div()
-                .id(SharedString::from(format!("conn-mcp-env-{id}")))
-                .max_h(px(110.))
-                .overflow_y_scroll()
-                .child(group.env_d),
-            theme,
-        ))
-        .child(labeled_field(
-            "HTTP ヘッダー（Name: Value を1行ずつ）",
-            div()
-                .id(SharedString::from(format!("conn-mcp-headers-{id}")))
-                .max_h(px(110.))
-                .overflow_y_scroll()
-                .child(group.headers_d),
-            theme,
-        ))
+    group
+        .append(panel, None, Some(id), theme)
         .when_some(mcp_kv_error, |this, error| {
             this.child(div().text_xs().text_color(theme.danger_fg).child(error))
         })

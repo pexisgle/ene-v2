@@ -1,4 +1,7 @@
-use super::{AddFlow, ConnectionsPane};
+use super::{
+    AddFlow, ConnectionsPane,
+    mcp_fields::{FieldMode, McpFields},
+};
 use crate::ui::icons::Icon;
 use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
@@ -6,7 +9,7 @@ use crate::ui::widgets::{Tone, disclosure_row, pill_button};
 use ene_client_core::{
     connections::{
         McpExtraConfig, McpTargetResult, build_mcp_connection_input, mcp_http_target,
-        mcp_local_target, mcp_npx_target, parse_mcp_kv,
+        mcp_local_target, mcp_npx_target,
     },
     domain::{ConnectionInput, ConnectionKind},
 };
@@ -170,109 +173,15 @@ fn render_mcp_advanced_section(
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
 ) -> (String, AnyElement, Option<&'static str>, McpExtraConfig) {
-    if mode == Mode::Http {
-        return render_mcp_http_advanced(pane, theme, cx);
-    }
-    render_mcp_process_advanced(pane, theme, cx)
-}
-
-fn render_mcp_http_advanced(
-    pane: &mut ConnectionsPane,
-    theme: &Theme,
-    cx: &mut Context<ConnectionsPane>,
-) -> (String, AnyElement, Option<&'static str>, McpExtraConfig) {
-    let auth_hdr_d = pane.drafts.draft(
-        cx,
-        "add:mcp:auth-header",
-        "空欄時は Authorization: Bearer",
-        None,
-        theme,
-    );
-    let secret_d = pane.drafts.masked_draft(
-        cx,
-        "add:mcp:secret",
-        "認証トークン（任意・暗号保存）",
-        true,
-        theme,
-    );
-    let headers_d = pane.drafts.description_draft(
-        cx,
-        "add:mcp:headers",
-        "例: X-Custom-Header: value（1行1件）",
-        None,
-        theme,
-    );
-    let auth_hdr = auth_hdr_d.read(cx).text().trim().to_owned();
-    let secret = secret_d.read(cx).text().trim().to_owned();
-    let headers_parsed =
-        parse_mcp_kv(headers_d.read(cx).text(), ':').map_err(|error| error.message(':'));
-    let adv_err = headers_parsed.as_ref().err().copied();
-    let panel = div()
-        .w_full()
-        .rounded(crate::ui::theme::radius::medium())
-        .bg(theme.bg_blush)
-        .p(px(12.))
-        .flex()
-        .flex_col()
-        .gap(px(8.))
-        .child(labeled_field("認証トークン（任意）", secret_d, theme))
-        .child(labeled_field(
-            "認証ヘッダー名（任意・空欄時は Bearer）",
-            auth_hdr_d,
-            theme,
-        ))
-        .child(labeled_field(
-            "追加 HTTP ヘッダー（Key: Value）",
-            headers_d,
-            theme,
-        ))
-        .into_any_element();
-    (
-        secret,
-        panel,
-        adv_err,
-        McpExtraConfig {
-            auth_header: auth_hdr,
-            headers: headers_parsed.unwrap_or_default(),
-            ..Default::default()
-        },
-    )
-}
-
-fn render_mcp_process_advanced(
-    pane: &mut ConnectionsPane,
-    theme: &Theme,
-    cx: &mut Context<ConnectionsPane>,
-) -> (String, AnyElement, Option<&'static str>, McpExtraConfig) {
-    let cwd_d = pane
+    let (mode, placeholder) = if mode == Mode::Http {
+        (FieldMode::Http, "認証トークン（任意・暗号保存）")
+    } else {
+        (FieldMode::Process, "環境変数へ渡すシークレット値（任意）")
+    };
+    let secret = pane
         .drafts
-        .draft(cx, "add:mcp:cwd", "例: C:/work/project", None, theme);
-    let secret_env_d = pane.drafts.draft(
-        cx,
-        "add:mcp:secret-env",
-        "例: GITHUB_TOKEN / API_KEY",
-        None,
-        theme,
-    );
-    let secret_d = pane.drafts.masked_draft(
-        cx,
-        "add:mcp:secret",
-        "環境変数へ渡すシークレット値（任意）",
-        true,
-        theme,
-    );
-    let env_d = pane.drafts.description_draft(
-        cx,
-        "add:mcp:env",
-        "例: NODE_ENV=production（1行1件）",
-        None,
-        theme,
-    );
-    let cwd = cwd_d.read(cx).text().trim().to_owned();
-    let secret_env = secret_env_d.read(cx).text().trim().to_owned();
-    let secret = secret_d.read(cx).text().trim().to_owned();
-    let env_parsed = parse_mcp_kv(env_d.read(cx).text(), '=').map_err(|error| error.message('='));
-    let adv_err = env_parsed.as_ref().err().copied();
+        .masked_draft(cx, "add:mcp:secret", placeholder, true, theme);
+    let value = secret.read(cx).text().trim().to_owned();
     let panel = div()
         .w_full()
         .rounded(crate::ui::theme::radius::medium())
@@ -280,38 +189,14 @@ fn render_mcp_process_advanced(
         .p(px(12.))
         .flex()
         .flex_col()
-        .gap(px(8.))
-        .child(labeled_field("作業ディレクトリ (cwd)", cwd_d, theme))
-        .child(
-            div()
-                .w_full()
-                .flex()
-                .flex_row()
-                .gap(px(8.))
-                .child(div().flex_1().min_w_0().child(labeled_field(
-                    "認証環境変数名",
-                    secret_env_d,
-                    theme,
-                )))
-                .child(div().flex_1().min_w_0().child(labeled_field(
-                    "認証シークレット",
-                    secret_d,
-                    theme,
-                ))),
-        )
-        .child(labeled_field("追加環境変数（KEY=VALUE）", env_d, theme))
+        .gap(px(8.));
+    let fields = McpFields::new(&mut pane.drafts, "add:mcp:", mode, None, theme, cx);
+    let result = fields.read(cx);
+    let panel = fields
+        .append(panel, Some(secret), None, theme)
         .into_any_element();
-    (
-        secret,
-        panel,
-        adv_err,
-        McpExtraConfig {
-            cwd,
-            secret_env_var: secret_env,
-            env: env_parsed.unwrap_or_default(),
-            ..Default::default()
-        },
-    )
+    let error = result.as_ref().err().copied();
+    (value, panel, error, result.unwrap_or_default())
 }
 
 fn render_mcp_add_header(theme: &Theme, cx: &Context<ConnectionsPane>) -> gpui::Div {

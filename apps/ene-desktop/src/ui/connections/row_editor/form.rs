@@ -2,10 +2,8 @@
 
 use super::ConnectionsPane;
 use crate::input::Draft;
-use crate::ui::connections::mcp_editor::{
-    McpDraftGroup, mcp_args_draft, mcp_extra_drafts, process_command_draft, read_mcp_extra,
-};
-use crate::ui::connections::secret_row;
+use crate::ui::connections::mcp_editor::{mcp_args_draft, mcp_extra_drafts, process_command_draft};
+use crate::ui::connections::{mcp_fields::McpFields, secret_row};
 use crate::ui::icons::Icon;
 use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
@@ -37,7 +35,7 @@ pub(crate) struct EditorDraftSet {
     pub(super) list_d: Entity<Draft>,
     pub(super) cmd_d: Option<Entity<Draft>>,
     pub(super) mcp_args_d: Option<Entity<Draft>>,
-    pub(super) mcp_extra_d: Option<McpDraftGroup>,
+    pub(super) mcp_extra_d: Option<McpFields>,
     pub(super) dim_d: Option<Entity<Draft>>,
 }
 
@@ -139,10 +137,7 @@ pub(super) fn build_editor_save_payload(
     let next_args = drafts.mcp_args_d.as_ref().map_or(Ok(Vec::new()), |draft| {
         parse_process_args(draft.read(cx).text())
     });
-    let next_mcp_extra = drafts
-        .mcp_extra_d
-        .as_ref()
-        .map(|group| read_mcp_extra(group, cx));
+    let next_mcp_extra = drafts.mcp_extra_d.as_ref().map(|group| group.read(cx));
     let mcp_kv_ok = next_mcp_extra.as_ref().is_none_or(Result::is_ok);
 
     EditorSavePayload {
