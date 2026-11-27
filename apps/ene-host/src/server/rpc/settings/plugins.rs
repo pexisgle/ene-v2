@@ -105,6 +105,10 @@ pub(super) async fn install_plugin(
             ..Default::default()
         };
         services.providers.replace(package, entry.installation_id);
+        notify_settings(
+            &services.notifier,
+            w::Settings::from(&store.settings_repo().settings()?),
+        );
         Ok(view)
     })
     .await
@@ -119,6 +123,7 @@ pub(super) async fn set_plugin_enabled(
     let enabled = req.enabled;
     change_plugin(services, enabled, move |services| {
         let store = &services.store;
+        let previous = services.providers.revision();
         let entry = store
             .plugin_repo()
             .set_plugin_enabled(&req.plugin_id, enabled)?
@@ -126,6 +131,12 @@ pub(super) async fn set_plugin_enabled(
         services
             .providers
             .set_enabled(&entry.plugin_id, entry.enabled);
+        if services.providers.revision() != previous {
+            notify_settings(
+                &services.notifier,
+                w::Settings::from(&store.settings_repo().settings()?),
+            );
+        }
         Ok(w::PluginInfo {
             id: entry.plugin_id,
             name: entry.name,

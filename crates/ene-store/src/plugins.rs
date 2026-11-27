@@ -124,18 +124,21 @@ impl<'a> PluginRepo<'a> {
         path: &str,
         revision: &str,
     ) -> Result<PluginEntry> {
-        self.0.fetch(
-            &format!(
+        self.0.write_tx(|transaction| {
+            let entry = transaction.prepare_cached(&format!(
                 "INSERT INTO plugin_entries ({ENTRY_COLUMNS})
                  VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?6, lower(hex(randomblob(16))))
                  ON CONFLICT(plugin_id) DO UPDATE SET name = excluded.name, version = excluded.version,
                  path = excluded.path, enabled = 1, updated_at = excluded.updated_at,
                  revision = excluded.revision, installation_id = excluded.installation_id
                  RETURNING {ENTRY_COLUMNS}"
-            ),
-            params![plugin_id, name, version, path, now(), revision],
-            PluginEntry::from_row,
-        )?.ok_or_else(|| StoreError::Storage("the plugin installation did not persist".into()))
+            ))?.query_row(
+                params![plugin_id, name, version, path, now(), revision],
+                PluginEntry::from_row,
+            )?;
+            invalidate_harness_checks(transaction, plugin_id)?;
+            Ok(entry)
+        })
     }
 
     pub fn pin_legacy_plugin_revision(&self, plugin_id: &str, revision: &str) -> Result<()> {
@@ -153,14 +156,25 @@ impl<'a> PluginRepo<'a> {
         plugin_id: &str,
         enabled: bool,
     ) -> Result<Option<PluginEntry>> {
-        self.0.fetch(
-            &format!(
-                "UPDATE plugin_entries SET enabled = ?2, updated_at = ?3 WHERE plugin_id = ?1
-             RETURNING {ENTRY_COLUMNS}"
-            ),
-            params![plugin_id, enabled, now()],
-            PluginEntry::from_row,
-        )
+        self.0.write_tx(|transaction| {
+            let updated = transaction
+                .prepare_cached(&format!(
+                    "UPDATE plugin_entries SET enabled = ?2, updated_at = ?3
+                 WHERE plugin_id = ?1 AND enabled <> ?2 RETURNING {ENTRY_COLUMNS}",
+                ))?
+                .query_row(params![plugin_id, enabled, now()], PluginEntry::from_row)
+                .optional()?;
+            if updated.is_some() {
+                invalidate_harness_checks(transaction, plugin_id)?;
+                return Ok(updated);
+            }
+            Ok(transaction
+                .prepare_cached(&format!(
+                    "SELECT {ENTRY_COLUMNS} FROM plugin_entries WHERE plugin_id = ?1",
+                ))?
+                .query_row([plugin_id], PluginEntry::from_row)
+                .optional()?)
+        })
     }
 
     pub fn remove_plugin_entry(&self, plugin_id: &str) -> Result<Option<PluginEntry>> {
@@ -182,6 +196,22 @@ impl<'a> PluginRepo<'a> {
             Ok(existing)
         })
     }
+}
+
+fn invalidate_harness_checks(conn: &Connection, plugin_id: &str) -> Result<()> {
+    let invalidated = conn
+        .prepare_cached(
+            "UPDATE connections SET last_check = NULL WHERE kind = 'acp' AND last_check IS NOT NULL
+         AND json_extract(config, '$.endpoint.adapter') = ?1",
+        )?
+        .execute([plugin_id])?;
+    if invalidated != 0 {
+        conn.prepare_cached(
+            "UPDATE settings_state SET revision = revision + 1, updated_at = ?1 WHERE id = 1",
+        )?
+        .execute([now()])?;
+    }
+    Ok(())
 }
 
 impl FromRow for PluginEntry {

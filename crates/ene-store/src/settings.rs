@@ -169,6 +169,9 @@ impl<'a> SettingsRepo<'a> {
                 };
                 let reset_check = existing.is_some_and(|previous| {
                     (input.kind == ConnectionKind::Search && input.config != previous.config)
+                        || (input.kind == ConnectionKind::Acp
+                            && (input.config != previous.config
+                                || input.enabled != previous.enabled))
                         || (input.endpoint().adapter == ene_catalog::GOOGLE_AGENT_PLATFORM
                             && input.config != previous.config
                             && !keeps_verified_model_list(previous, input))

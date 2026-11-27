@@ -129,6 +129,22 @@ async fn check_hand(settings: &w::SettingsServiceClient<HttpClient>) -> w::Conne
         .unwrap()
 }
 
+async fn saved_hand_check(
+    settings: &w::SettingsServiceClient<HttpClient>,
+) -> Option<w::ConnectionCheck> {
+    settings
+        .get_settings(w::Empty::default())
+        .await
+        .unwrap()
+        .into_owned()
+        .connections
+        .into_iter()
+        .find(|connection| connection.id == "hand")
+        .unwrap()
+        .last_check
+        .into_option()
+}
+
 async fn external_agent_is_explicitly_unavailable(settings: &w::SettingsServiceClient<HttpClient>) {
     let source = tempfile::tempdir().unwrap();
     std::fs::set_permissions(source.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -185,16 +201,18 @@ async fn disabling_a_live_harness_survives_restart_and_expires_its_approval() {
     assert!(!check_hand(&settings).await.healthy);
     external_agent_is_explicitly_unavailable(&settings).await;
 
-    settings
-        .install_plugin(w::InstallPluginRequest {
-            source_path: source.path().display().to_string(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+    let install = w::InstallPluginRequest {
+        source_path: source.path().display().to_string(),
+        ..Default::default()
+    };
+    settings.install_plugin(install.clone()).await.unwrap();
     let check = check_hand(&settings).await;
     assert!(check.healthy, "{check:?}");
     assert_eq!(check.capabilities, ["harness"]);
+    assert!(saved_hand_check(&settings).await.unwrap().healthy);
+    settings.install_plugin(install).await.unwrap();
+    assert_eq!(saved_hand_check(&settings).await, None);
+    assert!(check_hand(&settings).await.healthy);
     let start = w::StartWorkRequest {
         companion_id: companion,
         instruction: "Inspect the reference fixture".into(),
@@ -218,6 +236,7 @@ async fn disabling_a_live_harness_survives_restart_and_expires_its_approval() {
         .await
         .unwrap();
     assert!(!result.view().enabled);
+    assert_eq!(saved_hand_check(&settings).await, None);
     assert!(!check_hand(&settings).await.healthy);
     let detail = work
         .get_work(w::WorkRequest {
