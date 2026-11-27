@@ -117,7 +117,7 @@ impl Store {
         })
     }
 
-    /// Clears learned state with a durable commit so an interrupted offline reset can resume.
+    /// Erases learned state before the stopped host releases its reset marker.
     pub fn reset_learned_state(&self) -> Result<()> {
         let mut connection = self.conn();
         connection.pragma_update(None, "synchronous", "FULL")?;
@@ -128,10 +128,12 @@ impl Store {
              DELETE FROM mind_operations;
              DELETE FROM compaction_checkpoints;
              DELETE FROM memories;
+             INSERT INTO memories_fts(memories_fts) VALUES ('delete-all');
              DELETE FROM device_operations;
              DELETE FROM approval_requests;
              DELETE FROM work_runs;
-             DELETE FROM work_sessions;",
+             DELETE FROM work_sessions;
+             DELETE FROM schedule_occurrences WHERE status = 'delivered';",
         )?;
         let empty = to_json(&ene_mind::State::default())?;
         transaction.execute(
@@ -139,6 +141,17 @@ impl Store {
             [empty],
         )?;
         transaction.commit()?;
+        // FTS5 clears its own segments above. Vacuum removes discarded table
+        // pages, then a truncate checkpoint removes their older WAL images.
+        connection.execute_batch("VACUUM")?;
+        let busy = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            row.get::<_, bool>(0)
+        })?;
+        if busy {
+            return Err(StoreError::Unavailable(
+                "a database reader prevented history reset from truncating the WAL".into(),
+            ));
+        }
         Ok(())
     }
 

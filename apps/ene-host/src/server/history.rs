@@ -1,5 +1,6 @@
 //! Offline reset of learned state, serialized by the host's state lock.
 use ene_store::Store;
+use private_fs::PrivateDir;
 use std::{error::Error, fs, io, path::Path};
 
 pub(super) fn reset(state: &Path, requested: bool) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -9,12 +10,13 @@ pub(super) fn reset(state: &Path, requested: bool) -> Result<(), Box<dyn Error +
         return Ok(());
     }
 
-    let store = Store::open(&state.join("host.sqlite3"))?;
     let active = state.join("rig");
     let active_exists = directory_exists(&active)?;
     if already_pending && active_exists {
         return Err(io::Error::other("active and pending history directories both exist").into());
     }
+    let directory = PrivateDir::open(state)?;
+    let store = Store::open(&state.join("host.sqlite3"))?;
     if !already_pending {
         // A restart completes the reset before any agent opens a new log.
         if active_exists {
@@ -24,8 +26,11 @@ pub(super) fn reset(state: &Path, requested: bool) -> Result<(), Box<dyn Error +
         }
     }
 
+    directory.sync_all()?;
     store.reset_learned_state()?;
+    drop(store);
     fs::remove_dir_all(pending)?;
+    directory.sync_all()?;
     Ok(())
 }
 
@@ -47,6 +52,7 @@ mod tests {
 
     #[test]
     fn interrupted_history_reset_keeps_connections_and_policies() {
+        const STORED_DETAIL: &[u8] = b"RecallFixturezq9v2p7m5n3w8t1a6";
         let temp = tempfile::tempdir().unwrap();
         let state = temp.path();
         let db = state.join("host.sqlite3");
@@ -56,10 +62,14 @@ mod tests {
             .conn()
             .execute_batch(
                 "INSERT INTO memories (id, scope, content, importance, recorded_at)
-                 VALUES ('memory', 'ene', 'remembered detail', 5, '');
+                 VALUES ('memory', 'ene', 'RecallFixturezq9v2p7m5n3w8t1a6', 5, '');
              INSERT INTO policy_rules VALUES ('policy', 'work.write', '*', 'deny', '');
              INSERT INTO connections (id, name, enabled, kind, config, credential_state, updated_at)
-                 VALUES ('connection', 'Existing connection', 1, 'llm', '{}', 'registered', '');",
+                 VALUES ('connection', 'Existing connection', 1, 'llm', '{}', 'registered', '');
+             INSERT INTO schedule_occurrences
+                 (occurrence_key, schedule_id, companion_id, scheduled_for, title, instruction, status, created_at)
+                 VALUES ('done', 'old', 'ene', '', '', 'RecallFixturezq9v2p7m5n3w8t1a6', 'delivered', ''),
+                        ('next', 'existing', 'ene', '', '', 'Future instruction', 'pending', '');",
             )
             .unwrap();
         drop(store);
@@ -83,6 +93,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(memories, 0);
+        let occurrences: (i64, String) = connection
+            .query_row(
+                "SELECT count(*), min(instruction) FROM schedule_occurrences",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(occurrences, (1, "Future instruction".into()));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM memories_fts_data WHERE instr(block, ?) > 0",
+                    [b"9v2".as_slice()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
         assert_eq!(
             settings,
             ("Existing connection".into(), "registered".into())
@@ -96,5 +124,12 @@ mod tests {
         );
         drop(connection);
         assert_eq!(store.companion_repo().companions().unwrap()[0].id, "ene");
+        drop(store);
+        let bytes = fs::read(&db).unwrap();
+        assert!(
+            !bytes
+                .windows(STORED_DETAIL.len())
+                .any(|part| part == STORED_DETAIL)
+        );
     }
 }
