@@ -21,8 +21,8 @@ pub use ene_domain::{ModelAssignment, ModelAssignments};
 pub use json::JsonDoc;
 pub use memory::{
     MAX_IMPORTANCE, Memory, MemoryActionKind, MemoryRecord, MindStateChange, MindUpdate, NewMemory,
-    PINNED_BUDGET_CHARS, RecallMode, RecallOutcome, SHARED_SCOPE, Scored, StateUpdate, fuse,
-    in_scope, score, tokens,
+    PINNED_BUDGET_CHARS, RecallMode, RecallOutcome, SHARED_SCOPE, Scored, StateUpdate, in_scope,
+    rank_recall, score, tokens,
 };
 
 pub type Result<T> = std::result::Result<T, ene_domain::DomainError>;
@@ -56,15 +56,10 @@ mod tests {
     }
 
     #[test]
-    fn recall_scoring_rrf_and_citation_guard_preserve_invariants() {
+    fn recall_scoring_and_citation_guard_preserve_invariants() {
         let s_high = score(0.9, 8, None, None, "2026-11-21T00:00:00Z", 1_795_219_200);
         let s_low = score(0.9, 1, None, None, "2026-11-21T00:00:00Z", 1_795_219_200);
         assert!(s_high > s_low);
-
-        let l1 = vec!["a".to_owned(), "b".to_owned()];
-        let l2 = vec!["b".to_owned(), "c".to_owned()];
-        let fused = fuse(&[&l1, &l2], 60.0);
-        assert_eq!(fused[0].0, "b");
 
         assert_eq!(
             tokens("hi rust, メモリ管理!"),

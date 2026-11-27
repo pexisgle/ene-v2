@@ -92,26 +92,44 @@ pub fn score(
     decay * (0.5 * relevance + 0.3 * importance + 0.2 * recency)
 }
 
-/// Reciprocal Rank Fusion over the ranked lists present.
-pub fn fuse(lists: &[&[String]], k: f64) -> Vec<(String, f64)> {
-    use std::collections::HashMap;
-    let mut fused: HashMap<&str, f64> = HashMap::new();
+/// Combines lexical and semantic rank, then applies the memory scoring rule.
+pub fn rank_recall(lists: [Vec<Memory>; 2], now_epoch: i64, limit: usize) -> Vec<Scored> {
+    const K: f64 = 60.0;
+    let ceiling = lists.iter().filter(|list| !list.is_empty()).count().max(1) as f64 / (K + 1.0);
+    let mut fused = std::collections::HashMap::new();
     for list in lists {
-        for (index, id) in list.iter().enumerate() {
-            *fused.entry(id.as_str()).or_default() += 1.0 / (k + (index + 1) as f64);
+        for (index, memory) in list.into_iter().enumerate() {
+            let (_, sum) = fused.entry(memory.id.clone()).or_insert((memory, 0.0));
+            *sum += 1.0 / (K + (index + 1) as f64);
         }
     }
-    let ceiling = lists.iter().filter(|list| !list.is_empty()).count().max(1) as f64 / (k + 1.0);
-    let mut ranked: Vec<(String, f64)> = fused
-        .into_iter()
-        .map(|(id, value)| (id.to_owned(), (value / ceiling).clamp(0.0, 1.0)))
+    let mut ranked: Vec<Scored> = fused
+        .into_values()
+        .map(|(memory, sum)| {
+            let relevance = (sum / ceiling).clamp(0.0, 1.0);
+            let score = score(
+                relevance,
+                memory.importance,
+                memory.last_accessed_at.as_deref(),
+                memory.occurred_at.as_deref(),
+                &memory.recorded_at,
+                now_epoch,
+            );
+            Scored {
+                memory,
+                score,
+                relevance,
+            }
+        })
         .collect();
-    ranked.sort_by(|left, right| {
+    ranked.sort_unstable_by(|left, right| {
         right
-            .1
-            .total_cmp(&left.1)
-            .then_with(|| left.0.cmp(&right.0))
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| right.memory.importance.cmp(&left.memory.importance))
+            .then_with(|| left.memory.id.cmp(&right.memory.id))
     });
+    ranked.truncate(limit);
     ranked
 }
 
@@ -272,6 +290,7 @@ pub enum MemoryActionKind {
 mod property_tests {
     use super::*;
     use proptest::prelude::*;
+    use std::collections::{HashMap, HashSet};
 
     /// A list of memory ids, which may contain repeats the way a real
     /// recall pass can.
@@ -279,47 +298,110 @@ mod property_tests {
         prop::collection::vec("[a-z]{1,4}", 0..8)
     }
 
+    fn records(ids: &[String]) -> Vec<Memory> {
+        ids.iter()
+            .map(|id| Memory {
+                id: id.clone(),
+                scope: "fixture".into(),
+                content: id.clone(),
+                importance: 6,
+                occurred_at: None,
+                recorded_at: "2026-11-21T00:00:00Z".into(),
+                last_accessed_at: None,
+                memory_revision: 1,
+                content_revision: 1,
+                emotion: None,
+                source_context: Value::Null,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_match_in_both_channels_ranks_first() {
+        let lexical = records(&["a".into(), "b".into()]);
+        let semantic = records(&["b".into(), "c".into()]);
+        assert_eq!(rank_recall([lexical, semantic], 0, 1)[0].memory.id, "b");
+    }
+
+    fn rank_separately(lists: &[Vec<Memory>; 2], now: i64) -> Vec<Scored> {
+        let mut sums: HashMap<&str, f64> = HashMap::new();
+        for list in lists {
+            for (i, item) in list.iter().enumerate() {
+                *sums.entry(&item.id).or_default() += 1.0 / (60.0 + (i + 1) as f64);
+            }
+        }
+        let ceiling = lists.iter().filter(|list| !list.is_empty()).count().max(1) as f64 / 61.0;
+        let mut seen = HashSet::new();
+        let mut scored: Vec<_> = lists
+            .iter()
+            .flatten()
+            .filter(|memory| seen.insert(memory.id.as_str()))
+            .map(|memory| {
+                let relevance = (sums[memory.id.as_str()] / ceiling).clamp(0.0, 1.0);
+                Scored {
+                    memory: memory.clone(),
+                    relevance,
+                    score: score(
+                        relevance,
+                        memory.importance,
+                        memory.last_accessed_at.as_deref(),
+                        memory.occurred_at.as_deref(),
+                        &memory.recorded_at,
+                        now,
+                    ),
+                }
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| b.memory.importance.cmp(&a.memory.importance))
+                .then_with(|| a.memory.id.cmp(&b.memory.id))
+        });
+        scored
+    }
+
     proptest! {
-        /// Fusing one list twice is the same as fusing it once: the function
-        /// is a ranking rule, not an accumulator.
         #[test]
         fn fusing_is_idempotent(a in ids()) {
-            let once = fuse(&[&a], 60.0);
-            let twice = fuse(&[&a, &a], 60.0);
-            let order = |v: &[(String, f64)]| v.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
-            prop_assert_eq!(order(&once), order(&twice));
+            let list = records(&a);
+            let once = rank_recall([list.clone(), Vec::new()], 0, usize::MAX);
+            let twice = rank_recall([list.clone(), list], 0, usize::MAX);
+            let order = |v: Vec<Scored>| v.into_iter().map(|item| item.memory.id).collect::<Vec<_>>();
+            prop_assert_eq!(order(once), order(twice));
         }
 
-        /// Scores are finite and sorted high to low; a NaN would make the sort
-        /// non-deterministic and silently reorder the recall.
         #[test]
-        fn scores_are_finite_and_sorted(lists in prop::collection::vec(ids(), 1..4)) {
-            let refs: Vec<&[String]> = lists.iter().map(Vec::as_slice).collect();
-            let fused = fuse(&refs, 60.0);
-            for (_, score) in &fused {
-                prop_assert!(score.is_finite(), "score must be finite, got {score}");
-                prop_assert!(*score > 0.0, "a listed id always scores above zero");
+        fn scores_are_finite_and_sorted(a in ids(), b in ids()) {
+            let ranked = rank_recall([records(&a), records(&b)], 0, usize::MAX);
+            for item in &ranked {
+                prop_assert!(item.score.is_finite());
+                prop_assert!(item.relevance.is_finite() && item.relevance > 0.0);
             }
-            let scores: Vec<f64> = fused.iter().map(|(_, s)| *s).collect();
-            let mut sorted = scores.clone();
-            sorted.sort_by(|a, b| b.partial_cmp(a).expect("finite"));
-            prop_assert_eq!(scores, sorted, "results must be ordered by score");
+            prop_assert!(ranked.windows(2).all(|pair| pair[0].score >= pair[1].score));
         }
 
-        /// Every id that appeared anywhere appears exactly once in the output.
         #[test]
-        fn output_is_the_union_of_inputs(lists in prop::collection::vec(ids(), 1..4)) {
-            let refs: Vec<&[String]> = lists.iter().map(Vec::as_slice).collect();
-            let fused = fuse(&refs, 60.0);
-            let mut out: Vec<&String> = fused.iter().map(|(id, _)| id).collect();
-            let before = out.len();
-            out.sort();
-            out.dedup();
-            prop_assert_eq!(out.len(), before, "no id may repeat in the output");
+        fn output_is_the_union_of_inputs(a in ids(), b in ids()) {
+            let ranked = rank_recall([records(&a), records(&b)], 0, usize::MAX);
+            let actual: HashSet<_> = ranked.iter().map(|item| &item.memory.id).collect();
+            prop_assert_eq!(actual.len(), ranked.len());
+            prop_assert_eq!(actual, a.iter().chain(&b).collect());
+        }
 
-            for id in lists.iter().flatten() {
-                prop_assert!(out.contains(&id), "{id} vanished from the union");
+        #[test]
+        fn merging_preserves_original_values_and_tie_breaks(a in ids(), b in ids(), limit in 0..16usize) {
+            let lexical = records(&a);
+            let mut semantic = records(&b);
+            for item in &mut semantic {
+                item.importance = 2;
+                item.last_accessed_at = Some("2026-11-25T00:00:00Z".into());
             }
+            let lists = [lexical, semantic];
+            let now = 1_795_219_200;
+            let mut expected = rank_separately(&lists, now);
+            expected.truncate(limit);
+            prop_assert_eq!(rank_recall(lists, now, limit), expected);
         }
     }
 }

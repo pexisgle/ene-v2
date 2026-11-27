@@ -20,7 +20,7 @@ use crate::{
 pub use ene_mind::{
     Batch, Commit, Fact, MAX_IMPORTANCE, Memory, MemoryActionKind, MemoryContext, MemoryRecord,
     MindStateChange, MindUpdate, NewMemory, PINNED_BUDGET_CHARS, PendingEmbedding, RecallMode,
-    RecallOutcome, SHARED_SCOPE, Scored, StateUpdate, fuse, score, tokens, validate_citations,
+    RecallOutcome, SHARED_SCOPE, Scored, StateUpdate, score, tokens, validate_citations,
 };
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
@@ -201,55 +201,9 @@ impl<'a> MemoryRepo<'a> {
     ) -> Result<RecallOutcome> {
         let lexical = self.lexical_candidates(companion, query, mode)?;
         let semantic = self.memories_by_ids(companion, mode, semantic)?;
-        let lexical_ids: Vec<String> = lexical.iter().map(|memory| memory.id.clone()).collect();
-        let semantic_ids: Vec<String> = semantic.iter().map(|memory| memory.id.clone()).collect();
-        let mut lists: Vec<&[String]> = Vec::new();
-        if !lexical_ids.is_empty() {
-            lists.push(lexical_ids.as_slice());
-        }
-        if !semantic_ids.is_empty() {
-            lists.push(semantic_ids.as_slice());
-        }
-        let fused = fuse(&lists, 60.0);
-        let relevance: HashMap<&str, f64> = fused
-            .iter()
-            .map(|(id, value)| (id.as_str(), *value))
-            .collect();
-        let mut memories: HashMap<String, Memory> = HashMap::new();
-        for memory in lexical.into_iter().chain(semantic) {
-            memories.entry(memory.id.clone()).or_insert(memory);
-        }
-        let now_epoch = epoch(&now()).unwrap_or(0);
-        let mut scored: Vec<Scored> = memories
-            .into_values()
-            .map(|memory| {
-                let relevance = relevance.get(memory.id.as_str()).copied().unwrap_or(0.0);
-                let value = score(
-                    relevance,
-                    memory.importance,
-                    memory.last_accessed_at.as_deref(),
-                    memory.occurred_at.as_deref(),
-                    &memory.recorded_at,
-                    now_epoch,
-                );
-                Scored {
-                    memory,
-                    score: value,
-                    relevance,
-                }
-            })
-            .collect();
-        scored.sort_by(|left, right| {
-            right
-                .score
-                .total_cmp(&left.score)
-                .then_with(|| right.memory.importance.cmp(&left.memory.importance))
-                .then_with(|| left.memory.id.cmp(&right.memory.id))
-        });
-        scored.truncate(limit);
         Ok(RecallOutcome {
-            semantic: !semantic_ids.is_empty(),
-            items: scored,
+            semantic: !semantic.is_empty(),
+            items: ene_mind::rank_recall([lexical, semantic], epoch(&now()).unwrap_or(0), limit),
         })
     }
 
