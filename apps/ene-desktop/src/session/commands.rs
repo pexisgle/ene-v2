@@ -4,8 +4,6 @@
 
 use super::Session;
 use super::device_commands::{LookAtInput, MotionInput, OperationOutput, PerchInput};
-#[cfg(windows)]
-use crate::avatar::Avatar;
 use crate::{avatar, capabilities, host::Host, perception::Watch};
 use buffa::view::MessageView;
 use ene_rpc as w;
@@ -98,16 +96,12 @@ pub(super) enum OperationError {
     ComputerUseInactive,
     #[error("body.look_at requires yaw_deg in [-90, 90] and pitch_deg in [-60, 60]")]
     InvalidLookAtAngles,
-    #[error("no renderer is configured, so gaze was not updated")]
-    NoRendererForLookAt,
     #[error("body.perch coordinates must be finite")]
     NonFinitePerchCoord,
-    #[error("no renderer is configured, so the avatar could not perch")]
-    NoRendererForPerch,
     #[error("no model is configured for the renderer")]
     NoModelForMotion,
-    #[error("no renderer is configured, so no motion was shown")]
-    NoRendererForMotion,
+    #[error("the target companion's avatar is not ready")]
+    AvatarNotReady,
     #[error("「目」はオフです")]
     EyesDisabled,
     #[error("workspace operations require a work session and run")]
@@ -191,7 +185,7 @@ impl Session {
             &mut self.devices.computer_frame,
             run_id,
             input,
-            self.devices.avatar.as_ref().map(Avatar::pid),
+            self.devices.avatar.as_ref().map(avatar::Avatar::pid),
         )
         .await?)
     }
@@ -335,6 +329,14 @@ impl Session {
         }
     }
 
+    fn ready_avatar(&mut self, companion_id: &str) -> Result<&mut avatar::Avatar, OperationError> {
+        self.devices
+            .avatar
+            .as_mut()
+            .filter(|avatar| avatar.is_ready(companion_id))
+            .ok_or(OperationError::AvatarNotReady)
+    }
+
     async fn look_at(
         &mut self,
         companion_id: &str,
@@ -353,11 +355,7 @@ impl Session {
             }
             (Some(yaw), Some(pitch))
         };
-        let avatar = self
-            .devices
-            .avatar
-            .as_mut()
-            .ok_or(OperationError::NoRendererForLookAt)?;
+        let avatar = self.ready_avatar(companion_id)?;
         avatar.look_at(companion_id, yaw_deg, pitch_deg).await?;
         Ok(OperationOutput::LookAt {
             reset,
@@ -376,11 +374,7 @@ impl Session {
             return Err(OperationError::NonFinitePerchCoord);
         }
         let model = self.transport.model_for(companion_id);
-        let avatar = self
-            .devices
-            .avatar
-            .as_mut()
-            .ok_or(OperationError::NoRendererForPerch)?;
+        let avatar = self.ready_avatar(companion_id)?;
         avatar
             .place(companion_id, input.monitor.clone(), [x, y])
             .await?;
@@ -398,7 +392,7 @@ impl Session {
         Ok(OperationOutput::Perch(input))
     }
 
-    /// Shows a motion on `companion_id`. Without a renderer the operation fails.
+    /// Shows a motion on the target companion's currently available renderer.
     async fn motion(
         &mut self,
         companion_id: &str,
@@ -409,11 +403,7 @@ impl Session {
             .transport
             .model_for(companion_id)
             .ok_or(OperationError::NoModelForMotion)?;
-        let avatar = self
-            .devices
-            .avatar
-            .as_mut()
-            .ok_or(OperationError::NoRendererForMotion)?;
+        let avatar = self.ready_avatar(companion_id)?;
         if avatar
             .show_preset(companion_id, &model, &plan.motion, plan.clip.as_deref())
             .await?

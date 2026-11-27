@@ -1,7 +1,7 @@
 //! The per-character half of [`Avatar`]: what each character shows and how to
 //! change it.
 
-use super::client::{Avatar, AvatarError, WriteItem, lip_sync_line};
+use super::client::{Avatar, AvatarError, ModelState, ShownCharacter, WriteItem, lip_sync_line};
 use super::presets::{idle_return_preset, is_looping_motion, is_persistent_idle, motion};
 use ene_avatar_ipc::{AvatarEvent, CharacterConfig, Command};
 use std::path::Path;
@@ -15,8 +15,6 @@ impl Avatar {
 
     /// Removes `character` from the renderer when its companion is released.
     pub async fn remove_character(&mut self, character: &str) -> Result<(), AvatarError> {
-        self.base_motion.remove(character);
-        self.last_motion.remove(character);
         if self.shown.remove(character).is_some() {
             self.call(Command::Remove {
                 character: character.to_owned(),
@@ -36,9 +34,9 @@ impl Avatar {
         body: &ene_domain::BodyBinding,
         default_scale: f32,
     ) -> Result<bool, AvatarError> {
-        let existing = self.shown.get(character).cloned();
+        let existing = self.shown.get(character).map(|shown| &shown.config);
         let mut next = existing
-            .clone()
+            .cloned()
             .unwrap_or_else(|| CharacterConfig::for_model(model.to_string_lossy()));
         next.model = model.to_string_lossy().into_owned();
         if existing.is_none() {
@@ -52,12 +50,10 @@ impl Avatar {
             next.position = body.position;
         }
         next.size_percent = body.size_percent.unwrap_or(default_scale).clamp(50., 200.);
-        if existing.as_ref() == Some(&next) {
+        if existing == Some(&next) {
             return Ok(false);
         }
-        let loads_model = existing
-            .as_ref()
-            .is_none_or(|shown| shown.model != next.model);
+        let loads_model = existing.is_none_or(|shown| shown.model != next.model);
         self.configure(character, next, Some(body)).await?;
         Ok(loads_model)
     }
@@ -71,7 +67,7 @@ impl Avatar {
         looping: bool,
     ) -> Result<bool, AvatarError> {
         let motion = motion.map(|path| path.to_string_lossy().into_owned());
-        let existing = self.shown.get(character);
+        let existing = self.shown.get(character).map(|shown| &shown.config);
         let mut next = existing
             .cloned()
             .unwrap_or_else(|| CharacterConfig::for_model(model.to_string_lossy()));
@@ -91,7 +87,9 @@ impl Avatar {
                 looping,
             })
             .await?;
-            self.shown.insert(character.to_owned(), next);
+            if let Some(shown) = self.shown.get_mut(character) {
+                shown.config = next;
+            }
         }
         self.drain_incoming_events();
         self.events.retain(|event| {
@@ -110,11 +108,11 @@ impl Avatar {
     ) -> Result<bool, AvatarError> {
         let looping = is_looping_motion(preset);
         let loads_model = self.show(character, model, clip, looping).await?;
-        self.last_motion
-            .insert(character.to_owned(), preset.to_owned());
-        if is_persistent_idle(preset) {
-            self.base_motion
-                .insert(character.to_owned(), preset.to_owned());
+        if let Some(shown) = self.shown.get_mut(character) {
+            shown.last_motion = Some(preset.to_owned());
+            if is_persistent_idle(preset) {
+                shown.base_motion = Some(preset.to_owned());
+            }
         }
         Ok(loads_model)
     }
@@ -124,15 +122,13 @@ impl Avatar {
         character: &str,
         model: &Path,
     ) -> Result<(), AvatarError> {
-        if self
+        if let Some(shown) = self
             .shown
             .get(character)
-            .is_some_and(|shown| !shown.looping)
+            .filter(|shown| !shown.config.looping)
         {
-            let preset = idle_return_preset(
-                self.base_motion.get(character).map(String::as_str),
-                self.last_motion.get(character).map(String::as_str),
-            );
+            let preset =
+                idle_return_preset(shown.base_motion.as_deref(), shown.last_motion.as_deref());
             self.show_preset(character, model, preset, motion(preset).as_deref())
                 .await?;
         }
@@ -161,7 +157,17 @@ impl Avatar {
             }
         };
         self.call(command).await?;
-        self.shown.insert(character.to_owned(), next);
+        if let Some(shown) = self.shown.get_mut(character) {
+            if shown.config.model != next.model {
+                shown.state = ModelState::Loading;
+            }
+            shown.config = next;
+        } else {
+            self.shown.insert(
+                character.to_owned(),
+                ShownCharacter::new(next, ModelState::Loading),
+            );
+        }
         Ok(())
     }
 
@@ -188,7 +194,7 @@ impl Avatar {
     ) -> Result<(), AvatarError> {
         let clamped = size_percent.clamp(50., 200.);
         let next = match self.shown.get(character) {
-            Some(current) => current.with_scale(clamped),
+            Some(current) => current.config.with_scale(clamped),
             None => CharacterConfig::for_model(model.to_string_lossy()).with_scale(clamped),
         };
         self.configure(character, next, None).await
@@ -235,9 +241,9 @@ impl Avatar {
         .await?;
         if let Some(shown) = self.shown.get_mut(character) {
             if monitor.is_some() {
-                shown.monitor = monitor;
+                shown.config.monitor = monitor;
             }
-            shown.position = Some(position);
+            shown.config.position = Some(position);
         }
         Ok(())
     }
@@ -260,23 +266,44 @@ impl Avatar {
         }
     }
 
+    pub fn is_ready(&self, character: &str) -> bool {
+        self.is_healthy()
+            && self
+                .shown
+                .get(character)
+                .is_some_and(|shown| matches!(shown.state, ModelState::Ready))
+    }
+
+    pub fn failure(&self, character: &str) -> Option<&str> {
+        match &self.shown.get(character)?.state {
+            ModelState::Failed(error) => {
+                Some(error.as_deref().unwrap_or("モデルの読込に失敗しました"))
+            }
+            _ => None,
+        }
+    }
+
     /// What the renderer is showing, for the device footer.
     pub fn describe(&self, character: &str) -> Option<String> {
-        self.shown.get(character).map(|shown| {
-            let model = shown
-                .model
-                .rsplit(['\\', '/'])
-                .next()
-                .unwrap_or(&shown.model)
-                .to_owned();
-            match shown
-                .motion
-                .as_ref()
-                .and_then(|motion| motion.rsplit(['\\', '/']).next())
-            {
-                Some(motion) => format!("{model} ({motion})"),
-                None => model,
-            }
-        })
+        self.shown
+            .get(character)
+            .filter(|shown| self.is_healthy() && matches!(shown.state, ModelState::Ready))
+            .map(|shown| {
+                let shown = &shown.config;
+                let model = shown
+                    .model
+                    .rsplit(['\\', '/'])
+                    .next()
+                    .unwrap_or(&shown.model)
+                    .to_owned();
+                match shown
+                    .motion
+                    .as_ref()
+                    .and_then(|motion| motion.rsplit(['\\', '/']).next())
+                {
+                    Some(motion) => format!("{model} ({motion})"),
+                    None => model,
+                }
+            })
     }
 }

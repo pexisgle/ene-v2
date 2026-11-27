@@ -9,7 +9,7 @@
 
 use ene_rpc as w;
 use serde::Serialize;
-use std::{collections::BTreeMap, path::Path};
+use std::collections::BTreeMap;
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -114,10 +114,9 @@ pub struct Declaration {
 }
 
 impl Declaration {
-    /// What this machine can do, given its renderer and its assets.
-    pub fn probe(renderer: Option<&Path>, model: Option<&Path>) -> Self {
-        let usable = renderer.is_some() && model.is_some();
-        let motions = if usable {
+    /// What this machine can do with its currently displayed avatar.
+    pub fn probe(avatar_ready: bool) -> Self {
+        let motions = if avatar_ready {
             crate::avatar::MOTIONS
                 .iter()
                 .map(|&(preset, _)| preset)
@@ -127,7 +126,7 @@ impl Declaration {
         } else {
             Vec::new()
         };
-        let expressions = if usable {
+        let expressions = if avatar_ready {
             EXPRESSIONS.to_vec()
         } else {
             Vec::new()
@@ -392,20 +391,17 @@ mod tests {
     /// A machine that cannot show a motion must not claim it can.
     #[test]
     fn no_motion_is_declared_without_a_renderer() {
-        let none = Declaration {
-            motions: Vec::new(),
-            expressions: Vec::new(),
-            eyes: true,
-        };
-        let names = names(&none.specs());
-        assert!(!names.iter().any(|name| name == "body.motion"));
-        assert!(names.iter().any(|name| name == "eye.watch"));
+        let names = names(&Declaration::probe(false).specs());
+        assert!(!names.iter().any(|name| name.starts_with("body.")));
+        assert_eq!(
+            names.iter().any(|name| name == "eye.watch"),
+            crate::perception::supported()
+        );
     }
 
     #[test]
     fn the_bundled_ene_declares_the_selected_presets() {
-        let model = crate::avatar::bundled_ene_model().unwrap();
-        let declaration = Declaration::probe(Some(Path::new("ene-avatar")), Some(&model));
+        let declaration = Declaration::probe(true);
         assert!(
             declaration
                 .motions

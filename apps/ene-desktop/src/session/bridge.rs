@@ -112,21 +112,23 @@ impl DeviceBridge {
     }
 
     /// Returns to idle when the renderer finishes a gesture and detects dead renderers.
-    pub(super) async fn drain_renderer(&mut self, transport: &SessionTransport) -> Option<Device> {
-        let mut avatar = self.avatar.take()?;
+    pub(super) async fn drain_renderer(&mut self, transport: &SessionTransport) -> bool {
+        let Some(mut avatar) = self.avatar.take() else {
+            return false;
+        };
+        let mut changed = false;
         for event in avatar.notifications() {
             tracing::debug!(?event, "renderer");
+            changed |= matches!(event, AvatarEvent::State { .. });
             self.handle_renderer_event(transport, &mut avatar, event)
                 .await;
         }
         if avatar.is_healthy() {
             self.avatar = Some(avatar);
-            None
+            changed
         } else {
             avatar.shutdown();
-            Some(Device::Unavailable(
-                "アバター描画プロセスが応答を停止しました".into(),
-            ))
+            true
         }
     }
 
@@ -316,20 +318,32 @@ impl DeviceBridge {
         });
     }
 
+    pub(super) fn body_available(&self, transport: &SessionTransport) -> bool {
+        self.avatar
+            .as_ref()
+            .is_some_and(|avatar| transport.bindings.iter().any(|id| avatar.is_ready(id)))
+    }
+
     pub(super) fn avatar_state(&self, transport: &SessionTransport) -> Device {
+        if transport.bindings.is_empty() && transport.options.renderer.is_some() {
+            return Device::Off;
+        }
         match self.avatar.as_ref() {
             Some(avatar) => {
-                let mut labels: Vec<String> = transport
+                let labels: Vec<String> = transport
                     .bindings
                     .iter()
                     .filter_map(|id| avatar.describe(id))
                     .collect();
-                if labels.is_empty() {
-                    labels.push("描画中".into());
+                if !labels.is_empty() {
+                    return Device::Ready(labels.join(", "));
                 }
-                Device::Ready(labels.join(", "))
+                let reason = transport.bindings.iter().find_map(|id| avatar.failure(id));
+                Device::Unavailable(reason.unwrap_or("モデルの描画を準備しています").into())
             }
-            None if transport.options.renderer.is_some() => Device::Off,
+            None if transport.options.renderer.is_some() => {
+                Device::Unavailable("描画プロセスが動作していません".into())
+            }
             None => Device::Unavailable("描画プロセスが設定されていません".into()),
         }
     }

@@ -1,13 +1,12 @@
 //! Host connection, registration, companion activation bindings, and capability specs.
 
 use super::{Connection, DeviceBridge, Options, Outcome};
-use crate::{avatar, capabilities, host::Host, plugins::ClientPlugins, work_tools::Workspace};
+use crate::{avatar, capabilities, host::Host};
 use buffa::view::MessageView;
 use ene_rpc as w;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::Arc,
 };
 
 pub(super) struct SessionTransport {
@@ -30,25 +29,11 @@ pub(super) struct SessionTransport {
     pub(super) cursor: Option<w::Cursor>,
     /// The companion the operator asked to serve while a request was in flight.
     pub(super) pending: Option<String>,
-    /// Capabilities this machine can honour, declared at registration.
-    pub(super) specs: Vec<w::ClientCapabilitySpec>,
+    pub(super) published_body: bool,
 }
 
 impl SessionTransport {
-    pub(super) fn new(
-        path: PathBuf,
-        options: Options,
-        connection: Connection,
-        workspace: Option<&Arc<Workspace>>,
-        client_plugins: &Arc<ClientPlugins>,
-    ) -> Self {
-        let mut specs =
-            capabilities::Declaration::probe(options.renderer.as_deref(), options.model.as_deref())
-                .specs();
-        if let Some(workspace) = workspace {
-            specs.extend(workspace.specs());
-        }
-        specs.extend(client_plugins.specs().iter().cloned());
+    pub(super) fn new(path: PathBuf, options: Options, connection: Connection) -> Self {
         Self {
             path,
             options,
@@ -60,7 +45,7 @@ impl SessionTransport {
             subscription: String::new(),
             cursor: None,
             pending: None,
-            specs,
+            published_body: false,
         }
     }
 
@@ -92,25 +77,7 @@ impl SessionTransport {
         self.connection.read().clone()
     }
 
-    pub(super) fn rebuild_specs(
-        &mut self,
-        workspace: Option<&Arc<Workspace>>,
-        client_plugins: &Arc<ClientPlugins>,
-    ) {
-        let mut specs = capabilities::Declaration::probe(
-            self.options.renderer.as_deref(),
-            self.options.model.as_deref(),
-        )
-        .specs();
-        if let Some(workspace) = workspace {
-            specs.extend(workspace.specs());
-        }
-        specs.extend(client_plugins.specs().iter().cloned());
-        self.specs = specs;
-    }
-
     pub(super) async fn sync_capabilities(&mut self, host: &Host, devices: &DeviceBridge) {
-        self.rebuild_specs(devices.workspace.as_ref(), &devices.client_plugins);
         if let Err(error) = self.register(host, devices).await {
             tracing::warn!("failed to sync client capabilities in place: {error}");
         }
@@ -118,7 +85,7 @@ impl SessionTransport {
 
     /// Registers this client, keeping the host's grants across restarts.
     pub(super) async fn register(
-        &self,
+        &mut self,
         host: &Host,
         devices: &DeviceBridge,
     ) -> Result<w::Client, connectrpc::ConnectError> {
@@ -149,14 +116,17 @@ impl SessionTransport {
                 None
             }
         };
-        let specs: Vec<_> = self
-            .specs
-            .iter()
-            .filter(|spec| devices.eyes_enabled || spec.name != "eye.watch")
-            .cloned()
-            .chain(computer_spec)
-            .collect();
-        host.client
+        let body = devices.body_available(self);
+        let mut declaration = capabilities::Declaration::probe(body);
+        declaration.eyes &= devices.eyes_enabled;
+        let mut specs = declaration.specs();
+        if let Some(workspace) = &devices.workspace {
+            specs.extend(workspace.specs());
+        }
+        specs.extend(devices.client_plugins.specs().iter().cloned());
+        specs.extend(computer_spec);
+        let client = host
+            .client
             .register_client(w::RegisterClientRequest {
                 id: self.options.id.clone(),
                 name: self.options.name.clone(),
@@ -169,7 +139,9 @@ impl SessionTransport {
             .await?
             .view()
             .to_owned_message()
-            .map_err(|error| connectrpc::ConnectError::internal(error.to_string()))
+            .map_err(|error| connectrpc::ConnectError::internal(error.to_string()))?;
+        self.published_body = body;
+        Ok(client)
     }
 
     /// Installs the host snapshot and the cursor at which it was taken.
@@ -340,13 +312,8 @@ mod tests {
 
     #[test]
     fn a_replacement_snapshot_changes_residents_and_cursor_together() {
-        let mut transport = SessionTransport::new(
-            PathBuf::new(),
-            Options::default(),
-            Connection::default(),
-            None,
-            &Arc::new(ClientPlugins::default()),
-        );
+        let mut transport =
+            SessionTransport::new(PathBuf::new(), Options::default(), Connection::default());
         let snapshot = |epoch: &str, seq, resident: &str, other: &str| w::Snapshot {
             active_companion_id: Some(resident.into()),
             cursor: Some(w::Cursor {

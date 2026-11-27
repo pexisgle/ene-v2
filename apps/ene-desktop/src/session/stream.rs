@@ -134,13 +134,16 @@ impl Session {
         match tick {
             PeriodicTick::Capture => handle_capture_tick(self, state).await,
             PeriodicTick::Lip => {
-                if let Some(err_state) = self.devices.drain_renderer(&self.transport).await {
-                    self.set_avatar(err_state).await;
+                if self.devices.drain_renderer(&self.transport).await {
+                    self.report_devices().await;
                 }
                 self.audio
                     .pump_lip(&self.transport, self.devices.avatar.as_mut(), &self.updates);
             }
             PeriodicTick::Sample => {
+                if self.transport.published_body != self.devices.body_available(&self.transport) {
+                    self.transport.sync_capabilities(host, &self.devices).await;
+                }
                 // Fire-and-forget reports are only reaped here; without this
                 // the set grew for the life of the session.
                 self.devices.reap_background();

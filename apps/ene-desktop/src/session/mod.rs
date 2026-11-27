@@ -190,13 +190,7 @@ impl Session {
         commands: UnboundedReceiver<Command>,
     ) -> Self {
         let devices = DeviceBridge::new().await;
-        let transport = SessionTransport::new(
-            path,
-            options,
-            connection,
-            devices.workspace.as_ref(),
-            &devices.client_plugins,
-        );
+        let transport = SessionTransport::new(path, options, connection);
         Self {
             transport,
             audio: AudioPipeline::new(),

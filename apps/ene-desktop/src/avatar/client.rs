@@ -73,6 +73,31 @@ pub(super) enum WriteItem {
 }
 pub(super) type PendingReplies = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<(), AvatarError>>>>>;
 
+pub(super) enum ModelState {
+    Loading,
+    Ready,
+    Suspended,
+    Failed(Option<String>),
+}
+
+pub(super) struct ShownCharacter {
+    pub(super) config: CharacterConfig,
+    pub(super) state: ModelState,
+    pub(super) base_motion: Option<String>,
+    pub(super) last_motion: Option<String>,
+}
+
+impl ShownCharacter {
+    pub(super) fn new(config: CharacterConfig, state: ModelState) -> Self {
+        Self {
+            config,
+            state,
+            base_motion: None,
+            last_motion: None,
+        }
+    }
+}
+
 /// The renderer process and non-blocking async channels to its stdio workers.
 pub struct Avatar {
     child: Option<Child>,
@@ -84,9 +109,7 @@ pub struct Avatar {
     /// Shared with both stdio workers, so a renderer that dies while idle is
     /// reported unhealthy before the next call notices.
     pub(super) healthy: Arc<AtomicBool>,
-    pub(super) shown: HashMap<String, CharacterConfig>,
-    pub(super) base_motion: HashMap<String, String>,
-    pub(super) last_motion: HashMap<String, String>,
+    pub(super) shown: HashMap<String, ShownCharacter>,
 }
 
 impl Avatar {
@@ -134,8 +157,6 @@ impl Avatar {
             next_id: 1,
             healthy,
             shown: HashMap::new(),
-            base_motion: HashMap::new(),
-            last_motion: HashMap::new(),
         })
     }
 
@@ -144,6 +165,20 @@ impl Avatar {
     }
 
     fn push_event(&mut self, event: AvatarEvent) {
+        if let AvatarEvent::State {
+            character,
+            status,
+            error,
+        } = &event
+            && let Some(shown) = self.shown.get_mut(character)
+        {
+            shown.state = match status {
+                AvatarStatus::Loading => ModelState::Loading,
+                AvatarStatus::Ready => ModelState::Ready,
+                AvatarStatus::Suspended => ModelState::Suspended,
+                AvatarStatus::Error => ModelState::Failed(error.clone()),
+            };
+        }
         if self.events.len() >= MAX_EVENT_QUEUE {
             self.events.pop_front();
         }
@@ -341,9 +376,10 @@ impl Avatar {
             events: VecDeque::new(),
             next_id: 1,
             healthy: Arc::new(AtomicBool::new(true)),
-            shown,
-            base_motion: HashMap::new(),
-            last_motion: HashMap::new(),
+            shown: shown
+                .into_iter()
+                .map(|(id, config)| (id, ShownCharacter::new(config, ModelState::Ready)))
+                .collect(),
         };
         (
             avatar,
