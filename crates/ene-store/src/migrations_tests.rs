@@ -165,6 +165,56 @@ fn in_memory_fresh_db_applies_all_migrations_idempotently() {
 }
 
 #[test]
+fn v25_keeps_current_embeddings_and_fts_row_ids() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    crate::configure_connection(&connection).unwrap();
+    let mut old = ladder_steps();
+    old.truncate(24);
+    apply_ladder(&mut connection, old).unwrap();
+    connection.execute_batch(
+        "INSERT INTO memories (rowid, id, scope, content, importance, recorded_at, content_revision,
+                               embedding, embedding_model, embedding_dimensions, embedding_content_revision)
+         VALUES (42, 'current', 'ene', 'durable memory', 5, '2026-01-01T00:00:00Z', 3,
+                 x'0000803F', 'first:1:v1', 1, 3),
+                (45, 'stale', 'ene', 'stale vector', 2, '2026-01-01T00:00:00Z', 3,
+                 x'0000803F', 'first:1:v1', 1, 2),
+                (46, 'old-space', 'ene', 'old space', 2, '2026-01-01T00:00:00Z', 1,
+                 x'0000803F', 'first:1:v0', 1, 1),
+                (47, 'broken', 'ene', 'bad vector', 2, '2026-01-01T00:00:00Z', 1,
+                 x'0000803F', 'first:2:v1', 2, 1);",
+    ).unwrap();
+    apply_migrations(&mut connection).unwrap();
+    let rows = connection
+        .prepare("SELECT memory_id, space, hex(vector) FROM memory_embeddings")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<(String, String, String)>>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        [("current".into(), "first:1:v1".into(), "0000803F".into())]
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'durable'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        42
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM memories", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        4
+    );
+}
+
+#[test]
 fn upgrades_v6_database_in_place_preserving_existing_rows() {
     let mut mem = Connection::open_in_memory().unwrap();
     seed_v6_database(&mut mem);

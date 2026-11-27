@@ -304,17 +304,18 @@ fn memory(content: &str) -> MemoryRecord {
     }
 }
 
-fn embed(store: &Store, memory: &Memory, space: &str, dimensions: usize, vector: &[f32]) {
-    store
-        .memory_repo()
-        .write_embedding(
-            &memory.id,
-            memory.content_revision,
-            space,
-            dimensions,
-            &encode(vector),
-        )
-        .unwrap();
+fn embed(store: &Store, memory: &Memory, space: &str, vector: &[f32]) {
+    assert!(
+        store
+            .memory_repo()
+            .write_embedding(
+                &memory.scope,
+                &RecallCandidate::from(memory),
+                space,
+                &encode(vector),
+            )
+            .unwrap()
+    );
 }
 
 #[test]
@@ -327,8 +328,8 @@ fn the_index_mirrors_only_the_matching_space_and_revision() {
         .unwrap();
     let two = test_space("fake", 2);
     let three = test_space("other", 3);
-    embed(&store, &first, &two, 2, &[1.0, 0.0]);
-    embed(&store, &second, &three, 3, &[0.0, 0.0, 1.0]);
+    embed(&store, &first, &two, &[1.0, 0.0]);
+    embed(&store, &second, &three, &[0.0, 0.0, 1.0]);
     let mut index = CompactVectorIndex::default();
     index.sync(&store, "ene", &two).unwrap();
     let ranked = index.ranked("ene", &two, &[1.0, 0.1], RecallMode::Auto, 8);
@@ -368,7 +369,17 @@ fn the_index_mirrors_only_the_matching_space_and_revision() {
 
     // A vector of another preprocessing version is a different space.
     let legacy = "fake:2:v0";
-    embed(&store, &second, legacy, 2, &[1.0, 0.0]);
+    assert!(
+        store
+            .memory_repo()
+            .write_embedding(
+                "ene",
+                &RecallCandidate::from(&second),
+                legacy,
+                &encode(&[1.0, 0.0]),
+            )
+            .is_err()
+    );
     index.sync(&store, "ene", legacy).unwrap();
     assert_eq!(
         index.ranked("ene", legacy, &[1.0, 0.0], RecallMode::Auto, 8),
@@ -381,14 +392,14 @@ fn another_companions_vectors_cannot_take_the_companions_top_k() {
     let store = store();
     let space = test_space("fake", 2);
     let mine = store.memory_repo().insert_memory(&memory("mine")).unwrap();
-    embed(&store, &mine, &space, 2, &[1.0, 0.0]);
+    embed(&store, &mine, &space, &[1.0, 0.0]);
     // Other companions hold equally close vectors for the same query.
     let mut others = Vec::new();
     for index in 0..5 {
         let mut other = memory(&format!("other {index}"));
         other.scope = format!("other-{index}");
         let other = store.memory_repo().insert_memory(&other).unwrap();
-        embed(&store, &other, &space, 2, &[1.0, 0.0]);
+        embed(&store, &other, &space, &[1.0, 0.0]);
         others.push(other);
     }
     let mut index = CompactVectorIndex::default();
@@ -427,7 +438,7 @@ fn ranking_keeps_database_order_for_ties_and_bounds_top_k() {
         let mut record = memory(id);
         record.id = id.into();
         let memory = store.memory_repo().insert_memory(&record).unwrap();
-        embed(&store, &memory, &space, 2, &vector);
+        embed(&store, &memory, &space, &vector);
         ids.push(memory.id);
     }
     let mut index = CompactVectorIndex::default();
@@ -466,7 +477,7 @@ fn invalid_comparisons_do_not_enter_recall() {
             .memory_repo()
             .insert_memory(&memory("vector"))
             .unwrap();
-        embed(&store, &memory, &space, 2, &vector);
+        embed(&store, &memory, &space, &vector);
         candidates.push(RecallCandidate::from(&memory));
     }
     let mut index = CompactVectorIndex::default();
@@ -492,12 +503,12 @@ fn eligibility_and_precision_are_applied_before_truncation() {
         let mut record = memory("forgotten");
         record.importance = 0;
         let forgotten = repo.insert_memory(&record).unwrap();
-        embed(&store, &forgotten, &space, 2, &[1.0, 0.0]);
+        embed(&store, &forgotten, &space, &[1.0, 0.0]);
     }
     let approximate = repo.insert_memory(&memory("approximate")).unwrap();
     let exact = repo.insert_memory(&memory("exact")).unwrap();
-    embed(&store, &approximate, &space, 2, &[1.0, 0.0001]);
-    embed(&store, &exact, &space, 2, &[1.0, 0.0]);
+    embed(&store, &approximate, &space, &[1.0, 0.0001]);
+    embed(&store, &exact, &space, &[1.0, 0.0]);
 
     let mut index = CompactVectorIndex::default();
     index.sync(&store, "ene", &space).unwrap();
@@ -690,7 +701,10 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
         .memories_missing_embedding(&comp_a.id, &target_a.space, 10)
         .unwrap();
     assert_eq!(
-        missing_a.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        missing_a
+            .iter()
+            .map(|m| m.candidate.id.as_str())
+            .collect::<Vec<_>>(),
         [mem_a.id.as_str()]
     );
 

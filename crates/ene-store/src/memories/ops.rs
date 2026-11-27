@@ -138,57 +138,36 @@ impl<'a> MemoryRepo<'a> {
         space: &str,
         companion: &str,
     ) -> Result<Vec<(RecallCandidate, u8)>> {
-        let Some(dimensions) = dimensions_of_space(space) else {
-            return Ok(Vec::new());
-        };
-        let connection = self.0.conn();
-        let mut statement = connection.prepare_cached(&format!(
-            "SELECT m.id, m.content_revision, m.importance FROM memories m \
-             WHERE {VISIBLE} AND m.embedding_model = ?2 AND m.embedding_dimensions = ?3 \
-             AND m.embedding IS NOT NULL AND m.embedding_content_revision = m.content_revision \
-             ORDER BY m.rowid"
-        ))?;
-        let rows = statement.query_map(params![companion, space, dimensions as i64], |row| {
-            Ok((
-                RecallCandidate {
-                    id: row.get(0)?,
-                    content_revision: row.get(1)?,
-                },
-                row.get(2)?,
-            ))
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        self.0.fetch_all(
+            &format!(
+                "SELECT m.id, m.content_revision, m.importance FROM memory_embeddings e \
+                 JOIN memories m ON m.id = e.memory_id \
+                 WHERE {VISIBLE} AND e.space = ?2 ORDER BY m.rowid"
+            ),
+            params![companion, space],
+            |row| {
+                Ok((
+                    RecallCandidate {
+                        id: row.get(0)?,
+                        content_revision: row.get(1)?,
+                    },
+                    row.get(2)?,
+                ))
+            },
+        )
     }
 
     pub fn embedding_blob(
         &self,
         candidate: &RecallCandidate,
         space: &str,
-    ) -> Result<Option<(usize, Vec<u8>)>> {
-        let Some(dimensions) = dimensions_of_space(space) else {
-            return Ok(None);
-        };
-        let row: Option<(i64, Vec<u8>)> = self
-            .0
-            .conn()
-            .prepare_cached(
-                "SELECT embedding_dimensions, embedding FROM memories WHERE id = ?1 \
-                 AND embedding_model = ?2 AND embedding_dimensions = ?3 \
-                 AND embedding IS NOT NULL AND embedding_content_revision = content_revision \
-                 AND content_revision = ?4",
-            )?
-            .query_row(
-                params![
-                    candidate.id,
-                    space,
-                    dimensions as i64,
-                    candidate.content_revision
-                ],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        Ok(row.map(|(dimensions, bytes)| (dimensions as usize, bytes)))
+    ) -> Result<Option<Vec<u8>>> {
+        self.0.fetch(
+            "SELECT e.vector FROM memory_embeddings e JOIN memories m ON m.id = e.memory_id \
+             WHERE e.memory_id = ?1 AND e.space = ?2 AND m.content_revision = ?3",
+            params![candidate.id, space, candidate.content_revision],
+            |row| row.get(0),
+        )
     }
 
     pub fn memory_edges(&self, id: &str) -> Result<Vec<(String, String)>> {
@@ -209,56 +188,57 @@ impl<'a> MemoryRepo<'a> {
         space: &str,
         limit: usize,
     ) -> Result<Vec<PendingEmbedding>> {
-        let Some(dimensions) = dimensions_of_space(space) else {
-            return Ok(Vec::new());
-        };
-        let connection = self.0.conn();
-        let mut statement = connection.prepare_cached(&format!(
-            "SELECT m.id, m.content, m.content_revision FROM memories m \
-             WHERE {VISIBLE} AND (m.embedding IS NULL OR m.embedding_model IS NOT ?2 \
-             OR m.embedding_dimensions IS NOT ?3 OR m.embedding_content_revision IS NULL \
-             OR m.embedding_content_revision != m.content_revision) \
-             ORDER BY m.rowid LIMIT ?4",
-        ))?;
-        let rows = statement.query_map(
-            params![companion, space, dimensions as i64, limit as i64],
+        self.0.fetch_all(
+            &format!(
+                "SELECT m.id, m.content_revision, m.content FROM memories m \
+                 WHERE {VISIBLE} AND NOT EXISTS (SELECT 1 FROM memory_embeddings e \
+                     WHERE e.memory_id = m.id AND e.space = ?2) ORDER BY m.rowid LIMIT ?3"
+            ),
+            params![companion, space, limit as i64],
             |row| {
                 Ok(PendingEmbedding {
-                    id: row.get(0)?,
-                    content: row.get(1)?,
-                    content_revision: row.get(2)?,
+                    candidate: RecallCandidate {
+                        id: row.get(0)?,
+                        content_revision: row.get(1)?,
+                    },
+                    content: row.get(2)?,
                 })
             },
-        )?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        )
     }
 
-    /// Writes a generated vector while the embedded content revision matches.
+    /// Stores the first completed vector for the visible content revision and space.
     pub fn write_embedding(
         &self,
-        id: &str,
-        content_revision: u64,
+        companion: &str,
+        candidate: &RecallCandidate,
         space: &str,
-        dimensions: usize,
         bytes: &[u8],
     ) -> Result<bool> {
-        let updated = self
+        let expected =
+            dimensions_of_space(space).and_then(|dims| dims.checked_mul(size_of::<f32>()));
+        if bytes.is_empty() || expected != Some(bytes.len()) {
+            return Err(StoreError::Invalid(
+                "embedding does not match its space dimensions".into(),
+            ));
+        }
+        let inserted = self
             .0
             .conn()
-            .prepare_cached(
-                "UPDATE memories SET embedding = ?3, embedding_model = ?4, \
-                 embedding_dimensions = ?5, embedding_content_revision = content_revision \
-                 WHERE id = ?1 AND content_revision = ?2",
-            )?
+            .prepare_cached(&format!(
+                "INSERT INTO memory_embeddings (memory_id, space, vector) \
+             SELECT m.id, ?4, ?5 FROM memories m \
+             WHERE {VISIBLE} AND m.id = ?2 AND m.content_revision = ?3 \
+             ON CONFLICT (memory_id, space) DO NOTHING"
+            ))?
             .execute(params![
-                id,
-                content_revision,
-                bytes,
+                companion,
+                candidate.id,
+                candidate.content_revision,
                 space,
-                dimensions as i64
+                bytes
             ])?;
-        Ok(updated > 0)
+        Ok(inserted != 0)
     }
 }
 
@@ -332,12 +312,7 @@ fn correct_memory_tx(
             .prepare_cached(
                 "UPDATE memories SET content = ?3, importance = ?4, \
                  content_revision = content_revision + ?5, \
-                 memory_revision = memory_revision + 1, last_accessed_at = ?6, \
-                 embedding = CASE WHEN ?5 = 1 THEN NULL ELSE embedding END, \
-                 embedding_model = CASE WHEN ?5 = 1 THEN NULL ELSE embedding_model END, \
-                 embedding_dimensions = CASE WHEN ?5 = 1 THEN NULL ELSE embedding_dimensions END, \
-                 embedding_content_revision = CASE WHEN ?5 = 1 THEN NULL \
-                     ELSE embedding_content_revision END \
+                 memory_revision = memory_revision + 1, last_accessed_at = ?6 \
                  WHERE id = ?1 AND memory_revision = ?2",
             )?
             .execute(params![

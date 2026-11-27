@@ -28,7 +28,7 @@ use rusqlite_migration::{HookResult, M, Migrations};
 pub const BASELINE_VERSION: i64 = 6;
 
 /// Latest database schema version managed by [`ladder_steps`].
-pub const VERSION: i64 = 24;
+pub const VERSION: i64 = 25;
 
 /// Every version this host applies above the baseline, in order. The position
 /// in this table is the version, so adding a row is the only way to add a
@@ -160,6 +160,32 @@ const STEPS_ABOVE_BASELINE: &[(&str, &str)] = &[
         "0024_device_activation_generation",
         "ALTER TABLE activations ADD COLUMN generation INTEGER NOT NULL DEFAULT 1;
          ALTER TABLE device_operations ADD COLUMN activation_generation INTEGER;",
+    ),
+    (
+        "0025_memory_embedding_spaces",
+        "CREATE TABLE memory_embeddings (
+            memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+            space TEXT NOT NULL,
+            vector BLOB NOT NULL CHECK (length(vector) > 0 AND length(vector) % 4 = 0),
+            PRIMARY KEY (memory_id, space)
+         );
+         INSERT INTO memory_embeddings (memory_id, space, vector)
+            SELECT id, embedding_model, embedding FROM memories
+            WHERE embedding_content_revision = content_revision
+              AND embedding_dimensions > 0 AND length(embedding) = embedding_dimensions * 4
+              AND substr(embedding_model, -length(':' || embedding_dimensions || ':v1'))
+                  = ':' || embedding_dimensions || ':v1';
+         DROP INDEX idx_memories_embedding_space;
+         DROP INDEX idx_memories_embedding_scope;
+         ALTER TABLE memories DROP COLUMN embedding;
+         ALTER TABLE memories DROP COLUMN embedding_model;
+         ALTER TABLE memories DROP COLUMN embedding_dimensions;
+         ALTER TABLE memories DROP COLUMN embedding_content_revision;
+         CREATE INDEX idx_memory_embeddings_space ON memory_embeddings(space, memory_id);
+         CREATE TRIGGER discard_revised_embeddings AFTER UPDATE OF content_revision ON memories
+         WHEN new.content_revision <> old.content_revision BEGIN
+            DELETE FROM memory_embeddings WHERE memory_id = old.id;
+         END;",
     ),
 ];
 

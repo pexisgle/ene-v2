@@ -79,11 +79,14 @@ CREATE TABLE IF NOT EXISTS memories (
     memory_revision INTEGER NOT NULL DEFAULT 1,
     content_revision INTEGER NOT NULL DEFAULT 1, -- 本文更新時にインクリメントされ、埋め込みの鮮度検証に使用
     emotion TEXT,                     -- 当時の感情タグ
-    source_context TEXT NOT NULL,     -- JSON: 由来（turn_id, run_id, 話者等）
-    embedding BLOB,                   -- ベクトルバイト列 (f32 LE: Rust内スライスコサイン類似度計算用)
-    embedding_model TEXT,             -- 埋め込み空間複合識別子: "<model_name>:<dimensions>:<prep_version>"（例: "text-embedding-3-small:1536:v1"）
-    embedding_dimensions INTEGER,     -- 例: 1536
-    embedding_content_revision INTEGER -- 生成時の content_revision (不一致時は無効・再計算対象)
+    source_context TEXT NOT NULL     -- JSON: 由来（turn_id, run_id, 話者等）
+);
+
+CREATE TABLE IF NOT EXISTS memory_embeddings (
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    space TEXT NOT NULL,              -- モデル名、接続設定の指紋、次元数、前処理版
+    vector BLOB NOT NULL,             -- f32 little-endian
+    PRIMARY KEY (memory_id, space)
 );
 
 -- 4. 日本語 trigram 全文検索外部コンテンツ仮想テーブル
@@ -233,7 +236,7 @@ for candidate in &mut fused_candidates {
 ```
 - **マルチプロバイダー埋め込み（ローカル / クラウド選択性と空間分離）**:
   - セットアップ時や設定画面で、ユーザーの環境やプライバシー要件に応じて埋め込みモデルを柔軟に選択可能とする（ローカル: `fastembed`, `bge-m3`, `all-MiniLM-L6-v2` 等、クラウド: OpenAI `text-embedding-3-small`, Gemini 等）。
-  - 各記憶レコードは、モデル名・次元数・前処理バージョンを複合化した `embedding_model` 識別子（例: `"text-embedding-3-small:1536:v1"`）を保持し、検索時は現在の空間識別子と完全一致するベクトルのみを走査・類似度計算の対象とする（次元不一致や前処理変更による破綻を決定論的に防止）。
+  - ベクトルは記憶IDと空間識別子の組で保存する。空間識別子はモデル名・接続設定の指紋・次元数・前処理バージョンを含む。共有記憶も空間ごとに独立したベクトルを持ち、検索には選択中の空間のベクトルだけを使う。本文の改訂時は、同じトランザクションですべての派生ベクトルを削除する。
 - **Importance（重要度: $0.0 \sim 1.0$）**:
   - $0 \sim 10$ の順序尺度。$\text{Importance} = \text{importance} / 10.0$ として正規化（忘却時は $0$ または $1$ へ引き下げる）。
     - $0$: 忘却指示を受けた記憶（明示的検索でのみ参照可能）
@@ -389,4 +392,4 @@ SQLite トランザクション (Atomic Commit)
 | **遅延整理・並行コミットの競合排除** | 記憶変更の後、変更前の文脈から生成した整理結果をコミット試行 | `memory_revision` 不一致（Conflict）としてそのコミットが破棄され、古い状態の上書きが排除されること |
 | **引用ガードの厳密性** | 検索候補としてプロンプトに注入された記憶と、応答内で明示操作または推定引用された記憶を比較 | 検索されただけでは `last_accessed_at` が更新されず、明示操作（`cited_in`）またはホスト照合を通過した推定引用（`estimated_cited_in`）の場合のみ更新されること |
 | **Pinned予算制限** | 重要度10の記憶を多数作成し、プロンプト生成を実行 | 予算上限（例: 1,000トークン）を超過せず、文脈窓を圧迫しないこと |
-| **埋め込み空間の隔離** | 異なる埋め込みモデル名・次元数・前処理バージョンの複合キー（`embedding_model`）を持つベクトルを登録して検索 | 次元不一致や前処理違いのベクトルが混入せず、一致する空間複合キーのみで類似度計算が行われること |
+| **埋め込み空間の隔離** | 異なる埋め込みモデル名・接続設定・次元数・前処理バージョンを持つベクトルを同じ共有記憶に登録して検索 | ベクトルが空間ごとに保持され、現在の空間複合キーと一致するベクトルで類似度計算が行われること |

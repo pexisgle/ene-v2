@@ -2,10 +2,9 @@
 //! keeps as the canonical copy, and the flat in-memory index recall scans.
 //!
 //! The database stays canonical: every vector is written back through
-//! the backfill writer, and the index only mirrors rows whose
-//! `embedding_content_revision` still matches their `content_revision`. A
-//! memory whose content changed is re-embedded, never mixed with the stale
-//! vector (docs/design/mind.md §4.1).
+//! the backfill writer into its own space. Whenever the content revision
+//! changes, SQLite deletes the old vectors so the new text is re-embedded
+//! (docs/design/mind.md §4.1).
 //!
 //! Each embedding space hashes non-secret canonical provider parameters
 //! (`adapter`, `endpoint`, `options`, `model`) alongside `dimensions` and the

@@ -1,4 +1,4 @@
-//! In-memory compact vector index mirroring SQLite `memories.embedding`
+//! In-memory compact vector index mirroring SQLite `memory_embeddings`
 //! per `(companion, space)` so top-k ranking is isolated by companion and space.
 use super::dimensions_of_space;
 use crate::host::{
@@ -10,7 +10,7 @@ use ene_mind::{RecallCandidate, RecallMode};
 use itertools::Itertools;
 use std::collections::HashMap;
 
-/// The f32 LE wire format stored in `memories.embedding`.
+/// The f32 LE format stored in `memory_embeddings.vector`.
 pub(super) fn encode(vector: &[f32]) -> Vec<u8> {
     vector
         .iter()
@@ -86,6 +86,9 @@ impl CompactVectorIndex {
     /// revision still matches are reused, so an unchanged space reads no BLOB
     /// column.
     pub(crate) fn sync(&mut self, store: &Store, companion: &str, space: &str) -> Result<()> {
+        let Some(dimensions) = dimensions_of_space(space) else {
+            return Ok(());
+        };
         let rows = store.memory_repo().embedding_revisions(space, companion)?;
         let key = (companion.to_owned(), space.to_owned());
         if self
@@ -97,12 +100,7 @@ impl CompactVectorIndex {
         }
         let previous = self.spaces.remove(&key);
         let mut next = Space {
-            dimensions: previous
-                .as_ref()
-                .map(|current| current.dimensions)
-                .filter(|dimensions| *dimensions > 0)
-                .or_else(|| dimensions_of_space(space))
-                .unwrap_or(0),
+            dimensions,
             ..Space::default()
         };
         for (candidate, importance) in &rows {
@@ -110,8 +108,7 @@ impl CompactVectorIndex {
                 next.push(candidate, *importance, vector);
                 continue;
             }
-            let Some((dimensions, bytes)) = store.memory_repo().embedding_blob(candidate, space)?
-            else {
+            let Some(bytes) = store.memory_repo().embedding_blob(candidate, space)? else {
                 continue;
             };
             let vector = decode(&bytes)?;
@@ -119,13 +116,6 @@ impl CompactVectorIndex {
                 return Err(HostError::Storage(
                     ("stored embedding dimensions do not match its length").into(),
                 ));
-            }
-            if next.dimensions == 0 {
-                next.dimensions = dimensions;
-            }
-            if dimensions != next.dimensions {
-                // A vector of another dimension is not part of this space.
-                continue;
             }
             next.push(candidate, *importance, &vector);
         }

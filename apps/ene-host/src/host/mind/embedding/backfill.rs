@@ -187,10 +187,9 @@ pub(super) async fn fill(
                 ));
             }
             if memories.write_embedding(
-                &row.id,
-                row.content_revision,
+                &companion.id,
+                &row.candidate,
                 &target.space,
-                target.dimensions,
                 &encode(vector),
             )? {
                 written += 1;

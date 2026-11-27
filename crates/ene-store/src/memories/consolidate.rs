@@ -161,9 +161,7 @@ fn apply_consolidated_fact(
             .prepare_cached(
                 "UPDATE memories SET content = ?3, importance = ?4, \
                  content_revision = content_revision + 1, \
-                 memory_revision = memory_revision + 1, last_accessed_at = ?5, \
-                 embedding = NULL, embedding_model = NULL, \
-                 embedding_dimensions = NULL, embedding_content_revision = NULL \
+                 memory_revision = memory_revision + 1, last_accessed_at = ?5 \
                  WHERE id = ?1 AND memory_revision = ?2",
             )?
             .execute(params![id, revision, content, importance, stamp])?;

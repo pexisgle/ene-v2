@@ -1,4 +1,5 @@
 //! Embedding space identifiers and pending backfill row descriptors.
+use crate::memory::RecallCandidate;
 use sha2::{Digest, Sha256};
 
 /// The preprocessing version in the composite space id. Bump it whenever the
@@ -8,9 +9,8 @@ pub const PREP_VERSION: &str = "v1";
 /// A vector row waiting for an embedding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingEmbedding {
-    pub id: String,
+    pub candidate: RecallCandidate,
     pub content: String,
-    pub content_revision: u64,
 }
 
 /// The composite key that identifies an embedding space: the model, a short

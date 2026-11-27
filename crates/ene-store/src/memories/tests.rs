@@ -43,42 +43,91 @@ fn apply(
 }
 
 #[test]
-fn recurring_cached_embedding_writes_keep_bindings_and_revision_guards() {
+fn embedding_spaces_share_current_content_without_overwrites() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
     let repo = store.memory_repo();
     let first = repo.insert_memory(&new_memory("first", 3)).unwrap();
     let second = repo.insert_memory(&new_memory("second", 4)).unwrap();
+    repo.control_memory(&first.id, MemoryActionKind::Share, "ene")
+        .unwrap();
     let secondary = store.open_secondary().unwrap();
     let writer = secondary.memory_repo();
+    let first = RecallCandidate::from(&first);
+    let second = RecallCandidate::from(&second);
     let a = 1.0_f32.to_le_bytes();
     let b = 2.0_f32.to_le_bytes();
-    for (memory, bytes) in [(&first, &a), (&second, &b), (&first, &b)] {
+    let space_a = "alpha:1:v1";
+    let space_b = "beta:1:v1";
+    for (companion, candidate, space, bytes) in [
+        ("ene", &first, space_a, &a),
+        ("ene", &second, space_a, &b),
+        ("other", &first, space_b, &b),
+    ] {
         assert!(
             writer
-                .write_embedding(&memory.id, memory.content_revision, "fake:1:v1", 1, bytes)
+                .write_embedding(companion, candidate, space, bytes)
                 .unwrap()
         );
     }
+    assert!(!writer.write_embedding("ene", &first, space_a, &b).unwrap());
     assert!(
         !writer
-            .write_embedding(&first.id, first.content_revision + 1, "fake:1:v1", 1, &a)
+            .write_embedding("other", &second, space_b, &a)
             .unwrap()
     );
+    assert_eq!(
+        repo.embedding_blob(&first, space_a).unwrap().as_deref(),
+        Some(&a[..])
+    );
+    assert_eq!(
+        repo.embedding_blob(&first, space_b).unwrap().as_deref(),
+        Some(&b[..])
+    );
+    assert_eq!(
+        repo.embedding_blob(&second, space_a).unwrap().as_deref(),
+        Some(&b[..])
+    );
+    assert_eq!(
+        repo.memories_missing_embedding("other", space_b, 10)
+            .unwrap(),
+        Vec::<PendingEmbedding>::new()
+    );
+
+    repo.control_memory(&first.id, MemoryActionKind::Unshare, "ene")
+        .unwrap();
     assert!(
-        writer
-            .write_embedding(&second.id, second.content_revision, "fake:1:v1", 1, &a)
+        !writer
+            .write_embedding("other", &first, "third:1:v1", &a)
             .unwrap()
     );
+    store.conn().execute(
+        "UPDATE memories SET content = 'corrected', content_revision = content_revision + 1 WHERE id = ?1",
+        [&first.id],
+    ).unwrap();
+    for space in [space_a, space_b] {
+        assert_eq!(repo.embedding_blob(&first, space).unwrap(), None);
+        assert!(!writer.write_embedding("ene", &first, space, &a).unwrap());
+        let pending = repo.memories_missing_embedding("ene", space, 10).unwrap();
+        assert_eq!(pending[0].candidate.id, first.id);
+        assert_eq!(
+            pending[0].candidate.content_revision,
+            first.content_revision + 1
+        );
+        assert!(
+            writer
+                .write_embedding("ene", &pending[0].candidate, space, &a)
+                .unwrap()
+        );
+    }
+    store.reset_learned_state().unwrap();
     assert_eq!(
-        repo.embedding_blob(&RecallCandidate::from(&first), "fake:1:v1")
+        store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM memory_embeddings", [], |row| row
+                .get::<_, u32>(0))
             .unwrap(),
-        Some((1, b.to_vec()))
-    );
-    assert_eq!(
-        repo.embedding_blob(&RecallCandidate::from(&second), "fake:1:v1")
-            .unwrap(),
-        Some((1, a.to_vec()))
+        0
     );
 }
 
