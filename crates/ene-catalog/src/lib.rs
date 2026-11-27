@@ -20,5 +20,6 @@ pub use vendors::{
     SAKURA_CHAT_MODELS, SAKURA_EMBEDDING_MODELS, SAKURA_STT_MODELS, SAKURA_TTS_VOICES,
     SAKURA_VISION_MODELS, default_embedding_dimensions, default_models_for_adapter,
     is_non_chat_sakura_model, is_sakura_connection, is_sakura_endpoint, is_sakura_tts_model_id,
+    known_embedding_dimensions,
 };
 pub use voice::{OPENAI_TTS_VOICES, parse_voice_resource};

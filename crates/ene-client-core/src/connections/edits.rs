@@ -171,24 +171,29 @@ fn apply_stt_edits(stt: &mut SttConnection, spec: &ConnectionEditSpec<'_>) {
     stt.language_hints = hints;
 }
 
+fn default_embedding_model(endpoint: &ConnectionEndpoint) -> &'static str {
+    if endpoint.adapter.eq_ignore_ascii_case("sakura")
+        || ene_catalog::is_sakura_endpoint(&endpoint.endpoint)
+    {
+        "multilingual-e5-large"
+    } else {
+        "text-embedding-3-small"
+    }
+}
+
 fn apply_embedding_edits(emb: &mut EmbeddingConnection, spec: &ConnectionEditSpec<'_>) {
     let mut ep = updated_endpoint(emb.endpoint.as_ref(), spec.endpoint_url, spec.options_json);
     if ep.adapter.trim().is_empty() {
         ep.adapter = "openai".to_owned();
     }
-    let sakura =
-        ep.adapter.eq_ignore_ascii_case("sakura") || ene_catalog::is_sakura_endpoint(&ep.endpoint);
-    emb.endpoint = Some(ep);
-    let trimmed = spec.list_raw.trim();
-    emb.model_id = if trimmed.is_empty() {
-        if sakura {
-            "multilingual-e5-large".to_owned()
-        } else {
-            "text-embedding-3-small".to_owned()
-        }
+    let model_id = spec.list_raw.trim();
+    emb.model_id = if model_id.is_empty() {
+        default_embedding_model(&ep)
     } else {
-        trimmed.to_owned()
-    };
+        model_id
+    }
+    .to_owned();
+    emb.endpoint = Some(ep);
     let parsed_dim = spec
         .dimensions_raw
         .and_then(|raw| raw.trim().parse::<u32>().ok())
@@ -303,13 +308,8 @@ pub fn build_custom_connection_input(
             if emb_ep.adapter.trim().is_empty() {
                 emb_ep.adapter = "openai".to_owned();
             }
-            let sakura = emb_ep.adapter.eq_ignore_ascii_case("sakura")
-                || ene_catalog::is_sakura_endpoint(&emb_ep.endpoint);
-            let (model_id, dimensions) = if sakura {
-                ("multilingual-e5-large".to_owned(), 1024)
-            } else {
-                ("text-embedding-3-small".to_owned(), 1536)
-            };
+            let model_id = default_embedding_model(&emb_ep).to_owned();
+            let dimensions = ene_catalog::default_embedding_dimensions(&model_id);
             ConnectionConfig::Embedding(EmbeddingConnection {
                 endpoint: Some(emb_ep),
                 model_id,

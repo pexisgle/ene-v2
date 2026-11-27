@@ -1,7 +1,7 @@
 //! Connections and settings domain models and validation.
 
 use crate::{ConnectionId, Failure, error::DomainError, json};
-use ene_catalog::{GOOGLE_AGENT_PLATFORM, GOOGLE_AGENT_PLATFORM_ENDPOINT};
+use ene_catalog::{GOOGLE_AGENT_PLATFORM, GOOGLE_AGENT_PLATFORM_ENDPOINT, SearchAdapter};
 use ene_policy::PolicyText;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -292,17 +292,13 @@ impl ConnectionConfig {
 }
 
 fn validate_search(config: &SearchConnection) -> Result<(), DomainError> {
-    let adapter = config.endpoint.adapter.trim().to_ascii_lowercase();
-    if !matches!(
-        adapter.as_str(),
-        "mwmbl" | "searxng" | "brave" | "tavily" | "exa"
-    ) {
-        return Err(DomainError::Invalid(format!(
+    let adapter = SearchAdapter::parse(&config.endpoint.adapter).ok_or_else(|| {
+        DomainError::Invalid(format!(
             "unsupported search adapter `{}`",
             config.endpoint.adapter.trim()
-        )));
-    }
-    if adapter == "searxng" && config.endpoint.endpoint.trim().is_empty() {
+        ))
+    })?;
+    if adapter == SearchAdapter::Searxng && config.endpoint.endpoint.trim().is_empty() {
         return Err(DomainError::Invalid(
             "SearXNG search connections require an endpoint URL".into(),
         ));

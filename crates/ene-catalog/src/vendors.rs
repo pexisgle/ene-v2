@@ -101,15 +101,20 @@ pub fn is_non_chat_sakura_model(id: &str) -> bool {
         || is_sakura_tts_model_id(&lower)
 }
 
-pub fn default_embedding_dimensions(model_id: &str) -> u32 {
+pub fn known_embedding_dimensions(model_id: &str) -> Option<u32> {
     match model_id.trim() {
-        "multilingual-e5-large" => 1024,
+        "multilingual-e5-large" => Some(1024),
         "preview/Qwen3-Embedding-4B-FP16" | "Qwen3-Embedding-4B" | "Qwen3-Embedding-4B-FP16" => {
-            2560
+            Some(2560)
         }
-        "text-embedding-3-large" => 3072,
-        _ => 1536,
+        "text-embedding-3-small" | "text-embedding-ada-002" => Some(1536),
+        "text-embedding-3-large" => Some(3072),
+        _ => None,
     }
+}
+
+pub fn default_embedding_dimensions(model_id: &str) -> u32 {
+    known_embedding_dimensions(model_id).unwrap_or(1536)
 }
 
 pub fn default_models_for_adapter(adapter: &str) -> &'static [&'static str] {

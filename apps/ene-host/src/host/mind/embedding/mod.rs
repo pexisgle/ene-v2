@@ -108,18 +108,6 @@ async fn request(target: &Target, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     Ok(vectors)
 }
 
-pub(crate) fn default_dimensions(model_id: &str) -> Option<u32> {
-    match model_id.trim() {
-        "multilingual-e5-large" => Some(1024),
-        "preview/Qwen3-Embedding-4B-FP16" | "Qwen3-Embedding-4B" | "Qwen3-Embedding-4B-FP16" => {
-            Some(2560)
-        }
-        "text-embedding-3-small" | "text-embedding-ada-002" => Some(1536),
-        "text-embedding-3-large" => Some(3072),
-        _ => None,
-    }
-}
-
 struct ConnectParams<'a> {
     connection: &'a Connection,
     credentials: Option<&'a Credentials>,
@@ -308,7 +296,7 @@ fn target(
     let dimensions = if config.dimensions > 0 {
         config.dimensions as usize
     } else {
-        default_dimensions(model_id).unwrap_or(0) as usize
+        ene_catalog::known_embedding_dimensions(model_id).unwrap_or(0) as usize
     };
     // The space id is only stable when the dimensions are known up front.
     if model_id.is_empty() || dimensions == 0 || dimensions > MAX_DIMENSIONS {
