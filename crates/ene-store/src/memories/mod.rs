@@ -11,7 +11,7 @@ mod tests;
 pub use ops::{detail, profile_lines};
 pub(crate) use store::{add_edge, check_importance, insert_row};
 
-use crate::row::FromRow;
+use crate::row::{FromRow, row_fields};
 use crate::{
     Store, StoreError,
     error::Result,
@@ -32,21 +32,25 @@ const MAX_INJECTED: usize = 64;
 const KEEP_INJECTED_TURNS: usize = 64;
 const AUTO_VISIBLE: &str = "(m.scope = ?1 OR m.scope = 'shared') AND m.importance >= 2";
 
-const FIELDS: &str = "id, scope, content, importance, occurred_at, recorded_at, \
-     last_accessed_at, memory_revision, content_revision, emotion, source_context";
-
-pub(super) const COLUMNS: &str = "rowid, id, scope, content, importance, occurred_at, \
-     recorded_at, last_accessed_at, memory_revision, content_revision, emotion, source_context";
-
-const JOINED_COLUMNS: &str = "m.rowid, m.id, m.scope, m.content, m.importance, \
-     m.occurred_at, m.recorded_at, m.last_accessed_at, m.memory_revision, \
-     m.content_revision, m.emotion, m.source_context";
+row_fields!(Memory, FIELDS {
+    id,
+    scope,
+    content,
+    importance,
+    occurred_at,
+    recorded_at,
+    last_accessed_at,
+    memory_revision,
+    content_revision,
+    emotion,
+    source_context => json_column("stored memory source context is corrupt"),
+});
 
 pub(super) const VISIBLE: &str = "(m.scope = ?1 OR m.scope = 'shared')";
 
 fn load_memory(connection: &rusqlite::Connection, id: &str) -> Result<Option<Memory>> {
     Ok(connection
-        .prepare_cached(&format!("SELECT {COLUMNS} FROM memories WHERE id = ?1"))?
+        .prepare_cached(&format!("SELECT {FIELDS} FROM memories WHERE id = ?1"))?
         .query_row([id], Memory::from_row)
         .optional()?)
 }
@@ -203,7 +207,7 @@ impl<'a> MemoryRepo<'a> {
     pub fn pinned(&self, companion: &str) -> Result<Vec<Memory>> {
         let connection = self.0.conn();
         let mut statement = connection.prepare_cached(&format!(
-            "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance = 10 \
+            "SELECT {FIELDS} FROM memories m WHERE {VISIBLE} AND m.importance = 10 \
              ORDER BY COALESCE(m.last_accessed_at, m.recorded_at) DESC, m.rowid DESC"
         ))?;
         let rows = statement.query_map([companion], Memory::from_row)?;
@@ -235,7 +239,7 @@ impl<'a> MemoryRepo<'a> {
         }
         let connection = self.0.conn();
         let mut statement = connection.prepare_cached(&format!(
-            "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.rowid > ?2 \
+            "SELECT m.rowid, {FIELDS} FROM memories m WHERE {VISIBLE} AND m.rowid > ?2 \
              ORDER BY m.rowid LIMIT ?3"
         ))?;
         let lookahead = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);

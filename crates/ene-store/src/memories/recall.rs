@@ -1,4 +1,4 @@
-use super::{COLUMNS, JOINED_COLUMNS, VISIBLE};
+use super::{FIELDS, VISIBLE};
 use crate::{error::Result, row::FromRow, to_json};
 use ene_mind::{Memory, RecallCandidate, RecallMode, recall_terms};
 use itertools::Itertools as _;
@@ -38,7 +38,7 @@ pub(super) fn lexical_candidates(
             .join(" OR ");
         read(
             &format!(
-                "SELECT {JOINED_COLUMNS} FROM memories_fts f JOIN memories m ON m.rowid = f.rowid \
+                "SELECT m.* FROM memories_fts f JOIN memories m ON m.rowid = f.rowid \
                  WHERE {VISIBLE} AND {ELIGIBLE} AND memories_fts MATCH ?3 \
                  ORDER BY bm25(memories_fts), f.rowid LIMIT {CANDIDATES}"
             ),
@@ -82,7 +82,7 @@ pub(super) fn semantic_memories(
         return Ok(Vec::new());
     }
     let mut statement = connection.prepare_cached(&format!(
-        "SELECT {JOINED_COLUMNS} FROM json_each(?3) AS candidate CROSS JOIN memories m \
+        "SELECT m.* FROM json_each(?3) AS candidate CROSS JOIN memories m \
          WHERE m.id = candidate.value ->> '$.id' \
          AND m.content_revision = candidate.value ->> '$.content_revision' \
          AND {VISIBLE} AND m.importance >= ?2 ORDER BY candidate.key"
@@ -105,7 +105,7 @@ fn short_query(terms: &[&str]) -> Result<(String, String)> {
     };
     let ordered = |scope, predicate| {
         format!(
-            "SELECT {COLUMNS} FROM memories m WHERE {scope} AND {ELIGIBLE} AND {predicate} \
+            "SELECT m.rowid, {FIELDS} FROM memories m WHERE {scope} AND {ELIGIBLE} AND {predicate} \
              ORDER BY m.importance DESC, m.rowid DESC LIMIT {CANDIDATES}"
         )
     };

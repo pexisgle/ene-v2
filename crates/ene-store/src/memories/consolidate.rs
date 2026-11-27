@@ -3,7 +3,7 @@
 
 use super::ops::update_mind_state;
 use super::{
-    Batch, COLUMNS, Commit, Fact, Memory, MemoryContext, MemoryRecord, MemoryRepo, Result,
+    Batch, Commit, FIELDS, Fact, Memory, MemoryContext, MemoryRecord, MemoryRepo, Result,
     SHARED_SCOPE, VISIBLE, add_edge, cite_visible_memory, insert_row, load_memory, now,
     supersede_tx, truncate, validate_citations,
 };
@@ -27,15 +27,15 @@ impl<'a> MemoryRepo<'a> {
         }
         let mut seen = HashSet::new();
         let mut contexts = Vec::new();
-        let mut push = |memory: &Memory, contexts: &mut Vec<MemoryContext>| {
+        let mut push = |memory: Memory, contexts: &mut Vec<MemoryContext>| {
             if !memory.visible_to(companion) || !seen.insert(memory.id.clone()) {
                 return;
             }
             contexts.push(MemoryContext {
-                id: memory.id.clone(),
+                id: memory.id,
                 revision: memory.memory_revision,
                 importance: memory.importance,
-                content: memory.content.clone(),
+                content: memory.content,
             });
         };
         let retrieved = self.recall_hybrid(
@@ -45,22 +45,22 @@ impl<'a> MemoryRepo<'a> {
             semantic,
             limit.saturating_mul(2),
         )?;
-        for scored in &retrieved.items {
-            push(&scored.memory, &mut contexts);
+        for scored in retrieved.items {
+            push(scored.memory, &mut contexts);
             if contexts.len() >= limit {
                 return Ok(contexts);
             }
         }
         let connection = self.0.conn();
         let mut statement = connection.prepare_cached(&format!(
-            "SELECT {COLUMNS} FROM memories m \
+            "SELECT {FIELDS} FROM memories m \
              WHERE {VISIBLE} AND m.importance >= 2 \
              ORDER BY m.importance DESC, COALESCE(m.last_accessed_at, m.recorded_at) DESC, \
              m.rowid DESC LIMIT ?2"
         ))?;
         let rows = statement.query_map(params![companion, limit as i64], Memory::from_row)?;
         for memory in rows {
-            push(&memory?, &mut contexts);
+            push(memory?, &mut contexts);
             if contexts.len() >= limit {
                 break;
             }
