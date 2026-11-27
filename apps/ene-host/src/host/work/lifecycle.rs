@@ -127,15 +127,17 @@ pub(crate) fn restore(world: &mut World) -> Result<()> {
             let executor = work.run_executor(&run.run_id)?.ok_or_else(|| {
                 HostError::Storage("the work run disappeared during recovery".into())
             })?;
-            let legacy_run_log = logs.contains_key(&agent::work_agent_id(&run.run_id));
-            let persisted_input = restored
-                .and_then(|entity| world.get::<Conversation>(entity))
-                .is_some_and(|conversation| persisted_run_input(conversation, &run.run_id));
-            let available = match executor {
-                RunExecutor::Rig => persisted_input || legacy_run_log || already_attached.is_some(),
-                RunExecutor::Harness { .. } => false,
-                RunExecutor::Unrecorded => legacy_run_log,
-            };
+            let legacy_run_log = restored.is_some_and(|entity| {
+                logs.get(&agent::work_agent_id(&run.run_id)) == Some(&entity)
+            });
+            let available = restored
+                .or(already_attached)
+                .and_then(|entity| {
+                    let agent = world.get_entity(entity).ok()?;
+                    let turn = world.get_entity(agent.get::<ActiveTurn>()?.turn()).ok()?;
+                    Some(is_live_run(&agent, &turn, run, &executor, legacy_run_log))
+                })
+                .unwrap_or(false);
             if available && companion.is_some() {
                 world.resource_mut::<Runs>().begin(&run.run_id);
                 true
@@ -145,7 +147,7 @@ pub(crate) fn restore(world: &mut World) -> Result<()> {
                     run.clone(),
                     RunState::Failed,
                     Some(
-                        "作業を続けられませんでした。ホスト再起動後に実行環境を復元できません。"
+                        "ホストの再起動で作業が中断されました。実行中のターンを確認できません。"
                             .into(),
                     ),
                 );
@@ -187,14 +189,31 @@ pub(crate) fn restore(world: &mut World) -> Result<()> {
     Ok(())
 }
 
-fn persisted_run_input(conversation: &Conversation, run_id: &str) -> bool {
-    conversation.entries().any(|entry| {
-        entry.is_users_own()
-            && entry
-                .author
-                .and_then(|author| author.request.as_ref())
-                .is_some_and(|id| id.0 == run_id)
-    })
+fn is_live_run(
+    agent: &EntityRef<'_>,
+    turn: &EntityRef<'_>,
+    run: &super::Run,
+    executor: &RunExecutor,
+    legacy_run_log: bool,
+) -> bool {
+    if matches!(executor, RunExecutor::Harness { .. }) {
+        return false;
+    }
+    if turn.contains::<TurnOutcome>() || turn.contains::<rig_ecs::restore::Restored>() {
+        return false;
+    }
+    legacy_run_log
+        || matches!(executor, RunExecutor::Rig)
+            && turn
+                .get::<Turn>()
+                .and_then(|turn| agent.get::<Conversation>()?.request(turn.start))
+                .is_some_and(|entry| {
+                    entry.is_users_own()
+                        && entry
+                            .author
+                            .and_then(|author| author.request.as_ref())
+                            .is_some_and(|id| id.0 == run.run_id)
+                })
 }
 
 pub(super) fn detect_stalls(world: &mut World) {
