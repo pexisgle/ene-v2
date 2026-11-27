@@ -29,7 +29,7 @@ pub(super) fn render_remote_host_section(
 ) -> (AnyElement, AnyElement) {
     let saved = RemoteProfile::read();
     let has_current = !matches!(saved, Ok(None));
-    let current_remote = saved.ok().flatten().map(|profile| profile.endpoint);
+    let current_remote = saved.as_ref().ok().and_then(Option::as_ref);
     let remote_open = pane.form.remote_host_open;
     let pane_remote_toggle = cx.entity();
     let remote_heading = div()
@@ -52,8 +52,17 @@ pub(super) fn render_remote_host_section(
         )
         .into_any_element();
 
-    let form = remote_open
-        .then(|| render_remote_host_form(pane, current_remote.as_deref(), has_current, theme, cx));
+    let form = remote_open.then(|| {
+        let endpoint = current_remote.map(|profile| profile.endpoint.as_str());
+        render_remote_host_form(pane, endpoint, has_current, theme, cx)
+    });
+    let status = match saved {
+        Ok(Some(profile)) if !profile.needs_registration() => {
+            format!("遠隔 HTTPS ({})", profile.endpoint)
+        }
+        Ok(None) => "ローカル（自動検出）".to_owned(),
+        _ => "遠隔設定を再登録してください".to_owned(),
+    };
     let remote_card = div()
         .w_full()
         .bg(theme.bg_surface)
@@ -64,21 +73,8 @@ pub(super) fn render_remote_host_section(
         .flex_col()
         .child(row_frame(
             false,
-            "接続モード",
-            Some(match &current_remote {
-                Some(ep) => status_pill(
-                    format!("遠隔 HTTPS ({ep})"),
-                    Some(theme.mint),
-                    theme.mint_soft,
-                    theme.mint_fg,
-                ),
-                None => status_pill(
-                    "ローカル（自動検出）",
-                    Some(theme.mint),
-                    theme.mint_soft,
-                    theme.mint_fg,
-                ),
-            }),
+            "次回起動時の接続先",
+            Some(status_pill(status, None, theme.bg_blush, theme.ink_muted)),
             pill_button(
                 "dev-remote-toggle",
                 if remote_open {
@@ -121,7 +117,7 @@ fn render_remote_host_form(
         pane.drafts
             .masked_draft(cx, "remote:token", "Owner Bearer トークン", true, theme);
     let ep_val = remote_ep_d.read(cx).text().trim().to_owned();
-    let tok_val = remote_tok_d.read(cx).text().trim().to_owned();
+    let has_token = !remote_tok_d.read(cx).text().trim().is_empty();
     let ep_validation = (!ep_val.is_empty())
         .then(|| {
             RemoteProfile::validate_endpoint(&ep_val)
@@ -130,13 +126,13 @@ fn render_remote_host_form(
         })
         .flatten();
     let saving = matches!(pane.form.remote_status, RemoteStatus::Saving);
-    let can_save_remote =
-        !saving && !ep_val.is_empty() && !tok_val.is_empty() && ep_validation.is_none();
+    let can_save_remote = !saving && !ep_val.is_empty() && has_token && ep_validation.is_none();
     let pane_save_remote = cx.entity();
     let pane_clear_remote = pane_save_remote.clone();
     let tok_clear = remote_tok_d.clone();
     let tok_save = remote_tok_d.clone();
     let ep_clear = remote_ep_d.clone();
+    let ep_save = remote_ep_d.clone();
     let status = match &pane.form.remote_status {
         RemoteStatus::Idle => None,
         RemoteStatus::Saving => Some(("保存中…".into(), theme.ink_muted)),
@@ -199,8 +195,8 @@ fn render_remote_host_form(
                     move |_, cx| {
                         pane_save_remote.update(cx, |pane, cx| {
                             let edit = RemoteEdit::Save {
-                                endpoint: ep_val.clone(),
-                                token: tok_val.clone(),
+                                endpoint: ep_save.read(cx).text().trim().to_owned(),
+                                token: tok_save.read(cx).text().trim().to_owned(),
                             };
                             edit_remote(pane, edit, vec![tok_save.clone()], cx);
                         });

@@ -19,8 +19,8 @@ use args::DesktopInitError;
 use args::{DesktopArgs, OpenAt};
 use clap::Parser as _;
 use ene_desktop::{
-    Command, Connection, EmbeddedAssets, HostTarget, Hub, Options, PodMode, Session, Tray,
-    TrayAction, TrayState, bind_actions, open_pod_window,
+    Command, Connection, EmbeddedAssets, HostTarget, Hub, Options, PodMode, RemoteProfile, Session,
+    Tray, TrayAction, TrayState, bind_actions, open_pod_window,
 };
 use gpui::{App, AppContext as _};
 use parking_lot::RwLock;
@@ -265,6 +265,11 @@ fn run_gpui_app(init: DesktopAppInit) {
     gpui::application()
         .with_assets(EmbeddedAssets)
         .run(move |cx: &mut App| {
+            cx.background_executor()
+                .spawn(async {
+                    ene_domain::warn_if_err(RemoteProfile::recover(), "remote credential recovery");
+                })
+                .detach();
             #[cfg(windows)]
             if let Some(history_reset) = init.history_reset_ui {
                 cx.set_global(history_reset);

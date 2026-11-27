@@ -4,7 +4,7 @@ use super::Connect;
 use ene_keyring::{Entry, Error as VaultError, Keyring};
 use io_lifetimes::AsFilelike as _;
 use private_fs::{Durability, FileAccess, FileCreation, OpenOptions, PrivateDir, PrivateFile};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -12,13 +12,20 @@ use std::{
 use uuid::Uuid;
 
 const PREFERENCE: &str = "target.json";
+const PENDING: &str = "pending.json";
 const LEGACY: &str = "remote_host.json";
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RemoteProfile {
     pub endpoint: String,
     #[serde(default)]
     slot: Option<Uuid>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Publication {
+    previous: Option<RemoteProfile>,
+    next: Option<RemoteProfile>,
 }
 
 pub(crate) enum RemoteEdit {
@@ -36,7 +43,7 @@ impl RemoteProfile {
     pub fn read() -> Result<Option<Self>, Connect> {
         let root = config_root()?;
         if let Some(directory) = open_remote_dir(&root)?
-            && let Some(profile) = read_profile(&directory)?
+            && let Some(profile) = read_json(&directory, PREFERENCE)?
         {
             return Ok(Some(profile));
         }
@@ -47,6 +54,22 @@ impl RemoteProfile {
         };
         legacy.slot = None;
         Ok(Some(legacy))
+    }
+
+    /// Retries a previously interrupted edit on a background thread.
+    pub fn recover() -> Result<(), Connect> {
+        let root = config_root()?;
+        if let Some(directory) = open_remote_dir(&root)?
+            && read_json::<Publication>(&directory, PENDING)?.is_some()
+        {
+            let _lock = lock(&directory)?;
+            finish_publication(&root, &directory)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn needs_registration(&self) -> bool {
+        self.slot.is_none()
     }
 
     pub(super) fn with_token(&self) -> Result<String, Connect> {
@@ -79,28 +102,32 @@ impl RemoteEdit {
         fs::create_dir_all(&root).map_err(unavailable)?;
         let directory = PrivateDir::ensure(root.join("remote-host")).map_err(unavailable)?;
         let _lock = lock(&directory)?;
+        finish_publication(&root, &directory)?;
         match self {
             Self::Save { endpoint, token } => {
-                save(&directory, read_profile(&directory)?, &endpoint, &token)?
+                save(&directory, &endpoint, &token)?;
+                finish_publication(&root, &directory)
             }
             Self::Clear => {
-                match read_profile(&directory) {
-                    Ok(Some(current)) => current.erase()?,
-                    Ok(None) | Err(Connect::Invalid(_)) => {}
+                let previous = match read_json(&directory, PREFERENCE) {
+                    Ok(previous) => previous,
+                    Err(Connect::Invalid(_)) => None,
                     Err(error) => return Err(error),
+                };
+                if previous.is_some() {
+                    write_json(
+                        &directory,
+                        PENDING,
+                        &Publication {
+                            previous,
+                            next: None,
+                        },
+                    )?;
                 }
-                match directory.remove_file(PREFERENCE, Durability::Full) {
-                    Ok(()) => {}
-                    Err(private_fs::Error::Io(error))
-                        if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(unavailable(error)),
-                }
+                remove_file(&directory, PREFERENCE)?;
+                finish_publication(&root, &directory)?;
+                remove_legacy(&root)
             }
-        }
-        match fs::remove_file(root.join(LEGACY)) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(unavailable(error)),
         }
     }
 }
@@ -119,10 +146,35 @@ fn open_remote_dir(root: &Path) -> Result<Option<PrivateDir>, Connect> {
     }
 }
 
-fn read_profile(directory: &PrivateDir) -> Result<Option<RemoteProfile>, Connect> {
-    match directory.open_file(PREFERENCE) {
+fn read_json<T: DeserializeOwned>(
+    directory: &PrivateDir,
+    name: &str,
+) -> Result<Option<T>, Connect> {
+    match directory.open_file(name) {
         Ok(file) => serde_json::from_reader(file).map(Some).map_err(invalid),
         Err(private_fs::Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(unavailable(error)),
+    }
+}
+
+fn write_json(directory: &PrivateDir, name: &str, value: &impl Serialize) -> Result<(), Connect> {
+    directory
+        .write_atomic_durable(name, &serde_json::to_vec(value).map_err(invalid)?)
+        .map_err(unavailable)
+}
+
+fn remove_file(directory: &PrivateDir, name: &str) -> Result<(), Connect> {
+    match directory.remove_file(name, Durability::Full) {
+        Ok(()) => Ok(()),
+        Err(private_fs::Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(unavailable(error)),
+    }
+}
+
+fn remove_legacy(root: &Path) -> Result<(), Connect> {
+    match fs::remove_file(root.join(LEGACY)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(unavailable(error)),
     }
 }
@@ -149,12 +201,7 @@ fn slot_entry(endpoint: &str, slot: Uuid) -> Result<Entry, Connect> {
         .map_err(unavailable)
 }
 
-fn save(
-    directory: &PrivateDir,
-    previous: Option<RemoteProfile>,
-    endpoint: &str,
-    token: &str,
-) -> Result<(), Connect> {
+fn save(directory: &PrivateDir, endpoint: &str, token: &str) -> Result<(), Connect> {
     let endpoint = ene_rpc::validate_remote_endpoint(endpoint)
         .map_err(invalid)?
         .to_string();
@@ -166,23 +213,40 @@ fn save(
         endpoint,
         slot: Some(slot),
     };
-    let document = serde_json::to_vec(&profile).map_err(invalid)?;
+    write_json(
+        directory,
+        PENDING,
+        &Publication {
+            previous: read_json(directory, PREFERENCE)?,
+            next: Some(profile.clone()),
+        },
+    )?;
     let entry = slot_entry(&profile.endpoint, slot)?;
     entry.set_password(token).map_err(unavailable)?;
-    if let Err(error) = directory.write_atomic_durable(PREFERENCE, &document) {
-        // Publication can have taken effect before the final durability barrier.
-        if matches!(read_profile(directory), Ok(current) if current.as_ref().and_then(|item| item.slot) != profile.slot)
-        {
-            let _removed = profile.erase();
-        }
-        return Err(unavailable(error));
+    write_json(directory, PREFERENCE, &profile)
+}
+
+fn finish_publication(root: &Path, directory: &PrivateDir) -> Result<(), Connect> {
+    let Some(edit) = read_json::<Publication>(directory, PENDING)? else {
+        return Ok(());
+    };
+    let active = read_json(directory, PREFERENCE)?;
+    // The active pointer can already be visible after a failed durability barrier.
+    directory.sync_all().map_err(unavailable)?;
+    let retired = if active == edit.next {
+        remove_legacy(root)?;
+        edit.previous
+    } else if active == edit.previous {
+        edit.next
+    } else {
+        return Err(Connect::Unavailable(
+            "the saved remote target changed during recovery".into(),
+        ));
+    };
+    if let Some(retired) = retired {
+        retired.erase()?;
     }
-    if let Some(previous) = previous
-        && let Err(error) = previous.erase()
-    {
-        tracing::warn!(%error, "the retired remote credential could not be erased");
-    }
-    Ok(())
+    remove_file(directory, PENDING)
 }
 
 fn invalid(error: impl std::fmt::Display) -> Connect {
