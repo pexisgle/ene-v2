@@ -58,8 +58,11 @@ mod tests {
             connection_id: "conn-1".into(),
             model_id: String::new(),
         };
-        companion.assignments.perception = Some(legacy_partial);
-        assert!(companion.assignments.configured(Role::Perception).is_none());
+        companion.assignments.perception = Some(legacy_partial.clone());
+        assert_eq!(
+            companion.assignments.explicit(Role::Perception),
+            Some(&legacy_partial)
+        );
         assert!(companion.model(Role::Perception).is_none());
     }
 

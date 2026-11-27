@@ -84,6 +84,11 @@ impl ModelRole {
         Self::Embedding,
     ];
 
+    /// Whether this role has a required assignment field.
+    pub const fn is_primary(self) -> bool {
+        matches!(self, Self::Companion | Self::Task)
+    }
+
     /// Role to use when an optional assignment is absent.
     pub const fn fallback(self) -> Option<Self> {
         match self {
@@ -119,21 +124,9 @@ pub struct ModelAssignments {
 }
 
 impl ModelAssignments {
-    /// The explicit selection, if both its connection and model are set.
-    pub fn configured(&self, role: ModelRole) -> Option<&ModelAssignment> {
-        self.assignment(role)
-            .filter(|assignment| assignment.is_set())
-    }
-
-    /// The selection in use. A stored but incomplete assignment blocks fallback.
-    pub fn effective(&self, role: ModelRole) -> Option<&ModelAssignment> {
-        self.assignment(role)
-            .or_else(|| self.assignment(role.fallback()?))
-            .filter(|assignment| assignment.is_set())
-    }
-
-    fn assignment(&self, role: ModelRole) -> Option<&ModelAssignment> {
-        match role {
+    /// The explicit selection, including a saved incomplete value.
+    pub fn explicit(&self, role: ModelRole) -> Option<&ModelAssignment> {
+        let assignment = match role {
             ModelRole::Companion => Some(&self.companion),
             ModelRole::Task => Some(&self.task),
             ModelRole::Perception => self.perception.as_ref(),
@@ -141,7 +134,15 @@ impl ModelAssignments {
             ModelRole::Consolidation => self.consolidation.as_ref(),
             ModelRole::Decision => self.decision.as_ref(),
             ModelRole::Embedding => self.embedding.as_ref(),
-        }
+        }?;
+        (!role.is_primary() || *assignment != ModelAssignment::default()).then_some(assignment)
+    }
+
+    /// The selection in use. A stored but incomplete assignment blocks fallback.
+    pub fn effective(&self, role: ModelRole) -> Option<&ModelAssignment> {
+        self.explicit(role)
+            .or_else(|| self.explicit(role.fallback()?))
+            .filter(|assignment| assignment.is_set())
     }
 
     /// Clears any role referencing `id` and returns whether any assignment changed.

@@ -256,6 +256,6 @@ fn enabled_and_all_choice_collectors_distinguish_enabled_connections() {
     );
 
     for slot in ModelRole::ALL {
-        assert!(ModelAssignments::default().configured(slot).is_none());
+        assert!(ModelAssignments::default().explicit(slot).is_none());
     }
 }

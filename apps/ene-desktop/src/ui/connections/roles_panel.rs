@@ -92,10 +92,16 @@ fn render_model_role_row(
         harnesses,
         live,
     } = *row;
-    let current = assignments.and_then(|assignments| assignments.configured(slot));
+    let chosen = assignments.and_then(|assignments| assignments.explicit(slot));
+    let current = chosen.filter(|assignment| assignment.is_set());
     let fallback = fallback_hint(slot);
+    let placeholder = if chosen.is_some() && current.is_none() {
+        "割当が不完全です（モデルを選択）"
+    } else {
+        fallback
+    };
     let current_text = current.map_or_else(
-        || fallback.to_owned(),
+        || placeholder.to_owned(),
         |m| {
             slot_models
                 .iter()
@@ -109,9 +115,13 @@ fn render_model_role_row(
         },
     );
 
-    let clear = (!matches!(slot, ModelRole::Companion | ModelRole::Task)).then_some(fallback);
+    let clear = (!slot.is_primary()).then_some(fallback);
     let options = role_options(slot_models.iter().chain(harnesses), clear);
-    let current_value = current.cloned().map(Some).or_else(|| clear.map(|_| None));
+    let current_value = if chosen.is_none() {
+        clear.map(|_| None)
+    } else {
+        current.cloned().map(Some)
+    };
     let hub_assign = pane.hub.clone();
 
     render_role_row(

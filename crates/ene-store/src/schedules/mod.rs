@@ -259,10 +259,9 @@ impl<'a> ScheduleRepo<'a> {
             if !ready_companions.contains(&schedule.companion_id) {
                 continue;
             }
-            let scheduled_for = schedule
-                .next_run_at
-                .clone()
-                .unwrap_or_else(|| now_stamp.clone());
+            let scheduled_for = schedule.next_run_at.as_deref().ok_or_else(|| {
+                StoreError::Storage("due schedule is missing its next firing time".into())
+            })?;
             let occurrence_key = format!("schedule:{}:{scheduled_for}", schedule.id);
             let next_run_at = if schedule.one_shot() {
                 None
