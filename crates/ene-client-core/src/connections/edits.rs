@@ -1,7 +1,7 @@
 //! Domain connection form editing and custom connection builder helpers.
 
 use super::configured_stt_model;
-use super::options::{Speaker, SpeechOptions};
+use super::options::SpeechOptions;
 use crate::domain::{
     AcpConnection, Connection, ConnectionConfig, ConnectionEndpoint, ConnectionInput,
     ConnectionKind, EmbeddingConnection, LlmConnection, McpConnection, SearchConnection,
@@ -100,7 +100,7 @@ fn apply_tts_edits(tts: &mut TtsConnection, spec: &ConnectionEditSpec<'_>) {
         && let Ok(speaker_num) = first.trim().parse::<u32>()
     {
         let mut opts = SpeechOptions::parse(&ep.options);
-        opts.speaker = Some(Speaker::Id(speaker_num.into()));
+        opts.set("speaker", speaker_num);
         ep.options = opts.json();
     }
     tts.endpoint = Some(ep);
@@ -112,7 +112,7 @@ fn apply_stt_edits(stt: &mut SttConnection, spec: &ConnectionEditSpec<'_>) {
     let model = spec.list_raw.trim();
     if !model.is_empty() {
         let mut opts = SpeechOptions::parse(&ep.options);
-        opts.model = Some(model.to_owned());
+        opts.set("model", model);
         ep.options = opts.json();
     }
     stt.endpoint = Some(ep);
@@ -302,7 +302,8 @@ mod tests {
     fn selecting_a_transcription_model_preserves_the_saved_language_hints() {
         let endpoint = ConnectionEndpoint {
             adapter: "openai".into(),
-            options: r#"{"model":"old","language":"ja","custom":true}"#.into(),
+            options: r#"{"model":"old","language":"ja","custom":true,"speaker":{"preset":1}}"#
+                .into(),
             ..Default::default()
         };
         let conn = Connection {
@@ -333,7 +334,7 @@ mod tests {
             serde_json::from_str(&stt.endpoint.unwrap().options).unwrap();
         assert_eq!(
             options,
-            serde_json::json!({"model":"new","language":"ja","custom":true})
+            serde_json::json!({"model":"new","language":"ja","custom":true,"speaker":{"preset":1}})
         );
     }
 

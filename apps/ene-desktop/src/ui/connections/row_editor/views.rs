@@ -52,27 +52,28 @@ pub(super) fn render_connection_editor(
         )
     });
     let (schema_controls, next_options_json) = if harness {
-        (Vec::new(), None)
+        (Vec::new(), Ok(None))
     } else if agent_platform {
         render_agent_platform_options(pane, &id, conn.revision, endpoint, theme, cx)
     } else {
         render_options_schema(pane, &id, conn.revision, endpoint, theme, cx)
     };
 
-    let mut payload = build_editor_save_payload(&drafts, next_options_json, live, cx);
+    let options_error = next_options_json.as_ref().err().map(ToString::to_string);
+    let mut payload =
+        build_editor_save_payload(&drafts, next_options_json.ok().flatten(), live, cx);
     let search_cap_invalid = conn.kind == ConnectionKind::Search
         && ene_client_core::connections::parse_search_cap(&payload.next_list).is_none();
-    payload.can_save &= !search_cap_invalid;
+    payload.can_save &= !search_cap_invalid && options_error.is_none();
     let args_error = payload.next_args.as_ref().err().copied();
     let mcp_kv_error = payload
         .next_mcp_extra
         .as_ref()
         .and_then(|extra| extra.as_ref().err().copied());
-    let show_list_field = agent_platform
-        || matches!(
-            resource,
-            None | Some(ConnectionResource::TranscriptionModel)
-        );
+    let show_list_field = matches!(
+        resource,
+        None | Some(ConnectionResource::ChatModel | ConnectionResource::TranscriptionModel)
+    );
 
     let cred_strip = (!harness).then(|| render_credentials_strip(pane, conn, live, theme, cx));
     let actions = render_editor_actions(conn, payload, &pane.hub, theme);
@@ -118,10 +119,10 @@ pub(super) fn render_connection_editor(
         })
         .when(show_list_field && !harness, |this| {
             this.child(labeled_field(
-                if conn.kind == ConnectionKind::Search {
-                    "最大検索結果数（1–20、空欄で接続上限なし）"
-                } else {
-                    conn.kind.list_field_label()
+                match conn.kind {
+                    ConnectionKind::Search => "最大検索結果数（1–20、空欄で接続上限なし）",
+                    ConnectionKind::Llm => "候補のモデル ID（カンマ区切り）",
+                    _ => conn.kind.list_field_label(),
                 },
                 drafts.list_d,
                 theme,
@@ -138,6 +139,9 @@ pub(super) fn render_connection_editor(
         .when_some(mcp_tools_strip, gpui::ParentElement::child)
         .when(!schema_controls.is_empty(), |this| {
             this.child(render_schema_box(schema_controls, theme))
+        })
+        .when_some(options_error, |this, error| {
+            this.child(div().text_xs().text_color(theme.danger_fg).child(error))
         })
         .child(actions)
         .into_any_element()

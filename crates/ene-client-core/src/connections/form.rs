@@ -1,151 +1,175 @@
-//! Editable connection options and the supported subset of adapter schemas.
+//! Lossless edits to saved provider options.
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Number, Value};
-use std::collections::BTreeMap;
+use crate::domain::ConnectionEndpoint;
+use ene_domain::{DomainError, json::parse_schema};
+use serde_json::{Map, Value};
+use std::{collections::HashSet, fmt};
 
-/// Endpoint options for Google Agent Platform.
-#[derive(Debug, Default, Deserialize, Serialize)]
-pub struct AgentPlatformOptions {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    /// The Google Cloud project, absent in Express mode.
-    pub project_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    /// The deployment region, defaulting to global on the host.
-    pub location: Option<String>,
+type Options = Map<String, Value>;
+
+fn options(text: &str) -> Result<Options, DomainError> {
+    if text.trim().is_empty() {
+        return Ok(Options::new());
+    }
+    serde_json::from_str(text).map_err(|_| {
+        DomainError::Invalid("オプションを JSON オブジェクトで入力してください。".into())
+    })
+}
+
+/// Options from declared editable fields, with all other saved values retained.
+pub struct SchemaOptions {
+    saved: Options,
+    allowed: HashSet<String>,
+}
+
+impl fmt::Debug for SchemaOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SchemaOptions").finish_non_exhaustive()
+    }
+}
+
+impl SchemaOptions {
+    /// Loads the fields that an operator can inspect and edit.
+    pub fn from_endpoint(endpoint: &ConnectionEndpoint) -> Result<Option<Self>, DomainError> {
+        let schema = parse_schema(&endpoint.options_schema)?;
+        let Some(fields) = schema.get("properties").and_then(Value::as_object) else {
+            return Ok(None);
+        };
+        let allowed: HashSet<_> = fields
+            .iter()
+            .filter(|(_, field)| {
+                field.get("writeOnly").and_then(Value::as_bool) != Some(true)
+                    && field.get("readOnly").and_then(Value::as_bool) != Some(true)
+                    && field.get("format").and_then(Value::as_str) != Some("password")
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        if allowed.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            saved: options(&endpoint.options)?,
+            allowed,
+        }))
+    }
+
+    /// The inspectable values suitable for initializing a JSON input.
+    pub fn visible(&self) -> Options {
+        self.saved
+            .iter()
+            .filter(|(key, _)| self.allowed.contains(*key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
+    /// Applies edited fields and preserves the stored bytes on an unchanged draft.
+    pub fn apply(mut self, visible: &Options, draft: &str) -> Result<Option<String>, DomainError> {
+        let edited = options(draft)?;
+        if &edited == visible {
+            return Ok(None);
+        }
+        if edited.keys().any(|key| !self.allowed.contains(key)) {
+            return Err(DomainError::Invalid(
+                "編集できないオプションが含まれています。".into(),
+            ));
+        }
+        self.saved.retain(|key, _| !self.allowed.contains(key));
+        self.saved.extend(edited);
+        Ok(Some(Value::Object(self.saved).to_string()))
+    }
+}
+
+/// Google Agent Platform keeps its dedicated project and region fields.
+pub struct AgentPlatformOptions(Options);
+
+impl fmt::Debug for AgentPlatformOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentPlatformOptions")
+            .finish_non_exhaustive()
+    }
 }
 
 impl AgentPlatformOptions {
-    /// Builds options from the two form fields, treating blanks as unset.
-    pub fn new(project_id: &str, location: &str) -> Self {
-        Self {
-            project_id: super::nonempty(project_id).map(str::to_owned),
-            location: super::nonempty(location).map(str::to_owned),
+    /// Loads the saved fields without discarding extra settings.
+    pub fn load(saved: &str) -> Result<Self, DomainError> {
+        options(saved).map(Self)
+    }
+
+    /// The saved value of a project or location field.
+    pub fn text(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(Value::as_str)
+    }
+
+    /// Edits the two known fields and retains the rest of the object.
+    pub fn apply(mut self, project: &str, location: &str) -> Option<String> {
+        let mut changed = false;
+        for (key, draft) in [("project_id", project), ("location", location)] {
+            if draft == self.text(key).unwrap_or_default() {
+                continue;
+            }
+            changed = true;
+            if let Some(value) = super::nonempty(draft) {
+                self.0
+                    .insert(key.to_owned(), Value::String(value.to_owned()));
+            } else {
+                self.0.remove(key);
+            }
         }
+        changed.then(|| Value::Object(self.0).to_string())
     }
-
-    /// Serializes the options for the connection endpoint.
-    pub fn json(&self) -> String {
-        serde_json::json!(self).to_string()
-    }
-}
-
-/// The editable subset of the JSON Schema supplied by connection adapters.
-#[derive(Debug, Deserialize)]
-pub struct OptionsSchema {
-    /// Fields keyed by their option names.
-    pub properties: BTreeMap<String, FieldSchema>,
-}
-
-/// One field declared by the adapter.
-#[derive(Debug, Deserialize)]
-pub struct FieldSchema {
-    #[serde(rename = "type", default)]
-    /// The shape declared for this field.
-    pub kind: SchemaType,
-    #[serde(rename = "enum", default)]
-    choices: Option<Vec<Value>>,
-}
-
-impl FieldSchema {
-    /// Returns the string choices when the schema declares an enumeration.
-    pub fn choices(&self) -> Option<impl Iterator<Item = &str>> {
-        self.choices
-            .as_ref()
-            .map(|values| values.iter().filter_map(Value::as_str))
-    }
-}
-
-/// Type declaration in an option field schema.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum SchemaType {
-    /// A supported scalar name.
-    Scalar(FieldKind),
-    /// A complex type declaration.
-    Other(serde::de::IgnoredAny),
-}
-
-impl Default for SchemaType {
-    fn default() -> Self {
-        Self::Scalar(FieldKind::Text)
-    }
-}
-
-impl SchemaType {
-    /// Selects the editing control, falling back to a text field.
-    pub fn scalar(&self) -> FieldKind {
-        match self {
-            Self::Scalar(kind) => *kind,
-            Self::Other(_) => FieldKind::Text,
-        }
-    }
-}
-
-/// Scalar controls supported in the options form.
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FieldKind {
-    /// A toggle.
-    Boolean,
-    /// An integer field.
-    Integer,
-    /// A number field.
-    Number,
-    /// A text field.
-    #[serde(other)]
-    Text,
-}
-
-impl FieldKind {
-    /// Parses a draft using the numeric field kind, keeping invalid input for validation.
-    pub fn draft_value(self, text: &str) -> Value {
-        let number = match self {
-            Self::Integer => text.parse::<i64>().ok().map(Number::from),
-            Self::Number => text.parse::<f64>().ok().and_then(Number::from_f64),
-            _ => None,
-        };
-        number.map_or_else(|| Value::String(text.to_owned()), Value::Number)
-    }
-}
-
-/// Settings keyed by their schema property name.
-pub type Options = BTreeMap<String, Value>;
-
-/// Formats the current value for a text control.
-pub fn draft_text(value: &Value) -> String {
-    value
-        .as_str()
-        .map_or_else(|| value.to_string(), str::to_owned)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
-    fn editing_known_fields_keeps_adapter_extensions() {
-        let schema: OptionsSchema = serde_json::from_str(
-            r#"{"properties":{"count":{"type":"integer"},"variant":{"type":["string","null"],"enum":["on",null]}}}"#,
-        )
-        .unwrap();
-        let mut options: Options =
-            serde_json::from_str(r#"{"count":1,"adapter_extension":{"values":[true,null]}}"#)
-                .unwrap();
-        options.insert(
-            "count".to_owned(),
-            schema.properties["count"].kind.scalar().draft_value("42"),
-        );
+    fn a_schema_edit_preserves_unknown_and_protected_values_and_exact_json_types() {
+        let endpoint = ConnectionEndpoint {
+            options: r#"{"tree":{"items":[1,null]},"secret":"fixture","extension":7}"#.into(),
+            options_schema: r#"{"properties":{"tree":{"type":"object"},"flag":{"type":"boolean"},"secret":{"writeOnly":true}}}"#.into(),
+            ..Default::default()
+        };
+        let editable = || SchemaOptions::from_endpoint(&endpoint).unwrap().unwrap();
+        let visible = editable().visible();
         assert_eq!(
-            schema.properties["variant"]
-                .choices()
+            visible,
+            json!({"tree": {"items":[1,null]}})
+                .as_object()
                 .unwrap()
-                .collect::<Vec<_>>(),
-            ["on"]
+                .clone()
         );
         assert_eq!(
-            serde_json::json!(options),
-            serde_json::json!({"count": 42, "adapter_extension": {"values": [true, null]}})
+            editable()
+                .apply(&visible, r#"{"tree":{"items":[1,null]}}"#)
+                .unwrap(),
+            None
+        );
+        assert!(
+            editable()
+                .apply(&visible, r#"{"secret":"replace"}"#)
+                .is_err()
+        );
+        let updated = editable()
+            .apply(&visible, r#"{"tree":{"items":[2,null]},"flag":true}"#)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&updated).unwrap(),
+            json!({"tree":{"items":[2,null]},"flag":true,"secret":"fixture","extension":7})
+        );
+    }
+
+    #[test]
+    fn a_google_edit_preserves_extensions_and_does_not_rewrite_an_unchanged_object() {
+        let google =
+            || AgentPlatformOptions::load(r#"{"location":"global","extension":[1,null]}"#).unwrap();
+        assert_eq!(google().apply("", "global"), None);
+        let new = google().apply("project-a", "global").unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&new).unwrap(),
+            json!({"project_id":"project-a","location":"global","extension":[1,null]})
         );
     }
 }

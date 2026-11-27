@@ -21,7 +21,7 @@ use crate::domain::{
 };
 
 use crate::state::Model;
-use options::{Speaker, SpeechOptions, nonempty};
+use options::{SpeechOptions, nonempty};
 
 /// A resource the operator can choose on a connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,9 +99,9 @@ pub fn apply_tts_voice_to_config(cfg: &mut ConnectionConfig, is_sakura: bool, vo
     if is_sakura {
         opts.set_sakura_voice(voice_clean);
     } else if let Ok(speaker) = voice_clean.parse::<u32>() {
-        opts.speaker = Some(Speaker::Id(speaker.into()));
+        opts.set("speaker", speaker);
     } else {
-        opts.voice = Some(voice_clean.to_owned());
+        opts.set("voice", voice_clean);
     }
     ep.options = opts.json();
     tts.endpoint = Some(ep);
@@ -114,23 +114,24 @@ pub fn apply_stt_model_to_config(cfg: &mut ConnectionConfig, model_clean: &str) 
     };
     let mut ep = stt.endpoint.take().unwrap_or_default();
     let mut opts = SpeechOptions::parse(&ep.options);
-    opts.model = Some(model_clean.to_owned());
+    opts.set("model", model_clean);
     ep.options = opts.json();
     stt.endpoint = Some(ep);
 }
 
 /// Reads a configured STT model, leaving the fallback to the caller.
 pub fn configured_stt_model(endpoint: Option<&ConnectionEndpoint>) -> Option<String> {
-    let model = SpeechOptions::parse(&endpoint?.options).model?;
-    nonempty(&model).map(str::to_owned)
+    SpeechOptions::parse(&endpoint?.options)
+        .text("model")
+        .map(str::to_owned)
 }
 
 /// Reads the numeric VOICEVOX speaker from the options of an endpoint.
 pub fn configured_voicevox_speaker(endpoint: Option<&ConnectionEndpoint>) -> Option<String> {
-    match SpeechOptions::parse(&endpoint?.options).speaker? {
-        Speaker::Id(id) => Some(id.to_string()),
-        Speaker::Name(_) => None,
-    }
+    SpeechOptions::parse(&endpoint?.options)
+        .get("speaker")?
+        .as_u64()
+        .map(|id| id.to_string())
 }
 
 /// Resolves the effective STT model identifier configured on a connection.
