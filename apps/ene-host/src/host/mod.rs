@@ -95,16 +95,9 @@ pub(crate) enum StartError {
 
 type Job = Box<dyn FnOnce(&mut App) + Send>;
 
-/// Runs `job` on the actor thread inside the span its caller was already in.
-///
-/// The actor thread is not the thread that made the request, so `Span::current()`
-/// there is empty. Capturing it at submit time and entering it here is what lets
-/// one trace connect an RPC to the actor work it caused.
-fn trace_job(span: tracing::Span, job: Job) -> Job {
-    Box::new(move |app| {
-        let _entered = span.enter();
-        job(app);
-    })
+enum JobMode {
+    Read,
+    Advance,
 }
 
 enum Step {
@@ -139,8 +132,7 @@ impl Drop for Handle {
 impl Runtime {
     // The remaining `Runtime` methods. `start` and `start_with` are in
     // `runtime_start.rs`, which re-opens this impl block.
-    /// Tries to enqueue `operation` immediately. Accepted jobs advance one
-    /// frame and flush notifications even if the reply future is dropped.
+    #[cfg(test)]
     pub(crate) fn call<T: Send + 'static, F>(
         &self,
         operation: F,
@@ -148,24 +140,10 @@ impl Runtime {
     where
         F: FnOnce(&mut App) -> Result<T> + Send + 'static,
     {
-        let services = Arc::clone(&self.services);
-        self.send(move |reply| {
-            Box::new(move |app| {
-                let result = services.health.ready().and_then(|()| operation(app));
-                if let Err(error) = &result
-                    && error.is_storage()
-                {
-                    fail(app.world_mut(), &error.to_string());
-                }
-                tick(app);
-                let result = services.health.ready().and(result);
-                let _reply = reply.send(result);
-            })
-        })
+        self.submit(JobMode::Advance, move |app, _| operation(app))
     }
 
-    /// Tries to enqueue `operation` immediately. Accepted jobs run without
-    /// advancing the agent loop even if the reply future is dropped.
+    #[cfg(test)]
     pub(crate) fn read<T: Send + 'static, F>(
         &self,
         operation: F,
@@ -173,18 +151,7 @@ impl Runtime {
     where
         F: FnOnce(&mut App) -> Result<T> + Send + 'static,
     {
-        let services = Arc::clone(&self.services);
-        self.send(move |reply| {
-            Box::new(move |app| {
-                let result = services.health.ready().and_then(|()| operation(app));
-                if let Err(error) = &result
-                    && error.is_storage()
-                {
-                    fail(app.world_mut(), &error.to_string());
-                }
-                let _reply = reply.send(result);
-            })
-        })
+        self.submit(JobMode::Read, move |app, _| operation(app))
     }
 
     /// Runs an operation on live agents, then advances the kernel.
@@ -195,8 +162,9 @@ impl Runtime {
     where
         F: FnOnce(&mut agent::AgentKernel<'_>) -> Result<T> + Send + 'static,
     {
-        let services = Arc::clone(&self.services);
-        self.call(move |app| operation(&mut agent::AgentKernel::new(app, &services)))
+        self.submit(JobMode::Advance, move |app, services| {
+            operation(&mut agent::AgentKernel::new(app, services))
+        })
     }
 
     /// Reads live agent state between ticks.
@@ -207,8 +175,9 @@ impl Runtime {
     where
         F: FnOnce(&mut agent::AgentKernel<'_>) -> Result<T> + Send + 'static,
     {
-        let services = Arc::clone(&self.services);
-        self.read(move |app| operation(&mut agent::AgentKernel::new(app, &services)))
+        self.submit(JobMode::Read, move |app, services| {
+            operation(&mut agent::AgentKernel::new(app, services))
+        })
     }
 
     /// Serializes a service mutation with kernel ticks without exposing ECS.
@@ -219,8 +188,7 @@ impl Runtime {
     where
         F: FnOnce(&HostServices) -> Result<T> + Send + 'static,
     {
-        let services = Arc::clone(&self.services);
-        self.call(move |_| operation(&services))
+        self.submit(JobMode::Advance, move |_, services| operation(services))
     }
 
     /// Groups a read with the current notification cursor on the kernel thread.
@@ -231,22 +199,45 @@ impl Runtime {
     where
         F: FnOnce(&HostServices) -> Result<T> + Send + 'static,
     {
-        let services = Arc::clone(&self.services);
-        self.read(move |_| operation(&services))
+        self.submit(JobMode::Read, move |_, services| operation(services))
     }
 
-    fn send<T: Send + 'static, F>(
+    /// Tries to enqueue immediately. Accepted jobs still run when the caller drops its reply.
+    fn submit<T: Send + 'static, F>(
         &self,
-        job: F,
+        mode: JobMode,
+        operation: F,
     ) -> impl Future<Output = Result<T>> + Send + use<T, F>
     where
-        F: FnOnce(oneshot::Sender<Result<T>>) -> Job,
+        F: FnOnce(&mut App, &HostServices) -> Result<T> + Send + 'static,
     {
+        let services = Arc::clone(&self.services);
+        let span = tracing::Span::current();
         let (reply, received) = oneshot::channel();
+        let job: Job = Box::new(move |app| {
+            let _entered = span.enter();
+            let result = services
+                .health
+                .ready()
+                .and_then(|()| operation(app, &services));
+            if let Err(error) = &result
+                && error.is_storage()
+            {
+                fail(app.world_mut(), &error.to_string());
+            }
+            let result = match mode {
+                JobMode::Read => result,
+                JobMode::Advance => {
+                    tick(app);
+                    services.health.ready().and(result)
+                }
+            };
+            let _reply = reply.send(result);
+        });
         let submitted = self
             .handle
             .commands
-            .try_send(trace_job(tracing::Span::current(), job(reply)))
+            .try_send(job)
             .map_err(|_| HostError::Exhausted(("host command queue is full or closed").into()));
         async move {
             submitted?;
