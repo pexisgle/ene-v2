@@ -127,8 +127,8 @@ fn tool_call(output: &serde_json::Value) -> String {
 
 /// One compaction job covers one range. The summary it writes stands for a
 /// message window, and the memories it commits come from exactly the turns
-/// in that window, stamped with the same window end; the aside is written
-/// after the commit, so a job that committed memories has its summary.
+/// in that window, stamped with the same window end. The request view receives
+/// the summary after its transaction commits.
 #[test]
 fn one_job_covers_the_same_range_for_the_summary_and_the_memories() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -150,7 +150,13 @@ fn one_job_covers_the_same_range_for_the_summary_and_the_memories() {
 
     let conversation = world.app.world().get::<Conversation>(world.agent);
     let conversation = conversation.expect("the companion's conversation");
-    let summary = summary_of(&conversation.0).expect("the summary aside was written");
+    assert!(legacy_summary(&conversation.0).is_none());
+    let summary = &world
+        .app
+        .world()
+        .get::<CurrentSummary>(world.agent)
+        .unwrap()
+        .0;
     assert_eq!(summary.text, "既存の紅茶の話");
 
     // The turns the summary stands for, and the ones it does not.
@@ -204,7 +210,7 @@ fn one_job_covers_the_same_range_for_the_summary_and_the_memories() {
     provider.task.abort();
 }
 
-/// The aside is the position the next job starts from, so a pass that
+/// The checkpoint is the position the next job starts from, so a pass that
 /// commits nothing leaves it unwritten: the stored summary stays the one
 /// the range is measured from, and the next compaction covers the range
 /// again. No queue and no cursor is involved.
@@ -217,9 +223,12 @@ fn a_failed_pass_leaves_the_summary_unwritten_and_the_range_pending() {
     let mut world = SummaryWorld::at(answered(4), 400, 1_200, &provider.base);
     world.run();
 
-    let conversation = world.app.world().get::<Conversation>(world.agent);
     assert!(
-        summary_of(&conversation.expect("the companion's conversation").0).is_none(),
+        world
+            .app
+            .world()
+            .get::<CurrentSummary>(world.agent)
+            .is_none(),
         "a failed pass does not advance the stored summary"
     );
     let bodies = provider.bodies.lock().clone();

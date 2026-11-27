@@ -13,7 +13,7 @@ use ene_mind::Summary;
 use job::{CompactionError, Outcome, run};
 use rig_core::completion::Message;
 use rig_core::conversation::{
-    Aside, Author, AuthorKind, Conversation as History, Entry, EntryRef, pairing,
+    Author, AuthorKind, Conversation as History, Entry, EntryRef, pairing,
 };
 use rig_ecs::prelude::*;
 use serde::Deserialize;
@@ -22,6 +22,8 @@ use std::{collections::HashMap, sync::Arc};
 // Only the tests reach these through `use super::*`.
 #[cfg(test)]
 use super::mind::consolidate;
+#[cfg(test)]
+use rig_core::conversation::Aside;
 #[cfg(test)]
 use rig_core::{DynModel, operation::Completion};
 #[cfg(test)]
@@ -42,7 +44,10 @@ const NOTICE: &str = "[System Notice: 過去の一部ログを一時的に省略
 const SUMMARY_HEAD: &str =
     "Earlier messages of this conversation were compacted into the summary below.";
 
-pub(crate) fn summary_of(conversation: &History) -> Option<Summary> {
+#[derive(Component)]
+pub(crate) struct CurrentSummary(pub(crate) Summary);
+
+fn legacy_summary(conversation: &History) -> Option<Summary> {
     conversation
         .asides()
         .rev()
@@ -82,23 +87,14 @@ fn log_lineage(conversation: &History) -> ene_store::Result<String> {
         .map_err(|error| ene_store::StoreError::Storage(error.to_string()))
 }
 
-pub(crate) fn restore_summary(
+pub(crate) fn load_summary(
     store: &Store,
     companion: &str,
-    conversation: &mut History,
-) -> ene_store::Result<()> {
-    if let Some(summary) = saved_summary(store, companion, conversation)? {
-        publish_summary(conversation, &summary);
-    }
-    Ok(())
-}
-
-fn publish_summary(conversation: &mut History, summary: &Summary) {
-    if summary_of(conversation).as_ref() == Some(summary) {
-        return;
-    }
-    let value = serde_json::to_value(summary).unwrap_or_default();
-    conversation.add_aside(Aside::new(SUMMARY, Author::plugin("ene-host"), value));
+    conversation: &History,
+) -> ene_store::Result<Option<CurrentSummary>> {
+    Ok(saved_summary(store, companion, conversation)?
+        .or_else(|| legacy_summary(conversation))
+        .map(CurrentSummary))
 }
 
 /// Injects `summary` at the head of the request view, in place of the messages
@@ -215,6 +211,7 @@ type SummaryRows = (
     &'static CompanionAgent,
     Option<&'static Connection>,
     Option<&'static LastUsage>,
+    Option<&'static CurrentSummary>,
     Has<ActiveTurn>,
 );
 
@@ -264,7 +261,7 @@ fn summarize_at_turn_boundary(
         models: (*models).clone(),
         providers: providers.as_deref().cloned().unwrap_or_default(),
     };
-    for (conversation, agent, connection, usage, busy) in &agents {
+    for (conversation, agent, connection, usage, previous, busy) in &agents {
         // A turn in flight is not a boundary; the next one is.
         if busy {
             continue;
@@ -304,7 +301,6 @@ fn summarize_at_turn_boundary(
         // One snapshot serves both halves of the job: the summary reads it, and
         // the pass reads the same messages the summary stands for.
         let history = conversation.0.clone();
-        let previous = summary_of(&history);
         let Some(spec) = bound.spec().cloned() else {
             continue;
         };
@@ -313,7 +309,7 @@ fn summarize_at_turn_boundary(
             wake.as_deref(),
             run(
                 history,
-                previous,
+                previous.map(|summary| summary.0.clone()),
                 Arc::new(spec),
                 bound,
                 services.clone(),
@@ -325,22 +321,23 @@ fn summarize_at_turn_boundary(
     }
 }
 
-/// Projects the committed checkpoint into the append-only Rig log.
+/// Projects the committed checkpoint into subsequent requests in this process.
 fn collect_summaries(
+    mut commands: Commands,
     mut state: ResMut<CompactionState>,
-    mut agents: Query<(&CompanionAgent, &mut Conversation)>,
+    agents: Query<(Entity, &CompanionAgent)>,
 ) {
     let Some((companion, outcome)) = state.take_finished() else {
         return;
     };
     match outcome {
         Ok(summary) => {
-            let Some(mut conversation) = agents.iter_mut().find_map(|(agent, conversation)| {
-                (agent.companion_id == companion).then_some(conversation)
-            }) else {
-                return;
-            };
-            publish_summary(&mut conversation, &summary);
+            if let Some((entity, _)) = agents
+                .iter()
+                .find(|(_, agent)| agent.companion_id == companion)
+            {
+                commands.entity(entity).try_insert(CurrentSummary(summary));
+            }
         }
         Err(why) => {
             tracing::warn!(%why, companion = %companion, "the compaction summary failed")

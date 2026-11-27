@@ -19,7 +19,11 @@ fn persisted_summaries_resume_without_rewriting_source_messages() {
     rig_memory::save(&store, "main", &mut source).unwrap();
     let older_bytes = rig_memory::Store::read_log(&store, "main").unwrap();
     let mut source = rig_memory::load(&store, "main").unwrap();
-    assert_eq!(summary_of(&source), Some(older));
+    let database = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+    assert_eq!(
+        load_summary(&database, "ene", &source).unwrap().unwrap().0,
+        older
+    );
 
     let latest = Summary {
         text: "two completed turns".into(),
@@ -38,7 +42,7 @@ fn persisted_summaries_resume_without_rewriting_source_messages() {
 
     let store = rig_memory::DirStore::open(temp.path()).unwrap();
     let source = rig_memory::load(&store, "main").unwrap();
-    let resumed = summary_of(&source).expect("the newest saved summary");
+    let resumed = load_summary(&database, "ene", &source).unwrap().unwrap().0;
     assert_eq!(resumed, latest);
     assert_eq!(source.asides().count(), 2);
     assert_eq!(source.messages(), original_messages);
@@ -82,11 +86,52 @@ fn persisted_summaries_resume_without_rewriting_source_messages() {
             .collect::<Vec<_>>(),
         original_ids
     );
-    assert_eq!(summary_of(&persisted), Some(latest));
+    assert_eq!(legacy_summary(&persisted), Some(latest));
     assert_eq!(
         rig_memory::Store::read_log(&store, "main").unwrap(),
         latest_bytes
     );
+}
+
+#[test]
+fn the_checkpoint_takes_precedence_without_modifying_the_legacy_log() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+    database.companion_repo().seed_initial_companion().unwrap();
+    let logs = rig_memory::DirStore::open(temp.path().join("rig")).unwrap();
+    let mut history = conversation(3);
+    let through = history.entries().nth(3).unwrap().id.get();
+    history.add_aside(Aside::new(
+        SUMMARY,
+        Author::plugin("ene-host"),
+        serde_json::json!({"text": "legacy summary", "through_message_id": through}),
+    ));
+    rig_memory::save(&logs, "main", &mut history).unwrap();
+    let checkpoint = Summary {
+        text: "checkpoint summary".to_owned(),
+        through_message_id: history.entries().nth(7).unwrap().id.get(),
+    };
+    database
+        .conn()
+        .execute(
+            "INSERT INTO compaction_checkpoints VALUES ('ene', ?1, ?2, ?3)",
+            (
+                log_lineage(&history).unwrap(),
+                checkpoint.through_message_id,
+                &checkpoint.text,
+            ),
+        )
+        .unwrap();
+    let bytes = rig_memory::Store::read_log(&logs, "main").unwrap();
+    let restored = rig_memory::load(&logs, "main").unwrap();
+    assert_eq!(
+        load_summary(&database, "ene", &restored)
+            .unwrap()
+            .unwrap()
+            .0,
+        checkpoint
+    );
+    assert_eq!(rig_memory::Store::read_log(&logs, "main").unwrap(), bytes);
 }
 
 #[test]

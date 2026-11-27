@@ -27,8 +27,8 @@ use crate::host::{
     resources::{DeviceHub, Perception},
 };
 use bevy_ecs::{prelude::*, system::SystemParam};
-use compaction::RequestStart;
-use ene_mind::MemoryVersion;
+use compaction::{CurrentSummary, RequestStart};
+use ene_mind::{MemoryVersion, Summary};
 use rig_core::completion::Message;
 use rig_ecs::prelude::*;
 use std::sync::Arc;
@@ -51,6 +51,7 @@ type AdaptedRequest<'a> = (
     Option<&'a ForAgent>,
     &'a CallOf,
 );
+type ConversationContext<'a> = (&'a Conversation, Option<&'a CurrentSummary>);
 
 type NeedsTail = (
     With<Admitted>,
@@ -133,7 +134,7 @@ fn inject_tail(
     mut commands: Commands,
     turns: Query<(&Turn, Option<&DynamicTail>)>,
     agents: Query<&CompanionAgent>,
-    conversations: Query<&Conversation>,
+    conversations: Query<ConversationContext<'static>>,
     env: &TailEnv<'_>,
 ) {
     for (call_entity, mut call, of, agent) in &mut calls {
@@ -143,7 +144,11 @@ fn inject_tail(
         let Some(agent) = agent.map(|agent| agent.0) else {
             continue;
         };
-        let conversation = conversations.get(agent).ok();
+        let (conversation, summary) = conversations
+            .get(agent)
+            .map_or((None, None), |(log, summary)| {
+                (Some(log), summary.map(|summary| &summary.0))
+            });
         let Ok(companion) = agents.get(agent) else {
             continue;
         };
@@ -187,7 +192,7 @@ fn inject_tail(
             &mut commands,
             history,
             TailHistoryTarget {
-                conversation,
+                summary,
                 turn_entity: of.0,
                 call_entity,
                 turn_start: turn.start,
@@ -270,7 +275,7 @@ fn spawn_tail(
 }
 
 struct TailHistoryTarget<'a> {
-    conversation: Option<&'a Conversation>,
+    summary: Option<&'a Summary>,
     turn_entity: Entity,
     call_entity: Entity,
     turn_start: MessageId,
@@ -285,7 +290,7 @@ fn apply_tail_to_history(
     target: TailHistoryTarget<'_>,
 ) {
     let TailHistoryTarget {
-        conversation,
+        summary,
         turn_entity,
         call_entity,
         turn_start,
@@ -297,10 +302,8 @@ fn apply_tail_to_history(
         companion,
     } = target;
     let mut tail_entry = turn_start;
-    if let Some(summary) =
-        conversation.and_then(|conversation| compaction::summary_of(conversation))
-    {
-        compaction::inject_summary(history, &summary);
+    if let Some(summary) = summary {
+        compaction::inject_summary(history, summary);
     }
     if let Some((entry, report)) = eye_report {
         tail_entry = entry;
@@ -445,7 +448,7 @@ impl Plugin for RecallPlugin {
                   commands: Commands,
                   turns: Query<(&Turn, Option<&DynamicTail>)>,
                   agents: Query<&CompanionAgent>,
-                  conversations: Query<&Conversation>,
+                  conversations: Query<ConversationContext<'static>>,
                   env: TailEnv| {
                     inject_tail(calls, commands, turns, agents, conversations, &env);
                 })
