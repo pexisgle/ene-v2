@@ -3,12 +3,12 @@
 
 use super::{
     Batch, COLUMNS, Commit, Fact, Memory, MemoryContext, MemoryRecord, MemoryRepo, Result,
-    SHARED_SCOPE, VISIBLE, add_edge, cite_visible_memory, insert_row, now, read_memory_tx,
-    supersede_tx, truncate, validate_citations,
+    SHARED_SCOPE, VISIBLE, add_edge, cite_visible_memory, insert_row, now, truncate,
+    validate_citations,
 };
 use crate::StoreError;
 use crate::row::FromRow;
-use ene_mind::{RecallCandidate, RecallMode, in_scope};
+use ene_mind::{RecallCandidate, RecallMode};
 use rusqlite::params;
 use serde_json::json as value;
 use std::collections::{HashMap, HashSet};
@@ -87,6 +87,20 @@ impl<'a> MemoryRepo<'a> {
         let mut connection = self.0.conn();
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut current = transaction.prepare_cached(&format!(
+            "SELECT EXISTS (SELECT 1 FROM memories m WHERE {VISIBLE} \
+             AND m.id = ?2 AND m.memory_revision = ?3)"
+        ))?;
+        for (&id, &revision) in &expected {
+            if !current.query_row(params![batch.companion_id, id, revision], |row| {
+                row.get::<_, bool>(0)
+            })? {
+                return Err(StoreError::Conflict(
+                    "memory changed while consolidation was running".into(),
+                ));
+            }
+        }
+        drop(current);
         for fact in facts {
             apply_consolidated_fact(&transaction, batch, fact, &expected, &stamp, &mut commit)?;
         }
@@ -127,15 +141,19 @@ fn apply_consolidated_fact(
         ));
     }
     let importance = fact.importance.unwrap_or(3).min(10);
-    if let Some(old) = fact.supersedes.as_deref()
-        && let Some(current) = read_memory_tx(transaction, old)?
-        && in_scope(&current.scope, &batch.companion_id)
-        && current.importance <= 1
-        && importance > 1
+    if importance > 1
+        && transaction
+            .prepare_cached(&format!(
+                "SELECT EXISTS (SELECT 1 FROM memories m WHERE {VISIBLE} AND m.importance <= 1 \
+                 AND (m.content = ?2 OR m.id = ?3))"
+            ))?
+            .query_row(
+                params![batch.companion_id, content, fact.supersedes],
+                |row| row.get::<_, bool>(0),
+            )?
     {
         tracing::debug!(
             companion = %batch.companion_id,
-            memory = %old,
             "consolidation did not revive a forgotten memory"
         );
         return Ok(());
@@ -145,18 +163,6 @@ fn apply_consolidated_fact(
         .as_deref()
         .and_then(|id| expected.get(id).copied().map(|rev| (id, rev)));
     if let Some((id, revision)) = merge {
-        let current = read_memory_tx(transaction, id)?
-            .ok_or_else(|| StoreError::Conflict("the superseded memory is gone".into()))?;
-        if !in_scope(&current.scope, &batch.companion_id) {
-            return Err(StoreError::Permission(
-                "consolidation cannot merge a memory outside its scope".into(),
-            ));
-        }
-        if current.memory_revision != revision {
-            return Err(StoreError::Conflict(
-                "memory changed while consolidation was running".into(),
-            ));
-        }
         let rows = transaction
             .prepare_cached(
                 "UPDATE memories SET content = ?3, importance = ?4, \
@@ -195,13 +201,6 @@ fn apply_consolidated_fact(
         stamp,
     )?;
     add_edge(transaction, &batch.companion_id, "remembers", &id, stamp)?;
-    if let Some(old) = fact
-        .supersedes
-        .as_deref()
-        .filter(|old| expected.contains_key(old))
-    {
-        supersede_tx(transaction, &batch.companion_id, &id, old, stamp)?;
-    }
     commit.inserted += 1;
     Ok(())
 }

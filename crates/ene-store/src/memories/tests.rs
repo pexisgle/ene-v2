@@ -633,6 +633,53 @@ fn consolidation_does_not_resurrect_a_forgotten_memory() {
 }
 
 #[test]
+fn stale_consolidation_cannot_recreate_forgotten_text_or_use_revoked_context() {
+    let store = store();
+    let repo = store.memory_repo();
+    let forgotten = repo
+        .insert_memory(&new_memory("coffee every morning", 5))
+        .unwrap();
+    repo.control_memory(&forgotten.id, MemoryActionKind::Forget, "ene")
+        .unwrap();
+    let pinned = |content: &str| Fact {
+        content: content.into(),
+        importance: Some(10),
+        ..Fact::default()
+    };
+    let commit = repo
+        .consolidate(
+            &batch(7, Vec::new()),
+            &[
+                pinned(" coffee every morning "),
+                pinned("gardening at noon"),
+            ],
+        )
+        .unwrap();
+    assert_eq!(commit.inserted, 1);
+    let pins = repo.pinned("ene").unwrap();
+    assert_eq!(pins.len(), 1);
+    assert_eq!(pins[0].content, "gardening at noon");
+    assert_eq!(repo.memory(&forgotten.id).unwrap().unwrap().importance, 0);
+
+    let mut shared = new_memory("formerly shared", 4);
+    shared.scope = "other".into();
+    let shared = repo.insert_memory(&shared).unwrap();
+    repo.control_memory(&shared.id, MemoryActionKind::Share, "other")
+        .unwrap();
+    let context = repo
+        .consolidation_context("ene", "formerly shared", &[], 32)
+        .unwrap();
+    assert!(context.iter().any(|memory| memory.id == shared.id));
+    repo.control_memory(&shared.id, MemoryActionKind::Unshare, "other")
+        .unwrap();
+    assert!(matches!(
+        repo.consolidate(&batch(9, context), &[pinned("derived from stale context")]),
+        Err(StoreError::Conflict(_))
+    ));
+    assert_eq!(repo.pinned("ene").unwrap().len(), 1);
+}
+
+#[test]
 fn injected_memory_ids_survive_a_restart() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("host.sqlite3");
