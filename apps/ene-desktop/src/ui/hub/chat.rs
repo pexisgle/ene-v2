@@ -9,7 +9,7 @@ use crate::{
 use ene_domain::CompanionId;
 use gpui::Context;
 
-pub(super) fn select_companion(hub: &mut Hub, companion_id: &str, cx: &mut Context<Hub>) {
+pub(in crate::ui) fn select_companion(hub: &mut Hub, companion_id: &str, cx: &mut Context<Hub>) {
     if hub.model.companion_id() == Some(companion_id) {
         return;
     }
@@ -22,13 +22,13 @@ pub(super) fn select_companion(hub: &mut Hub, companion_id: &str, cx: &mut Conte
     hub.model.companions.streaming.clear();
     hub.model.audio.transcription = None;
     hub.command(Command::Serve(companion_id.to_owned()));
-    hub.load_history(cx);
+    load_history(hub);
     hub.load_mind(cx);
     hub.windows.pod_scroll_ping = hub.windows.pod_scroll_ping.saturating_add(1);
     cx.notify();
 }
 
-pub(super) fn load_history(hub: &mut Hub, _cx: &mut Context<Hub>) {
+pub(super) fn load_history(hub: &mut Hub) {
     let Some(companion_id) = hub.model.companion_id().map(str::to_owned) else {
         return;
     };
@@ -62,17 +62,12 @@ pub(super) fn load_history(hub: &mut Hub, _cx: &mut Context<Hub>) {
     }
 }
 
-pub(super) fn send(hub: &mut Hub, text: &str, cx: &mut Context<Hub>) -> bool {
+pub(in crate::ui) fn send(hub: &mut Hub, text: &str, cx: &mut Context<Hub>) -> bool {
     let request_key = uuid::Uuid::new_v4().to_string();
-    hub.send_keyed(text, request_key, cx)
+    send_keyed(hub, text, request_key, cx)
 }
 
-pub(super) fn send_keyed(
-    hub: &mut Hub,
-    text: &str,
-    request_key: String,
-    cx: &mut Context<Hub>,
-) -> bool {
+fn send_keyed(hub: &mut Hub, text: &str, request_key: String, cx: &mut Context<Hub>) -> bool {
     let text = text.trim().to_owned();
     if text.is_empty() {
         return false;
@@ -113,11 +108,16 @@ pub(super) fn send_keyed(
     true
 }
 
-pub(super) fn retry_unsent(hub: &mut Hub, request_key: &str, text: &str, cx: &mut Context<Hub>) {
-    let _discarded = hub.send_keyed(text, request_key.to_owned(), cx);
+pub(in crate::ui) fn retry_unsent(
+    hub: &mut Hub,
+    request_key: &str,
+    text: &str,
+    cx: &mut Context<Hub>,
+) {
+    let _discarded = send_keyed(hub, text, request_key.to_owned(), cx);
 }
 
-pub(super) fn dismiss_unsent(hub: &mut Hub, request_key: &str, cx: &mut Context<Hub>) {
+pub(in crate::ui) fn dismiss_unsent(hub: &mut Hub, request_key: &str, cx: &mut Context<Hub>) {
     hub.model
         .companions
         .chat
@@ -126,7 +126,7 @@ pub(super) fn dismiss_unsent(hub: &mut Hub, request_key: &str, cx: &mut Context<
     cx.notify();
 }
 
-pub(super) fn stop(hub: &mut Hub, cx: &mut Context<Hub>) {
+pub(in crate::ui) fn stop(hub: &mut Hub, cx: &mut Context<Hub>) {
     hub.command(Command::StopPlayback);
     if let Some(companion) = hub.model.companion_id().map(str::to_owned) {
         rpc::chat::stop(&hub.rpc, hub.model.connections.link_epoch, companion);

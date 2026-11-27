@@ -1,6 +1,7 @@
 use super::ConnectionsPane;
 use super::roles_voice::{collect_roles_context, render_voice_role_row, voice_role_specs};
 use crate::ui::ModelRoleSlot;
+use crate::ui::hub::companions as companion_actions;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{DropdownOption, DropdownSpec, dropdown_select};
 use ene_client_core::domain::{Companion, ModelAssignment, ModelAssignments};
@@ -147,7 +148,9 @@ fn render_model_role_row(
                 empty_label: "利用可能なモデルがありません（接続を追加・確認してください）",
             },
             move |picked, _, cx| {
-                hub_assign.update(cx, |hub, cx| hub.assign_model(slot, picked, cx));
+                hub_assign.update(cx, |hub, cx| {
+                    companion_actions::assign_model(hub, slot, picked, cx)
+                });
             },
         ))
         .into_any_element()

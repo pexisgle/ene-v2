@@ -8,28 +8,17 @@ use crate::{
         initial_pod_bounds_for_mode, pod,
     },
 };
-use ene_platform_os::{TrayAction, TrayHandle, TrayMode, TraySection, TrayState};
+use ene_platform_os::{TrayAction, TrayMode, TraySection, TrayState};
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, WeakEntity, WindowBounds,
     WindowKind, WindowOptions, px, size,
 };
 
-pub(super) fn is_tray_resident(hub: &Hub) -> bool {
-    hub.windows
-        .tray
-        .as_ref()
-        .is_some_and(TrayHandle::is_resident)
-}
-
-pub(super) fn is_pod_visible(hub: &Hub) -> bool {
-    hub.windows.pod_visible && hub.windows.pod_window.is_some()
-}
-
-pub(super) fn pod_view(hub: &Hub) -> Option<WeakEntity<CompanionPod>> {
+pub(in crate::ui) fn pod_view(hub: &Hub) -> Option<WeakEntity<CompanionPod>> {
     hub.windows.pod_view.clone()
 }
 
-pub(super) fn register_pod_window(
+fn register_pod_window(
     hub: &mut Hub,
     handle: AnyWindowHandle,
     view: WeakEntity<CompanionPod>,
@@ -57,7 +46,7 @@ pub(super) fn open_pod(hub: &mut Hub, mode: Option<PodMode>, cx: &mut Context<Hu
         }
     }
     hub.windows.pod_visible = true;
-    let existing = hub.windows.pod_window.zip(hub.pod_view());
+    let existing = hub.windows.pod_window.zip(pod_view(hub));
     sync_tray_state(hub);
     cx.notify();
 
@@ -89,7 +78,7 @@ pub(super) fn open_pod(hub: &mut Hub, mode: Option<PodMode>, cx: &mut Context<Hu
 }
 
 pub(super) fn toggle_pod(hub: &mut Hub, mode: Option<PodMode>, cx: &mut Context<Hub>) {
-    if is_pod_visible(hub) && mode.is_none_or(|m| m == hub.windows.pod_mode) {
+    if hub.is_pod_visible() && mode.is_none_or(|m| m == hub.windows.pod_mode) {
         hide_pod(hub, cx);
     } else {
         open_pod(hub, mode, cx);
@@ -115,7 +104,7 @@ pub(super) fn sync_window_closed(hub: &mut Hub, cx: &mut App) {
         hub.windows.pod_visible = false;
     }
     sync_tray_state(hub);
-    if windows.is_empty() || (!is_tray_resident(hub) && hub.windows.pod_window.is_none()) {
+    if windows.is_empty() || (!hub.is_tray_resident() && hub.windows.pod_window.is_none()) {
         cx.quit();
     }
 }
@@ -135,7 +124,7 @@ pub(super) fn sync_tray_state(hub: &Hub) {
         _ => "未接続",
     };
     tray.update(TrayState {
-        pod_open: is_pod_visible(hub),
+        pod_open: hub.is_pod_visible(),
         pod_mode: tray_mode(hub.windows.pod_mode),
         mic_muted: hub.model.audio.mic_muted,
         avatar_ready: matches!(hub.model.connections.devices.avatar, Device::Ready(_)),
@@ -174,7 +163,7 @@ pub(super) fn handle_tray_action(hub: &mut Hub, action: TrayAction, cx: &mut Con
     }
 }
 
-pub(super) fn set_pod_mode(hub: &mut Hub, mode: PodMode, cx: &mut Context<Hub>) {
+pub(in crate::ui) fn set_pod_mode(hub: &mut Hub, mode: PodMode, cx: &mut Context<Hub>) {
     if hub.windows.pod_mode != mode {
         hub.windows.pod_mode = mode;
         if mode == PodMode::ExpandedChat {
@@ -308,7 +297,7 @@ pub fn open_pod_window(cx: &mut App, hub: &Entity<Hub>) -> Option<AnyWindowHandl
             });
             if did_open.is_ok() {
                 hub.update(cx, |hub, cx| {
-                    hub.register_pod_window(window, view.downgrade(), cx)
+                    register_pod_window(hub, window, view.downgrade(), cx)
                 });
             }
             Some(window)

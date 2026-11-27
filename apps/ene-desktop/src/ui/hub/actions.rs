@@ -1,18 +1,13 @@
 //! Chat, audio, device, approval, policy, plugin, remote-host, and companion actions on [`Hub`].
 
-use super::{Hub, chat, companions};
+use super::{Hub, windows};
 use crate::{
     rpc,
     state::{Notice, NoticeKind},
     update::Command,
 };
-use ene_client_core::{
-    ModelRoleSlot,
-    domain::{
-        ApprovalDecision, CompanionProfilePatch, CompanionTemplate, MindProfile, ModelAssignment,
-        NewCompanionSpec, PolicyEffect, PolicyRule, PolicyRulesUpdate, PolicyText,
-        PolicyTextsUpdate,
-    },
+use ene_client_core::domain::{
+    ApprovalDecision, PolicyEffect, PolicyRule, PolicyRulesUpdate, PolicyText, PolicyTextsUpdate,
 };
 use gpui::Context;
 use std::sync::Arc;
@@ -28,39 +23,6 @@ impl Hub {
         }
     }
 
-    pub(crate) fn select_companion(&mut self, companion_id: &str, cx: &mut Context<Self>) {
-        chat::select_companion(self, companion_id, cx);
-    }
-
-    pub(crate) fn load_history(&mut self, cx: &mut Context<Self>) {
-        chat::load_history(self, cx);
-    }
-
-    pub(crate) fn send(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
-        chat::send(self, text, cx)
-    }
-
-    pub(crate) fn send_keyed(
-        &mut self,
-        text: &str,
-        request_key: String,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        chat::send_keyed(self, text, request_key, cx)
-    }
-
-    pub(crate) fn retry_unsent(&mut self, request_key: &str, text: &str, cx: &mut Context<Self>) {
-        chat::retry_unsent(self, request_key, text, cx);
-    }
-
-    pub(crate) fn dismiss_unsent(&mut self, request_key: &str, cx: &mut Context<Self>) {
-        chat::dismiss_unsent(self, request_key, cx);
-    }
-
-    pub(crate) fn stop(&mut self, cx: &mut Context<Self>) {
-        chat::stop(self, cx);
-    }
-
     pub(crate) fn toggle_mic_mute(&mut self, cx: &mut Context<Self>) {
         let next = !self.model.audio.mic_muted;
         self.model.audio.mic_muted = next;
@@ -69,7 +31,7 @@ impl Hub {
             self.model.audio.transcription = None;
         }
         self.command(Command::SetMicMuted(next));
-        self.sync_tray_state();
+        windows::sync_tray_state(self);
         cx.notify();
     }
 
@@ -117,7 +79,7 @@ impl Hub {
             self.model.audio.output_rms = 0.0;
         }
         self.command(Command::SetOutputMuted(next));
-        self.sync_tray_state();
+        windows::sync_tray_state(self);
         cx.notify();
     }
 
@@ -375,18 +337,6 @@ impl Hub {
         cx.notify();
     }
 
-    pub(crate) fn create_companion(&mut self, spec: NewCompanionSpec, cx: &mut Context<Self>) {
-        companions::create_companion(self, spec, cx);
-    }
-
-    pub(crate) fn update_companion_profile(
-        &mut self,
-        patch: CompanionProfilePatch,
-        cx: &mut Context<Self>,
-    ) {
-        companions::update_companion_profile(self, patch, cx);
-    }
-
     pub(crate) fn load_companion_templates(&mut self, _cx: &mut Context<Self>) {
         rpc::companions::load_companion_templates(&self.rpc, self.model.connections.link_epoch);
     }
@@ -398,37 +348,6 @@ impl Hub {
             companion_id,
         );
         cx.notify();
-    }
-
-    pub(crate) fn import_companion_json(&mut self, raw: &str, cx: &mut Context<Self>) {
-        companions::import_companion_json(self, raw, cx);
-    }
-
-    pub(crate) fn import_companion_template(
-        &mut self,
-        template: CompanionTemplate,
-        cx: &mut Context<Self>,
-    ) {
-        companions::import_companion_template(self, template, cx);
-    }
-
-    pub(crate) fn preview_companion(
-        &mut self,
-        spec: NewCompanionSpec,
-        model: ModelAssignment,
-        revision: u64,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        companions::preview_companion(self, spec, model, revision, cx)
-    }
-
-    pub(crate) fn assign_model(
-        &mut self,
-        slot: ModelRoleSlot,
-        assignment: Option<ModelAssignment>,
-        cx: &mut Context<Self>,
-    ) {
-        companions::assign_model(self, slot, assignment, cx);
     }
 
     pub(crate) fn delete_companion(&mut self, companion_id: String, cx: &mut Context<Self>) {
@@ -449,15 +368,5 @@ impl Hub {
 
     pub(crate) fn load_mind_for(&mut self, companion_id: String) {
         rpc::companions::load_mind(&self.rpc, self.model.connections.link_epoch, companion_id);
-    }
-
-    pub(crate) fn update_mind_profile(
-        &mut self,
-        companion_id: String,
-        expected_revision: u64,
-        profile: MindProfile,
-        cx: &mut Context<Self>,
-    ) {
-        companions::update_mind_profile(self, companion_id, expected_revision, profile, cx);
     }
 }

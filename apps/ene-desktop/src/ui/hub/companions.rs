@@ -11,12 +11,16 @@ use ene_client_core::{
 };
 use gpui::Context;
 
-pub(super) fn create_companion(hub: &mut Hub, spec: NewCompanionSpec, cx: &mut Context<Hub>) {
+pub(in crate::ui) fn create_companion(
+    hub: &mut Hub,
+    spec: NewCompanionSpec,
+    cx: &mut Context<Hub>,
+) {
     rpc::companions::create_companion(&hub.rpc, hub.model.connections.link_epoch, spec);
     cx.notify();
 }
 
-pub(super) fn update_companion_profile(
+pub(in crate::ui) fn update_companion_profile(
     hub: &mut Hub,
     patch: CompanionProfilePatch,
     cx: &mut Context<Hub>,
@@ -38,7 +42,7 @@ pub(super) fn update_companion_profile(
     cx.notify();
 }
 
-pub(super) fn import_companion_json(hub: &mut Hub, raw: &str, cx: &mut Context<Hub>) {
+pub(in crate::ui) fn import_companion_json(hub: &mut Hub, raw: &str, cx: &mut Context<Hub>) {
     let template = match parse_template_json(raw) {
         Ok(template) => template,
         Err(error) => {
@@ -54,7 +58,7 @@ pub(super) fn import_companion_json(hub: &mut Hub, raw: &str, cx: &mut Context<H
     import_companion_template(hub, template, cx);
 }
 
-pub(super) fn import_companion_template(
+pub(in crate::ui) fn import_companion_template(
     hub: &mut Hub,
     template: CompanionTemplate,
     cx: &mut Context<Hub>,
@@ -63,7 +67,7 @@ pub(super) fn import_companion_template(
     cx.notify();
 }
 
-pub(super) fn preview_companion(
+pub(in crate::ui) fn preview_companion(
     hub: &mut Hub,
     spec: NewCompanionSpec,
     model: ModelAssignment,
@@ -84,7 +88,7 @@ pub(super) fn preview_companion(
     admitted
 }
 
-pub(super) fn assign_model(
+pub(in crate::ui) fn assign_model(
     hub: &mut Hub,
     slot: ModelRoleSlot,
     assignment: Option<ModelAssignment>,
@@ -104,7 +108,7 @@ pub(super) fn assign_model(
     cx.notify();
 }
 
-pub(super) fn update_mind_profile(
+pub(in crate::ui) fn update_mind_profile(
     hub: &mut Hub,
     companion_id: String,
     expected_revision: u64,

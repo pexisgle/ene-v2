@@ -7,6 +7,7 @@ mod text;
 
 use super::CompanionPod;
 use crate::state::Link;
+use crate::ui::hub::{chat, windows};
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, notice_strip, pill_button};
@@ -296,7 +297,9 @@ impl CompanionPod {
                     Tone::Soft,
                     theme,
                     move |_, cx| {
-                        more.update(cx, |hub, cx| hub.set_pod_mode(PodMode::ExpandedChat, cx))
+                        more.update(cx, |hub, cx| {
+                            windows::set_pod_mode(hub, PodMode::ExpandedChat, cx)
+                        })
                     },
                 ))
             })
@@ -308,7 +311,7 @@ impl CompanionPod {
                     Tone::Primary.icon(Icon::Send).enabled(can_send_greet),
                     theme,
                     move |_, cx| {
-                        greeting.update(cx, |hub, cx| hub.send("こんにちは", cx));
+                        greeting.update(cx, |hub, cx| chat::send(hub, "こんにちは", cx));
                     },
                 ))
             })

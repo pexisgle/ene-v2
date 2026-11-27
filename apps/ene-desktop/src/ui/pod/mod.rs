@@ -8,6 +8,7 @@ mod onboarding;
 
 use crate::input::{Draft, SubmitDraft};
 use crate::ui::hub::SetupStage;
+use crate::ui::hub::{chat, windows};
 use crate::ui::theme::{resolve_ui_font_family, ui_font_fallbacks};
 use crate::ui::{Hub, PodMode};
 use ene_client_core::domain::TurnStatus;
@@ -177,7 +178,8 @@ impl CompanionPod {
 
     pub(super) fn toggle_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let next = self.hub.read(cx).windows.pod_mode.toggle();
-        self.hub.update(cx, |hub, cx| hub.set_pod_mode(next, cx));
+        self.hub
+            .update(cx, |hub, cx| windows::set_pod_mode(hub, next, cx));
         let desired = self.desired_size(cx);
         self.apply_size(desired, window, cx);
         cx.notify();
@@ -248,7 +250,7 @@ impl CompanionPod {
         if text.is_empty() || text.chars().count() > MAX_INPUT {
             return;
         }
-        let sent = self.hub.update(cx, |hub, cx| hub.send(&text, cx));
+        let sent = self.hub.update(cx, |hub, cx| chat::send(hub, &text, cx));
         if sent {
             self.controls_open = false;
             self.chat_input
@@ -274,10 +276,11 @@ impl CompanionPod {
         let busy = hub.model.audio.companion_speaking || !hub.model.companions.streaming.is_empty();
         let expanded = hub.windows.pod_mode == PodMode::ExpandedChat;
         if busy {
-            self.hub.update(cx, super::hub::Hub::stop);
+            self.hub.update(cx, chat::stop);
         } else if expanded {
-            self.hub
-                .update(cx, |hub, cx| hub.set_pod_mode(PodMode::MiniVoice, cx));
+            self.hub.update(cx, |hub, cx| {
+                windows::set_pod_mode(hub, PodMode::MiniVoice, cx)
+            });
         }
     }
 }
@@ -405,7 +408,7 @@ pub fn bind(cx: &mut App, hub: Entity<Hub>) {
 
     let escape_hub = hub.clone();
     cx.on_action(move |_: &CancelOrStop, cx: &mut App| {
-        let Some(view) = escape_hub.read(cx).pod_view() else {
+        let Some(view) = windows::pod_view(escape_hub.read(cx)) else {
             return;
         };
         let _updated = view.update(cx, CompanionPod::handle_escape);

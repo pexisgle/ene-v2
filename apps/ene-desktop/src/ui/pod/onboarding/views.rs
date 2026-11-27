@@ -1,6 +1,7 @@
 //! The connect-submit row, voice launch and finish button.
 
 use crate::input::Draft;
+use crate::ui::hub::companions as companion_actions;
 use crate::ui::hub::presets;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
@@ -188,7 +189,8 @@ pub(super) fn render_setup_finish_button(
                 });
             } else if params.companions_empty && !params.name.is_empty() {
                 hub_start.update(cx, |hub, cx| {
-                    hub.create_companion(
+                    companion_actions::create_companion(
+                        hub,
                         NewCompanionSpec {
                             name: params.name.clone(),
                             persona: "柔らかく親しみやすい口調で会話します。".into(),

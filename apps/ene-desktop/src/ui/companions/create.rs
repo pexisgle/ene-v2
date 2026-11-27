@@ -1,6 +1,7 @@
 //! Companion template import and creation panels in `SettingsStudio`.
 
 use super::{CompanionsPane, CompanionsSnapshot};
+use crate::ui::hub::companions as companion_actions;
 use crate::{
     input::Draft,
     ui::{
@@ -44,7 +45,7 @@ pub(super) fn render_import_panel(
                 theme,
                 move |_, cx| {
                     hub_tpl.update(cx, |hub, cx| {
-                        hub.import_companion_template(tpl.clone(), cx);
+                        companion_actions::import_companion_template(hub, tpl.clone(), cx);
                     });
                 },
             )
@@ -116,7 +117,7 @@ pub(super) fn render_import_panel(
                     theme,
                     move |_, cx| {
                         hub_import_json.update(cx, |hub, cx| {
-                            hub.import_companion_json(&json_text, cx);
+                            companion_actions::import_companion_json(hub, &json_text, cx);
                         });
                     },
                 )),
@@ -265,7 +266,8 @@ fn render_create_actions(
                     return;
                 };
                 let admitted = hub_preview.update(cx, |hub, cx| {
-                    hub.preview_companion(
+                    companion_actions::preview_companion(
+                        hub,
                         preview_spec.clone(),
                         target.assignment,
                         target.revision,
@@ -287,7 +289,8 @@ fn render_create_actions(
             theme,
             move |_, cx| {
                 hub_create.update(cx, |hub, cx| {
-                    hub.create_companion(
+                    companion_actions::create_companion(
+                        hub,
                         NewCompanionSpec {
                             name: spec.name.clone(),
                             persona: spec.persona.clone(),

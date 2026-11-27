@@ -1,19 +1,19 @@
 //! Shared UI state hub, lifecycle state grouping, and host update dispatch.
 
 mod actions;
-mod chat;
-mod companions;
+pub(super) mod chat;
+pub(super) mod companions;
 mod connections;
 pub(crate) mod presets;
 mod state;
 pub(crate) mod voice_roles;
-mod windows;
+pub(super) mod windows;
 
 pub(crate) use state::SetupStage;
 pub use state::{HubInit, SetupFlowState, WindowState};
 pub use windows::open_pod_window;
 
-use super::{CompanionPod, PodMode, SettingsSection};
+use super::{PodMode, SettingsSection};
 use crate::{
     rpc::{self, RpcDispatcher},
     session::Options,
@@ -21,8 +21,8 @@ use crate::{
     update::{Command, Update},
 };
 use ene_client_core::domain::ConnectionKind;
-use ene_platform_os::TrayAction;
-use gpui::{AnyWindowHandle, App, Context, EventEmitter, Task, WeakEntity};
+use ene_platform_os::TrayHandle;
+use gpui::{App, Context, EventEmitter, Task};
 use state::ApplyFlags;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -73,7 +73,7 @@ impl Hub {
             cx.spawn(async move |this, cx| {
                 while let Some(action) = actions.recv().await {
                     if this
-                        .update(cx, |this, cx| this.handle_tray_action(action, cx))
+                        .update(cx, |this, cx| windows::handle_tray_action(this, action, cx))
                         .is_err()
                     {
                         break;
@@ -177,12 +177,12 @@ impl Hub {
                 self.setup.error = result.as_ref().err().cloned();
                 self.resnapshot();
                 if let Ok(id) = result {
-                    self.select_companion(id, cx);
+                    chat::select_companion(self, id, cx);
                 }
             }
             Update::Created(id) => {
                 self.resnapshot();
-                self.select_companion(id, cx);
+                chat::select_companion(self, id, cx);
                 cx.emit(HubEvent::CompanionCreated(id.clone()));
             }
             Update::CompanionPreview { .. } => cx.emit(HubEvent::CompanionPreviewFinished),
@@ -215,7 +215,7 @@ impl Hub {
             self.windows.pod_scroll_ping = self.windows.pod_scroll_ping.saturating_add(1);
         }
         if effects.history || selected_now {
-            self.load_history(cx);
+            chat::load_history(self);
         }
         if effects.mind || selected_now {
             self.load_mind(cx);
@@ -226,13 +226,13 @@ impl Hub {
         if selected_now {
             self.load_models(cx);
         }
-        self.sync_tray_state();
+        windows::sync_tray_state(self);
         cx.notify();
     }
 
     pub(crate) fn refresh_active_data(&mut self, cx: &mut Context<Self>) {
         self.resnapshot();
-        self.load_history(cx);
+        chat::load_history(self);
         self.load_providers(cx);
         self.load_models(cx);
         self.load_mind(cx);
@@ -243,24 +243,14 @@ impl Hub {
     }
 
     pub fn is_tray_resident(&self) -> bool {
-        windows::is_tray_resident(self)
+        self.windows
+            .tray
+            .as_ref()
+            .is_some_and(TrayHandle::is_resident)
     }
 
     pub fn is_pod_visible(&self) -> bool {
-        windows::is_pod_visible(self)
-    }
-
-    pub(crate) fn pod_view(&self) -> Option<WeakEntity<CompanionPod>> {
-        windows::pod_view(self)
-    }
-
-    pub(crate) fn register_pod_window(
-        &mut self,
-        handle: AnyWindowHandle,
-        view: WeakEntity<CompanionPod>,
-        cx: &mut Context<Self>,
-    ) {
-        windows::register_pod_window(self, handle, view, cx);
+        self.windows.pod_visible && self.windows.pod_window.is_some()
     }
 
     pub fn hide_pod(&mut self, cx: &mut Context<Self>) {
@@ -277,18 +267,6 @@ impl Hub {
 
     pub fn sync_window_closed(&mut self, cx: &mut App) {
         windows::sync_window_closed(self, cx);
-    }
-
-    pub(crate) fn sync_tray_state(&self) {
-        windows::sync_tray_state(self);
-    }
-
-    pub(crate) fn handle_tray_action(&mut self, action: TrayAction, cx: &mut Context<Self>) {
-        windows::handle_tray_action(self, action, cx);
-    }
-
-    pub(crate) fn set_pod_mode(&mut self, mode: PodMode, cx: &mut Context<Self>) {
-        windows::set_pod_mode(self, mode, cx);
     }
 
     /// Opens or focuses the standalone `SettingsStudio` window at `section`.

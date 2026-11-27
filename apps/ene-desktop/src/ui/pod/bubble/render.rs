@@ -6,6 +6,7 @@
 use super::{preview_text, reply_view};
 use crate::state::{Link, Model};
 use crate::ui::Hub;
+use crate::ui::hub::chat;
 use crate::ui::icons::{Icon, icon};
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button, status_pill, window_drag_area};
@@ -411,7 +412,7 @@ pub(super) fn render_stop_button(
         Tone::Danger.icon(Icon::SquareStop).enabled(!stop_requested),
         theme,
         move |_, cx| {
-            hub_stop.update(cx, crate::ui::hub::Hub::stop);
+            hub_stop.update(cx, chat::stop);
         },
     ))
 }

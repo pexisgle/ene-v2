@@ -1,8 +1,9 @@
 //! State types owned by [`Hub`]: window/tray handles, the setup flow, and the
 //! per-update flags the hub computes before handing an update to the reducer.
 
-use super::{CompanionPod, PodMode, SettingsSection};
+use super::{PodMode, SettingsSection};
 use crate::session::{Connection, Options};
+use crate::ui::CompanionPod;
 use crate::update::{Command, Update};
 use ene_client_core::domain::Connection as ProviderConnection;
 use ene_client_core::domain::NotificationEvent;

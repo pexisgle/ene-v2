@@ -2,6 +2,7 @@
 //! the inline editor disclosed beneath it.
 
 use super::{CompanionsPane, CompanionsSnapshot, editor};
+use crate::ui::hub::chat;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{ButtonStyle, Tone, companion_badge, pill_button, status_pill};
 use ene_client_core::domain::Companion;
@@ -190,7 +191,7 @@ impl CompanionsPane {
                     theme,
                     move |_, cx| {
                         hub_select.update(cx, |hub, cx| {
-                            hub.select_companion(&select_id, cx);
+                            chat::select_companion(hub, &select_id, cx);
                         });
                     },
                 )

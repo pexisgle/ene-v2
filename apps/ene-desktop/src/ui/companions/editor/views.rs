@@ -3,6 +3,7 @@
 //! Per-companion profile, VRM model, voice binding, and mind profile editor.
 
 use super::super::{CompanionsPane, split_pipe};
+use crate::ui::hub::companions as companion_actions;
 use crate::{
     input::Draft,
     ui::{
@@ -116,7 +117,13 @@ pub(super) fn render_mind_section(
             theme,
             move |_, cx| {
                 hub_mind.update(cx, |hub, cx| {
-                    hub.update_mind_profile(comp_id_save.clone(), prev, next_profile.clone(), cx);
+                    companion_actions::update_mind_profile(
+                        hub,
+                        comp_id_save.clone(),
+                        prev,
+                        next_profile.clone(),
+                        cx,
+                    );
                 });
             },
         )))
@@ -224,7 +231,8 @@ pub(super) fn render_companion_footer(
                     theme,
                     move |_, cx| {
                         hub_save.update(cx, |hub, cx| {
-                            hub.update_companion_profile(
+                            companion_actions::update_companion_profile(
+                                hub,
                                 CompanionProfilePatch {
                                     companion_id: patch.companion_id.clone(),
                                     name: patch.name.clone(),

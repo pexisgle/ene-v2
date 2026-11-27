@@ -1,5 +1,6 @@
 use super::{CompanionPod, MAX_INPUT};
 use crate::state::Unsent;
+use crate::ui::hub::chat;
 use crate::ui::icons::{Icon, icon};
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{
@@ -243,7 +244,8 @@ fn render_unsent_rows(
                     Tone::Primary.icon(Icon::RefreshCw).enabled(live),
                     theme,
                     move |_, cx| {
-                        hub_retry.update(cx, |hub, cx| hub.retry_unsent(&key, &retry_text, cx));
+                        hub_retry
+                            .update(cx, |hub, cx| chat::retry_unsent(hub, &key, &retry_text, cx));
                     },
                 ))
                 .child(circle_icon_button(
@@ -252,7 +254,8 @@ fn render_unsent_rows(
                     CircleButtonStyle::new(Icon::Close, 22., 11.),
                     theme,
                     move |_, cx| {
-                        hub_dismiss.update(cx, |hub, cx| hub.dismiss_unsent(&dismiss_key, cx));
+                        hub_dismiss
+                            .update(cx, |hub, cx| chat::dismiss_unsent(hub, &dismiss_key, cx));
                     },
                 ))
                 .into_any_element()
@@ -295,7 +298,7 @@ fn render_roster_row(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, window, cx| {
                 this.hub
-                    .update(cx, |hub, cx| hub.select_companion(&pick_id, cx));
+                    .update(cx, |hub, cx| chat::select_companion(hub, &pick_id, cx));
                 this.roster_open = false;
                 this.focus_input(window, cx);
                 cx.notify();
