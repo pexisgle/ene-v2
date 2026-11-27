@@ -12,7 +12,8 @@ use ene_client_core::{
 };
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 
-use chips::{build_custom_kind_chips, build_search_preset_chips, build_voice_embedding_chips};
+pub(super) use chips::build_search_preset_chips;
+use chips::{build_custom_kind_chips, build_voice_embedding_chips};
 
 pub(super) fn render_add_connection_panel(
     pane: &mut ConnectionsPane,
@@ -47,11 +48,6 @@ pub(super) fn render_add_connection_panel(
         .child(render_chip_section(
             "音声・埋め込み機能を追加",
             build_voice_embedding_chips(live, &pane.hub, theme, cx),
-            theme,
-        ))
-        .child(render_chip_section(
-            "Web 検索を追加",
-            build_search_preset_chips(live, &pane.hub, theme, cx),
             theme,
         ))
         .child(disclosure_row(

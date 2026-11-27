@@ -48,14 +48,8 @@ pub fn extract_kind_list_init(cfg: Option<&ConnectionConfig>) -> String {
         Some(ConnectionConfig::Embedding(c)) => c.model_id.clone(),
         Some(ConnectionConfig::Mcp(c)) => c.allowed_tools.join(", "),
         Some(ConnectionConfig::Acp(c)) => c.args.join(" "),
-        Some(ConnectionConfig::Search(c)) => {
-            if c.max_results == 0 {
-                "5".into()
-            } else {
-                c.max_results.to_string()
-            }
-        }
-        None => String::new(),
+        Some(ConnectionConfig::Search(c)) if c.max_results > 0 => c.max_results.to_string(),
+        Some(ConnectionConfig::Search(_)) | None => String::new(),
     }
 }
 
@@ -224,6 +218,15 @@ fn apply_mcp_edits(mcp: &mut McpConnection, spec: &ConnectionEditSpec<'_>) {
     mcp.allowed_tools = split_comma(spec.list_raw);
 }
 
+/// A blank Search limit has no connection-specific cap.
+pub fn parse_search_cap(raw: &str) -> Option<u32> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Some(0);
+    }
+    raw.parse().ok().filter(|&cap| (1..=20).contains(&cap))
+}
+
 fn apply_search_edits(search: &mut SearchConnection, spec: &ConnectionEditSpec<'_>) {
     let mut ep = updated_endpoint(
         search.endpoint.as_ref(),
@@ -234,13 +237,9 @@ fn apply_search_edits(search: &mut SearchConnection, spec: &ConnectionEditSpec<'
         ep.adapter = "mwmbl".to_owned();
     }
     search.endpoint = Some(ep);
-    search.max_results = spec
-        .list_raw
-        .trim()
-        .parse::<u32>()
-        .ok()
-        .filter(|&n| (1..=20).contains(&n))
-        .unwrap_or(5);
+    if let Some(cap) = parse_search_cap(spec.list_raw) {
+        search.max_results = cap;
+    }
 }
 
 /// Applies edited connection fields to produce a `ConnectionInput` update payload.
@@ -352,7 +351,7 @@ pub fn build_custom_connection_input(
     Some(ConnectionInput {
         id: uuid::Uuid::new_v4().to_string(),
         name: name.to_owned(),
-        enabled: true,
+        enabled: kind != ConnectionKind::Search,
         expected_revision: 0,
         kind,
         config: Some(config),
@@ -363,6 +362,34 @@ pub fn build_custom_connection_input(
 mod tests {
     use super::*;
     use crate::connections::mcp::parse_process_args;
+
+    #[test]
+    fn changes_to_other_search_fields_preserve_a_connection_without_a_cap() {
+        let conn = Connection {
+            kind: ConnectionKind::Search,
+            config: Some(ConnectionConfig::Search(SearchConnection::default())),
+            ..Default::default()
+        };
+        let initial = extract_kind_list_init(conn.config.as_ref());
+        assert_eq!(initial, "");
+        let update = apply_connection_edits(
+            &conn,
+            &ConnectionEditSpec {
+                name: "My search",
+                endpoint_url: "",
+                process: None,
+                list_raw: &initial,
+                dimensions_raw: None,
+                options_json: None,
+            },
+        );
+        let Some(ConnectionConfig::Search(search)) = update.config else {
+            panic!("expected updated search settings");
+        };
+        assert_eq!(search.max_results, 0);
+        assert_eq!(parse_search_cap("20"), Some(20));
+        assert_eq!(parse_search_cap("21"), None);
+    }
 
     #[test]
     fn editing_a_saved_mcp_connection_replaces_only_the_requested_arguments() {

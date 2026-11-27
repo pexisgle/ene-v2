@@ -165,36 +165,13 @@ pub(crate) fn register_secret(
     epoch: u64,
     connection_id: String,
     secret: String,
-    probe_after: bool,
-    settings: Option<(u64, Vec<ConnectionInput>)>,
 ) {
-    let updates = rpc.updates();
-    let id = connection_id.clone();
-    let context = if settings.is_some() {
-        "Web 検索APIキーの登録"
-    } else {
-        "資格情報の登録"
-    };
-    rpc.call(
+    let request = credential_request(connection_id.clone(), secret);
+    rpc.call_owned(
         epoch,
-        context,
-        |host| async move {
-            if let Some((revision, inputs)) = settings.filter(|(_, inputs)| !inputs.is_empty()) {
-                let response = host
-                    .settings
-                    .update_settings(settings_request(revision, inputs))
-                    .await?;
-                crate::session::notify_ui(&updates, settings_update(response.into_owned()));
-            }
-            host.settings
-                .register_credentials(credential_request(connection_id.clone(), secret))
-                .await?;
-            if probe_after {
-                spawn_connection_probe(host, connection_id, updates);
-            }
-            Ok(())
-        },
-        move |()| Update::CredentialRegistered { connection_id: id },
+        "資格情報の登録",
+        request!(settings.register_credentials(request)),
+        move |_| Update::CredentialRegistered { connection_id },
     );
 }
 

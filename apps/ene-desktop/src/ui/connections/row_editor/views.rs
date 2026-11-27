@@ -58,7 +58,10 @@ pub(super) fn render_connection_editor(
         render_options_schema(pane, &id, conn.revision, endpoint, theme, cx)
     };
 
-    let payload = build_editor_save_payload(&drafts, next_options_json, live, cx);
+    let mut payload = build_editor_save_payload(&drafts, next_options_json, live, cx);
+    let search_cap_invalid = conn.kind == ConnectionKind::Search
+        && ene_client_core::connections::parse_search_cap(&payload.next_list).is_none();
+    payload.can_save &= !search_cap_invalid;
     let args_error = payload.next_args.as_ref().err().copied();
     let mcp_kv_error = payload
         .next_mcp_extra
@@ -87,7 +90,9 @@ pub(super) fn render_connection_editor(
         .flex()
         .flex_col()
         .gap(px(12.))
-        .child(render_enable_row(conn, live, &pane.hub, theme))
+        .when(conn.kind != ConnectionKind::Search, |this| {
+            this.child(render_enable_row(conn, live, &pane.hub, theme))
+        })
         .when_some(error_banner(check, theme), gpui::ParentElement::child)
         .child(cred_strip)
         .child(labeled_field("表示名", drafts.name_d, theme))
@@ -109,10 +114,22 @@ pub(super) fn render_connection_editor(
         })
         .when(show_list_field, |this| {
             this.child(labeled_field(
-                conn.kind.list_field_label(),
+                if conn.kind == ConnectionKind::Search {
+                    "最大検索結果数（1–20、空欄で接続上限なし）"
+                } else {
+                    conn.kind.list_field_label()
+                },
                 drafts.list_d,
                 theme,
             ))
+        })
+        .when(search_cap_invalid, |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.danger_fg)
+                    .child("1から20までの整数を入力してください"),
+            )
         })
         .when_some(mcp_tools_strip, gpui::ParentElement::child)
         .when(!schema_controls.is_empty(), |this| {

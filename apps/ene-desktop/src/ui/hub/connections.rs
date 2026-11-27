@@ -8,7 +8,6 @@ use ene_client_core::{
         ConnectionResource, build_connection_enabled_input, build_embedding_model_input,
     },
     domain::{Connection, ConnectionInput, ConnectionKind, LlmProvider},
-    presets::SearchPresetSpec,
 };
 use gpui::Context;
 
@@ -199,23 +198,11 @@ impl Hub {
         if secret.is_empty() || self.rpc.host().is_none() {
             return;
         }
-        let is_search = self.model.settings().is_some_and(|s| {
-            s.connections
-                .iter()
-                .any(|c| c.id == connection_id && c.kind == ConnectionKind::Search)
-        });
-        if is_search {
-            self.setup
-                .checking_connections
-                .insert(connection_id.to_owned());
-        }
         rpc::connections::register_secret(
             &self.rpc,
             self.model.connections.link_epoch,
             connection_id.to_owned(),
             secret.to_owned(),
-            is_search,
-            None,
         );
         cx.notify();
     }
@@ -258,20 +245,10 @@ impl Hub {
 
     pub(crate) fn add_search_preset(
         &mut self,
-        spec: &SearchPresetSpec<'_>,
+        adapter: SearchAdapter,
         cx: &mut Context<Self>,
     ) -> String {
-        presets::add_search_preset(self, spec, cx)
-    }
-
-    pub(crate) fn save_search_provider_key(
-        &mut self,
-        adapter: SearchAdapter,
-        secret: &str,
-        activate: bool,
-        cx: &mut Context<Self>,
-    ) {
-        presets::save_search_provider_key(self, adapter, secret, activate, cx);
+        presets::add_search_preset(self, adapter, cx)
     }
 
     pub(crate) fn add_llm_from_provider(

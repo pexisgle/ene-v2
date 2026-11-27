@@ -9,9 +9,9 @@ use ene_client_core::{
     ModelRoleSlot, SAKURA_AI_ENDPOINT as SAKURA_ENDPOINT, SearchAdapter,
     domain::LlmProvider,
     presets::{
-        EmbeddingPresetSpec, SearchPresetSpec, SttPresetSpec, build_embedding_preset_input,
-        build_llm_provider_input, build_openai_tts_preset_input, build_sakura_tts_preset_input,
-        build_search_assignment_inputs, build_search_preset_inputs, build_stt_preset_input,
+        EmbeddingPresetSpec, SttPresetSpec, build_embedding_preset_input, build_llm_provider_input,
+        build_openai_tts_preset_input, build_sakura_tts_preset_input,
+        build_search_assignment_inputs, build_search_preset_input, build_stt_preset_input,
         build_voicevox_preset_input, find_reusable_quick_connect_connection,
     },
 };
@@ -42,64 +42,17 @@ pub(super) fn assign_search_connection(
 
 pub(super) fn add_search_preset(
     hub: &mut Hub,
-    spec: &SearchPresetSpec<'_>,
+    adapter: SearchAdapter,
     cx: &mut Context<Hub>,
 ) -> String {
-    let Some(settings) = hub.model.settings().cloned() else {
-        return spec.preset_id.to_owned();
+    let Some(settings) = hub.model.settings() else {
+        return adapter.provider().preset_id.into();
     };
-    if hub.rpc.host().is_none() {
-        return spec.preset_id.to_owned();
+    let (target, input) = build_search_preset_input(&settings.connections, adapter);
+    if let Some(input) = input {
+        hub.upsert_connection("Web 検索接続の追加", input, cx);
     }
-    let (target_id, inputs) = build_search_preset_inputs(&settings.connections, spec, true);
-    rpc::connections::update_settings(
-        &hub.rpc,
-        hub.model.connections.link_epoch,
-        "Web 検索接続の追加",
-        settings.revision,
-        inputs,
-        None,
-    );
-    cx.notify();
-    target_id
-}
-
-pub(super) fn save_search_provider_key(
-    hub: &mut Hub,
-    adapter: SearchAdapter,
-    secret: &str,
-    activate: bool,
-    cx: &mut Context<Hub>,
-) {
-    let secret = secret.trim().to_owned();
-    let provider = adapter.provider();
-    let (Some(_), Some(endpoint)) = (provider.key_environment, provider.default_endpoint) else {
-        return;
-    };
-    if secret.is_empty() || hub.rpc.host().is_none() {
-        return;
-    }
-    let Some(settings) = hub.model.settings().cloned() else {
-        return;
-    };
-    let spec = SearchPresetSpec {
-        preset_id: provider.preset_id,
-        name: provider.connection_name,
-        adapter: provider.adapter_id,
-        endpoint,
-        activate,
-    };
-    let (target_id, inputs) = build_search_preset_inputs(&settings.connections, &spec, false);
-    hub.setup.checking_connections.insert(target_id.clone());
-    rpc::connections::register_secret(
-        &hub.rpc,
-        hub.model.connections.link_epoch,
-        target_id,
-        secret,
-        true,
-        Some((settings.revision, inputs)),
-    );
-    cx.notify();
+    target
 }
 
 pub(super) fn add_llm_from_provider(

@@ -6,21 +6,6 @@ use crate::domain::{
     TtsConnection,
 };
 
-/// Parameters for creating or enabling a search provider preset.
-#[derive(Debug)]
-pub struct SearchPresetSpec<'a> {
-    /// Id the preset is stored under.
-    pub preset_id: &'a str,
-    /// Display name shown to the operator.
-    pub name: &'a str,
-    /// Adapter name the driver selects on.
-    pub adapter: &'a str,
-    /// Base URL of the provider.
-    pub endpoint: &'a str,
-    /// Whether the preset becomes the active connection.
-    pub activate: bool,
-}
-
 /// Parameters for creating or updating an STT preset connection.
 #[derive(Debug)]
 pub struct SttPresetSpec<'a> {
@@ -55,88 +40,70 @@ pub struct EmbeddingPresetSpec<'a> {
     pub dimensions: u32,
 }
 
-fn search_connection_input(
-    id: String,
-    name: String,
-    adapter: String,
-    endpoint: String,
-    enabled: bool,
-) -> ConnectionInput {
-    ConnectionInput {
-        id,
-        name,
-        enabled,
+/// Opens the catalog preset's own connection or creates it disabled.
+pub fn build_search_preset_input(
+    connections: &[Connection],
+    adapter: ene_catalog::SearchAdapter,
+) -> (String, Option<ConnectionInput>) {
+    let provider = adapter.provider();
+    let endpoint = provider
+        .default_endpoint
+        .unwrap_or("http://127.0.0.1:8080/search");
+    let reserved = connections
+        .iter()
+        .find(|conn| conn.id == provider.preset_id);
+    if let Some(conn) = reserved
+        && let Some(ConnectionConfig::Search(search)) = conn.config.as_ref()
+        && let Some(config) = search.endpoint.as_ref()
+        && ene_catalog::SearchAdapter::parse(&config.adapter) == Some(adapter)
+        && (config.endpoint == endpoint
+            || (config.endpoint.trim().is_empty() && provider.default_endpoint.is_some()))
+    {
+        return (conn.id.clone(), None);
+    }
+    let id = reserved.map_or_else(
+        || provider.preset_id.to_owned(),
+        |_| uuid::Uuid::new_v4().to_string(),
+    );
+    let input = ConnectionInput {
+        id: id.clone(),
+        name: provider.connection_name.into(),
+        enabled: false,
         expected_revision: 0,
         kind: ConnectionKind::Search,
         config: Some(ConnectionConfig::Search(SearchConnection {
             endpoint: Some(ConnectionEndpoint {
-                adapter,
-                endpoint,
+                adapter: provider.adapter_id.into(),
+                endpoint: endpoint.into(),
                 options_schema: String::new(),
                 options: "{}".into(),
             }),
             max_results: 5,
         })),
-    }
+    };
+    (id, Some(input))
 }
 
-/// Computes `(target_connection_id, inputs)` for adding or activating a search preset.
-pub fn build_search_preset_inputs(
-    connections: &[Connection],
-    spec: &SearchPresetSpec<'_>,
-    update_existing_always: bool,
-) -> (String, Vec<ConnectionInput>) {
-    let existing = connections.iter().find(|conn| {
-        conn.id == spec.preset_id
-            || conn
-                .search_adapter()
-                .is_some_and(|existing| existing.eq_ignore_ascii_case(spec.adapter))
-    });
-    let target_id = existing.map_or_else(|| spec.preset_id.to_owned(), |conn| conn.id.clone());
-    let has_enabled_other = connections
-        .iter()
-        .any(|conn| conn.kind == ConnectionKind::Search && conn.enabled && conn.id != target_id);
-    let should_enable = spec.activate || !has_enabled_other || existing.is_some_and(|c| c.enabled);
-    let mut inputs = Vec::new();
-    if let Some(conn) = existing {
-        if update_existing_always || conn.enabled != should_enable {
-            let mut input = conn.to_input();
-            input.enabled = should_enable;
-            inputs.push(input);
-        }
-    } else {
-        inputs.push(search_connection_input(
-            target_id.clone(),
-            spec.name.to_owned(),
-            spec.adapter.to_owned(),
-            spec.endpoint.to_owned(),
-            should_enable,
-        ));
-    }
-    if spec.activate {
-        for conn in connections {
-            if conn.kind == ConnectionKind::Search && conn.enabled && conn.id != target_id {
-                let mut input = conn.to_input();
-                input.enabled = false;
-                inputs.push(input);
-            }
-        }
-    }
-    (target_id, inputs)
-}
-
-/// Builds settings inputs enabling at most one search connection.
+/// Builds one atomic settings update for an explicit search selection.
 pub fn build_search_assignment_inputs(
     connections: &[Connection],
     connection_id: Option<&str>,
 ) -> Vec<ConnectionInput> {
+    let search = |conn: &&Connection| conn.kind == ConnectionKind::Search;
+    if connection_id.is_some_and(|id| !connections.iter().filter(search).any(|conn| conn.id == id))
+    {
+        return Vec::new();
+    }
     connections
         .iter()
-        .filter(|conn| conn.kind == ConnectionKind::Search)
-        .map(|conn| {
-            let mut input = conn.to_input();
-            input.enabled = connection_id == Some(conn.id.as_str());
-            input
+        .filter(search)
+        .filter_map(|conn| {
+            let selected = connection_id == Some(conn.id.as_str());
+            (conn.enabled != selected).then(|| {
+                let mut input = conn.to_input();
+                input.enabled = selected;
+                input
+            })
         })
         .collect()
 }
@@ -370,73 +337,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn search_preset_inputs_activate_target_and_disable_other_enabled_search() {
-        let (_, init_inputs) = build_search_preset_inputs(
-            &[],
-            &SearchPresetSpec {
-                preset_id: "search-exa",
-                name: "Web検索 (Exa)",
-                adapter: "exa",
-                endpoint: "https://api.exa.ai/search",
-                activate: true,
-            },
-            false,
-        );
-        assert_eq!(init_inputs.len(), 1);
-        assert_eq!(init_inputs[0].id, "search-exa");
-        assert!(init_inputs[0].enabled);
+    fn a_search_preset_never_targets_a_custom_endpoint_or_changes_the_active_connection() {
+        use ene_catalog::SearchAdapter;
 
-        let existing = vec![
-            Connection {
-                id: "search-exa".into(),
-                name: "Exa".into(),
-                enabled: true,
-                revision: 2,
-                kind: ConnectionKind::Search,
-                config: init_inputs[0].config.clone(),
-                ..Default::default()
-            },
-            Connection {
-                id: "search-tavily".into(),
-                name: "Tavily".into(),
-                enabled: false,
-                revision: 3,
-                kind: ConnectionKind::Search,
-                config: Some(ConnectionConfig::Search(SearchConnection {
-                    endpoint: Some(ConnectionEndpoint {
-                        adapter: "tavily".into(),
-                        endpoint: "https://api.tavily.com/search".into(),
-                        ..Default::default()
-                    }),
-                    max_results: 5,
-                })),
-                ..Default::default()
-            },
-        ];
+        let (id, preset) = build_search_preset_input(&[], SearchAdapter::Exa);
+        let preset = preset.unwrap();
+        assert_eq!(id, "search-exa");
+        assert!(!preset.enabled);
+        let default = Connection {
+            id: id.clone(),
+            kind: ConnectionKind::Search,
+            config: preset.config.clone(),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_search_preset_input(std::slice::from_ref(&default), SearchAdapter::Exa),
+            (id.clone(), None)
+        );
 
-        let (target_id, switch_inputs) = build_search_preset_inputs(
-            &existing,
-            &SearchPresetSpec {
-                preset_id: "search-tavily",
-                name: "Web検索 (Tavily)",
-                adapter: "tavily",
-                endpoint: "https://api.tavily.com/search",
-                activate: true,
-            },
-            false,
+        let mut custom = default;
+        custom.enabled = true;
+        let Some(ConnectionConfig::Search(config)) = &mut custom.config else {
+            panic!("the preset provides a Search config");
+        };
+        config.endpoint.as_mut().unwrap().endpoint = "https://custom.example/".into();
+        let (another_id, new_preset) =
+            build_search_preset_input(std::slice::from_ref(&custom), SearchAdapter::Exa);
+        assert_ne!(another_id, id);
+        let new_preset = new_preset.unwrap();
+        assert!(!new_preset.enabled);
+        let second = Connection {
+            id: another_id.clone(),
+            kind: ConnectionKind::Search,
+            config: new_preset.config,
+            ..Default::default()
+        };
+        let connections = [custom, second];
+        assert_eq!(
+            build_search_assignment_inputs(&connections, Some("missing")),
+            [] as [ConnectionInput; 0]
         );
-        assert_eq!(target_id, "search-tavily");
-        assert_eq!(switch_inputs.len(), 2);
-        assert!(
-            switch_inputs
-                .iter()
-                .any(|c| c.id == "search-tavily" && c.enabled)
-        );
-        assert!(
-            switch_inputs
-                .iter()
-                .any(|c| c.id == "search-exa" && !c.enabled)
-        );
+        let changes = build_search_assignment_inputs(&connections, Some(&another_id));
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].id, id);
+        assert!(!changes[0].enabled);
+        assert_eq!(changes[1].id, another_id);
+        assert!(changes[1].enabled);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use crate::ui::connections::mcp_editor::{
     McpDraftGroup, ParsedMcpExtra, mcp_args_draft, mcp_extra_drafts, process_command_draft,
     read_mcp_extra,
 };
-use crate::ui::connections::{SecretField, secret_row};
+use crate::ui::connections::secret_row;
 use crate::ui::icons::Icon;
 use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
@@ -245,7 +245,7 @@ pub(super) fn render_cred_secret_row(
 
     secret_row(
         format!("conn-eye-{id}"),
-        SecretField::Connection(id.to_owned()),
+        id.to_owned(),
         secret_d,
         revealed,
         theme,

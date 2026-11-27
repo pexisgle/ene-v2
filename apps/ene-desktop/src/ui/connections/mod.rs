@@ -32,11 +32,6 @@ enum AddFlow {
     Mcp(mcp_add::Form),
 }
 
-enum SecretField {
-    Connection(String),
-    Search(&'static str),
-}
-
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum EditorMode {
     #[default]
@@ -55,7 +50,6 @@ struct ConnectionFormState {
     add: AddFlow,
     pending_mcp: Option<String>,
     expanded: Option<ExpandedConnection>,
-    revealed_search: Option<&'static str>,
     advanced_roles_open: bool,
     auto_probed_connections: HashSet<String>,
     last_cleared_secret_seq: Option<u64>,
@@ -82,27 +76,16 @@ impl ConnectionFormState {
         self.expanded = None;
     }
 
-    fn toggle_secret(&mut self, field: &SecretField) {
-        match field {
-            SecretField::Connection(id) => {
-                if let Some(editor) = self.editor_mut(id) {
-                    editor.key_visible = !editor.key_visible;
-                    self.revealed_search = None;
-                }
-            }
-            SecretField::Search(adapter) => {
-                if let Some(editor) = &mut self.expanded {
-                    editor.key_visible = false;
-                }
-                self.revealed_search = (self.revealed_search != Some(adapter)).then_some(adapter);
-            }
+    fn toggle_secret(&mut self, id: &str) {
+        if let Some(editor) = self.editor_mut(id) {
+            editor.key_visible = !editor.key_visible;
         }
     }
 }
 
 fn secret_row(
     button_id: String,
-    field: SecretField,
+    connection_id: String,
     draft: Entity<Draft>,
     revealed: bool,
     theme: &Theme,
@@ -120,7 +103,7 @@ fn secret_row(
             theme,
             move |_, cx| {
                 pane.update(cx, |this, cx| {
-                    this.form.toggle_secret(&field);
+                    this.form.toggle_secret(&connection_id);
                     cx.notify();
                 });
             },
@@ -174,7 +157,6 @@ impl ConnectionsPane {
 
     pub(crate) fn on_leave(&mut self) {
         self.open_dropdown = None;
-        self.form.revealed_search = None;
         if let Some(editor) = &mut self.form.expanded {
             editor.mode = EditorMode::Editing;
             editor.key_visible = false;
@@ -192,30 +174,12 @@ impl ConnectionsPane {
         if let Some((conn_id, seq)) = cleared
             && previous.is_some_and(|previous| previous != seq)
         {
-            let adapter = self.hub.read(cx).model.settings().and_then(|s| {
-                s.connections
-                    .iter()
-                    .find(|c| c.id == conn_id)
-                    .and_then(|c| c.search_adapter())
-                    .map(str::to_ascii_lowercase)
-            });
-            let search_adapter = adapter
-                .as_deref()
-                .or_else(|| conn_id.strip_prefix("search-"));
-            let keys = [
-                Some(format!("conn:secret:{conn_id}")),
-                search_adapter.map(|adapter| format!("search-card:secret:{adapter}")),
-            ];
-            self.drafts
-                .clear_keys(cx, keys.iter().flatten().map(String::as_str));
+            let key = format!("conn:secret:{conn_id}");
+            self.drafts.clear_keys(cx, [key.as_str()]);
             if let Some(editor) = self.form.editor_mut(&conn_id) {
                 editor.key_visible = false;
                 editor.mode = EditorMode::Editing;
             }
-            self.form.revealed_search = self
-                .form
-                .revealed_search
-                .filter(|&adapter| Some(adapter) != search_adapter);
         }
     }
 
@@ -280,8 +244,7 @@ impl gpui::Render for ConnectionsPane {
             )),
             AddFlow::Mcp(form) => Some(mcp_add::render_mcp_add(self, form, live, &theme, cx)),
         };
-        let search_card =
-            web_search::render_web_search_card(self, &connections, &checks, live, &theme, cx);
+        let search_card = web_search::render_web_search_card(self, &connections, live, &theme, cx);
         let rows = self.build_connection_rows(&connections, (&checks, live, adding), &theme, cx);
         let adv_open = self.form.advanced_roles_open;
         let adv_panel = adv_open.then(|| {

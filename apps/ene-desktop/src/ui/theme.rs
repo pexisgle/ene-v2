@@ -10,10 +10,6 @@ use gpui::{BoxShadow, FontFallbacks, Hsla, hsla, point, px, rgb};
 pub mod radius {
     use gpui::{Pixels, px};
 
-    /// Tags, pills and small chips.
-    pub fn small() -> Pixels {
-        px(8.)
-    }
     /// Inputs and inline cards.
     pub fn medium() -> Pixels {
         px(10.)

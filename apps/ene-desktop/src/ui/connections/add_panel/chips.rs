@@ -4,7 +4,6 @@
 use super::AddFlow;
 use super::ConnectionsPane;
 use crate::ui::Hub;
-use crate::ui::SearchPresetSpec;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button};
@@ -131,7 +130,7 @@ fn preset_chip(
     })
 }
 
-pub(super) fn build_search_preset_chips(
+pub(in crate::ui::connections) fn build_search_preset_chips(
     live: bool,
     hub: &Entity<Hub>,
     theme: &Theme,
@@ -160,20 +159,7 @@ pub(super) fn build_search_preset_chips(
             tone.icon(Icon::Search).enabled(live),
             theme,
             move |_, cx| {
-                let target_id = hub_s.update(cx, |hub, cx| {
-                    hub.add_search_preset(
-                        &SearchPresetSpec {
-                            preset_id: provider.preset_id,
-                            name: provider.connection_name,
-                            adapter: provider.adapter_id,
-                            endpoint: provider
-                                .default_endpoint
-                                .unwrap_or("http://127.0.0.1:8080/search"),
-                            activate: true,
-                        },
-                        cx,
-                    )
-                });
+                let target_id = hub_s.update(cx, |hub, cx| hub.add_search_preset(adapter, cx));
                 pane_s.update(cx, |this, cx| {
                     this.form.add = AddFlow::Closed;
                     this.form.open_editor(target_id);

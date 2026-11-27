@@ -8,7 +8,8 @@ mod options;
 pub use edits::{
     ConnectionEditSpec, apply_connection_edits, apply_mcp_extra_edits,
     build_custom_connection_input, decode_model_choice, encode_model_choice,
-    extract_kind_list_init, format_kv_lines, parse_kv_lines, split_comma, toggle_comma_item,
+    extract_kind_list_init, format_kv_lines, parse_kv_lines, parse_search_cap, split_comma,
+    toggle_comma_item,
 };
 pub use mcp::{
     McpExtraConfig, McpTargetResult, build_mcp_connection_input, mcp_http_target, mcp_local_target,
