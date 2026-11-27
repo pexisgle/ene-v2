@@ -235,7 +235,7 @@ pub(crate) struct CompanionAgent {
     pub(crate) companion_id: String,
 }
 
-/// One agent per open run, addressed by its run id.
+/// One Rig agent per open work session, bound to the run it currently serves.
 #[derive(Component, Clone, Debug, PartialEq, Eq)]
 #[require(LastProjectedEntry)]
 pub(crate) struct WorkAgent {

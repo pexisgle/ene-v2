@@ -150,23 +150,11 @@ fn apply(
                 return;
             };
             if let Some(text) = effects.flushed {
-                super::inform(
-                    world,
-                    &companion_id,
-                    &run.run_id,
-                    text,
-                    DeliveryMode::Inform,
-                );
+                super::inform(world, &companion_id, &run, text, DeliveryMode::Inform);
             }
             if let Some(text) = effects.report {
                 super::note_activity(&mut world.resource_mut(), &run.run_id);
-                super::inform(
-                    world,
-                    &companion_id,
-                    &run.run_id,
-                    text,
-                    DeliveryMode::Inform,
-                );
+                super::inform(world, &companion_id, &run, text, DeliveryMode::Inform);
             }
         }
         HarnessEvent::RequestPermission {

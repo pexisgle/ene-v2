@@ -37,6 +37,12 @@ pub(super) fn ensure(
     match agent_of(world, work_id) {
         Some(entity) => {
             bind_work_agent(world.get_mut::<WorkAgent>(entity), run_id);
+            world
+                .entity_mut(entity)
+                .insert(SystemPrompt(ene_mind::prompt::work_prompt(
+                    companion,
+                    instruction,
+                )));
             entity
         }
         None => agent::spawn_work_agent(world, companion, work_id, run_id, instruction),
@@ -70,71 +76,125 @@ pub(super) fn retire(world: &mut World, work_id: &str) {
 pub(crate) fn restore(world: &mut World) -> Result<()> {
     let store = world.resource::<Store>().clone();
     let work = store.work_repo();
-    let companions: HashSet<_> = store
+    let companions: HashMap<_, _> = store
         .companion_repo()
         .companions()?
         .into_iter()
-        .map(|companion| companion.id)
+        .map(|companion| (companion.id.clone(), companion))
         .collect();
-    let restored: HashSet<_> = world
-        .query::<&AgentId>()
+    let logs: HashMap<_, _> = world
+        .query::<(Entity, &AgentId)>()
         .iter(world)
-        .filter(|agent| agent.0.starts_with("work-"))
-        .map(|agent| agent.0.clone())
+        .filter(|(_, id)| id.0.starts_with("work-"))
+        .map(|(entity, id)| (id.0.clone(), entity))
         .collect();
-    let mut open = HashMap::new();
+    let attached: Vec<_> = world
+        .query::<(Entity, &WorkAgent)>()
+        .iter(world)
+        .map(|(entity, worker)| (entity, worker.clone()))
+        .collect();
+    let mut retained = HashSet::new();
     for session in work.all_work_sessions()? {
         if session.status == WorkStatus::Closed {
             continue;
         }
-        let mut active_id = None;
-        if let Some(run) = work.active_run(&session.id)? {
+        let companion = companions.get(session.companion_id.as_str());
+        let active = work.active_run(&session.id)?;
+        let stable = logs.get(&agent::work_agent_id(&session.id));
+        let history = if stable.is_none() || active.is_none() {
+            work.runs(&session.id)?
+        } else {
+            Vec::new()
+        };
+        let restored = stable
+            .or_else(|| {
+                history
+                    .iter()
+                    .rev()
+                    .find_map(|run| logs.get(&agent::work_agent_id(&run.run_id)))
+            })
+            .copied();
+        let already_attached = attached
+            .iter()
+            .find(|(_, worker)| {
+                worker.work_id == session.id
+                    && active
+                        .as_ref()
+                        .is_none_or(|run| run.run_id == worker.run_id)
+            })
+            .map(|(entity, _)| *entity);
+        let recoverable = if let Some(run) = &active {
             let executor = work.run_executor(&run.run_id)?.ok_or_else(|| {
                 HostError::Storage("the work run disappeared during recovery".into())
             })?;
-            let recoverable = match executor {
-                RunExecutor::Rig => true,
+            let legacy_run_log = logs.contains_key(&agent::work_agent_id(&run.run_id));
+            let persisted_input = restored
+                .and_then(|entity| world.get::<Conversation>(entity))
+                .is_some_and(|conversation| persisted_run_input(conversation, &run.run_id));
+            let available = match executor {
+                RunExecutor::Rig => persisted_input || legacy_run_log || already_attached.is_some(),
                 RunExecutor::Harness { .. } => false,
-                RunExecutor::Unrecorded => work
-                    .runs(&session.id)?
-                    .iter()
-                    .any(|previous| restored.contains(&agent::work_agent_id(&previous.run_id))),
+                RunExecutor::Unrecorded => legacy_run_log,
             };
-            if recoverable && companions.contains(session.companion_id.as_str()) {
+            if available && companion.is_some() {
                 world.resource_mut::<Runs>().begin(&run.run_id);
-                active_id = Some(run.run_id);
+                true
             } else {
                 finish_run(
                     world,
-                    run,
+                    run.clone(),
                     RunState::Failed,
                     Some(
                         "作業を続けられませんでした。ホスト再起動後に実行環境を復元できません。"
                             .into(),
                     ),
                 );
+                false
+            }
+        } else {
+            false
+        };
+        if let Some(companion) = companion {
+            if let Some(entity) = restored
+                && let Some(run) = active.as_ref().or_else(|| history.last())
+            {
+                if !recoverable {
+                    world.trigger(StopTurn::plugin(
+                        entity,
+                        "ene-host",
+                        "the work run is not active",
+                    ));
+                }
+                agent::attach_work_agent(
+                    world,
+                    entity,
+                    companion,
+                    &session.id,
+                    &run.run_id,
+                    &run.instruction,
+                );
+                retained.insert(entity);
+            } else if let Some(entity) = already_attached {
+                retained.insert(entity);
             }
         }
-        if companions.contains(session.companion_id.as_str()) {
-            open.insert(session.id, active_id);
+    }
+    for (entity, _) in attached {
+        if !retained.contains(&entity) {
+            retire_entity(world, entity);
         }
     }
-    let mut retained = HashSet::new();
-    let obsolete: Vec<_> = world
-        .query::<(Entity, &WorkAgent)>()
-        .iter(world)
-        .filter_map(|(entity, agent)| {
-            let keep = open.get(&agent.work_id).is_some_and(|active| {
-                active.as_ref().is_none_or(|run_id| run_id == &agent.run_id)
-                    && retained.insert(agent.work_id.clone())
-            });
-            (!keep).then_some(entity)
-        })
-        .collect();
-    for entity in obsolete {
-        retire_entity(world, entity);
-    }
     Ok(())
+}
+
+fn persisted_run_input(conversation: &Conversation, run_id: &str) -> bool {
+    conversation.entries().any(|entry| {
+        entry.is_users_own()
+            && entry
+                .author
+                .and_then(|author| author.request.as_ref())
+                .is_some_and(|id| id.0 == run_id)
+    })
 }
 
 pub(super) fn detect_stalls(world: &mut World) {

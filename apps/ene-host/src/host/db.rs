@@ -1,7 +1,7 @@
 //! Thin Bevy ECS resource wrapper over the persistence layer in `ene-store`.
 
 pub(crate) use super::error::Result;
-pub(crate) use ene_store::{clients, memories, plugins, schedules, work};
+pub(crate) use ene_store::{clients, memories, plugins, schedules};
 
 /// Relational persistence resource shared across ECS systems and RPC handlers.
 #[derive(Clone, Debug, bevy_ecs::prelude::Resource)]

@@ -1,4 +1,4 @@
-//! One agent per companion and one per open work run.
+//! One agent per companion and one per open work session.
 //!
 //! Every lookup and spawn goes through a stable id so a restart adopts the
 //! conversation the kernel restored instead of starting a second one, and
@@ -34,8 +34,8 @@ pub(crate) fn companion_agent_id(companion: &str) -> String {
     format!("companion-{companion}")
 }
 
-pub(crate) fn work_agent_id(run: &str) -> String {
-    format!("work-{run}")
+pub(crate) fn work_agent_id(work: &str) -> String {
+    format!("work-{work}")
 }
 
 pub(crate) fn agent_of(world: &mut World, companion: &str) -> Option<Entity> {
@@ -43,14 +43,6 @@ pub(crate) fn agent_of(world: &mut World, companion: &str) -> Option<Entity> {
     query
         .iter(world)
         .find(|(_, agent)| agent.companion_id == companion)
-        .map(|(entity, _)| entity)
-}
-
-pub(crate) fn work_agent_of(world: &mut World, run: &str) -> Option<Entity> {
-    let mut query = world.query::<(Entity, &WorkAgent)>();
-    query
-        .iter(world)
-        .find(|(_, agent)| agent.run_id == run)
         .map(|(entity, _)| entity)
 }
 
@@ -123,14 +115,26 @@ pub(crate) fn spawn_work_agent(
     run_id: &str,
     instruction: &str,
 ) -> Entity {
-    if let Some(entity) = work_agent_of(world, run_id) {
-        return entity;
-    }
-    let id = work_agent_id(run_id);
-    let entity = match restored_agent(world, &id) {
-        Some(entity) => entity,
-        None => spawn_root(world, (Name::new(format!("work:{run_id}")), AgentId(id))).id(),
-    };
+    let entity = spawn_root(
+        world,
+        (
+            Name::new(format!("work:{work_id}")),
+            AgentId(work_agent_id(work_id)),
+        ),
+    )
+    .id();
+    attach_work_agent(world, entity, companion, work_id, run_id, instruction);
+    entity
+}
+
+pub(crate) fn attach_work_agent(
+    world: &mut World,
+    entity: Entity,
+    companion: &Companion,
+    work_id: &str,
+    run_id: &str,
+    instruction: &str,
+) {
     let published = published_through(world.get::<Conversation>(entity));
     let access = crate::host::tools::sync::hand_tool_access(world);
     world.entity_mut(entity).insert((
@@ -143,7 +147,6 @@ pub(crate) fn spawn_work_agent(
         access,
     ));
     world.entity_mut(entity).insert(published);
-    entity
 }
 
 /// Rebuilds the system prompt after a companion edit, and drops the agent when
@@ -183,24 +186,14 @@ pub(crate) fn sync_companion(world: &mut World, companion_id: &str) -> Result<()
     }
 }
 
-/// Reconciliation after the first frame: one agent per companion, one per open
-/// run, and no agent whose companion or run is gone. A store failure ends the
+/// Reconciliation after restoring work sessions: one agent per companion and
+/// no default or stray agent. A store failure ends the
 /// start, because read as an empty list it would retire every restored agent.
 pub(crate) fn reconcile(world: &mut World) -> Result<()> {
     let store = world.resource::<Store>().clone();
     let companions = store.companion_repo().companions()?;
-    let existing: Vec<Entity> = world
-        .query_filtered::<Entity, Or<(With<CompanionAgent>, With<WorkAgent>)>>()
-        .iter(world)
-        .collect();
     for companion in &companions {
         spawn_companion(world, companion);
-        // Work agents for runs that are still open.
-        for session in store.work_repo().work_sessions(&companion.id)? {
-            if let Some(run) = store.work_repo().active_run(&session.id)? {
-                spawn_work_agent(world, companion, &session.id, &run.run_id, &run.instruction);
-            }
-        }
     }
     // Retire the kernel's default agent and any agent without a role.
     let stray: Vec<Entity> = world
@@ -209,27 +202,6 @@ pub(crate) fn reconcile(world: &mut World) -> Result<()> {
         .collect();
     for entity in stray {
         world.trigger(Retire { entity });
-    }
-    // Retire agents whose run closed or whose companion disappeared.
-    for entity in existing {
-        let keep = world.get::<CompanionAgent>(entity).is_some_and(|agent| {
-            store
-                .companion_repo()
-                .companion(&agent.companion_id)
-                .ok()
-                .flatten()
-                .is_some()
-        }) || world.get::<WorkAgent>(entity).is_some_and(|agent| {
-            store
-                .work_repo()
-                .run(&agent.run_id)
-                .ok()
-                .flatten()
-                .is_some_and(|run| crate::host::db::work::open_state(run.state))
-        });
-        if !keep {
-            world.trigger(Retire { entity });
-        }
     }
     // Bind every remaining agent's model; a missing model is a notice, not a
     // startup failure.

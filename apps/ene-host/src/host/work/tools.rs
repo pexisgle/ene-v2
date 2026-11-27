@@ -223,7 +223,7 @@ fn report(world: &mut World, agent: Entity, args: &ReportArgs) -> Result<String>
             super::inform(
                 world,
                 &work.companion_id,
-                &run_id,
+                &run,
                 format!("[作業報告 (work_id: {work_id})] {}", args.content),
                 DeliveryMode::Inform,
             );
@@ -234,7 +234,7 @@ fn report(world: &mut World, agent: Entity, args: &ReportArgs) -> Result<String>
             super::inform(
                 world,
                 &work.companion_id,
-                &run_id,
+                &run,
                 format!("[作業連絡 (work_id: {work_id})] {}", args.content),
                 DeliveryMode::Queue,
             );
@@ -275,7 +275,7 @@ fn report(world: &mut World, agent: Entity, args: &ReportArgs) -> Result<String>
             super::inform(
                 world,
                 &work.companion_id,
-                &run_id,
+                &run,
                 format!("[作業失敗 (work_id: {work_id})] {}", args.content),
                 DeliveryMode::Queue,
             );

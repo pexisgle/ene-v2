@@ -369,7 +369,7 @@ fn computer_use_sends_a_request_only_image_and_never_replays_input() {
         &mut events,
         &ScreenshotAudit {
             operation_id: &result.operation_id,
-            run: &run,
+            work_id: &session.id,
             frame_id: &frame_id,
             encoded: &encoded,
         },
@@ -494,7 +494,7 @@ fn complete_screenshot_op(
 
 struct ScreenshotAudit<'a> {
     operation_id: &'a str,
-    run: &'a str,
+    work_id: &'a str,
     frame_id: &'a str,
     encoded: &'a str,
 }
@@ -507,7 +507,7 @@ fn assert_redacted_screenshot_effects(
 ) {
     let &ScreenshotAudit {
         operation_id,
-        run,
+        work_id,
         frame_id,
         encoded,
     } = audit;
@@ -532,7 +532,8 @@ fn assert_redacted_screenshot_effects(
     );
     let logs = harness.root.path().join("rig").join("logs");
     let work_log =
-        std::fs::read_to_string(logs.join(format!("{}.jsonl", agent::work_agent_id(run)))).unwrap();
+        std::fs::read_to_string(logs.join(format!("{}.jsonl", agent::work_agent_id(work_id))))
+            .unwrap();
     assert!(work_log.contains(frame_id));
     assert!(!work_log.contains(encoded));
 }

@@ -6,7 +6,7 @@
 //! the conversation into the host's notification stream.
 //!
 //! The pieces are split by responsibility: [`ene_mind::prompt`] is the static persona,
-//! [`spawn`] owns one agent per companion and per open run, [`binding`] keeps
+//! [`spawn`] binds one agent per companion and per work session, [`binding`] keeps
 //! its model current, [`transcript`] and [`turns`] publish what happens to it.
 mod binding;
 mod kernel;
@@ -24,8 +24,8 @@ pub(crate) use binding::{Connections, deliver, ensure_model};
 #[cfg(test)]
 pub(crate) use spawn::companion_agent_id;
 pub(crate) use spawn::{
-    WorkReports, agent_of, reconcile, spawn_companion, spawn_work_agent, sync_companion,
-    work_agent_id,
+    WorkReports, agent_of, attach_work_agent, reconcile, spawn_companion, spawn_work_agent,
+    sync_companion, work_agent_id,
 };
 pub(crate) use transcript::{entry_text, role_of};
 

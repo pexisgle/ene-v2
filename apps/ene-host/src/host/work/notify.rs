@@ -10,14 +10,17 @@ use rig_ecs::prelude::*;
 pub(super) fn inform(
     world: &mut World,
     companion: &str,
-    run_id: &str,
+    run: &Run,
     text: String,
     mode: DeliveryMode,
 ) {
     let Some(parent) = agent::agent_of(world, companion) else {
         return;
     };
-    let author = Author::agent(agent::work_agent_id(run_id), None);
+    let author = Author::agent(
+        agent::work_agent_id(&run.work_id),
+        Some(RequestId(run.run_id.clone())),
+    );
     world.trigger(Deliver::new(parent, text, mode).with_author(author));
 }
 

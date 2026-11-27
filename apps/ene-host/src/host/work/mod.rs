@@ -186,11 +186,14 @@ pub(crate) fn start_run(
             let agent = ensure(world, &companion, &session.id, &run.run_id, instruction);
             match agent::ensure_model(world, agent) {
                 Ok(()) => {
-                    world.trigger(Deliver::new(
-                        agent,
-                        instruction.to_owned(),
-                        DeliveryMode::Queue,
-                    ));
+                    let author = Author {
+                        request: Some(RequestId(run.run_id.clone())),
+                        ..Author::user()
+                    };
+                    world.trigger(
+                        Deliver::new(agent, instruction.to_owned(), DeliveryMode::Queue)
+                            .with_author(author),
+                    );
                     None
                 }
                 Err(error) => Some(error),

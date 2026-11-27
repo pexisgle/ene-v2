@@ -105,7 +105,7 @@ pub(super) fn finish_run(world: &mut World, mut run: Run, state: RunState, text:
                     format!("[作業結果 (work_id: {})] {raw_report}", session.id)
                 };
                 let author = Author::agent(
-                    agent::work_agent_id(&run_id),
+                    agent::work_agent_id(&session.id),
                     Some(RequestId(run_id.clone())),
                 );
                 world

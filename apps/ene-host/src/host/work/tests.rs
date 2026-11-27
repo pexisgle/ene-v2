@@ -101,6 +101,83 @@ fn a_session_keeps_one_agent_across_runs_and_retires_it_with_the_session() {
 }
 
 #[test]
+fn a_rig_work_session_adopts_its_saved_conversation_before_the_next_run() {
+    use crate::host::tests::Harness;
+    use rig_core::test_utils::MockStreamEvent;
+
+    let response = |text| {
+        vec![
+            MockStreamEvent::text(text),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]
+    };
+    let mut harness = Harness::new([response("first work answer"), response("first parent ack")]);
+    let session = start(
+        harness.app.world_mut(),
+        &w::StartWorkRequest {
+            companion_id: harness.companion.clone(),
+            instruction: "first instruction".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let store = harness.store();
+    let idle = || store.work_repo().active_run(&session.id).unwrap().is_none();
+    harness.run_until(|_| idle());
+    harness.restart([
+        response("second work answer"),
+        response("second parent ack"),
+    ]);
+
+    let worker = agent_of(harness.app.world_mut(), &session.id).unwrap();
+    let agent_id = &harness.app.world().get::<AgentId>(worker).unwrap().0;
+    assert_eq!(*agent_id, agent::work_agent_id(&session.id));
+    assert!(
+        harness
+            .conversation(worker)
+            .entries()
+            .any(|entry| agent::entry_text(&entry).as_deref() == Some("first work answer"))
+    );
+    send(
+        harness.app.world_mut(),
+        &w::SendWorkRequest {
+            work_id: session.id.clone(),
+            request_key: "the-follow-up".into(),
+            text: "second instruction".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(agent_of(harness.app.world_mut(), &session.id), Some(worker));
+    let prompt = harness.app.world().get::<SystemPrompt>(worker).unwrap();
+    assert!(prompt.0.contains("second instruction"));
+    harness.run_until(|_| idle());
+    assert!(
+        harness
+            .conversation(worker)
+            .entries()
+            .any(|entry| agent::entry_text(&entry).as_deref() == Some("second work answer"))
+    );
+    assert_eq!(store.work_repo().runs(&session.id).unwrap().len(), 2);
+
+    // A crash can leave a committed Run before Rig saved its first input.
+    // An earlier session transcript does not prove that new input reached Rig.
+    let incomplete = new_run(
+        "not-yet-delivered".into(),
+        &session.id,
+        "third instruction",
+        RunState::Running,
+    );
+    store
+        .work_repo()
+        .insert_run(&incomplete, &RunExecutor::Rig, None)
+        .unwrap();
+    harness.restart([]);
+    assert_eq!(state(&store, &incomplete.run_id), RunState::Failed);
+    assert!(agent_of(harness.app.world_mut(), &session.id).is_some());
+}
+
+#[test]
 fn a_stall_is_warned_once_and_reset_by_activity() {
     use std::time::Duration;
     let mut runs = Runs::default();
