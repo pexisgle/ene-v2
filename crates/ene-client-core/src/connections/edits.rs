@@ -64,47 +64,6 @@ pub fn format_kv_lines(map: &BTreeMap<String, String>, sep: char) -> String {
         .join("\n")
 }
 
-/// Parses `KEY=VALUE` or `Name: Value` multi-line text into key-value pairs.
-pub fn parse_kv_lines(raw: &str, sep: char) -> Result<Vec<(String, String)>, &'static str> {
-    let mut out = Vec::new();
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Some((k, v)) = trimmed.split_once(sep) else {
-            return Err(match sep {
-                ':' => "ヘッダーは `Name: Value` 形式で入力してください。",
-                _ => "環境変数は `KEY=VALUE` 形式で入力してください。",
-            });
-        };
-        let key = k.trim();
-        if key.is_empty() {
-            return Err("空のキーは指定できません。");
-        }
-        out.push((key.to_owned(), v.trim().to_owned()));
-    }
-    Ok(out)
-}
-
-/// Applies advanced MCP fields onto a mutable `ConnectionInput`.
-pub fn apply_mcp_extra_edits(
-    input: &mut ConnectionInput,
-    cwd: &str,
-    secret_env_var: &str,
-    auth_header: &str,
-    env: &[(String, String)],
-    headers: &[(String, String)],
-) {
-    if let Some(ConnectionConfig::Mcp(mcp)) = input.config.as_mut() {
-        mcp.cwd = cwd.to_owned();
-        mcp.secret_env_var = secret_env_var.to_owned();
-        mcp.auth_header = auth_header.to_owned();
-        mcp.env = env.iter().cloned().collect();
-        mcp.headers = headers.iter().cloned().collect();
-    }
-}
-
 /// Splits a comma-separated string into trimmed non-empty owned strings.
 pub fn split_comma(raw: &str) -> Vec<String> {
     raw.split(',')

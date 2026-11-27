@@ -4,19 +4,34 @@ use crate::domain::{
     ConnectionConfig, ConnectionEndpoint, ConnectionInput, ConnectionKind, McpConnection,
 };
 
+use std::collections::BTreeMap;
+
 /// Advanced MCP server fields captured separately from the primary target input.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct McpExtraConfig {
     /// Working directory for the server command; empty inherits the host's.
     pub cwd: String,
-    /// Environment variable holding the secret, read at connect time.
+    /// Environment variable receiving the registered secret in the server process.
     pub secret_env_var: String,
     /// Header name the stored secret is sent in.
     pub auth_header: String,
     /// Environment variables added to the command.
-    pub env: Vec<(String, String)>,
+    pub env: BTreeMap<String, String>,
     /// HTTP headers sent to a remote server.
-    pub headers: Vec<(String, String)>,
+    pub headers: BTreeMap<String, String>,
+}
+
+impl McpExtraConfig {
+    /// Apply validated advanced settings to a connection being created or edited.
+    pub fn apply_to(self, input: &mut ConnectionInput) {
+        if let Some(ConnectionConfig::Mcp(config)) = input.config.as_mut() {
+            config.cwd = self.cwd;
+            config.secret_env_var = self.secret_env_var;
+            config.auth_header = self.auth_header;
+            config.env = self.env;
+            config.headers = self.headers;
+        }
+    }
 }
 
 /// Parsed MCP target and suggested display name (or `Ok(None)` when incomplete).
@@ -28,50 +43,65 @@ pub fn build_mcp_connection_input(
     extra: McpExtraConfig,
     chosen_name: &str,
 ) -> Option<ConnectionInput> {
-    target.ok().flatten().map(|(mut config, suggested_name)| {
-        config.cwd = extra.cwd;
-        config.secret_env_var = extra.secret_env_var;
-        config.auth_header = extra.auth_header;
-        config.env = extra.env.into_iter().collect();
-        config.headers = extra.headers.into_iter().collect();
+    target.ok().flatten().map(|(config, suggested_name)| {
         let name = if chosen_name.is_empty() {
             suggested_name
         } else {
             chosen_name.to_owned()
         };
-        ConnectionInput {
+        let mut input = ConnectionInput {
             id: String::new(),
             name,
             enabled: true,
             expected_revision: 0,
             kind: ConnectionKind::Mcp,
             config: Some(ConnectionConfig::Mcp(config)),
-        }
+        };
+        extra.apply_to(&mut input);
+        input
     })
 }
 
-/// Parses `KEY=VALUE` or `Header: Value` multi-line MCP advanced settings.
-pub fn parse_mcp_kv(raw: &str, sep: char) -> Result<Vec<(String, String)>, &'static str> {
-    let mut out = Vec::new();
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+/// The reason a line in an MCP header or environment map could not be parsed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum McpKvError {
+    /// The input line does not contain the required delimiter.
+    #[error("the line is missing its key-value separator")]
+    MissingSeparator,
+    /// The input has no key before its delimiter.
+    #[error("the key is empty")]
+    EmptyKey,
+}
+
+impl McpKvError {
+    /// The shared message shown for an invalid advanced settings line.
+    pub const fn message(self, separator: char) -> &'static str {
+        match self {
+            Self::EmptyKey => "キー名が空の行があります。",
+            Self::MissingSeparator if separator == ':' => {
+                "ヘッダーは 1 行ごとに「Header: Value」形式で入力してください。"
+            }
+            Self::MissingSeparator => "環境変数は 1 行ごとに「KEY=VALUE」形式で入力してください。",
         }
-        let Some((k, v)) = trimmed.split_once(sep) else {
-            return Err(if sep == ':' {
-                "追加ヘッダーは 1 行ごとに「Header: Value」形式で入力してください。"
-            } else {
-                "追加環境変数は 1 行ごとに「KEY=VALUE」形式で入力してください。"
-            });
-        };
-        let key = k.trim();
-        if key.is_empty() {
-            return Err("キー名が空の行があります。");
-        }
-        out.push((key.to_owned(), v.trim().to_owned()));
     }
-    Ok(out)
+}
+
+/// Parses one header or environment variable per line. A later key replaces an earlier value.
+pub fn parse_mcp_kv(raw: &str, separator: char) -> Result<BTreeMap<String, String>, McpKvError> {
+    raw.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let (key, value) = line
+                .split_once(separator)
+                .ok_or(McpKvError::MissingSeparator)?;
+            let key = key.trim();
+            if key.is_empty() {
+                return Err(McpKvError::EmptyKey);
+            }
+            Ok((key.to_owned(), value.trim().to_owned()))
+        })
+        .collect()
 }
 
 fn mcp_endpoint(url: String) -> ConnectionEndpoint {
@@ -379,14 +409,20 @@ mod tests {
     fn parse_mcp_kv_accepts_headers_and_env_and_rejects_malformed_lines() {
         let env = parse_mcp_kv("FOO=bar\n  # comment=ok\nEMPTY=\n\n", '=').unwrap();
         assert_eq!(env.len(), 3);
-        assert_eq!(env[0], ("FOO".into(), "bar".into()));
-        let headers = parse_mcp_kv("X-Tenant: acme\nX-Mode: strict", ':').unwrap();
+        assert_eq!(env["FOO"], "bar");
+        assert_eq!(env["# comment"], "ok");
+        assert_eq!(env["EMPTY"], "");
+        let headers = parse_mcp_kv(
+            "X-Tenant: discarded\r\nX-Mode: strict\nX-Tenant: acme:two",
+            ':',
+        )
+        .unwrap();
         assert_eq!(
             headers,
-            vec![
-                ("X-Tenant".into(), "acme".into()),
+            BTreeMap::from([
+                ("X-Tenant".into(), "acme:two".into()),
                 ("X-Mode".into(), "strict".into()),
-            ]
+            ])
         );
         assert!(parse_mcp_kv("INVALID_LINE_WITHOUT_SEP", '=').is_err());
         assert!(parse_mcp_kv(": missing-key", ':').is_err());

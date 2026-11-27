@@ -3,8 +3,7 @@
 use super::ConnectionsPane;
 use crate::input::Draft;
 use crate::ui::connections::mcp_editor::{
-    McpDraftGroup, ParsedMcpExtra, mcp_args_draft, mcp_extra_drafts, process_command_draft,
-    read_mcp_extra,
+    McpDraftGroup, mcp_args_draft, mcp_extra_drafts, process_command_draft, read_mcp_extra,
 };
 use crate::ui::connections::secret_row;
 use crate::ui::icons::Icon;
@@ -52,7 +51,8 @@ pub(crate) struct EditorSavePayload {
     pub(super) next_list: String,
     pub(super) next_dim: Option<String>,
     pub(super) next_options_json: Option<String>,
-    pub(super) next_mcp_extra: Option<ParsedMcpExtra>,
+    pub(super) next_mcp_extra:
+        Option<Result<ene_client_core::connections::McpExtraConfig, &'static str>>,
 }
 
 pub(super) fn collect_editor_drafts(
@@ -143,9 +143,7 @@ pub(super) fn build_editor_save_payload(
         .mcp_extra_d
         .as_ref()
         .map(|group| read_mcp_extra(group, cx));
-    let mcp_kv_ok = next_mcp_extra
-        .as_ref()
-        .is_none_or(|(_, _, _, env_r, hdr_r)| env_r.is_ok() && hdr_r.is_ok());
+    let mcp_kv_ok = next_mcp_extra.as_ref().is_none_or(Result::is_ok);
 
     EditorSavePayload {
         live,

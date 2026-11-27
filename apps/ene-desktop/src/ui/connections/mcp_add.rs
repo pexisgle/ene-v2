@@ -204,7 +204,8 @@ fn render_mcp_http_advanced(
     );
     let auth_hdr = auth_hdr_d.read(cx).text().trim().to_owned();
     let secret = secret_d.read(cx).text().trim().to_owned();
-    let headers_parsed = parse_mcp_kv(headers_d.read(cx).text(), ':');
+    let headers_parsed =
+        parse_mcp_kv(headers_d.read(cx).text(), ':').map_err(|error| error.message(':'));
     let adv_err = headers_parsed.as_ref().err().copied();
     let panel = div()
         .w_full()
@@ -270,7 +271,7 @@ fn render_mcp_process_advanced(
     let cwd = cwd_d.read(cx).text().trim().to_owned();
     let secret_env = secret_env_d.read(cx).text().trim().to_owned();
     let secret = secret_d.read(cx).text().trim().to_owned();
-    let env_parsed = parse_mcp_kv(env_d.read(cx).text(), '=');
+    let env_parsed = parse_mcp_kv(env_d.read(cx).text(), '=').map_err(|error| error.message('='));
     let adv_err = env_parsed.as_ref().err().copied();
     let panel = div()
         .w_full()

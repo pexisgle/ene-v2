@@ -5,7 +5,7 @@ use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button};
 use ene_client_core::{
-    connections::{format_kv_lines, parse_kv_lines, split_comma, toggle_comma_item},
+    connections::{McpExtraConfig, format_kv_lines, parse_mcp_kv, split_comma, toggle_comma_item},
     domain::{Connection, ConnectionCheck, ConnectionConfig, ConnectionKind},
 };
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
@@ -17,14 +17,6 @@ pub(super) struct McpDraftGroup {
     pub(super) env_d: Entity<Draft>,
     pub(super) headers_d: Entity<Draft>,
 }
-
-pub(super) type ParsedMcpExtra = (
-    String,
-    String,
-    String,
-    Result<Vec<(String, String)>, &'static str>,
-    Result<Vec<(String, String)>, &'static str>,
-);
 
 pub(super) fn process_command_draft(
     pane: &mut ConnectionsPane,
@@ -184,16 +176,20 @@ pub(super) fn render_mcp_tools_strip(
     )
 }
 
-pub(super) fn read_mcp_extra(group: &McpDraftGroup, cx: &gpui::App) -> ParsedMcpExtra {
-    let env_parsed = parse_kv_lines(group.env_d.read(cx).text(), '=');
-    let headers_parsed = parse_kv_lines(group.headers_d.read(cx).text(), ':');
-    (
-        group.cwd_d.read(cx).text().trim().to_owned(),
-        group.secret_env_d.read(cx).text().trim().to_owned(),
-        group.auth_hdr_d.read(cx).text().trim().to_owned(),
-        env_parsed,
-        headers_parsed,
-    )
+pub(super) fn read_mcp_extra(
+    group: &McpDraftGroup,
+    cx: &gpui::App,
+) -> Result<McpExtraConfig, &'static str> {
+    let env = parse_mcp_kv(group.env_d.read(cx).text(), '=').map_err(|error| error.message('='))?;
+    let headers =
+        parse_mcp_kv(group.headers_d.read(cx).text(), ':').map_err(|error| error.message(':'))?;
+    Ok(McpExtraConfig {
+        cwd: group.cwd_d.read(cx).text().trim().to_owned(),
+        secret_env_var: group.secret_env_d.read(cx).text().trim().to_owned(),
+        auth_header: group.auth_hdr_d.read(cx).text().trim().to_owned(),
+        env,
+        headers,
+    })
 }
 
 pub(super) fn append_mcp_extra_fields(

@@ -11,9 +11,7 @@ use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button, toggle_switch};
 use crate::ui::{GOOGLE_AGENT_PLATFORM, Hub};
 use ene_client_core::{
-    connections::{
-        ConnectionEditSpec, ConnectionResource, apply_connection_edits, apply_mcp_extra_edits,
-    },
+    connections::{ConnectionEditSpec, ConnectionResource, apply_connection_edits},
     domain::{Connection, ConnectionCheck, ConnectionKind},
 };
 use ene_domain::CredentialState;
@@ -69,13 +67,7 @@ pub(super) fn render_connection_editor(
     let mcp_kv_error = payload
         .next_mcp_extra
         .as_ref()
-        .and_then(|(_, _, _, env_r, hdr_r)| {
-            env_r
-                .as_ref()
-                .err()
-                .or_else(|| hdr_r.as_ref().err())
-                .copied()
-        });
+        .and_then(|extra| extra.as_ref().err().copied());
     let show_list_field = agent_platform
         || matches!(
             resource,
@@ -392,10 +384,8 @@ pub(super) fn render_editor_actions(
                         options_json: payload.next_options_json.as_deref(),
                     },
                 );
-                if let Some((cwd, secret_env, auth_hdr, Ok(env), Ok(headers))) =
-                    &payload.next_mcp_extra
-                {
-                    apply_mcp_extra_edits(&mut input, cwd, secret_env, auth_hdr, env, headers);
+                if let Some(Ok(extra)) = &payload.next_mcp_extra {
+                    extra.clone().apply_to(&mut input);
                 }
                 hub_save.update(cx, |hub, cx| hub.upsert_connection("接続設定の保存", input, cx));
             },
