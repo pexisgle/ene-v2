@@ -205,10 +205,15 @@ async fn open_http(
         config.custom_headers.insert(header_name, header_value);
     }
     apply_http_auth_headers(&mut config, &want.auth_header, secret)?;
+    let stop = tokio_util::sync::CancellationToken::new();
+    let startup = stop.clone().drop_guard();
+    let client = super::http::StartupHttp { client, stop };
     let transport = StreamableHttpClientTransport::with_client(client, config);
-    Box::pin(handler.connect(transport))
+    let connection = Box::pin(handler.connect(transport))
         .await
-        .map_err(connect_failure)
+        .map_err(connect_failure)?;
+    let _stop = startup.disarm();
+    Ok(connection)
 }
 
 fn apply_http_auth_headers(

@@ -40,6 +40,7 @@ fn attach_now(
         id.to_owned(),
         Server {
             launch,
+            receiver: Default::default(),
             connection,
             registry,
             label: want.name.clone(),
@@ -73,6 +74,7 @@ fn project(
             id.to_owned(),
             (
                 server.launch.clone(),
+                server.receiver.clone(),
                 collect_server_tools(id, server, catalog),
             ),
         )]
@@ -93,9 +95,9 @@ async fn registry_refresh_replaces_handlers_and_keeps_pinned_calls() {
         launch: Launch {
             stamp: STAMP,
             owner: registry.owner(),
-            receiver: Default::default(),
         },
         registry: registry.clone(),
+        receiver: Default::default(),
         label: "notes".into(),
         allowed: Vec::new(),
     };
@@ -178,7 +180,6 @@ async fn projection_refuses_collisions_and_retires_only_owned_entities() {
         Launch {
             stamp: STAMP,
             owner: registry.owner(),
-            receiver: Default::default(),
         },
         first.clone(),
         registry.clone(),
@@ -199,7 +200,6 @@ async fn projection_refuses_collisions_and_retires_only_owned_entities() {
         Launch {
             stamp: STAMP,
             owner: other_registry.owner(),
-            receiver: Default::default(),
         },
         second.clone(),
         other_registry,
@@ -234,12 +234,10 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
     let old_launch = Launch {
         stamp: STAMP,
         owner: old_registry.owner(),
-        receiver: Default::default(),
     };
     let new_launch = Launch {
         stamp: STAMP,
         owner: new_registry.owner(),
-        receiver: Default::default(),
     };
     assert_ne!(old_launch, new_launch);
     let mut harness = crate::host::tests::Harness::new([]);
@@ -288,6 +286,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
             id: "c1".into(),
             launch: new_launch,
             connection: new.clone(),
+            receiver: Default::default(),
             registry: new_registry,
         },
         &runtime,
@@ -316,6 +315,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
             id: "c1".into(),
             launch: old_launch,
             connection: old.clone(),
+            receiver: Default::default(),
             registry: old_registry.clone(),
         },
         &runtime,
@@ -401,7 +401,6 @@ fn setup_gate_mcp_harness(
         Launch {
             stamp,
             owner: registry.owner(),
-            receiver: Default::default(),
         },
         connection,
         registry,

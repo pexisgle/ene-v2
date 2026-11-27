@@ -1,5 +1,6 @@
 //! MCP transport helpers (`npx` direct resolution, stdio/HTTP transport opening, and naming).
 
+mod http;
 pub mod npx;
 pub mod transport;
 

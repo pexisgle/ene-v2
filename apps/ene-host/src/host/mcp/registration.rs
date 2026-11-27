@@ -26,7 +26,12 @@ pub(super) struct Receiver {
 }
 
 impl Receiver {
-    pub(super) fn new(id: &str, want: &Desired, key: Option<&[u8; 32]>) -> Self {
+    pub(super) fn new(
+        id: &str,
+        want: &Desired,
+        secret: Option<&str>,
+        key: Option<&[u8; 32]>,
+    ) -> Self {
         let config = &want.config;
         let command = config.command.trim();
         let address = if command.is_empty() {
@@ -42,7 +47,6 @@ impl Receiver {
                 .to_owned()
         };
         let tag = key.and_then(|key| {
-            let secret = want.secret.as_ref().ok()?;
             let config = serde_json::to_value(config).ok()?;
             scope_tag(
                 key,
@@ -52,7 +56,7 @@ impl Receiver {
                     &want.stamp.created_revision.to_be_bytes(),
                     &want.stamp.revision.to_be_bytes(),
                     canonical_json(&config).as_bytes(),
-                    secret.as_deref().unwrap_or_default().as_bytes(),
+                    secret.unwrap_or_default().as_bytes(),
                 ],
             )
         });
@@ -66,6 +70,7 @@ impl Receiver {
 pub(crate) struct McpRegistration {
     pub(crate) server: String,
     pub(super) launch: Launch,
+    pub(super) receiver: Receiver,
     pub(super) definition: Arc<ToolDefinition>,
     pub(super) key: Key<family::Tool>,
     pub(super) store: Store,
@@ -75,7 +80,7 @@ pub(crate) struct McpRegistration {
 
 impl McpRegistration {
     pub(crate) fn receiver(&self) -> &str {
-        &self.launch.receiver.label
+        &self.receiver.label
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
@@ -104,7 +109,7 @@ impl McpRegistration {
             key,
             b"ene-host MCP tool v1\0",
             [
-                self.launch.receiver.tag.as_ref()?.as_slice(),
+                self.receiver.tag.as_ref()?.as_slice(),
                 canonical_json(&definition).as_bytes(),
                 tool_name.as_bytes(),
                 canonical_json(input).as_bytes(),

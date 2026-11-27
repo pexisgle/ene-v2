@@ -10,6 +10,7 @@ use super::{
         ConnectionStamp, DesiredServers, McpSettings, collect_retire_ids, prune_connecting,
         reload_desired_settings,
     },
+    startup,
 };
 use crate::host::{db::Store, model::Credentials, resources::HostRuntime};
 use bevy_ecs::prelude::*;
@@ -29,7 +30,6 @@ const QUEUE: usize = 32;
 pub(super) struct Launch {
     pub(super) stamp: ConnectionStamp,
     pub(super) owner: String,
-    pub(super) receiver: Receiver,
 }
 
 /// Live state returned to connection probes.
@@ -44,6 +44,7 @@ pub(crate) enum CheckState {
 pub(super) struct Server {
     pub(super) connection: McpConnection,
     pub(super) launch: Launch,
+    pub(super) receiver: Receiver,
     pub(super) registry: ToolServerHandle,
     pub(super) label: String,
     pub(super) allowed: Vec<String>,
@@ -67,6 +68,7 @@ pub(super) enum Event {
         id: String,
         launch: Launch,
         connection: McpConnection,
+        receiver: Receiver,
         registry: ToolServerHandle,
     },
     Failed {
@@ -213,7 +215,8 @@ impl McpSupervisor {
         );
         self.connecting.0.extend(spawn_connect_tasks(
             targets,
-            credentials.and_then(|keys| keys.approval_key.as_ref()),
+            store,
+            credentials,
             &self.events.sender,
             wake,
             runtime,
@@ -271,7 +274,8 @@ fn plan_connect_targets(
 
 fn spawn_connect_tasks(
     targets: Vec<(String, Desired)>,
-    approval_key: Option<&[u8; 32]>,
+    store: &Store,
+    credentials: Option<&Credentials>,
     sender: &mpsc::Sender<Event>,
     wake: Option<&Wake>,
     runtime: &tokio::runtime::Handle,
@@ -283,18 +287,28 @@ fn spawn_connect_tasks(
             let launch = Launch {
                 stamp: want.stamp,
                 owner: registry.owner(),
-                receiver: Receiver::new(&id, &want, approval_key),
             };
             let event_id = id.clone();
             let event_launch = launch.clone();
             let sender = sender.clone();
+            let credentials = credentials.cloned();
+            let store = store.clone();
             let wake = wake.cloned();
             let task = runtime.spawn(Box::pin(async move {
-                let event = match open(&want, registry.clone()).await {
-                    Ok(connection) => Event::Connected {
+                let opened = startup::start(
+                    &store,
+                    &event_id,
+                    &want,
+                    credentials.as_ref(),
+                    registry.clone(),
+                )
+                .await;
+                let event = match opened {
+                    Ok((connection, receiver)) => Event::Connected {
                         id: event_id,
                         launch: event_launch,
                         connection,
+                        receiver,
                         registry,
                     },
                     Err(failure) => Event::Failed {
@@ -354,6 +368,7 @@ pub(super) fn accept_event(
             id,
             launch,
             connection,
+            receiver,
             registry,
         } => {
             supervisor.failures.0.remove(&id);
@@ -362,6 +377,7 @@ pub(super) fn accept_event(
                 Server {
                     connection,
                     launch,
+                    receiver,
                     registry,
                     label: want.name.clone(),
                     allowed: want.config.allowed_tools.clone(),
@@ -387,16 +403,6 @@ pub(super) fn accept_event(
             );
         }
     }
-}
-
-pub(super) async fn open(
-    want: &Desired,
-    registry: ToolServerHandle,
-) -> Result<McpConnection, ConnectFailure> {
-    let secret = want.secret.as_ref().map_err(Clone::clone)?.as_deref();
-    let client = crate::host::net::client()
-        .map_err(|error| ConnectFailure::Configuration(error.to_string()))?;
-    ene_work::mcp::open(&want.config, secret, registry, client).await
 }
 
 /// Inspects the current MCP state for a specific configuration and credential generation.

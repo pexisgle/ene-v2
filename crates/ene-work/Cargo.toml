@@ -13,6 +13,7 @@ workspace = true
 backon.workspace = true
 ene-domain.workspace = true
 ene-plugin.workspace = true
+futures-util.workspace = true
 process-wrap.workspace = true
 reqwest.workspace = true
 rig-agent.workspace = true
@@ -20,6 +21,7 @@ rig-rmcp.workspace = true
 rmcp.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "process"] }
+tokio-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

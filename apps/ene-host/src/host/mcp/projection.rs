@@ -1,6 +1,6 @@
 //! ECS tool projection for connected MCP servers.
 use super::{
-    registration::{McpRegistration, ServeRegisteredTool},
+    registration::{McpRegistration, Receiver, ServeRegisteredTool},
     supervisor::{Launch, Mcp, McpServers, Server},
 };
 use crate::host::{
@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::{collections::HashMap, sync::Arc};
 
 type ServerTools = HashMap<ToolName, (Arc<ToolDefinition>, RegisteredTool)>;
-pub(super) type ToolSnapshot = HashMap<String, (Launch, ServerTools)>;
+pub(super) type ToolSnapshot = HashMap<String, (Launch, Receiver, ServerTools)>;
 
 pub(super) fn snapshot_tools(servers: &McpServers) -> ToolSnapshot {
     servers
@@ -27,6 +27,7 @@ pub(super) fn snapshot_tools(servers: &McpServers) -> ToolSnapshot {
                 id.clone(),
                 (
                     server.launch.clone(),
+                    server.receiver.clone(),
                     collect_server_tools(id, server, &server.registry.snapshot()),
                 ),
             )
@@ -70,9 +71,11 @@ pub(super) fn project_servers(world: &mut World, mut desired: ToolSnapshot) -> b
             };
 
             let name = &definition.0.name;
-            if let Some((launch, (definition, tool))) = desired
+            if let Some((launch, receiver, (definition, tool))) = desired
                 .get_mut(&binding.server)
-                .and_then(|(launch, tools)| tools.remove(name).map(|tool| (&*launch, tool)))
+                .and_then(|(launch, receiver, tools)| {
+                    tools.remove(name).map(|tool| (&*launch, &*receiver, tool))
+                })
             {
                 if tool.key() == &binding.key && launch == &binding.launch {
                     return None;
@@ -80,6 +83,7 @@ pub(super) fn project_servers(world: &mut World, mut desired: ToolSnapshot) -> b
                 replacements.push((
                     binding.server.clone(),
                     launch.clone(),
+                    receiver.clone(),
                     name.clone(),
                     (definition, tool),
                 ));
@@ -91,18 +95,23 @@ pub(super) fn project_servers(world: &mut World, mut desired: ToolSnapshot) -> b
     for entity in obsolete {
         let _despawned = world.try_despawn(entity);
     }
-    let added = desired.into_iter().flat_map(|(server, (launch, tools))| {
-        tools
-            .into_iter()
-            .map(move |(name, tool)| (server.clone(), launch.clone(), name, tool))
-    });
+    let added = desired
+        .into_iter()
+        .flat_map(|(server, (launch, receiver, tools))| {
+            tools.into_iter().map(move |(name, tool)| {
+                (server.clone(), launch.clone(), receiver.clone(), name, tool)
+            })
+        });
     // A refresh can reclaim its name before a colliding server is considered.
-    for (server, launch, name, (definition, tool)) in replacements.into_iter().chain(added) {
+    for (server, launch, receiver, name, (definition, tool)) in
+        replacements.into_iter().chain(added)
+    {
         let mut offered = (*definition).clone();
         offered.name = name;
         let registration = Arc::new(McpRegistration {
             server,
             launch,
+            receiver,
             definition,
             key: tool.key().clone(),
             store: world.resource::<Store>().clone(),

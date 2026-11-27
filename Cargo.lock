@@ -4367,6 +4367,7 @@ dependencies = [
  "backon",
  "ene-domain",
  "ene-plugin",
+ "futures-util",
  "process-wrap",
  "reqwest",
  "rig-agent",
@@ -4375,6 +4376,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "windows 0.62.2",
 ]
 

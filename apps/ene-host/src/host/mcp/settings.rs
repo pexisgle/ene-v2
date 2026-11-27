@@ -2,7 +2,6 @@
 use super::supervisor::{Connecting, McpServers};
 use crate::host::{db::Store, model::Credentials};
 use ene_domain::settings::{ConnectionConfig, CredentialState, McpConnection};
-use ene_work::mcp::ConnectFailure;
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,7 +37,7 @@ pub(super) struct Desired {
     pub(super) stamp: ConnectionStamp,
     pub(super) name: String,
     pub(super) config: McpConnection,
-    pub(super) secret: Result<Option<String>, ConnectFailure>,
+    pub(super) credential_state: CredentialState,
 }
 
 pub(super) type DesiredServers = BTreeMap<String, Desired>;
@@ -80,22 +79,6 @@ fn desired(
                 return None;
             };
             let id = connection.id.as_str();
-            let secret = if connection.credential_state == CredentialState::Registered {
-                credentials
-                    .map_or(Ok(None), |keys| keys.secret(id))
-                    .map_err(|_| {
-                        ConnectFailure::Transient("MCP credential store could not be read".into())
-                    })
-                    .and_then(|secret| {
-                        secret.map(Some).ok_or_else(|| {
-                            ConnectFailure::Configuration(
-                                "the registered MCP credential is unavailable".into(),
-                            )
-                        })
-                    })
-            } else {
-                Ok(None)
-            };
             Some((
                 id.to_owned(),
                 Desired {
@@ -106,7 +89,7 @@ fn desired(
                     },
                     name: connection.name,
                     config,
-                    secret,
+                    credential_state: connection.credential_state,
                 },
             ))
         })

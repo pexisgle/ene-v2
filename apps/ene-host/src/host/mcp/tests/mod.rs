@@ -2,8 +2,8 @@
 mod pending_tests;
 mod supervisor_tests;
 
-use super::supervisor::*;
 use super::*;
+use super::{startup::open, supervisor::*};
 use crate::host::resources::{ExternalToolOwner, HostExternalTool};
 use rig_agent::tool::server::{ToolServer, ToolServerHandle};
 use rig_core::message::ToolName;
@@ -22,7 +22,7 @@ pub(super) fn want(name: &str) -> Desired {
         stamp: STAMP,
         name: name.into(),
         config: Default::default(),
-        secret: Ok(None),
+        credential_state: Default::default(),
     }
 }
 
@@ -159,7 +159,7 @@ async fn http_tools_use_the_shared_redirect_refusing_client() {
     let registry = ToolServer::new().run();
     let connection = tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        open(&desired, registry.clone()),
+        open(&desired.config, None, registry.clone()),
     )
     .await
     .unwrap()
@@ -178,7 +178,7 @@ async fn http_tools_use_the_shared_redirect_refusing_client() {
     assert!(
         tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            open(&desired, ToolServer::new().run())
+            open(&desired.config, None, ToolServer::new().run())
         )
         .await
         .unwrap()

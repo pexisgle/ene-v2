@@ -299,6 +299,7 @@ async fn run_node_probe(
     if !env.is_empty() {
         cmd.envs(env);
     }
+    cmd.kill_on_drop(true);
     let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
         .await
         .ok()?

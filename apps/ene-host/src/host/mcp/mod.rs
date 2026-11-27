@@ -14,6 +14,7 @@ mod failures;
 mod projection;
 mod registration;
 mod settings;
+mod startup;
 mod supervisor;
 
 pub(crate) use ene_work::mcp::is_npx_command;
