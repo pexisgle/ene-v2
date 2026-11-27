@@ -1,6 +1,6 @@
 //! The companion pod's message stage.
 //!
-//! `render` draws the element tree; `text` extracts previews and URLs.
+//! `render` draws the element tree and `text` prepares the replies.
 
 mod render;
 mod text;
@@ -15,8 +15,8 @@ use ene_client_core::domain::{ApprovalRequest, RiskLevel};
 use gpui::{AnyElement, Context, SharedString, div, prelude::*, px};
 
 use render::*;
+pub(super) use text::active_mini_speech_text;
 use text::*;
-pub(super) use text::{active_mini_speech_text, extract_urls};
 
 impl CompanionPod {
     pub(super) fn render_bubble_stage(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -255,7 +255,6 @@ impl CompanionPod {
             .map(|line| line.chars().count().max(1).div_ceil(24))
             .sum::<usize>()
             > 6;
-        let url_pills = render_url_pills(&speech_text, "mini", theme);
         let failed_turn = failed_turn_message(&hub.model);
         let can_greet = hub.model.companions.chat.messages.is_empty()
             && !hub.model.companions.chat.loading
@@ -279,7 +278,7 @@ impl CompanionPod {
                     .overflow_y_scroll()
                     .text_sm()
                     .text_color(theme.ink)
-                    .child(display_text),
+                    .child(reply_view("mini-reply-text", display_text)),
             )
             .when(long_reply, |row| {
                 let more = self.hub.clone();
@@ -305,7 +304,6 @@ impl CompanionPod {
                     },
                 ))
             })
-            .when_some(url_pills, gpui::ParentElement::child)
             .when_some(failed_turn, |this, reason| {
                 this.child(render_mini_error_banner(&reason, theme))
             })

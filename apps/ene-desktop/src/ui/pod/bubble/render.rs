@@ -3,7 +3,7 @@
 //! These draw from a `Model` or a `Theme` and own no state; `super`
 //! composes them into the element tree.
 
-use super::{preview_text, render_url_pills};
+use super::{preview_text, reply_view};
 use crate::state::{Link, Model, Notice, NoticeKind};
 use crate::ui::Hub;
 use crate::ui::icons::{Icon, icon};
@@ -347,24 +347,20 @@ pub(super) fn collect_timeline_rows(
                 .into_any_element(),
         );
     }
-    for (msg_idx, msg) in model.companions.chat.messages.iter().enumerate() {
+    for msg in &model.companions.chat.messages {
         let is_user = msg.role == MessageRole::User;
-        let url_pills = (!is_user)
-            .then(|| render_url_pills(&msg.text, &format!("exp-{msg_idx}"), theme))
-            .flatten();
         rows.push(render_message_bubble(
             is_user,
+            SharedString::from(format!("reply-{}", msg.id)),
             msg.text.clone(),
-            url_pills,
             theme,
         ));
     }
     if !streaming_preview.is_empty() {
-        let url_pills = render_url_pills(streaming_preview, "exp-stream", theme);
         rows.push(render_message_bubble(
             false,
+            "streaming-reply".into(),
             preview_text(streaming_preview),
-            url_pills,
             theme,
         ));
     }
@@ -389,10 +385,15 @@ pub(super) fn collect_timeline_rows(
 
 pub(super) fn render_message_bubble(
     is_user: bool,
+    id: SharedString,
     body_text: String,
-    url_pills: Option<AnyElement>,
     theme: &Theme,
 ) -> AnyElement {
+    let text = if is_user {
+        SharedString::from(body_text).into_any_element()
+    } else {
+        reply_view(id, body_text).into_any_element()
+    };
     div()
         .w_full()
         .flex()
@@ -418,8 +419,7 @@ pub(super) fn render_message_bubble(
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .child(div().text_sm().child(SharedString::from(body_text)))
-                .when_some(url_pills, gpui::ParentElement::child),
+                .child(div().text_sm().child(text)),
         )
         .into_any_element()
 }

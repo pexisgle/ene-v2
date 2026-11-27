@@ -310,9 +310,6 @@ fn mini_bubble_size(model: &crate::state::Model) -> Size<Pixels> {
     if estimated_lines > 6 || model.companions.chat.messages.is_empty() {
         h += 40.0;
     }
-    if !bubble::extract_urls(&speech_text).is_empty() {
-        h += 28.0;
-    }
     if model.audio.transcription.is_some() {
         h += 38.0;
     }

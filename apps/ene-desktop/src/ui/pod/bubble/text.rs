@@ -1,14 +1,10 @@
-//! Text extracted from a message for the pod: previews and URLs.
-//!
-//! Pure string work, so it is testable without a window and separable from
-//! the element tree in `mod.rs`.
-
-//! The companion pod's message stage.
+//! Text replies in the companion pod.
 
 use crate::state::Model;
-use crate::ui::theme::Theme;
 use ene_client_core::domain::{MessageRole, TurnStatus};
-use gpui::{AnyElement, SharedString, div, prelude::*, px};
+use gpui::{ElementId, ImageSource, base::text::TextView};
+use std::sync::Arc;
+use url::Url;
 
 pub(crate) fn active_mini_speech_text(model: &Model) -> String {
     let streaming: String = model
@@ -90,122 +86,21 @@ pub(crate) fn preview_text(raw: &str) -> String {
     }
 }
 
-fn short_url_label(url: &str) -> String {
-    let without_scheme = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
-    let trimmed = without_scheme.trim_end_matches('/');
-    if trimmed.chars().count() <= 32 {
-        trimmed.to_owned()
-    } else {
-        let head: String = trimmed.chars().take(29).collect();
-        format!("{head}…")
-    }
+pub(super) fn reply_view(id: impl Into<ElementId>, text: String) -> TextView {
+    TextView::markdown(id, text)
+        .markdown_raw_html(false)
+        // Conversation data cannot cause an automatic image fetch or file read.
+        .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))
+        .link(|link, _| web_link(&link.url).map(|url| link.clone().url(url.as_str().to_owned())))
 }
 
-pub(crate) fn extract_urls(raw: &str) -> Vec<(String, String)> {
-    let mut urls: Vec<(String, String)> = Vec::new();
-    collect_markdown_links(raw, &mut urls);
-    collect_bare_urls(raw, &mut urls);
-    urls
-}
-
-fn push_unique_url(urls: &mut Vec<(String, String)>, label: String, url: String) {
-    if urls.len() >= 4 || urls.iter().any(|(_, existing)| existing == &url) {
-        return;
-    }
-    let clean_label = if label.trim().is_empty() {
-        short_url_label(&url)
-    } else {
-        label
-    };
-    urls.push((clean_label, url));
-}
-
-fn collect_markdown_links(raw: &str, urls: &mut Vec<(String, String)>) {
-    let mut rest = raw;
-    while let Some(open) = rest.find('[') {
-        let after_open = &rest[open + 1..];
-        if let Some(mid) = after_open.find("](")
-            && let Some(close) = after_open[mid + 2..].find(')')
-        {
-            let label = after_open[..mid].trim();
-            let url = after_open[mid + 2..mid + 2 + close].trim();
-            if url.starts_with("http://") || url.starts_with("https://") {
-                push_unique_url(urls, label.to_owned(), url.to_owned());
-                rest = &after_open[mid + 2 + close + 1..];
-                continue;
-            }
-        }
-        rest = after_open;
-    }
-}
-
-fn collect_bare_urls(raw: &str, urls: &mut Vec<(String, String)>) {
-    for token in raw.split_whitespace() {
-        let candidate = token.trim_start_matches(['(', '[', '<', '"', '\'', '「', '『']);
-        let Some(pos) = candidate
-            .find("https://")
-            .or_else(|| candidate.find("http://"))
-        else {
-            continue;
-        };
-        let slice = &candidate[pos..];
-        let end = slice
-            .find(|ch: char| {
-                matches!(
-                    ch,
-                    ')' | ']' | '>' | '"' | '\'' | ',' | '。' | '、' | '」' | '』'
-                ) || ch.is_whitespace()
-            })
-            .unwrap_or(slice.len());
-        let clean = slice[..end].trim_end_matches(['.', ';', ':']);
-        if clean.starts_with("http://") || clean.starts_with("https://") {
-            push_unique_url(urls, short_url_label(clean), clean.to_owned());
-        }
-    }
-}
-
-pub(crate) fn render_url_pills(raw: &str, id_prefix: &str, theme: &Theme) -> Option<AnyElement> {
-    let urls = extract_urls(raw);
-    if urls.is_empty() {
-        return None;
-    }
-    let chips: Vec<AnyElement> = urls
-        .into_iter()
-        .enumerate()
-        .map(|(idx, (label, url))| {
-            let hover_bg = theme.accent_soft;
-            let open_url = url.clone();
-            div()
-                .id(SharedString::from(format!("{id_prefix}-url-{idx}")))
-                .rounded_full()
-                .bg(theme.accent_soft)
-                .border_1()
-                .border_color(theme.border)
-                .px(px(8.))
-                .py(px(2.))
-                .text_xs()
-                .text_color(theme.accent_soft_fg)
-                .cursor_pointer()
-                .hover(move |style| style.bg(hover_bg))
-                .on_click(move |_, _, cx| {
-                    cx.open_url(&open_url);
-                })
-                .child(label)
-                .into_any_element()
-        })
-        .collect();
-    Some(
-        div()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .gap(px(6.))
-            .children(chips)
-            .into_any_element(),
-    )
+fn web_link(raw: &str) -> Option<Url> {
+    let url = Url::parse(raw.trim_end_matches(['。', '、', '」', '』'])).ok()?;
+    (matches!(url.scheme(), "http" | "https")
+        && url.host().is_some()
+        && url.username().is_empty()
+        && url.password().is_none())
+    .then_some(url)
 }
 
 #[cfg(test)]
@@ -222,28 +117,24 @@ mod tests {
     }
 
     #[test]
-    fn preview_preserves_markdown_links_and_extract_urls_parses_them() {
-        let raw = "### 結果\n- **公式**: [Antigravity](https://example.com/docs) を確認 👍\nhttps://example.com/raw。";
-        let clean = preview_text(raw);
-        assert!(clean.contains("**公式**"), "{clean}");
-        assert!(
-            clean.contains("[Antigravity](https://example.com/docs)"),
-            "{clean}"
-        );
-        assert!(clean.contains("👍"), "{clean}");
-        let urls = extract_urls(raw);
+    fn preview_preserves_reply_markup() {
+        let raw = "### 結果\n- **公式**: [出典](https://example.com/docs) を確認 👍";
+        assert_eq!(preview_text(raw), raw);
+    }
+
+    #[test]
+    fn citations_open_only_explicit_web_urls() {
         assert_eq!(
-            urls,
-            vec![
-                (
-                    "Antigravity".to_owned(),
-                    "https://example.com/docs".to_owned()
-                ),
-                (
-                    "example.com/raw".to_owned(),
-                    "https://example.com/raw".to_owned()
-                ),
-            ]
+            web_link("https://example.com/docs。").unwrap().as_str(),
+            "https://example.com/docs"
         );
+        for value in [
+            "file:///tmp/example",
+            "javascript:alert(1)",
+            "https://user@host/",
+            "/local",
+        ] {
+            assert!(web_link(value).is_none());
+        }
     }
 }
