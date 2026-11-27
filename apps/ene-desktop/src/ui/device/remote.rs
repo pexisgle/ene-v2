@@ -22,14 +22,27 @@ pub(super) enum RemoteStatus {
     Failed(crate::Connect),
 }
 
+pub(super) fn load(cx: &mut Context<DevicePane>) {
+    let task = cx
+        .background_executor()
+        .spawn(async { RemoteProfile::read() });
+    cx.spawn(async move |pane, cx| {
+        let profile = task.await;
+        let _updated = pane.update(cx, |pane, cx| {
+            pane.form.remote_profile = Some(profile);
+            cx.notify();
+        });
+    })
+    .detach();
+}
+
 pub(super) fn render_remote_host_section(
     pane: &mut DevicePane,
     theme: &Theme,
     cx: &mut Context<DevicePane>,
 ) -> (AnyElement, AnyElement) {
-    let saved = RemoteProfile::read();
-    let has_current = !matches!(saved, Ok(None));
-    let current_remote = saved.as_ref().ok().and_then(Option::as_ref);
+    let saved = pane.form.remote_profile.as_ref();
+    let has_current = matches!(saved, Some(Ok(Some(_)) | Err(_)));
     let remote_open = pane.form.remote_host_open;
     let pane_remote_toggle = cx.entity();
     let remote_heading = div()
@@ -52,17 +65,20 @@ pub(super) fn render_remote_host_section(
         )
         .into_any_element();
 
-    let form = remote_open.then(|| {
-        let endpoint = current_remote.map(|profile| profile.endpoint.as_str());
-        render_remote_host_form(pane, endpoint, has_current, theme, cx)
-    });
     let status = match saved {
-        Ok(Some(profile)) if !profile.needs_registration() => {
+        Some(Ok(Some(profile))) if !profile.needs_registration() => {
             format!("遠隔 HTTPS ({})", profile.endpoint)
         }
-        Ok(None) => "ローカル（自動検出）".to_owned(),
+        Some(Ok(None)) => "ローカル（自動検出）".to_owned(),
+        None => "接続先を読み込み中…".to_owned(),
         _ => "遠隔設定を再登録してください".to_owned(),
     };
+    let endpoint = match (remote_open, saved) {
+        (true, Some(Ok(Some(profile)))) => Some(profile.endpoint.clone()),
+        _ => None,
+    };
+    let form = (remote_open && saved.is_some())
+        .then(|| render_remote_host_form(pane, endpoint.as_deref(), has_current, theme, cx));
     let remote_card = div()
         .w_full()
         .bg(theme.bg_surface)
@@ -216,12 +232,14 @@ fn edit_remote(
         return;
     }
     pane.form.remote_status = RemoteStatus::Saving;
-    let task = cx
-        .background_executor()
-        .spawn(async move { edit.persist() });
+    let task = cx.background_executor().spawn(async move {
+        let result = edit.persist();
+        (result, RemoteProfile::read())
+    });
     cx.spawn(async move |this, cx| {
-        let outcome = task.await;
+        let (outcome, profile) = task.await;
         let _observed = this.update(cx, |pane, cx| {
+            pane.form.remote_profile = Some(profile);
             pane.form.remote_status = match outcome {
                 Ok(()) => {
                     for draft in drafts {

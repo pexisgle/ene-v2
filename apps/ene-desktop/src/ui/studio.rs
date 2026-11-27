@@ -34,7 +34,7 @@ impl SettingsStudio {
         let companions = cx.new(|cx| CompanionsPane::new(hub.clone(), cx));
         let connections = cx.new(|cx| ConnectionsPane::new(hub.clone(), cx));
         let voice = cx.new(|cx| VoicePane::new(hub.clone(), cx));
-        let device = cx.new(|_| DevicePane::new(hub.clone()));
+        let device = cx.new(|cx| DevicePane::new(hub.clone(), cx));
         let shown_section = hub.read(cx).windows.settings_section;
         Self {
             hub,

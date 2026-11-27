@@ -32,6 +32,7 @@ pub(super) struct DeviceFormState {
     pub(super) adding_plugin_open: bool,
     pub(super) remote_host_open: bool,
     remote_status: remote::RemoteStatus,
+    remote_profile: Option<Result<Option<crate::RemoteProfile>, crate::Connect>>,
     pub(super) skip_confirm_armed: bool,
 }
 
@@ -47,6 +48,7 @@ impl Default for DeviceFormState {
             adding_plugin_open: false,
             remote_host_open: false,
             remote_status: remote::RemoteStatus::default(),
+            remote_profile: None,
             skip_confirm_armed: false,
         }
     }
@@ -142,7 +144,8 @@ impl DeviceSnapshot {
 }
 
 impl DevicePane {
-    pub(crate) fn new(hub: Entity<Hub>) -> Self {
+    pub(crate) fn new(hub: Entity<Hub>, cx: &mut Context<Self>) -> Self {
+        remote::load(cx);
         Self {
             hub,
             drafts: DraftStore::default(),
