@@ -11,18 +11,23 @@
 mod headers;
 
 use crate::limits::{HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_CHUNK};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use bytes::Bytes;
 use ene_plugin::{Failure, HttpChunk, HttpRequest};
+use futures_util::StreamExt as _;
 use headers::{copy_headers, request_headers};
+use http_body_util::{BodyDataStream, BodyExt, Limited};
 use parking_lot::Mutex;
 use reqwest::header::HeaderMap;
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
+use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -52,27 +57,18 @@ impl HttpGrants for DenyHttp {
     }
 }
 
-/// One open reply, read back a chunk at a time.
-enum Open {
-    /// The whole body was read under the exchange deadline before open
-    /// returned. Reads split that buffer; no network happens after open.
-    Buffered {
-        status: u16,
-        headers: BTreeMap<String, String>,
-        body: Vec<u8>,
-        /// How much of `body` has been handed out.
-        read: usize,
-    },
-    /// The reply is still arriving. Reads hand out what the network has
-    /// delivered, within the same exchange deadline and body cap.
-    Streaming {
-        status: u16,
-        deadline: Instant,
-        total: usize,
-        /// A network chunk larger than the ABI chunk, split across reads.
-        pending: VecDeque<Vec<u8>>,
-        response: reqwest::Response,
-    },
+/// One reply. Buffered replies hold all their bytes; streamed replies retain
+/// at most one network chunk alongside the connection.
+struct Open {
+    status: u16,
+    headers: BTreeMap<String, String>,
+    pending: Bytes,
+    stream: Option<Streaming>,
+}
+
+struct Streaming {
+    body: BodyDataStream<Limited<reqwest::Body>>,
+    deadline: Instant,
 }
 
 /// The process's HTTP path for plugins.
@@ -181,81 +177,54 @@ impl HttpBroker {
             .map_err(|_| Failure::new("invalid_method"))?;
         let mut headers = request_headers(&request.headers)?;
         self.grants.authorize(provider, &mut headers)?;
-        let body = request
-            .body_base64
-            .map(|encoded| {
-                use base64::Engine;
-                base64::engine::general_purpose::STANDARD
-                    .decode(encoded)
-                    .map_err(|_| Failure::new("invalid_body"))
-            })
-            .transpose()?;
         let mut call = self.client.request(method, url).headers(headers);
-        if let Some(body) = body {
-            call = call.body(body);
+        if let Some(encoded) = request.body_base64 {
+            call = call.body(
+                STANDARD
+                    .decode(encoded)
+                    .map_err(|_| Failure::new("invalid_body"))?,
+            );
         }
         self.check()?;
         let deadline = Instant::now() + self.deadline;
         let handle = format!("http-{}", self.next.fetch_add(1, Ordering::Relaxed));
-        if request.stream {
-            let response = tokio::time::timeout(self.deadline, call.send())
+        let response = timeout_at(deadline, call.send())
+            .await
+            .map_err(|_| Failure::new("http_timeout"))?
+            .map_err(|error| body_error(&error))?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_HTTP_BODY as u64)
+        {
+            return Err(Failure::new("http_body_too_large"));
+        }
+        let status = response.status().as_u16();
+        let mut entry = Open {
+            status,
+            headers: copy_headers(response.headers()),
+            pending: Bytes::new(),
+            stream: None,
+        };
+        let body = Limited::new(reqwest::Body::from(response), MAX_HTTP_BODY);
+        let headers = if request.stream {
+            entry.stream = Some(Streaming {
+                body: body.into_data_stream(),
+                deadline,
+            });
+            std::mem::take(&mut entry.headers)
+        } else {
+            entry.pending = timeout_at(deadline, body.collect())
                 .await
                 .map_err(|_| Failure::new("http_timeout"))?
-                .map_err(|error| Failure {
-                    code: "http_failed".into(),
-                    message: error.to_string(),
-                })?;
-            if response
-                .content_length()
-                .is_some_and(|length| length > MAX_HTTP_BODY as u64)
-            {
-                return Err(Failure::new("http_body_too_large"));
-            }
-            let status = response.status().as_u16();
-            let headers = copy_headers(response.headers());
-            self.open.lock().insert(
-                handle.clone(),
-                Open::Streaming {
-                    status,
-                    deadline,
-                    total: 0,
-                    pending: VecDeque::new(),
-                    response,
-                },
-            );
-            return Ok(HttpChunk {
-                handle,
-                status,
-                headers,
-                data_base64: String::new(),
-                done: false,
-            });
-        }
-        let (status, headers, body) = tokio::time::timeout(self.deadline, async {
-            let response = call.send().await.map_err(|error| Failure {
-                code: "http_failed".into(),
-                message: error.to_string(),
-            })?;
-            let status = response.status().as_u16();
-            let headers = copy_headers(response.headers());
-            let body = bounded(response).await?;
-            Ok::<_, Failure>((status, headers, body))
-        })
-        .await
-        .map_err(|_| Failure::new("http_timeout"))??;
-        self.open.lock().insert(
-            handle.clone(),
-            Open::Buffered {
-                status,
-                headers,
-                body,
-                read: 0,
-            },
-        );
+                .map_err(|error| body_error(error.as_ref()))?
+                .to_bytes();
+            BTreeMap::new()
+        };
+        self.open.lock().insert(handle.clone(), entry);
         Ok(HttpChunk {
             handle,
             status,
-            headers: BTreeMap::new(),
+            headers,
             data_base64: String::new(),
             done: false,
         })
@@ -269,188 +238,45 @@ impl HttpBroker {
     }
 
     async fn read_reply(&self, handle: &str) -> Result<HttpChunk, Failure> {
-        let entry = self
+        let mut entry = self
             .open
             .lock()
             .remove(handle)
             .ok_or_else(|| Failure::new("unknown_handle"))?;
-        match entry {
-            Open::Buffered {
-                status,
-                headers,
-                body,
-                read,
-            } => self.read_buffered_chunk(
-                handle,
-                BufferedChunk {
-                    status,
-                    headers,
-                    body,
-                    read,
-                },
-            ),
-            Open::Streaming {
-                status,
-                deadline,
-                total,
-                pending,
-                response,
-            } => {
-                self.read_streaming_chunk(
-                    handle,
-                    StreamingChunk {
-                        status,
-                        deadline,
-                        total,
-                        pending,
-                        response,
-                    },
-                )
-                .await
+        if let Some(stream) = &mut entry.stream {
+            if Instant::now() >= stream.deadline {
+                return Err(Failure::new("http_timeout"));
+            }
+            if entry.pending.is_empty() {
+                let next = timeout_at(stream.deadline, stream.body.next())
+                    .await
+                    .map_err(|_| Failure::new("http_timeout"))?
+                    .transpose()
+                    .map_err(|error| body_error(error.as_ref()))?;
+                if let Some(bytes) = next {
+                    entry.pending = bytes;
+                } else {
+                    entry.stream = None;
+                }
             }
         }
-    }
-
-    fn read_buffered_chunk(
-        &self,
-        handle: &str,
-        chunk_state: BufferedChunk,
-    ) -> Result<HttpChunk, Failure> {
-        use base64::Engine;
-
-        let BufferedChunk {
-            status,
-            headers,
-            body,
-            read,
-        } = chunk_state;
-        let take = (body.len() - read).min(MAX_HTTP_CHUNK);
-        let end = read + take;
-        let done = end >= body.len();
-        // The reply headers ride the first chunk only.
-        let headers = if read == 0 { headers } else { BTreeMap::new() };
-        let chunk = base64::engine::general_purpose::STANDARD.encode(&body[read..end]);
-        if !done {
-            self.open.lock().insert(
-                handle.to_owned(),
-                Open::Buffered {
-                    status,
-                    headers: BTreeMap::new(),
-                    body,
-                    read: end,
-                },
-            );
-        }
-        Ok(HttpChunk {
+        let bytes = entry
+            .pending
+            .split_to(entry.pending.len().min(MAX_HTTP_CHUNK));
+        let done = entry.stream.is_none() && entry.pending.is_empty();
+        let chunk = HttpChunk {
             handle: handle.to_owned(),
-            status,
-            headers,
-            data_base64: chunk,
+            status: entry.status,
+            headers: std::mem::take(&mut entry.headers),
+            data_base64: STANDARD.encode(bytes),
             done,
-        })
+        };
+        if !done {
+            self.open.lock().insert(handle.to_owned(), entry);
+        }
+        Ok(chunk)
     }
 
-    async fn read_streaming_chunk(
-        &self,
-        handle: &str,
-        stream: StreamingChunk,
-    ) -> Result<HttpChunk, Failure> {
-        use base64::Engine;
-
-        let StreamingChunk {
-            status,
-            deadline,
-            mut total,
-            mut pending,
-            mut response,
-        } = stream;
-        if let Some(bytes) = pending.pop_front() {
-            self.open.lock().insert(
-                handle.to_owned(),
-                Open::Streaming {
-                    status,
-                    deadline,
-                    total,
-                    pending,
-                    response,
-                },
-            );
-            return Ok(HttpChunk {
-                handle: handle.to_owned(),
-                status,
-                headers: BTreeMap::new(),
-                data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                done: false,
-            });
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(Failure::new("http_timeout"));
-        }
-        let next = match tokio::time::timeout(remaining, response.chunk()).await {
-            Err(_) => return Err(Failure::new("http_timeout")),
-            Ok(Err(error)) => {
-                return Err(Failure {
-                    code: "http_failed".into(),
-                    message: error.to_string(),
-                });
-            }
-            Ok(Ok(None)) => None,
-            Ok(Ok(Some(bytes))) => Some(bytes.to_vec()),
-        };
-        let Some(mut bytes) = next else {
-            return Ok(HttpChunk {
-                handle: handle.to_owned(),
-                status,
-                headers: BTreeMap::new(),
-                data_base64: String::new(),
-                done: true,
-            });
-        };
-        total += bytes.len();
-        if total > MAX_HTTP_BODY {
-            return Err(Failure::new("http_body_too_large"));
-        }
-        if bytes.len() > MAX_HTTP_CHUNK {
-            let rest = bytes.split_off(MAX_HTTP_CHUNK);
-            pending.push_back(rest);
-        }
-        self.open.lock().insert(
-            handle.to_owned(),
-            Open::Streaming {
-                status,
-                deadline,
-                total,
-                pending,
-                response,
-            },
-        );
-        Ok(HttpChunk {
-            handle: handle.to_owned(),
-            status,
-            headers: BTreeMap::new(),
-            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-            done: false,
-        })
-    }
-}
-
-struct BufferedChunk {
-    status: u16,
-    headers: BTreeMap<String, String>,
-    body: Vec<u8>,
-    read: usize,
-}
-
-struct StreamingChunk {
-    status: u16,
-    deadline: Instant,
-    total: usize,
-    pending: VecDeque<Vec<u8>>,
-    response: reqwest::Response,
-}
-
-impl HttpBroker {
     /// Drops `handle` without reading the rest. Closing a handle whose body was
     /// already read to its end succeeds: the end state is the same, so a guest
     /// may close unconditionally.
@@ -460,32 +286,15 @@ impl HttpBroker {
     }
 }
 
-/// Headers the host owns. A plugin that sets one is refused rather than
-/// silently overridden, so a provider author sees the refusal.
-/// Reads a reply body, refusing one larger than the cap.
-async fn bounded(response: reqwest::Response) -> Result<Vec<u8>, Failure> {
-    use http_body_util::BodyExt;
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_HTTP_BODY as u64)
-    {
-        return Err(Failure::new("http_body_too_large"));
+fn body_error(error: &(dyn std::error::Error + 'static)) -> Failure {
+    if error.is::<http_body_util::LengthLimitError>() {
+        Failure::new("http_body_too_large")
+    } else {
+        Failure {
+            code: "http_failed".into(),
+            message: error.to_string(),
+        }
     }
-    let limited = http_body_util::Limited::new(reqwest::Body::from(response), MAX_HTTP_BODY);
-    limited
-        .collect()
-        .await
-        .map(|body| body.to_bytes().to_vec())
-        .map_err(|error| {
-            if error.is::<http_body_util::LengthLimitError>() {
-                Failure::new("http_body_too_large")
-            } else {
-                Failure {
-                    code: "http_failed".into(),
-                    message: error.to_string(),
-                }
-            }
-        })
 }
 
 #[cfg(test)]
@@ -614,35 +423,36 @@ mod tests {
 
     #[tokio::test]
     async fn a_reply_is_read_back_in_bounded_chunks() {
-        use base64::Engine;
-
-        let body: &'static [u8] = b"0123456789";
-        let (url, server) = serve(body).await;
+        static BODY: [u8; 3 * MAX_HTTP_CHUNK + 17] = [b'x'; 3 * MAX_HTTP_CHUNK + 17];
+        let (url, server) = serve(&BODY).await;
         let broker = HttpBroker::new(Arc::new(Allow(url.clone()))).unwrap();
-        let first = broker
-            .open("provider", request(format!("{url}/x")))
-            .await
-            .unwrap();
-        assert!(!first.done, "the opening chunk carries no body");
-        let mut read = Vec::new();
-        let mut chunk = broker.read(&first.handle).await.unwrap();
-        loop {
-            read.extend_from_slice(
-                &base64::engine::general_purpose::STANDARD
-                    .decode(&chunk.data_base64)
-                    .unwrap(),
-            );
-            if chunk.done {
-                break;
+        for stream in [false, true] {
+            let mut call = request(format!("{url}/x"));
+            call.stream = stream;
+            let first = broker.open("provider", call).await.unwrap();
+            assert!(!first.done && first.data_base64.is_empty());
+            assert_eq!(first.headers.contains_key("content-type"), stream);
+            let mut read = Vec::new();
+            loop {
+                let chunk = broker.read(&first.handle).await.unwrap();
+                assert_eq!(chunk.status, 200);
+                assert_eq!(
+                    chunk.headers.contains_key("content-type"),
+                    !stream && read.is_empty()
+                );
+                let bytes = STANDARD.decode(&chunk.data_base64).unwrap();
+                assert!(bytes.len() <= MAX_HTTP_CHUNK);
+                read.extend(bytes);
+                if chunk.done {
+                    break;
+                }
             }
-            chunk = broker.read(&first.handle).await.unwrap();
+            assert_eq!(read, BODY);
+            assert_eq!(
+                broker.read(&first.handle).await.unwrap_err().code,
+                "unknown_handle"
+            );
         }
-        assert_eq!(read, body);
-        // The handle is spent once its body is handed out.
-        assert_eq!(
-            broker.read(&first.handle).await.unwrap_err().code,
-            "unknown_handle"
-        );
         server.abort();
     }
 
@@ -795,26 +605,41 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0; 4096];
-            assert_ne!(socket.read(&mut request).await.unwrap(), 0);
-            socket
-                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
-                .await
-                .unwrap();
-            if let Err(error) = socket.write_all(&vec![b'x'; MAX_HTTP_BODY + 1]).await {
-                tracing::debug!(%error, "oversized fixture write failed");
+            let oversized = vec![b'x'; MAX_HTTP_BODY + 1];
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                assert_ne!(socket.read(&mut request).await.unwrap(), 0);
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                if let Err(error) = socket.write_all(&oversized).await {
+                    tracing::debug!(%error, "oversized fixture write failed");
+                }
             }
         });
         let broker = HttpBroker::new(Arc::new(Allow(origin.clone()))).unwrap();
         assert_eq!(
             broker
-                .open("provider", request(origin))
+                .open("provider", request(origin.clone()))
                 .await
                 .unwrap_err()
                 .code,
             "http_body_too_large"
         );
+        let mut call = request(origin);
+        call.stream = true;
+        let opened = broker.open("provider", call).await.unwrap();
+        loop {
+            match broker.read(&opened.handle).await {
+                Ok(chunk) => assert!(!chunk.done),
+                Err(error) => {
+                    assert_eq!(error.code, "http_body_too_large");
+                    break;
+                }
+            }
+        }
         assert!(broker.open.lock().is_empty());
         server.await.unwrap();
     }

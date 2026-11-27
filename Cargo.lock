@@ -4234,6 +4234,7 @@ dependencies = [
  "async-task",
  "base64 0.23.1",
  "blocking",
+ "bytes",
  "cap-fs-ext",
  "cap-std",
  "ene-plugin",

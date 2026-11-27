@@ -16,6 +16,7 @@ cap-std.workspace = true
 hex.workspace = true
 ene-plugin.workspace = true
 base64.workspace = true
+bytes.workspace = true
 reqwest.workspace = true
 url.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "macros"] }
