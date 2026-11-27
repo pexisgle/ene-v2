@@ -174,7 +174,7 @@ pub fn build_voicevox_preset_input(
         config: Some(ConnectionConfig::Tts(TtsConnection {
             endpoint: Some(ConnectionEndpoint {
                 adapter: "voicevox".into(),
-                endpoint: "http://127.0.0.1:50021".into(),
+                endpoint: crate::VOICEVOX_DEFAULT_ENDPOINT.into(),
                 options_schema: String::new(),
                 options,
             }),

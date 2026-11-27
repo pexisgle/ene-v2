@@ -22,4 +22,6 @@ pub use vendors::{
     is_non_chat_sakura_model, is_sakura_connection, is_sakura_endpoint, is_sakura_tts_model_id,
     known_embedding_dimensions,
 };
-pub use voice::{OPENAI_TTS_VOICES, parse_voice_resource};
+pub use voice::{
+    OPENAI_TTS_VOICES, VOICEVOX_DEFAULT_ENDPOINT, parse_voice_resource, voicevox_local_address,
+};

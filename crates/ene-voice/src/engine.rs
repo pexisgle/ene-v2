@@ -315,10 +315,14 @@ impl HttpEngine {
             .post(format!("{}{}", self.base, self.path))
             .multipart(form);
         let body = self.exchange(call, "STT").await?;
-        let value: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
-            VoiceHttpError::Decode("the STT endpoint answered a non-JSON transcript".into())
+        #[derive(serde::Deserialize)]
+        struct Transcript {
+            text: String,
+        }
+        let value: Transcript = serde_json::from_slice(&body).map_err(|_| {
+            VoiceHttpError::Decode("the STT endpoint answered an invalid transcript".into())
         })?;
-        Ok(value["text"].as_str().unwrap_or_default().trim().to_owned())
+        Ok(value.text.trim().to_owned())
     }
 
     async fn raw_stt(&self, pcm: Vec<u8>, sample_rate: u32) -> HttpResult<String> {

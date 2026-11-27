@@ -8,7 +8,6 @@ use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{DropdownOption, DropdownSpec, Tone, dropdown_select, pill_button};
 use ene_client_core::connections::{decode_model_choice, encode_model_choice};
-use ene_client_core::domain::ConnectionKind;
 use gpui::{AnyElement, Context, div, prelude::*, px};
 use std::collections::BTreeMap;
 
@@ -16,8 +15,6 @@ type VoiceAssignFn = fn(&mut Hub, Option<(&str, &str)>, &mut Context<Hub>);
 
 /// Connection-derived inputs shared by STT and TTS.
 pub(super) struct RolesContext {
-    pub(super) refresh_ids: Vec<String>,
-    pub(super) checking_any: bool,
     stt_models: Vec<(String, String, String)>,
     active_stt: Option<(String, String)>,
     tts_voices: Vec<(String, String, String)>,
@@ -27,22 +24,6 @@ pub(super) struct RolesContext {
 
 pub(super) fn collect_roles_context(hub: &Hub) -> RolesContext {
     let settings = hub.model.settings();
-    let refresh_ids = settings.map_or_default(|s| {
-        s.connections
-            .iter()
-            .filter(|c| {
-                c.enabled
-                    && matches!(
-                        c.kind,
-                        ConnectionKind::Llm
-                            | ConnectionKind::Embedding
-                            | ConnectionKind::Stt
-                            | ConnectionKind::Tts
-                    )
-            })
-            .map(|c| c.id.clone())
-            .collect()
-    });
     let conn_names = settings.map_or_default(|s| {
         s.connections
             .iter()
@@ -50,8 +31,6 @@ pub(super) fn collect_roles_context(hub: &Hub) -> RolesContext {
             .collect()
     });
     RolesContext {
-        refresh_ids,
-        checking_any: !hub.setup.checking_connections.is_empty(),
         stt_models: hub.model.all_stt_models(),
         active_stt: hub.model.active_stt_selection(),
         tts_voices: hub.all_tts_voices(),

@@ -1,14 +1,14 @@
 //! Which probe a connection gets, plus the MCP probe that polls for tools.
 
 use super::super::Services;
-use super::probe::{failed, healthy, probe_embedding, probe_openai_speech, probe_voicevox_tts};
+use super::probe::{failed, healthy, probe_embedding, probe_voicevox_tts, speech_resources};
 use crate::host::{
     error::{HostError, Result},
     mcp::{CheckState, ConnectionStamp},
     model,
     providers::Providers,
     settings::{Check, Connection, ConnectionConfig},
-    voice::{is_builtin_voicevox, probe_plugin_speech},
+    voice::{is_builtin_voicevox, probe_speech},
 };
 use ene_store::util::now;
 use std::time::Duration;
@@ -36,13 +36,26 @@ pub(super) async fn run_connection_probe(
             .await;
         }
         ConnectionConfig::Tts(_) if is_builtin_voicevox(connection, &providers) => {
-            probe_voicevox_tts(connection, &services.runtime.voicevox()).await
+            let check = probe_voicevox_tts(connection, &services.runtime.voicevox()).await;
+            if check.healthy
+                && let Err(error) = probe_speech(connection, credentials, &providers).await
+            {
+                Check {
+                    resources: check.resources,
+                    ..failed(check.checked_at, error.to_string())
+                }
+            } else {
+                check
+            }
         }
         ConnectionConfig::Stt(_) | ConnectionConfig::Tts(_) => {
             let checked_at = now();
-            match probe_plugin_speech(connection, credentials, &providers).await {
+            match probe_speech(connection, credentials, &providers).await {
                 Ok(Some(resources)) => healthy(checked_at, resources),
-                Ok(None) => probe_openai_speech(connection, credentials, &providers).await,
+                Ok(None) => healthy(
+                    checked_at,
+                    speech_resources(connection, credentials, &providers).await,
+                ),
                 Err(error) => failed(checked_at, error.to_string()),
             }
         }

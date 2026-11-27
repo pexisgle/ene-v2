@@ -20,8 +20,9 @@ mod state_tests;
 pub use attachments::is_attachment_image;
 pub use choices::ModelRoleSlot;
 pub use ene_catalog::{
-    GOOGLE_AGENT_PLATFORM, SAKURA_AI_ENDPOINT, SearchAdapter, default_embedding_dimensions,
-    is_sakura_endpoint, parse_voice_resource, search_adapter_requires_key,
+    GOOGLE_AGENT_PLATFORM, SAKURA_AI_ENDPOINT, SearchAdapter, VOICEVOX_DEFAULT_ENDPOINT,
+    default_embedding_dimensions, is_sakura_endpoint, parse_voice_resource,
+    search_adapter_requires_key,
 };
 pub use ene_domain::client_view as domain;
 pub use reducer::{is_user_facing_message, merge_message, upsert_approval};

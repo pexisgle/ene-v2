@@ -7,7 +7,6 @@
 //! broker, so no credential ever enters the guest.
 use super::{BoxFuture, HttpResult, SAMPLE_RATE, SetupError, SttEngine, TtsEngine, VoiceHttpError};
 use crate::host::{
-    error::{HostError, Result},
     model::Credentials,
     providers::{ProviderInvocationContext, Providers},
     settings::{Connection, ConnectionKind},
@@ -16,66 +15,19 @@ use ene_plugin::{
     AudioFormat, Extension, Operation as PluginOperation, SynthesisRequest, TranscriptionRequest,
 };
 use ene_plugin_runtime::service::HttpBroker;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 /// The most audio one utterance may produce. A minute of 24 kHz PCM is about
 /// 2.8 MB; this leaves room for a long sentence without letting a provider
 /// stream without end.
 const MAX_AUDIO_BYTES: u64 = 16 * 1024 * 1024;
-const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn speech_extension(kind: ConnectionKind) -> Option<Extension> {
+pub(super) fn speech_extension(kind: ConnectionKind) -> Option<Extension> {
     match kind {
         ConnectionKind::Tts => Some(Extension::Tts),
         ConnectionKind::Stt => Some(Extension::Stt),
         _ => None,
     }
-}
-
-/// Exercise a selected plugin through the ordinary speech engine and broker.
-pub(crate) async fn probe(
-    connection: &Connection,
-    credentials: &Credentials,
-    providers: &Providers,
-) -> Result<Option<Vec<String>>> {
-    let Some(extension) = speech_extension(connection.kind) else {
-        return Ok(None);
-    };
-    let adapter = &connection.endpoint().adapter;
-    if !providers.claims(adapter, extension) {
-        return Ok(None);
-    }
-    let unavailable = HostError::Unavailable;
-    tokio::time::timeout(PROBE_TIMEOUT, async {
-        providers.start(adapter, extension).await?;
-        let engine = PluginSpeech::new(providers, connection, Some(credentials), connection.kind)
-            .map_err(|error| unavailable(error.to_string()))?
-            .ok_or_else(|| unavailable("the selected speech provider changed".into()))?;
-        let resources = match &connection.config {
-            crate::host::settings::ConnectionConfig::Tts(config) => {
-                let voice = config.voice_ids.first().cloned().unwrap_or_default();
-                let (audio, _) = engine
-                    .synthesize("接続確認です。".into(), voice)
-                    .await
-                    .map_err(|error| unavailable(error.to_string()))?;
-                if audio.is_empty() {
-                    return Err(unavailable("the speech provider returned no audio".into()));
-                }
-                config.voice_ids.clone()
-            }
-            _ => {
-                // Half a second of silent PCM16, with no microphone data.
-                engine
-                    .transcribe(vec![0; SAMPLE_RATE as usize], SAMPLE_RATE)
-                    .await
-                    .map_err(|error| unavailable(error.to_string()))?;
-                Vec::new()
-            }
-        };
-        Ok(Some(resources))
-    })
-    .await
-    .map_err(|_| unavailable("the speech connection check timed out".into()))?
 }
 
 /// A speech engine backed by a provider plugin.

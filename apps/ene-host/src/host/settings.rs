@@ -230,6 +230,9 @@ pub(crate) fn endpoint_of(connection: &Connection, loaded: &Providers) -> Option
     if !configured.is_empty() {
         return Some(configured.to_owned());
     }
+    if super::voice::is_builtin_voicevox(connection, loaded) {
+        return Some(ene_catalog::VOICEVOX_DEFAULT_ENDPOINT.into());
+    }
     provider(&connection.endpoint().adapter, loaded)
         .map(|provider| provider.endpoint)
         .filter(|endpoint| !endpoint.is_empty())

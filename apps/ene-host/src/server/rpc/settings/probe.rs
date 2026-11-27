@@ -5,7 +5,7 @@ use ene_store::util::now;
 use reqwest::{Client, IntoUrl, RequestBuilder, Response, StatusCode};
 use serde::{Deserialize, de::DeserializeOwned};
 use std::time::Duration;
-use url::{Host, Url};
+use url::Url;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const METADATA_LIMIT: usize = 2 * 1024 * 1024;
@@ -80,7 +80,7 @@ pub(super) async fn probe_voicevox_tts(
     let endpoint = connection.endpoint();
     let base = endpoint.endpoint.trim().trim_end_matches('/');
     let base = if base.is_empty() {
-        "http://127.0.0.1:50021"
+        ene_catalog::VOICEVOX_DEFAULT_ENDPOINT
     } else {
         base
     };
@@ -161,50 +161,35 @@ async fn read_listed_model_ids(response: Response) -> Vec<String> {
     }
 }
 
-pub(super) async fn probe_openai_speech(
+/// Optional model metadata. The speech engine itself determines readiness.
+pub(super) async fn speech_resources(
     connection: &settings::Connection,
     credentials: &model::Credentials,
     providers: &Providers,
-) -> settings::Check {
-    let checked_at = now();
+) -> Vec<String> {
     let base = settings::endpoint_of(connection, providers).unwrap_or_default();
-    let Ok(parsed) = Url::parse(&base) else {
-        return failed(checked_at, "接続先URLが正しくありません");
-    };
     let sakura = model::is_sakura_connection(&connection.endpoint().adapter, &base);
-    let secret = match model::connection_secret(connection, Some(credentials), providers) {
-        Ok(secret) => secret,
-        Err(error) => return failed(checked_at, error.to_string()),
-    };
-    let client = match net::client() {
-        Ok(client) => client,
-        Err(error) => return failed(checked_at, error.to_string()),
-    };
-    let models_url = if sakura && base.ends_with("/tts/v1") {
-        format!("{}/v1/models", base.trim_end_matches("/tts/v1"))
-    } else {
-        format!("{base}/models")
-    };
-    match get(&client, &models_url, secret.as_deref()).send().await {
-        Ok(response) if response.status().is_success() => {
-            let listed = read_listed_model_ids(response).await;
-            healthy(
-                checked_at,
-                collect_speech_resources(connection.kind, sakura, listed),
-            )
+    let listed = async {
+        let secret = model::connection_secret(connection, Some(credentials), providers).ok()?;
+        let client = net::client().ok()?;
+        let models_url = if sakura && base.ends_with("/tts/v1") {
+            format!("{}/v1/models", base.trim_end_matches("/tts/v1"))
+        } else {
+            format!("{base}/models")
+        };
+        let response = get(&client, models_url, secret.as_deref())
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
         }
-        Ok(response) if auth_failed(response.status()) => {
-            failed(checked_at, auth_message(response.status()))
-        }
-        Ok(response) => {
-            if loopback_speech_health(&client, &parsed, secret.as_deref()).await {
-                healthy(checked_at, Vec::new())
-            } else {
-                failed(checked_at, format!("HTTP {}", response.status().as_u16()))
-            }
-        }
-        Err(error) => failed(checked_at, error.without_url().to_string()),
+        Some(read_listed_model_ids(response).await)
     }
+    .await
+    .unwrap_or_default();
+    collect_speech_resources(connection.kind, sakura, listed)
 }
 
 fn collect_speech_resources(
@@ -247,26 +232,6 @@ fn collect_speech_resources(
     } else {
         listed
     }
-}
-
-async fn loopback_speech_health(client: &Client, parsed: &Url, secret: Option<&str>) -> bool {
-    let is_loopback = parsed.host().is_some_and(|host| match host {
-        Host::Ipv4(ip) => ip.is_loopback(),
-        Host::Ipv6(ip) => ip.is_loopback(),
-        Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
-    });
-    if !is_loopback {
-        return false;
-    }
-    let origin = parsed.origin().ascii_serialization();
-    for path in ["/health", "/"] {
-        if let Ok(response) = get(client, format!("{origin}{path}"), secret).send().await
-            && response.status().is_success()
-        {
-            return true;
-        }
-    }
-    false
 }
 
 pub(super) async fn probe_embedding(

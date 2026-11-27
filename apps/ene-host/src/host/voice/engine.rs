@@ -1,17 +1,18 @@
 //! Speech synthesis and recognition engine resolution (`HttpEngine` and plugin adapters).
 
-use super::{HttpEngine, SetupError, SttEngine, TtsEngine, parse_binding, plugin};
+use super::{HttpEngine, SAMPLE_RATE, SetupError, SttEngine, TtsEngine, parse_binding, plugin};
 use crate::host::{
     db::Store,
+    error::{HostError, Result},
     mind::Companion,
     model::{self, Credentials},
     net,
     providers::Providers,
-    settings::{Connection, ConnectionKind},
+    settings::{Connection, ConnectionConfig, ConnectionKind},
 };
 #[cfg(test)]
 use bevy_ecs::prelude::*;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 pub(crate) fn is_builtin_voicevox(connection: &Connection, providers: &Providers) -> bool {
     let endpoint = connection.endpoint();
@@ -104,6 +105,19 @@ fn http_engine(
     kind: ConnectionKind,
     binding: Option<&ene_domain::VoiceBinding>,
 ) -> std::result::Result<HttpEngine, SetupError> {
+    let adapter = connection.endpoint().adapter.as_str();
+    if !(matches!(adapter, "openai" | "sakura")
+        || (kind == ConnectionKind::Tts && adapter == "voicevox"))
+    {
+        let label = if kind == ConnectionKind::Tts {
+            "TTS"
+        } else {
+            "STT"
+        };
+        return Err(SetupError::Unsupported(format!(
+            "the {label} adapter `{adapter}` is not served by an installed plugin"
+        )));
+    }
     let resolved_base = resolve_base(connection, ctx.providers);
     let secret = load_connection_secret(connection, ctx.credentials, ctx.providers)?;
     let client = net::client().map_err(|error| SetupError::Broken(error.to_string()))?;
@@ -143,17 +157,12 @@ pub(crate) fn companion_tts_source(
     if let Some(engine) = plugin_engine(ctx, &connection, ConnectionKind::Tts)? {
         return Ok(Arc::new(engine));
     }
-    if matches!(
-        connection.endpoint().adapter.as_str(),
-        "voicevox" | "openai" | "sakura"
-    ) {
-        let engine = http_engine(ctx, &connection, ConnectionKind::Tts, Some(&binding))?;
-        return Ok(Arc::new(engine));
-    }
-    Err(SetupError::Unsupported(format!(
-        "the TTS adapter `{}` is not served by an installed plugin",
-        connection.endpoint().adapter
-    )))
+    Ok(Arc::new(http_engine(
+        ctx,
+        &connection,
+        ConnectionKind::Tts,
+        Some(&binding),
+    )?))
 }
 
 pub(crate) fn stt_source(
@@ -167,14 +176,74 @@ pub(crate) fn stt_source(
     if let Some(engine) = plugin_engine(ctx, &connection, ConnectionKind::Stt)? {
         return Ok(Arc::new(engine));
     }
-    if matches!(connection.endpoint().adapter.as_str(), "openai" | "sakura") {
-        let engine = http_engine(ctx, &connection, ConnectionKind::Stt, None)?;
-        return Ok(Arc::new(engine));
+    Ok(Arc::new(http_engine(
+        ctx,
+        &connection,
+        ConnectionKind::Stt,
+        None,
+    )?))
+}
+
+/// Checks the selected speech engine with a fixed sample. Native models can be listed separately.
+pub(crate) async fn probe_speech(
+    connection: &Connection,
+    credentials: &Credentials,
+    providers: &Providers,
+) -> Result<Option<Vec<String>>> {
+    let Some(extension) = plugin::speech_extension(connection.kind) else {
+        return Err(HostError::Invalid("a speech connection is required".into()));
+    };
+    let adapter = &connection.endpoint().adapter;
+    let unavailable = HostError::Unavailable;
+    let ctx = VoiceEngineContext {
+        store: None,
+        credentials: Some(credentials),
+        providers: Some(providers),
+        #[cfg(test)]
+        engines: Engines::default(),
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        if providers.claims(adapter, extension) {
+            providers.start(adapter, extension).await?;
+            let engine = plugin_engine(&ctx, connection, connection.kind)
+                .map_err(|error| unavailable(error.to_string()))?
+                .ok_or_else(|| unavailable("the selected speech provider changed".into()))?;
+            return run_speech_sample(&engine, &connection.config)
+                .await
+                .map(Some);
+        }
+        let engine = http_engine(&ctx, connection, connection.kind, None)
+            .map_err(|error| unavailable(error.to_string()))?;
+        run_speech_sample(&engine, &connection.config).await?;
+        Ok(None)
+    })
+    .await
+    .map_err(|_| unavailable("the speech connection check timed out".into()))?
+}
+
+async fn run_speech_sample(
+    engine: &(impl TtsEngine + SttEngine),
+    config: &ConnectionConfig,
+) -> Result<Vec<String>> {
+    let unavailable = HostError::Unavailable;
+    if let ConnectionConfig::Tts(config) = config {
+        let voice = config.voice_ids.first().cloned().unwrap_or_default();
+        let (audio, rate) = engine
+            .synthesize("接続確認です。".into(), voice)
+            .await
+            .map_err(|error| unavailable(error.to_string()))?;
+        if audio.is_empty() || !audio.len().is_multiple_of(2) || rate == 0 {
+            return Err(unavailable(
+                "the speech provider returned no playable PCM16 audio".into(),
+            ));
+        }
+        return Ok(config.voice_ids.clone());
     }
-    Err(SetupError::Unsupported(format!(
-        "the STT adapter `{}` is not served by an installed plugin",
-        connection.endpoint().adapter
-    )))
+    engine
+        .transcribe(vec![0; SAMPLE_RATE as usize], SAMPLE_RATE)
+        .await
+        .map_err(|error| unavailable(error.to_string()))?;
+    Ok(Vec::new())
 }
 
 fn plugin_engine(

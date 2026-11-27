@@ -1,14 +1,13 @@
 use super::ConnectionsPane;
 use super::roles_voice::{collect_roles_context, render_voice_role_row, voice_role_specs};
-use crate::ui::icons::Icon;
+use crate::ui::ModelRoleSlot;
 use crate::ui::theme::Theme;
-use crate::ui::widgets::{DropdownOption, DropdownSpec, Tone, dropdown_select, pill_button};
-use crate::ui::{Hub, ModelRoleSlot};
+use crate::ui::widgets::{DropdownOption, DropdownSpec, dropdown_select};
 use ene_client_core::{
     connections::{decode_model_choice, encode_model_choice},
     domain::{Companion, ModelAssignments},
 };
-use gpui::{AnyElement, Context, Entity, FontWeight, div, prelude::*, px};
+use gpui::{AnyElement, Context, FontWeight, div, prelude::*, px};
 
 #[derive(Clone, Copy)]
 pub(super) struct ModelRoleChoices<'a> {
@@ -81,13 +80,6 @@ pub(super) fn render_advanced_roles_panel(
         .flex()
         .flex_col()
         .gap(px(12.))
-        .child(render_roles_refresh_bar(
-            &roles_ctx.refresh_ids,
-            roles_ctx.checking_any,
-            live,
-            &pane.hub,
-            theme,
-        ))
         .children(rows)
         .into_any_element()
 }
@@ -184,50 +176,6 @@ fn render_no_companion_roles_hint(theme: &Theme) -> AnyElement {
         .text_color(theme.ink_muted)
         .child("コンパニオンを選択すると、役割別のモデル割当を調整できます。")
         .into_any_element()
-}
-
-fn render_roles_refresh_bar(
-    refresh_ids: &[String],
-    checking_any: bool,
-    live: bool,
-    hub: &Entity<Hub>,
-    theme: &Theme,
-) -> gpui::Div {
-    let hub_refresh_all = hub.clone();
-    let ids = refresh_ids.to_vec();
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap(px(8.))
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme.ink_muted)
-                .child("役割ごとに使用するモデルをドロップダウンから割り当てます。"),
-        )
-        .when(!ids.is_empty(), |this| {
-            this.child(pill_button(
-                "adv-roles-refresh-all",
-                if checking_any {
-                    "モデル一覧を取得中…"
-                } else {
-                    "全接続のモデルを再取得"
-                },
-                Tone::Ghost
-                    .icon(Icon::Refresh)
-                    .enabled(live && !checking_any),
-                theme,
-                move |_, cx| {
-                    hub_refresh_all.update(cx, |hub, cx| {
-                        for cid in &ids {
-                            hub.check_connection(cid.clone(), cx);
-                        }
-                    });
-                },
-            ))
-        })
 }
 
 fn build_slot_model_options<'a>(

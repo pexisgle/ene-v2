@@ -133,7 +133,9 @@ impl Connection {
                     if tts
                         .endpoint
                         .as_ref()
-                        .is_some_and(|ep| ep.adapter.eq_ignore_ascii_case("voicevox"))
+                        .is_some_and(|ep| ep.adapter.eq_ignore_ascii_case("voicevox")
+                            && (ep.endpoint.trim().is_empty()
+                                || ene_catalog::voicevox_local_address(&ep.endpoint).is_some()))
             )
     }
 

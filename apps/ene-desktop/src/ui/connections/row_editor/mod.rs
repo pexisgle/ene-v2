@@ -7,7 +7,7 @@ use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, kind_pill, pill_button, status_pill};
 use ene_client_core::connections::ConnectionResource;
-use ene_client_core::domain::Connection;
+use ene_client_core::domain::{Connection, ConnectionKind, LlmProvider};
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
 use form::*;
@@ -22,15 +22,16 @@ pub(super) fn render_connection_row(
 ) -> AnyElement {
     let id = conn.id.clone();
     let expanded = pane.form.editor(&id).is_some();
-    let needs_key_flag = conn.needs_key(
-        pane.hub
-            .read(cx)
-            .model
-            .connections
-            .providers
-            .as_deref()
-            .unwrap_or_default(),
-    );
+    let providers = pane
+        .hub
+        .read(cx)
+        .model
+        .connections
+        .providers
+        .as_deref()
+        .unwrap_or_default();
+    let needs_key_flag = conn.needs_key(providers);
+    let disclosure = speech_disclosure(conn, providers);
     let check = conn.last_check.as_ref();
     let badge = compute_connection_badge(conn, check, needs_key_flag, theme);
     let header = render_row_header(
@@ -52,8 +53,42 @@ pub(super) fn render_connection_row(
         .flex()
         .flex_col()
         .child(header)
+        .when_some(disclosure, |row, text| {
+            row.child(
+                div()
+                    .px(px(12.))
+                    .pb(px(10.))
+                    .text_xs()
+                    .text_color(theme.ink_muted)
+                    .child(text),
+            )
+        })
         .when_some(detail, gpui::ParentElement::child)
         .into_any_element()
+}
+
+fn speech_disclosure(connection: &Connection, providers: &[LlmProvider]) -> Option<String> {
+    let sample = match connection.kind {
+        ConnectionKind::Tts => "テスト文「接続確認です。」",
+        ConnectionKind::Stt => "無音のテスト音声（0.5秒）",
+        _ => return None,
+    };
+    let endpoint = connection.endpoint()?;
+    let mut destination = endpoint.endpoint.trim();
+    if destination.is_empty() {
+        destination = if connection.is_local_voicevox() {
+            ene_client_core::VOICEVOX_DEFAULT_ENDPOINT
+        } else {
+            providers
+                .iter()
+                .find(|provider| provider.adapter == endpoint.adapter)?
+                .endpoint
+                .as_str()
+        };
+    }
+    Some(format!(
+        "接続確認では {destination} に{sample}を送信します。"
+    ))
 }
 
 fn render_row_header(

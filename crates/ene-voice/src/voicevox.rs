@@ -1,5 +1,7 @@
 //! Local VOICEVOX Engine process discovery, lifecycle management and readiness probing.
 
+use ene_catalog::VOICEVOX_DEFAULT_ENDPOINT;
+pub use ene_catalog::voicevox_local_address as is_local_voicevox_url;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use std::{
     fmt,
@@ -10,7 +12,6 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-const DEFAULT_PORT: u16 = 50021;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(25);
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 
@@ -79,13 +80,13 @@ impl VoicevoxManager {
         if (!self.auto_start || cfg!(test)) && std::env::var_os("ENE_VOICEVOX_ENGINE").is_none() {
             return Err(VoicevoxError::SkippedInTests);
         }
+        let Some((host, port)) = is_local_voicevox_url(base) else {
+            return Err(VoicevoxError::RemoteEndpointNotAutoStartable);
+        };
         let mut guard = self.inner.lock().await;
         if is_reachable(base, Duration::from_millis(1_200)).await {
             return Ok(());
         }
-        let Some((host, port)) = is_local_voicevox_url(base) else {
-            return Err(VoicevoxError::RemoteEndpointNotAutoStartable);
-        };
         if !same_process_running(&mut guard, base) {
             start_local_engine(&mut guard, base, &host, port, options_json).await?;
         }
@@ -102,7 +103,7 @@ impl VoicevoxManager {
 fn normalized_voicevox_base(base_url: &str) -> &str {
     let base = base_url.trim().trim_end_matches('/');
     if base.is_empty() {
-        "http://127.0.0.1:50021"
+        VOICEVOX_DEFAULT_ENDPOINT
     } else {
         base
     }
@@ -217,31 +218,6 @@ pub async fn is_reachable(base_url: &str, timeout: Duration) -> bool {
         .send()
         .await
         .is_ok_and(|res| res.status().is_success())
-}
-
-/// Parses a loopback HTTP URL for VOICEVOX (`http://127.0.0.1:50021`, `http://localhost:50021`, etc.).
-pub fn is_local_voicevox_url(base: &str) -> Option<(String, u16)> {
-    let parsed = url::Url::parse(base.trim()).ok()?;
-    if parsed.scheme() != "http" {
-        return None;
-    }
-    let host = parsed.host_str()?;
-    let is_loopback = host.eq_ignore_ascii_case("localhost")
-        || parsed.host().is_some_and(|h| match h {
-            url::Host::Ipv4(ip) => ip.is_loopback(),
-            url::Host::Ipv6(ip) => ip.is_loopback(),
-            url::Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
-        });
-    if !is_loopback {
-        return None;
-    }
-    let bind_host = match parsed.host() {
-        Some(url::Host::Ipv6(ip)) => ip.to_string(),
-        _ if host.eq_ignore_ascii_case("localhost") => "127.0.0.1".to_owned(),
-        _ => host.to_owned(),
-    };
-    let port = parsed.port().unwrap_or(DEFAULT_PORT);
-    Some((bind_host, port))
 }
 
 /// Resolves the VOICEVOX Engine binary across explicit options, env vars, and standard install locations.

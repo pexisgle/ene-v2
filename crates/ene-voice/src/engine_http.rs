@@ -35,7 +35,10 @@ pub(crate) async fn post(
         None => call,
     };
     let response = call.send().await.map_err(|error| {
-        VoiceHttpError::Transport(format!("the {label} endpoint is unreachable: {error}"))
+        VoiceHttpError::Transport(format!(
+            "the {label} endpoint is unreachable: {}",
+            error.without_url()
+        ))
     })?;
     let status = response.status();
     if status.is_success() {
