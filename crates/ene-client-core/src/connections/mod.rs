@@ -162,7 +162,7 @@ pub fn tts_voice_of_connection(conn: &Connection) -> Option<String> {
     {
         let (vid, _) = ene_catalog::parse_voice_resource(first);
         if !vid.is_empty() {
-            return Some(vid);
+            return Some(vid.to_owned());
         }
     }
     let sakura = conn.is_sakura();

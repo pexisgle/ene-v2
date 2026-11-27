@@ -8,8 +8,9 @@ use crate::domain::{
 };
 use crate::state::Model;
 use ene_catalog::{
-    GOOGLE_AGENT_PLATFORM, OPENAI_TTS_VOICES, SAKURA_EMBEDDING_MODELS, SAKURA_STT_MODELS,
-    SAKURA_TTS_VOICES, default_models_for_adapter, parse_voice_resource,
+    GOOGLE_AGENT_PLATFORM, GOOGLE_AGENT_PLATFORM_VERIFIED_MODEL_LIST, OPENAI_TTS_VOICES,
+    SAKURA_EMBEDDING_MODELS, SAKURA_STT_MODELS, SAKURA_TTS_VOICES, default_models_for_adapter,
+    parse_voice_resource,
 };
 use indexmap::IndexMap;
 
@@ -84,7 +85,7 @@ impl ModelRoleSlot {
 
 fn push_voice_unique(voices: &mut IndexMap<String, String>, raw: &str) {
     let (id, label) = parse_voice_resource(raw);
-    insert_choice(voices, &id, Some(&label));
+    insert_choice(voices, id, Some(label));
 }
 
 fn insert_choice(choices: &mut IndexMap<String, String>, id: &str, label: Option<&str>) {
@@ -126,7 +127,7 @@ fn verified_google_platform_models(
     if !check
         .capabilities
         .iter()
-        .any(|cap| cap == "verified_model_list")
+        .any(|cap| cap == GOOGLE_AGENT_PLATFORM_VERIFIED_MODEL_LIST)
     {
         return None;
     }

@@ -27,16 +27,16 @@ pub fn voicevox_local_address(endpoint: &str) -> Option<(String, u16)> {
 
 /// Splits a `id:name` voice resource reference, falling back to using the
 /// trimmed input for both halves.
-pub fn parse_voice_resource(raw: &str) -> (String, String) {
+pub fn parse_voice_resource(raw: &str) -> (&str, &str) {
     let trimmed = raw.trim();
     if let Some((id, name)) = trimmed.split_once(':') {
         let id = id.trim();
         let name = name.trim();
         if !id.is_empty() && !name.is_empty() {
-            return (id.to_owned(), name.to_owned());
+            return (id, name);
         }
     }
-    (trimmed.to_owned(), trimmed.to_owned())
+    (trimmed, trimmed)
 }
 
 #[cfg(test)]
@@ -47,15 +47,15 @@ mod tests {
     fn voice_resources_split_on_the_first_colon_and_fall_back_to_the_raw_name() {
         assert_eq!(
             parse_voice_resource("voicevox:四国めたん"),
-            ("voicevox".into(), "四国めたん".into())
+            ("voicevox", "四国めたん")
         );
         assert_eq!(
             parse_voice_resource("  bare-name  "),
-            ("bare-name".into(), "bare-name".into())
+            ("bare-name", "bare-name")
         );
         assert_eq!(
             parse_voice_resource(":only-name"),
-            (":only-name".into(), ":only-name".into())
+            (":only-name", ":only-name")
         );
     }
 }
