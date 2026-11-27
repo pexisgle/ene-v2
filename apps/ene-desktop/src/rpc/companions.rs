@@ -5,8 +5,8 @@ use crate::update::Update;
 use ene_client_core::{
     ModelRoleSlot,
     domain::{
-        AutoAssignModelPatch, Companion, CompanionProfilePatch, CompanionTemplate, MindProfile,
-        ModelAssignment, NewCompanionSpec,
+        Companion, CompanionProfilePatch, CompanionTemplate, MindProfile, ModelAssignment,
+        NewCompanionSpec,
     },
     templates::export_template_json,
 };
@@ -119,22 +119,6 @@ pub(crate) fn assign_model(
         ModelRoleSlot::Embedding => request.embedding_assignment = Some(patch).into(),
     }
     update_companion(rpc, epoch, "モデル割当の変更", request);
-}
-
-pub(crate) fn auto_assign_default_model(
-    rpc: &RpcDispatcher,
-    epoch: u64,
-    patch: AutoAssignModelPatch,
-) {
-    let wire_patch = w::AssignmentPatch::from(Some(patch.assignment));
-    let request = w::UpdateCompanionRequest {
-        id: patch.companion_id,
-        revision: patch.revision,
-        companion_assignment: patch.assign_companion.then(|| wire_patch.clone()).into(),
-        task_assignment: patch.assign_task.then_some(wire_patch).into(),
-        ..Default::default()
-    };
-    update_companion(rpc, epoch, "既定モデルの自動設定", request);
 }
 
 pub(crate) fn sync_companion_voice(

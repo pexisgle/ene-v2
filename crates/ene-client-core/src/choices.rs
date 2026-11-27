@@ -4,15 +4,13 @@ use crate::connections::{
     active_stt_in_connections, active_tts_in_connections, tts_voice_of_connection,
 };
 use crate::domain::{
-    AutoAssignModelPatch, Connection, ConnectionConfig, ConnectionKind, ModelAssignment,
-    ModelAssignments, ModelInfo,
+    Connection, ConnectionConfig, ConnectionKind, ModelAssignment, ModelAssignments, ModelInfo,
 };
 use crate::state::Model;
 use ene_catalog::{
     GOOGLE_AGENT_PLATFORM, OPENAI_TTS_VOICES, SAKURA_EMBEDDING_MODELS, SAKURA_STT_MODELS,
     SAKURA_TTS_VOICES, default_models_for_adapter, parse_voice_resource,
 };
-use std::collections::BTreeMap;
 
 /// Internal host model role slots, exposed only inside progressive disclosure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -414,64 +412,5 @@ impl Model {
     /// The text-to-speech connection and voice currently in force.
     pub fn active_tts_selection(&self) -> Option<(String, String)> {
         active_tts_in_connections(&self.settings()?.connections)
-    }
-
-    /// Computes a default companion/task model auto-assignment patch if needed.
-    pub fn auto_assign_default_model_request(
-        &self,
-        auto_assigned_revisions: &BTreeMap<String, u64>,
-    ) -> Option<AutoAssignModelPatch> {
-        if !self.connections.link.is_live() {
-            return None;
-        }
-        let providers = self.connections.providers.as_deref()?;
-        let companion = self.companion()?;
-        if auto_assigned_revisions
-            .get(&companion.id)
-            .is_some_and(|rev| *rev >= companion.revision)
-        {
-            return None;
-        }
-        let settings = self.settings()?;
-        let assignments = companion.assignments.as_ref();
-        let is_valid = |slot: ModelRoleSlot| -> bool {
-            assignments
-                .and_then(|a| slot.current(a))
-                .is_some_and(|assigned| {
-                    settings.connections.iter().any(|c| {
-                        c.id == assigned.connection_id
-                            && ((slot == ModelRoleSlot::Task && c.kind == ConnectionKind::Acp)
-                                || (c.enabled
-                                    && c.kind == ConnectionKind::Llm
-                                    && !c.needs_key(providers)))
-                    })
-                })
-        };
-        let assign_companion = !is_valid(ModelRoleSlot::Companion);
-        let assign_task = !is_valid(ModelRoleSlot::Task);
-        if !assign_companion && !assign_task {
-            return None;
-        }
-        let assignment = settings
-            .connections
-            .iter()
-            .filter(|c| c.can_start_chat(providers))
-            .find_map(|connection| {
-                let (model_id, _) = self
-                    .available_models_for_connection(&connection.id)
-                    .into_iter()
-                    .next()?;
-                Some(ModelAssignment {
-                    connection_id: connection.id.clone(),
-                    model_id,
-                })
-            })?;
-        Some(AutoAssignModelPatch {
-            companion_id: companion.id.clone(),
-            revision: companion.revision,
-            assign_companion,
-            assign_task,
-            assignment,
-        })
     }
 }

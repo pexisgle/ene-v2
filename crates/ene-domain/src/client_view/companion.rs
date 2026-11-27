@@ -1,6 +1,6 @@
 //! Pure companion, mind, chat message, turn, and binding domain types.
 
-use super::{BodyBinding, Failure, JsonDocument, ModelAssignment, ModelAssignments, VoiceBinding};
+use super::{BodyBinding, Failure, JsonDocument, ModelAssignments, VoiceBinding};
 use crate::CompanionId;
 
 /// Structured personality profile stored on a companion's mind.
@@ -234,19 +234,4 @@ pub struct NewCompanionSpec {
     pub mind: String,
     /// Voice identifier the operator picked.
     pub voice_identifier: Option<String>,
-}
-
-/// Automatic default model patch computed when a companion lacks required slots.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct AutoAssignModelPatch {
-    /// The companion the patch applies to.
-    pub companion_id: String,
-    /// The revision the patch was computed against.
-    pub revision: u64,
-    /// Whether to fill the companion slot.
-    pub assign_companion: bool,
-    /// Whether to fill the task slot.
-    pub assign_task: bool,
-    /// The assignment to write into the slots being filled.
-    pub assignment: ModelAssignment,
 }

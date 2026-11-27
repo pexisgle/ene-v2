@@ -400,6 +400,13 @@ impl Model {
             .find(|companion| companion.id == id)
     }
 
+    /// Whether the selected companion has an explicit dialogue binding, even if it is offline.
+    pub fn has_dialogue_assignment(&self) -> bool {
+        self.companion()
+            .and_then(|companion| companion.assignments.as_ref())
+            .is_some_and(|assignments| !assignments.companion.connection_id.is_empty())
+    }
+
     /// The activation the host holds for the shown companion.
     pub fn activation(&self) -> Option<&Activation> {
         let id = self.companion_id()?;

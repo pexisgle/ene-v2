@@ -200,9 +200,6 @@ impl Hub {
             let _discarded = self.commands.send(Command::Refresh);
             self.load_models(cx);
         }
-        if flags.companion_or_snapshot || flags.models_or_check || selected_now {
-            self.maybe_auto_assign_default_model();
-        }
         if flags.conflicted {
             self.refresh_active_data(cx);
         } else if effects.snapshot {
@@ -228,29 +225,6 @@ impl Hub {
         }
         self.sync_tray_state();
         cx.notify();
-    }
-
-    fn maybe_auto_assign_default_model(&mut self) {
-        if !self.live() || self.setup.stage != SetupStage::Idle {
-            return;
-        }
-        let Some(patch) = self
-            .model
-            .auto_assign_default_model_request(&self.setup.auto_assigned_revisions)
-        else {
-            return;
-        };
-        if self.rpc.host().is_none() {
-            return;
-        }
-        self.setup
-            .auto_assigned_revisions
-            .insert(patch.companion_id.clone(), patch.revision);
-        rpc::companions::auto_assign_default_model(
-            &self.rpc,
-            self.model.connections.link_epoch,
-            patch,
-        );
     }
 
     pub(crate) fn refresh_active_data(&mut self, cx: &mut Context<Self>) {

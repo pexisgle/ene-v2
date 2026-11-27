@@ -9,7 +9,7 @@ use ene_client_core::domain::NotificationEvent;
 use ene_client_core::state::{Notice, NoticeKind};
 use ene_platform_os::{TrayAction, TrayHandle};
 use gpui::{AnyWindowHandle, WeakEntity};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 /// Window handles, floating pod mode, and tray state owned by [`Hub`].
@@ -41,7 +41,6 @@ pub struct SetupFlowState {
     pub(crate) stage: SetupStage,
     pub(crate) error: Option<Notice>,
     pub checking_connections: HashMap<String, String>,
-    pub(crate) auto_assigned_revisions: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -108,8 +107,6 @@ pub(super) struct ApplyFlags {
     pub(super) conflicted: bool,
     pub(super) history_arrived: bool,
     pub(super) settings_changed: bool,
-    pub(super) companion_or_snapshot: bool,
-    pub(super) models_or_check: bool,
     pub(super) message_arrived: bool,
 }
 
@@ -135,19 +132,6 @@ impl ApplyFlags {
             settings_changed: matches!(
                 notification_event,
                 Some(NotificationEvent::SettingsUpdated(_))
-            ),
-            companion_or_snapshot: matches!(
-                notification_event,
-                Some(
-                    NotificationEvent::InitialState(_)
-                        | NotificationEvent::Companion(_)
-                        | NotificationEvent::CompanionRemoved(_)
-                        | NotificationEvent::SettingsUpdated(_)
-                )
-            ),
-            models_or_check: matches!(
-                update,
-                Update::Providers(_) | Update::Models { .. } | Update::Checked { .. }
             ),
             message_arrived: matches!(
                 notification_event,

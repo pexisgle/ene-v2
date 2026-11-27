@@ -2,13 +2,12 @@ use crate::{
     GOOGLE_AGENT_PLATFORM,
     choices::ModelRoleSlot,
     domain::{
-        Companion, Connection, ConnectionCheck, ConnectionConfig, ConnectionEndpoint,
-        ConnectionKind, EmbeddingConnection, LlmConnection, ModelAssignments, ModelInfo, Settings,
-        Snapshot, SttConnection, TtsConnection,
+        Connection, ConnectionCheck, ConnectionConfig, ConnectionEndpoint, ConnectionKind,
+        EmbeddingConnection, LlmConnection, ModelAssignments, ModelInfo, Settings, Snapshot,
+        SttConnection, TtsConnection,
     },
-    state::{Link, Model},
+    state::Model,
 };
-use std::collections::BTreeMap;
 
 fn llm_conn(id: &str, adapter: &str, model_ids: Vec<&str>, healthy: bool) -> Connection {
     Connection {
@@ -158,77 +157,6 @@ fn voice_stt_and_embedding_choices_merge_checks_and_vendor_defaults() {
         model.active_stt_selection(),
         Some(("stt-oa".into(), "custom-stt".into()))
     );
-}
-
-#[test]
-fn auto_assign_default_model_fills_missing_companion_and_task_slots_once() {
-    let mut model = Model::new("conn.json".into());
-    model.connections.link = Link::Live {
-        version: "1".into(),
-    };
-    model.connections.providers = Some(Vec::new());
-    model.snapshot = Some(Snapshot {
-        active_companion_id: Some("ene".into()),
-        companions: vec![Companion {
-            id: "ene".into(),
-            name: "ene".into(),
-            revision: 3,
-            ..Default::default()
-        }],
-        settings: Some(Settings {
-            connections: vec![llm_conn("c1", "openai", vec!["gpt-5.4-mini"], true)],
-            ..Default::default()
-        }),
-        ..Default::default()
-    });
-
-    let mut seen = BTreeMap::new();
-    let patch = model
-        .auto_assign_default_model_request(&seen)
-        .expect("missing companion/task roles produce patch");
-    assert_eq!((patch.companion_id.as_str(), patch.revision), ("ene", 3));
-    assert!(patch.assign_companion);
-    assert!(patch.assign_task);
-    assert_eq!(patch.assignment.connection_id, "c1");
-    assert_eq!(patch.assignment.model_id, "gpt-5.4-mini");
-
-    let snapshot = model.snapshot.as_mut().unwrap();
-    let input = crate::connections::build_custom_connection_input(
-        ConnectionKind::Acp,
-        "Reference",
-        "reference",
-        "",
-    )
-    .unwrap();
-    let hand_id = input.id;
-    snapshot
-        .settings
-        .as_mut()
-        .unwrap()
-        .connections
-        .push(Connection {
-            id: hand_id.clone(),
-            config: input.config,
-            kind: input.kind,
-            ..Default::default()
-        });
-    snapshot.companions[0].assignments = Some(ModelAssignments {
-        task: crate::domain::ModelAssignment {
-            connection_id: hand_id,
-            model_id: "legacy-harness-marker".into(),
-        },
-        ..Default::default()
-    });
-    let patch = model.auto_assign_default_model_request(&seen).unwrap();
-    assert!(patch.assign_companion);
-    assert!(
-        !patch.assign_task,
-        "an explicitly assigned hand remains bound while unavailable"
-    );
-
-    seen.insert("ene".into(), 3);
-    assert!(model.auto_assign_default_model_request(&seen).is_none());
-    assert_eq!(ModelRoleSlot::ALL.len(), 7);
 }
 
 #[test]

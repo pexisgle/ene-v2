@@ -13,9 +13,8 @@ pub use crate::{
 };
 
 pub use companion::{
-    AutoAssignModelPatch, Companion, CompanionProfilePatch, CompanionTemplate, Message,
-    MessageRole, MindIndexStatus, MindProfile, MindState, MindView, NewCompanionSpec, TurnEvent,
-    TurnStatus,
+    Companion, CompanionProfilePatch, CompanionTemplate, Message, MessageRole, MindIndexStatus,
+    MindProfile, MindState, MindView, NewCompanionSpec, TurnEvent, TurnStatus,
 };
 pub use connection::{
     AcpConnection, Connection, ConnectionConfig, ConnectionInput, ConnectionKind,

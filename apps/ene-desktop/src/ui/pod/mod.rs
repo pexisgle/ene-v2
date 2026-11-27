@@ -122,6 +122,7 @@ impl CompanionPod {
         let hub = self.hub.read(cx);
         hub.live()
             && hub.setup.connection_id().is_none()
+            && !hub.model.has_dialogue_assignment()
             && hub.model.settings().is_some_and(|settings| {
                 hub.setup.stage == SetupStage::SavingConnection
                     || hub.setup.error.is_some()
@@ -141,14 +142,9 @@ impl CompanionPod {
 
     pub(super) fn in_model_setup(&self, cx: &App) -> bool {
         let hub = self.hub.read(cx);
-        if !hub.live() {
-            return false;
-        }
-        let companions_empty = hub
-            .model
-            .snapshot()
-            .is_none_or(|snap| snap.companions.is_empty());
-        hub.setup.connection_id().is_some() || companions_empty
+        hub.live()
+            && (hub.setup.connection_id().is_some()
+                || (hub.model.snapshot().is_some() && !hub.model.has_dialogue_assignment()))
     }
 
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
