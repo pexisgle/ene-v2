@@ -370,7 +370,7 @@ fn background_handles_run_on_tokio_wake_and_abort_on_drop() {
         }
     });
     let (done, received) = tokio::sync::oneshot::channel();
-    let task = background::spawn(runtime.handle(), Some(&wake), async move {
+    let mut task = background::spawn(runtime.handle(), Some(&wake), async move {
         let value = tokio::time::timeout(Duration::from_secs(1), async { 42 })
             .await
             .unwrap();
@@ -378,8 +378,7 @@ fn background_handles_run_on_tokio_wake_and_abort_on_drop() {
         value
     });
     runtime.block_on(received).unwrap();
-    assert!(task.is_finished());
-    assert_eq!(background::take(task), Some(42));
+    assert_eq!(task.poll(), std::task::Poll::Ready(Some(42)));
     assert_eq!(wakes.load(Ordering::Relaxed), 1);
 
     let dropped = Arc::new(AtomicBool::new(false));

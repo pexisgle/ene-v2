@@ -2,7 +2,7 @@
 //! request fit (docs/design/compaction.md).
 use super::{
     agent::CompanionAgent,
-    background::{self, AbortOnDropHandle},
+    background::{self, Job},
     db::Store,
     mind::{Role, consolidate::Services, embedding::Embeddings},
     model::{self, Credentials},
@@ -96,7 +96,7 @@ fn is_summary_entry(entry: Option<EntryRef<'_>>) -> bool {
 /// last attempt was made for.
 #[derive(Default)]
 struct CompanionSummary {
-    running: Option<AbortOnDropHandle<Outcome>>,
+    running: Option<Job<Outcome>>,
     tried_at: Option<u64>,
 }
 
@@ -136,26 +136,24 @@ impl CompactionState {
             .tried_at = Some(newest);
     }
 
-    fn start(&mut self, companion: &str, running: AbortOnDropHandle<Outcome>) {
+    fn start(&mut self, companion: &str, running: Job<Outcome>) {
         let slot = self.companions.entry(companion.to_owned()).or_default();
         debug_assert!(slot.running.is_none(), "one summary per companion");
         slot.running = Some(running);
     }
 
     /// Takes the one finished task, with the companion it belongs to.
-    fn take_finished(&mut self) -> Option<(String, AbortOnDropHandle<Outcome>)> {
-        let companion = self.companions.iter().find_map(|(companion, state)| {
-            state
-                .running
-                .as_ref()
-                .filter(|running| running.is_finished())
-                .map(|_| companion.clone())
-        })?;
-        let running = self
-            .companions
-            .get_mut(&companion)
-            .and_then(|state| state.running.take())?;
-        Some((companion, running))
+    fn take_finished(&mut self) -> Option<(String, Outcome)> {
+        self.companions.iter_mut().find_map(|(companion, state)| {
+            let std::task::Poll::Ready(outcome) = state.running.as_mut()?.poll() else {
+                return None;
+            };
+            state.running = None;
+            Some((
+                companion.clone(),
+                outcome.unwrap_or(Err(CompactionError::TaskMissingResult)),
+            ))
+        })
     }
 }
 
@@ -299,10 +297,9 @@ fn collect_summaries(
     mut state: ResMut<CompactionState>,
     mut agents: Query<(&CompanionAgent, &mut Conversation)>,
 ) {
-    let Some((companion, running)) = state.take_finished() else {
+    let Some((companion, outcome)) = state.take_finished() else {
         return;
     };
-    let outcome = background::take(running).unwrap_or(Err(CompactionError::TaskMissingResult));
     match outcome {
         Ok(collected) => {
             if let Err(error) = collected.memories {

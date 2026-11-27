@@ -2,7 +2,7 @@
 use super::gate::Approvals;
 use super::{ApprovalDecision, ApprovalRequest, ApprovalStatus, submit_with_outcome};
 use crate::host::{
-    background::{self, AbortOnDropHandle},
+    background::{self, Job},
     db::{Result, Store},
     error::HostError,
     mind::Role,
@@ -22,8 +22,7 @@ use rig_ecs::{model::Models, prelude::*};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashMap, time::Duration};
-use tokio::sync::oneshot;
+use std::{collections::HashMap, task::Poll, time::Duration};
 
 const TOOL: &str = "resolve_approval";
 const MAX_REPLIES: usize = 8;
@@ -116,8 +115,7 @@ pub(super) struct Replies(HashMap<Entity, Reply>);
 struct Reply {
     request: String,
     companion: String,
-    answer: oneshot::Receiver<Option<ApprovalDecision>>,
-    _task: AbortOnDropHandle<()>,
+    answer: Job<Option<ApprovalDecision>>,
 }
 
 /// User input during a held call must reach context without steering the call away.
@@ -210,18 +208,17 @@ pub(crate) fn consider_user_reply(world: &mut World, agent: Entity, input: &str,
         "arguments": ene_store::util::truncate(&approval.review_arguments(), 2_000),
         "user_reply": text,
     });
-    let (publish, answer) = oneshot::channel();
-    let interpreting = interpret(model, request.clone(), prompt);
-    let task = background::spawn(&runtime.0, world.get_resource::<Wake>(), async move {
-        let _accepted = publish.send(interpreting.await);
-    });
+    let answer = background::spawn(
+        &runtime.0,
+        world.get_resource::<Wake>(),
+        interpret(model, request.clone(), prompt),
+    );
     world.resource_mut::<Replies>().0.insert(
         agent,
         Reply {
             request,
             companion: approval.session_id,
             answer,
-            _task: task,
         },
     );
 }
@@ -268,28 +265,32 @@ pub(super) fn collect_replies(world: &mut World) {
     if world.resource::<Replies>().0.is_empty() {
         return;
     }
-    let mut replies = std::mem::take(&mut world.resource_mut::<Replies>().0);
-    let approvals = world.resource::<Approvals>();
-    replies.retain(|_, reply| approvals.by_request.contains_key(&reply.request));
-    let ready: Vec<_> = replies
-        .iter_mut()
-        .filter_map(|(&agent, reply)| match reply.answer.try_recv() {
-            Ok(decision) => Some((agent, decision)),
-            Err(oneshot::error::TryRecvError::Closed) => Some((agent, None)),
-            Err(oneshot::error::TryRecvError::Empty) => None,
-        })
-        .collect();
-    let answered: Vec<_> = ready
-        .into_iter()
-        .filter_map(|(agent, decision)| replies.remove(&agent).zip(decision))
-        .collect();
-    world.resource_mut::<Replies>().0 = replies;
-    for (reply, decision) in answered {
+    let mut answered = Vec::new();
+    world.resource_scope(|world, mut replies: Mut<Replies>| {
+        let approvals = world.resource::<Approvals>();
+        replies.0.retain(|_, reply| {
+            if !approvals.by_request.contains_key(&reply.request) {
+                return false;
+            }
+            let Poll::Ready(decision) = reply.answer.poll() else {
+                return true;
+            };
+            if let Some(decision) = decision.flatten() {
+                answered.push((
+                    std::mem::take(&mut reply.request),
+                    std::mem::take(&mut reply.companion),
+                    decision,
+                ));
+            }
+            false
+        });
+    });
+    for (request, companion, decision) in answered {
         let result = submit_with_outcome(
             world,
             ApprovalRequest::Companion {
-                request: &reply.request,
-                companion: &reply.companion,
+                request: &request,
+                companion: &companion,
             },
             decision,
         );

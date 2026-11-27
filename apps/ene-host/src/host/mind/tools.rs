@@ -1,7 +1,7 @@
 //! The parent's explicit memory tools.
 use crate::host::{
     agent::{CompanionAgent, WorkAgent},
-    background::{self, AbortOnDropHandle},
+    background::{self, Job},
     db::{
         Result, Store,
         memories::{MindStateChange, MindUpdate, NewMemory, StateUpdate, detail},
@@ -73,7 +73,7 @@ pub(crate) fn register(app: &mut App) {
                 });
                 match result {
                     Ok(RecallWork::Running(task)) => {
-                        world.entity_mut(call).insert(PendingRecall(Some(task)));
+                        world.entity_mut(call).insert(PendingRecall(task));
                     }
                     Ok(RecallWork::Ready(text)) => {
                         crate::host::permission::answer(world, call, &text)
@@ -131,30 +131,22 @@ fn companion_of_any(world: &World, agent: Entity) -> Result<String> {
 
 enum RecallWork {
     Ready(String),
-    Running(AbortOnDropHandle<Result<String>>),
+    Running(Job<Result<String>>),
 }
 
 #[derive(Component)]
-struct PendingRecall(Option<AbortOnDropHandle<Result<String>>>);
+struct PendingRecall(Job<Result<String>>);
 
 fn complete_recall(mut commands: Commands, mut pending: Query<(Entity, &mut PendingRecall)>) {
     for (call, mut pending) in &mut pending {
-        if !pending
-            .0
-            .as_ref()
-            .is_some_and(AbortOnDropHandle::is_finished)
-        {
+        let std::task::Poll::Ready(result) = pending.0.poll() else {
             continue;
-        }
-        let result = pending
-            .0
-            .take()
-            .and_then(background::take)
-            .unwrap_or_else(|| {
-                Err(HostError::Unavailable(
-                    ("memory recall was cancelled").into(),
-                ))
-            });
+        };
+        let result = result.unwrap_or_else(|| {
+            Err(HostError::Unavailable(
+                ("memory recall was cancelled").into(),
+            ))
+        });
         commands.queue(move |world: &mut World| {
             if world.get_entity(call).is_err() {
                 return;

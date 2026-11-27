@@ -20,7 +20,7 @@ use super::embedding::Embeddings;
 use crate::host::agent;
 use crate::host::{
     agent::{CompanionAgent, WorkAgent},
-    background::{self, AbortOnDropHandle},
+    background::{self, Job},
     compaction,
     db::Store,
     eyes::{Eyes, ReportKind, ReportOfTurn},
@@ -79,19 +79,14 @@ struct AwaitingTail;
 #[derive(Component)]
 struct PendingTail {
     turn: Entity,
-    task: Option<AbortOnDropHandle<crate::host::db::Result<String>>>,
+    task: Job<crate::host::db::Result<String>>,
 }
 
 fn collect_tails(mut commands: Commands, mut pending: Query<(Entity, &HoldOf, &mut PendingTail)>) {
     for (hold, of, mut pending) in &mut pending {
-        if !pending
-            .task
-            .as_ref()
-            .is_some_and(AbortOnDropHandle::is_finished)
-        {
+        let std::task::Poll::Ready(outcome) = pending.task.poll() else {
             continue;
-        }
-        let outcome = pending.task.take().and_then(background::take);
+        };
         let tail = match outcome {
             Some(Ok(tail)) => tail,
             Some(Err(error)) => {
@@ -259,7 +254,7 @@ fn compute_or_spawn_tail(
             HoldOf(call_entity),
             PendingTail {
                 turn: turn_entity,
-                task: Some(task),
+                task,
             },
         ));
         return None;

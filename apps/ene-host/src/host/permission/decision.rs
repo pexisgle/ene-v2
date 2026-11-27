@@ -4,7 +4,7 @@ use super::gate::{MAX_TOOL_IDENTIFIER_BYTES, notify_approval_card};
 use crate::host::{
     Notifier,
     agent::entry_text,
-    background::{self, AbortOnDropHandle},
+    background::{self, Job},
     db::Store,
     mind::Role,
     model::{self, Credentials},
@@ -21,7 +21,7 @@ use rig_core::{
 };
 use rig_ecs::prelude::*;
 use serde::Deserialize;
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, task::Poll, time::Duration};
 
 /// How long the decision model may take.
 const DECISION_TIMEOUT: Duration = Duration::from_secs(15);
@@ -60,7 +60,7 @@ pub(super) struct Pending {
 /// One decision in flight: what it decides, the task, and the model that runs it.
 pub(super) struct InFlight {
     pending: Pending,
-    task: AbortOnDropHandle<DecisionOutcome>,
+    task: Job<DecisionOutcome>,
     engine: String,
     policies: Vec<PolicyText>,
     rules: Vec<PolicyRule>,
@@ -112,12 +112,17 @@ impl Decisions {
     }
 
     /// Takes the one finished task, with the approval it decides.
-    fn take_finished(&mut self) -> Option<InFlight> {
-        let request = self
-            .running
-            .iter()
-            .find_map(|(request, flight)| flight.task.is_finished().then(|| request.clone()))?;
-        self.running.remove(&request)
+    fn take_finished(&mut self) -> Option<(InFlight, DecisionOutcome)> {
+        let (request, outcome) = self.running.iter_mut().find_map(|(request, flight)| {
+            let Poll::Ready(outcome) = flight.task.poll() else {
+                return None;
+            };
+            Some((
+                request.clone(),
+                outcome.unwrap_or(Err(DecisionError::TaskMissingResult)),
+            ))
+        })?;
+        Some((self.running.remove(&request)?, outcome))
     }
 }
 
@@ -337,11 +342,10 @@ fn prepare_decision_task(
 /// Lands one finished decision. Submission and card publication each check that
 /// the approval is still pending before acting.
 pub(super) fn collect_decisions(world: &mut World) {
-    let Some(flight) = world.resource_mut::<Decisions>().take_finished() else {
+    let Some((flight, outcome)) = world.resource_mut::<Decisions>().take_finished() else {
         return;
     };
     let pending = &flight.pending;
-    let outcome = background::take(flight.task).unwrap_or(Err(DecisionError::TaskMissingResult));
     let store = world.resource::<Store>().clone();
     if let Ok(decision) = &outcome
         && decision.allow

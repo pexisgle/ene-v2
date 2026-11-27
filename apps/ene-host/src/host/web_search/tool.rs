@@ -163,10 +163,10 @@ fn start(
         AsyncComputeTaskPool::get_or_init(TaskPool::default),
         &services.wake,
         async move {
-            match task.await {
-                Ok(Ok(result)) => Outcome::from(ToolResult::success(ToolOutput::json(result))),
-                Ok(Err(error)) => Outcome::from(ToolResult::failed(error)),
-                Err(_) => Outcome::from(ToolResult::failed(ToolExecutionError::new(
+            match task.wait().await {
+                Some(Ok(result)) => Outcome::from(ToolResult::success(ToolOutput::json(result))),
+                Some(Err(error)) => Outcome::from(ToolResult::failed(error)),
+                None => Outcome::from(ToolResult::failed(ToolExecutionError::new(
                     ToolErrorKind::Other,
                     "the web search task stopped",
                 ))),

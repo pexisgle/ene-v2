@@ -26,6 +26,7 @@ use std::{
     collections::{HashMap, VecDeque},
     io::Cursor,
     sync::Arc,
+    task::Poll,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -80,7 +81,7 @@ struct Session {
     recent_screens: VecDeque<ScreenSample>,
     last_evaluated: Option<ScreenSample>,
     previous: String,
-    task: Option<background::AbortOnDropHandle<Evaluation>>,
+    task: Option<background::Job<Evaluation>>,
     status: &'static str,
     pending: Option<Reaction>,
     pending_important: VecDeque<Reaction>,
@@ -321,13 +322,13 @@ pub(crate) fn poll(world: &mut World) {
             {
                 session.last_evaluated = None;
             }
-            if session
-                .task
-                .as_ref()
-                .is_some_and(tokio_util::task::AbortOnDropHandle::is_finished)
-                && let Some(result) = session.task.take().and_then(background::take)
+            if let Some(task) = &mut session.task
+                && let Poll::Ready(evaluation) = task.poll()
             {
-                result.record(&notifier, companion_id, session, now);
+                session.task = None;
+                if let Some(result) = evaluation {
+                    result.record(&notifier, companion_id, session, now);
+                }
             }
             if let Some(entity) = agent::agent_of(world, companion_id) {
                 let current =

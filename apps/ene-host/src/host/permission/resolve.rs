@@ -3,7 +3,7 @@
 use super::approval::refuse;
 use super::gate::{GateCall, GateContext};
 use crate::host::{
-    background::{self, AbortOnDropHandle},
+    background::{self, Job},
     client::Client,
     db::Store,
     error::{HostError, Result},
@@ -21,8 +21,7 @@ use rig_ecs::prelude::{
     CallOf, Decider, Decision, Effect, HoldOf, Outcome, SupersededBy, ToolRequest,
 };
 use serde_json::Value;
-use std::sync::Arc;
-use tokio::sync::oneshot::{self, error::TryRecvError};
+use std::{sync::Arc, task::Poll};
 
 /// A work call belongs to its admitted turn, even when the agent is reused.
 pub(super) fn binding_of(
@@ -80,10 +79,7 @@ pub(super) fn load_gate_rules(
 }
 
 #[derive(Component)]
-pub(super) struct PendingToolHook {
-    response: oneshot::Receiver<Option<String>>,
-    _task: AbortOnDropHandle<()>,
-}
+pub(super) struct PendingToolHook(Job<Option<String>>);
 
 #[derive(Component)]
 pub(super) struct PreToolChecked;
@@ -104,7 +100,6 @@ pub(super) fn start_pre_tool_hooks(
         .runtime
         .as_ref()
         .ok_or_else(|| HostError::Unavailable("pre-tool hooks are unavailable".into()))?;
-    let (reply, response) = oneshot::channel();
     let providers = providers.clone();
     let store = ctx.store.clone();
     let event = ene_plugin::HookEvent::PreTool {
@@ -113,13 +108,9 @@ pub(super) fn start_pre_tool_hooks(
         arguments: call.arguments.clone(),
     };
     let task = background::spawn(runtime, ctx.wake.as_ref(), async move {
-        let outcome = run_hooks(&providers, &store, event).await;
-        let _sent = reply.send(outcome.blocked);
+        run_hooks(&providers, &store, event).await.blocked
     });
-    Ok(Some(PendingToolHook {
-        response,
-        _task: task,
-    }))
+    Ok(Some(PendingToolHook(task)))
 }
 
 pub(super) fn collect_pre_tool_hooks(
@@ -129,14 +120,14 @@ pub(super) fn collect_pre_tool_hooks(
 ) {
     for (hold, &HoldOf(call), mut hook) in &mut hooks {
         if let Ok(mut decision) = calls.get_mut(call) {
-            let reason = match hook.response.try_recv() {
-                Ok(None) => {
+            let reason = match hook.0.poll() {
+                Poll::Ready(Some(None)) => {
                     commands.entity(call).insert(PreToolChecked);
                     None
                 }
-                Ok(Some(reason)) => Some(reason),
-                Err(TryRecvError::Empty) => continue,
-                Err(TryRecvError::Closed) => Some("pre-tool hooks did not complete".into()),
+                Poll::Ready(Some(Some(reason))) => Some(reason),
+                Poll::Pending => continue,
+                Poll::Ready(None) => Some("pre-tool hooks did not complete".into()),
             };
             if let Some(reason) = reason {
                 decision.decide(Decider::plugin("ene-host"), Outcome::refused(&reason));
@@ -430,7 +421,7 @@ fn resolve_capability(
 #[cfg(test)]
 mod hook_tests {
     use super::*;
-    use rig_ecs::prelude::{App, Holds, Update};
+    use rig_ecs::prelude::{App, Holds, Update, Wake};
 
     #[tokio::test]
     async fn pre_tool_hook_holds_only_its_call_until_the_verdict() {
@@ -438,19 +429,22 @@ mod hook_tests {
         app.add_systems(Update, collect_pre_tool_hooks);
         let call = app.world_mut().spawn(Decision::default()).id();
         let other = app.world_mut().spawn(Decision::default()).id();
-        let (reply, response) = oneshot::channel();
-        app.world_mut().spawn((
-            HoldOf(call),
-            PendingToolHook {
-                response,
-                _task: AbortOnDropHandle::new(tokio::spawn(std::future::pending())),
-            },
-        ));
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let ready = Arc::new(tokio::sync::Notify::new());
+        let wake = Wake::new({
+            let ready = Arc::clone(&ready);
+            move || ready.notify_one()
+        });
+        let job = background::spawn(&tokio::runtime::Handle::current(), Some(&wake), async {
+            response.await.unwrap()
+        });
+        app.world_mut().spawn((HoldOf(call), PendingToolHook(job)));
 
         app.update();
         assert!(app.world().get::<Holds>(call).is_some());
         assert!(app.world().get::<Holds>(other).is_none());
         reply.send(Some("blocked by hook".into())).unwrap();
+        ready.notified().await;
         app.update();
 
         assert!(app.world().get::<Holds>(call).is_none());
