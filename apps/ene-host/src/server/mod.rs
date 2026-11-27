@@ -72,8 +72,8 @@ pub async fn run(config: &HostArgs) -> Result<(), Box<dyn Error + Send + Sync>> 
              do not expose this port without the external access control described in docs/design/work.md"
         );
     }
-    access.publish(&format!("http://{local}/rpc"))?;
-    let guard = auth::Guard::with_allowed_hosts(access.token.clone(), &config.allowed_hosts);
+    let token = access.publish(&format!("http://{local}/rpc"))?;
+    let guard = auth::Guard::with_allowed_hosts(token, &config.allowed_hosts);
     if !guard.allowed().is_empty() {
         let allowed = guard
             .allowed()

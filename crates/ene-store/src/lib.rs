@@ -86,10 +86,30 @@ impl Store {
         migrations::validate_open_version(&connection)?;
         configure_connection(&connection)?;
         migrations::apply_migrations(&mut connection)?;
-        Ok(Self {
+        Ok(Self::from_connection(connection, Arc::new(grants)))
+    }
+
+    /// Opens existing learned state without applying unrelated schema migrations.
+    pub fn open_for_history_reset(path: &Path) -> Result<Option<Self>> {
+        if !path
+            .try_exists()
+            .map_err(|error| StoreError::Storage(format!("state database: {error}")))?
+        {
+            return Ok(None);
+        }
+        let connection = open_connection(path)?;
+        if migrations::validate_open_version(&connection)? == 0 {
+            return Ok(None);
+        }
+        configure_connection(&connection)?;
+        Ok(Some(Self::from_connection(connection, Arc::default())))
+    }
+
+    fn from_connection(connection: Connection, grants: Arc<ene_policy::CapabilityGrants>) -> Self {
+        Self {
             connection: Arc::new(Mutex::new(connection)),
-            grants: Arc::new(grants),
-        })
+            grants,
+        }
     }
 
     /// Borrows the primary SQLite connection under its mutual-exclusion lock.
@@ -111,10 +131,7 @@ impl Store {
             })?;
         let connection = open_connection(Path::new(path))?;
         configure_connection(&connection)?;
-        Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
-            grants: self.grants.clone(),
-        })
+        Ok(Self::from_connection(connection, self.grants.clone()))
     }
 
     /// Erases learned state before the stopped host releases its reset marker.
@@ -126,7 +143,6 @@ impl Store {
             "DELETE FROM memory_edges;
              DELETE FROM memory_injections;
              DELETE FROM mind_operations;
-             DELETE FROM compaction_checkpoints;
              DELETE FROM skills;
              DELETE FROM memories;
              INSERT INTO memories_fts(memories_fts) VALUES ('delete-all');
@@ -136,6 +152,15 @@ impl Store {
              DELETE FROM work_sessions;
              DELETE FROM schedule_occurrences WHERE status = 'delivered';",
         )?;
+        // A pre-v27 database still has the original schema during maintenance.
+        let has_checkpoints = transaction.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'compaction_checkpoints')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if has_checkpoints {
+            transaction.execute("DELETE FROM compaction_checkpoints", [])?;
+        }
         let empty = to_json(&ene_mind::State::default())?;
         transaction.execute(
             "UPDATE companions SET state = ?1, state_revision = state_revision + 1 WHERE state <> ?1",

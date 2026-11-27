@@ -19,7 +19,6 @@ pub(super) struct Access {
     _locks: [PrivateFile; 2],
     directory: PrivateDir,
     state: PrivateDir,
-    pub token: String,
     /// The discovery file the tests read back; production code reaches the
     /// same path through `directory` and `publish`.
     #[cfg(test)]
@@ -49,13 +48,10 @@ impl Access {
                 .try_lock()
                 .map_err(|_| io::Error::other("state or runtime directory already in use"))?;
         }
-        let mut token = [0u8; 32];
-        getrandom::fill(&mut token)?;
         Ok(Self {
             _locks: locks,
             directory,
             state,
-            token: URL_SAFE_NO_PAD.encode(token),
             #[cfg(test)]
             connection: runtime.join("connection.json"),
         })
@@ -80,12 +76,15 @@ impl Access {
         Ok(key)
     }
 
-    pub(super) fn publish(&self, endpoint: &str) -> Result<()> {
+    pub(super) fn publish(&self, endpoint: &str) -> Result<String> {
+        let mut token = [0u8; 32];
+        getrandom::fill(&mut token)?;
+        let token = URL_SAFE_NO_PAD.encode(token);
         self.directory.write_atomic_durable(
             "connection.json",
-            &serde_json::to_vec(&serde_json::json!({"endpoint": endpoint, "token": self.token}))?,
+            &serde_json::to_vec(&serde_json::json!({"endpoint": endpoint, "token": token}))?,
         )?;
-        Ok(())
+        Ok(token)
     }
 }
 
@@ -108,25 +107,27 @@ mod tests {
         let state = root.join("state");
         let runtime = root.join("runtime");
         let first = Access::acquire(&state, &runtime).unwrap();
-        first.publish("http://127.0.0.1:1234/rpc").unwrap();
+        let first_token = first.publish("http://127.0.0.1:1234/rpc").unwrap();
         private_fs::verify(&File::open(&first.connection).unwrap()).unwrap();
         let value: serde_json::Value =
             serde_json::from_slice(&fs::read(&first.connection).unwrap()).unwrap();
-        assert_eq!(value["token"], first.token);
+        assert_eq!(value["token"], first_token);
         first.publish("http://127.0.0.1:4321/rpc").unwrap();
         let value: serde_json::Value =
             serde_json::from_slice(&fs::read(&first.connection).unwrap()).unwrap();
         assert_eq!(value["endpoint"], "http://127.0.0.1:4321/rpc");
         assert!(Access::acquire(&state, &root.join("other-runtime")).is_err());
         assert!(Access::acquire(&root.join("other-state"), &runtime).is_err());
-        let token = first.token.clone();
         let approval_key = first.approval_key().unwrap();
         private_fs::verify(&File::open(state.join("approval.key")).unwrap()).unwrap();
         let connection = first.connection.clone();
         drop(first);
         assert!(!connection.exists());
         let second = Access::acquire(&state, &runtime).unwrap();
-        assert_ne!(token, second.token);
+        assert_ne!(
+            first_token,
+            second.publish("http://127.0.0.1:1234/rpc").unwrap()
+        );
         assert_eq!(approval_key, second.approval_key().unwrap());
         fs::write(state.join("approval.key"), [0; 33]).unwrap();
         assert!(second.approval_key().is_err());

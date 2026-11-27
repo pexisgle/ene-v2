@@ -215,6 +215,36 @@ fn v25_keeps_current_embeddings_and_fts_row_ids() {
 }
 
 #[test]
+fn history_reset_preserves_legacy_version_and_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("host.sqlite3");
+    assert!(Store::open_for_history_reset(&path).unwrap().is_none());
+    assert!(!path.exists());
+    {
+        let mut raw = Connection::open(&path).unwrap();
+        seed_v6_database(&mut raw);
+        raw.execute(
+            "INSERT INTO memories (id, scope, content, importance, recorded_at)
+             VALUES ('previous', 'ene', 'Previous learned detail', 5, '')",
+            [],
+        )
+        .unwrap();
+    }
+    let store = Store::open_for_history_reset(&path).unwrap().unwrap();
+    store.reset_learned_state().unwrap();
+    let db = store.conn();
+    assert_eq!(user_version(&db), BASELINE_VERSION);
+    let state: (String, i64) = db
+        .query_row(
+            "SELECT credential_state, (SELECT count(*) FROM memories) FROM connections WHERE id = 'c-v6'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, ("registered".into(), 0));
+}
+
+#[test]
 fn upgrades_v6_database_in_place_preserving_existing_rows() {
     let mut mem = Connection::open_in_memory().unwrap();
     seed_v6_database(&mut mem);

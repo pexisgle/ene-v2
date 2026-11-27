@@ -17,7 +17,7 @@ pub(super) fn reset(state: &Path, requested: bool) -> Result<(), Box<dyn Error +
         return Err(io::Error::other("active and pending history directories both exist").into());
     }
     let directory = PrivateDir::open(state)?;
-    let store = Store::open(&state.join("host.sqlite3"))?;
+    let store = Store::open_for_history_reset(&state.join("host.sqlite3"))?;
     if !already_pending {
         // A restart completes the reset before any agent opens a new log.
         if active_exists {
@@ -28,9 +28,10 @@ pub(super) fn reset(state: &Path, requested: bool) -> Result<(), Box<dyn Error +
     }
 
     directory.sync_all()?;
-    reconcile_schedule_receipts(&store, &pending)?;
-    store.reset_learned_state()?;
-    drop(store);
+    if let Some(store) = store {
+        reconcile_schedule_receipts(&store, &pending)?;
+        store.reset_learned_state()?;
+    }
     fs::remove_dir_all(pending)?;
     directory.sync_all()?;
     Ok(())
