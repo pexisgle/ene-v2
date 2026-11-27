@@ -88,7 +88,8 @@ fn default_schema() -> String {
     r#"{"type":"object"}"#.into()
 }
 
-pub(crate) fn parse_schema_object(text: &str) -> Result<Value> {
+/// Parses JSON Schema object text, using `{"type":"object"}` for blank input.
+pub fn parse_schema(text: &str) -> Result<Value> {
     if text.trim().is_empty() {
         return Ok(json!({"type": "object"}));
     }
@@ -146,14 +147,9 @@ impl CapabilitySpec {
                 "capability approval target is too long".into(),
             ));
         }
-        let schema = parse_schema_object(&self.input_schema)?;
-        if !schema.is_object() {
-            return Err(DomainError::Invalid(
-                "capability input schema must be an object".into(),
-            ));
-        }
+        parse_schema(&self.input_schema)?;
         if !self.output_schema.trim().is_empty() {
-            parse_schema_object(&self.output_schema)?;
+            parse_schema(&self.output_schema)?;
         }
         if self.presets.len() > 64
             || self

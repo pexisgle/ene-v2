@@ -6,6 +6,8 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::sync::{Arc, LazyLock};
 
+pub use ene_policy::parse_schema;
+
 /// Parses an optional JSON object document, defaulting empty text to `{}`.
 pub fn parse_object(text: &str) -> Result<Value, DomainError> {
     if text.trim().is_empty() {
@@ -16,21 +18,6 @@ pub fn parse_object(text: &str) -> Result<Value, DomainError> {
     if !value.is_object() {
         return Err(DomainError::Invalid(
             "arguments must be a JSON object".into(),
-        ));
-    }
-    Ok(value)
-}
-
-/// Parses a JSON Schema object document, defaulting empty text to `{"type":"object"}`.
-pub fn parse_schema(text: &str) -> Result<Value, DomainError> {
-    if text.trim().is_empty() {
-        return Ok(json!({"type": "object"}));
-    }
-    let value: Value = serde_json::from_str(text)
-        .map_err(|_| DomainError::Invalid("input schema must be a JSON object".into()))?;
-    if !value.is_object() {
-        return Err(DomainError::Invalid(
-            "input schema must be a JSON object".into(),
         ));
     }
     Ok(value)

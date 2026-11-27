@@ -17,7 +17,7 @@ mod targets;
 
 pub use capability::{
     BUILTIN_TOOLS, COMPUTER_USE, CapabilityApproval, CapabilitySpec, WORKSPACE_CAPABILITY_PREFIX,
-    approval_target, validate_declarations,
+    approval_target, parse_schema, validate_declarations,
 };
 pub use grants::CapabilityGrants;
 pub use hard_deny::{
