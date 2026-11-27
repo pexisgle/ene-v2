@@ -846,6 +846,7 @@ message WatchMatch {
 }
 
 message ActiveWindowChanged {
+  // Empty title and app_id with no URL clear the current foreground window.
   string title = 1;
   string app_id = 2;
   optional string url = 3;
@@ -854,6 +855,8 @@ message ActiveWindowChanged {
 message UserActivityState {
   bool is_active = 1;
   uint64 idle_seconds = 2;
+  // The OS did not provide an activity observation. Ignore the other fields.
+  bool unavailable = 3;
 }
 
 message PerceptionSummary {

@@ -64,6 +64,8 @@ WorkSessionの実行バックエンドは親のtask接続で選ぶ。接続が`C
 
 有効なクライアントは `ClientService.ReportPerception` に現在の `DeviceReady.subscription_id` を付け、`enabled=true` で観測を開始する。`enabled=false`、ストリーム切断、端末移動で観測と未配送の通知が失効する。画面フレームは長辺1280ピクセル、512 KiB以内のJPEGとする。「目」のモデルが報告を選んだ観測と `WatchMatch` が親ターンを起こす。観測要約は対象ターンの動的文脈に入り、「頭」が返答に使うか判断する。購読 ID のない旧形式は従来の受動的な要約として扱う。
 
+前面ウィンドウを取得できなくなったときは、`title` と `app_id` が空で `url` のない `ActiveWindowChanged` で現在の前面情報を消去する。OS から活動状態を取得できないときは `UserActivityState.unavailable=true` で現在の活動情報を消去する。この場合、ホストは `is_active` と `idle_seconds` を使用しない。
+
 ### 身体表現（体）
 
 クライアントは`body.motion`等の表現能力を`capability_specs`で宣言する。利用可能なモーション名や表情プリセットは`presets`に含める。ホストは、`body.motion`を宣言し許可されたアクティブクライアントがある間だけ`body_motion`ツールを親エージェントへ公開する。ツール名と引数スキーマはクライアントが宣言し、ホストはモーション名や表情名の意味を解釈しない。

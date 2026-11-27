@@ -179,10 +179,11 @@ fn record_window_event(
     window: &w::ActiveWindowChanged,
     now: Instant,
 ) -> Option<(&'static str, Value)> {
-    let window = window_data(window);
-    if session.window.as_ref() != Some(&window) {
+    let window = (!window.title.is_empty() || !window.app_id.is_empty() || window.url.is_some())
+        .then(|| window_data(window));
+    if session.window != window {
         session.event(now, json!({"window": window}));
-        session.window = Some(window);
+        session.window = window;
         Some(("window_changed", json!({})))
     } else {
         None
@@ -194,6 +195,12 @@ fn record_activity_event(
     activity: &w::UserActivityState,
     now: Instant,
 ) -> Option<(&'static str, Value)> {
+    if activity.unavailable {
+        return session
+            .activity
+            .take()
+            .map(|_| ("activity_changed", json!({})));
+    }
     let changed = session
         .activity
         .is_none_or(|(active, _)| active != activity.is_active);

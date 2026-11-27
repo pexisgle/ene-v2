@@ -257,9 +257,8 @@ impl DeviceBridge {
         #[cfg(windows)]
         if !perception::unlocked() {
             if std::mem::take(eyes_open) {
-                let watch = self.sensor.watch.take();
-                self.sensor = Sensor::default();
-                self.sensor.apply(watch);
+                observations.abort_all();
+                self.sensor.reset();
                 let event = transport.perception_event(Event::Enabled(false));
                 let host = host.clone();
                 observations.spawn(async move {
@@ -271,26 +270,18 @@ impl DeviceBridge {
         }
         let now = tokio::time::Instant::now();
         let periodic = !*eyes_open || now >= *screen_at;
-        let observed = perception::observe();
-        let idle_seconds = observed.idle_seconds;
-        let window = periodic.then(|| observed.window.clone()).flatten();
-        let mut reports = self.sensor.observe(observed);
         let mut events = Vec::new();
         if periodic {
             *screen_at = now + SCREEN_SAMPLE;
             *eyes_open = true;
             events.push(Event::Enabled(true));
-            if let Some(window) = window {
-                reports.retain(|report| !matches!(report, Report::Window(_)));
-                events.push(Event::ActiveWindow(Box::new(window_report(window))));
-            }
-            reports.retain(|report| !matches!(report, Report::Activity { .. }));
-            reports.push(Report::Activity {
-                is_active: idle_seconds < perception::IDLE_THRESHOLD,
-                idle_seconds,
-            });
         }
-        events.extend(reports.into_iter().map(perception_report_event));
+        events.extend(
+            self.sensor
+                .observe(perception::observe(), periodic)
+                .into_iter()
+                .map(perception_report_event),
+        );
         if events.is_empty() {
             return;
         }
@@ -399,7 +390,9 @@ async fn remove_stale_avatars(
 fn perception_report_event(report: Report) -> w::perception_event::Event {
     use w::perception_event::Event;
     match report {
-        Report::Window(window) => Event::ActiveWindow(Box::new(window_report(window))),
+        Report::Window(window) => Event::ActiveWindow(Box::new(
+            window.map_or_else(w::ActiveWindowChanged::default, window_report),
+        )),
         Report::Interrupt(window, transition) => Event::WatchMatch(Box::new(w::WatchMatch {
             window: Some(window_report(window)).into(),
             transition: match transition {
@@ -410,12 +403,10 @@ fn perception_report_event(report: Report) -> w::perception_event::Event {
             .into(),
             ..Default::default()
         })),
-        Report::Activity {
-            is_active,
-            idle_seconds,
-        } => Event::UserActivity(Box::new(w::UserActivityState {
-            is_active,
-            idle_seconds,
+        Report::Activity(idle_seconds) => Event::UserActivity(Box::new(w::UserActivityState {
+            is_active: idle_seconds.is_some_and(|seconds| seconds < perception::IDLE_THRESHOLD),
+            idle_seconds: idle_seconds.unwrap_or_default(),
+            unavailable: idle_seconds.is_none(),
             ..Default::default()
         })),
     }

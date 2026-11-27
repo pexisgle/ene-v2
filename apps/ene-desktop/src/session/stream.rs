@@ -57,6 +57,7 @@ impl Session {
     /// Serves the device stream, audio, the microphone and the subscription.
     pub(super) async fn serve(&mut self, host: Host) -> Outcome {
         self.transport.subscription.clear();
+        self.devices.sensor.reset();
         #[cfg(windows)]
         {
             self.devices.computer_frame = None;

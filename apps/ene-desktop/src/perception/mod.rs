@@ -11,7 +11,8 @@ pub(crate) mod screen;
 #[cfg(test)]
 mod tests;
 
-pub use rules::{IDLE_THRESHOLD, NotifyOn, Observation, Report, Sensor, Watch, Window};
+use ene_platform_os::Observation;
+pub use rules::{IDLE_THRESHOLD, NotifyOn, Report, Sensor, Watch, Window};
 #[cfg(windows)]
 pub(crate) use screen::{capture, unlocked};
 
@@ -76,8 +77,5 @@ pub fn observe() -> Observation {
 /// returning `None` rather than inventing one.
 #[cfg(not(any(windows, target_os = "linux")))]
 pub fn observe() -> Observation {
-    Observation {
-        window: None,
-        idle_seconds: 0,
-    }
+    Observation::default()
 }

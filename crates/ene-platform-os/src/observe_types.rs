@@ -5,8 +5,8 @@
 pub struct Observation {
     /// The foreground window's title and process name, when readable.
     pub window: Option<Window>,
-    /// Seconds since the last input.
-    pub idle_seconds: u64,
+    /// Seconds since the last input, when activity can be observed.
+    pub idle_seconds: Option<u64>,
 }
 
 /// A foreground window's title and owning process name.

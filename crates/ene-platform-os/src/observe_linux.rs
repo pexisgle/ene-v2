@@ -4,7 +4,7 @@ use self::protocol::{parse_wm_class, wayland_state_is_activated};
 use crate::{Observation, Window};
 use parking_lot::Mutex;
 use std::{collections::HashMap, sync::LazyLock, time::Instant};
-use wayland_client::backend::ObjectId;
+use wayland_client::backend::{ObjectId, WaylandError};
 use wayland_client::{
     Connection as WaylandConnection, Dispatch, EventQueue, Proxy, QueueHandle, delegate_noop,
     event_created_child,
@@ -44,14 +44,7 @@ pub fn observe() -> Observation {
     match &mut *backend {
         LinuxBackend::Wayland(wayland) => wayland.observe(),
         LinuxBackend::X11(x11) => x11.observe(),
-        LinuxBackend::Unsupported => empty(),
-    }
-}
-
-fn empty() -> Observation {
-    Observation {
-        window: None,
-        idle_seconds: 0,
+        LinuxBackend::Unsupported => Observation::default(),
     }
 }
 
@@ -135,7 +128,7 @@ struct WaylandBackend {
     _manager: zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
     _seat: Option<wl_seat::WlSeat>,
     _idle_notifier: Option<ext_idle_notifier_v1::ExtIdleNotifierV1>,
-    _idle_notification: Option<ext_idle_notification_v1::ExtIdleNotificationV1>,
+    idle_notification: Option<ext_idle_notification_v1::ExtIdleNotificationV1>,
 }
 
 impl WaylandBackend {
@@ -171,39 +164,44 @@ impl WaylandBackend {
             _manager: manager,
             _seat: seat,
             _idle_notifier: idle_notifier,
-            _idle_notification: idle_notification,
+            idle_notification,
         })
     }
 
     fn observe(&mut self) -> Observation {
-        self.pump();
+        if !self.state.finished && !self.pump() {
+            self.state.finished = true;
+        }
         if self.state.finished {
-            return empty();
+            return Observation::default();
         }
         Observation {
             window: self.state.active_window(),
-            idle_seconds: self
-                .state
-                .idled_at
-                .map_or(0, |at| 1 + at.elapsed().as_secs()),
+            idle_seconds: self.idle_notification.as_ref().map(|_| {
+                self.state
+                    .idled_at
+                    .map_or(0, |at| 1 + at.elapsed().as_secs())
+            }),
         }
     }
 
-    fn pump(&mut self) {
-        let _flushed = self.queue.flush();
-        let _dispatched = self.queue.dispatch_pending(&mut self.state);
-        if let Some(guard) = self.queue.prepare_read() {
-            match guard.read() {
-                Ok(_) => {
-                    let _dispatched = self.queue.dispatch_pending(&mut self.state);
-                }
-                Err(wayland_client::backend::WaylandError::Io(err))
-                    if err.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(_) => {}
-            }
-        } else {
-            let _dispatched = self.queue.dispatch_pending(&mut self.state);
+    fn pump(&mut self) -> bool {
+        if !nonblocking(self.queue.flush()) || self.queue.dispatch_pending(&mut self.state).is_err()
+        {
+            return false;
         }
+        self.queue
+            .prepare_read()
+            .is_none_or(|guard| nonblocking(guard.read()))
+            && self.queue.dispatch_pending(&mut self.state).is_ok()
+    }
+}
+
+fn nonblocking<T>(result: Result<T, WaylandError>) -> bool {
+    match result {
+        Ok(_) => true,
+        Err(WaylandError::Io(error)) => error.kind() == std::io::ErrorKind::WouldBlock,
+        Err(_) => false,
     }
 }
 
@@ -407,7 +405,7 @@ impl X11Backend {
         let idle_seconds = screensaver::query_info(&self.conn, self.root)
             .ok()
             .and_then(|cookie| cookie.reply().ok())
-            .map_or(0, |info| u64::from(info.ms_since_user_input) / 1000);
+            .map(|info| u64::from(info.ms_since_user_input) / 1000);
         Observation {
             window,
             idle_seconds,

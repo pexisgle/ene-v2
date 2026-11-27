@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
-pub use ene_platform_os::{Observation, Window};
+use ene_platform_os::Observation;
+pub use ene_platform_os::Window;
 
 /// A parsed `eye.watch` rule.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -57,20 +58,20 @@ impl Watch {
 #[derive(Default)]
 pub struct Sensor {
     /// The rule currently applied by the host, if any.
-    pub watch: Option<Watch>,
+    watch: Option<Watch>,
     /// The window the last sample saw, for focus and title-change edges.
     last: Option<Window>,
     /// Whether the last sample matched, so `focus` fires once per entry.
     matched: bool,
-    idle: bool,
+    idle: Option<bool>,
 }
 
 /// What a sample produced for the host.
 pub enum Report {
     /// The foreground window changed.
-    Window(Window),
+    Window(Option<Window>),
     /// The user's activity state changed.
-    Activity { is_active: bool, idle_seconds: u64 },
+    Activity(Option<u64>),
     /// A watch rule matched on this transition.
     Interrupt(Window, NotifyOn),
 }
@@ -82,47 +83,49 @@ impl Sensor {
         self.matched = false;
     }
 
+    pub fn reset(&mut self) {
+        *self = Self {
+            watch: self.watch.take(),
+            ..Self::default()
+        };
+    }
+
     /// Turns one observation into the reports the host should receive.
     ///
     /// A changed window is always reported, because the host summarizes it for
     /// the conversation. A matching rule adds an interrupt, so the parent is
     /// woken without waiting for the next periodic sample.
-    pub fn observe(&mut self, observation: Observation) -> Vec<Report> {
+    pub fn observe(&mut self, observation: Observation, refresh: bool) -> Vec<Report> {
         let mut reports = Vec::new();
-        if let Some(window) = observation.window {
-            let changed = self.last.as_ref() != Some(&window);
-            if changed {
-                reports.push(Report::Window(window.clone()));
-            }
-            if let Some(watch) = self.watch.as_ref().filter(|watch| watch.enabled) {
-                let matched = watch.matches(&window);
-                let fires = match watch.notify_on {
-                    NotifyOn::Focus => matched && !self.matched,
-                    NotifyOn::Blur => !matched && self.matched,
-                    NotifyOn::TitleChange => {
-                        matched
-                            && self.last.as_ref().is_some_and(|last| {
-                                last.app_id == window.app_id && last.title != window.title
-                            })
-                    }
-                };
-                if fires {
-                    let target = match watch.notify_on {
-                        NotifyOn::Blur => self.last.as_ref().unwrap_or(&window),
-                        _ => &window,
-                    };
-                    reports.push(Report::Interrupt(target.clone(), watch.notify_on));
-                }
-                self.matched = matched;
-            }
-            self.last = Some(window);
+        let window = observation.window.as_ref();
+        if refresh || self.last.as_ref() != window {
+            reports.push(Report::Window(observation.window.clone()));
         }
-        let idle = observation.idle_seconds >= IDLE_THRESHOLD;
-        if idle != self.idle {
-            reports.push(Report::Activity {
-                is_active: !idle,
-                idle_seconds: observation.idle_seconds,
-            });
+        if let Some(watch) = self.watch.as_ref().filter(|watch| watch.enabled) {
+            let matched = window.filter(|window| watch.matches(window));
+            let target = match watch.notify_on {
+                NotifyOn::Focus => matched.filter(|_| !self.matched),
+                NotifyOn::Blur => self
+                    .last
+                    .as_ref()
+                    .filter(|_| self.matched && matched.is_none()),
+                NotifyOn::TitleChange => matched.filter(|window| {
+                    self.last.as_ref().is_some_and(|last| {
+                        last.app_id == window.app_id && last.title != window.title
+                    })
+                }),
+            };
+            if let Some(target) = target {
+                reports.push(Report::Interrupt(target.clone(), watch.notify_on));
+            }
+            self.matched = matched.is_some();
+        }
+        self.last = observation.window;
+        let idle = observation
+            .idle_seconds
+            .map(|seconds| seconds >= IDLE_THRESHOLD);
+        if refresh || idle != self.idle {
+            reports.push(Report::Activity(observation.idle_seconds));
         }
         self.idle = idle;
         reports

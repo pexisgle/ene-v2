@@ -80,24 +80,24 @@ fn a_focus_rule_fires_once_per_entry() {
     sensor.apply(Some(rule(MatchKind::Title, NotifyOn::Focus)));
     let github = Observation {
         window: Some(window("GitHub", "chrome.exe")),
-        idle_seconds: 0,
+        idle_seconds: Some(0),
     };
     let other = Observation {
         window: Some(window("editor", "code.exe")),
-        idle_seconds: 0,
+        idle_seconds: Some(0),
     };
     assert!(matches!(
-        sensor.observe(other).as_slice(),
-        [Report::Window(_)]
+        sensor.observe(other, false).as_slice(),
+        [Report::Window(_), Report::Activity(Some(0))]
     ));
-    let first = sensor.observe(github.clone());
+    let first = sensor.observe(github.clone(), false);
     assert!(
         first
             .iter()
             .any(|report| matches!(report, Report::Interrupt(_, _))),
         "entering the match interrupts"
     );
-    let second = sensor.observe(github);
+    let second = sensor.observe(github, false);
     assert!(
         !second
             .iter()
@@ -112,14 +112,14 @@ fn a_blur_rule_fires_when_the_match_is_left() {
     sensor.apply(Some(rule(MatchKind::Title, NotifyOn::Blur)));
     let github = Observation {
         window: Some(window("GitHub", "chrome.exe")),
-        idle_seconds: 0,
+        idle_seconds: Some(0),
     };
     let other = Observation {
         window: Some(window("editor", "code.exe")),
-        idle_seconds: 0,
+        idle_seconds: Some(0),
     };
-    sensor.observe(github);
-    let left = sensor.observe(other);
+    sensor.observe(github, false);
+    let left = sensor.observe(other, false);
     assert!(
         left.iter()
             .any(|report| matches!(report, Report::Interrupt(window, NotifyOn::Blur) if window.title == "GitHub")),
@@ -128,15 +128,42 @@ fn a_blur_rule_fires_when_the_match_is_left() {
 }
 
 #[test]
+fn disappearance_clears_the_window_and_fires_blur_once() {
+    let mut sensor = Sensor::default();
+    sensor.apply(Some(rule(MatchKind::Title, NotifyOn::Blur)));
+    sensor.observe(
+        Observation {
+            window: Some(window("GitHub", "chrome.exe")),
+            idle_seconds: Some(0),
+        },
+        false,
+    );
+    let reports = sensor.observe(Observation::default(), false);
+    assert!(matches!(reports.as_slice(), [
+        Report::Window(None),
+        Report::Interrupt(window, NotifyOn::Blur),
+        Report::Activity(None)
+    ] if window.title == "GitHub"));
+    assert!(sensor.observe(Observation::default(), false).is_empty());
+    assert!(matches!(
+        sensor.observe(Observation::default(), true).as_slice(),
+        [Report::Window(None), Report::Activity(None)]
+    ));
+}
+
+#[test]
 fn a_disabled_rule_never_interrupts() {
     let mut sensor = Sensor::default();
     let mut disabled = rule(MatchKind::Title, NotifyOn::Focus);
     disabled.enabled = false;
     sensor.apply(Some(disabled));
-    let reports = sensor.observe(Observation {
-        window: Some(window("GitHub", "chrome.exe")),
-        idle_seconds: 0,
-    });
+    let reports = sensor.observe(
+        Observation {
+            window: Some(window("GitHub", "chrome.exe")),
+            idle_seconds: Some(0),
+        },
+        false,
+    );
     assert!(
         !reports
             .iter()
@@ -147,27 +174,27 @@ fn a_disabled_rule_never_interrupts() {
 #[test]
 fn an_idle_observation_reports_the_activity_state() {
     let mut sensor = Sensor::default();
-    let reports = sensor.observe(Observation {
-        window: None,
-        idle_seconds: IDLE_THRESHOLD,
-    });
+    let reports = sensor.observe(
+        Observation {
+            window: None,
+            idle_seconds: Some(IDLE_THRESHOLD),
+        },
+        false,
+    );
     assert!(matches!(
         reports.as_slice(),
-        [Report::Activity {
-            is_active: false,
-            ..
-        }]
+        [Report::Activity(Some(IDLE_THRESHOLD))]
     ));
     assert!(matches!(
         sensor
-            .observe(Observation {
-                window: None,
-                idle_seconds: 0
-            })
+            .observe(
+                Observation {
+                    window: None,
+                    idle_seconds: Some(0),
+                },
+                false
+            )
             .as_slice(),
-        [Report::Activity {
-            is_active: true,
-            ..
-        }]
+        [Report::Activity(Some(0))]
     ));
 }
