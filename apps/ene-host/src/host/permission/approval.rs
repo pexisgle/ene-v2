@@ -358,6 +358,11 @@ pub(crate) fn submit_with_outcome(
             (approval, None)
         }
     };
+    if approval.work_id.is_some()
+        && let Some(mut runs) = world.get_resource_mut::<crate::host::work::Runs>()
+    {
+        runs.touch(&approval.run_id);
+    }
     let rule = if matches!(decision, ApprovalDecision::AlwaysApprove) {
         match persist_always_allow_rule(
             &store,

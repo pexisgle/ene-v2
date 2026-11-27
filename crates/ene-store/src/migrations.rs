@@ -28,7 +28,7 @@ use rusqlite_migration::{HookResult, M, Migrations};
 pub const BASELINE_VERSION: i64 = 6;
 
 /// Latest database schema version managed by [`ladder_steps`].
-pub const VERSION: i64 = 13;
+pub const VERSION: i64 = 14;
 
 /// Every version this host applies above the baseline, in order. The position
 /// in this table is the version, so adding a row is the only way to add a
@@ -83,6 +83,23 @@ const STEPS_ABOVE_BASELINE: &[(&str, &str)] = &[
     (
         "0013_connection_incarnation",
         "ALTER TABLE connections ADD COLUMN created_revision INTEGER NOT NULL DEFAULT 0;",
+    ),
+    (
+        "0014_derive_work_approval_wait",
+        "UPDATE work_runs SET state = 'running' WHERE state = 'waiting_input';
+        ALTER TABLE work_runs DROP COLUMN pending_request_id;
+        CREATE INDEX idx_pending_approvals_work_run
+          ON approval_requests(work_id, run_id, created_at, request_id) WHERE status = 'pending';
+        CREATE VIEW work_run_view AS
+          SELECT r.run_id, r.work_id, r.instruction,
+                 CASE WHEN a.request_id IS NOT NULL THEN 'waiting_input' ELSE r.state END AS state,
+                 a.request_id AS pending_request_id, r.failure, r.started_at, r.updated_at
+            FROM work_runs r LEFT JOIN approval_requests a ON a.request_id = (
+              SELECT request_id FROM approval_requests p
+                WHERE r.state IN ('starting','running') AND p.status = 'pending'
+                  AND p.work_id = r.work_id AND p.run_id = r.run_id
+                ORDER BY p.created_at, p.request_id LIMIT 1
+          );",
     ),
 ];
 

@@ -238,6 +238,15 @@ fn an_acp_assignment_drives_the_plugin_hand_end_to_end() {
     });
     let request = world.pending();
     assert_eq!(request.work_id.as_deref(), Some(session.id.as_str()));
+    let view = work::get(&world.harness.store(), &session.id).unwrap();
+    assert_eq!(
+        view.runs[0].state.as_known(),
+        Some(w::RunStatus::RUN_STATUS_WAITING_INPUT)
+    );
+    assert_eq!(
+        view.runs[0].pending_request_id.as_deref(),
+        Some(request.request_id.as_str())
+    );
     assert_eq!(
         request.capability.as_deref(),
         Some("reference.inspect"),
@@ -270,6 +279,7 @@ fn an_acp_assignment_drives_the_plugin_hand_end_to_end() {
         .unwrap()
         .unwrap();
     assert_eq!(run.state, work::RunState::Completed);
+    assert!(run.pending_request_id.is_none());
     let companion = world.companion.clone();
     world
         .harness

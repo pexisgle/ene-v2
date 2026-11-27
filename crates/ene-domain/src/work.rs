@@ -89,7 +89,7 @@ pub struct Run {
     pub instruction: String,
     /// Where the run is in its lifecycle.
     pub state: RunState,
-    /// The approval the run is waiting on, while it is `WaitingInput`.
+    /// The current pending approval projected by the repository while waiting for input.
     pub pending_request_id: Option<String>,
     /// Why the run failed, when it did.
     pub failure: Option<Failure>,

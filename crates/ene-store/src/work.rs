@@ -39,6 +39,13 @@ pub fn open_state(state: RunState) -> bool {
     )
 }
 
+fn stored_run_state(state: RunState) -> &'static str {
+    match state {
+        RunState::WaitingInput => RunState::Running.as_str(),
+        state => state.as_str(),
+    }
+}
+
 /// Repository managing `work_sessions` and `work_runs`.
 #[derive(Clone, Copy, Debug)]
 pub struct WorkRepo<'a>(&'a Store);
@@ -120,10 +127,11 @@ impl<'a> WorkRepo<'a> {
         self.set_work_status(id, WorkStatus::Closed)
     }
 
+    /// Reads the run history, including any currently pending approval.
     pub fn runs(&self, work: &str) -> Result<Vec<Run>> {
         self.0.fetch_all(
             &format!(
-                "SELECT {RUN_COLUMNS} FROM work_runs WHERE work_id = ?1 ORDER BY started_at, run_id"
+                "SELECT {RUN_COLUMNS} FROM work_run_view WHERE work_id = ?1 ORDER BY started_at, run_id"
             ),
             [work],
             Run::from_row,
@@ -132,7 +140,7 @@ impl<'a> WorkRepo<'a> {
 
     pub fn run(&self, run_id: &str) -> Result<Option<Run>> {
         self.0.fetch(
-            &format!("SELECT {RUN_COLUMNS} FROM work_runs WHERE run_id = ?1"),
+            &format!("SELECT {RUN_COLUMNS} FROM work_run_view WHERE run_id = ?1"),
             [run_id],
             Run::from_row,
         )
@@ -143,9 +151,10 @@ impl<'a> WorkRepo<'a> {
     pub fn active_run(&self, work: &str) -> Result<Option<Run>> {
         self.0.fetch(
             &format!(
-                "SELECT {RUN_COLUMNS} FROM work_runs WHERE work_id = ?1 \
-                 AND state IN ('starting','running','waiting_input') \
-                 ORDER BY started_at DESC LIMIT 1"
+                "SELECT {RUN_COLUMNS} FROM work_run_view WHERE run_id = (
+                   SELECT run_id FROM work_runs WHERE work_id = ?1 AND state IN ('starting','running')
+                   ORDER BY started_at DESC LIMIT 1
+                 )"
             ),
             [work],
             Run::from_row,
@@ -156,15 +165,15 @@ impl<'a> WorkRepo<'a> {
         let stamp = now();
         self.0
             .conn()
-            .prepare_cached(&format!(
-                "INSERT INTO work_runs ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
-            ))?
+            .prepare_cached(
+                "INSERT INTO work_runs (run_id, work_id, instruction, state, failure, started_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+            )?
             .execute(params![
                 run.run_id,
                 run.work_id,
                 run.instruction,
-                run.state.as_str(),
-                run.pending_request_id,
+                stored_run_state(run.state),
                 run.failure.as_ref().map(to_json).transpose()?,
                 or_stamp(&run.started_at, &stamp),
                 stamp,
@@ -177,13 +186,11 @@ impl<'a> WorkRepo<'a> {
             let now = now();
             let changed = transaction
                 .prepare_cached(
-                    "UPDATE work_runs SET state = ?2, pending_request_id = ?3, failure = ?4, \
-                 updated_at = ?5 WHERE run_id = ?1",
+                    "UPDATE work_runs SET state = ?2, failure = ?3, updated_at = ?4 WHERE run_id = ?1",
                 )?
                 .execute(params![
                     run.run_id,
-                    run.state.as_str(),
-                    run.pending_request_id,
+                    stored_run_state(run.state),
                     run.failure.as_ref().map(to_json).transpose()?,
                     now,
                 ])?;

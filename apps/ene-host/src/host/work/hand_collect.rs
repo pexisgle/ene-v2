@@ -262,7 +262,7 @@ fn request_permission(
             ),
         })
         .id();
-    if let Err(error) = permission::issue_hold(world, store, &approval.clone(), call) {
+    if let Err(error) = permission::issue_hold(world, store, &approval, call) {
         world.entity_mut(call).despawn();
         crate::host::fail(world, &error.to_string());
         return;

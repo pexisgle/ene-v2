@@ -314,6 +314,56 @@ fn v11_operations_without_a_recorded_owner_are_never_replayed() {
 }
 
 #[test]
+fn work_wait_state_is_recovered_from_current_approvals() {
+    use ene_domain::RunState;
+    use ene_policy::ApprovalStatus;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy-wait.sqlite3");
+    {
+        let mut conn = Connection::open(&path).unwrap();
+        apply_ladder(&mut conn, ladder_steps().into_iter().take(13).collect()).unwrap();
+        conn.execute_batch(
+            "INSERT INTO work_runs (run_id, work_id, instruction, state, pending_request_id,
+                                    started_at, updated_at)
+                  VALUES ('run', 'work', 'continue', 'waiting_input', 'stale', '2026-01-01', '2026-01-01');
+             INSERT INTO approval_requests (request_id, session_id, run_id, work_id,
+                          action_payload_hash, tool_name, normalized_arguments, status, created_at)
+                  VALUES ('later', 'ene', 'run', 'work', X'01', 'device_request', '{}', 'pending', '2026-01-02'),
+                         ('first', 'ene', 'run', 'work', X'01', 'device_request', '{}', 'pending', '2026-01-01'),
+                         ('auto', 'ene', 'run', 'work', X'01', 'device_request', '{}', 'evaluating', '2026-01-01'),
+                         ('different', 'ene', 'run', 'other', X'01', 'device_request', '{}', 'pending', '2026-01-01');",
+        ).unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let work = store.work_repo();
+    let run = work.active_run("work").unwrap().unwrap();
+    assert_eq!(run.state, RunState::WaitingInput);
+    assert_eq!(run.pending_request_id.as_deref(), Some("first"));
+    assert_eq!(work.runs("work").unwrap(), [run]);
+
+    let approvals = store.approval_repo();
+    approvals
+        .resolve_approval("first", ApprovalStatus::Denied)
+        .unwrap();
+    let mut run = work.run("run").unwrap().unwrap();
+    assert_eq!(run.pending_request_id.as_deref(), Some("later"));
+    approvals
+        .resolve_approval("later", ApprovalStatus::Approved)
+        .unwrap();
+    run = work.run("run").unwrap().unwrap();
+    assert_eq!(run.state, RunState::Running);
+    assert!(run.pending_request_id.is_none());
+
+    approvals.request_user_approval("auto").unwrap();
+    run.state = RunState::Cancelled;
+    work.update_run(&run).unwrap();
+    let terminal = work.run("run").unwrap().unwrap();
+    assert_eq!(terminal.state, RunState::Cancelled);
+    assert!(terminal.pending_request_id.is_none());
+}
+
+#[test]
 fn refuses_pre_baseline_versions_without_modifying_database() {
     let mut v0_populated = Connection::open_in_memory().unwrap();
     v0_populated
