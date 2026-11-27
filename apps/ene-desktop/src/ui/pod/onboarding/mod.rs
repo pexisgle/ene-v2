@@ -9,6 +9,7 @@ mod views;
 
 use super::CompanionPod;
 use crate::ui::GOOGLE_AGENT_PLATFORM;
+use crate::ui::hub::SetupStage;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::DropdownOption;
 use gpui::{AnyElement, Context, div, prelude::*, px};
@@ -21,6 +22,8 @@ pub(super) struct SetupChoices {
     model_options: Vec<DropdownOption>,
     selected_model: Option<String>,
     checking_models: bool,
+    model_ready: bool,
+    model_failure: Option<String>,
     voicevox_conn_id: Option<String>,
     voicevox_enabled: bool,
     voicevox_checking: bool,
@@ -72,9 +75,12 @@ pub(super) fn render_connection_onboarding(
         picked.is_some() && (!needs_key || !pod.onboard_key.read(cx).text().trim().is_empty());
 
     let hub = pod.hub.read(cx);
-    let pending = hub.setup.pending;
-    let err = hub.setup.error;
-    let err_detail = hub.setup.error_detail.clone();
+    let pending = hub.setup.stage == SetupStage::SavingConnection;
+    let error = hub
+        .setup
+        .error
+        .as_ref()
+        .map(|notice| notice.message.clone());
     let name = picked
         .as_ref()
         .map_or_else(|| "AIサービス".to_owned(), |p| p.name.clone());
@@ -100,11 +106,8 @@ pub(super) fn render_connection_onboarding(
             this.child(render_keys_link_row(url, &name, !pending, theme))
         })
         .child(pod.onboard_key.clone())
-        .when_some(err, |row, msg| {
+        .when_some(error, |row, msg| {
             row.child(div().text_xs().text_color(theme.danger_fg).child(msg))
-        })
-        .when_some(err_detail, |row, detail| {
-            row.child(div().text_xs().text_color(theme.danger_fg).child(detail))
         })
         .child(render_connect_submit_row(
             ConnectSubmitSpec {
@@ -126,18 +129,28 @@ pub(super) fn render_model_voice_onboarding(
 ) -> AnyElement {
     let look = theme.field_look(false);
     pod.onboard_name.update(cx, |d, cx| d.apply_look(look, cx));
-    let companions_empty = pod
-        .hub
-        .read(cx)
+    let hub = pod.hub.read(cx);
+    let companions_empty = hub
         .model
         .snapshot()
         .is_none_or(|snap| snap.companions.is_empty());
+    let staged = hub.setup.connection_id().is_some();
+    let applying = matches!(hub.setup.stage, SetupStage::Applying(_));
+    let error = hub
+        .setup
+        .error
+        .as_ref()
+        .map(|notice| notice.message.clone());
     let mut choices = collect_setup_choices(pod, cx);
 
     let name = pod.onboard_name.read(cx).text().trim().to_owned();
-    let can_finish = (!companions_empty || !name.is_empty())
-        && ((choices.target_conn_id.is_some() && choices.selected_model.is_some())
-            || (companions_empty && choices.selected_model.is_none() && !choices.checking_models));
+    let can_finish = !applying
+        && !choices.checking_models
+        && (!companions_empty || !name.is_empty())
+        && (match choices.selected_model {
+            Some(_) => choices.model_ready,
+            None => companions_empty && !staged,
+        });
 
     let mut body = div().flex().flex_col().gap(px(8.)).child(
         div()
@@ -147,6 +160,16 @@ pub(super) fn render_model_voice_onboarding(
 
     if let Some(refresh_cid) = choices.target_conn_id.clone() {
         body = append_setup_model_section(pod, body, &refresh_cid, &mut choices, theme, cx);
+    }
+    if staged && !choices.model_ready {
+        let message = choices
+            .model_failure
+            .take()
+            .unwrap_or_else(|| "接続を確認してからモデルを割り当ててください。".into());
+        body = body.child(div().text_xs().text_color(theme.ink_muted).child(message));
+    }
+    if let Some(message) = error {
+        body = body.child(div().text_xs().text_color(theme.danger_fg).child(message));
     }
     body = append_setup_voice_section(pod, body, &mut choices, theme, cx);
     if companions_empty {
@@ -167,6 +190,7 @@ pub(super) fn render_model_voice_onboarding(
         model_id: choices.selected_model,
         voice_id: choices.selected_voice,
         can_finish,
+        applying,
     };
     body.child(render_setup_finish_button(finish_ctx, &pod.hub, theme))
         .into_any_element()

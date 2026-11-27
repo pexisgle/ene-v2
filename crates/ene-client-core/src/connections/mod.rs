@@ -276,15 +276,6 @@ pub fn build_tts_assignment_inputs(
     )
 }
 
-/// Builds a `ConnectionInput` updating the selected model ID on an LLM connection.
-pub fn build_connection_model_input(conn: &Connection, model_id: &str) -> ConnectionInput {
-    let mut input = conn.to_input();
-    if let Some(ConnectionConfig::Llm(llm)) = input.config.as_mut() {
-        llm.model_ids = vec![model_id.to_owned()];
-    }
-    input
-}
-
 /// Builds a `ConnectionInput` toggling `enabled` while keeping existing configuration intact.
 pub fn build_connection_enabled_input(conn: &Connection, enabled: bool) -> ConnectionInput {
     let mut input = conn.to_input();

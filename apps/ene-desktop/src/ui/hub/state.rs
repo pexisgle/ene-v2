@@ -4,6 +4,7 @@
 use super::{CompanionPod, PodMode, SettingsSection};
 use crate::session::{Connection, Options};
 use crate::update::{Command, Update};
+use ene_client_core::domain::Connection as ProviderConnection;
 use ene_client_core::domain::NotificationEvent;
 use ene_client_core::state::{Notice, NoticeKind};
 use ene_platform_os::{TrayAction, TrayHandle};
@@ -37,12 +38,56 @@ impl std::fmt::Debug for WindowState {
 /// First-run onboarding and connection check state owned by [`Hub`].
 #[derive(Debug, Default)]
 pub struct SetupFlowState {
-    pub(crate) pending: bool,
-    pub(crate) error: Option<&'static str>,
-    pub error_detail: Option<String>,
-    pub pending_connection_id: Option<String>,
+    pub(crate) stage: SetupStage,
+    pub(crate) error: Option<Notice>,
     pub checking_connections: HashMap<String, String>,
     pub(crate) auto_assigned_revisions: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) enum SetupStage {
+    #[default]
+    Idle,
+    SavingConnection,
+    Choosing(String),
+    Applying(String),
+}
+
+impl SetupFlowState {
+    pub(crate) fn connection_id(&self) -> Option<&str> {
+        match &self.stage {
+            SetupStage::Choosing(id) | SetupStage::Applying(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn can_apply(&self, connection: &ProviderConnection) -> bool {
+        connection.enabled
+            && self.connection_id().is_none_or(|id| {
+                id == connection.id
+                    && connection
+                        .last_check
+                        .as_ref()
+                        .is_some_and(|check| check.healthy)
+            })
+    }
+
+    pub(super) fn disconnect(&mut self) {
+        self.checking_connections.clear();
+        self.stage = match std::mem::take(&mut self.stage) {
+            SetupStage::SavingConnection => SetupStage::Idle,
+            SetupStage::Applying(id) => SetupStage::Choosing(id),
+            other => {
+                self.stage = other;
+                return;
+            }
+        };
+        self.error = Some(Notice {
+            context: "接続が切れました".into(),
+            message: "再接続後に保存を確認してください。".into(),
+            kind: NoticeKind::Failed,
+        });
+    }
 }
 
 /// Dependencies and channel endpoints used to construct [`Hub`].

@@ -15,7 +15,7 @@ use gpui::{AnyElement, App, Context, Entity, SharedString, div, prelude::*, px};
 
 pub(super) fn collect_setup_choices(pod: &CompanionPod, cx: &App) -> SetupChoices {
     let hub = pod.hub.read(cx);
-    let target_conn_id = hub.setup.pending_connection_id.clone().or_else(|| {
+    let target_conn_id = hub.setup.connection_id().map(str::to_owned).or_else(|| {
         let providers = hub.model.connections.providers.as_deref()?;
         hub.model.settings().and_then(|settings| {
             settings
@@ -30,6 +30,18 @@ pub(super) fn collect_setup_choices(pod: &CompanionPod, cx: &App) -> SetupChoice
     let checking_models = target_conn_id
         .as_deref()
         .is_some_and(|cid| hub.setup.checking_connections.contains_key(cid));
+    let connection = target_conn_id.as_deref().and_then(|id| {
+        hub.model
+            .settings()?
+            .connections
+            .iter()
+            .find(|connection| connection.id == id)
+    });
+    let model_ready = connection.is_some_and(|connection| hub.setup.can_apply(connection));
+    let model_failure = connection
+        .and_then(|connection| connection.last_check.as_ref())
+        .and_then(|check| check.failure.as_ref())
+        .map(|failure| failure.message.clone());
 
     let voicevox_conn = hub.model.settings().and_then(|settings| {
         settings
@@ -52,6 +64,8 @@ pub(super) fn collect_setup_choices(pod: &CompanionPod, cx: &App) -> SetupChoice
         model_options,
         selected_model,
         checking_models,
+        model_ready,
+        model_failure,
         voicevox_conn_id,
         voicevox_enabled,
         voicevox_checking,

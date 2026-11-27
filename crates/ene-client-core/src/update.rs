@@ -94,6 +94,8 @@ pub enum Update {
     Providers(Vec<LlmProvider>),
     /// The connection and any credential have been saved for onboarding.
     SetupSaved(Result<String, Notice>),
+    /// The chosen model has been applied to the companion during onboarding.
+    SetupApplied(Result<String, Notice>),
     /// The declared models of one connection.
     Models {
         /// The connection the models belong to.

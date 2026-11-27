@@ -155,6 +155,7 @@ pub(super) struct SetupFinishParams {
     pub(super) model_id: Option<String>,
     pub(super) voice_id: Option<String>,
     pub(super) can_finish: bool,
+    pub(super) applying: bool,
 }
 
 pub(super) fn render_setup_finish_button(
@@ -163,7 +164,9 @@ pub(super) fn render_setup_finish_button(
     theme: &Theme,
 ) -> gpui::Div {
     let hub_start = hub.clone();
-    let label = if params.model_id.is_some() {
+    let label = if params.applying {
+        "モデルを割り当て中…"
+    } else if params.model_id.is_some() {
         "このモデルで始める"
     } else {
         "対話を始める"

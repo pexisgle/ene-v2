@@ -1,14 +1,11 @@
 //! Connection CRUD, probing, credential registration, and onboarding setup RPCs.
 
 use super::{
-    CallContext, RPC_TIMEOUT, RpcDispatcher, companion_update,
-    companions::shared_model_assignments, failure, failure_notice, id_request,
+    CallContext, RPC_TIMEOUT, RpcDispatcher, companions::shared_model_assignments, failure,
+    failure_notice, id_request,
 };
 use crate::{host::Host, update::Update};
-use ene_client_core::{
-    connections::build_connection_model_input,
-    domain::{Companion, Connection, ConnectionInput, ModelAssignment},
-};
+use ene_client_core::domain::{Companion, ConnectionInput, ModelAssignment};
 use ene_rpc as w;
 use std::{future::Future, time::Duration};
 
@@ -25,8 +22,6 @@ pub(crate) struct SetupConnection {
 
 /// Parameters for finalizing onboarding setup selection.
 pub(crate) struct SetupSelection {
-    pub(crate) settings_revision: u64,
-    pub(crate) conn: Option<Connection>,
     pub(crate) connection_id: String,
     pub(crate) model_id: String,
     pub(crate) existing_comp: Option<Companion>,
@@ -360,40 +355,38 @@ pub(crate) fn save_setup_connection(rpc: &RpcDispatcher, epoch: u64, req: SetupC
     )
 }
 
-pub(crate) fn complete_setup_selection(rpc: &RpcDispatcher, epoch: u64, selection: SetupSelection) {
-    rpc.call(
+pub(crate) fn complete_setup_selection(
+    rpc: &RpcDispatcher,
+    epoch: u64,
+    selection: SetupSelection,
+) -> bool {
+    rpc.call_with(
         epoch,
-        "初期設定の完了",
+        "モデルの割当",
         |host| async move {
-            if let Some(conn) = selection.conn {
-                let input = build_connection_model_input(&conn, &selection.model_id);
-                let _written = host
-                    .settings
-                    .update_settings(settings_request(selection.settings_revision, vec![input]))
-                    .await?;
-            }
-            let patch = w::AssignmentPatch::from(Some(ModelAssignment {
-                connection_id: selection.connection_id.clone(),
-                model_id: selection.model_id.clone(),
-            }));
+            let assignment = ModelAssignment {
+                connection_id: selection.connection_id,
+                model_id: selection.model_id,
+            };
             if let Some(comp) = selection.existing_comp {
+                let task_is_unassigned = comp
+                    .assignments
+                    .as_ref()
+                    .is_none_or(|assignments| assignments.task.connection_id.is_empty());
+                let patch = w::AssignmentPatch::from(Some(assignment));
                 let response = host
                     .host
                     .update_companion(w::UpdateCompanionRequest {
                         id: comp.id,
                         revision: comp.revision,
                         companion_assignment: Some(patch.clone()).into(),
-                        task_assignment: Some(patch).into(),
+                        task_assignment: task_is_unassigned.then_some(patch).into(),
                         voice_identifier: selection.voice_identifier,
                         ..Default::default()
                     })
                     .await?;
-                Ok(companion_update(response.into_owned()))
+                Ok(response.view().id.to_owned())
             } else {
-                let assignments = shared_model_assignments(ModelAssignment {
-                    connection_id: selection.connection_id,
-                    model_id: selection.model_id,
-                });
                 let response = host
                     .host
                     .create_companion(w::CreateCompanionRequest {
@@ -401,14 +394,14 @@ pub(crate) fn complete_setup_selection(rpc: &RpcDispatcher, epoch: u64, selectio
                         mind: "相手を思いやりながら率直に対話する。".into(),
                         persona: Some("柔らかく親しみやすい口調で会話します。".into()),
                         voice_identifier: selection.voice_identifier,
-                        assignments: Some(assignments).into(),
+                        assignments: Some(shared_model_assignments(assignment)).into(),
                         ..Default::default()
                     })
                     .await?;
-                let created = response.into_owned();
-                Ok(Update::Created(created.id))
+                Ok(response.view().id.to_owned())
             }
         },
-        |update| update,
-    );
+        |id| Update::SetupApplied(Ok(id)),
+        |label, error| Update::SetupApplied(Err(failure_notice(label, error))),
+    )
 }

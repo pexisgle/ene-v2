@@ -1,6 +1,6 @@
 //! Connection presets and first-run quick setup helpers for [`Hub`].
 
-use super::Hub;
+use super::{Hub, SetupStage};
 use crate::rpc::{
     self,
     connections::{SetupConnection, SetupSelection},
@@ -69,7 +69,7 @@ pub(super) fn save_setup_connection(
     let Some(settings) = hub.model.settings() else {
         return false;
     };
-    if hub.rpc.host().is_none() || hub.setup.pending {
+    if hub.setup.stage != SetupStage::Idle {
         return false;
     }
     // Reuse a failed attempt only at the exact catalog endpoint.
@@ -91,9 +91,8 @@ pub(super) fn save_setup_connection(
     ) {
         return false;
     }
-    hub.setup.pending = true;
+    hub.setup.stage = SetupStage::SavingConnection;
     hub.setup.error = None;
-    hub.setup.error_detail = None;
     cx.notify();
     true
 }
@@ -106,21 +105,28 @@ pub(super) fn complete_setup_selection(
     voice_identifier: Option<String>,
     cx: &mut Context<Hub>,
 ) {
-    let Some(settings) = hub.model.settings().cloned() else {
+    let Some(settings) = hub.model.settings() else {
         return;
     };
-    if hub.rpc.host().is_none() {
+    if !matches!(hub.setup.stage, SetupStage::Idle | SetupStage::Choosing(_))
+        || hub
+            .setup
+            .connection_id()
+            .is_some_and(|id| id != connection_id)
+    {
         return;
     }
     let model_id = model_id.trim().to_owned();
     if model_id.is_empty() {
         return;
     }
-    let conn = settings
+    if !settings
         .connections
         .iter()
-        .find(|c| c.id == connection_id)
-        .cloned();
+        .any(|connection| connection.id == connection_id && hub.setup.can_apply(connection))
+    {
+        return;
+    }
     let existing_comp = hub.model.companion().cloned();
     let voice_clean = voice_identifier
         .map(|v| v.trim().to_owned())
@@ -130,22 +136,21 @@ pub(super) fn complete_setup_selection(
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "ene".to_owned());
 
-    hub.setup.pending_connection_id = None;
-
-    rpc::connections::complete_setup_selection(
+    if rpc::connections::complete_setup_selection(
         &hub.rpc,
         hub.model.connections.link_epoch,
         SetupSelection {
-            settings_revision: settings.revision,
-            conn,
-            connection_id,
+            connection_id: connection_id.clone(),
             model_id,
             existing_comp,
             companion_name: name_clean,
             voice_identifier: voice_clean,
         },
-    );
-    cx.notify();
+    ) {
+        hub.setup.stage = SetupStage::Applying(connection_id);
+        hub.setup.error = None;
+        cx.notify();
+    }
 }
 
 pub(super) fn add_voicevox_preset(

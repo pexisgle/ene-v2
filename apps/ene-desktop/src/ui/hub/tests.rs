@@ -142,7 +142,7 @@ fn setup_can_retry_after_a_failed_save_or_disconnect(cx: &mut TestAppContext) {
                 cx,
             );
             let epoch = hub.model.connections.link_epoch;
-            hub.setup.pending = true;
+            hub.setup.stage = SetupStage::SavingConnection;
             hub.apply(
                 Update::Scoped {
                     epoch,
@@ -155,10 +155,10 @@ fn setup_can_retry_after_a_failed_save_or_disconnect(cx: &mut TestAppContext) {
                 },
                 cx,
             );
-            assert!(!hub.setup.pending);
-            assert_eq!(hub.setup.error_detail.as_deref(), Some("fixture timeout"));
+            assert_eq!(hub.setup.stage, SetupStage::Idle);
+            assert_eq!(hub.setup.error.as_ref().unwrap().message, "fixture timeout");
 
-            hub.setup.pending = true;
+            hub.setup.stage = SetupStage::SavingConnection;
             hub.apply(
                 Update::Link(Box::new(Link::Unset {
                     path: "fixture".into(),
@@ -174,9 +174,41 @@ fn setup_can_retry_after_a_failed_save_or_disconnect(cx: &mut TestAppContext) {
                 },
                 cx,
             );
-            assert!(!hub.setup.pending);
+            assert_eq!(hub.setup.stage, SetupStage::Idle);
             assert!(hub.setup.error.is_some());
-            assert!(hub.setup.pending_connection_id.is_none());
+            assert!(hub.setup.connection_id().is_none());
+        });
+    });
+}
+
+#[gpui::test]
+fn failed_model_assignment_keeps_the_chosen_connection(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    cx.update(|cx| {
+        let hub = test_hub(cx, runtime.handle());
+        hub.update(cx, |hub, cx| {
+            let chosen = "chosen-provider";
+            hub.setup.stage = SetupStage::Applying(chosen.into());
+            hub.apply(
+                Update::SetupApplied(Err(Notice {
+                    context: "モデル割当".into(),
+                    message: "fixture conflict".into(),
+                    kind: NoticeKind::Failed,
+                })),
+                cx,
+            );
+            assert_eq!(hub.setup.stage, SetupStage::Choosing(chosen.into()));
+            assert_eq!(
+                hub.setup.error.as_ref().unwrap().message,
+                "fixture conflict"
+            );
+
+            hub.setup.stage = SetupStage::Applying(chosen.into());
+            hub.setup.disconnect();
+            hub.apply(Update::SetupApplied(Ok("retired-result".into())), cx);
+            assert_eq!(hub.setup.stage, SetupStage::Choosing(chosen.into()));
         });
     });
 }

@@ -9,6 +9,7 @@ mod state;
 mod voice_roles;
 mod windows;
 
+pub(crate) use state::SetupStage;
 pub use state::{HubInit, SetupFlowState, WindowState};
 pub use windows::open_pod_window;
 
@@ -146,46 +147,35 @@ impl Hub {
 
     fn apply_ui_update_bookkeeping(&mut self, update: &Update, cx: &mut Context<Self>) {
         match update {
-            Update::Link(link) if !link.is_live() => {
-                self.setup.checking_connections.clear();
-                if std::mem::take(&mut self.setup.pending) {
-                    self.setup.error = Some("接続が切れました。再接続後に保存を確認してください。");
-                }
-            }
+            Update::Link(link) if !link.is_live() => self.setup.disconnect(),
             Update::CredentialRegistered { connection_id } => {
                 cx.emit(HubEvent::CredentialsSaved(connection_id.clone()));
             }
-            Update::Checked {
-                connection_id: id,
-                result,
-                ..
-            } => {
-                self.setup.checking_connections.remove(id);
-                if matches!(result, Ok(true))
-                    && self.model.settings().is_some_and(|s| {
-                        s.connections
-                            .iter()
-                            .any(|c| &c.id == id && c.kind == ConnectionKind::Llm)
-                    })
-                {
-                    self.setup.error = None;
-                    self.setup.error_detail = None;
-                }
+            Update::Checked { connection_id, .. } => {
+                self.setup.checking_connections.remove(connection_id);
             }
-            Update::SetupSaved(result) => {
-                self.setup.pending = false;
-                match result {
-                    Ok(connection_id) => {
-                        self.setup.error = None;
-                        self.setup.error_detail = None;
-                        self.setup.pending_connection_id = Some(connection_id.clone());
-                    }
-                    Err(error) => {
-                        self.setup.error = Some("接続設定を保存できませんでした。");
-                        self.setup.error_detail = Some(error.message.clone());
-                    }
-                }
+            Update::SetupSaved(result) if self.setup.stage == SetupStage::SavingConnection => {
+                self.setup.stage = match result {
+                    Ok(id) => SetupStage::Choosing(id.clone()),
+                    Err(_) => SetupStage::Idle,
+                };
+                self.setup.error = result.as_ref().err().cloned();
                 self.resnapshot();
+            }
+            Update::SetupApplied(result) => {
+                let SetupStage::Applying(id) = &self.setup.stage else {
+                    return;
+                };
+                self.setup.stage = if result.is_ok() {
+                    SetupStage::Idle
+                } else {
+                    SetupStage::Choosing(id.clone())
+                };
+                self.setup.error = result.as_ref().err().cloned();
+                self.resnapshot();
+                if let Ok(id) = result {
+                    self.select_companion(id, cx);
+                }
             }
             Update::Created(id) => {
                 self.resnapshot();
@@ -241,7 +231,7 @@ impl Hub {
     }
 
     fn maybe_auto_assign_default_model(&mut self) {
-        if !self.live() || self.setup.pending || self.setup.pending_connection_id.is_some() {
+        if !self.live() || self.setup.stage != SetupStage::Idle {
             return;
         }
         let Some(patch) = self

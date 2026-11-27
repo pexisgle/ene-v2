@@ -7,6 +7,7 @@ mod menu;
 mod onboarding;
 
 use crate::input::{Draft, SubmitDraft};
+use crate::ui::hub::SetupStage;
 use crate::ui::theme::{resolve_ui_font_family, ui_font_fallbacks};
 use crate::ui::{Hub, PodMode};
 use ene_client_core::domain::TurnStatus;
@@ -120,8 +121,9 @@ impl CompanionPod {
     pub(super) fn needs_connection(&self, cx: &App) -> bool {
         let hub = self.hub.read(cx);
         hub.live()
+            && hub.setup.connection_id().is_none()
             && hub.model.settings().is_some_and(|settings| {
-                hub.setup.pending
+                hub.setup.stage == SetupStage::SavingConnection
                     || hub.setup.error.is_some()
                     || hub
                         .model
@@ -146,7 +148,7 @@ impl CompanionPod {
             .model
             .snapshot()
             .is_none_or(|snap| snap.companions.is_empty());
-        hub.setup.pending_connection_id.is_some() || companions_empty
+        hub.setup.connection_id().is_some() || companions_empty
     }
 
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
@@ -202,7 +204,7 @@ impl CompanionPod {
 
     fn onboarding_size(&self, hub: &Hub, needs_conn: bool) -> Size<Pixels> {
         let base = if needs_conn {
-            if hub.setup.error_detail.is_some() {
+            if hub.setup.error.is_some() {
                 520.
             } else {
                 496.
