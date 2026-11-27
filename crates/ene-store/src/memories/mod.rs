@@ -277,39 +277,36 @@ impl<'a> MemoryRepo<'a> {
         turn_id: &str,
         memories: &[MemoryVersion],
     ) -> Result<()> {
-        let mut connection = self.0.conn();
-        let transaction =
-            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let stamp = now();
-        for version in memories
-            .iter()
-            .filter(|version| !version.id.is_empty())
-            .take(MAX_INJECTED)
-        {
-            transaction
-                .prepare_cached(&format!(
-                    "INSERT OR REPLACE INTO memory_injections \
-                     (companion_id, turn_id, memory_id, created_at, memory_revision) \
-                     SELECT ?1, ?2, m.id, ?4, m.memory_revision FROM memories m \
-                     WHERE {AUTO_VISIBLE} AND m.id = ?3 AND m.memory_revision = ?5"
-                ))?
-                .execute(params![
+        self.0.write_tx(|transaction| {
+            let stamp = now();
+            let mut insert = transaction.prepare_cached(&format!(
+                "INSERT OR REPLACE INTO memory_injections \
+                 (companion_id, turn_id, memory_id, created_at, memory_revision) \
+                 SELECT ?1, ?2, m.id, ?4, m.memory_revision FROM memories m \
+                 WHERE {AUTO_VISIBLE} AND m.id = ?3 AND m.memory_revision = ?5"
+            ))?;
+            for version in memories
+                .iter()
+                .filter(|version| !version.id.is_empty())
+                .take(MAX_INJECTED)
+            {
+                insert.execute(params![
                     companion,
                     turn_id,
                     version.id,
                     stamp,
                     version.revision
                 ])?;
-        }
-        transaction
-            .prepare_cached(
-                "DELETE FROM memory_injections WHERE companion_id = ?1 AND turn_id NOT IN (\
-                 SELECT turn_id FROM memory_injections WHERE companion_id = ?1 \
-                 GROUP BY turn_id ORDER BY CAST(turn_id AS INTEGER) DESC LIMIT ?2)",
-            )?
-            .execute(params![companion, KEEP_INJECTED_TURNS as i64])?;
-        transaction.commit()?;
-        Ok(())
+            }
+            transaction
+                .prepare_cached(
+                    "DELETE FROM memory_injections WHERE companion_id = ?1 AND turn_id NOT IN (\
+                     SELECT turn_id FROM memory_injections WHERE companion_id = ?1 \
+                     GROUP BY turn_id ORDER BY CAST(turn_id AS INTEGER) DESC LIMIT ?2)",
+                )?
+                .execute(params![companion, KEEP_INJECTED_TURNS as i64])?;
+            Ok(())
+        })
     }
 
     pub fn injected_between(

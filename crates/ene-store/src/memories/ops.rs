@@ -18,88 +18,86 @@ impl<'a> MemoryRepo<'a> {
             ));
         }
         let stamp = now();
-        let mut connection = self.0.conn();
-        let transaction =
-            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let existing: Option<(String, Vec<u8>, String)> = transaction
-            .prepare_cached(
-                "SELECT companion_id, request_hash, result FROM mind_operations \
-                 WHERE operation_id = ?1",
-            )?
-            .query_row([&update.operation_id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .optional()?;
-        if let Some((companion_id, hash, stored)) = existing {
-            if companion_id == update.companion_id && hash == update.request_hash {
-                return json(&stored);
-            }
-            return Err(StoreError::Conflict(
-                "operation_id was already used with different content".into(),
-            ));
-        }
-        let mut inserted = Vec::new();
-        let mut updated = Vec::new();
-        let mut forgotten = Vec::new();
-        for memory in &update.memories {
-            let Some((id, revision)) = mutation_target(memory)? else {
-                inserted.push(insert_mind_memory(
-                    &transaction,
-                    update,
-                    memory,
-                    None,
-                    memory.importance.unwrap_or(3).min(10),
-                    &stamp,
-                )?);
-                continue;
-            };
-            let current = editable_memory(&transaction, &update.companion_id, id, revision)?;
-            if memory.forget {
-                forget_memory_tx(&transaction, &current)?;
-                forgotten.push(current.id);
-            } else {
-                inserted.extend(correct_memory_tx(
-                    &transaction,
-                    update,
-                    memory,
-                    &current,
-                    &stamp,
-                )?);
-                updated.push(current.id);
-            }
-        }
-        let mut state_revision = None;
-        if let Some(state) = &update.state {
-            if !update_mind_state(&transaction, &update.companion_id, state, &stamp)? {
+        self.0.write_tx(|transaction| {
+            let existing: Option<(String, Vec<u8>, String)> = transaction
+                .prepare_cached(
+                    "SELECT companion_id, request_hash, result FROM mind_operations \
+                     WHERE operation_id = ?1",
+                )?
+                .query_row([&update.operation_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()?;
+            if let Some((companion_id, hash, stored)) = existing {
+                if companion_id == update.companion_id && hash == update.request_hash {
+                    return json(&stored);
+                }
                 return Err(StoreError::Conflict(
-                    "mind changed since it was read".into(),
+                    "operation_id was already used with different content".into(),
                 ));
             }
-            state_revision = Some(state.expected_revision + 1);
-        }
-        let result = value!({
-            "memories": inserted,
-            "updated": updated,
-            "forgotten": forgotten,
-            "state": update.state.is_some(),
-            "state_revision": state_revision,
-            "operation_id": update.operation_id,
-        });
-        transaction
-            .prepare_cached(
-                "INSERT INTO mind_operations \
-                 (operation_id, companion_id, request_hash, result, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-            )?
-            .execute(params![
-                update.operation_id,
-                update.companion_id,
-                update.request_hash,
-                to_json(&result)?,
-                stamp
-            ])?;
-        transaction.commit()?;
-        Ok(result)
+            let mut inserted = Vec::new();
+            let mut updated = Vec::new();
+            let mut forgotten = Vec::new();
+            for memory in &update.memories {
+                let Some((id, revision)) = mutation_target(memory)? else {
+                    inserted.push(insert_mind_memory(
+                        transaction,
+                        update,
+                        memory,
+                        None,
+                        memory.importance.unwrap_or(3).min(10),
+                        &stamp,
+                    )?);
+                    continue;
+                };
+                let current = editable_memory(transaction, &update.companion_id, id, revision)?;
+                if memory.forget {
+                    forget_memory_tx(transaction, &current)?;
+                    forgotten.push(current.id);
+                } else {
+                    inserted.extend(correct_memory_tx(
+                        transaction,
+                        update,
+                        memory,
+                        &current,
+                        &stamp,
+                    )?);
+                    updated.push(current.id);
+                }
+            }
+            let mut state_revision = None;
+            if let Some(state) = &update.state {
+                if !update_mind_state(transaction, &update.companion_id, state, &stamp)? {
+                    return Err(StoreError::Conflict(
+                        "mind changed since it was read".into(),
+                    ));
+                }
+                state_revision = Some(state.expected_revision + 1);
+            }
+            let result = value!({
+                "memories": inserted,
+                "updated": updated,
+                "forgotten": forgotten,
+                "state": update.state.is_some(),
+                "state_revision": state_revision,
+                "operation_id": update.operation_id,
+            });
+            transaction
+                .prepare_cached(
+                    "INSERT INTO mind_operations \
+                     (operation_id, companion_id, request_hash, result, created_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )?
+                .execute(params![
+                    update.operation_id,
+                    update.companion_id,
+                    update.request_hash,
+                    to_json(&result)?,
+                    stamp
+                ])?;
+            Ok(result)
+        })
     }
 
     pub fn embedding_revisions(

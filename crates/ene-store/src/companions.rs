@@ -3,7 +3,7 @@
 use crate::row::{FromRow, row_fields};
 use crate::{Store, error::Result, require, to_json, util::now};
 use ene_mind::{Companion, Profile};
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, params};
 
 const INITIAL_ENE_SEED: &str = "default_companion_ene";
 const PREVIOUS_ENE_PERSONA: &str = "一人称は「私」、ユーザーのことは「マスター」（別の呼び方を望まれたらそちらに従う）と呼ぶ。明るい敬語（〜ですよ、〜ですね、〜じゃないですか！）をベースに、親しみやすい軽口や茶目っ気を少し混ぜてテンポよく1〜3文で話す。相手を傷つける煽りや邪魔はしない。作業報告では最初に成否を簡潔に伝え、詳しい説明を求められたときは手順や根拠を丁寧に並べる。";
@@ -61,43 +61,40 @@ impl<'a> CompanionRepo<'a> {
     /// Recording a one-time marker in `bootstrap_state` ensures that user edits
     /// or deletions are preserved across restarts instead of resurrecting `ene`.
     pub fn seed_initial_companion(&self) -> Result<bool> {
-        let mut connection = self.0.conn();
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let stamp = now();
-        let applied: Option<String> = transaction
-            .query_row(
-                "SELECT applied_at FROM bootstrap_state WHERE key = ?1",
-                [INITIAL_ENE_SEED],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let first_instruction_update = transaction.execute(
-            "INSERT OR IGNORE INTO bootstrap_state (key, applied_at) VALUES (?1, ?2)",
-            params!["default_ene_instructions_v2", stamp],
-        )? != 0;
-        if let Some(seed_stamp) = applied {
-            if first_instruction_update {
-                refresh_initial_ene_instructions(&transaction, &seed_stamp, &stamp)?;
+        self.0.write_tx(|transaction| {
+            let stamp = now();
+            let applied: Option<String> = transaction
+                .query_row(
+                    "SELECT applied_at FROM bootstrap_state WHERE key = ?1",
+                    [INITIAL_ENE_SEED],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let first_instruction_update = transaction.execute(
+                "INSERT OR IGNORE INTO bootstrap_state (key, applied_at) VALUES (?1, ?2)",
+                params!["default_ene_instructions_v2", stamp],
+            )? != 0;
+            if let Some(seed_stamp) = applied {
+                if first_instruction_update {
+                    refresh_initial_ene_instructions(transaction, &seed_stamp, &stamp)?;
+                }
+                return Ok(false);
             }
-            transaction.commit()?;
-            return Ok(false);
-        }
-        transaction.execute(
-            "INSERT INTO bootstrap_state (key, applied_at) VALUES (?1, ?2)",
-            params![INITIAL_ENE_SEED, stamp],
-        )?;
-        let count: i64 =
-            transaction.query_row("SELECT COUNT(*) FROM companions", [], |row| row.get(0))?;
-        let inserted = if count == 0 {
-            let companion = ene_mind::default_ene_companion(&stamp);
-            companion.validate()?;
-            insert_companion_with(&transaction, &companion)?;
-            true
-        } else {
-            false
-        };
-        transaction.commit()?;
-        Ok(inserted)
+            transaction.execute(
+                "INSERT INTO bootstrap_state (key, applied_at) VALUES (?1, ?2)",
+                params![INITIAL_ENE_SEED, stamp],
+            )?;
+            let count: i64 =
+                transaction.query_row("SELECT COUNT(*) FROM companions", [], |row| row.get(0))?;
+            if count == 0 {
+                let companion = ene_mind::default_ene_companion(&stamp);
+                companion.validate()?;
+                insert_companion_with(transaction, &companion)?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })
     }
 
     /// Saves an edited companion with an optimistic revision check.
