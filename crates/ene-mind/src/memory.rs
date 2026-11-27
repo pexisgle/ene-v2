@@ -285,11 +285,11 @@ impl StateUpdate {
     }
 }
 
-/// The mind state half of a `mind_update`, already serialised.
+/// A typed mind state update at the revision it was based on.
 #[derive(Clone, Debug)]
 pub struct MindStateChange {
     pub expected_revision: u64,
-    pub state: String,
+    pub state: State,
 }
 
 /// Everything a `mind_update` commits atomically.

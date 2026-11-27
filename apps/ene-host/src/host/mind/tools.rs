@@ -279,8 +279,7 @@ fn update(
             patch.apply(&mut next);
             Some(MindStateChange {
                 expected_revision: current.state_revision,
-                state: serde_json::to_string(&next)
-                    .map_err(|error| HostError::Internal(format!("companion state: {error}")))?,
+                state: next,
             })
         }
         None => None,

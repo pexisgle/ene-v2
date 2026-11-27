@@ -1,5 +1,5 @@
 //! Consolidation domain types and citation guard.
-use crate::{MemoryVersion, State, StateUpdate};
+use crate::{MemoryVersion, MindStateChange, State, StateUpdate};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -26,12 +26,14 @@ pub struct MemoryContext {
 #[derive(Clone, Debug)]
 pub struct Batch {
     pub companion_id: String,
+    pub companion_created_at: String,
     /// The newest message the summary this pass runs beside stands for: the id
     /// every memory and edge of the window is stamped with.
     pub through: u64,
     pub context: Vec<MemoryContext>,
     /// Memory versions the host actually injected into those turns.
     pub injected: Vec<MemoryVersion>,
+    pub reflection: Option<MindStateChange>,
 }
 
 /// The result of one committed pass.

@@ -1,7 +1,7 @@
 use super::{
-    Memory, MemoryRecord, MemoryRepo, MindUpdate, NewMemory, PendingEmbedding, Result, VISIBLE,
-    add_edge, check_content, check_importance, insert_row, json, now, read_memory_tx, supersede_tx,
-    to_json,
+    Memory, MemoryRecord, MemoryRepo, MindStateChange, MindUpdate, NewMemory, PendingEmbedding,
+    Result, VISIBLE, add_edge, check_content, check_importance, insert_row, json, now,
+    read_memory_tx, supersede_tx, to_json,
 };
 use crate::{Store, StoreError};
 use ene_mind::{RecallCandidate, dimensions_of_space, in_scope};
@@ -90,18 +90,7 @@ impl<'a> MemoryRepo<'a> {
         }
         let mut state_revision = None;
         if let Some(state) = &update.state {
-            let rows = transaction
-                .prepare_cached(
-                    "UPDATE companions SET state = ?2, state_revision = state_revision + 1, \
-                     updated_at = ?3 WHERE id = ?1 AND state_revision = ?4",
-                )?
-                .execute(params![
-                    update.companion_id,
-                    state.state,
-                    stamp,
-                    state.expected_revision
-                ])?;
-            if rows == 0 {
+            if !update_mind_state(&transaction, &update.companion_id, state, &stamp)? {
                 return Err(StoreError::Conflict(
                     "mind changed since it was read".into(),
                 ));
@@ -233,6 +222,27 @@ impl<'a> MemoryRepo<'a> {
             ])?;
         Ok(inserted != 0)
     }
+}
+
+pub(super) fn update_mind_state(
+    transaction: &rusqlite::Transaction<'_>,
+    companion: &str,
+    state: &MindStateChange,
+    stamp: &str,
+) -> Result<bool> {
+    state.state.validate()?;
+    Ok(transaction
+        .prepare_cached(
+            "UPDATE companions SET state = ?2, state_revision = state_revision + 1, \
+         updated_at = ?3 WHERE id = ?1 AND state_revision = ?4",
+        )?
+        .execute(params![
+            companion,
+            to_json(&state.state)?,
+            stamp,
+            state.expected_revision
+        ])?
+        != 0)
 }
 
 pub(super) fn memory_edges(

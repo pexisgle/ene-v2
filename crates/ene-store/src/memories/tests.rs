@@ -358,7 +358,7 @@ fn state_only(store: &Store, operation: &str, version: i64) -> Result<Value> {
         Vec::new(),
         Some(MindStateChange {
             expected_revision: 1,
-            state: serde_json::to_string(&ene_mind::State::default()).unwrap(),
+            state: ene_mind::State::default(),
         }),
     )
 }
@@ -554,9 +554,11 @@ fn a_shared_pinned_memory_is_injected_for_every_companion() {
 fn batch(through: u64, context: Vec<MemoryContext>) -> Batch {
     Batch {
         companion_id: "ene".into(),
+        companion_created_at: "now".into(),
         through,
         context,
         injected: Vec::new(),
+        reflection: None,
     }
 }
 
@@ -591,6 +593,7 @@ fn consolidation_context_retrieves_instead_of_ranking_importance() {
 #[test]
 fn consolidation_does_not_resurrect_a_forgotten_memory() {
     let store = store();
+    companion_row(&store);
     let repo = store.memory_repo();
     let memory = repo.insert_memory(&new_memory("coffee", 5)).unwrap();
     repo.control_memory(&memory.id, MemoryActionKind::Forget, "ene")
@@ -635,6 +638,7 @@ fn consolidation_does_not_resurrect_a_forgotten_memory() {
 #[test]
 fn stale_consolidation_cannot_recreate_forgotten_text_or_use_revoked_context() {
     let store = store();
+    companion_row(&store);
     let repo = store.memory_repo();
     let forgotten = repo
         .insert_memory(&new_memory("coffee every morning", 5))
@@ -759,6 +763,7 @@ fn a_failed_citation_never_advances_the_memory_access_time() {
 #[test]
 fn a_memory_unshared_after_injection_cannot_be_cited_by_consolidation() {
     let store = store();
+    companion_row(&store);
     let repo = store.memory_repo();
     let mut input = new_memory("shared note", 5);
     input.scope = SHARED_SCOPE.into();
@@ -820,5 +825,59 @@ fn a_memory_unshared_after_injection_cannot_be_cited_by_consolidation() {
     assert_eq!(
         repo.memory_edges(&memory.id).unwrap(),
         [("estimated_cited_in".into(), "7".into())]
+    );
+}
+
+#[test]
+fn failed_reflection_and_retired_owner_leave_no_consolidated_fact() {
+    let store = store();
+    companion_row(&store);
+    let repo = store.memory_repo();
+    let mut proposal = batch(7, Vec::new());
+    proposal.reflection = Some(MindStateChange {
+        expected_revision: 1,
+        state: ene_mind::State::default(),
+    });
+    let facts = [Fact {
+        content: "a new fact extracted before the failure".into(),
+        scope: Some(SHARED_SCOPE.into()),
+        ..Fact::default()
+    }];
+    store
+        .conn()
+        .execute_batch(
+            "CREATE TEMP TRIGGER fail_reflection BEFORE UPDATE OF state ON companions BEGIN
+         SELECT RAISE(ABORT, 'reflection fixture failure'); END;",
+        )
+        .unwrap();
+    assert!(matches!(
+        repo.consolidate(&proposal, &facts),
+        Err(StoreError::Storage(_))
+    ));
+    assert_eq!(
+        repo.list_memories("any-companion", None, 9).unwrap().0,
+        [] as [Memory; 0]
+    );
+    store
+        .conn()
+        .execute_batch("DROP TRIGGER fail_reflection")
+        .unwrap();
+    proposal.reflection.as_mut().unwrap().state.emotion.json = Value::Bool(true);
+    assert!(matches!(
+        repo.consolidate(&proposal, &facts),
+        Err(StoreError::Invalid(_))
+    ));
+    assert_eq!(
+        repo.list_memories("any-companion", None, 9).unwrap().0,
+        [] as [Memory; 0]
+    );
+    assert!(store.companion_repo().delete_companion("ene").unwrap());
+    assert!(matches!(
+        repo.consolidate(&proposal, &facts),
+        Err(StoreError::Conflict(_))
+    ));
+    assert_eq!(
+        repo.list_memories("any-companion", None, 9).unwrap().0,
+        [] as [Memory; 0]
     );
 }

@@ -28,6 +28,20 @@ pub struct State {
     pub concerns: JsonDoc,
 }
 
+impl State {
+    /// Validates the schema-tagged documents before persisting a mind change.
+    pub fn validate(&self) -> Result<()> {
+        [
+            &self.emotion,
+            &self.relationships,
+            &self.tendencies,
+            &self.concerns,
+        ]
+        .into_iter()
+        .try_for_each(JsonDoc::validate)
+    }
+}
+
 impl Default for State {
     fn default() -> Self {
         Self {

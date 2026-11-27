@@ -12,10 +12,7 @@ use super::{
     embedding::{self, Embeddings},
 };
 use crate::host::{
-    db::{
-        Result, Store,
-        memories::{MindStateChange, MindUpdate, StateUpdate},
-    },
+    db::{Result, Store},
     error::HostError,
     model::{self, Credentials},
 };
@@ -154,18 +151,26 @@ pub(crate) async fn pass(
         extraction_prompt(&turns, &context, &injected, &companion.state),
     )
     .await?;
+    let reflection = extraction.state.map(|patch| {
+        let mut state = companion.state;
+        patch.apply(&mut state);
+        ene_mind::MindStateChange {
+            expected_revision: companion.state_revision,
+            state,
+        }
+    });
     let batch = Batch {
         companion_id: companion_id.to_owned(),
+        companion_created_at: companion.created_at,
         through,
         context,
         injected,
+        reflection,
     };
-    let commit = services
+    Ok(services
         .store
         .memory_repo()
-        .consolidate(&batch, &extraction.facts)?;
-    reflect(services, &companion, through, extraction.state)?;
-    Ok(commit)
+        .consolidate(&batch, &extraction.facts)?)
 }
 
 /// Resolves the companion's `Consolidation` assignment (or its documented
@@ -182,55 +187,6 @@ fn target(services: &Services, companion: &Companion) -> Result<DynModel<Complet
         Role::Consolidation,
         &services.providers,
     )
-}
-
-/// Applies the emotion and growth the interval left through the same path
-/// `mind_update` uses: one `mind_operations` receipt per window, and the mind
-/// document it read as the revision the write has to match.
-fn reflect(
-    services: &Services,
-    companion: &Companion,
-    through: u64,
-    patch: Option<StateUpdate>,
-) -> Result<()> {
-    let Some(patch) = patch else {
-        return Ok(());
-    };
-    let mut next = companion.state.clone();
-    patch.apply(&mut next);
-    let state = serde_json::to_string(&next)
-        .map_err(|error| HostError::Internal(format!("companion state: {error}")))?;
-    let operation_id = format!("consolidate:{}:{through}", companion.id);
-    let request = serde_json::json!({
-        "operation_id": &operation_id,
-        "memories": [],
-        "state": &patch,
-    });
-    let request_hash = services.store.memory_repo().mind_hash(&request);
-    match services.store.memory_repo().apply_mind_update(&MindUpdate {
-        operation_id,
-        companion_id: companion.id.clone(),
-        request_hash,
-        memories: Vec::new(),
-        state: Some(MindStateChange {
-            expected_revision: companion.state_revision,
-            state,
-        }),
-    }) {
-        Ok(_) => Ok(()),
-        // A mind edit that landed while the pass ran wins: the reflection of
-        // this window is discarded, and the rest of the pass still counts
-        // (docs/design/mind.md).
-        Err(ene_store::StoreError::Conflict(why)) => {
-            tracing::debug!(
-                companion = %companion.id,
-                %why,
-                "the mind moved while consolidation ran; its reflection was discarded"
-            );
-            Ok(())
-        }
-        Err(error) => Err(error.into()),
-    }
 }
 
 /// The provider must submit typed facts. Text and fenced JSON are not accepted.
@@ -296,9 +252,11 @@ mod tests {
     fn batch(through: u64, context: Vec<MemoryContext>) -> Batch {
         Batch {
             companion_id: "ene".into(),
+            companion_created_at: companion().created_at,
             through,
             context,
             injected: Vec::new(),
+            reflection: None,
         }
     }
 
@@ -372,6 +330,10 @@ mod tests {
     #[test]
     fn a_stale_memory_revision_aborts_the_whole_commit() {
         let store = store();
+        store
+            .companion_repo()
+            .insert_companion(&companion())
+            .unwrap();
         let memory = store
             .memory_repo()
             .insert_memory(&new_memory("m1", "tea"))
@@ -412,6 +374,10 @@ mod tests {
     #[test]
     fn a_pass_merges_cites_and_writes_the_edges() {
         let store = store();
+        store
+            .companion_repo()
+            .insert_companion(&companion())
+            .unwrap();
         let memory = store
             .memory_repo()
             .insert_memory(&new_memory("m2", "coffee"))
@@ -752,18 +718,26 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_ne!(moved.state_revision, stale.state_revision);
-        reflect(
-            &services(&setup),
-            &stale,
-            9,
-            Some(StateUpdate {
-                emotion: Some(serde_json::json!({ "mood": "warm" })),
-                relationships: None,
-                tendencies: None,
-                concerns: None,
-            }),
-        )
-        .unwrap();
+        let mut proposal = batch(9, Vec::new());
+        let mut state = stale.state;
+        state.emotion.json = serde_json::json!({ "mood": "warm" });
+        proposal.reflection = Some(ene_mind::MindStateChange {
+            expected_revision: stale.state_revision,
+            state,
+        });
+        let fact = Fact {
+            content: "the extraction can still commit".into(),
+            ..Fact::default()
+        };
+        assert_eq!(
+            setup
+                .store
+                .memory_repo()
+                .consolidate(&proposal, &[fact])
+                .unwrap()
+                .inserted,
+            1
+        );
         let after = setup
             .store
             .companion_repo()

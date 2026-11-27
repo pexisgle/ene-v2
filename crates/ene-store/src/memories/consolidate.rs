@@ -1,6 +1,7 @@
 //! Consolidation: gathering the context to consolidate, then committing the
 //! extracted facts and their citations in one transaction.
 
+use super::ops::update_mind_state;
 use super::{
     Batch, COLUMNS, Commit, Fact, Memory, MemoryContext, MemoryRecord, MemoryRepo, Result,
     SHARED_SCOPE, VISIBLE, add_edge, cite_visible_memory, insert_row, now, truncate,
@@ -89,9 +90,13 @@ impl<'a> MemoryRepo<'a> {
             inserted: 0,
             updated: 0,
         };
-        let mut connection = self.0.conn();
-        let transaction =
-            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        self.0.write_tx(|transaction| {
+        let owner = transaction.prepare_cached(
+            "SELECT 1 FROM companions WHERE id = ?1 AND created_at = ?2",
+        )?.exists(params![batch.companion_id, batch.companion_created_at])?;
+        if !owner {
+            return Err(StoreError::Conflict("the consolidation companion was retired".into()));
+        }
         let mut current = transaction.prepare_cached(&format!(
             "SELECT EXISTS (SELECT 1 FROM memories m WHERE {VISIBLE} \
              AND m.id = ?2 AND m.memory_revision = ?3)"
@@ -114,12 +119,15 @@ impl<'a> MemoryRepo<'a> {
             }
         }
         drop(current);
-        record_consolidation_citations(&transaction, batch, &accepted, &stamp)?;
+        record_consolidation_citations(transaction, batch, &accepted, &stamp)?;
         for fact in facts {
-            apply_consolidated_fact(&transaction, batch, fact, &expected, &stamp, &mut commit)?;
+            apply_consolidated_fact(transaction, batch, fact, &expected, &stamp, &mut commit)?;
         }
-        transaction.commit()?;
+        if let Some(state) = &batch.reflection && !update_mind_state(transaction, &batch.companion_id, state, &stamp)? {
+            tracing::debug!(companion = %batch.companion_id, "consolidation kept the newer mind state");
+        }
         Ok(commit)
+        })
     }
 }
 
