@@ -7,7 +7,7 @@ use crate::domain::{
     Activation, ApprovalRequest, Companion, CompanionTemplate, Connection, LlmProvider, MindView,
     ModelAssignment, ModelInfo, PluginInfo, PolicyText, Settings, Snapshot,
 };
-use crate::update::{CaptureMode, ReplyTarget};
+use crate::update::{CaptureMode, ReplyOrder, ReplyTarget};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
@@ -153,8 +153,7 @@ pub struct ConnectionViewState {
     pub link: Link,
     /// Bumped on every new link, so stale replies can be dropped.
     pub link_epoch: u64,
-    /// Latest replacement reply per view resource on this link.
-    pub(crate) applied_seq: HashMap<ReplyTarget, u64>,
+    pub(crate) replies: HashMap<ReplyTarget, ReplyOrder>,
     pub(crate) order: crate::notifications::HostOrder,
     /// The provider catalog, once fetched.
     pub providers: Option<Vec<LlmProvider>>,
@@ -175,7 +174,7 @@ impl ConnectionViewState {
                 reason: String::new(),
             },
             link_epoch: 1,
-            applied_seq: HashMap::new(),
+            replies: HashMap::new(),
             order: Default::default(),
             providers: None,
             models: BTreeMap::new(),

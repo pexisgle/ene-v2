@@ -5,8 +5,8 @@ use crate::{
         PolicyText, Settings, Snapshot, TurnEvent, TurnStatus, WorkStatus,
     },
     reducer::is_user_facing_message,
-    state::{Link, Model, NoticeKind, Sending},
-    update::Update,
+    state::{Link, Model, Notice, NoticeKind, Sending},
+    update::{ReadTarget, Update},
 };
 use ene_domain::CompanionId;
 use std::time::Duration;
@@ -733,6 +733,30 @@ fn scoped_model_lists_replace_only_the_same_connections_older_reply() {
     assert_eq!(model.connections.models["b"][0].id, "first");
     model.apply(scoped(4, "a", "newer"));
     assert_eq!(model.connections.models["a"][0].id, "newer");
+
+    let failed = |seq, connection: &str| Update::Scoped {
+        epoch,
+        seq,
+        inner: Box::new(Update::Notice {
+            read: Some(ReadTarget::Models(connection.into())),
+            notice: Notice {
+                context: connection.into(),
+                message: "transient failure".into(),
+                kind: NoticeKind::Failed,
+            },
+        }),
+    };
+    model.apply(failed(2, "a"));
+    assert_eq!(model.notices.len(), 0);
+    model.apply(failed(2, "b"));
+    assert_eq!(model.notices[0].context, "b");
+    model.apply(failed(6, "a"));
+    assert_eq!(model.notices[1].context, "a");
+    model.apply(failed(5, "a"));
+    model.apply(failed(6, "a"));
+    assert_eq!(model.notices.len(), 2);
+    model.apply(scoped(5, "a", "still-useful"));
+    assert_eq!(model.connections.models["a"][0].id, "still-useful");
 }
 
 #[test]

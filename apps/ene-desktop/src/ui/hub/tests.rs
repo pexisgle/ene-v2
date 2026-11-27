@@ -17,7 +17,10 @@ fn only_revision_conflicts_request_a_refresh_for_notice_and_check_results() {
             kind,
         };
         for update in [
-            Update::Notice(notice.clone()),
+            Update::Notice {
+                notice: notice.clone(),
+                read: None,
+            },
             Update::Checked {
                 connection_id: "fixture".into(),
                 ticket: "fixture-check".into(),

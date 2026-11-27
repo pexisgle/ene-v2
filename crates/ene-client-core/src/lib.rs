@@ -29,4 +29,4 @@ pub use state::{
     AudioState, Capture, Chat, CompanionState, ConnectionViewState, Device, Devices, Effects, Link,
     LiveTranscription, Model, Notice, NoticeKind, PerceptionState, Sending, SpeechReport, Unsent,
 };
-pub use update::{CaptureMode, Command, Update};
+pub use update::{CaptureMode, Command, ReadTarget, Update};

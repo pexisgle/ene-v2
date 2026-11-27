@@ -1,8 +1,9 @@
 //! Companion CRUD, model assignment, mind profile, template, and preview RPCs.
 
-use super::{RpcDispatcher, companion_update, id_request};
+use super::{RpcDispatcher, companion_update, id_request, read_failure};
 use crate::update::Update;
 use ene_client_core::{
+    ReadTarget,
     domain::{
         Companion, CompanionProfilePatch, CompanionTemplate, MindProfile, ModelAssignment,
         ModelRole, NewCompanionSpec,
@@ -134,9 +135,23 @@ pub(crate) fn delete_companion(rpc: &RpcDispatcher, epoch: u64, companion_id: St
     );
 }
 
-load! {
-    load_companion_templates: host.list_companion_templates("テンプレート一覧の取得") =>
-        |templates| Update::CompanionTemplates(templates.items.into_iter().map(Into::into).collect());
+pub(crate) fn load_companion_templates(rpc: &RpcDispatcher, epoch: u64) {
+    rpc.call_with(
+        epoch,
+        "テンプレート一覧の取得",
+        request!(host.list_companion_templates(w::Empty::default())),
+        |templates| {
+            Update::CompanionTemplates(
+                templates
+                    .into_owned()
+                    .items
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            )
+        },
+        read_failure(ReadTarget::Templates),
+    );
 }
 
 pub(crate) fn export_companion(rpc: &RpcDispatcher, epoch: u64, companion_id: String) {
@@ -213,14 +228,16 @@ pub(crate) fn preview_companion(
 
 pub(crate) fn load_mind(rpc: &RpcDispatcher, epoch: u64, companion_id: String) {
     let target = companion_id.clone();
-    rpc.call_owned(
+    let failure = read_failure(ReadTarget::Mind(companion_id.clone()));
+    rpc.call_with(
         epoch,
         "詳細プロフィールの取得",
         request!(host.get_mind(id_request(companion_id))),
         move |view| Update::MindLoaded {
             companion_id: target,
-            view: Box::new(view.into()),
+            view: Box::new(view.into_owned().into()),
         },
+        failure,
     );
 }
 

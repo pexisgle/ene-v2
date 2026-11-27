@@ -1,16 +1,20 @@
 //! Approval resolution, policy rules/texts, and host plugin management RPCs.
 
-use super::{RpcDispatcher, failure};
+use super::{RpcDispatcher, failure, read_failure};
 use crate::update::Update;
-use ene_client_core::domain::{ApprovalDecision, PolicyRulesUpdate, PolicyTextsUpdate};
+use ene_client_core::{
+    ReadTarget,
+    domain::{ApprovalDecision, PolicyRulesUpdate, PolicyTextsUpdate},
+};
 use ene_rpc as w;
 
 pub(crate) fn load_plugins(rpc: &RpcDispatcher, epoch: u64) {
-    rpc.call(
+    rpc.call_with(
         epoch,
         "プラグイン一覧の取得",
         request!(settings.list_plugins(w::Empty::default())),
         |response| plugins_update(response.view()),
+        read_failure(ReadTarget::Plugins),
     );
 }
 

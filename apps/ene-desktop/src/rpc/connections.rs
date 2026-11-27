@@ -2,10 +2,14 @@
 
 use super::{
     RpcDispatcher, companions::shared_model_assignments, failure, failure_notice, id_request,
+    read_failure,
 };
 use crate::{host::Host, update::Update};
 use connectrpc::client::CallOptions;
-use ene_client_core::domain::{Companion, ConnectionInput, ModelAssignment};
+use ene_client_core::{
+    ReadTarget,
+    domain::{Companion, ConnectionInput, ModelAssignment},
+};
 use ene_rpc as w;
 use std::{future::Future, time::Duration};
 
@@ -85,11 +89,12 @@ where
 }
 
 pub(crate) fn load_providers(rpc: &RpcDispatcher, epoch: u64) {
-    rpc.call(
+    rpc.call_with(
         epoch,
         "プロバイダ一覧の取得",
         request!(settings.list_providers(w::Empty::default())),
         |providers| Update::Providers(providers.view().items.iter().map(Into::into).collect()),
+        read_failure(ReadTarget::Providers),
     );
 }
 
@@ -99,6 +104,7 @@ pub(crate) fn load_models(rpc: &RpcDispatcher, epoch: u64, connection_ids: Vec<S
     };
     for id in connection_ids {
         let request_id = id.clone();
+        let failure = read_failure(ReadTarget::Models(id.clone()));
         let host = host.clone();
         rpc.dispatch(
             epoch,

@@ -22,12 +22,15 @@ impl Model {
             if epoch != self.connections.link_epoch {
                 return None;
             }
-            if let Some(target) = inner.reply_target() {
-                let applied = self.connections.applied_seq.entry(target).or_default();
-                if seq <= *applied {
-                    return None;
-                }
-                *applied = seq;
+            if let Some(target) = inner.reply_target()
+                && !self
+                    .connections
+                    .replies
+                    .entry(target)
+                    .or_default()
+                    .accept(seq, matches!(inner.as_ref(), Update::Notice { .. }))
+            {
+                return None;
             }
             update = *inner;
         }
@@ -69,7 +72,7 @@ impl Model {
                 self.connections.models.insert(connection_id, models);
             }
             Update::Resnapshot | Update::Checked { result: Ok(_), .. } => effects.snapshot = true,
-            Update::Notice(notice)
+            Update::Notice { notice, .. }
             | Update::Checked {
                 result: Err(notice),
                 ..
@@ -88,7 +91,7 @@ fn apply_link(model: &mut Model, link: Link, effects: &mut Effects) {
     let appeared = is_live && !was_live;
     if was_live != is_live {
         model.connections.link_epoch = model.connections.link_epoch.saturating_add(1);
-        model.connections.applied_seq.clear();
+        model.connections.replies.clear();
     }
     if was_live && !is_live {
         model.connections.order = Default::default();

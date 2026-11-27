@@ -29,7 +29,12 @@ pub enum Update {
     /// A local device changed state.
     Devices(Box<Devices>),
     /// A failure, conflict or refusal to show to the operator.
-    Notice(Notice),
+    Notice {
+        /// The operation being reported and why it failed.
+        notice: Notice,
+        /// The failed read's resource, if a newer reply can make the notice obsolete.
+        read: Option<ReadTarget>,
+    },
     /// A message was accepted into the conversation.
     Accepted {
         /// Client-side key that makes a retry idempotent.
@@ -204,34 +209,72 @@ pub enum Update {
     PluginsChanged,
 }
 
+/// A resource whose read failure can become obsolete after a successful reply.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ReadTarget {
+    /// Available providers.
+    Providers,
+    /// Available models for the given connection.
+    Models(String),
+    /// Mind profile for the given companion.
+    Mind(String),
+    /// Installed plugins.
+    Plugins,
+    /// Available companion templates.
+    Templates,
+}
+
 /// A newer response can replace an older one for the same view resource.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ReplyTarget {
-    Providers,
-    Models(String),
+    Read(ReadTarget),
     Check(String),
     Credential(String),
     History(String),
-    Mind(String),
-    Plugins,
-    Templates,
     Preview,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ReplyOrder {
+    value: u64,
+    notice: u64,
+}
+
+impl ReplyOrder {
+    pub(crate) fn accept(&mut self, sequence: u64, is_notice: bool) -> bool {
+        if sequence <= self.value || (is_notice && sequence <= self.notice) {
+            return false;
+        }
+        // A failed read can supersede a diagnostic without replacing the view data.
+        if is_notice {
+            self.notice = sequence;
+        } else {
+            self.value = sequence;
+        }
+        true
+    }
 }
 
 impl Update {
     /// Reports a local action that could not be completed.
     pub fn failed(context: &str, message: impl Into<String>) -> Self {
-        Self::Notice(Notice {
-            context: context.into(),
-            message: message.into(),
-            kind: NoticeKind::Failed,
-        })
+        Self::Notice {
+            notice: Notice {
+                context: context.into(),
+                message: message.into(),
+                kind: NoticeKind::Failed,
+            },
+            read: None,
+        }
     }
 
     pub(crate) fn reply_target(&self) -> Option<ReplyTarget> {
         Some(match self {
-            Self::Providers(_) => ReplyTarget::Providers,
-            Self::Models { connection_id, .. } => ReplyTarget::Models(connection_id.clone()),
+            Self::Notice { read, .. } => ReplyTarget::Read(read.clone()?),
+            Self::Providers(_) => ReplyTarget::Read(ReadTarget::Providers),
+            Self::Models { connection_id, .. } => {
+                ReplyTarget::Read(ReadTarget::Models(connection_id.clone()))
+            }
             Self::Checked { connection_id, .. } => ReplyTarget::Check(connection_id.clone()),
             Self::CredentialRegistered { connection_id } => {
                 ReplyTarget::Credential(connection_id.clone())
@@ -239,9 +282,11 @@ impl Update {
             Self::History { companion_id, .. } | Self::HistoryFailed { companion_id, .. } => {
                 ReplyTarget::History(companion_id.clone())
             }
-            Self::MindLoaded { companion_id, .. } => ReplyTarget::Mind(companion_id.clone()),
-            Self::Plugins(_) => ReplyTarget::Plugins,
-            Self::CompanionTemplates(_) => ReplyTarget::Templates,
+            Self::MindLoaded { companion_id, .. } => {
+                ReplyTarget::Read(ReadTarget::Mind(companion_id.clone()))
+            }
+            Self::Plugins(_) => ReplyTarget::Read(ReadTarget::Plugins),
+            Self::CompanionTemplates(_) => ReplyTarget::Read(ReadTarget::Templates),
             Self::CompanionPreview { .. } => ReplyTarget::Preview,
             _ => return None,
         })

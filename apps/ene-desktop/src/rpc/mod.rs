@@ -7,15 +7,6 @@ macro_rules! request {
     };
 }
 
-// Empty unary reads differ only by method, label, and update mapping.
-macro_rules! load {
-    ($($name:ident: $service:ident.$method:ident($context:literal) => $done:expr;)+) => {
-        $(pub(crate) fn $name(rpc: &$crate::rpc::RpcDispatcher, epoch: u64) {
-            rpc.call_owned(epoch, $context, request!($service.$method(::ene_rpc::Empty::default())), $done);
-        })+
-    };
-}
-
 pub mod chat;
 pub mod companions;
 pub mod connections;
@@ -29,6 +20,7 @@ use crate::{
 use buffa::view::{MessageView, OwnedView};
 use connectrpc::{ConnectError, client::UnaryResponse};
 use ene_client_core::{
+    ReadTarget,
     domain::HostNotification,
     state::{Notice, NoticeKind},
 };
@@ -156,7 +148,19 @@ impl RpcDispatcher {
 }
 
 pub(crate) fn failure(context: &'static str, error: &ConnectError) -> Update {
-    Update::Notice(failure_notice(context, error))
+    Update::Notice {
+        notice: failure_notice(context, error),
+        read: None,
+    }
+}
+
+fn read_failure(
+    target: ReadTarget,
+) -> impl FnOnce(&'static str, &ConnectError) -> Update + Send + 'static {
+    move |context, error| Update::Notice {
+        read: Some(target),
+        notice: failure_notice(context, error),
+    }
 }
 
 fn failure_notice(context: &'static str, error: &ConnectError) -> Notice {
@@ -184,5 +188,61 @@ fn id_request(id: String) -> w::Id {
     w::Id {
         id,
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ene_client_core::{Model, domain::ModelInfo};
+    use std::time::Duration;
+    use tokio::sync::{mpsc, oneshot};
+
+    #[tokio::test]
+    async fn late_model_list_failure_does_not_show_after_newer_success() {
+        let (updates, mut received) = mpsc::unbounded_channel();
+        let dispatcher = RpcDispatcher::new(
+            Connection::default(),
+            tokio::runtime::Handle::current(),
+            updates,
+        );
+        let mut model = Model::new("fixture".into());
+        let epoch = model.connections.link_epoch;
+        let (release, blocked) = oneshot::channel();
+        let target = ReadTarget::Models("llm".into());
+
+        dispatcher.dispatch(
+            epoch,
+            "モデル一覧の取得",
+            async move {
+                blocked.await.unwrap();
+                Err::<(), _>(ConnectError::internal("earlier request failed"))
+            },
+            |()| unreachable!(),
+            read_failure(target.clone()),
+        );
+        dispatcher.dispatch(
+            epoch,
+            "モデル一覧の取得",
+            async { Ok(()) },
+            |()| Update::Models {
+                connection_id: "llm".into(),
+                models: vec![ModelInfo {
+                    id: "current".into(),
+                    name: "Current".into(),
+                }],
+            },
+            read_failure(target),
+        );
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            model.apply(received.recv().await.unwrap());
+            assert_eq!(model.connections.models["llm"][0].id, "current");
+            release.send(()).unwrap();
+            model.apply(received.recv().await.unwrap());
+            assert_eq!(model.notices.len(), 0);
+        })
+        .await
+        .unwrap();
     }
 }

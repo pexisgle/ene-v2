@@ -119,7 +119,7 @@ impl ApplyFlags {
         Self {
             conflicted: matches!(
                 update,
-                Update::Notice(notice)
+                Update::Notice { notice, .. }
                     | Update::Checked {
                         result: Err(notice),
                         ..

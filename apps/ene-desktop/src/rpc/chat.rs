@@ -5,9 +5,13 @@ use crate::update::Update;
 use ene_client_core::domain::Message;
 use ene_rpc as w;
 
-load! {
-    resnapshot: host.get_snapshot("ホスト状態の取得") =>
-        |snapshot| Update::Notification(Box::new(snapshot.into()));
+pub(crate) fn resnapshot(rpc: &RpcDispatcher, epoch: u64) {
+    rpc.call_owned(
+        epoch,
+        "ホスト状態の取得",
+        request!(host.get_snapshot(w::Empty::default())),
+        |snapshot| Update::Notification(Box::new(snapshot.into())),
+    );
 }
 
 pub(crate) fn load_history(rpc: &RpcDispatcher, epoch: u64, companion_id: String) -> bool {
