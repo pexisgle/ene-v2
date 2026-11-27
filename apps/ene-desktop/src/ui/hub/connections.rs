@@ -146,41 +146,19 @@ impl Hub {
 
     pub(crate) fn register_secret(
         &mut self,
-        connection_id: &str,
-        secret: &str,
-        revision: Option<u64>,
+        connection_id: String,
+        secret: String,
+        revision: u64,
         cx: &mut Context<Self>,
     ) {
-        let secret = secret.trim();
         if secret.is_empty() || !self.rpc.has_host() {
             return;
         }
         rpc::connections::register_secret(
             &self.rpc,
             self.model.connections.link_epoch,
-            connection_id.to_owned(),
-            secret.to_owned(),
-            revision,
-        );
-        cx.notify();
-    }
-
-    pub(crate) fn register_secret_for_connections(
-        &mut self,
-        connection_ids: Vec<String>,
-        secret: &str,
-        revision: u64,
-        cx: &mut Context<Self>,
-    ) {
-        let secret = secret.trim();
-        if secret.is_empty() || connection_ids.is_empty() {
-            return;
-        }
-        rpc::connections::register_secret_for_connections(
-            &self.rpc,
-            self.model.connections.link_epoch,
-            connection_ids,
-            secret.to_owned(),
+            connection_id,
+            secret,
             revision,
         );
         cx.notify();

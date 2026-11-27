@@ -27,10 +27,7 @@ use crate::{
     update::Update,
 };
 use buffa::view::{MessageView, OwnedView};
-use connectrpc::{
-    ConnectError,
-    client::{CallOptions, UnaryResponse},
-};
+use connectrpc::{ConnectError, client::UnaryResponse};
 use ene_client_core::{
     domain::HostNotification,
     state::{Notice, NoticeKind},
@@ -38,17 +35,7 @@ use ene_client_core::{
 use ene_rpc as w;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::{sync::mpsc::UnboundedSender, time::Instant};
-
-fn remaining_options(deadline: Instant) -> Result<CallOptions, ConnectError> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Err(ConnectError::deadline_exceeded(
-            "the host did not answer in time",
-        ));
-    }
-    Ok(CallOptions::default().with_timeout(remaining))
-}
+use tokio::sync::mpsc::UnboundedSender;
 
 /// Dispatches asynchronous Connect RPC calls on the session Tokio runtime and routes scoped updates back to the UI.
 #[derive(Debug)]

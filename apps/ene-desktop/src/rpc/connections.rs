@@ -1,15 +1,13 @@
 //! Connection CRUD, probing, credential registration, and onboarding setup RPCs.
 
 use super::{
-    RPC_TIMEOUT, RpcDispatcher, companions::shared_model_assignments, failure, failure_notice,
-    id_request, remaining_options,
+    RpcDispatcher, companions::shared_model_assignments, failure, failure_notice, id_request,
 };
 use crate::{host::Host, update::Update};
 use connectrpc::client::CallOptions;
 use ene_client_core::domain::{Companion, ConnectionInput, ModelAssignment};
 use ene_rpc as w;
 use std::{future::Future, time::Duration};
-use tokio::time::Instant;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(65);
 
@@ -244,40 +242,14 @@ pub(crate) fn register_secret(
     epoch: u64,
     connection_id: String,
     secret: String,
-    revision: Option<u64>,
+    revision: u64,
 ) {
-    let request = credential_request(connection_id.clone(), secret, revision);
+    let request = credential_request(connection_id.clone(), secret, Some(revision));
     rpc.call_owned(
         epoch,
         "資格情報の登録",
         request!(settings.register_credentials(request)),
         move |_| Update::CredentialRegistered { connection_id },
-    );
-}
-
-pub(crate) fn register_secret_for_connections(
-    rpc: &RpcDispatcher,
-    epoch: u64,
-    connection_ids: Vec<String>,
-    secret: String,
-    revision: u64,
-) {
-    rpc.call(
-        epoch,
-        "複数接続への資格情報登録",
-        |host| async move {
-            let deadline = Instant::now() + RPC_TIMEOUT;
-            for id in connection_ids {
-                host.settings
-                    .register_credentials_with_options(
-                        credential_request(id, secret.clone(), Some(revision)),
-                        remaining_options(deadline)?,
-                    )
-                    .await?;
-            }
-            Ok::<_, connectrpc::ConnectError>(())
-        },
-        |_| Update::Resnapshot,
     );
 }
 

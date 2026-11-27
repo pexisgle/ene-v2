@@ -165,7 +165,6 @@ pub(super) fn render_credentials_strip(
         !revealed,
         theme,
     );
-    let secret_val = secret_d.read(cx).text().trim().to_owned();
     let has_cred = conn.credential_state.is_configured();
     let cred_label = match conn.credential_state {
         CredentialState::Registered => "登録済み",
@@ -173,7 +172,6 @@ pub(super) fn render_credentials_strip(
         CredentialState::Absent => "未登録",
         CredentialState::RegistrationRequired => "再登録が必要",
     };
-    let sakura_ids = collect_sakura_conn_ids(conn, pane.hub.read(cx));
 
     div()
         .rounded(crate::ui::theme::radius::medium())
@@ -187,11 +185,10 @@ pub(super) fn render_credentials_strip(
             CredSecretInput {
                 id: &id,
                 secret_d,
-                secret_val,
                 revealed,
                 live,
             },
-            (&sakura_ids, &pane.hub),
+            &pane.hub,
             theme,
             cx,
         ))

@@ -211,79 +211,51 @@ pub(super) fn render_cred_strip_header(
 pub(crate) struct CredSecretInput<'a> {
     pub(super) id: &'a str,
     pub(super) secret_d: Entity<Draft>,
-    pub(super) secret_val: String,
     pub(super) revealed: bool,
     pub(super) live: bool,
 }
 
 pub(super) fn render_cred_secret_row(
     input: CredSecretInput<'_>,
-    (sakura_ids, hub): (&[String], &Entity<Hub>),
+    hub: &Entity<Hub>,
     theme: &Theme,
     cx: &Context<ConnectionsPane>,
 ) -> gpui::Div {
     let CredSecretInput {
         id,
         secret_d,
-        secret_val,
         revealed,
         live,
     } = input;
-    let hub_reg = hub.clone();
-    let reg_id = id.to_owned();
-    let secret_save = secret_val.clone();
-    let ids_all = sakura_ids.to_vec();
-    let hub_all = hub.clone();
     let revision = hub
         .read(cx)
         .model
         .settings()
         .map(|settings| settings.revision);
+    let enabled = live && revision.is_some() && !secret_d.read(cx).text().trim().is_empty();
+    let hub = hub.clone();
+    let id = id.to_owned();
 
     secret_row(
         format!("conn-eye-{id}"),
-        id.to_owned(),
-        secret_d,
+        id.clone(),
+        secret_d.clone(),
         revealed,
         theme,
         cx,
     )
-    .when(ids_all.len() > 1, |this| {
-        let sec_all = secret_val.clone();
-        this.child(pill_button(
-            SharedString::from(format!("conn-save-sakura-all-{id}")),
-            "全さくら接続に登録",
-            Tone::Soft
-                .icon(Icon::Check)
-                .enabled(live && !sec_all.is_empty()),
-            theme,
-            move |_, cx| {
-                hub_all.update(cx, |hub, cx| {
-                    if let Some(revision) = revision {
-                        hub.register_secret_for_connections(
-                            ids_all.clone(),
-                            &sec_all,
-                            revision,
-                            cx,
-                        );
-                    }
-                });
-            },
-        ))
-    })
     .child(pill_button(
         SharedString::from(format!("conn-save-key-{id}")),
         "キーを登録",
-        Tone::Primary
-            .icon(Icon::Check)
-            .enabled(live && !secret_save.is_empty()),
+        Tone::Primary.icon(Icon::Check).enabled(enabled),
         theme,
         move |_, cx| {
-            hub_reg.update(cx, |hub, cx| {
-                if let Some(revision) = revision {
-                    hub.register_secret(&reg_id, &secret_save, Some(revision), cx);
-                }
-            });
+            if let Some(revision) = revision {
+                let secret = secret_d.read(cx).text().trim().to_owned();
+                hub.update(cx, |hub, cx| {
+                    hub.register_secret(id.clone(), secret, revision, cx)
+                });
+            }
         },
     ))
 }
@@ -321,17 +293,4 @@ pub(super) fn compute_connection_badge(
         None => ("未確認", pending),
     };
     RowBadge { label, dot, bg, fg }
-}
-
-pub(super) fn collect_sakura_conn_ids(conn: &Connection, hub: &Hub) -> Vec<String> {
-    if !conn.is_sakura() {
-        return Vec::new();
-    }
-    hub.model.settings().map_or_default(|s| {
-        s.connections
-            .iter()
-            .filter(|c| c.is_sakura())
-            .map(|c| c.id.clone())
-            .collect()
-    })
 }
