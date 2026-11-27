@@ -29,15 +29,7 @@ pub(super) fn assign_search_connection(
     if inputs.is_empty() {
         return;
     }
-    rpc::connections::update_settings(
-        &hub.rpc,
-        hub.model.connections.link_epoch,
-        "Web 検索接続の割当",
-        settings.revision,
-        inputs,
-        None,
-    );
-    cx.notify();
+    hub.update_connections("Web 検索接続の割当", settings.revision, inputs, None, cx);
 }
 
 pub(super) fn add_search_preset(
@@ -172,16 +164,13 @@ pub(super) fn add_voicevox_preset(
         .find(|c| c.id == "voicevox")
         .map_or(0, |c| c.revision);
     let input = build_voicevox_preset_input(existing_rev, speaker, speed);
-    hub.setup.checking_connections.insert("voicevox".into());
-    rpc::connections::update_settings(
-        &hub.rpc,
-        hub.model.connections.link_epoch,
+    hub.update_connections(
         "VOICEVOX接続の追加",
         settings.revision,
         vec![input],
         Some("voicevox".into()),
+        cx,
     );
-    cx.notify();
 }
 
 pub(super) fn add_openai_tts_preset(

@@ -5,7 +5,7 @@ use crate::domain::{
     ApprovalRequest, CompanionTemplate, ConnectionCheck, HostNotification, LlmProvider, Message,
     MindView, ModelInfo, PluginInfo, PolicyRule, PolicyText,
 };
-use crate::state::{Devices, Link};
+use crate::state::{Devices, Link, Notice};
 
 /// Microphone capture mode (`F07`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -116,8 +116,10 @@ pub enum Update {
     Checked {
         /// The connection that was probed.
         connection_id: String,
+        /// Local ownership of the pending probe, echoed by its completion.
+        ticket: String,
         /// The probe result.
-        check: ConnectionCheck,
+        result: Result<ConnectionCheck, Notice>,
     },
     /// The host's pending approvals, as refetched.
     Approvals(Vec<ApprovalRequest>),

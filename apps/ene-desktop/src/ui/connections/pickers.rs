@@ -35,7 +35,7 @@ pub(super) fn render_resource_picker(
     } = *input;
     let labels = PickerLabels::for_resource(resource);
     let hub = pane.hub.read(cx);
-    let checking = hub.setup.checking_connections.contains(id);
+    let checking = hub.setup.checking_connections.contains_key(id);
     let choices = resource.choices(&hub.model, id);
     let selected = resource.selected(
         list_d.read(cx).text(),

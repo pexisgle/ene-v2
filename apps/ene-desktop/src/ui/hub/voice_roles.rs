@@ -122,15 +122,7 @@ pub(super) fn assign_stt_model(
     if inputs.is_empty() {
         return;
     }
-    rpc::connections::update_settings(
-        &hub.rpc,
-        hub.model.connections.link_epoch,
-        "音声認識モデルの割当",
-        settings.revision,
-        inputs,
-        None,
-    );
-    cx.notify();
+    hub.update_connections("音声認識モデルの割当", settings.revision, inputs, None, cx);
 }
 
 pub(super) fn assign_tts_voice(
@@ -158,19 +150,14 @@ pub(super) fn assign_tts_voice(
             && (!conn.enabled || hub.model.voice_choices_for_connection(&conn.id).len() <= 1))
             .then(|| conn.id.clone())
     });
-    if let Some(check_id) = &probe_voicevox_id {
-        hub.setup.checking_connections.insert(check_id.clone());
-    }
-    rpc::connections::update_settings(
-        &hub.rpc,
-        hub.model.connections.link_epoch,
+    hub.update_connections(
         "音声合成（TTS）の割当",
         settings.revision,
         inputs,
         probe_voicevox_id,
+        cx,
     );
     sync_companion_voice(hub, target_voice_clean);
-    cx.notify();
 }
 
 fn sync_companion_voice(hub: &Hub, voice: Option<String>) {

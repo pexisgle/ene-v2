@@ -24,17 +24,36 @@ pub mod policy;
 use crate::{host::Host, session::Connection, update::Update};
 use buffa::view::{MessageView, OwnedView};
 use connectrpc::{ConnectError, client::UnaryResponse};
-use ene_client_core::domain::HostNotification;
+use ene_client_core::{
+    domain::HostNotification,
+    state::{Notice, NoticeKind},
+};
 use ene_rpc as w;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
 /// How long one RPC may take before the UI gives up on it.
 ///
 /// Generous next to a loopback round trip: this exists to stop a wedged host
 /// from hanging the window, not to police normal latency.
-const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const RPC_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy)]
+struct CallContext {
+    label: &'static str,
+    timeout: Duration,
+}
+
+impl From<&'static str> for CallContext {
+    fn from(label: &'static str) -> Self {
+        Self {
+            label,
+            timeout: RPC_TIMEOUT,
+        }
+    }
+}
 
 /// Dispatches asynchronous Connect RPC calls on the session Tokio runtime and routes scoped updates back to the UI.
 #[derive(Debug)]
@@ -61,10 +80,6 @@ impl RpcDispatcher {
 
     pub(crate) fn host(&self) -> Option<Host> {
         self.connection.read().clone()
-    }
-
-    pub(crate) fn updates(&self) -> UnboundedSender<Update> {
-        self.updates.clone()
     }
 
     /// Runs a unary request with the default failure update.
@@ -97,10 +112,10 @@ impl RpcDispatcher {
         });
     }
 
-    pub(crate) fn call_with<T, F>(
+    fn call_with<T, F>(
         &self,
         epoch: u64,
-        context: &'static str,
+        context: impl Into<CallContext>,
         run: impl FnOnce(Host) -> F,
         done: impl FnOnce(T) -> Update + Send + 'static,
         error: impl FnOnce(&'static str, &ConnectError) -> Update + Send + 'static,
@@ -112,14 +127,14 @@ impl RpcDispatcher {
         let Some(host) = self.host() else {
             return false;
         };
-        self.dispatch(epoch, context, run(host), done, error);
+        self.dispatch(epoch, context.into(), run(host), done, error);
         true
     }
 
     fn dispatch<T>(
         &self,
         epoch: u64,
-        context: &'static str,
+        context: CallContext,
         future: impl Future<Output = Result<T, ConnectError>> + Send + 'static,
         done: impl FnOnce(T) -> Update + Send + 'static,
         error: impl FnOnce(&'static str, &ConnectError) -> Update + Send + 'static,
@@ -129,11 +144,11 @@ impl RpcDispatcher {
         let updates = self.updates.clone();
         let seq = self.request_seq.fetch_add(1, Ordering::Relaxed);
         self.runtime.spawn(async move {
-            let inner = match tokio::time::timeout(RPC_TIMEOUT, future).await {
+            let inner = match tokio::time::timeout(context.timeout, future).await {
                 Ok(Ok(value)) => done(value),
-                Ok(Err(failed)) => error(context, &failed),
+                Ok(Err(failed)) => error(context.label, &failed),
                 Err(_) => error(
-                    context,
+                    context.label,
                     &ConnectError::deadline_exceeded("the host did not answer in time"),
                 ),
             };
@@ -169,14 +184,28 @@ impl RpcDispatcher {
 }
 
 pub(crate) fn failure(context: &'static str, error: &ConnectError) -> Update {
-    use connectrpc::ErrorCode;
     let message = error.to_string();
+    match failure_kind(error) {
+        NoticeKind::Conflict => Update::Conflict { context, message },
+        NoticeKind::Denied => Update::Denied { context, message },
+        NoticeKind::Failed => Update::Failed { context, message },
+    }
+}
+
+fn failure_notice(context: &'static str, error: &ConnectError) -> Notice {
+    Notice {
+        context: context.into(),
+        message: error.to_string(),
+        kind: failure_kind(error),
+    }
+}
+
+fn failure_kind(error: &ConnectError) -> NoticeKind {
+    use connectrpc::ErrorCode;
     match error.code {
-        ErrorCode::Aborted => Update::Conflict { context, message },
-        ErrorCode::Unauthenticated | ErrorCode::PermissionDenied => {
-            Update::Denied { context, message }
-        }
-        _ => Update::Failed { context, message },
+        ErrorCode::Aborted => NoticeKind::Conflict,
+        ErrorCode::Unauthenticated | ErrorCode::PermissionDenied => NoticeKind::Denied,
+        _ => NoticeKind::Failed,
     }
 }
 

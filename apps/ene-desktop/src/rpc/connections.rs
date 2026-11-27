@@ -1,16 +1,18 @@
 //! Connection CRUD, probing, credential registration, and onboarding setup RPCs.
 
 use super::{
-    RpcDispatcher, companion_update, companions::shared_model_assignments, failure, id_request,
-    settings_update,
+    CallContext, RPC_TIMEOUT, RpcDispatcher, companion_update,
+    companions::shared_model_assignments, failure, failure_notice, id_request, settings_update,
 };
 use crate::{host::Host, update::Update};
 use ene_client_core::{
     connections::build_connection_model_input,
-    domain::{Companion, Connection, ConnectionInput, ModelAssignment},
+    domain::{Companion, Connection, ConnectionCheck, ConnectionInput, ModelAssignment},
 };
 use ene_rpc as w;
-use tokio::sync::mpsc::UnboundedSender;
+use std::{future::Future, time::Duration};
+
+const PROBE_TIMEOUT: Duration = Duration::from_secs(65);
 
 /// Parameters for quick-connecting and verifying an LLM provider during onboarding.
 pub(crate) struct QuickConnectRequest {
@@ -32,35 +34,53 @@ pub(crate) struct SetupSelection {
     pub(crate) voice_identifier: Option<String>,
 }
 
-async fn run_connection_probe(host: Host, connection_id: String, revision: u64) -> Update {
-    match host
-        .settings
-        .check_connection(check_request(connection_id.clone(), revision))
-        .await
-    {
-        Ok(resp) => Update::Checked {
-            connection_id,
-            check: resp
-                .into_owned()
-                .check
-                .into_option()
-                .unwrap_or_default()
-                .into(),
-        },
-        Err(err) => failure("接続確認", &err),
-    }
-}
-
-fn spawn_connection_probe(
+async fn run_connection_probe(
     host: Host,
     connection_id: String,
     revision: u64,
-    updates: UnboundedSender<Update>,
-) {
-    tokio::spawn(async move {
-        let update = run_connection_probe(host, connection_id, revision).await;
-        crate::session::notify_ui(&updates, update);
-    });
+    ticket: String,
+) -> Result<ConnectionCheck, connectrpc::ConnectError> {
+    Ok(host
+        .settings
+        .check_connection(check_request(connection_id, revision, ticket))
+        .await?
+        .into_owned()
+        .check
+        .into_option()
+        .unwrap_or_default()
+        .into())
+}
+
+fn dispatch_probe<F>(
+    rpc: &RpcDispatcher,
+    epoch: u64,
+    connection_id: String,
+    context: CallContext,
+    run: impl FnOnce(Host, String) -> F,
+) -> Option<String>
+where
+    F: Future<Output = Result<ConnectionCheck, connectrpc::ConnectError>> + Send + 'static,
+{
+    let failed_id = connection_id.clone();
+    let ticket = uuid::Uuid::new_v4().to_string();
+    let success_ticket = ticket.clone();
+    let failed_ticket = ticket.clone();
+    rpc.call_with(
+        epoch,
+        context,
+        |host| run(host, ticket.clone()),
+        move |check| Update::Checked {
+            connection_id,
+            ticket: success_ticket,
+            result: Ok(check),
+        },
+        move |label, error| Update::Checked {
+            connection_id: failed_id,
+            ticket: failed_ticket,
+            result: Err(failure_notice(label, error)),
+        },
+    )
+    .then_some(ticket)
 }
 
 load! {
@@ -77,7 +97,7 @@ pub(crate) fn load_models(rpc: &RpcDispatcher, epoch: u64, connection_ids: Vec<S
         let host = host.clone();
         rpc.dispatch(
             epoch,
-            "モデル一覧の取得",
+            "モデル一覧の取得".into(),
             async move {
                 host.settings
                     .list_models(w::ModelsRequest {
@@ -102,21 +122,39 @@ pub(crate) fn update_settings(
     expected_revision: u64,
     inputs: Vec<ConnectionInput>,
     probe: Option<String>,
-) {
+) -> Option<String> {
     let request = settings_request(expected_revision, inputs);
-    let updates = rpc.updates();
-    rpc.call_owned(
+    if let Some(id) = probe {
+        let named = id.clone();
+        return dispatch_probe(
+            rpc,
+            epoch,
+            id,
+            CallContext {
+                label: context,
+                timeout: RPC_TIMEOUT + PROBE_TIMEOUT,
+            },
+            move |host, ticket| async move {
+                let save =
+                    tokio::time::timeout(RPC_TIMEOUT, host.settings.update_settings(request))
+                        .await
+                        .map_err(|_| {
+                            connectrpc::ConnectError::deadline_exceeded(
+                                "the settings save timed out",
+                            )
+                        })??;
+                run_connection_probe(host, named, save.view().revision, ticket).await
+            },
+        );
+    }
+    rpc.call_with(
         epoch,
         context,
-        |host| async move {
-            let response = host.settings.update_settings(request).await?;
-            if let Some(id) = probe {
-                spawn_connection_probe(host, id, response.view().revision, updates);
-            }
-            Ok(response)
-        },
-        settings_update,
+        request!(settings.update_settings(request)),
+        |response| settings_update(response.into_owned()),
+        failure,
     );
+    None
 }
 
 fn settings_request(revision: u64, inputs: Vec<ConnectionInput>) -> w::UpdateSettingsRequest {
@@ -136,10 +174,10 @@ fn credential_request(id: String, secret: String, revision: Option<u64>) -> w::C
     }
 }
 
-fn check_request(id: String, revision: u64) -> w::CheckRequest {
+fn check_request(id: String, revision: u64, request_key: String) -> w::CheckRequest {
     w::CheckRequest {
         id,
-        request_key: uuid::Uuid::new_v4().to_string(),
+        request_key,
         expected_settings_revision: Some(revision),
         ..Default::default()
     }
@@ -163,10 +201,18 @@ pub(crate) fn probe_connection(
     epoch: u64,
     connection_id: String,
     revision: u64,
-) {
-    rpc.call_update(epoch, |host| {
-        run_connection_probe(host, connection_id, revision)
-    });
+) -> Option<String> {
+    let named = connection_id.clone();
+    dispatch_probe(
+        rpc,
+        epoch,
+        connection_id,
+        CallContext {
+            label: "接続確認",
+            timeout: PROBE_TIMEOUT,
+        },
+        |host, ticket| run_connection_probe(host, named, revision, ticket),
+    )
 }
 
 pub(crate) fn register_secret(
@@ -243,7 +289,11 @@ pub(crate) fn quick_connect_llm(rpc: &RpcDispatcher, epoch: u64, req: QuickConne
             }
             let probe = host
                 .settings
-                .check_connection(check_request(req.id.clone(), revision))
+                .check_connection(check_request(
+                    req.id.clone(),
+                    revision,
+                    uuid::Uuid::new_v4().to_string(),
+                ))
                 .await?;
             let check = &probe.view().check;
             Ok(Update::SetupFinished {

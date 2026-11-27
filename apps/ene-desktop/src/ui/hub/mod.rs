@@ -114,6 +114,15 @@ impl Hub {
         let Some(update) = self.model.accept_update(update) else {
             return;
         };
+        if let Update::Checked {
+            connection_id,
+            ticket,
+            ..
+        } = &update
+            && self.setup.checking_connections.get(connection_id) != Some(ticket)
+        {
+            return;
+        }
         let flags = self.pre_apply_hub_state(&update, cx);
         let had_companion = self.model.companion_id().is_some();
         let had_approvals = self.model.approvals().len();
@@ -124,19 +133,11 @@ impl Hub {
     fn pre_apply_hub_state(&mut self, update: &Update, cx: &mut Context<Self>) -> ApplyFlags {
         self.apply_ui_update_bookkeeping(update, cx);
         if let Update::Checked {
-            connection_id: _,
-            check,
+            result: Ok(check), ..
         } = update
             && check.healthy
         {
             self.load_models(cx);
-        }
-        if let Update::Failed { context, .. }
-        | Update::Conflict { context, .. }
-        | Update::Denied { context, .. } = update
-            && *context == "接続確認"
-        {
-            self.setup.checking_connections.clear();
         }
         if let Update::SendFailed { reason, .. } = update {
             tracing::warn!(reason = %reason, "the message was not accepted");
@@ -146,15 +147,17 @@ impl Hub {
 
     fn apply_ui_update_bookkeeping(&mut self, update: &Update, cx: &mut Context<Self>) {
         match update {
+            Update::Link(link) if !link.is_live() => self.setup.checking_connections.clear(),
             Update::CredentialRegistered { connection_id } => {
                 cx.emit(HubEvent::CredentialsSaved(connection_id.clone()));
             }
             Update::Checked {
                 connection_id: id,
-                check,
+                result,
+                ..
             } => {
                 self.setup.checking_connections.remove(id);
-                if check.healthy
+                if result.as_ref().is_ok_and(|check| check.healthy)
                     && self.model.settings().is_some_and(|s| {
                         s.connections
                             .iter()

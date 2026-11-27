@@ -69,10 +69,14 @@ impl Model {
             }
             Update::Checked {
                 connection_id,
-                check,
-            } => {
-                self.connections.checks.insert(connection_id, check);
-            }
+                result,
+                ..
+            } => match result {
+                Ok(check) => {
+                    self.connections.checks.insert(connection_id, check);
+                }
+                Err(notice) => self.notice(notice.kind, notice.context, notice.message),
+            },
             Update::Plugins(plugins) => self.connections.plugins = plugins,
             other => apply_domain_update(self, other, &mut effects),
         }

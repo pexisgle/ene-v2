@@ -30,7 +30,7 @@ pub(super) fn collect_setup_choices(pod: &CompanionPod, cx: &App) -> SetupChoice
     let selected_model_label = find_option_label(&model_options, selected_model.as_deref());
     let checking_models = target_conn_id
         .as_deref()
-        .is_some_and(|cid| hub.setup.checking_connections.contains(cid));
+        .is_some_and(|cid| hub.setup.checking_connections.contains_key(cid));
 
     let voicevox_conn = hub.model.settings().and_then(|settings| {
         settings
@@ -42,8 +42,8 @@ pub(super) fn collect_setup_choices(pod: &CompanionPod, cx: &App) -> SetupChoice
     let voicevox_enabled = voicevox_conn.is_some_and(|c| c.enabled);
     let voicevox_checking = voicevox_conn_id
         .as_deref()
-        .is_some_and(|cid| hub.setup.checking_connections.contains(cid))
-        || hub.setup.checking_connections.contains("voicevox");
+        .is_some_and(|cid| hub.setup.checking_connections.contains_key(cid))
+        || hub.setup.checking_connections.contains_key("voicevox");
     let voice_options = build_voice_options(hub, voicevox_conn_id.as_deref());
     let selected_voice =
         resolve_selected_option(pod.setup_voice_speaker_id.as_deref(), &voice_options);

@@ -1,32 +1,40 @@
 use super::*;
 use crate::ui::connections::ConnectionsPane;
+use ene_client_core::{
+    domain::ConnectionCheck,
+    state::{Link, Notice, NoticeKind},
+};
 use gpui::{AppContext as _, TestAppContext};
 use tokio::sync::mpsc::unbounded_channel;
+
+fn test_hub(cx: &mut App, runtime: &tokio::runtime::Handle) -> gpui::Entity<Hub> {
+    let (commands, _sent) = unbounded_channel();
+    let (updates_tx, updates) = unbounded_channel();
+    cx.new(|cx| {
+        Hub::new(
+            cx,
+            HubInit {
+                options: Options::default(),
+                connection: Default::default(),
+                commands,
+                updates_tx,
+                updates,
+                tray: None,
+                tray_rx: None,
+                runtime: runtime.clone(),
+                discovery: "fixture".into(),
+            },
+        )
+    })
+}
 
 #[gpui::test]
 fn accepted_credential_replies_clear_each_hidden_draft(cx: &mut TestAppContext) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    let (commands, _sent) = unbounded_channel();
-    let (updates_tx, updates) = unbounded_channel();
     let (hub, drafts) = cx.update(|cx| {
-        let hub = cx.new(|cx| {
-            Hub::new(
-                cx,
-                HubInit {
-                    options: Options::default(),
-                    connection: Default::default(),
-                    commands,
-                    updates_tx,
-                    updates,
-                    tray: None,
-                    tray_rx: None,
-                    runtime: runtime.handle().clone(),
-                    discovery: "fixture".into(),
-                },
-            )
-        });
+        let hub = test_hub(cx, runtime.handle());
         let pane = cx.new(|cx| ConnectionsPane::new(hub.clone(), cx));
         let theme = hub.read(cx).theme();
         let drafts = pane.update(cx, |pane, cx| {
@@ -59,5 +67,70 @@ fn accepted_credential_replies_clear_each_hidden_draft(cx: &mut TestAppContext) 
         assert_eq!(a.read(cx).text(), "");
         assert_eq!(b.read(cx).text(), "");
         assert_eq!(stale.read(cx).text(), "edited");
+    });
+}
+
+#[gpui::test]
+fn a_probe_settles_only_its_own_pending_check(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    cx.update(|cx| {
+        let hub = test_hub(cx, runtime.handle());
+        hub.update(cx, |hub, cx| {
+            hub.apply(
+                Update::Link(Box::new(Link::Live {
+                    version: "1".into(),
+                })),
+                cx,
+            );
+            let epoch = hub.model.connections.link_epoch;
+            hub.setup
+                .checking_connections
+                .extend([("a".into(), "current".into()), ("b".into(), "other".into())]);
+            let reply = |seq, id: &str, ticket: &str, result| Update::Scoped {
+                epoch,
+                seq,
+                inner: Box::new(Update::Checked {
+                    connection_id: id.into(),
+                    ticket: ticket.into(),
+                    result,
+                }),
+            };
+            hub.apply(
+                reply(
+                    4,
+                    "b",
+                    "other",
+                    Err(Notice {
+                        context: "接続確認".into(),
+                        message: "fixture failure".into(),
+                        kind: NoticeKind::Failed,
+                    }),
+                ),
+                cx,
+            );
+            hub.apply(
+                reply(2, "a", "replaced", Ok(ConnectionCheck::default())),
+                cx,
+            );
+            assert_eq!(hub.setup.checking_connections["a"], "current");
+            assert!(!hub.setup.checking_connections.contains_key("b"));
+            assert!(!hub.model.connections.checks.contains_key("a"));
+            hub.apply(reply(3, "a", "current", Ok(ConnectionCheck::default())), cx);
+            assert_eq!(hub.setup.checking_connections.len(), 0);
+            assert!(hub.model.connections.checks.contains_key("a"));
+            hub.setup
+                .checking_connections
+                .insert("a".into(), "disconnected".into());
+            hub.apply(
+                Update::Link(Box::new(Link::Unset {
+                    path: "fixture".into(),
+                    reason: "disconnected".into(),
+                })),
+                cx,
+            );
+            assert_eq!(hub.setup.checking_connections.len(), 0);
+        });
     });
 }

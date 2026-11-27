@@ -43,15 +43,7 @@ impl Hub {
         let Some(settings) = self.model.settings() else {
             return;
         };
-        rpc::connections::update_settings(
-            &self.rpc,
-            self.model.connections.link_epoch,
-            context,
-            settings.revision,
-            vec![input],
-            None,
-        );
-        cx.notify();
+        self.update_connections(context, settings.revision, vec![input], None, cx);
     }
 
     pub(crate) fn delete_connection(&mut self, id: String, revision: u64, cx: &mut Context<Self>) {
@@ -73,25 +65,30 @@ impl Hub {
         let Some(settings) = self.model.settings() else {
             return;
         };
-        let is_voicevox = connection.is_local_voicevox();
-        let conn_id = connection.id.clone();
         let input = build_connection_enabled_input(connection, enabled);
-        if !(enabled && is_voicevox) {
-            self.upsert_connection("接続状態の更新", input, cx);
-            return;
-        }
-        if self.rpc.host().is_none() {
-            return;
-        }
-        self.setup.checking_connections.insert(conn_id.clone());
-        rpc::connections::update_settings(
+        let probe = (enabled && connection.is_local_voicevox()).then(|| connection.id.clone());
+        self.update_connections("接続状態の更新", settings.revision, vec![input], probe, cx);
+    }
+
+    pub(super) fn update_connections(
+        &mut self,
+        context: &'static str,
+        revision: u64,
+        inputs: Vec<ConnectionInput>,
+        probe: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let ticket = rpc::connections::update_settings(
             &self.rpc,
             self.model.connections.link_epoch,
-            "接続状態の更新",
-            settings.revision,
-            vec![input],
-            Some(conn_id),
+            context,
+            revision,
+            inputs,
+            probe.clone(),
         );
+        if let Some((id, ticket)) = probe.zip(ticket) {
+            self.setup.checking_connections.insert(id, ticket);
+        }
         cx.notify();
     }
 
@@ -108,19 +105,20 @@ impl Hub {
         revision: u64,
         cx: &mut Context<Self>,
     ) {
-        if self.rpc.host().is_none() || self.setup.checking_connections.contains(&connection_id) {
+        if self.setup.checking_connections.contains_key(&connection_id) {
             return;
         }
-        self.setup
-            .checking_connections
-            .insert(connection_id.clone());
-        rpc::connections::probe_connection(
+        if let Some(ticket) = rpc::connections::probe_connection(
             &self.rpc,
             self.model.connections.link_epoch,
-            connection_id,
+            connection_id.clone(),
             revision,
-        );
-        cx.notify();
+        ) {
+            self.setup
+                .checking_connections
+                .insert(connection_id, ticket);
+            cx.notify();
+        }
     }
 
     pub(crate) fn select_connection_resource(

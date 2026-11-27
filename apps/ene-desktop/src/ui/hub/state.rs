@@ -5,9 +5,10 @@ use super::{CompanionPod, PodMode, SettingsSection};
 use crate::session::{Connection, Options};
 use crate::update::{Command, Update};
 use ene_client_core::domain::NotificationEvent;
+use ene_client_core::state::{Notice, NoticeKind};
 use ene_platform_os::{TrayAction, TrayHandle};
 use gpui::{AnyWindowHandle, WeakEntity};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 /// Window handles, floating pod mode, and tray state owned by [`Hub`].
@@ -41,7 +42,7 @@ pub struct SetupFlowState {
     pub error_detail: Option<String>,
     pub pending_connection_id: Option<String>,
     pub pending_models: Vec<String>,
-    pub checking_connections: HashSet<String>,
+    pub checking_connections: HashMap<String, String>,
     pub(crate) auto_assigned_revisions: BTreeMap<String, u64>,
 }
 
@@ -75,7 +76,17 @@ impl ApplyFlags {
             _ => None,
         };
         Self {
-            conflicted: matches!(update, Update::Conflict { .. }),
+            conflicted: matches!(
+                update,
+                Update::Conflict { .. }
+                    | Update::Checked {
+                        result: Err(Notice {
+                            kind: NoticeKind::Conflict,
+                            ..
+                        }),
+                        ..
+                    }
+            ),
             history_arrived: matches!(update, Update::History { .. }),
             settings_changed: matches!(
                 notification_event,

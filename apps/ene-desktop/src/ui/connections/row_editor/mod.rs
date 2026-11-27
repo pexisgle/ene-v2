@@ -82,7 +82,11 @@ fn render_row_header(
         .model
         .settings()
         .map(|settings| settings.revision);
-    let is_checking = hub_check.read(cx).setup.checking_connections.contains(id);
+    let is_checking = hub_check
+        .read(cx)
+        .setup
+        .checking_connections
+        .contains_key(id);
     let is_voicevox = ConnectionResource::for_connection(conn) == Some(ConnectionResource::Speaker);
     let hub_expand_probe = hub_check.clone();
     let check_id = id.clone();

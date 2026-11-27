@@ -57,7 +57,7 @@ pub(super) fn render_voice_selector(
         let hub = pane.hub.read(cx);
         ctx.tts_conn_ids
             .iter()
-            .any(|cid| hub.setup.checking_connections.contains(cid))
+            .any(|cid| hub.setup.checking_connections.contains_key(cid))
     };
 
     div()
