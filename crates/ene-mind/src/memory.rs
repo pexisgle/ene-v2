@@ -246,10 +246,10 @@ pub struct NewMemory {
     pub importance: Option<u8>,
     #[serde(default)]
     pub occurred_at: Option<String>,
-    /// The revision that was read; a stale value is a conflict.
+    /// The revision returned by recall or read. Required when changing an existing memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_revision: Option<u64>,
-    /// An existing memory this record supersedes.
+    /// Another way to name the existing memory this record corrects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<String>,
     /// Forget the addressed memory by lowering its importance to zero.

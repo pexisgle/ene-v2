@@ -103,6 +103,7 @@ pub(crate) fn register(app: &mut App) {
     .add_open_tool::<UpdateArgs, _>(
         "mind_update",
         "Record, correct or forget memories and update the current mind. \
+         For an existing memory, use its ID and copy its revision into expected_revision. \
          The host binds the scope and commits everything atomically.",
         ToolOptions::default(),
         run_tool(|world, agent, _, args| {
@@ -212,6 +213,7 @@ fn recall_result(
         .map(|memory| {
             json!({
                 "id": memory.memory.id,
+                "revision": memory.memory.memory_revision,
                 "content": memory.memory.content,
                 "importance": memory.memory.importance,
                 "occurred_at": memory.memory.occurred_at,
@@ -233,6 +235,7 @@ fn read(store: &Store, companion: &str, args: &ReadArgs, turn: &str) -> Result<S
         // (docs/design/mind.md).
         return Ok(json!({
             "id": memory.id,
+            "revision": memory.memory_revision,
             "content": memory.content,
             "importance": memory.importance,
             "occurred_at": memory.occurred_at,

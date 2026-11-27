@@ -42,26 +42,7 @@ impl<'a> MemoryRepo<'a> {
         let mut updated = Vec::new();
         let mut forgotten = Vec::new();
         for memory in &update.memories {
-            if memory.forget {
-                let Some(id) = &memory.id else {
-                    return Err(StoreError::Invalid(
-                        "forget needs the id of the memory to lower".into(),
-                    ));
-                };
-                forget_memory_tx(&transaction, update, id, memory.expected_revision)?;
-                forgotten.push(id.clone());
-            } else if let Some(id) = memory.id.as_ref().or(memory.supersedes.as_ref()) {
-                if memory.content.trim().is_empty()
-                    && memory.importance.is_none()
-                    && memory.supersedes.is_none()
-                {
-                    return Err(StoreError::Invalid(
-                        "a correction needs content, importance or supersedes".into(),
-                    ));
-                }
-                inserted.extend(correct_memory_tx(&transaction, update, memory, id, &stamp)?);
-                updated.push(id.clone());
-            } else {
+            let Some((id, revision)) = mutation_target(memory)? else {
                 inserted.push(insert_mind_memory(
                     &transaction,
                     update,
@@ -70,6 +51,21 @@ impl<'a> MemoryRepo<'a> {
                     memory.importance.unwrap_or(3).min(10),
                     &stamp,
                 )?);
+                continue;
+            };
+            let current = editable_memory(&transaction, &update.companion_id, id, revision)?;
+            if memory.forget {
+                forget_memory_tx(&transaction, &current)?;
+                forgotten.push(current.id);
+            } else {
+                inserted.extend(correct_memory_tx(
+                    &transaction,
+                    update,
+                    memory,
+                    &current,
+                    &stamp,
+                )?);
+                updated.push(current.id);
             }
         }
         let mut state_revision = None;
@@ -242,25 +238,30 @@ pub(super) fn memory_edges(
         .map_err(Into::into)
 }
 
-fn forget_memory_tx(
-    transaction: &rusqlite::Transaction<'_>,
-    update: &MindUpdate,
-    id: &str,
-    expected_revision: Option<u64>,
-) -> Result<()> {
-    let current = editable_memory(transaction, &update.companion_id, id, expected_revision)?;
-    let rows = transaction
+fn mutation_target(memory: &NewMemory) -> Result<Option<(&str, u64)>> {
+    let id = match (memory.id.as_deref(), memory.supersedes.as_deref()) {
+        (Some(id), Some(other)) if id != other => {
+            return Err(StoreError::Invalid("specify one memory to change".into()));
+        }
+        (id, supersedes) => id.or(supersedes),
+    };
+    match (id, memory.expected_revision) {
+        (Some(id), Some(revision)) => Ok(Some((id, revision))),
+        (None, None) if !memory.forget => Ok(None),
+        _ => Err(StoreError::Invalid(
+            "changing a memory requires its id and expected_revision".into(),
+        )),
+    }
+}
+
+fn forget_memory_tx(transaction: &rusqlite::Transaction<'_>, current: &Memory) -> Result<()> {
+    transaction
         .prepare_cached(
             "UPDATE memories SET importance = 0, \
              memory_revision = memory_revision + 1 \
-             WHERE id = ?1 AND memory_revision = ?2",
+             WHERE id = ?1",
         )?
-        .execute(params![id, current.memory_revision])?;
-    if rows == 0 {
-        return Err(StoreError::Conflict(
-            "memory changed since it was read".into(),
-        ));
-    }
+        .execute([&current.id])?;
     Ok(())
 }
 
@@ -268,56 +269,44 @@ fn correct_memory_tx(
     transaction: &rusqlite::Transaction<'_>,
     update: &MindUpdate,
     memory: &NewMemory,
-    id: &str,
+    current: &Memory,
     stamp: &str,
 ) -> Result<Option<String>> {
-    let current = editable_memory(
-        transaction,
-        &update.companion_id,
-        id,
-        memory.expected_revision,
-    )?;
     let importance = memory.importance.unwrap_or(current.importance);
     check_importance(importance)?;
-    let replacement = if !memory.content.trim().is_empty() && memory.content != current.content {
+    if memory.content.trim().is_empty() && memory.importance.is_none() {
+        return Err(StoreError::Invalid(
+            "a correction needs content or importance".into(),
+        ));
+    }
+    if !memory.content.trim().is_empty() && memory.content != current.content {
         let next = insert_mind_memory(
             transaction,
             update,
             memory,
-            Some(&current),
+            Some(current),
             importance,
             stamp,
         )?;
-        supersede_tx(transaction, &update.companion_id, &next, id, stamp)?;
-        Some(next)
-    } else {
-        if importance != current.importance {
-            transaction
-                .prepare_cached(
-                    "UPDATE memories SET importance = ?2, \
-                 memory_revision = memory_revision + 1, last_accessed_at = ?3 WHERE id = ?1",
-                )?
-                .execute(params![id, importance, stamp])?;
-        }
-        None
-    };
-    if let Some(old) = memory.supersedes.as_deref().filter(|old| *old != id) {
-        supersede_tx(
-            transaction,
-            &update.companion_id,
-            replacement.as_deref().unwrap_or(id),
-            old,
-            stamp,
-        )?;
+        supersede_tx(transaction, &update.companion_id, &next, &current.id, stamp)?;
+        return Ok(Some(next));
     }
-    Ok(replacement)
+    if importance != current.importance {
+        transaction
+            .prepare_cached(
+                "UPDATE memories SET importance = ?2, \
+                 memory_revision = memory_revision + 1, last_accessed_at = ?3 WHERE id = ?1",
+            )?
+            .execute(params![current.id, importance, stamp])?;
+    }
+    Ok(None)
 }
 
 fn editable_memory(
     connection: &rusqlite::Connection,
     companion: &str,
     id: &str,
-    expected: Option<u64>,
+    expected: u64,
 ) -> Result<Memory> {
     let current = load_memory(connection, id)?
         .ok_or_else(|| StoreError::NotFound("memory not found".into()))?;
@@ -326,7 +315,7 @@ fn editable_memory(
             "this memory is outside the companion's scope".into(),
         ));
     }
-    if expected.is_some_and(|revision| revision != current.memory_revision) {
+    if expected != current.memory_revision {
         return Err(StoreError::Conflict(
             "memory changed since it was read".into(),
         ));

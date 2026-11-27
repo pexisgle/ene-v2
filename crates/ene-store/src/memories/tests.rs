@@ -322,6 +322,61 @@ fn mind_update_is_idempotent_and_corrections_forgets_and_state_use_cas() {
     );
 }
 
+#[test]
+fn a_memory_change_needs_one_target_at_its_observed_revision() {
+    let store = store();
+    let repo = store.memory_repo();
+    companion_row(&store);
+    let old = repo.insert_memory(&new_memory("tea", 5)).unwrap();
+    let other = repo.insert_memory(&new_memory("coffee", 4)).unwrap();
+    let revise = NewMemory {
+        supersedes: Some(old.id.clone()),
+        content: "green tea".into(),
+        importance: Some(7),
+        ..NewMemory::default()
+    };
+    let hash = repo.mind_hash(&value!({"content": "green tea"}));
+    for edit in [
+        revise.clone(),
+        NewMemory {
+            id: Some(other.id.clone()),
+            expected_revision: Some(old.memory_revision),
+            ..revise.clone()
+        },
+        NewMemory {
+            id: Some(other.id.clone()),
+            forget: true,
+            ..NewMemory::default()
+        },
+    ] {
+        assert!(matches!(
+            apply(
+                &store,
+                "rejected",
+                &hash,
+                vec![input("rolled back", 3), edit],
+                None
+            ),
+            Err(StoreError::Invalid(_))
+        ));
+    }
+    assert_eq!(repo.list_memories("ene", None, 10).unwrap().0.len(), 2);
+    assert_eq!(repo.memory(&old.id).unwrap().unwrap(), old);
+    assert_eq!(repo.memory(&other.id).unwrap().unwrap(), other);
+    let result = apply(
+        &store,
+        "accepted",
+        &hash,
+        vec![NewMemory {
+            expected_revision: Some(old.memory_revision),
+            ..revise
+        }],
+        None,
+    )
+    .unwrap();
+    assert_preserved_correction(repo, &old.id, result["memories"][0].as_str().unwrap());
+}
+
 fn assert_preserved_correction(repo: MemoryRepo<'_>, previous: &str, corrected_id: &str) {
     assert_ne!(corrected_id, previous);
     let original = repo.memory(previous).unwrap().unwrap();
