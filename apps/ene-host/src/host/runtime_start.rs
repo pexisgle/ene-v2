@@ -46,9 +46,7 @@ impl Runtime {
         // instances the stored connections reference start here too, for the
         // same reason: a frame cannot await a load.
         let providers = providers::Providers::load(state);
-        for entry in store.plugin_repo().plugin_entries()? {
-            providers.set_enabled(&entry.plugin_id, entry.enabled);
-        }
+        providers.restore_admissions(state, &store)?;
         // An operator who installed a plugin that did not load has no other
         // way to find out: the connection it named simply resolves to nothing.
         let installed: Vec<String> = providers.adapters().collect();

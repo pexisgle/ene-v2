@@ -60,6 +60,7 @@ strum.workspace = true
 # held cannot turn every later access into an error.
 parking_lot.workspace = true
 subtle = "2"
+tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "io-util", "process"] }
 tokio-util = { workspace = true, features = ["rt", "compat", "codec"] }
@@ -84,7 +85,6 @@ rig-core = { workspace = true, features = ["test-utils"] }
 # Parses each workspace file so the architecture test can blank `#[cfg(test)]`
 # spans by real syntax instead of counting braces.
 syn = { version = "3", features = ["full", "parsing", "printing", "extra-traits"] }
-tempfile.workspace = true
 # `start_paused` lets the decision-timeout test fire the 15s deadline
 # without waiting it out.
 tokio = { workspace = true, features = ["test-util"] }

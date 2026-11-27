@@ -42,6 +42,7 @@ use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
 use crate::host::error::HostError;
+use install::{is_managed_directory, is_managed_revision, package_locations};
 
 /// Where a host looks for plugin packages unless told otherwise.
 pub(crate) const PLUGINS_DIR: &str = "plugins";
@@ -132,19 +133,88 @@ impl Providers {
         let registry = Self::none();
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() {
+            if !path.is_dir() || is_managed_directory(&path) {
                 continue;
             }
             match load_one(&path) {
-                Ok((id, plugin)) => {
-                    registry.install(id, plugin);
+                Ok((id, plugin)) if path.file_name().is_some_and(|name| name == id.as_str()) => {
+                    registry.install(id, Arc::new(plugin));
                 }
+                Ok((id, _)) => tracing::warn!(plugin = %id, "plugin directory must match its ID"),
                 Err(error) => {
                     tracing::warn!(plugin = %path.display(), "the plugin was not loaded: {error}");
                 }
             }
         }
         registry
+    }
+
+    /// Loads the exact recorded revision before any plugin can start. A loose
+    /// package found in the operator's plugin directory is registered once.
+    pub(crate) fn restore_admissions(
+        &self,
+        state: &Path,
+        store: &crate::host::db::Store,
+    ) -> ene_store::Result<()> {
+        let repo = store.plugin_repo();
+        let entries = repo.plugin_entries()?;
+        for entry in &entries {
+            self.restore_package(state, entry);
+            if entry.revision.is_none()
+                && let Some(loaded) = self.get(&entry.plugin_id)
+            {
+                repo.pin_legacy_plugin_revision(&entry.plugin_id, &loaded.package.revision)?;
+            }
+        }
+        for id in self
+            .adapters()
+            .filter(|id| entries.iter().all(|entry| entry.plugin_id != *id))
+        {
+            if let Some(loaded) = self.get(&id) {
+                let package = &loaded.package;
+                repo.install_plugin_entry(
+                    &id,
+                    &package.manifest.name,
+                    &package.manifest.version,
+                    &package.root.to_string_lossy(),
+                    &package.revision,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn restore_package(&self, state: &Path, entry: &ene_store::PluginEntry) {
+        let id = &entry.plugin_id;
+        if !ene_plugin_runtime::package::identifier(id) {
+            return;
+        }
+        let [legacy, managed] = package_locations(state, id);
+        let managed_revision = entry.revision.as_deref().filter(|revision| {
+            revision.len() == 64
+                && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && is_managed_revision(Path::new(&entry.path), id, revision)
+        });
+        let candidate = if let Some(revision) = managed_revision {
+            load_one(&managed.join(revision))
+                .ok()
+                .map(|(_, loaded)| Arc::new(loaded))
+        } else {
+            self.get(id).filter(|loaded| loaded.package.root == legacy)
+        };
+        if let Some(loaded) = candidate
+            && loaded.package.manifest.id == *id
+            && entry
+                .revision
+                .as_ref()
+                .is_none_or(|revision| *revision == loaded.package.revision)
+        {
+            self.install(id.clone(), loaded);
+            self.set_enabled(id, entry.enabled);
+        } else {
+            self.remove(id);
+            tracing::warn!(plugin = %id, "the registered plugin revision is unavailable");
+        }
     }
 
     /// The plugin a connection's `adapter` names, when one is installed.
@@ -165,11 +235,11 @@ impl Providers {
             .into_iter()
     }
 
-    fn install(&self, id: String, plugin: Loaded) {
+    fn install(&self, id: String, loaded: Arc<Loaded>) {
         self.installed.write().insert(
             id,
             Registration {
-                loaded: Arc::new(plugin),
+                loaded,
                 active: Some(Admission::default()),
             },
         );
@@ -178,7 +248,7 @@ impl Providers {
     pub(crate) fn replace(&self, package: Package) {
         let id = package.manifest.id.clone();
         match load_package(package) {
-            Ok(plugin) => self.install(id, plugin),
+            Ok(plugin) => self.install(id, Arc::new(plugin)),
             Err(_) => self.remove(&id),
         }
     }

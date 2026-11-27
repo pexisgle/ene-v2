@@ -5,6 +5,9 @@ use crate::{Store, StoreError, error::Result, util::now};
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
+const ENTRY_COLUMNS: &str =
+    "plugin_id, name, version, path, enabled, installed_at, updated_at, revision";
+
 const MAX_KEY_CHARS: usize = 128;
 const MAX_VALUE_BYTES: usize = 64 * 1024;
 const MAX_KEYS_PER_PLUGIN: i64 = 256;
@@ -19,6 +22,7 @@ pub struct PluginEntry {
     pub enabled: bool,
     pub installed_at: String,
     pub updated_at: String,
+    pub revision: Option<String>,
 }
 
 /// Repository managing `plugin_config`, `plugin_state`, and `plugin_entries`.
@@ -116,48 +120,41 @@ impl<'a> PluginRepo<'a> {
     }
 
     pub fn plugin_entries(&self) -> Result<Vec<PluginEntry>> {
-        let conn = self.0.conn();
-        let mut stmt = conn.prepare_cached(
-            "SELECT plugin_id, name, version, path, enabled, installed_at, updated_at \
-             FROM plugin_entries ORDER BY plugin_id",
-        )?;
-        let rows = stmt
-            .query_map([], PluginEntry::from_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
+        self.0.fetch_all(
+            &format!("SELECT {ENTRY_COLUMNS} FROM plugin_entries ORDER BY plugin_id"),
+            [],
+            PluginEntry::from_row,
+        )
     }
 
-    pub fn upsert_plugin_entry(
+    pub fn install_plugin_entry(
         &self,
         plugin_id: &str,
         name: &str,
         version: &str,
         path: &str,
-        enabled: bool,
+        revision: &str,
     ) -> Result<PluginEntry> {
-        let stamp = now();
-        let conn = self.0.conn();
-        conn.prepare_cached(
-            "INSERT INTO plugin_entries (plugin_id, name, version, path, enabled, installed_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6) \
-             ON CONFLICT(plugin_id) DO UPDATE SET name = excluded.name, version = excluded.version, \
-             path = excluded.path, enabled = excluded.enabled, updated_at = excluded.updated_at",
-        )?
-        .execute(params![
-            plugin_id,
-            name,
-            version,
-            path,
-            if enabled { 1 } else { 0 },
-            stamp,
-        ])?;
-        let entry = conn
+        self.0.fetch(
+            &format!(
+                "INSERT INTO plugin_entries ({ENTRY_COLUMNS}) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?6)
+                 ON CONFLICT(plugin_id) DO UPDATE SET name = excluded.name, version = excluded.version,
+                 path = excluded.path, enabled = 1, updated_at = excluded.updated_at, revision = excluded.revision
+                 RETURNING {ENTRY_COLUMNS}"
+            ),
+            params![plugin_id, name, version, path, now(), revision],
+            PluginEntry::from_row,
+        )?.ok_or_else(|| StoreError::Storage("the plugin installation did not persist".into()))
+    }
+
+    pub fn pin_legacy_plugin_revision(&self, plugin_id: &str, revision: &str) -> Result<()> {
+        self.0
+            .conn()
             .prepare_cached(
-                "SELECT plugin_id, name, version, path, enabled, installed_at, updated_at \
-                 FROM plugin_entries WHERE plugin_id = ?1",
+                "UPDATE plugin_entries SET revision = ?2 WHERE plugin_id = ?1 AND revision IS NULL",
             )?
-            .query_row([plugin_id], PluginEntry::from_row)?;
-        Ok(entry)
+            .execute(params![plugin_id, revision])?;
+        Ok(())
     }
 
     pub fn set_plugin_enabled(
@@ -166,31 +163,33 @@ impl<'a> PluginRepo<'a> {
         enabled: bool,
     ) -> Result<Option<PluginEntry>> {
         self.0.fetch(
-            "UPDATE plugin_entries SET enabled = ?2, updated_at = ?3 WHERE plugin_id = ?1
-             RETURNING plugin_id, name, version, path, enabled, installed_at, updated_at",
+            &format!(
+                "UPDATE plugin_entries SET enabled = ?2, updated_at = ?3 WHERE plugin_id = ?1
+             RETURNING {ENTRY_COLUMNS}"
+            ),
             params![plugin_id, enabled, now()],
             PluginEntry::from_row,
         )
     }
 
     pub fn remove_plugin_entry(&self, plugin_id: &str) -> Result<Option<PluginEntry>> {
-        let conn = self.0.conn();
-        let existing = conn
-            .prepare_cached(
-                "SELECT plugin_id, name, version, path, enabled, installed_at, updated_at \
-                 FROM plugin_entries WHERE plugin_id = ?1",
-            )?
-            .query_row([plugin_id], PluginEntry::from_row)
-            .optional()?;
-        if existing.is_some() {
-            conn.prepare_cached("DELETE FROM plugin_entries WHERE plugin_id = ?1")?
-                .execute([plugin_id])?;
-            conn.prepare_cached("DELETE FROM plugin_config WHERE plugin_id = ?1")?
-                .execute([plugin_id])?;
-            conn.prepare_cached("DELETE FROM plugin_state WHERE plugin_id = ?1")?
-                .execute([plugin_id])?;
-        }
-        Ok(existing)
+        self.0.write_tx(|transaction| {
+            let existing = transaction
+                .prepare_cached(&format!(
+                    "DELETE FROM plugin_entries WHERE plugin_id = ?1 RETURNING {ENTRY_COLUMNS}"
+                ))?
+                .query_row([plugin_id], PluginEntry::from_row)
+                .optional()?;
+            if existing.is_some() {
+                transaction
+                    .prepare_cached("DELETE FROM plugin_config WHERE plugin_id = ?1")?
+                    .execute([plugin_id])?;
+                transaction
+                    .prepare_cached("DELETE FROM plugin_state WHERE plugin_id = ?1")?
+                    .execute([plugin_id])?;
+            }
+            Ok(existing)
+        })
     }
 }
 
@@ -204,6 +203,7 @@ impl FromRow for PluginEntry {
             enabled: row.get::<_, i64>(4)? != 0,
             installed_at: row.get(5)?,
             updated_at: row.get(6)?,
+            revision: row.get(7)?,
         })
     }
 }
@@ -229,12 +229,12 @@ mod tests {
         let repo = store.plugin_repo();
 
         let entry = repo
-            .upsert_plugin_entry(
+            .install_plugin_entry(
                 "demo-tool",
                 "Demo Tool",
                 "0.2.0",
                 "/plugins/demo-tool",
-                true,
+                "example-revision",
             )
             .unwrap();
         assert_eq!(entry.plugin_id, "demo-tool");

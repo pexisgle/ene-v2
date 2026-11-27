@@ -215,7 +215,7 @@ async fn unavailable_executor_is_not_recovered_as_rig(
     assert!(!exit.success());
     std::fs::remove_file(runtime.join("connection.json")).unwrap();
     std::fs::rename(
-        state.join("plugins/reference"),
+        state.join("plugins/.managed/reference"),
         state.join("reference-offline"),
     )
     .unwrap();
