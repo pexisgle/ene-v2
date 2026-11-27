@@ -23,6 +23,7 @@ directories = "6"
 ene-rpc.workspace = true
 ene-catalog.workspace = true
 ene-domain.workspace = true
+ene-keyring.workspace = true
 ene-mind.workspace = true
 ene-policy.workspace = true
 ene-plugin.workspace = true
@@ -45,8 +46,6 @@ io-lifetimes = "3"
 image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 itertools = "0.15"
 jiff.workspace = true
-keyring-core = "1"
-once_cell = "1"
 private-fs = "0.2.1"
 process-wrap.workspace = true
 reqwest.workspace = true
@@ -97,15 +96,6 @@ tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
-zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-apple-native-keyring-store = { version = "1", features = ["keychain"] }
-
-[target.'cfg(windows)'.dependencies]
-windows-native-keyring-store = "1"
 
 # `hyper-util` is reached only through `axum::serve`'s h2c handling, never named
 # in this crate's source, so machete cannot see it. Keep the ignore.

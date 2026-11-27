@@ -51,6 +51,7 @@ ene-avatar-ipc = { path = "crates/ene-avatar-ipc" }
 ene-catalog = { path = "crates/ene-catalog" }
 ene-client-core = { path = "crates/ene-client-core" }
 ene-domain = { path = "crates/ene-domain" }
+ene-keyring = { path = "crates/ene-keyring" }
 ene-mind = { path = "crates/ene-mind" }
 ene-policy = { path = "crates/ene-policy" }
 ene-plugin = { path = "crates/ene-plugin" }

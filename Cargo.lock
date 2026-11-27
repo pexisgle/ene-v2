@@ -4112,7 +4112,6 @@ dependencies = [
 name = "ene-host"
 version = "0.1.8"
 dependencies = [
- "apple-native-keyring-store",
  "async-stream",
  "axum",
  "base64 0.23.1",
@@ -4126,6 +4125,7 @@ dependencies = [
  "directories",
  "ene-catalog",
  "ene-domain",
+ "ene-keyring",
  "ene-mind",
  "ene-plugin",
  "ene-plugin-runtime",
@@ -4147,8 +4147,6 @@ dependencies = [
  "io-lifetimes 3.0.1",
  "itertools 0.15.0",
  "jiff 1.0.3",
- "keyring-core",
- "once_cell",
  "parking_lot 0.13.0",
  "private-fs",
  "proc-macro2",
@@ -4180,6 +4178,15 @@ dependencies = [
  "url",
  "uuid",
  "which",
+]
+
+[[package]]
+name = "ene-keyring"
+version = "0.1.8"
+dependencies = [
+ "apple-native-keyring-store",
+ "keyring-core",
+ "once_cell",
  "windows-native-keyring-store",
  "zbus-secret-service-keyring-store",
 ]

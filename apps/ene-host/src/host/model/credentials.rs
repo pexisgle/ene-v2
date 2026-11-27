@@ -9,18 +9,11 @@ use crate::host::error::HostError;
 use crate::host::settings::{
     Connection, ConnectionConfig, CredentialState, environment_secret, validate_settings_revision,
 };
-#[cfg(target_os = "macos")]
-use apple_native_keyring_store::keychain::Store as PlatformVault;
+use ene_keyring::{Error as VaultError, Keyring};
 use ene_store::credentials::VaultSlot;
-use keyring_core::api::CredentialStoreApi as _;
-use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, path::Path, sync::Arc};
-#[cfg(windows)]
-use windows_native_keyring_store::Store as PlatformVault;
-#[cfg(target_os = "linux")]
-use zbus_secret_service_keyring_store::Store as PlatformVault;
 
 const KEYRING_SERVICE: &str = "ene-host";
 
@@ -49,7 +42,7 @@ struct ManagedVault {
     store: Store,
     namespace: String,
     mutations: Mutex<()>,
-    platform: OnceCell<Arc<PlatformVault>>,
+    platform: Keyring,
 }
 
 impl CredentialMemory {
@@ -98,7 +91,7 @@ impl Credentials {
                 store: store.clone(),
                 namespace: ene_policy::hex_digest(&digest),
                 mutations: Mutex::new(()),
-                platform: OnceCell::new(),
+                platform: Keyring::new(),
             })),
             session_only,
             ..Self::default()
@@ -177,7 +170,7 @@ impl Credentials {
         }
         match vault.entry(binding.slot)?.get_password() {
             Ok(secret) => Ok(Some(secret)),
-            Err(keyring_core::Error::NoEntry) => Ok(None),
+            Err(VaultError::NoEntry) => Ok(None),
             Err(error) => Err(vault_error(&error)),
         }
     }
@@ -210,7 +203,7 @@ impl Credentials {
                 continue;
             } else {
                 match vault.entry(slot)?.delete_credential() {
-                    Ok(()) | Err(keyring_core::Error::NoEntry) => {}
+                    Ok(()) | Err(VaultError::NoEntry) => {}
                     Err(error) => return Err(vault_error(&error)),
                 }
             }
@@ -221,21 +214,17 @@ impl Credentials {
 }
 
 impl ManagedVault {
-    fn entry(&self, slot: VaultSlot) -> Result<keyring_core::Entry> {
+    fn entry(&self, slot: VaultSlot) -> Result<ene_keyring::Entry> {
         self.platform
-            .get_or_try_init(PlatformVault::new)
-            .and_then(|store| {
-                store.build(
-                    KEYRING_SERVICE,
-                    &format!("v2:{}:{}", self.namespace, slot.id),
-                    None,
-                )
-            })
+            .entry(
+                KEYRING_SERVICE,
+                &format!("v2:{}:{}", self.namespace, slot.id),
+            )
             .map_err(|error| vault_error(&error))
     }
 }
 
-fn vault_error(error: &keyring_core::Error) -> HostError {
+fn vault_error(error: &VaultError) -> HostError {
     HostError::Unavailable(format!("credential store: {error}"))
 }
 
