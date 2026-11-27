@@ -14,7 +14,7 @@ pub const MAX_IMPORTANCE: u8 = 10;
 pub const PINNED_BUDGET_CHARS: usize = 3_000;
 
 /// The one visibility rule: a memory is visible when it lives in the reader's
-/// own scope or in the shared pool (`docs/design/mind.md §3.3`).
+/// own scope or in the shared pool (`docs/design/mind.md`).
 pub fn in_scope(scope: &str, companion: &str) -> bool {
     scope == companion || scope == SHARED_SCOPE
 }
@@ -106,7 +106,7 @@ fn parse_epoch(text: &str) -> Option<i64> {
     text.parse::<Timestamp>().ok().map(Timestamp::as_second)
 }
 
-/// Recall score from `docs/design/mind.md §4.1`: a decay coefficient by
+/// Recall score from `docs/design/mind.md`: a decay coefficient by
 /// importance times the weighted relevance, importance and recency.
 pub fn score(
     relevance: f64,

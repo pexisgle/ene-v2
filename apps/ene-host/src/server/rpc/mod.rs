@@ -28,7 +28,7 @@ use tower_http::{
 /// Largest request body the Connect surface accepts.
 ///
 /// The biggest legitimate body is a perception frame: a JPEG capped at 512 KiB
-/// by `docs/api.md` §知覚. 8 MiB leaves room for a batch of frames plus
+/// by `docs/design/client.md`. 8 MiB leaves room for a batch of frames plus
 /// protobuf overhead while still refusing a malformed or hostile body before it
 /// is buffered in memory.
 const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;

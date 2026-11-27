@@ -50,7 +50,7 @@ pub(super) struct BackfillParams<'w> {
 /// Starts at most one background backfill per companion without starving the
 /// frame loop or opening concurrent writers per companion. Each background
 /// task writes through its own SQLite connection opened from the store's path
-/// (docs/design/mind.md §3.2), so the ECS thread's `Mutex<Connection>` is not
+/// (docs/design/mind.md), so the ECS thread's `Mutex<Connection>` is not
 /// held while the background writes; the ECS thread only schedules and
 /// reports.
 pub(super) fn backfill(mut commands: Commands, params: BackfillParams<'_>) {

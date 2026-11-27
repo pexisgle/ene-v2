@@ -1,7 +1,7 @@
 //! What this client tells the host it can do.
 //!
 //! The host stores capability names, JSON Schema, presets and approval
-//! declarations only (`docs/api.md` §クライアント能力). It never interprets them,
+//! declarations only (`docs/design/client.md`). It never interprets them,
 //! so this table is the whole of this client's contract with the host, and it
 //! must describe what this machine can actually do: a capability is declared
 //! only when its inputs can be honoured here. A motion whose asset is missing is

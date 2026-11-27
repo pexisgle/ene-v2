@@ -32,7 +32,7 @@ impl Watch {
     /// Whether the observed window matches this rule's target.
     ///
     /// `target_pattern` is documented as "a substring or regular expression"
-    /// (`docs/api.md` §知覚), so it is compiled as a case-insensitive pattern
+    /// (`docs/design/client.md`), so it is compiled as a case-insensitive pattern
     /// and falls back to a case-insensitive substring when it is not valid
     /// regex. A pattern that matches nothing is the model's mistake, not a
     /// reason to fail the operation.

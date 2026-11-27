@@ -1,6 +1,6 @@
 //! Voice service: microphone input (STT) and synthesized speech output (TTS).
 //! The host owns generations, the audio-owning client and the speech floor
-//! (docs/design/voice-avatar.md §4–§6). `StreamAudioInput` binds the stream to
+//! (docs/design/client.md). `StreamAudioInput` binds the stream to
 //! the client that opened it and recognizes each finished utterance;
 //! `SubscribeAudioOutput` only pumps the host's generation-gated channel.
 use super::voice_convert::to_wire_event;

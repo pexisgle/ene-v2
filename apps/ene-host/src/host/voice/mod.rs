@@ -1,4 +1,4 @@
-//! Host-side ECS adapter over the `ene-voice` pipeline (`docs/design/voice-avatar.md` §4–§5).
+//! Host-side ECS adapter over the `ene-voice` pipeline (`docs/design/client.md`).
 
 mod engine;
 mod plugin;

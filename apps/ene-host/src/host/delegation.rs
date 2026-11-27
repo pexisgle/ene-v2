@@ -1,5 +1,5 @@
 //! Atomic delegation claims for one voice recognition event
-//! (docs/design/voice-avatar.md §5.2).
+//! (docs/design/client.md).
 //!
 //! Every companion receives the same transcription, so two companions may
 //! decide to start the same irreversible task. The host binds the task to the

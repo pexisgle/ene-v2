@@ -3,7 +3,7 @@
 //! is resolved to its next firing at creation and after each firing, on the
 //! host's wall clock; a due schedule is delivered to the companion's head as
 //! a queued message with a short context line, the row records its firing,
-//! and a one-shot row is disabled (docs/features/autonomy/schedule.md).
+//! and a one-shot row is disabled (docs/features/tasks.md).
 use crate::host::{
     agent::{self, CompanionAgent},
     db::{Result, ScheduleClock, Store},

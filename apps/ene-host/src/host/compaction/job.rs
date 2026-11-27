@@ -1,5 +1,5 @@
 //! One compaction job: the summary request, then the memory pass over the same
-//! window (docs/design/compaction.md).
+//! window (docs/design/mind.md).
 use super::{
     Summary,
     budget::{cut, input_budget},

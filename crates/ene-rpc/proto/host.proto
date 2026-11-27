@@ -452,7 +452,7 @@ message UpdatePolicyRulesRequest {
 }
 message PolicyRulesUpdated { repeated PolicyRule rules = 1; }
 
-// ユーザーが自由文で書くポリシー。Decision Engine の判定入力（docs/design/permissions.md §3.1）。
+// ユーザーが自由文で書くポリシー。Decision Engine の判定入力（docs/design/work.md）。
 message PolicyText {
   string id = 1;
   string text = 2;

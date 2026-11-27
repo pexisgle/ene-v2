@@ -30,7 +30,7 @@ const DECISION_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_IN_FLIGHT_DECISIONS: usize = 8;
 
 /// The per-string bounds the decision prompt enforces
-/// (docs/design/permissions.md §3.1: bounded inputs only).
+/// (docs/design/work.md: bounded inputs only).
 pub(super) const DECISION_ARGUMENT_CHARS: usize = 2_000;
 pub(super) const DECISION_REQUEST_CHARS: usize = 1_000;
 const DECISION_RULE_CHARS: usize = 200;

@@ -12,7 +12,7 @@ from an agent. Everything below runs against a real `target/debug/ene-host`
 process with its own state directory.
 
 The API contract is `crates/ene-rpc/proto/host.proto` (canonical per
-`docs/api.md` §7). Requests are Connect unary JSON
+`docs/api.md`). Requests are Connect unary JSON
 (`Content-Type: application/json`) or Connect streaming
 (`Content-Type: application/connect+json`, one length-prefixed frame per
 message). The shipped `scripts/connect.py` speaks both; use it instead of

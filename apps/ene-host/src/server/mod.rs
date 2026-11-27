@@ -61,7 +61,7 @@ pub async fn run(config: &HostArgs) -> Result<(), Box<dyn Error + Send + Sync>> 
     )
     .await?;
     // Access control is delegated to the OS or a fronting service
-    // (docs/design/host-access.md): the bind address is explicit, and the
+    // (docs/design/work.md): the bind address is explicit, and the
     // Owner Bearer stays mandatory even on a non-loopback listener.
     let listener = TcpListener::bind(config.bind).await?;
     let local = listener.local_addr()?;
@@ -69,7 +69,7 @@ pub async fn run(config: &HostArgs) -> Result<(), Box<dyn Error + Send + Sync>> 
         tracing::warn!(
             %local,
             "listening on non-loopback address; Owner Bearer remains required; \
-             do not expose this port without the external access control described in docs/design/host-access.md"
+             do not expose this port without the external access control described in docs/design/work.md"
         );
     }
     access.publish(&format!("http://{local}/rpc"))?;

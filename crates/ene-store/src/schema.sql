@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS bootstrap_state (
 CREATE TABLE IF NOT EXISTS memories (
     rowid INTEGER PRIMARY KEY,
     id TEXT NOT NULL UNIQUE,
-    -- 'shared' or a companion id (docs/design/mind.md §3.3): the same column
+    -- 'shared' or a companion id (docs/design/mind.md): the same column
     -- decides who recalls the row, so there is no separate audience list.
     scope TEXT NOT NULL,
     content TEXT NOT NULL,
@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS memory_edges (
 );
 
 -- Which memory ids the host injected into each turn: the citation guard reads
--- the verified injection set back after a restart (docs/design/mind.md §4.2).
+-- the verified injection set back after a restart (docs/design/mind.md).
 CREATE TABLE IF NOT EXISTS memory_injections (
     companion_id TEXT NOT NULL,
     turn_id TEXT NOT NULL,
@@ -155,7 +155,7 @@ CREATE TABLE IF NOT EXISTS policy_rules (
 );
 
 -- Free-text policies: prose the decision engine reads, never a mechanical
--- gate (docs/design/permissions.md §3.1).
+-- gate (docs/design/work.md).
 CREATE TABLE IF NOT EXISTS policy_texts (
     id TEXT PRIMARY KEY,
     text TEXT NOT NULL,

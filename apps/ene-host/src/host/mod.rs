@@ -107,7 +107,7 @@ enum Step {
 }
 
 /// The connection.json endpoint and the host's Owner Bearer stay the only
-/// authentication; see docs/design/host-access.md.
+/// authentication; see docs/design/work.md.
 #[derive(Clone)]
 pub(crate) struct Runtime {
     handle: Arc<Handle>,

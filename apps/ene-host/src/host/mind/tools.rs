@@ -244,7 +244,7 @@ fn read(store: &Store, companion: &str, args: &ReadArgs, turn: &str) -> Result<S
     if memory.scope != companion {
         // A shared memory exposes the facts only: its private origin, emotion
         // and relations stay with the companion that recorded it
-        // (docs/design/mind.md §3.3).
+        // (docs/design/mind.md).
         return Ok(json!({
             "id": memory.id,
             "content": memory.content,

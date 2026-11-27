@@ -10,7 +10,7 @@ use rig_core::conversation::{Aside, Author, RequestId};
 use rig_ecs::prelude::*;
 use serde_json::json;
 
-/// The ingress limits from docs/design/compaction.md §5.1.
+/// The ingress limits from docs/design/mind.md.
 pub(crate) const MAX_INPUT_TOKENS: usize = 8_000;
 pub(crate) const MAX_INPUT_CHARS: usize = 32_000;
 

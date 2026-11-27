@@ -4,7 +4,7 @@
 //! The database stays canonical: every vector is written back through
 //! the backfill writer into its own space. Whenever the content revision
 //! changes, SQLite deletes the old vectors so the new text is re-embedded
-//! (docs/design/mind.md §4.1).
+//! (docs/design/mind.md).
 //!
 //! Each embedding space hashes non-secret canonical provider parameters
 //! (`adapter`, `endpoint`, `options`, `model`) alongside `dimensions` and the

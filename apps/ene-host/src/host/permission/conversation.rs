@@ -29,7 +29,7 @@ const MAX_REPLIES: usize = 8;
 const MAX_REPLY_CHARS: usize = 1_000;
 
 /// The arguments of the head's `resolve_approval` tool
-/// (docs/design/permissions.md §4.2).
+/// (docs/design/work.md).
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResolveApprovalArgs {

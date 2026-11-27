@@ -1,12 +1,12 @@
 //! Compaction's memory pass: the turns one summary stands for are read once, a
 //! side model extracts the facts and the mind that interval moved, and the host
 //! validates citations and commits memories, edges and the reflection
-//! (docs/design/compaction.md §3.2, docs/design/mind.md §5.2).
+//! (docs/design/mind.md).
 //!
 //! The pass is one async function the compaction job awaits. Nothing schedules
 //! it and nothing stores where it stands: its range is the message window
 //! between the previous summary and the new one, so the newest `ene.summary`
-//! aside is the only position (docs/design/compaction.md §2.1).
+//! aside is the only position (docs/design/mind.md).
 use super::{
     Companion, Role,
     embedding::{self, Embeddings},
@@ -220,7 +220,7 @@ fn reflect(
         Ok(_) => Ok(()),
         // A mind edit that landed while the pass ran wins: the reflection of
         // this window is discarded, and the rest of the pass still counts
-        // (docs/design/mind.md §5.2).
+        // (docs/design/mind.md).
         Err(ene_store::StoreError::Conflict(why)) => {
             tracing::debug!(
                 companion = %companion.id,

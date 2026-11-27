@@ -3,7 +3,8 @@
 //!
 //! AIとの会話、コンパニオンの心と記憶、作業セッション、接続・設定・承認、クライアント能力と端末操作をまとめる常駐ホストです。会話の正本は Rig のセッションログ（`rig-ecs` + `rig-memory::DirStore`）に任せ、SQLite はコンパニオン・設定・承認・受付・作業・クライアント・記憶だけを持ちます。
 //!
-//! > このパッケージは [ホストAPI設計](../../../docs/api.md)（§7 のカノニカル Protobuf 定義が正本）と [全体アーキテクチャ](../../../docs/architecture.md) に沿って書き直した実装です。製品としての振る舞いは [docs/features](../../../docs/features/README.md)、知覚・身体・音声の契約は [共通仕様](../../../docs/design/voice-avatar.md) を参照してください。**接続経路の認証はOwner Bearerのみ**です（[ホスト接続の設計](../../../docs/design/host-access.md) の移行は未完了）。外部入口を経由する場合は、`ENE_HOST_ALLOWED_HOSTS` にその入口の名前を設定します。`client_id` は接続端末の区別であり、認証情報ではありません。
+//! [機能仕様と設計](../../../docs/README.md)に製品の振る舞いをまとめています。Connect の通信契約は [host.proto](../../../crates/ene-rpc/proto/host.proto) を参照してください。
+//! 接続には [Owner Bearer 認証](../../../docs/design/work.md) が必要です。外部入口を経由する場合は `ENE_HOST_ALLOWED_HOSTS` にその名前を設定します。`client_id` は端末を識別します。
 //!
 //! ## 起動
 //!
@@ -92,7 +93,7 @@
 //!
 //! ## API契約
 //!
-//! `crates/ene-rpc/proto/host.proto` が正本で、`docs/api.md` §7 と一致します。有限の状態はenum、イベント詳細は `oneof`、自由形式の値は `JsonDocument`（schema + JSON text）で運びます。`Subscribe` は `Notification` の単一ストリームで、`activation_updated` や `device_operation` もここを流れます。実際の端末操作の配送は `ClientService.DeviceStream` だけです。
+//! `crates/ene-rpc/proto/host.proto` が正本で、`docs/api.md` が通信方針を説明します。有限の状態はenum、イベント詳細は `oneof`、自由形式の値は `JsonDocument`（schema + JSON text）で運びます。`Subscribe` は `Notification` の単一ストリームで、`activation_updated` や `device_operation` もここを流れます。実際の端末操作の配送は `ClientService.DeviceStream` だけです。
 //!
 //! ## 実装状況と境界
 //!

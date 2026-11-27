@@ -53,7 +53,7 @@ pub fn connect(endpoint: &str, token: &str) -> Result<(HttpClient, ClientConfig)
     }
     let bearer = parse_bearer(token)?;
     // The contract puts the full-duplex voice stream on HTTP/2
-    // (docs/api.md §6), and the host's plain listener accepts h2c prior
+    // (docs/architecture.md), and the host's plain listener accepts h2c prior
     // knowledge. `plaintext()` would negotiate HTTP/1.1, which the contract
     // does not name for that path and which a proxy may buffer until the
     // input ends.

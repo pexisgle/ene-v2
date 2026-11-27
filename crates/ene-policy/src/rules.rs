@@ -58,7 +58,7 @@ pub struct PolicyRule {
 /// The most characters one free-text policy may carry.
 pub const MAX_POLICY_TEXT_CHARS: usize = 500;
 
-/// A free-text policy the decision engine reads (`docs/design/permissions.md`).
+/// A free-text policy the decision engine reads (`docs/design/work.md`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyText {
     /// Id of this policy text.
@@ -303,7 +303,7 @@ fn resolve_action(action: &CandidateAction) -> ResolvedAction<'_> {
 }
 
 /// Evaluates any `CandidateAction` against Hard Deny, saved `PolicyRule`s, and
-/// default approval policy (`docs/design/permissions.md` §3).
+/// default approval policy (`docs/design/work.md`).
 pub fn decide_action(rules: &[PolicyRule], action: &CandidateAction) -> Verdict {
     let typed_target = extract_target(action);
     if let Some(reason) = hard_denied_action(action, &typed_target) {

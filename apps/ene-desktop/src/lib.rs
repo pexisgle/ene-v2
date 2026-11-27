@@ -4,10 +4,10 @@
 //! the companion the operator is talking to. The avatar renderer is its child,
 //! and the audio devices and the window are its own.
 //!
-//! This is the reference client `docs/design/desktop-client.md` describes. It
+//! This is the reference client `docs/design/client.md` describes. It
 //! owns no conversation, no memory and no model: those stay in the host.
 //!
-//! デスクトップクライアントのリファレンス実装です。[デスクトップクライアント設計](../../../docs/design/desktop-client.md)が定めるプロセス構成を、GPUIのフローティングコンパニオンポッド（`CompanionPod`）と独立設定ウィンドウ（`SettingsStudio`）で提供します。
+//! デスクトップクライアントのリファレンス実装です。[デスクトップクライアント設計](../../../docs/design/client.md)が定めるプロセス構成を、GPUIのフローティングコンパニオンポッド（`CompanionPod`）と独立設定ウィンドウ（`SettingsStudio`）で提供します。
 //!
 //! `ene-host` へConnect-RPCで接続し、自身が提供できる能力を宣言して、コンパニオンのアクティブ端末になります。会話・記憶・モデル・作業のオーケストレーションはホストにあり、このプロセスはそれらを持ちません。アバター描画は子プロセスの [`ene-avatar`](../../ene-avatar/) に委ね、音声デバイスとOSのウィンドウ監視はこのプロセスが所有します。
 //!

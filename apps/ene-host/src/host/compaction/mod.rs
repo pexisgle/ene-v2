@@ -1,5 +1,5 @@
 //! Context compaction: the rolling summary at a turn boundary and the one-pass
-//! request fit (docs/design/compaction.md).
+//! request fit (docs/design/mind.md).
 use super::{
     agent::CompanionAgent,
     background::{self, Job},
@@ -43,7 +43,7 @@ const SUMMARY_HEAD: &str =
 
 /// The rolling summary snapshot kept as the newest `ene.summary` aside.
 ///
-/// The snapshot is view-only by design (docs/design/compaction.md §2.1): the
+/// The snapshot is view-only by design (docs/design/mind.md): the
 /// append-only session log is never rewritten, so rig-memory's `apply_summary`
 /// (which splices older messages out in place) and the `summary_state` /
 /// `summary_in` bookkeeping of that splice are not the host's path. The
