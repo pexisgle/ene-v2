@@ -89,9 +89,9 @@ pub(super) fn append_setup_model_section(
             .child(pill_button(
                 "onboard-refresh-models",
                 if checking {
-                    "取得中…".to_owned()
+                    "確認中…"
                 } else {
-                    "再取得".to_owned()
+                    "接続を確認"
                 },
                 Tone::Ghost.enabled(!checking),
                 theme,
@@ -115,7 +115,7 @@ pub(super) fn append_setup_model_section(
             enabled: !checking,
             max_list_height: 168.,
             search_placeholder: "モデルを検索…",
-            empty_label: "取得済みのモデルがありません（「再取得」で確認）",
+            empty_label: "取得済みのモデルがありません",
         },
         move |val, _, cx| {
             _ = pod_model_select.update(cx, |this, cx| {

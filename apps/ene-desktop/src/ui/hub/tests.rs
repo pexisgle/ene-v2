@@ -126,3 +126,57 @@ fn a_probe_settles_only_its_own_pending_check(cx: &mut TestAppContext) {
         });
     });
 }
+
+#[gpui::test]
+fn setup_can_retry_after_a_failed_save_or_disconnect(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    cx.update(|cx| {
+        let hub = test_hub(cx, runtime.handle());
+        hub.update(cx, |hub, cx| {
+            hub.apply(
+                Update::Link(Box::new(Link::Live {
+                    version: "1".into(),
+                })),
+                cx,
+            );
+            let epoch = hub.model.connections.link_epoch;
+            hub.setup.pending = true;
+            hub.apply(
+                Update::Scoped {
+                    epoch,
+                    seq: 1,
+                    inner: Box::new(Update::SetupSaved(Err(Notice {
+                        context: "接続設定の保存".into(),
+                        message: "fixture timeout".into(),
+                        kind: NoticeKind::Failed,
+                    }))),
+                },
+                cx,
+            );
+            assert!(!hub.setup.pending);
+            assert_eq!(hub.setup.error_detail.as_deref(), Some("fixture timeout"));
+
+            hub.setup.pending = true;
+            hub.apply(
+                Update::Link(Box::new(Link::Unset {
+                    path: "fixture".into(),
+                    reason: "disconnected".into(),
+                })),
+                cx,
+            );
+            hub.apply(
+                Update::Scoped {
+                    epoch,
+                    seq: 2,
+                    inner: Box::new(Update::SetupSaved(Ok("retired-connection".into()))),
+                },
+                cx,
+            );
+            assert!(!hub.setup.pending);
+            assert!(hub.setup.error.is_some());
+            assert!(hub.setup.pending_connection_id.is_none());
+        });
+    });
+}

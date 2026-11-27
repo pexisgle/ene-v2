@@ -56,9 +56,7 @@ impl Model {
                 notifications::merge_notification(self, *notification, &mut effects);
             }
             Update::Resync => self.companions.streaming.clear(),
-            Update::Created(_)
-            | Update::SetupFinished { .. }
-            | Update::CredentialRegistered { .. } => {}
+            Update::Created(_) | Update::SetupSaved(_) | Update::CredentialRegistered { .. } => {}
             Update::Devices(devices) => self.connections.devices = *devices,
             Update::Failed { context, message } => {
                 self.notice(NoticeKind::Failed, context, message)

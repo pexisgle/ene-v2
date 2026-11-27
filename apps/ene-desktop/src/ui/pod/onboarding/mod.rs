@@ -67,9 +67,9 @@ pub(super) fn render_connection_onboarding(
 
     let look = theme.field_look(false);
     pod.onboard_key.update(cx, |d, cx| d.apply_look(look, cx));
-    let secret = pod.onboard_key.read(cx).text().trim().to_owned();
     let needs_key = picked.as_ref().is_some_and(|p| p.requires_credentials);
-    let can_connect = picked.is_some() && (!needs_key || !secret.is_empty());
+    let can_connect =
+        picked.is_some() && (!needs_key || !pod.onboard_key.read(cx).text().trim().is_empty());
 
     let hub = pod.hub.read(cx);
     let pending = hub.setup.pending;
@@ -109,14 +109,12 @@ pub(super) fn render_connection_onboarding(
         .child(render_connect_submit_row(
             ConnectSubmitSpec {
                 picked,
-                name: &name,
-                secret,
                 can_connect,
                 pending,
             },
             &pod.hub,
+            &pod.onboard_key,
             theme,
-            cx,
         ))
         .into_any_element()
 }

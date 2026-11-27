@@ -14,8 +14,8 @@ use std::{future::Future, time::Duration};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(65);
 
-/// Parameters for quick-connecting and verifying an LLM provider during onboarding.
-pub(crate) struct QuickConnectRequest {
+/// Connection and optional credential to save before onboarding model selection.
+pub(crate) struct SetupConnection {
     pub(crate) revision: u64,
     pub(crate) id: String,
     pub(crate) create: bool,
@@ -326,59 +326,38 @@ pub(crate) fn revoke_secret(rpc: &RpcDispatcher, epoch: u64, connection_id: Stri
     );
 }
 
-pub(crate) fn quick_connect_llm(rpc: &RpcDispatcher, epoch: u64, req: QuickConnectRequest) {
-    rpc.call_update(epoch, |host| async move {
-        let outcome: Result<Update, connectrpc::ConnectError> = async {
+pub(crate) fn save_setup_connection(rpc: &RpcDispatcher, epoch: u64, req: SetupConnection) -> bool {
+    rpc.call_with(
+        epoch,
+        CallContext {
+            label: "接続設定の保存",
+            timeout: 2 * RPC_TIMEOUT,
+        },
+        |host| async move {
             let revision = if req.create {
-                host.settings
-                    .update_settings(settings_request(req.revision, vec![req.input]))
-                    .await?
-                    .view()
-                    .revision
+                before_probe(
+                    host.settings
+                        .update_settings(settings_request(req.revision, vec![req.input])),
+                )
+                .await?
+                .view()
+                .revision
             } else {
                 req.revision
             };
             if !req.secret.is_empty() {
-                host.settings
-                    .register_credentials(credential_request(
-                        req.id.clone(),
-                        req.secret,
-                        Some(revision),
-                    ))
-                    .await?;
-            }
-            let probe = host
-                .settings
-                .check_connection(check_request(
+                before_probe(host.settings.register_credentials(credential_request(
                     req.id.clone(),
-                    revision,
-                    uuid::Uuid::new_v4().to_string(),
-                ))
+                    req.secret,
+                    Some(revision),
+                )))
                 .await?;
-            let check = &probe.view().check;
-            Ok(Update::SetupFinished {
-                ok: check.healthy,
-                connection_id: Some(req.id),
-                models: check.resources.iter().copied().map(str::to_owned).collect(),
-                error: check
-                    .failure
-                    .as_option()
-                    .map(|failure| failure.message)
-                    .filter(|message| !message.trim().is_empty())
-                    .map(str::to_owned),
-            })
-        }
-        .await;
-        match outcome {
-            Ok(update) => update,
-            Err(err) => Update::SetupFinished {
-                ok: false,
-                connection_id: None,
-                models: Vec::new(),
-                error: Some(err.to_string()),
-            },
-        }
-    });
+            }
+            Ok(req.id)
+        },
+        |id| Update::SetupSaved(Ok(id)),
+        |label, error| Update::SetupSaved(Err(failure_notice(label, error))),
+    )
 }
 
 pub(crate) fn complete_setup_selection(rpc: &RpcDispatcher, epoch: u64, selection: SetupSelection) {

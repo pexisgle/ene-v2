@@ -41,7 +41,6 @@ pub struct SetupFlowState {
     pub(crate) error: Option<&'static str>,
     pub error_detail: Option<String>,
     pub pending_connection_id: Option<String>,
-    pub pending_models: Vec<String>,
     pub checking_connections: HashMap<String, String>,
     pub(crate) auto_assigned_revisions: BTreeMap<String, u64>,
 }

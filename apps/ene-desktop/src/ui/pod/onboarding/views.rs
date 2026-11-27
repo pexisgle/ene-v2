@@ -1,51 +1,48 @@
 //! The connect-submit row, voice launch and finish button.
 
-use super::CompanionPod;
+use crate::input::Draft;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{DropdownOption, Tone, pill_button};
 use crate::ui::{Hub, NewCompanionSpec};
 use ene_client_core::domain::{Connection, ConnectionConfig, ConnectionKind, LlmProvider};
-use gpui::{Context, Entity, div, prelude::*, px};
+use gpui::{Entity, div, prelude::*, px};
 
-pub(super) struct ConnectSubmitSpec<'a> {
+pub(super) struct ConnectSubmitSpec {
     pub(super) picked: Option<LlmProvider>,
-    pub(super) name: &'a str,
-    pub(super) secret: String,
     pub(super) can_connect: bool,
     pub(super) pending: bool,
 }
 
 pub(super) fn render_connect_submit_row(
-    spec: ConnectSubmitSpec<'_>,
+    spec: ConnectSubmitSpec,
     hub: &Entity<Hub>,
+    key: &Entity<Draft>,
     theme: &Theme,
-    cx: &Context<CompanionPod>,
 ) -> gpui::Div {
     let hub_connect = hub.clone();
-    let pod = cx.entity();
+    let key = key.clone();
     let picked = spec.picked;
-    let secret = spec.secret;
     div().flex().justify_end().child(pill_button(
         "onboard-connect-llm",
         if spec.pending {
-            "接続してモデルを取得中…".to_owned()
+            "接続設定を保存中…"
         } else {
-            format!("{}に接続してモデルを取得", spec.name)
+            "接続設定を保存"
         },
         Tone::Primary
             .icon(Icon::Check)
             .enabled(spec.can_connect && !spec.pending),
         theme,
         move |_, cx| {
-            if let Some(provider) = picked.clone() {
-                hub_connect.update(cx, |hub, cx| {
-                    hub.quick_connect_llm(provider, secret.clone(), cx)
-                });
-                pod.update(cx, |this, cx| {
-                    this.onboard_key.update(cx, crate::input::Draft::clear);
-                    cx.notify();
-                });
+            let Some(provider) = picked.clone() else {
+                return;
+            };
+            let secret = key.read(cx).text().trim().to_owned();
+            if hub_connect.update(cx, |hub, cx| {
+                hub.save_setup_connection(provider, secret, cx)
+            }) {
+                key.update(cx, Draft::clear);
             }
         },
     ))
@@ -65,14 +62,8 @@ pub(super) fn is_voicevox_connection(c: &Connection) -> bool {
 }
 
 pub(super) fn build_model_options(hub: &Hub, target_conn_id: Option<&str>) -> Vec<DropdownOption> {
-    let mut pairs =
-        target_conn_id.map_or_default(|cid| hub.model.available_models_for_connection(cid));
-    for model_id in &hub.setup.pending_models {
-        if !pairs.iter().any(|(id, _)| id == model_id) {
-            pairs.push((model_id.clone(), model_id.clone()));
-        }
-    }
-    pairs
+    target_conn_id
+        .map_or_default(|cid| hub.model.available_models_for_connection(cid))
         .into_iter()
         .map(|(id, label)| {
             let detail = (label != id).then(|| id.clone());

@@ -238,13 +238,13 @@ impl Hub {
         presets::add_llm_from_provider(self, provider, model_ids, cx);
     }
 
-    pub(crate) fn quick_connect_llm(
+    pub(crate) fn save_setup_connection(
         &mut self,
         provider: LlmProvider,
         secret: String,
         cx: &mut Context<Self>,
-    ) {
-        presets::quick_connect_llm(self, provider, secret, cx);
+    ) -> bool {
+        presets::save_setup_connection(self, provider, secret, cx)
     }
 
     pub(crate) fn complete_setup_selection(

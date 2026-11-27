@@ -92,18 +92,8 @@ pub enum Update {
     },
     /// The provider catalog.
     Providers(Vec<LlmProvider>),
-    /// Setup finished for one connection.
-    SetupFinished {
-        /// Whether the setup completed.
-        ok: bool,
-        /// The connection that was set up, when one was.
-        connection_id: Option<String>,
-        /// Models the new connection reported.
-        models: Vec<String>,
-        /// Why setup failed, when it did.
-        /// Why the preview failed, when it did.
-        error: Option<String>,
-    },
+    /// The connection and any credential have been saved for onboarding.
+    SetupSaved(Result<String, Notice>),
     /// The declared models of one connection.
     Models {
         /// The connection the models belong to.

@@ -3,7 +3,7 @@
 use super::Hub;
 use crate::rpc::{
     self,
-    connections::{QuickConnectRequest, SetupSelection},
+    connections::{SetupConnection, SetupSelection},
 };
 use ene_client_core::{
     ModelRoleSlot, SAKURA_AI_ENDPOINT as SAKURA_ENDPOINT, SearchAdapter,
@@ -60,17 +60,17 @@ pub(super) fn add_llm_from_provider(
     );
 }
 
-pub(super) fn quick_connect_llm(
+pub(super) fn save_setup_connection(
     hub: &mut Hub,
     provider: LlmProvider,
     secret: String,
     cx: &mut Context<Hub>,
-) {
+) -> bool {
     let Some(settings) = hub.model.settings() else {
-        return;
+        return false;
     };
     if hub.rpc.host().is_none() || hub.setup.pending {
-        return;
+        return false;
     }
     // Reuse a failed attempt only at the exact catalog endpoint.
     let existing = find_reusable_quick_connect_connection(&settings.connections, &provider);
@@ -78,21 +78,24 @@ pub(super) fn quick_connect_llm(
     let revision = settings.revision;
     let create = existing.is_none();
     let input = build_llm_provider_input(id.clone(), provider, Vec::new());
-    hub.setup.pending = true;
-    hub.setup.error = None;
-    hub.setup.error_detail = None;
-    rpc::connections::quick_connect_llm(
+    if !rpc::connections::save_setup_connection(
         &hub.rpc,
         hub.model.connections.link_epoch,
-        QuickConnectRequest {
+        SetupConnection {
             revision,
             id,
             create,
             input,
             secret,
         },
-    );
+    ) {
+        return false;
+    }
+    hub.setup.pending = true;
+    hub.setup.error = None;
+    hub.setup.error_detail = None;
     cx.notify();
+    true
 }
 
 pub(super) fn complete_setup_selection(
@@ -128,7 +131,6 @@ pub(super) fn complete_setup_selection(
         .unwrap_or_else(|| "ene".to_owned());
 
     hub.setup.pending_connection_id = None;
-    hub.setup.pending_models.clear();
 
     rpc::connections::complete_setup_selection(
         &hub.rpc,

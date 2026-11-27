@@ -146,7 +146,12 @@ impl Hub {
 
     fn apply_ui_update_bookkeeping(&mut self, update: &Update, cx: &mut Context<Self>) {
         match update {
-            Update::Link(link) if !link.is_live() => self.setup.checking_connections.clear(),
+            Update::Link(link) if !link.is_live() => {
+                self.setup.checking_connections.clear();
+                if std::mem::take(&mut self.setup.pending) {
+                    self.setup.error = Some("接続が切れました。再接続後に保存を確認してください。");
+                }
+            }
             Update::CredentialRegistered { connection_id } => {
                 cx.emit(HubEvent::CredentialsSaved(connection_id.clone()));
             }
@@ -167,28 +172,20 @@ impl Hub {
                     self.setup.error_detail = None;
                 }
             }
-            Update::SetupFinished {
-                ok,
-                connection_id,
-                models,
-                error,
-            } => {
+            Update::SetupSaved(result) => {
                 self.setup.pending = false;
-                if *ok {
-                    self.setup.error = None;
-                    self.setup.error_detail = None;
-                    self.setup.pending_connection_id = connection_id.clone();
-                    self.setup.pending_models = models.clone();
-                } else {
-                    self.setup.error = Some(
-                        "接続を確認できませんでした。選んだサービスのキーとネットワークを確認して、もう一度登録してください。",
-                    );
-                    self.setup.error_detail = error.clone();
+                match result {
+                    Ok(connection_id) => {
+                        self.setup.error = None;
+                        self.setup.error_detail = None;
+                        self.setup.pending_connection_id = Some(connection_id.clone());
+                    }
+                    Err(error) => {
+                        self.setup.error = Some("接続設定を保存できませんでした。");
+                        self.setup.error_detail = Some(error.message.clone());
+                    }
                 }
                 self.resnapshot();
-                if *ok {
-                    self.load_models(cx);
-                }
             }
             Update::Created(id) => {
                 self.resnapshot();
