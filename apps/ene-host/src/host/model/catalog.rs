@@ -3,7 +3,7 @@
 use crate::host::{agent, background::AbortOnDropHandle, net};
 use bevy_ecs::prelude::*;
 use rig_core::{
-    catalog::{Catalog, Connector, ModelSpec},
+    catalog::{Catalog, ModelSpec},
     providers::registry::ProviderId,
 };
 use rig_ecs::model::Models;
@@ -22,43 +22,32 @@ pub(crate) struct Refresh {
 }
 
 impl Refresh {
-    pub(crate) async fn initial(wake: crossbeam_channel::Sender<()>) -> Self {
-        let (catalog, delay) = if cfg!(test) {
-            (Catalog::builtin().clone(), None)
-        } else {
-            let catalog = fetch().await;
-            let delay = Some(next_delay(catalog.is_some()));
-            (catalog.unwrap_or_else(|| Catalog::builtin().clone()), delay)
-        };
-        let (updates, pending) = watch::channel(catalog);
-        let fetch = delay
-            .map(|delay| AbortOnDropHandle::new(tokio::spawn(fetch_updates(updates, wake, delay))));
+    pub(crate) fn start(wake: crossbeam_channel::Sender<()>) -> Self {
+        let (updates, pending) = watch::channel(Catalog::default());
+        let fetch = (!cfg!(test))
+            .then(|| AbortOnDropHandle::new(tokio::spawn(fetch_updates(updates, wake))));
         Self {
             pending,
             _fetch: fetch,
         }
     }
-
-    pub(crate) fn initial_models(&self) -> Models {
-        Models(Connector::new(self.pending.borrow().clone()))
-    }
 }
 
-async fn fetch_updates(
-    updates: watch::Sender<Catalog>,
-    wake: crossbeam_channel::Sender<()>,
-    mut delay: Duration,
-) {
+async fn fetch_updates(updates: watch::Sender<Catalog>, wake: crossbeam_channel::Sender<()>) {
     loop {
-        tokio::time::sleep(delay).await;
         let catalog = fetch().await;
-        delay = next_delay(catalog.is_some());
+        let delay = if catalog.is_some() {
+            REFRESH_INTERVAL
+        } else {
+            RETRY_INTERVAL
+        };
         if let Some(catalog) = catalog {
             if updates.send(catalog).is_err() {
                 return;
             }
             let _pending_wake = wake.try_send(());
         }
+        tokio::time::sleep(delay).await;
     }
 }
 
@@ -70,14 +59,6 @@ pub(crate) fn apply_refresh(
     if matches!(refresh.pending.has_changed(), Ok(true)) {
         *models.0.catalog_mut() = refresh.pending.borrow_and_update().clone();
         connections.clear_models();
-    }
-}
-
-fn next_delay(succeeded: bool) -> Duration {
-    if succeeded {
-        REFRESH_INTERVAL
-    } else {
-        RETRY_INTERVAL
     }
 }
 
@@ -158,7 +139,7 @@ mod tests {
             pending,
             _fetch: None,
         };
-        world.insert_resource(refresh.initial_models());
+        world.init_resource::<Models>();
         world.insert_resource(refresh);
         world.init_resource::<agent::Connections>();
 

@@ -55,10 +55,9 @@ impl Runtime {
         if !installed.is_empty() {
             tracing::info!(plugins = %installed.join(","), "provider plugins loaded");
         }
-        let ((), initial_plugin_tools, catalog_refresh) = tokio::join!(
+        let ((), initial_plugin_tools) = tokio::join!(
             providers.start_used(&store),
             providers::extensions::discover_plugin_tools(&providers, &store),
-            model::catalog::Refresh::initial(wake_tx.clone())
         );
         let services = Arc::new(HostServices {
             state_dir: state.to_path_buf(),
@@ -77,7 +76,7 @@ impl Runtime {
         let thread = spawn_kernel_thread(KernelLaunch {
             resources: KernelResources {
                 services: Arc::clone(&services),
-                catalog_refresh,
+                catalog_refresh: model::catalog::Refresh::start(wake_tx),
                 host_runtime: tokio::runtime::Handle::current(),
                 device_timeout: options.device_timeout,
                 wake,

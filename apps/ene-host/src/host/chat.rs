@@ -6,8 +6,9 @@ use super::{
 };
 use ene_rpc as w;
 use ene_store::util::{digest, now};
-use rig_core::conversation::{Aside, Author, RequestId};
+use rig_core::conversation::{Aside, Author, AuthorKind, RequestId};
 use rig_ecs::prelude::*;
+use serde::Deserialize;
 use serde_json::json;
 
 /// The ingress limits from docs/design/mind.md.
@@ -37,8 +38,7 @@ pub(crate) fn accept(app: &mut App, request: &w::SendMessageRequest) -> Result<w
     if !request.request_key.is_empty() {
         ene_domain::validate_id(&request.request_key)?;
     }
-    let text = request.text.clone();
-    let hash = digest(format!("{}:{}", request.companion_id, text).as_bytes());
+    let hash = digest(format!("{}:{}", request.companion_id, request.text).as_bytes());
     let world = app.world_mut();
     let store = world.resource::<Store>().clone();
     store
@@ -47,7 +47,6 @@ pub(crate) fn accept(app: &mut App, request: &w::SendMessageRequest) -> Result<w
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     let agent = agent::agent_of(world, &request.companion_id)
         .ok_or_else(|| HostError::NotFound(("companion agent not found").into()))?;
-    agent::ensure_model(world, agent)?;
 
     // A receipt is only trusted when the input it names is actually in the
     // conversation; an orphan receipt is ignored and a new accept proceeds.
@@ -60,6 +59,7 @@ pub(crate) fn accept(app: &mut App, request: &w::SendMessageRequest) -> Result<w
             ..Default::default()
         });
     }
+    agent::ensure_model(world, agent)?;
 
     let request_id = uuid::Uuid::new_v4().to_string();
     tracing::Span::current().record("request_id", request_id.as_str());
@@ -86,7 +86,7 @@ pub(crate) fn accept(app: &mut App, request: &w::SendMessageRequest) -> Result<w
             ..Author::user()
         };
         let mode = super::permission::user_reply_delivery(world.get_resource(), agent);
-        world.trigger(Deliver::new(agent, text, mode).with_author(author));
+        world.trigger(Deliver::new(agent, request.text.clone(), mode).with_author(author));
     }
     super::tick(app);
     if let Some(reason) = app
@@ -113,8 +113,27 @@ pub(crate) fn accept(app: &mut App, request: &w::SendMessageRequest) -> Result<w
 /// and is skipped, even when the retry carries a different message. `Err` means
 /// a confirmed receipt accepted different content.
 fn accepted(world: &World, agent: Entity, key: &str, hash: &[u8]) -> Result<Option<String>> {
-    for (recorded_key, request_id, recorded) in receipts(world, agent) {
-        if recorded_key != key || !has_input(world, agent, &request_id) {
+    let Some(conversation) = world.get::<Conversation>(agent) else {
+        return Ok(None);
+    };
+    for (_, aside) in conversation.asides() {
+        let value = &aside.value;
+        if aside.kind != "ene.accepted"
+            || !matches!(&aside.author.kind, AuthorKind::Plugin(id) if id == "ene-host")
+            || value.get("request_key").and_then(serde_json::Value::as_str) != Some(key)
+        {
+            continue;
+        }
+        let Some(request_id) = value.get("request_id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(recorded) = value
+            .get("hash")
+            .and_then(|value| Vec::<u8>::deserialize(value).ok())
+        else {
+            continue;
+        };
+        if !has_input(world, agent, request_id) {
             continue;
         }
         if recorded != hash {
@@ -122,26 +141,9 @@ fn accepted(world: &World, agent: Entity, key: &str, hash: &[u8]) -> Result<Opti
                 ("this request key already accepted different content").into(),
             ));
         }
-        return Ok(Some(request_id));
+        return Ok(Some(request_id.to_owned()));
     }
     Ok(None)
-}
-
-fn receipts(world: &World, agent: Entity) -> Vec<(String, String, Vec<u8>)> {
-    let Some(conversation) = world.get::<Conversation>(agent) else {
-        return Vec::new();
-    };
-    conversation
-        .asides()
-        .filter(|(_, aside)| aside.kind == "ene.accepted")
-        .filter_map(|(_, aside)| {
-            Some((
-                aside.value.get("request_key")?.as_str()?.to_owned(),
-                aside.value.get("request_id")?.as_str()?.to_owned(),
-                serde_json::from_value(aside.value.get("hash")?.clone()).ok()?,
-            ))
-        })
-        .collect()
 }
 
 fn has_input(world: &World, agent: Entity, request_id: &str) -> bool {

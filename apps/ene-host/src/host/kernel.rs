@@ -70,7 +70,7 @@ fn build_kernel_app(res: KernelResources) -> App {
         .insert_resource(res.services.store.clone())
         .insert_resource(res.services.providers.clone())
         .insert_resource(res.services.credentials.clone())
-        .insert_resource(res.catalog_refresh.initial_models())
+        .init_resource::<Models>()
         .insert_resource(res.catalog_refresh)
         .insert_resource(HostRuntime(res.host_runtime))
         .insert_resource(res.services.hub.clone())
