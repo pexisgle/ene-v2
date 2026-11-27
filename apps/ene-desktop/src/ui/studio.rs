@@ -10,8 +10,8 @@ use super::widgets::{CircleButtonStyle, Tone, circle_icon_button, pill_button, w
 use super::{Hub, SettingsSection};
 use crate::state::NoticeKind;
 use gpui::{
-    AnyElement, Context, Entity, MouseButton, MouseDownEvent, SharedString, Subscription, Window,
-    div, prelude::*, px,
+    AnyElement, Context, Entity, MouseButton, MouseDownEvent, SharedString, Window, div,
+    prelude::*, px,
 };
 
 /// Settings window managing companions, connections and local device permissions.
@@ -22,7 +22,6 @@ pub struct SettingsStudio {
     voice: Entity<VoicePane>,
     device: Entity<DevicePane>,
     content_scroll: gpui::ScrollHandle,
-    _observe: Subscription,
 }
 
 impl std::fmt::Debug for SettingsStudio {
@@ -33,11 +32,10 @@ impl std::fmt::Debug for SettingsStudio {
 
 impl SettingsStudio {
     pub fn new(hub: Entity<Hub>, cx: &mut Context<Self>) -> Self {
-        let _observe = cx.observe(&hub, |_, _, cx| cx.notify());
         let companions = cx.new(|cx| CompanionsPane::new(hub.clone(), cx));
         let connections = cx.new(|cx| ConnectionsPane::new(hub.clone(), cx));
         let voice = cx.new(|cx| VoicePane::new(hub.clone(), cx));
-        let device = cx.new(|cx| DevicePane::new(hub.clone(), cx));
+        let device = cx.new(|_| DevicePane::new(hub.clone()));
         Self {
             hub,
             companions,
@@ -45,7 +43,6 @@ impl SettingsStudio {
             voice,
             device,
             content_scroll: gpui::ScrollHandle::new(),
-            _observe,
         }
     }
 

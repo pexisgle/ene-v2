@@ -18,7 +18,7 @@ use ene_client_core::domain::{
     SKIP_TOOL_CONFIRMATION_ID, is_file_confirmation_rule as domain_is_file_confirmation,
     tool_confirmation_update,
 };
-use gpui::{AnyElement, Context, Entity, FontWeight, Subscription, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, Entity, FontWeight, Window, div, prelude::*, px};
 
 /// Form and arming state owned by [`DevicePane`].
 pub(super) struct DeviceFormState {
@@ -54,7 +54,6 @@ pub(crate) struct DevicePane {
     pub(crate) hub: Entity<Hub>,
     pub(super) drafts: DraftStore,
     pub(super) form: DeviceFormState,
-    _observe: Subscription,
 }
 
 impl std::fmt::Debug for DevicePane {
@@ -140,13 +139,11 @@ impl DeviceSnapshot {
 }
 
 impl DevicePane {
-    pub(crate) fn new(hub: Entity<Hub>, cx: &mut Context<Self>) -> Self {
-        let _observe = cx.observe(&hub, |_, _, cx| cx.notify());
+    pub(crate) fn new(hub: Entity<Hub>) -> Self {
         Self {
             hub,
             drafts: DraftStore::default(),
             form: DeviceFormState::default(),
-            _observe,
         }
     }
 

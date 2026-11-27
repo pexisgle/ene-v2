@@ -119,7 +119,6 @@ pub(crate) struct ConnectionsPane {
     pub(super) drafts: DraftStore,
     form: ConnectionFormState,
     pub(super) open_dropdown: Option<String>,
-    _observe: Subscription,
     _events: Subscription,
 }
 
@@ -149,14 +148,12 @@ fn close_pane_dropdown(pane: &Entity<ConnectionsPane>, cx: &mut gpui::App) {
 
 impl ConnectionsPane {
     pub(crate) fn new(hub: Entity<Hub>, cx: &mut Context<Self>) -> Self {
-        let _observe = cx.observe(&hub, |_, _, cx| cx.notify());
         let _events = cx.subscribe(&hub, Self::on_hub_event);
         Self {
             hub,
             drafts: DraftStore::default(),
             form: ConnectionFormState::default(),
             open_dropdown: None,
-            _observe,
             _events,
         }
     }

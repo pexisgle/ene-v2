@@ -34,7 +34,6 @@ pub(crate) struct CompanionsPane {
     pub(super) form: CompanionFormState,
     pub(super) open_dropdown: Option<String>,
     initialized: bool,
-    _observe: Subscription,
     _events: Subscription,
 }
 
@@ -90,7 +89,6 @@ impl CompanionsSnapshot {
 
 impl CompanionsPane {
     pub(crate) fn new(hub: Entity<Hub>, cx: &mut Context<Self>) -> Self {
-        let _observe = cx.observe(&hub, |_, _, cx| cx.notify());
         let _events = cx.subscribe(&hub, Self::on_hub_event);
         Self {
             hub,
@@ -98,7 +96,6 @@ impl CompanionsPane {
             form: CompanionFormState::default(),
             open_dropdown: None,
             initialized: false,
-            _observe,
             _events,
         }
     }
