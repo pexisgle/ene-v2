@@ -3,7 +3,8 @@
 use super::{Run, RunState, Runs, WorkStatus, inform, notify_finished, notify_status, retire};
 use crate::host::{agent::WorkReports, db::Store, error::Failure, notify::Notifier};
 use bevy_ecs::prelude::*;
-use rig_core::completion::Message;
+use itertools::Itertools as _;
+use rig_core::completion::{AssistantContent, Message};
 use rig_ecs::prelude::*;
 
 fn resolve_settle_outcome(
@@ -126,11 +127,7 @@ fn message_text(message: &Message) -> Option<String> {
     let text = reply
         .content
         .iter()
-        .filter_map(|item| match item {
-            rig_core::completion::AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
+        .filter_map(AssistantContent::as_text)
         .join("\n");
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_owned())
