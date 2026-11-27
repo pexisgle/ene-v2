@@ -1,10 +1,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const Module = require('module');
-const cp = require('child_process');
-
-const wrapped = new WeakMap();
+const { createRequire } = require('module');
 
 function splitSimpleArgs(str) {
   const out = [];
@@ -191,151 +188,80 @@ function getPathValue(env) {
   return '';
 }
 
-function resolveDirectTarget(cmd, opts, baseEnv) {
-  const hasSep = cmd.includes('\\') || cmd.includes('/');
-  if (hasSep) {
-    const abs = path.resolve(opts.path || process.cwd(), cmd);
-    const dir = path.dirname(abs);
-    const name = path.basename(abs);
-    return resolveInDir(dir, name, baseEnv).target;
+function resolveDirectTarget(cmd, cwd, env) {
+  if (cmd.includes('\\') || cmd.includes('/')) {
+    const absolute = path.resolve(cwd, cmd);
+    return resolveInDir(path.dirname(absolute), path.basename(absolute), env).target;
   }
-  // Reject shell pipelines/expressions such as `npx -c "a && b"`.
-  if (/[\s&|<>^();!%"'\r\n]/.test(cmd)) {
-    return null;
-  }
-  const dirs = [];
-  if (Array.isArray(opts.binPaths)) {
-    for (const d of opts.binPaths) {
-      if (d) dirs.push(d);
-    }
-  }
-  if (opts.path) {
-    dirs.push(path.join(opts.path, 'node_modules', '.bin'));
-  }
-  const pathVal = getPathValue(baseEnv);
-  if (pathVal) {
-    for (const d of pathVal.split(path.delimiter)) {
-      if (d) dirs.push(d);
-    }
-  }
+  // Arbitrary shell expressions still belong to npm's selected shell.
+  if (/[\s&|<>^();!%"'\r\n]/.test(cmd)) return null;
+  const dirs = getPathValue(env).split(path.delimiter).filter(Boolean);
   const seen = new Set();
   for (const dir of dirs) {
     const key = path.resolve(dir).toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    const res = resolveInDir(dir, cmd, baseEnv);
-    if (res.found) return res.target;
+    const result = resolveInDir(dir, cmd, env);
+    if (result.found) return result.target;
   }
   return null;
 }
 
-function isDefaultWindowsShell(shell) {
+function isDefaultWindowsShell(shell, env) {
   if (!shell || shell === true) return true;
   if (typeof shell !== 'string') return false;
   const base = path.basename(shell.trim()).toLowerCase();
   if (base === 'cmd' || base === 'cmd.exe') return true;
-  const comspecKey = Object.keys(process.env).find((k) => k.toLowerCase() === 'comspec');
-  const comspec = comspecKey ? process.env[comspecKey] : '';
-  return Boolean(comspec && shell.trim().toLowerCase() === comspec.trim().toLowerCase());
+  const key = Object.keys(env).find((name) => name.toLowerCase() === 'comspec');
+  return Boolean(key && shell.trim().toLowerCase() === String(env[key]).trim().toLowerCase());
 }
 
-function buildChildEnv(opts, extraEnv) {
-  const env = Object.assign({}, process.env, opts.env || {}, extraEnv || {});
-  const pathKeys = Object.keys(env).filter((k) => k.toLowerCase() === 'path');
-  const primaryKey = pathKeys[0] || 'PATH';
-  const existing = [];
-  for (const k of pathKeys) {
-    if (env[k]) existing.push(env[k]);
-    if (k !== primaryKey) delete env[k];
+function withShimEnvironment(env, extra) {
+  const result = { ...env };
+  for (const [name, value] of Object.entries(extra)) {
+    const key = Object.keys(result).find((key) => key.toLowerCase() === name.toLowerCase());
+    result[key || name] = value;
   }
-  const prefix = [];
-  if (Array.isArray(opts.binPaths)) {
-    for (const d of opts.binPaths) {
-      if (d) prefix.push(d);
-    }
-  }
-  prefix.push(path.dirname(process.execPath));
-  env[primaryKey] = [...prefix, ...existing].filter(Boolean).join(path.delimiter);
-  env.npm_lifecycle_event = opts.event;
-  if (opts.cmd || (opts.pkg && opts.pkg.scripts && opts.pkg.scripts[opts.event])) {
-    env.npm_lifecycle_script = opts.cmd || opts.pkg.scripts[opts.event];
-  }
-  return env;
+  const pathKey = Object.keys(result).find((key) => key.toLowerCase() === 'path') || 'PATH';
+  result[pathKey] = [result[pathKey], path.dirname(process.execPath)].filter(Boolean).join(path.delimiter);
+  return result;
 }
 
-function wrapRunScript(orig) {
-  if (wrapped.has(orig)) return wrapped.get(orig);
-  const directRunScript = function (opts) {
-    if (
-      process.platform === 'win32' &&
-      opts &&
-      opts.event === 'npx' &&
-      (opts.stdio === undefined || opts.stdio === 'inherit') &&
-      isDefaultWindowsShell(opts.scriptShell)
-    ) {
-      const cmd = opts.cmd || (opts.pkg && opts.pkg.scripts && opts.pkg.scripts[opts.event]);
-      if (typeof cmd === 'string' && cmd.trim()) {
-        const baseEnv = Object.assign({}, process.env, opts.env || {});
-        const target = resolveDirectTarget(cmd.trim(), opts, baseEnv);
-        if (target) {
-          const spawnArgs = [...target.prefixArgs, ...(Array.isArray(opts.args) ? opts.args : [])];
-          const spawnEnv = buildChildEnv(opts, target.extraEnv);
-          return new Promise((resolve, reject) => {
-            const child = cp.spawn(target.file, spawnArgs, {
-              cwd: opts.path || process.cwd(),
-              env: spawnEnv,
-              stdio: opts.stdio || 'inherit',
-              shell: false,
-              windowsHide: true,
-            });
-            child.on('error', (err) => {
-              reject(Object.assign(err, { cmd, args: spawnArgs, event: opts.event, script: cmd, path: opts.path }));
-            });
-            child.on('close', (code, signal) => {
-              if (code || signal) {
-                reject(Object.assign(new Error('command failed'), {
-                  cmd,
-                  args: spawnArgs,
-                  code,
-                  signal,
-                  stdout: null,
-                  stderr: null,
-                  event: opts.event,
-                  script: cmd,
-                  path: opts.path,
-                }));
-              } else {
-                resolve({
-                  cmd,
-                  args: spawnArgs,
-                  code: 0,
-                  signal: null,
-                  stdout: null,
-                  stderr: null,
-                  event: opts.event,
-                  script: cmd,
-                  path: opts.path,
-                });
-              }
-            });
-          });
-        }
+function installDirectSpawn(npx) {
+  // Resolve through this installation of npm. Its run-script has already
+  // assembled npm's PATH, package variables, working directory and signals.
+  const npmRequire = createRequire(npx);
+  const execRequire = createRequire(npmRequire.resolve('libnpmexec'));
+  const runRequire = createRequire(execRequire.resolve('@npmcli/run-script'));
+  const spawnFile = runRequire.resolve('@npmcli/promise-spawn');
+  const spawn = runRequire(spawnFile);
+  require.cache[spawnFile].exports = Object.assign(function (cmd, args, options, extra) {
+    if (!options || !extra || extra.event !== 'npx') return spawn(cmd, args, options, extra);
+    const env = options.env || process.env;
+    if ((options.stdio === undefined || options.stdio === 'inherit') &&
+        isDefaultWindowsShell(options.shell, env)) {
+      const cwd = options.cwd || process.cwd();
+      const target = resolveDirectTarget(cmd, cwd, env);
+      if (target) {
+        return spawn(target.file, [...target.prefixArgs, ...args], {
+          ...options,
+          env: withShimEnvironment(env, target.extraEnv),
+          shell: false,
+          windowsHide: true,
+        }, extra);
       }
     }
-    return orig.apply(this, arguments);
-  };
-  Object.assign(directRunScript, orig);
-  wrapped.set(orig, directRunScript);
-  return directRunScript;
+    return spawn(cmd, args, options, extra);
+  }, spawn);
 }
 
-const origLoad = Module._load;
-Module._load = function (request, parent, isMain) {
-  const loaded = origLoad.apply(this, arguments);
-  if (request === '@npmcli/run-script' && typeof loaded === 'function') {
-    return wrapRunScript(loaded);
+const npx = path.resolve(process.argv[1]);
+if (process.platform === 'win32') {
+  try {
+    installDirectSpawn(npx);
+  } catch (error) {
+    // Other npm layouts can still run through the regular CLI.
+    if (error.code !== 'MODULE_NOT_FOUND') throw error;
   }
-  return loaded;
-};
-
-require(process.argv[1]);
+}
+require(npx);
