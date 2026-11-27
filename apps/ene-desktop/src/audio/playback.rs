@@ -9,7 +9,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
 };
 
@@ -18,7 +18,18 @@ use std::{
 pub(super) struct Deck {
     pub(super) generation: u64,
     pub(super) utterance: String,
+    pub(super) companion_id: Option<Arc<str>>,
+    pub(super) level: f32,
     pub(super) pending: VecDeque<f32>,
+}
+
+impl Deck {
+    fn clear(&mut self) {
+        self.utterance.clear();
+        self.companion_id = None;
+        self.level = 0.;
+        self.pending.clear();
+    }
 }
 
 pub(super) struct PlayerQueue {
@@ -40,6 +51,7 @@ impl PlayerQueue {
 
     pub(super) fn push(
         &mut self,
+        companion_id: &str,
         utterance: &str,
         generation: u64,
         pcm: &[u8],
@@ -52,7 +64,11 @@ impl PlayerQueue {
             if generation < deck.generation {
                 return Ok(());
             }
-            deck.generation != generation || deck.utterance != utterance
+            let switched = deck.generation != generation || deck.utterance != utterance;
+            if !switched && deck.companion_id.as_deref().unwrap_or("") != companion_id {
+                return Ok(());
+            }
+            switched
         };
         let decoded = decode(pcm)?;
         if switched && let Some(filter) = self.filter.as_mut() {
@@ -64,9 +80,10 @@ impl PlayerQueue {
         };
         let mut deck = self.deck.lock();
         if switched {
-            deck.pending.clear();
+            deck.clear();
             deck.generation = generation;
             deck.utterance = utterance.to_owned();
+            deck.companion_id = (!companion_id.is_empty()).then(|| companion_id.into());
         }
         deck.pending.extend(samples);
         Ok(())
@@ -95,20 +112,15 @@ impl PlayerQueue {
     }
 
     pub(super) fn stop_current(&mut self) {
-        if let Some(filter) = self.filter.as_mut() {
-            filter.reset();
-        }
-        let mut deck = self.deck.lock();
-        deck.pending.clear();
-        deck.utterance.clear();
+        let generation = self.deck.lock().generation;
+        self.flush(generation);
     }
 
     pub(super) fn flush(&mut self, generation: u64) {
         self.flushed = self.flushed.max(generation);
         let mut deck = self.deck.lock();
         if deck.generation <= generation {
-            deck.pending.clear();
-            deck.utterance.clear();
+            deck.clear();
             if let Some(filter) = self.filter.as_mut() {
                 filter.reset();
             }
@@ -116,14 +128,9 @@ impl PlayerQueue {
     }
 
     pub(super) fn reset_stream(&mut self) {
+        self.stop_current();
         self.flushed = 0;
-        if let Some(filter) = self.filter.as_mut() {
-            filter.reset();
-        }
-        let mut deck = self.deck.lock();
-        deck.generation = 0;
-        deck.pending.clear();
-        deck.utterance.clear();
+        self.deck.lock().generation = 0;
     }
 }
 
@@ -131,12 +138,11 @@ fn output_stream<T: cpal::SizedSample + 'static>(
     device: &cpal::Device,
     supported: &cpal::SupportedStreamConfig,
     deck: &Arc<Mutex<Deck>>,
-    level: &Arc<AtomicU32>,
     muted: &Arc<AtomicBool>,
     convert: fn(f32) -> T,
 ) -> Result<cpal::Stream, cpal::Error> {
     let channels = supported.channels() as usize;
-    let (deck, level, muted) = (deck.clone(), level.clone(), muted.clone());
+    let (deck, muted) = (deck.clone(), muted.clone());
     device.build_output_stream(
         supported.config(),
         move |output, _| {
@@ -145,7 +151,6 @@ fn output_stream<T: cpal::SizedSample + 'static>(
                 channels,
                 &PlaybackSink {
                     deck: &deck,
-                    level: &level,
                     muted: &muted,
                 },
                 T::EQUILIBRIUM,
@@ -163,8 +168,14 @@ pub struct Player {
     rate: u32,
     channels: usize,
     _stream: cpal::Stream,
-    level: Arc<AtomicU32>,
     muted: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+pub(crate) struct Playback {
+    pub(crate) companion_id: Option<Arc<str>>,
+    pub(crate) level: f32,
+    pub(crate) playing: bool,
 }
 
 impl Player {
@@ -179,17 +190,16 @@ impl Player {
         let rate = supported.sample_rate();
         let channels = supported.channels() as usize;
         let queue = PlayerQueue::new(rate)?;
-        let level = Arc::new(AtomicU32::new(0));
         let muted = Arc::new(AtomicBool::new(false));
         let stream = match supported.sample_format() {
             cpal::SampleFormat::F32 => {
-                output_stream(&device, &supported, &queue.deck, &level, &muted, |s| s)
+                output_stream(&device, &supported, &queue.deck, &muted, |s| s)
             }
             cpal::SampleFormat::I16 => {
-                output_stream(&device, &supported, &queue.deck, &level, &muted, f32_to_i16)
+                output_stream(&device, &supported, &queue.deck, &muted, f32_to_i16)
             }
             cpal::SampleFormat::U16 => {
-                output_stream(&device, &supported, &queue.deck, &level, &muted, f32_to_u16)
+                output_stream(&device, &supported, &queue.deck, &muted, f32_to_u16)
             }
             format => {
                 return Err(AudioError::UnsupportedFormat {
@@ -211,7 +221,6 @@ impl Player {
             rate,
             channels,
             _stream: stream,
-            level,
             muted,
         })
     }
@@ -219,7 +228,7 @@ impl Player {
     pub fn set_muted(&self, muted: bool) {
         self.muted.store(muted, Ordering::Relaxed);
         if muted {
-            self.level.store(0f32.to_bits(), Ordering::Relaxed);
+            self.queue.deck.lock().level = 0.;
         }
     }
 
@@ -227,12 +236,23 @@ impl Player {
         self.muted.load(Ordering::Relaxed)
     }
 
-    pub fn level(&self) -> f32 {
-        f32::from_bits(self.level.load(Ordering::Relaxed))
+    pub(crate) fn playback(&self) -> Playback {
+        let deck = self.queue.deck.lock();
+        Playback {
+            companion_id: deck.companion_id.clone(),
+            level: deck.level,
+            playing: deck.level > 0. || !deck.pending.is_empty(),
+        }
     }
 
-    pub fn push(&mut self, utterance: &str, generation: u64, pcm: &[u8]) -> Result<(), AudioError> {
-        self.queue.push(utterance, generation, pcm)
+    pub fn push(
+        &mut self,
+        companion_id: &str,
+        utterance: &str,
+        generation: u64,
+        pcm: &[u8],
+    ) -> Result<(), AudioError> {
+        self.queue.push(companion_id, utterance, generation, pcm)
     }
 
     pub fn finish_utterance(&mut self, utterance: &str, generation: u64) -> Result<(), AudioError> {
@@ -251,10 +271,6 @@ impl Player {
         self.queue.reset_stream();
     }
 
-    pub fn playing(&self) -> bool {
-        !self.queue.deck.lock().pending.is_empty()
-    }
-
     pub fn rate(&self) -> u32 {
         self.rate
     }
@@ -266,7 +282,6 @@ impl Player {
 
 pub(super) struct PlaybackSink<'a> {
     pub(super) deck: &'a Mutex<Deck>,
-    pub(super) level: &'a AtomicU32,
     pub(super) muted: &'a AtomicBool,
 }
 
@@ -280,13 +295,11 @@ pub(super) fn fill_with<T: Copy>(
 ) {
     if channels == 0 {
         output.fill(silence);
-        sink.level.store(0f32.to_bits(), Ordering::Relaxed);
         return;
     }
     let Some(mut deck) = sink.deck.try_lock() else {
         // The session thread is queueing; silence one buffer rather than block.
         output.fill(silence);
-        sink.level.store(0f32.to_bits(), Ordering::Relaxed);
         return;
     };
     let is_muted = sink.muted.load(Ordering::Relaxed);
@@ -304,10 +317,9 @@ pub(super) fn fill_with<T: Copy>(
         }
     }
     // The RMS of what this buffer actually sent is the mouth opening.
-    let rms = if is_muted || audible == 0 {
+    deck.level = if is_muted || audible == 0 {
         0.
     } else {
         (energy / audible as f64).sqrt() as f32
     };
-    sink.level.store(rms.to_bits(), Ordering::Relaxed);
 }

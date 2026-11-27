@@ -8,14 +8,12 @@ use crate::{
     update::{Command, Update},
 };
 use ene_rpc as w;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::mpsc::UnboundedSender;
 
 pub(super) struct AudioPipeline {
     pub(super) player: Option<Player>,
     pub(super) microphone: Option<Microphone>,
-    /// Companion currently owning active TTS playback for lip-sync attribution.
-    pub(super) speaking_companion: Option<String>,
     /// Software mute for the microphone.
     pub(super) mic_muted: bool,
     /// Active capture mode (VAD or Push-to-Talk) (`F07`).
@@ -26,7 +24,7 @@ pub(super) struct AudioPipeline {
     /// Last audio state forwarded to the UI, to avoid spamming idle frames.
     pub(super) last_ui_audio: (f32, f32, bool),
     /// Last amplitude sent per character, so silence sends nothing new.
-    pub(super) last_lip: HashMap<String, f32>,
+    last_lip: HashMap<Arc<str>, f32>,
 }
 
 impl AudioPipeline {
@@ -34,7 +32,6 @@ impl AudioPipeline {
         Self {
             player: None,
             microphone: None,
-            speaking_companion: None,
             mic_muted: false,
             capture_mode: audio::CaptureMode::Vad,
             ptt_active: false,
@@ -103,13 +100,15 @@ impl AudioPipeline {
             companion = %chunk.companion_id,
             "audio output chunk"
         );
-        if !chunk.companion_id.is_empty() {
-            self.speaking_companion = Some(chunk.companion_id.clone());
-        }
         let Some(player) = self.player.as_mut() else {
             return;
         };
-        if let Err(error) = player.push(&chunk.utterance_id, chunk.generation_id, &chunk.pcm_data) {
+        if let Err(error) = player.push(
+            &chunk.companion_id,
+            &chunk.utterance_id,
+            chunk.generation_id,
+            &chunk.pcm_data,
+        ) {
             tracing::warn!("the audio chunk was not played: {error}");
         }
     }
@@ -117,11 +116,6 @@ impl AudioPipeline {
     fn play_audio_flush(&mut self, flush: &w::FlushControl) {
         if let Some(player) = self.player.as_mut() {
             player.flush(flush.flush_generation_id);
-        }
-        if !flush.companion_id.is_empty()
-            && self.speaking_companion.as_deref() == Some(flush.companion_id.as_str())
-        {
-            self.speaking_companion = None;
         }
         tracing::info!(reason = ?flush.reason, "the host flushed playback");
     }
@@ -133,11 +127,6 @@ impl AudioPipeline {
         {
             tracing::warn!("the audio resampler tail was not drained: {error}");
         }
-        if !finished.companion_id.is_empty()
-            && self.speaking_companion.as_deref() == Some(finished.companion_id.as_str())
-        {
-            self.speaking_companion = None;
-        }
         tracing::debug!(
             utterance = %finished.utterance_id,
             sentences = finished.total_sentences,
@@ -145,7 +134,7 @@ impl AudioPipeline {
         );
     }
 
-    /// Stops playback now without poisoning future generations.
+    /// Stops the current generation immediately.
     pub(super) fn stop_playback(&mut self) {
         if let Some(player) = self.player.as_mut() {
             player.stop_current();
@@ -153,10 +142,13 @@ impl AudioPipeline {
     }
 
     pub(super) fn clear_speaking_if(&mut self, companion_id: &str) {
-        if self.speaking_companion.as_deref() == Some(companion_id) {
+        if self.playing_companion().as_deref() == Some(companion_id) {
             self.stop_playback();
-            self.speaking_companion = None;
         }
+    }
+
+    pub(super) fn playing_companion(&self) -> Option<Arc<str>> {
+        self.player.as_ref()?.playback().companion_id
     }
 
     /// Sends the amplitude the device last played, so the renderer can open the
@@ -167,9 +159,10 @@ impl AudioPipeline {
         avatar: Option<&mut Avatar>,
         updates: &UnboundedSender<Update>,
     ) {
-        let level = self.player.as_ref().map_or(0., Player::level);
+        let playback = self.player.as_ref().map_or_default(Player::playback);
+        let level = playback.level;
         let input = self.microphone.as_ref().map_or(0., Microphone::level);
-        let speaking = self.player.as_ref().is_some_and(Player::playing);
+        let speaking = playback.playing;
         let (prev_out, prev_in, prev_speaking) = self.last_ui_audio;
         if (level - prev_out).abs() >= 0.015
             || (input - prev_in).abs() >= 0.015
@@ -185,35 +178,23 @@ impl AudioPipeline {
                 },
             );
         }
-        let target = self
-            .speaking_companion
-            .as_deref()
-            .filter(|id| transport.bindings.contains(*id))
-            .or_else(|| transport.focused_companion_id())
-            .map(str::to_owned);
+        let target = playback
+            .companion_id
+            .filter(|id| transport.bindings.contains(id.as_ref()));
         let Some(avatar) = avatar else {
             return;
         };
-        let active_chars: Vec<String> = self.last_lip.keys().cloned().collect();
-        for other in active_chars {
-            if target.as_deref() != Some(other.as_str())
-                && self.last_lip.get(&other).is_some_and(|v| *v > 0.005)
-                && avatar.lip_sync(&other, 0.0).is_ok()
-            {
-                self.last_lip.insert(other, 0.0);
-            }
-        }
+        self.last_lip.retain(|id, last| {
+            target.as_ref() == Some(id)
+                || (*last > 0.005 && !matches!(avatar.lip_sync(id, 0.), Ok(true)))
+        });
         let Some(id) = target else {
             return;
         };
-        if self
-            .last_lip
-            .get(&id)
-            .is_some_and(|last| (*last - level).abs() < 0.005)
-        {
+        if (self.last_lip.get(&id).copied().unwrap_or_default() - level).abs() < 0.005 {
             return;
         }
-        if avatar.lip_sync(&id, level).is_ok() {
+        if matches!(avatar.lip_sync(&id, level), Ok(true)) {
             tracing::trace!(companion = %id, "lip sync {level:.3}");
             self.last_lip.insert(id, level);
         }

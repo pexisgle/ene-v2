@@ -6,7 +6,7 @@
 
 use super::{Outcome, Session, persistent, stream::StreamLoopState};
 use crate::{
-    audio::{self, Microphone, Player},
+    audio::{self, Microphone},
     host::Host,
     state::Device,
     update::Update,
@@ -197,12 +197,10 @@ pub(super) async fn handle_mic_retry(
 }
 
 pub(super) async fn handle_capture_tick(session: &mut Session, state: &mut StreamLoopState) {
-    let speaking = session
-        .audio
-        .player
-        .as_ref()
-        .is_some_and(|player| player.playing() && !player.is_muted());
-    let far_end_level = session.audio.player.as_ref().map_or(0., Player::level);
+    let (speaking, far_end_level) = session.audio.player.as_ref().map_or((false, 0.), |player| {
+        let playback = player.playback();
+        (playback.playing && !player.is_muted(), playback.level)
+    });
     let CaptureTick {
         chunks,
         state: capture_state,
@@ -214,9 +212,8 @@ pub(super) async fn handle_capture_tick(session: &mut Session, state: &mut Strea
         speaking,
         far_end_level,
     );
-    if barge_in && let Some(player) = session.audio.player.as_mut() {
-        player.stop_current();
-        session.audio.speaking_companion = None;
+    if barge_in {
+        session.audio.stop_playback();
     }
     let mut sent = 0;
     if let Some(stream) = state.mic_send.as_mut() {

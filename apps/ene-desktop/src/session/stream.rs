@@ -344,12 +344,11 @@ impl Session {
                 if restart {
                     if self
                         .audio
-                        .speaking_companion
+                        .playing_companion()
                         .as_deref()
                         .is_some_and(|id| !self.transport.bindings.contains(id))
                     {
                         self.audio.stop_playback();
-                        self.audio.speaking_companion = None;
                     }
                     self.devices.sensor = Sensor::default();
                 }

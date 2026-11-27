@@ -234,14 +234,15 @@ impl Avatar {
         Ok(())
     }
 
-    /// Queues one mouth amplitude non-blockingly; drops frames when congested.
-    pub fn lip_sync(&mut self, character: &str, rms: f32) -> Result<(), AvatarError> {
+    /// Queues one mouth amplitude, returning false when the channel is busy.
+    pub fn lip_sync(&mut self, character: &str, rms: f32) -> Result<bool, AvatarError> {
         if !self.is_healthy() {
             return Err(AvatarError::Unhealthy);
         }
         let line = lip_sync_line(character, rms)?;
         match self.write_tx.try_send(WriteItem::OneWay(line)) {
-            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => Ok(()),
+            Ok(()) => Ok(true),
+            Err(mpsc::error::TrySendError::Full(_)) => Ok(false),
             Err(mpsc::error::TrySendError::Closed(_)) => Err(AvatarError::InputClosed),
         }
     }

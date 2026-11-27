@@ -13,17 +13,11 @@ use std::{
     },
 };
 
-fn fill(
-    output: &mut [f32],
-    channels: usize,
-    deck: &Arc<Mutex<Deck>>,
-    level: &AtomicU32,
-    muted: &AtomicBool,
-) {
+fn fill(output: &mut [f32], channels: usize, deck: &Arc<Mutex<Deck>>, muted: &AtomicBool) {
     fill_with(
         output,
         channels,
-        &PlaybackSink { deck, level, muted },
+        &PlaybackSink { deck, muted },
         0.0f32,
         |s| s,
     );
@@ -168,16 +162,15 @@ fn an_odd_byte_count_is_rejected_rather_than_truncated() {
 fn the_played_buffer_reports_its_rms_and_silence() {
     let deck = Arc::new(Mutex::new(Deck::default()));
     deck.lock().pending.extend([0.5f32, -0.5, 0.5, -0.5]);
-    let level = AtomicU32::new(0);
     let muted = AtomicBool::new(false);
     let mut output = vec![0.; 4];
-    fill(&mut output, 1, &deck, &level, &muted);
-    let rms = f32::from_bits(level.load(Ordering::Relaxed));
+    fill(&mut output, 1, &deck, &muted);
+    let rms = deck.lock().level;
     assert!((rms - 0.5).abs() < 1e-6, "{rms}");
 
     let mut output = vec![0.; 4];
-    fill(&mut output, 1, &deck, &level, &muted);
-    assert_eq!(f32::from_bits(level.load(Ordering::Relaxed)), 0.);
+    fill(&mut output, 1, &deck, &muted);
+    assert_eq!(deck.lock().level, 0.);
 }
 
 #[test]
@@ -189,12 +182,11 @@ fn muted_playback_silences_output_and_level_while_advancing_deck() {
         guard.generation = 1;
         guard.pending.extend([0.5f32, -0.5, 0.5, -0.5]);
     }
-    let level = AtomicU32::new(0);
     let muted = AtomicBool::new(true);
     let mut output = vec![1.; 4];
-    fill(&mut output, 1, &deck, &level, &muted);
+    fill(&mut output, 1, &deck, &muted);
     assert_eq!(output, [0., 0., 0., 0.]);
-    assert_eq!(f32::from_bits(level.load(Ordering::Relaxed)), 0.);
+    assert_eq!(deck.lock().level, 0.);
     assert!(deck.lock().pending.is_empty());
 }
 
@@ -282,7 +274,6 @@ fn i16_only_hardware_range_is_accepted_and_converts_accurately() {
         guard.generation = 1;
         guard.pending.extend([0.5f32, -0.5]);
     }
-    let level = AtomicU32::new(0);
     let muted = AtomicBool::new(false);
     let mut output_i16 = vec![0i16; 4];
     fill_with(
@@ -290,7 +281,6 @@ fn i16_only_hardware_range_is_accepted_and_converts_accurately() {
         2,
         &PlaybackSink {
             deck: &deck,
-            level: &level,
             muted: &muted,
         },
         0i16,
@@ -298,7 +288,7 @@ fn i16_only_hardware_range_is_accepted_and_converts_accurately() {
     );
     assert_eq!(output_i16[0], output_i16[1]);
     assert!(output_i16[0] > 16_000 && output_i16[2] < -16_000);
-    assert!((f32::from_bits(level.load(Ordering::Relaxed)) - 0.5).abs() < 1e-4);
+    assert!((deck.lock().level - 0.5).abs() < 1e-4);
 
     let sink = Mutex::new(VecDeque::new());
     let cap_level = AtomicU32::new(0);
@@ -324,17 +314,18 @@ fn i16_only_hardware_range_is_accepted_and_converts_accurately() {
 fn b01_stop_current_and_reset_stream_do_not_silence_generation_one() {
     let mut queue = PlayerQueue::new(WIRE_RATE).unwrap();
     let pcm = encode(&[0.25; 64]);
-    queue.push("u1", 5, &pcm).unwrap();
+    queue.push("speaker", "u1", 5, &pcm).unwrap();
     assert!(!queue.deck.lock().pending.is_empty());
 
     queue.stop_current();
+    queue.push("speaker", "u1", 5, &pcm).unwrap();
     assert!(queue.deck.lock().pending.is_empty());
-    queue.push("u2", 6, &pcm).unwrap();
+    queue.push("speaker", "u2", 6, &pcm).unwrap();
     assert!(!queue.deck.lock().pending.is_empty());
 
     queue.flush(6);
     queue.reset_stream();
-    queue.push("u3", 1, &pcm).unwrap();
+    queue.push("speaker", "u3", 1, &pcm).unwrap();
     assert_eq!(queue.deck.lock().generation, 1);
     assert!(!queue.deck.lock().pending.is_empty());
 }
@@ -344,11 +335,13 @@ fn q01_older_generation_chunk_never_overwrites_newer_generation() {
     let mut queue = PlayerQueue::new(WIRE_RATE).unwrap();
     let newer = encode(&[0.5; 32]);
     let older = encode(&[-0.5; 32]);
-    queue.push("u3", 3, &newer).unwrap();
-    queue.push("u2", 2, &older).unwrap();
+    queue.push("speaker", "u3", 3, &newer).unwrap();
+    queue.push("other", "u2", 2, &older).unwrap();
+    queue.push("other", "u3", 3, &older).unwrap();
     let deck = queue.deck.lock();
     assert_eq!(deck.generation, 3);
     assert_eq!(deck.utterance, "u3");
+    assert_eq!(deck.companion_id.as_deref(), Some("speaker"));
     assert_eq!(deck.pending.len(), 32);
 }
 
@@ -356,11 +349,11 @@ fn q01_older_generation_chunk_never_overwrites_newer_generation() {
 fn q02_utterance_switch_resets_filter_and_finish_drains_tail() {
     let mut queue = PlayerQueue::new(48_000).unwrap();
     let partial = encode(&[0.25; 240]);
-    queue.push("u1", 1, &partial).unwrap();
+    queue.push("speaker", "u1", 1, &partial).unwrap();
     assert!(queue.deck.lock().pending.is_empty());
 
     let full = encode(&[-0.25; 480]);
-    queue.push("u2", 2, &full).unwrap();
+    queue.push("speaker", "u2", 2, &full).unwrap();
     {
         let deck = queue.deck.lock();
         assert_eq!(deck.generation, 2);
@@ -368,19 +361,41 @@ fn q02_utterance_switch_resets_filter_and_finish_drains_tail() {
     }
 
     let mut queue2 = PlayerQueue::new(48_000).unwrap();
-    queue2.push("u3", 1, &partial).unwrap();
+    queue2.push("speaker", "u3", 1, &partial).unwrap();
     assert!(queue2.deck.lock().pending.is_empty());
     queue2.finish_utterance("u3", 1).unwrap();
     assert!(!queue2.deck.lock().pending.is_empty());
 }
 
 #[test]
+fn finished_utterances_keep_their_playback_identity_until_the_tail_is_played() {
+    let mut queue = PlayerQueue::new(WIRE_RATE).unwrap();
+    let pcm = encode(&[0.5; 8]);
+    queue.push("speaker", "utterance", 3, &pcm).unwrap();
+    queue.finish_utterance("utterance", 3).unwrap();
+    queue.flush(2);
+    let mut output = [0.; 8];
+    let muted = AtomicBool::new(false);
+    fill(&mut output, 1, &queue.deck, &muted);
+    {
+        let deck = queue.deck.lock();
+        assert!((deck.level - 0.5).abs() < 1e-4);
+        assert_eq!(deck.companion_id.as_deref(), Some("speaker"));
+    }
+
+    queue.push("next", "new-utterance", 4, &pcm).unwrap();
+    let deck = queue.deck.lock();
+    assert_eq!(deck.level, 0.);
+    assert_eq!(deck.companion_id.as_deref(), Some("next"));
+}
+
+#[test]
 fn finishing_a_flushed_utterance_keeps_the_new_utterances_resampler_tail() {
     let mut queue = PlayerQueue::new(48_000).unwrap();
     let partial = encode(&[0.25; 240]);
-    queue.push("previous", 1, &partial).unwrap();
+    queue.push("speaker", "previous", 1, &partial).unwrap();
     queue.flush(1);
-    queue.push("current", 2, &partial).unwrap();
+    queue.push("speaker", "current", 2, &partial).unwrap();
     queue.finish_utterance("previous", 1).unwrap();
     queue.finish_utterance("current", 2).unwrap();
     let deck = queue.deck.lock();
