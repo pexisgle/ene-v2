@@ -1,5 +1,6 @@
 //! The permission gate (`Stage::Gate`): limits, hooks, rule evaluation, and holds.
-use super::approval::{expire_orphaned_approvals, refuse, resolve_approval};
+use super::approval::{expire_orphaned_approvals, refuse};
+use super::conversation::{Replies, collect_replies, latest_user_request, register_approval_tool};
 use super::decision::{
     DECISION_ARGUMENT_CHARS, DecisionInputs, Decisions, Pending, collect_decisions, push_card,
     request_context, start_decision,
@@ -13,7 +14,6 @@ use crate::host::{
     error::Result,
     notify::Notifier,
     resources::{CompanionAgent, HostExternalTool, WorkAgent},
-    tools::run_tool,
 };
 use bevy_ecs::prelude::*;
 use ene_policy::{
@@ -24,8 +24,6 @@ use ene_rpc as w;
 use ene_store::util::truncate;
 use rig_core::effect::EffectId;
 use rig_ecs::prelude::*;
-use schemars::JsonSchema;
-use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -40,16 +38,6 @@ fn within_tool_limits(id: &str, name: &str, reply_calls: usize) -> bool {
     id.len() <= MAX_TOOL_IDENTIFIER_BYTES
         && name.len() <= MAX_TOOL_IDENTIFIER_BYTES
         && reply_calls <= MAX_REPLY_TOOL_CALLS
-}
-
-/// The arguments of the head's `resolve_approval` tool
-/// (docs/design/permissions.md §4.2).
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct ResolveApprovalArgs {
-    /// The `request_id` of a pending approval of this companion.
-    pub(crate) request_id: String,
-    /// `approve` or `deny`.
-    pub(crate) decision: String,
 }
 
 /// The marker the host inserts on a call whose approval was granted.
@@ -71,10 +59,12 @@ pub(crate) struct CallBinding {
 }
 
 /// A held tool call and the marker that keeps it from running.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct Hold {
     pub(crate) call: Entity,
     pub(crate) hold: Entity,
+    pub(super) agent: Option<Entity>,
+    pub(super) after_input: Option<RequestId>,
 }
 
 /// The approvals that are currently attached to a live tool call.
@@ -89,24 +79,20 @@ pub(crate) struct GatePlugin;
 impl Plugin for GatePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Decisions>()
+            .init_resource::<Replies>()
             .add_systems(AgentPass, gate.in_set(Stage::Gate))
             .add_systems(Update, collect_pre_tool_hooks.before(AgentLoop))
             .add_systems(
                 Update,
-                (expire_orphaned_approvals, collect_decisions)
+                (
+                    expire_orphaned_approvals,
+                    collect_decisions,
+                    collect_replies,
+                )
                     .chain()
                     .after(AgentLoop),
-            )
-            .add_open_tool::<ResolveApprovalArgs, _>(
-                "resolve_approval",
-                "Approve or deny one pending approval request of this companion. Call it when \
-                 the user has agreed or refused in conversation to the operation the approval \
-                 card names. Arguments: request_id, decision (`approve` or `deny`).",
-                ToolOptions::default(),
-                run_tool(|world, agent, request, args: ResolveApprovalArgs| {
-                    resolve_approval(world, agent, request, &args)
-                }),
             );
+        register_approval_tool(app);
     }
 }
 
@@ -442,11 +428,20 @@ pub(crate) fn issue_hold(
     let request_id = approval.request_id.clone();
     store.approval_repo().insert_approval(approval)?;
     let hold = world.spawn(HoldOf(call)).id();
-    let entry = Hold { call, hold };
+    let after_input = crate::host::agent::agent_of(world, &approval.session_id)
+        .and_then(|agent| world.get::<Conversation>(agent))
+        .and_then(latest_user_request)
+        .cloned();
+    let entry = Hold {
+        call,
+        hold,
+        agent: world.get::<ForAgent>(call).map(|owner| owner.0),
+        after_input,
+    };
     world
         .resource_mut::<Approvals>()
         .by_request
-        .insert(request_id, entry);
+        .insert(request_id, entry.clone());
     Ok(entry)
 }
 

@@ -8,7 +8,7 @@ use crate::host::{
 };
 use ene_domain::ClientId;
 use ene_rpc as w;
-use rig_ecs::prelude::{App, Aside, Author, Conversation, DeliveryMode, RequestId};
+use rig_ecs::prelude::{App, Aside, Author, Conversation, RequestId};
 
 /// The RPC boundary for operations that touch live agents or their tools.
 pub(crate) struct AgentKernel<'a> {
@@ -245,6 +245,7 @@ impl<'a> AgentKernel<'a> {
             request: Some(RequestId(id.to_owned())),
             ..Author::user()
         };
+        let one_companion = companions.len() == 1;
         for companion in companions {
             let Some(agent) = super::agent_of(world, &companion) else {
                 continue;
@@ -256,14 +257,18 @@ impl<'a> AgentKernel<'a> {
                     serde_json::json!({"transcription_id": id, "client_id": client.as_str()}),
                 ));
             }
-            super::deliver(
+            let mode = permission::user_reply_delivery(world.get_resource(), agent);
+            if super::deliver(
                 world,
                 agent,
                 &companion,
                 text.to_owned(),
-                DeliveryMode::Steer,
+                mode,
                 author.clone(),
-            );
+            ) && one_companion
+            {
+                permission::consider_user_reply(world, agent, id, text);
+            }
         }
         Ok(true)
     }

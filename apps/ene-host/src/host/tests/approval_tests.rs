@@ -463,7 +463,7 @@ fn an_approval_whose_stored_session_is_gone_still_runs_on_its_client() {
 }
 
 #[test]
-fn the_head_resolves_its_own_pending_approval_with_the_tool() {
+fn the_head_cannot_approve_its_own_held_call_without_a_new_user_answer() {
     let mut harness = Harness::new([
         vec![
             MockStreamEvent::tool_call(
@@ -503,8 +503,14 @@ fn the_head_resolves_its_own_pending_approval_with_the_tool() {
             decision: "approve".into(),
         },
     )
+    .unwrap_err();
+    assert!(answer.to_string().contains("a new user answer is required"));
+    permission::submit_with_outcome(
+        harness.app.world_mut(),
+        permission::ApprovalRequest::Operator(&request.request_id),
+        permission::ApprovalDecision::Approve,
+    )
     .unwrap();
-    assert!(answer.contains("approved"), "{answer}");
     assert_eq!(
         harness
             .store()

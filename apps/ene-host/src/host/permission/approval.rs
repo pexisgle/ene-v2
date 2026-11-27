@@ -1,13 +1,12 @@
 //! Approval submission, hold release, rule persistence, and orphan expiration.
 use super::{
     decision::Decisions,
-    gate::{Approvals, Approved, CallBinding, ResolveApprovalArgs},
+    gate::{Approvals, Approved, CallBinding},
 };
 use crate::host::{
     db::Store,
     error::{HostError, Result},
     notify::Notifier,
-    resources::CompanionAgent,
     web_search::{self, ResolvedSearch, SearchConfigError},
 };
 use bevy_ecs::prelude::*;
@@ -338,7 +337,19 @@ pub(crate) fn submit_with_outcome(
             "this operation requires user confirmation".into(),
         ));
     }
-    let Some(&hold) = world.resource::<Approvals>().by_request.get(request_id) else {
+    if matches!(request, ApprovalRequest::Companion { .. })
+        && approval.status != ApprovalStatus::Pending
+    {
+        return Err(HostError::Permission(
+            "there is no user approval to answer yet".into(),
+        ));
+    }
+    let Some(hold) = world
+        .resource::<Approvals>()
+        .by_request
+        .get(request_id)
+        .cloned()
+    else {
         repo.resolve_approval(request_id, ApprovalStatus::Expired)?;
         return Err(HostError::Conflict(
             "approval is not attached to a live tool call".into(),
@@ -416,42 +427,6 @@ fn notify_resolved(notifier: &mut Notifier, approval: &Approval) {
         "approval_resolved",
         &format!("{}: {}", approval.request_id, approval.status.as_str()),
     );
-}
-
-/// The head's `resolve_approval` tool: answers one pending approval of its own companion.
-pub(crate) fn resolve_approval(
-    world: &mut World,
-    agent: Entity,
-    _call_id: &str,
-    args: &ResolveApprovalArgs,
-) -> Result<String> {
-    let companion_id = world
-        .get::<CompanionAgent>(agent)
-        .map(|companion| companion.companion_id.clone())
-        .ok_or_else(|| HostError::Internal(("this tool belongs to a companion").into()))?;
-    let decision = match args.decision.trim() {
-        "approve" => ApprovalDecision::Approve,
-        "deny" => ApprovalDecision::Deny,
-        other => {
-            return Err(HostError::Invalid(format!(
-                "decision must be `approve` or `deny`, not `{other}`"
-            )));
-        }
-    };
-    let approval = submit_with_outcome(
-        world,
-        ApprovalRequest::Companion {
-            request: &args.request_id,
-            companion: &companion_id,
-        },
-        decision,
-    )?
-    .approval;
-    Ok(serde_json::json!({
-        "request_id": approval.request_id,
-        "status": approval.status.as_str(),
-    })
-    .to_string())
 }
 
 /// A stopped turn takes its held calls with it; the approval must not become reusable.

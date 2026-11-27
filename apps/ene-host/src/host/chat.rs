@@ -85,7 +85,8 @@ pub(crate) fn accept(app: &mut App, request: &w::SendMessageRequest) -> Result<w
             request: Some(RequestId(request_id.clone())),
             ..Author::user()
         };
-        world.trigger(Deliver::new(agent, text, DeliveryMode::Steer).with_author(author));
+        let mode = super::permission::user_reply_delivery(world.get_resource(), agent);
+        world.trigger(Deliver::new(agent, text, mode).with_author(author));
     }
     super::tick(app);
     if let Some(reason) = app
@@ -98,6 +99,7 @@ pub(crate) fn accept(app: &mut App, request: &w::SendMessageRequest) -> Result<w
     if !has_input(app.world(), agent, &request_id) {
         return Err(HostError::Unavailable(("the input was not saved").into()));
     }
+    super::permission::consider_user_reply(app.world_mut(), agent, &request_id, &request.text);
     Ok(w::Acceptance {
         request_id,
         ..Default::default()
