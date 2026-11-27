@@ -1,6 +1,6 @@
 use super::{
     AudioError,
-    resampler::{U16_SILENCE, WIRE_RATE, decode, f32_to_i16, f32_to_u16, pick_output},
+    resampler::{WIRE_RATE, decode, f32_to_i16, f32_to_u16, pick_output},
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ene_voice::pcm::StreamingResampler;
@@ -9,7 +9,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
 };
 
@@ -24,7 +24,7 @@ pub(super) struct Deck {
 pub(super) struct PlayerQueue {
     pub(super) deck: Arc<Mutex<Deck>>,
     filter: Option<StreamingResampler>,
-    flushed: Arc<AtomicU64>,
+    flushed: u64,
 }
 
 impl PlayerQueue {
@@ -34,7 +34,7 @@ impl PlayerQueue {
             filter: (device_rate != WIRE_RATE)
                 .then(|| StreamingResampler::new(WIRE_RATE, device_rate))
                 .transpose()?,
-            flushed: Arc::new(AtomicU64::new(0)),
+            flushed: 0,
         })
     }
 
@@ -44,10 +44,9 @@ impl PlayerQueue {
         generation: u64,
         pcm: &[u8],
     ) -> Result<(), AudioError> {
-        if generation == 0 || generation <= self.flushed.load(Ordering::Relaxed) {
+        if generation <= self.flushed {
             return Ok(());
         }
-        let decoded = decode(pcm)?;
         let switched = {
             let deck = self.deck.lock();
             if generation < deck.generation {
@@ -55,6 +54,7 @@ impl PlayerQueue {
             }
             deck.generation != generation || deck.utterance != utterance
         };
+        let decoded = decode(pcm)?;
         if switched && let Some(filter) = self.filter.as_mut() {
             filter.reset();
         }
@@ -63,10 +63,7 @@ impl PlayerQueue {
             None => decoded,
         };
         let mut deck = self.deck.lock();
-        if generation <= self.flushed.load(Ordering::Relaxed) || generation < deck.generation {
-            return Ok(());
-        }
-        if deck.generation != generation || deck.utterance != utterance {
+        if switched {
             deck.pending.clear();
             deck.generation = generation;
             deck.utterance = utterance.to_owned();
@@ -80,10 +77,7 @@ impl PlayerQueue {
         utterance: &str,
         generation: u64,
     ) -> Result<(), AudioError> {
-        if generation == 0 || generation <= self.flushed.load(Ordering::Relaxed) {
-            if let Some(filter) = self.filter.as_mut() {
-                filter.reset();
-            }
+        if generation <= self.flushed {
             return Ok(());
         }
         let active = {
@@ -93,19 +87,9 @@ impl PlayerQueue {
         if !active {
             return Ok(());
         }
-        let tail = match self.filter.as_mut() {
-            Some(filter) => filter.finish()?,
-            None => Vec::new(),
-        };
-        if tail.is_empty() {
-            return Ok(());
-        }
-        let mut deck = self.deck.lock();
-        if generation > self.flushed.load(Ordering::Relaxed)
-            && deck.generation == generation
-            && deck.utterance == utterance
-        {
-            deck.pending.extend(tail);
+        if let Some(filter) = self.filter.as_mut() {
+            let tail = filter.finish()?;
+            self.deck.lock().pending.extend(tail);
         }
         Ok(())
     }
@@ -120,7 +104,7 @@ impl PlayerQueue {
     }
 
     pub(super) fn flush(&mut self, generation: u64) {
-        self.flushed.fetch_max(generation, Ordering::Relaxed);
+        self.flushed = self.flushed.max(generation);
         let mut deck = self.deck.lock();
         if deck.generation <= generation {
             deck.pending.clear();
@@ -132,7 +116,7 @@ impl PlayerQueue {
     }
 
     pub(super) fn reset_stream(&mut self) {
-        self.flushed.store(0, Ordering::Relaxed);
+        self.flushed = 0;
         if let Some(filter) = self.filter.as_mut() {
             filter.reset();
         }
@@ -141,6 +125,36 @@ impl PlayerQueue {
         deck.pending.clear();
         deck.utterance.clear();
     }
+}
+
+fn output_stream<T: cpal::SizedSample + 'static>(
+    device: &cpal::Device,
+    supported: &cpal::SupportedStreamConfig,
+    deck: &Arc<Mutex<Deck>>,
+    level: &Arc<AtomicU32>,
+    muted: &Arc<AtomicBool>,
+    convert: fn(f32) -> T,
+) -> Result<cpal::Stream, cpal::Error> {
+    let channels = supported.channels() as usize;
+    let (deck, level, muted) = (deck.clone(), level.clone(), muted.clone());
+    device.build_output_stream(
+        supported.config(),
+        move |output, _| {
+            fill_with(
+                output,
+                channels,
+                &PlaybackSink {
+                    deck: &deck,
+                    level: &level,
+                    muted: &muted,
+                },
+                T::EQUILIBRIUM,
+                convert,
+            );
+        },
+        |error| tracing::error!("audio output failed: {error}"),
+        None,
+    )
 }
 
 /// The device-side player. One client owns one deck.
@@ -167,64 +181,16 @@ impl Player {
         let queue = PlayerQueue::new(rate)?;
         let level = Arc::new(AtomicU32::new(0));
         let muted = Arc::new(AtomicBool::new(false));
-        let sink = queue.deck.clone();
-        let rms = level.clone();
-        let out_muted = muted.clone();
         let stream = match supported.sample_format() {
-            cpal::SampleFormat::F32 => device.build_output_stream(
-                supported.config(),
-                move |output: &mut [f32], _| {
-                    fill_with(
-                        output,
-                        channels,
-                        &PlaybackSink {
-                            deck: &sink,
-                            level: &rms,
-                            muted: &out_muted,
-                        },
-                        0.0f32,
-                        |s| s,
-                    );
-                },
-                |error| tracing::error!("audio output failed: {error}"),
-                None,
-            ),
-            cpal::SampleFormat::I16 => device.build_output_stream(
-                supported.config(),
-                move |output: &mut [i16], _| {
-                    fill_with(
-                        output,
-                        channels,
-                        &PlaybackSink {
-                            deck: &sink,
-                            level: &rms,
-                            muted: &out_muted,
-                        },
-                        0i16,
-                        f32_to_i16,
-                    );
-                },
-                |error| tracing::error!("audio output failed: {error}"),
-                None,
-            ),
-            cpal::SampleFormat::U16 => device.build_output_stream(
-                supported.config(),
-                move |output: &mut [u16], _| {
-                    fill_with(
-                        output,
-                        channels,
-                        &PlaybackSink {
-                            deck: &sink,
-                            level: &rms,
-                            muted: &out_muted,
-                        },
-                        U16_SILENCE,
-                        f32_to_u16,
-                    );
-                },
-                |error| tracing::error!("audio output failed: {error}"),
-                None,
-            ),
+            cpal::SampleFormat::F32 => {
+                output_stream(&device, &supported, &queue.deck, &level, &muted, |s| s)
+            }
+            cpal::SampleFormat::I16 => {
+                output_stream(&device, &supported, &queue.deck, &level, &muted, f32_to_i16)
+            }
+            cpal::SampleFormat::U16 => {
+                output_stream(&device, &supported, &queue.deck, &level, &muted, f32_to_u16)
+            }
             format => {
                 return Err(AudioError::UnsupportedFormat {
                     direction: "output",

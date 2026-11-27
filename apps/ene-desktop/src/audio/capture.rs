@@ -1,7 +1,6 @@
-use super::resampler::{
-    WIRE_RATE, encode, i16_to_f32, pick_input, u16_to_f32, validate_default_config,
-};
+use super::resampler::{WIRE_RATE, encode, pick_input, validate_default_config};
 use super::vad::VoiceGate;
+use cpal::Sample as _;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ene_client_core::CaptureMode;
 use ene_voice::pcm::StreamingResampler;
@@ -146,62 +145,16 @@ fn build_microphone_stream(
     muted: &Arc<AtomicBool>,
     level: &Arc<AtomicU32>,
 ) -> Result<cpal::Stream, super::AudioError> {
-    let channels = supported.channels() as usize;
-    let sink = frames.clone();
-    let cap_muted = muted.clone();
-    let cap_level = level.clone();
     let stream = match supported.sample_format() {
-        cpal::SampleFormat::F32 => device.build_input_stream(
-            supported.config(),
-            move |input: &[f32], _| {
-                push_captured_with(
-                    input,
-                    (channels, capacity),
-                    &CaptureSink {
-                        frames: &sink,
-                        muted: &cap_muted,
-                        level: &cap_level,
-                    },
-                    |s| s,
-                );
-            },
-            |error| tracing::error!("audio input failed: {error}"),
-            None,
-        ),
-        cpal::SampleFormat::I16 => device.build_input_stream(
-            supported.config(),
-            move |input: &[i16], _| {
-                push_captured_with(
-                    input,
-                    (channels, capacity),
-                    &CaptureSink {
-                        frames: &sink,
-                        muted: &cap_muted,
-                        level: &cap_level,
-                    },
-                    i16_to_f32,
-                );
-            },
-            |error| tracing::error!("audio input failed: {error}"),
-            None,
-        ),
-        cpal::SampleFormat::U16 => device.build_input_stream(
-            supported.config(),
-            move |input: &[u16], _| {
-                push_captured_with(
-                    input,
-                    (channels, capacity),
-                    &CaptureSink {
-                        frames: &sink,
-                        muted: &cap_muted,
-                        level: &cap_level,
-                    },
-                    u16_to_f32,
-                );
-            },
-            |error| tracing::error!("audio input failed: {error}"),
-            None,
-        ),
+        cpal::SampleFormat::F32 => {
+            input_stream::<f32>(device, supported, capacity, frames, muted, level)
+        }
+        cpal::SampleFormat::I16 => {
+            input_stream::<i16>(device, supported, capacity, frames, muted, level)
+        }
+        cpal::SampleFormat::U16 => {
+            input_stream::<u16>(device, supported, capacity, frames, muted, level)
+        }
         format => {
             return Err(super::AudioError::UnsupportedFormat {
                 direction: "input",
@@ -220,6 +173,38 @@ fn build_microphone_stream(
             reason: error.to_string(),
         })?;
     Ok(stream)
+}
+
+fn input_stream<T: cpal::SizedSample>(
+    device: &cpal::Device,
+    supported: &cpal::SupportedStreamConfig,
+    capacity: usize,
+    frames: &Arc<Mutex<VecDeque<f32>>>,
+    muted: &Arc<AtomicBool>,
+    level: &Arc<AtomicU32>,
+) -> Result<cpal::Stream, cpal::Error>
+where
+    f32: cpal::FromSample<T>,
+{
+    let channels = supported.channels() as usize;
+    let (frames, muted, level) = (frames.clone(), muted.clone(), level.clone());
+    device.build_input_stream(
+        supported.config(),
+        move |input: &[T], _| {
+            push_captured_with(
+                input,
+                (channels, capacity),
+                &CaptureSink {
+                    frames: &frames,
+                    muted: &muted,
+                    level: &level,
+                },
+                f32::from_sample,
+            );
+        },
+        |error| tracing::error!("audio input failed: {error}"),
+        None,
+    )
 }
 
 impl Microphone {

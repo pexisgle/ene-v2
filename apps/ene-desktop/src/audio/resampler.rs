@@ -1,25 +1,16 @@
 use super::AudioError;
+use cpal::Sample as _;
 use cpal::traits::DeviceTrait;
 
 /// The wire format the host and the client agree on.
 pub use ene_voice::SAMPLE_RATE as WIRE_RATE;
-
-pub(super) const U16_SILENCE: u16 = 32_768;
 
 pub(super) fn f32_to_i16(sample: f32) -> i16 {
     (sample.clamp(-1., 1.) * 32_767.).round() as i16
 }
 
 pub(super) fn f32_to_u16(sample: f32) -> u16 {
-    ((sample.clamp(-1., 1.) * 32_767.).round() + 32_768.) as u16
-}
-
-pub(super) fn i16_to_f32(sample: i16) -> f32 {
-    f32::from(sample) / 32_768.0
-}
-
-pub(super) fn u16_to_f32(sample: u16) -> f32 {
-    (f32::from(sample) - 32_768.0) / 32_768.0
+    u16::from_sample(f32_to_i16(sample))
 }
 
 /// Decodes the wire's 16-bit signed little-endian mono PCM.
@@ -31,16 +22,15 @@ pub fn decode(pcm: &[u8]) -> Result<Vec<f32>, AudioError> {
         .as_chunks::<2>()
         .0
         .iter()
-        .map(|pair| f32::from(i16::from_le_bytes(*pair)) / 32_768.0)
+        .map(|pair| f32::from_sample(i16::from_le_bytes(*pair)))
         .collect())
 }
 
 /// Encodes device samples as the wire's 16-bit signed little-endian mono PCM.
 pub fn encode(samples: &[f32]) -> Vec<u8> {
     let mut pcm = Vec::with_capacity(samples.len() * 2);
-    for sample in samples {
-        let value = (sample.clamp(-1., 1.) * 32_767.).round() as i16;
-        pcm.extend_from_slice(&value.to_le_bytes());
+    for &sample in samples {
+        pcm.extend_from_slice(&f32_to_i16(sample).to_le_bytes());
     }
     pcm
 }

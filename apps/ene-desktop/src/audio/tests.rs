@@ -1,8 +1,6 @@
 use super::capture::{CaptureSink, EchoSuppressor, PttController, push_captured_with};
 use super::playback::{Deck, PlaybackSink, PlayerQueue, fill_with};
-use super::resampler::{
-    WIRE_RATE, decode, encode, f32_to_i16, i16_to_f32, pick_config_from_ranges,
-};
+use super::resampler::{WIRE_RATE, decode, encode, f32_to_i16, pick_config_from_ranges};
 use super::vad::{
     VAD_FRAME_SAMPLES, VAD_HANGOVER_FRAMES, VAD_MAX_ACTIVE_FRAMES, VAD_START_FRAMES, VoiceGate,
 };
@@ -313,7 +311,7 @@ fn i16_only_hardware_range_is_accepted_and_converts_accurately() {
             muted: &cap_muted,
             level: &cap_level,
         },
-        i16_to_f32,
+        <f32 as cpal::Sample>::from_sample,
     );
     let captured: Vec<f32> = sink.lock().iter().copied().collect();
     assert_eq!(captured.len(), 2);
@@ -374,6 +372,20 @@ fn q02_utterance_switch_resets_filter_and_finish_drains_tail() {
     assert!(queue2.deck.lock().pending.is_empty());
     queue2.finish_utterance("u3", 1).unwrap();
     assert!(!queue2.deck.lock().pending.is_empty());
+}
+
+#[test]
+fn finishing_a_flushed_utterance_keeps_the_new_utterances_resampler_tail() {
+    let mut queue = PlayerQueue::new(48_000).unwrap();
+    let partial = encode(&[0.25; 240]);
+    queue.push("previous", 1, &partial).unwrap();
+    queue.flush(1);
+    queue.push("current", 2, &partial).unwrap();
+    queue.finish_utterance("previous", 1).unwrap();
+    queue.finish_utterance("current", 2).unwrap();
+    let deck = queue.deck.lock();
+    assert_eq!(deck.generation, 2);
+    assert!(!deck.pending.is_empty());
 }
 
 #[test]
