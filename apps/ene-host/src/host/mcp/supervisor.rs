@@ -15,7 +15,7 @@ use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::{
     sync::{CancellationToken, DropGuard},
     task::AbortOnDropHandle,
@@ -112,9 +112,9 @@ pub(super) enum Event {
 }
 
 impl Event {
-    fn retire(self, runtime: &tokio::runtime::Handle) {
+    fn retire(self, closing: &mut JoinSet<()>, runtime: &tokio::runtime::Handle) {
         if let Self::Connected { connection, .. } = self {
-            close_connection(connection, runtime);
+            close_connection(closing, connection, runtime);
         }
     }
 }
@@ -138,6 +138,13 @@ pub(crate) struct Mcp(std::sync::Arc<parking_lot::Mutex<McpSupervisor>>);
 impl Mcp {
     pub(super) fn lock(&self) -> parking_lot::MutexGuard<'_, McpSupervisor> {
         self.0.lock()
+    }
+
+    pub(crate) async fn finish_retirement(&self) {
+        let mut closing = std::mem::take(&mut self.lock().closing);
+        while let Some(result) = closing.join_next().await {
+            ene_domain::warn_if_err(result, "MCP connection retirement");
+        }
     }
 
     pub(crate) fn request_reconnect(&self, id: &str, stamp: ConnectionStamp) {
@@ -197,6 +204,7 @@ impl Mcp {
 #[derive(Default)]
 pub(super) struct McpSupervisor {
     pub(super) slots: HashMap<String, Slot>,
+    pub(super) closing: JoinSet<()>,
     events: EventChannel,
     settings: McpSettings,
 }
@@ -244,6 +252,9 @@ impl McpSupervisor {
         runtime: &tokio::runtime::Handle,
     ) -> crate::host::db::Result<()> {
         reload_desired_settings(&mut self.settings, store, credentials)?;
+        while let Some(result) = self.closing.try_join_next() {
+            ene_domain::warn_if_err(result, "MCP connection retirement");
+        }
         let wanted = self.settings.desired.clone();
         while let Ok(event) = self.events.receiver.try_recv() {
             self.accept_event(&wanted, event, wake, runtime);
@@ -256,7 +267,7 @@ impl McpSupervisor {
                 && (!current || server.connection.is_closed())
             {
                 slot.stop.token().cancel();
-                close_connection(server.connection.clone(), runtime);
+                close_connection(&mut self.closing, server.connection.clone(), runtime);
                 if current {
                     if server.connected_at.elapsed() >= STABLE_CONNECTION {
                         slot.attempts = 0;
@@ -381,7 +392,7 @@ impl McpSupervisor {
                         && matches!(slot.phase, Phase::Opening { .. })
                 })
         else {
-            event.retire(runtime);
+            event.retire(&mut self.closing, runtime);
             return;
         };
         match event {
@@ -411,17 +422,21 @@ impl McpSupervisor {
         for (_, slot) in self.slots.drain() {
             slot.stop.token().cancel();
             if let (Some(runtime), Phase::Running(server)) = (runtime, slot.phase) {
-                close_connection(server.connection, runtime);
+                close_connection(&mut self.closing, server.connection, runtime);
             }
         }
         while let Ok(event) = self.events.receiver.try_recv() {
             if let Some(runtime) = runtime {
-                event.retire(runtime);
+                event.retire(&mut self.closing, runtime);
             }
         }
     }
 }
 
-pub(super) fn close_connection(connection: McpConnection, runtime: &tokio::runtime::Handle) {
-    runtime.spawn(async move { connection.close().await });
+pub(super) fn close_connection(
+    closing: &mut JoinSet<()>,
+    connection: McpConnection,
+    runtime: &tokio::runtime::Handle,
+) {
+    closing.spawn_on(async move { connection.close().await }, runtime);
 }

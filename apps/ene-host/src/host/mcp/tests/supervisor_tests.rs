@@ -58,7 +58,11 @@ fn retire_one_now(world: &mut World, id: &str) {
     let Phase::Running(server) = slot.phase else {
         panic!("the test server was not running");
     };
-    close_connection(server.connection, &world.resource::<HostRuntime>().0);
+    close_connection(
+        &mut world.resource::<Mcp>().lock().closing,
+        server.connection,
+        &world.resource::<HostRuntime>().0,
+    );
     project_servers_now(world);
 }
 

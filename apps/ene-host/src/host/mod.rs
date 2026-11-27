@@ -269,7 +269,8 @@ impl Runtime {
         self.services.voicevox.stop().await;
         let shutdown = self.handle.shutdown.clone();
         let thread = self.handle.thread.lock().take();
-        tokio::task::spawn_blocking(move || {
+        let waits_for_kernel = thread.is_some();
+        let result = tokio::task::spawn_blocking(move || {
             thread.map_or(Ok(()), |thread| {
                 ene_domain::debug_if_err(shutdown.try_send(()), "host shutdown signal");
                 thread
@@ -277,8 +278,11 @@ impl Runtime {
                     .map_err(|_| HostError::Internal(("Rig kernel panicked").into()))?
             })
         })
-        .await
-        .map_err(|_| HostError::Internal(("Rig kernel join failed").into()))?
+        .await;
+        if waits_for_kernel {
+            self.services.mcp.finish_retirement().await;
+        }
+        result.map_err(|_| HostError::Internal(("Rig kernel join failed").into()))?
     }
 }
 

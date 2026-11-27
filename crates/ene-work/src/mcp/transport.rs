@@ -13,9 +13,7 @@ use rmcp::{
     transport::{
         DynamicTransportError,
         child_process::TokioChildProcess,
-        streamable_http_client::{
-            StreamableHttpClientTransport, StreamableHttpClientTransportConfig, StreamableHttpError,
-        },
+        streamable_http_client::{StreamableHttpClientTransportConfig, StreamableHttpError},
     },
 };
 use std::time::Duration;
@@ -216,11 +214,7 @@ async fn open_http(
         config.custom_headers.insert(header_name, header_value);
     }
     apply_http_auth_headers(&mut config, &want.auth_header, secret)?;
-    let client = super::http::CancellableHttp {
-        client,
-        stop: stop.clone(),
-    };
-    let transport = StreamableHttpClientTransport::with_client(client, config);
+    let transport = super::http::HttpTransport::new(client, stop.clone(), config);
     Box::pin(handler.connect(transport))
         .await
         .map_err(connect_failure)

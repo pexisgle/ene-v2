@@ -6,26 +6,76 @@ use reqwest::{
     header::{HeaderName, HeaderValue},
 };
 use rmcp::{
+    RoleClient,
     model::ClientJsonRpcMessage,
+    service::{RxJsonRpcMessage, TxJsonRpcMessage},
     transport::{
+        Transport,
         common::client_side_sse::BoxedSseResponse,
         streamable_http_client::{
-            StreamableHttpClient, StreamableHttpError, StreamableHttpPostResponse,
+            StreamableHttpClient, StreamableHttpClientTransport,
+            StreamableHttpClientTransportConfig, StreamableHttpError, StreamableHttpPostResponse,
             StreamableHttpResponseLimits,
         },
     },
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 type Response<T> = Result<T, StreamableHttpError<reqwest::Error>>;
 
+pub(super) struct HttpTransport(Option<StreamableHttpClientTransport<CancellableHttp>>);
+
+impl HttpTransport {
+    pub(super) fn new(
+        client: Client,
+        stop: CancellationToken,
+        config: StreamableHttpClientTransportConfig,
+    ) -> Self {
+        Self(Some(StreamableHttpClientTransport::with_client(
+            CancellableHttp { client, stop },
+            config,
+        )))
+    }
+}
+
+impl Transport<RoleClient> for HttpTransport {
+    type Error = StreamableHttpError<reqwest::Error>;
+
+    fn send(
+        &mut self,
+        item: TxJsonRpcMessage<RoleClient>,
+    ) -> impl Future<Output = Response<()>> + Send + 'static {
+        let send = self.0.as_mut().map(|transport| transport.send(item));
+        async move {
+            send.ok_or(StreamableHttpError::TransportChannelClosed)?
+                .await
+        }
+    }
+
+    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
+        self.0.as_mut()?.receive().await
+    }
+
+    async fn close(&mut self) -> Response<()> {
+        let Some(mut transport) = self.0.take() else {
+            return Ok(());
+        };
+        // rmcp normally spends up to five seconds on session cleanup. If its
+        // worker instead blocks forwarding to the unread inbound channel,
+        // drop that receiver after the deadline to unblock the worker as well.
+        tokio::time::timeout(Duration::from_secs(6), transport.close())
+            .await
+            .unwrap_or(Err(StreamableHttpError::TransportChannelClosed))
+    }
+}
+
 /// Keep rmcp's Reqwest client and size limits. Cancel work inside its HTTP
 /// worker as well as waits made through the outer transport.
 #[derive(Clone)]
-pub(super) struct CancellableHttp {
-    pub(super) client: Client,
-    pub(super) stop: CancellationToken,
+struct CancellableHttp {
+    client: Client,
+    stop: CancellationToken,
 }
 
 impl StreamableHttpClient for CancellableHttp {
