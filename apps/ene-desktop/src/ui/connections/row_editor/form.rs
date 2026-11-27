@@ -8,9 +8,9 @@ use crate::ui::icons::Icon;
 use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button, status_pill};
-use crate::ui::{GOOGLE_AGENT_PLATFORM, Hub, default_embedding_dimensions};
+use crate::ui::{Hub, default_embedding_dimensions};
 use ene_client_core::{
-    connections::{ConnectionResource, extract_kind_list_init, parse_process_args},
+    connections::{extract_kind_list_init, parse_process_args},
     domain::{Connection, ConnectionCheck, ConnectionConfig, ConnectionEndpoint, ConnectionKind},
 };
 use gpui::{Context, Entity, FontWeight, SharedString, div, prelude::*, px};
@@ -25,7 +25,6 @@ pub(crate) struct RowBadge {
 #[derive(Clone, Copy)]
 pub(crate) struct RowHeaderFlags {
     pub(super) expanded: bool,
-    pub(super) should_auto_probe: bool,
     pub(super) live: bool,
 }
 
@@ -341,29 +340,6 @@ pub(super) fn compute_connection_badge(
             fg: theme.amber_fg,
         },
     }
-}
-
-pub(super) fn should_auto_probe_connection(
-    conn: &Connection,
-    check: Option<&ConnectionCheck>,
-    needs_key_flag: bool,
-) -> bool {
-    let kind = conn.kind;
-    let is_voicevox = ConnectionResource::for_connection(conn) == Some(ConnectionResource::Speaker);
-    let agent_platform = conn
-        .llm_endpoint()
-        .is_some_and(|e| e.adapter == GOOGLE_AGENT_PLATFORM);
-    conn.enabled
-        && !needs_key_flag
-        && (kind == ConnectionKind::Llm || is_voicevox)
-        && check.is_none_or(|c| {
-            c.resources.is_empty()
-                || (agent_platform
-                    && !c
-                        .capabilities
-                        .iter()
-                        .any(|cap| cap == "verified_model_list"))
-        })
 }
 
 pub(super) fn collect_sakura_conn_ids(conn: &Connection, hub: &Hub) -> Vec<String> {

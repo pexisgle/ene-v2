@@ -77,14 +77,8 @@ impl Model {
             } => {
                 self.connections.models.insert(connection_id, models);
             }
-            Update::Checked {
-                connection_id,
-                result,
-                ..
-            } => match result {
-                Ok(check) => {
-                    self.connections.checks.insert(connection_id, check);
-                }
+            Update::Checked { result, .. } => match result {
+                Ok(_) => effects.snapshot = true,
                 Err(notice) => self.notice(notice.kind, notice.context, notice.message),
             },
             Update::Plugins(plugins) => self.connections.plugins = plugins,

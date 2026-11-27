@@ -2,8 +2,7 @@
 //! reports to the window, and the window asks the session to act.
 
 use crate::domain::{
-    CompanionTemplate, ConnectionCheck, HostNotification, LlmProvider, Message, MindView,
-    ModelInfo, PluginInfo,
+    CompanionTemplate, HostNotification, LlmProvider, Message, MindView, ModelInfo, PluginInfo,
 };
 use crate::state::{Devices, Link, Notice};
 
@@ -118,8 +117,8 @@ pub enum Update {
         connection_id: String,
         /// Local ownership of the pending probe, echoed by its completion.
         ticket: String,
-        /// The probe result.
-        result: Result<ConnectionCheck, Notice>,
+        /// Whether the saved check was healthy, or why the request failed.
+        result: Result<bool, Notice>,
     },
     /// An approval is no longer pending.
     ApprovalStale {

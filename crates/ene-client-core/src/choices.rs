@@ -188,12 +188,7 @@ impl Model {
             return Vec::new();
         };
         let mut voices = Vec::new();
-        if let Some(check) = self
-            .connections
-            .checks
-            .get(&conn.id)
-            .or(conn.last_check.as_ref())
-        {
+        if let Some(check) = &conn.last_check {
             for res in &check.resources {
                 push_voice_unique(&mut voices, res);
             }
@@ -243,12 +238,7 @@ impl Model {
             push_str_unique(&mut models, model);
         }
         let sakura = conn.is_sakura();
-        if let Some(check) = self
-            .connections
-            .checks
-            .get(&conn.id)
-            .or(conn.last_check.as_ref())
-        {
+        if let Some(check) = &conn.last_check {
             for res in &check.resources {
                 let lower = res.to_ascii_lowercase();
                 if !sakura || lower.contains("whisper") || lower.contains("transcribe") {
@@ -279,12 +269,7 @@ impl Model {
         if let Some(ConnectionConfig::Embedding(emb)) = conn.config.as_ref() {
             push_str_unique(&mut models, &emb.model_id);
         }
-        if let Some(check) = self
-            .connections
-            .checks
-            .get(&conn.id)
-            .or(conn.last_check.as_ref())
-        {
+        if let Some(check) = &conn.last_check {
             for res in &check.resources {
                 let lower = res.to_ascii_lowercase();
                 if lower.contains("embed") || lower.contains("e5") {
@@ -326,15 +311,10 @@ impl Model {
         {
             return verified;
         }
-        let checked = if adapter == GOOGLE_AGENT_PLATFORM {
-            connection.last_check.as_ref()
-        } else {
-            self.connections
-                .checks
-                .get(&connection.id)
-                .or(connection.last_check.as_ref())
-        }
-        .map_or(&[][..], |check| check.resources.as_slice());
+        let checked = connection
+            .last_check
+            .as_ref()
+            .map_or(&[][..], |check| check.resources.as_slice());
         let mut list = Vec::new();
         for id in configured {
             let fetched_name = fetched

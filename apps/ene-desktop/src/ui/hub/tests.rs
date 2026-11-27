@@ -1,9 +1,6 @@
 use super::*;
 use crate::ui::connections::ConnectionsPane;
-use ene_client_core::{
-    domain::ConnectionCheck,
-    state::{Link, Notice, NoticeKind},
-};
+use ene_client_core::state::{Link, Notice, NoticeKind};
 use gpui::{AppContext as _, TestAppContext};
 use tokio::sync::mpsc::unbounded_channel;
 
@@ -110,16 +107,11 @@ fn a_probe_settles_only_its_own_pending_check(cx: &mut TestAppContext) {
                 ),
                 cx,
             );
-            hub.apply(
-                reply(2, "a", "replaced", Ok(ConnectionCheck::default())),
-                cx,
-            );
+            hub.apply(reply(2, "a", "replaced", Ok(false)), cx);
             assert_eq!(hub.setup.checking_connections["a"], "current");
             assert!(!hub.setup.checking_connections.contains_key("b"));
-            assert!(!hub.model.connections.checks.contains_key("a"));
-            hub.apply(reply(3, "a", "current", Ok(ConnectionCheck::default())), cx);
+            hub.apply(reply(3, "a", "current", Ok(false)), cx);
             assert_eq!(hub.setup.checking_connections.len(), 0);
-            assert!(hub.model.connections.checks.contains_key("a"));
             hub.setup
                 .checking_connections
                 .insert("a".into(), "disconnected".into());

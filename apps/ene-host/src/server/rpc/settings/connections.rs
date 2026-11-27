@@ -4,7 +4,6 @@ use super::super::Services;
 use super::connection_probe::run_connection_probe;
 use super::{notify_settings, parse_connection_id};
 use crate::host::error::HostError;
-use crate::host::model;
 use crate::host::permission;
 use crate::host::settings;
 use crate::host::voice::is_builtin_voicevox;
@@ -95,13 +94,6 @@ pub(super) async fn check_connection(
         })
         .await
         .map_err(ConnectError::from)?;
-    let notify = connection.endpoint().adapter == model::agent_platform::ADAPTER
-        || matches!(
-            connection.kind,
-            settings::ConnectionKind::Mcp
-                | settings::ConnectionKind::Search
-                | settings::ConnectionKind::Acp
-        );
     let revision = connection.revision;
     let check =
         run_connection_probe(services, &credentials, &connection, created, generation).await?;
@@ -124,12 +116,10 @@ pub(super) async fn check_connection(
             store
                 .settings_repo()
                 .set_check(&id, revision, created, &check)?;
-            if notify {
-                notify_settings(
-                    &services.notifier,
-                    w::Settings::from(&store.settings_repo().settings()?),
-                );
-            }
+            notify_settings(
+                &services.notifier,
+                w::Settings::from(&store.settings_repo().settings()?),
+            );
             Ok(w::CheckResult {
                 request_id,
                 success: check.healthy,

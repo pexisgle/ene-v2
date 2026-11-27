@@ -7,7 +7,7 @@ use super::{
 use crate::{host::Host, update::Update};
 use ene_client_core::{
     connections::build_connection_model_input,
-    domain::{Companion, Connection, ConnectionCheck, ConnectionInput, ModelAssignment},
+    domain::{Companion, Connection, ConnectionInput, ModelAssignment},
 };
 use ene_rpc as w;
 use std::{future::Future, time::Duration};
@@ -39,16 +39,13 @@ async fn run_connection_probe(
     connection_id: String,
     revision: u64,
     ticket: String,
-) -> Result<ConnectionCheck, connectrpc::ConnectError> {
+) -> Result<bool, connectrpc::ConnectError> {
     Ok(host
         .settings
         .check_connection(check_request(connection_id, revision, ticket))
         .await?
-        .into_owned()
-        .check
-        .into_option()
-        .unwrap_or_default()
-        .into())
+        .view()
+        .success)
 }
 
 fn dispatch_probe<F>(
@@ -59,7 +56,7 @@ fn dispatch_probe<F>(
     run: impl FnOnce(Host, String) -> F,
 ) -> Option<String>
 where
-    F: Future<Output = Result<ConnectionCheck, connectrpc::ConnectError>> + Send + 'static,
+    F: Future<Output = Result<bool, connectrpc::ConnectError>> + Send + 'static,
 {
     let failed_id = connection_id.clone();
     let ticket = uuid::Uuid::new_v4().to_string();

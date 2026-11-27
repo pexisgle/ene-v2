@@ -20,13 +20,12 @@ use crate::ui::theme::Theme;
 use crate::ui::widgets::{
     CircleButtonStyle, Tone, circle_icon_button, disclosure_row, pill_button,
 };
-use crate::ui::{DraftStore, GOOGLE_AGENT_PLATFORM, Hub};
+use crate::ui::{DraftStore, Hub};
 use ene_client_core::{
     connections::task_harness_choices,
-    domain::{Connection, ConnectionCheck, ConnectionKind},
+    domain::{Connection, ConnectionKind},
 };
 use gpui::{AnyElement, Context, Entity, FontWeight, Subscription, Window, div, prelude::*, px};
-use std::collections::{BTreeMap, HashSet};
 
 #[derive(Clone, Copy, Default)]
 enum AddFlow {
@@ -55,7 +54,6 @@ struct ConnectionFormState {
     add: AddFlow,
     expanded: Option<ExpandedConnection>,
     advanced_roles_open: bool,
-    auto_probed_connections: HashSet<String>,
 }
 
 impl ConnectionFormState {
@@ -186,16 +184,14 @@ impl ConnectionsPane {
     fn build_connection_rows(
         &mut self,
         connections: &[Connection],
-        (checks, live, adding): (&BTreeMap<String, ConnectionCheck>, bool, bool),
+        live: bool,
+        adding: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut rows: Vec<AnyElement> = connections
             .iter()
-            .map(|conn| {
-                let check = effective_check(conn, checks);
-                row_editor::render_connection_row(self, conn, check, live, theme, cx)
-            })
+            .map(|conn| row_editor::render_connection_row(self, conn, live, theme, cx))
             .collect();
         if rows.is_empty() && !adding {
             rows.push(render_empty_connections_notice(theme));
@@ -206,7 +202,7 @@ impl ConnectionsPane {
 
 impl gpui::Render for ConnectionsPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (theme, live, connections, providers, checks, companion) = {
+        let (theme, live, connections, providers, companion) = {
             let hub = self.hub.read(cx);
             (
                 hub.theme(),
@@ -215,7 +211,6 @@ impl gpui::Render for ConnectionsPane {
                     .settings()
                     .map_or_default(|s| s.connections.clone()),
                 hub.model.connections.providers.clone().unwrap_or_default(),
-                hub.model.connections.checks.clone(),
                 hub.model.companion().cloned(),
             )
         };
@@ -229,7 +224,7 @@ impl gpui::Render for ConnectionsPane {
             AddFlow::Mcp(form) => Some(mcp_add::render_mcp_add(self, form, live, &theme, cx)),
         };
         let search_card = web_search::render_web_search_card(self, &connections, live, &theme, cx);
-        let rows = self.build_connection_rows(&connections, (&checks, live, adding), &theme, cx);
+        let rows = self.build_connection_rows(&connections, live, adding, &theme, cx);
         let adv_open = self.form.advanced_roles_open;
         let adv_panel = adv_open.then(|| {
             let model = &self.hub.read(cx).model;
@@ -270,20 +265,6 @@ impl gpui::Render for ConnectionsPane {
                     .child(render_advanced_roles_toggle(adv_open, &theme, cx))
                     .when_some(adv_panel, gpui::ParentElement::child),
             )
-    }
-}
-
-fn effective_check<'a>(
-    conn: &'a Connection,
-    checks: &'a BTreeMap<String, ConnectionCheck>,
-) -> Option<&'a ConnectionCheck> {
-    if conn
-        .llm_endpoint()
-        .is_some_and(|ep| ep.adapter == GOOGLE_AGENT_PLATFORM)
-    {
-        conn.last_check.as_ref()
-    } else {
-        checks.get(&conn.id).or(conn.last_check.as_ref())
     }
 }
 

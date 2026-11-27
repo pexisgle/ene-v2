@@ -133,9 +133,8 @@ impl Hub {
     fn pre_apply_hub_state(&mut self, update: &Update, cx: &mut Context<Self>) -> ApplyFlags {
         self.apply_ui_update_bookkeeping(update, cx);
         if let Update::Checked {
-            result: Ok(check), ..
+            result: Ok(true), ..
         } = update
-            && check.healthy
         {
             self.load_models(cx);
         }
@@ -157,7 +156,7 @@ impl Hub {
                 ..
             } => {
                 self.setup.checking_connections.remove(id);
-                if result.as_ref().is_ok_and(|check| check.healthy)
+                if matches!(result, Ok(true))
                     && self.model.settings().is_some_and(|s| {
                         s.connections
                             .iter()

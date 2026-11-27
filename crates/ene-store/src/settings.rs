@@ -207,13 +207,12 @@ impl<'a> SettingsRepo<'a> {
                 }
                 let reset_check = existing.is_some_and(|previous| {
                     input.kind != previous.kind
-                        || (input.kind == ConnectionKind::Mcp
+                        || input.endpoint().adapter != previous.endpoint().adapter
+                        || input.endpoint().endpoint != previous.endpoint().endpoint
+                        || (matches!(input.kind, ConnectionKind::Mcp | ConnectionKind::Acp)
                             && (input.config != previous.config
                                 || input.enabled != previous.enabled))
                         || (input.kind == ConnectionKind::Search && input.config != previous.config)
-                        || (input.kind == ConnectionKind::Acp
-                            && (input.config != previous.config
-                                || input.enabled != previous.enabled))
                         || (input.endpoint().adapter == ene_catalog::GOOGLE_AGENT_PLATFORM
                             && input.config != previous.config
                             && !keeps_verified_model_list(previous, input))
@@ -267,18 +266,14 @@ impl<'a> SettingsRepo<'a> {
     }
 
     pub fn set_credential_state(&self, id: &ConnectionId, state: CredentialState) -> Result<()> {
-        let reset_check = self.connection(id.as_str())?.is_some_and(|connection| {
-            connection.kind == ConnectionKind::Search
-                || connection.endpoint().adapter == ene_catalog::GOOGLE_AGENT_PLATFORM
-        });
         let changed = self
             .0
             .conn()
             .prepare_cached(
                 "UPDATE connections SET credential_state = ?2, updated_at = ?3,
-                 last_check = CASE WHEN ?4 THEN NULL ELSE last_check END WHERE id = ?1",
+                 last_check = NULL WHERE id = ?1",
             )?
-            .execute(params![id.as_str(), state.as_str(), now(), reset_check])?;
+            .execute(params![id.as_str(), state.as_str(), now()])?;
         require_found(changed, "connection not found")
     }
 
@@ -454,6 +449,42 @@ mod tests {
             repo.connection("bad id"),
             Err(StoreError::Storage(_))
         ));
+    }
+
+    #[test]
+    fn a_probe_is_invalidated_when_its_llm_receiver_or_credential_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        let repo = store.settings_repo();
+        let settings = repo.update_settings(1, &[(connection("c1"), 0)]).unwrap();
+        let (mut active, created) = repo.connection_with_creation("c1").unwrap().unwrap();
+        let check = Check {
+            healthy: true,
+            ..Default::default()
+        };
+        repo.set_check(&active.id, active.revision, created, &check)
+            .unwrap();
+        let ConnectionConfig::Llm(config) = &mut active.config else {
+            panic!("LLM fixture")
+        };
+        config.endpoint.endpoint = "http://127.0.0.1:8142/v1".into();
+        let id = active.id.clone();
+        let revision = active.revision;
+        repo.update_settings(settings.revision, &[(active, revision)])
+            .unwrap();
+        let active = repo.connection(id.as_str()).unwrap().unwrap();
+        assert!(active.last_check.is_none());
+        repo.set_check(&id, active.revision, created, &check)
+            .unwrap();
+        repo.set_credential_state(&id, CredentialState::Registered)
+            .unwrap();
+        assert!(
+            repo.connection(id.as_str())
+                .unwrap()
+                .unwrap()
+                .last_check
+                .is_none()
+        );
     }
 
     #[test]

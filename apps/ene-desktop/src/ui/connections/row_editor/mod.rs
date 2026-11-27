@@ -7,7 +7,7 @@ use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, kind_pill, pill_button, status_pill};
 use ene_client_core::connections::ConnectionResource;
-use ene_client_core::domain::{Connection, ConnectionCheck};
+use ene_client_core::domain::Connection;
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
 use form::*;
@@ -16,7 +16,6 @@ use views::*;
 pub(super) fn render_connection_row(
     pane: &mut ConnectionsPane,
     conn: &Connection,
-    check: Option<&ConnectionCheck>,
     live: bool,
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
@@ -32,17 +31,13 @@ pub(super) fn render_connection_row(
             .as_deref()
             .unwrap_or_default(),
     );
+    let check = conn.last_check.as_ref();
     let badge = compute_connection_badge(conn, check, needs_key_flag, theme);
-    let should_auto_probe = should_auto_probe_connection(conn, check, needs_key_flag);
     let header = render_row_header(
         pane,
         conn,
         &badge,
-        &RowHeaderFlags {
-            expanded,
-            should_auto_probe,
-            live,
-        },
+        &RowHeaderFlags { expanded, live },
         theme,
         cx,
     );
@@ -69,11 +64,7 @@ fn render_row_header(
     theme: &Theme,
     cx: &Context<ConnectionsPane>,
 ) -> gpui::Div {
-    let RowHeaderFlags {
-        expanded,
-        should_auto_probe,
-        live,
-    } = *flags;
+    let RowHeaderFlags { expanded, live } = *flags;
     let id = &conn.id;
     let kind = conn.kind;
     let hub_check = pane.hub.clone();
@@ -88,7 +79,6 @@ fn render_row_header(
         .checking_connections
         .contains_key(id);
     let is_voicevox = ConnectionResource::for_connection(conn) == Some(ConnectionResource::Speaker);
-    let hub_expand_probe = hub_check.clone();
     let check_id = id.clone();
     let expand_id = id.clone();
     let pane_expand = cx.entity();
@@ -166,24 +156,15 @@ fn render_row_header(
                     if expanded { Tone::Soft } else { Tone::Ghost },
                     theme,
                     move |_, cx| {
-                        let probe = pane_expand.update(cx, |this, cx| {
-                            let opening = this.form.editor(&expand_id).is_none();
-                            if opening {
+                        pane_expand.update(cx, |this, cx| {
+                            if this.form.editor(&expand_id).is_none() {
                                 this.form.open_editor(expand_id.clone());
                             } else {
                                 this.form.close_editor();
                             }
                             this.open_dropdown = None;
                             cx.notify();
-                            opening
-                                && should_auto_probe
-                                && this.form.auto_probed_connections.insert(expand_id.clone())
                         });
-                        if probe && let Some(revision) = revision {
-                            hub_expand_probe.update(cx, |hub, cx| {
-                                hub.check_connection_at(expand_id.clone(), revision, cx)
-                            });
-                        }
                     },
                 )),
         )

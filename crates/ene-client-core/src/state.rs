@@ -1,8 +1,8 @@
 //! Client domain state models organized by responsibility.
 
 use crate::domain::{
-    Activation, ApprovalRequest, Companion, CompanionTemplate, ConnectionCheck, LlmProvider,
-    Message, MindView, ModelInfo, PluginInfo, PolicyText, Settings, Snapshot, TurnEvent,
+    Activation, ApprovalRequest, Companion, CompanionTemplate, LlmProvider, Message, MindView,
+    ModelInfo, PluginInfo, PolicyText, Settings, Snapshot, TurnEvent,
 };
 use crate::update::{CaptureMode, ReplyTarget};
 use ene_domain::CompanionId;
@@ -196,8 +196,6 @@ pub struct ConnectionViewState {
     pub providers: Option<Vec<LlmProvider>>,
     /// Models per connection id, once fetched.
     pub models: BTreeMap<String, Vec<ModelInfo>>,
-    /// Last probe result per connection id.
-    pub checks: BTreeMap<String, ConnectionCheck>,
     /// The client's own devices.
     pub devices: Devices,
     /// Installed plugins, once fetched.
@@ -217,7 +215,6 @@ impl ConnectionViewState {
             order: Default::default(),
             providers: None,
             models: BTreeMap::new(),
-            checks: BTreeMap::new(),
             devices: Devices::default(),
             plugins: Vec::new(),
         }
