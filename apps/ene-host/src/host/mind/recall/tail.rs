@@ -197,24 +197,6 @@ pub(super) async fn dynamic_tail(
     })
 }
 
-pub(super) fn render_tail(
-    store: &Store,
-    perception: &Perception,
-    companion: &str,
-    query: Option<&str>,
-    semantic: &[RecallCandidate],
-) -> crate::host::db::Result<RenderedTail> {
-    render_tail_full(&TailRenderRequest {
-        store,
-        perception,
-        companion,
-        query,
-        semantic,
-        hook_notes: &[],
-        budget_chars: TAIL_BUDGET_CHARS,
-    })
-}
-
 pub(super) fn render_tail_full(
     req: &TailRenderRequest<'_>,
 ) -> crate::host::db::Result<RenderedTail> {

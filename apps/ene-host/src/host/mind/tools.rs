@@ -63,7 +63,7 @@ pub(crate) fn register(app: &mut App) {
                             store: world.resource(),
                             embeddings: world.resource(),
                             credentials: world.get_resource(),
-                            runtime: world.get_resource(),
+                            runtime: world.resource(),
                             wake: world.get_resource(),
                         },
                         companion,
@@ -71,11 +71,8 @@ pub(crate) fn register(app: &mut App) {
                     )
                 });
                 match result {
-                    Ok(RecallWork::Running(task)) => {
+                    Ok(task) => {
                         world.entity_mut(call).insert(PendingRecall(task));
-                    }
-                    Ok(RecallWork::Ready(text)) => {
-                        crate::host::permission::answer(world, call, &text)
                     }
                     Err(error) => crate::host::permission::refuse(world, call, &error.to_string()),
                 }
@@ -141,11 +138,6 @@ fn companion_of_any(world: &World, agent: Entity) -> Result<String> {
     ))
 }
 
-enum RecallWork {
-    Ready(String),
-    Running(Job<Result<String>>),
-}
-
 #[derive(Component)]
 struct PendingRecall(Job<Result<String>>);
 
@@ -181,7 +173,7 @@ struct RecallServices<'a> {
     store: &'a Store,
     embeddings: &'a Embeddings,
     credentials: Option<&'a Credentials>,
-    runtime: Option<&'a HostRuntime>,
+    runtime: &'a HostRuntime,
     wake: Option<&'a Wake>,
 }
 
@@ -189,18 +181,15 @@ fn recall(
     services: &RecallServices<'_>,
     companion: String,
     args: RecallArgs,
-) -> Result<RecallWork> {
+) -> Result<Job<Result<String>>> {
     if args.query.chars().count() > 4_000 {
         return Err(HostError::Invalid(("query is too long").into()));
     }
-    let Some(runtime) = services.runtime else {
-        return recall_result(services.store, &companion, &args, &[]).map(RecallWork::Ready);
-    };
     let store = services.store.clone();
     let embeddings = services.embeddings.clone();
     let credentials = services.credentials.cloned();
-    Ok(RecallWork::Running(background::spawn(
-        &runtime.0,
+    Ok(background::spawn(
+        &services.runtime.0,
         services.wake,
         async move {
             let semantic = embedding::semantic_candidates(
@@ -214,7 +203,7 @@ fn recall(
             .await;
             recall_result(&store, &companion, &args, &semantic)
         },
-    )))
+    ))
 }
 
 fn recall_result(

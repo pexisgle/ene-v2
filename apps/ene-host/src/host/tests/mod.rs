@@ -6,7 +6,7 @@ use super::{
     agent, chat, client,
     db::Store,
     permission,
-    resources::{DeviceHub, Perception, Waiting},
+    resources::{DeviceHub, HostRuntime, Perception, Waiting},
     work,
 };
 use bevy_ecs::prelude::*;
@@ -19,9 +19,17 @@ use rig_ecs::prelude::*;
 use rig_ecs::session_log::SessionStore;
 use rig_memory::DirStore;
 use std::{
-    sync::{Arc, mpsc},
+    sync::{Arc, LazyLock, mpsc},
     time::{Duration, Instant},
 };
+
+static JOBS: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("the test host runtime")
+});
 
 pub(crate) struct Harness {
     pub(crate) app: App,
@@ -81,6 +89,7 @@ impl Harness {
         app.set_error_handler(bevy_ecs::error::warn)
             .add_plugins(TaskPoolPlugin::default())
             .insert_resource(store)
+            .insert_resource(HostRuntime(JOBS.handle().clone()))
             .insert_resource(super::model::Credentials::new(true))
             .insert_resource(DeviceHub::default())
             .insert_resource(super::HostState::default())

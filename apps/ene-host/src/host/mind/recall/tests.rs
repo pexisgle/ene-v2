@@ -180,7 +180,7 @@ async fn work_agent_recall_keeps_the_tail_without_polluting_companion_injections
     use crate::host::db::memories::MemoryRecord;
     use crate::host::tests::{Harness, bound, text_turn};
 
-    for with_runtime in [false, true] {
+    for use_caller_runtime in [false, true] {
         let model = MockCompletionModel::from_stream_turns([
             text_turn("head reply"),
             text_turn("work reply"),
@@ -192,7 +192,7 @@ async fn work_agent_recall_keeps_the_tail_without_polluting_companion_injections
             .insert_resource(ModelFactory(Arc::new(move |_, _, _, _, _, _| {
                 Ok(bound(&model))
             })));
-        if with_runtime {
+        if use_caller_runtime {
             harness
                 .app
                 .insert_resource(HostRuntime(tokio::runtime::Handle::current()));
@@ -559,13 +559,15 @@ fn q05_storage_fault_in_tail_marks_host_failed_instead_of_empty_state() {
         .conn()
         .execute("DROP TABLE user_profiles", [])
         .unwrap();
-    let err = render_tail(
-        &harness.store(),
-        &Perception::default(),
-        &harness.companion,
-        Some("query"),
-        &[],
-    )
+    let err = render_tail_full(&TailRenderRequest {
+        store: &harness.store(),
+        perception: &Perception::default(),
+        companion: &harness.companion,
+        query: Some("query"),
+        semantic: &[],
+        hook_notes: &[],
+        budget_chars: TAIL_BUDGET_CHARS,
+    })
     .unwrap_err();
     assert!(err.is_storage(), "expected storage error, got {err:?}");
     let _discarded = harness.accept("k-fault", "こんにちは");

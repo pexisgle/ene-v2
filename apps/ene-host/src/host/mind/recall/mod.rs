@@ -10,7 +10,7 @@
 //! to the model's window.
 mod tail;
 
-use tail::{DynamicTailQuery, RenderedTail, dynamic_tail, recall_query, render_tail};
+use tail::{DynamicTailQuery, RenderedTail, dynamic_tail, recall_query};
 #[cfg(test)]
 use tail::{TAIL_BUDGET_CHARS, TailRenderRequest, render_tail_full};
 
@@ -120,7 +120,7 @@ struct TailEnv<'w> {
     store: Res<'w, Store>,
     perception: Res<'w, Perception>,
     embeddings: Res<'w, Embeddings>,
-    runtime: Option<Res<'w, crate::host::resources::HostRuntime>>,
+    runtime: Res<'w, crate::host::resources::HostRuntime>,
     credentials: Option<Res<'w, Credentials>>,
     wake: Option<Res<'w, Wake>>,
     eyes: Option<Res<'w, Eyes>>,
@@ -153,22 +153,22 @@ fn inject_tail(
         );
         let tail = match cached {
             Some(tail) => tail.0.clone(),
-            None => match compute_or_spawn_tail(
-                &mut commands,
-                &agents,
-                conversation,
-                env,
-                &SpawnTailTarget {
-                    call_entity,
-                    turn_entity: of.0,
-                    turn_start: turn.start,
-                    agent,
-                    has_eye_report: eye_report.is_some(),
-                },
-            ) {
-                Some(tail) => tail,
-                None => continue,
-            },
+            None => {
+                spawn_tail(
+                    &mut commands,
+                    &agents,
+                    conversation,
+                    env,
+                    &SpawnTailTarget {
+                        call_entity,
+                        turn_entity: of.0,
+                        turn_start: turn.start,
+                        agent,
+                        has_eye_report: eye_report.is_some(),
+                    },
+                );
+                continue;
+            }
         };
         let Some(history) = call.history.as_mut() else {
             continue;
@@ -212,13 +212,13 @@ struct SpawnTailTarget {
     has_eye_report: bool,
 }
 
-fn compute_or_spawn_tail(
+fn spawn_tail(
     commands: &mut Commands,
     agents: &Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
     conversation: Option<&Conversation>,
     env: &TailEnv<'_>,
     target: &SpawnTailTarget,
-) -> Option<RenderedTail> {
+) {
     let SpawnTailTarget {
         call_entity,
         turn_entity,
@@ -226,10 +226,16 @@ fn compute_or_spawn_tail(
         agent,
         has_eye_report,
     } = *target;
-    let (companion, work) = agents.get(agent).ok()?;
-    let companion = companion
+    let Ok((companion, work)) = agents.get(agent) else {
+        return;
+    };
+    let Some(companion) = companion
         .map(|agent| &agent.companion_id)
-        .or_else(|| work.map(|agent| &agent.companion_id))?;
+        .or_else(|| work.map(|agent| &agent.companion_id))
+        .cloned()
+    else {
+        return;
+    };
     let query = recall_query(conversation, turn_start, has_eye_report);
     let empty_perception = Perception::default();
     let perception = if has_eye_report {
@@ -237,51 +243,31 @@ fn compute_or_spawn_tail(
     } else {
         &*env.perception
     };
-    if let Some(runtime) = env.runtime.as_deref() {
-        let store = env.store.clone();
-        let perception = Perception {
-            events: perception.events.clone(),
-        };
-        let embeddings = env.embeddings.clone();
-        let credentials = env.credentials.as_deref().cloned();
-        let companion = companion.clone();
-        let task = background::spawn(&runtime.0, env.wake.as_deref(), async move {
-            dynamic_tail(DynamicTailQuery {
-                store: &store,
-                perception: &perception,
-                companion: &companion,
-                query: query.as_deref(),
-                embeddings: &embeddings,
-                credentials: credentials.as_ref(),
-            })
-            .await
-        });
-        commands.entity(call_entity).insert(AwaitingTail);
-        commands.spawn((
-            HoldOf(call_entity),
-            PendingTail {
-                turn: turn_entity,
-                task,
-            },
-        ));
-        return None;
-    }
-    let tail = match render_tail(&env.store, perception, companion, query.as_deref(), &[]) {
-        Ok(tail) => tail,
-        Err(error) => {
-            if error.is_storage() {
-                let message = error.to_string();
-                commands.run_system_cached_with(crate::host::stop_on_failure, message);
-            } else {
-                tracing::warn!(%error, "dynamic tail could not be rendered");
-            }
-            RenderedTail::fallback()
-        }
+    let store = env.store.clone();
+    let perception = Perception {
+        events: perception.events.clone(),
     };
-    commands
-        .entity(turn_entity)
-        .insert(DynamicTail(tail.clone()));
-    Some(tail)
+    let embeddings = env.embeddings.clone();
+    let credentials = env.credentials.as_deref().cloned();
+    let task = background::spawn(&env.runtime.0, env.wake.as_deref(), async move {
+        dynamic_tail(DynamicTailQuery {
+            store: &store,
+            perception: &perception,
+            companion: &companion,
+            query: query.as_deref(),
+            embeddings: &embeddings,
+            credentials: credentials.as_ref(),
+        })
+        .await
+    });
+    commands.entity(call_entity).insert(AwaitingTail);
+    commands.spawn((
+        HoldOf(call_entity),
+        PendingTail {
+            turn: turn_entity,
+            task,
+        },
+    ));
 }
 
 struct TailHistoryTarget<'a> {
