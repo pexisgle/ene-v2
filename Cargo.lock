@@ -4368,10 +4368,8 @@ dependencies = [
  "rig-agent",
  "rig-rmcp",
  "rmcp",
- "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.21",
  "tokio",
  "windows 0.62.2",
 ]

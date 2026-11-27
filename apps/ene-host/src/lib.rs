@@ -75,7 +75,7 @@
 //! | `src/host/voice/` | `ene-voice` の音声パイプライン・エンジン解決への薄い ECS/Wasm アダプタ |
 //! | `src/host/permission/` | `Stage::Gate`、承認保留と解決、ポリシー判定 |
 //! | `src/host/client/` | クライアント登録、能力ツールの公開、アクティブクライアント、知覚、`DeviceStream` と操作台帳 |
-//! | `src/host/work/` | WorkSession/Run、1セッション1エージェント、ツール（`ene-work` の ACP/ハーネス補助と `ene-store` 永続化を利用） |
+//! | `src/host/work/` | WorkSession/Run、1セッション1エージェント、ツール（`ene-work` のハーネス補助と `ene-store` 永続化を利用） |
 //! | `src/host/mcp/` | `ene-work::mcp` を用いる MCP サーバー接続管理と ECS ツール投影 |
 //! | `src/host/model.rs` | 資格情報、LLM接続、モデル一覧、接続チェック |
 //! | `src/host/net.rs` | HTTPクライアントの共有、ループバック/SSRF検証、サイズ上限付きボディ読み取り |

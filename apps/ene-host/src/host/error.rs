@@ -87,17 +87,6 @@ impl From<ene_voice::VoiceSessionError> for HostError {
     }
 }
 
-impl From<ene_work::WorkError> for HostError {
-    fn from(error: ene_work::WorkError) -> Self {
-        match error {
-            ene_work::WorkError::Invalid(message) => Self::Invalid(message),
-            ene_work::WorkError::Conflict(message) => Self::Conflict(message),
-            ene_work::WorkError::Unavailable(message) => Self::Unavailable(message),
-            ene_work::WorkError::Internal(message) => Self::Internal(message),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

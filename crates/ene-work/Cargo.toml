@@ -1,6 +1,6 @@
 [package]
 name = "ene-work"
-description = "ACP stdio bridge, harness protocol formatting, work run tracking, and MCP stdio/HTTP transport"
+description = "Harness protocol formatting, work run tracking, and MCP stdio/HTTP transport"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,9 +18,7 @@ reqwest.workspace = true
 rig-agent.workspace = true
 rig-rmcp.workspace = true
 rmcp.workspace = true
-serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "process"] }
 
 [dev-dependencies]

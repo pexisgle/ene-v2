@@ -314,14 +314,11 @@ pub trait TtsEngine: Send + Sync {
 
 ### G. 外部ACPエージェント接続（プラグイン側）と Connect-RPC サーバー設定
 
-- **ACP 外部ハーネス接続**
-  - ホストは `CONNECTION_KIND_ACP` の接続設定（`command` / `args`）をハーネスプラグインへ渡す。Wasm ゲストとホストで共有する ACP v1 の型は、`ene-plugin` が `agent-client-protocol-schema` から再公開する。
-  - `ene-work` のネイティブ ACP ブリッジは標準入出力の JSON-RPC で初期化、セッション作成、プロンプト送信、権限要求を扱う。子プロセスの管理には `process-wrap` を使う。
+- **タスク用ハーネス**
+  - `CONNECTION_KIND_ACP` の `endpoint.adapter` はホスト向け Wasm ハーネスの ID を指す。Wasm とホストの共通イベントには、`ene-plugin` が `agent-client-protocol-schema` から再公開する ACP v1 の型を使う。
+  - 外部 ACP エージェントの起動と接続は未実装。保存済み接続の `command` と `args` は読み出せる。現行の Wasm 呼び出しは SDK の `HarnessInput` を受け取る。
 
 - **Connect-RPC サーバーの HTTP/2（h2c）設定**:
   - `VoiceService.StreamAudioInput` 等の双方向ストリーミングを平文ローカル通信（h2c）で安定動作させるため、`connectrpc::Server` または axum / hyper において明示的に HTTP/2 prior knowledge（h2c）を有効化して起動する（デフォルトの HTTP/1.1 単一受付によるストリーミング遮断を防止）。
 
-> [!NOTE]
-> **Extism (Wasm) プラグインのフェーズ位置づけ**:
-> Extism (Wasm) によるサードパーティプラグイン実行環境は、後続の拡張フェーズ（Phase 2）へ延期する。Alpha/Minimal構成では、内蔵Rigツール、外部MCPサーバー（JSON-RPC）、および外部ACPコーディングエージェント（stdio）の3系統に集中し、過剰な抽象化層を排して堅牢な動作を担保する。
-> 型定義SDK（`crates/ene-plugin`）とExtism組み込みランタイム（`crates/ene-plugin-runtime`）はPhase 2に備えて先行実装済みで、ワークスペースのビルド・テスト対象に含まれる。Alphaの `ene-host` はこれらをリンクせず、プラグインツールも公開しない。
+`ene-host` は Extism を使ってホスト向け Wasm を実行する。プラグイン作者は `ene-plugin` の公開型と SDK を使う。内蔵 Rig ツールと外部 MCP の stdio/HTTP 接続も利用できる。

@@ -41,7 +41,7 @@ pub(super) fn render_plugins_section(
                     div()
                         .text_xs()
                         .text_color(theme.ink_muted)
-                        .child("ローカルの Wasm プラグインパッケージ（ene-plugin.json）を導入・有効化・削除します。"),
+                        .child("ホスト上の Wasm プラグインパッケージ（manifest.json）を導入・有効化・削除します。"),
                 ),
         )
         .child(
@@ -80,7 +80,7 @@ fn render_add_plugin_panel(
     let plugin_path_d = pane.drafts.draft(
         cx,
         "plugin:install-path",
-        "プラグインフォルダのパス（ene-plugin.json を含むディレクトリ）",
+        "ホスト上のプラグインフォルダ（manifest.json を含むパス）",
         None,
         theme,
     );
