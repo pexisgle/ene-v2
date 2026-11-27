@@ -11,7 +11,7 @@ use crate::host::{
     model::Credentials,
     resources::Perception,
 };
-use ene_mind::{RecallMode, Scored};
+use ene_mind::{RecallCandidate, RecallMode, Scored};
 use ene_store::util::now;
 use rig_ecs::prelude::{Conversation, MessageId};
 
@@ -194,7 +194,7 @@ pub(super) struct TailRenderRequest<'a> {
     pub(super) perception: &'a Perception,
     pub(super) companion: &'a str,
     pub(super) query: Option<&'a str>,
-    pub(super) semantic: &'a [String],
+    pub(super) semantic: &'a [RecallCandidate],
     pub(super) hook_notes: &'a [String],
     pub(super) turn: Option<u64>,
     pub(super) budget_chars: usize,
@@ -203,12 +203,13 @@ pub(super) struct TailRenderRequest<'a> {
 pub(crate) async fn dynamic_tail(req: DynamicTailQuery<'_>) -> crate::host::db::Result<String> {
     let semantic = match req.query {
         Some(query) => {
-            embedding::semantic_ids(
+            embedding::semantic_candidates(
                 req.store,
                 req.embeddings,
                 req.credentials,
                 req.companion,
                 query,
+                RecallMode::Auto,
             )
             .await
         }
@@ -249,7 +250,7 @@ pub(super) fn render_tail(
     perception: &Perception,
     companion: &str,
     query: Option<&str>,
-    semantic: &[String],
+    semantic: &[RecallCandidate],
     turn: Option<u64>,
 ) -> crate::host::db::Result<String> {
     render_tail_full(&TailRenderRequest {

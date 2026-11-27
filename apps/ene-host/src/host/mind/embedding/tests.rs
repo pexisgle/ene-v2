@@ -1,5 +1,5 @@
 use super::backfill::{MAX_EMBED_BATCH, fill};
-use super::index::{Space, cosine_similarity, encode};
+use super::index::{Space, dot, encode};
 use super::*;
 use crate::host::db::memories::MemoryRecord;
 use ene_mind::Memory;
@@ -18,13 +18,6 @@ fn test_space(model: &str, dimensions: usize) -> String {
 fn borrowed_cosine_matches_rig_scores_and_ranks() {
     use rig_core::embeddings::{Embedding, distance::VectorDistance};
 
-    let score = |similarity: f64| {
-        if similarity.is_finite() {
-            similarity.clamp(-1.0, 1.0) as f32
-        } else {
-            0.0
-        }
-    };
     for dimensions in [0, 1, 2, 255, 256, 257, 511, 512, 513, 1536] {
         let query: Vec<f32> = (0..dimensions)
             .map(|i| ((i * 17 % 101) as f32 - 50.0) / 13.0)
@@ -47,19 +40,38 @@ fn borrowed_cosine_matches_rig_scores_and_ranks() {
                 })
                 .collect();
             let old = embedding(&query).cosine_similarity(&embedding(&vector), false);
-            let new = cosine_similarity(&query, &vector);
+            let new =
+                dot(&query, &vector) / (dot(&query, &query).sqrt() * dot(&vector, &vector).sqrt());
             assert!(old.to_bits() == new.to_bits() || (old.is_nan() && new.is_nan()));
-            space.push(&candidate.to_string(), 1, &vector);
-            expected.push((candidate.to_string(), score(old)));
+            let candidate = RecallCandidate {
+                id: candidate.to_string(),
+                content_revision: 1,
+            };
+            space.push(&candidate, 3, &vector);
+            if old.is_finite() {
+                expected.push((candidate, old.clamp(-1.0, 1.0)));
+            }
         }
         expected.sort_by(|(_, left), (_, right)| right.total_cmp(left));
         expected.truncate(9);
         let mut index = CompactVectorIndex::default();
         index.spaces.insert(("owner".into(), "space".into()), space);
-        assert_eq!(index.ranked("owner", "space", &query, 9), expected);
         assert_eq!(
-            index.ranked("owner", "space", &vec![0.0; dimensions + 1], 9),
-            [] as [(std::string::String, f32); 0]
+            index.ranked("owner", "space", &query, RecallMode::Auto, 9),
+            expected
+                .into_iter()
+                .map(|(candidate, _)| candidate)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            index.ranked(
+                "owner",
+                "space",
+                &vec![0.0; dimensions + 1],
+                RecallMode::Auto,
+                9
+            ),
+            [] as [RecallCandidate; 0]
         );
     }
 }
@@ -319,21 +331,23 @@ fn the_index_mirrors_only_the_matching_space_and_revision() {
     embed(&store, &second, &three, 3, &[0.0, 0.0, 1.0]);
     let mut index = CompactVectorIndex::default();
     index.sync(&store, "ene", &two).unwrap();
-    let ranked = index.ranked("ene", &two, &[1.0, 0.1], 8);
+    let ranked = index.ranked("ene", &two, &[1.0, 0.1], RecallMode::Auto, 8);
     assert_eq!(ranked.len(), 1);
-    assert_eq!(ranked[0].0, first.id);
+    assert_eq!(ranked[0].id, first.id);
     assert!(
-        index.ranked("ene", &two, &[1.0, 0.1, 0.0], 8).is_empty(),
+        index
+            .ranked("ene", &two, &[1.0, 0.1, 0.0], RecallMode::Auto, 8)
+            .is_empty(),
         "a query of another dimension is not this space"
     );
     index.sync(&store, "ene", &three).unwrap();
     assert_eq!(
-        index.ranked("ene", &three, &[0.0, 1.0, 0.0], 8)[0].0,
+        index.ranked("ene", &three, &[0.0, 1.0, 0.0], RecallMode::Auto, 8)[0].id,
         second.id
     );
     assert_eq!(
-        index.ranked("ene", &three, &[1.0, 0.0], 8),
-        [] as [(std::string::String, f32); 0]
+        index.ranked("ene", &three, &[1.0, 0.0], RecallMode::Auto, 8),
+        Vec::<RecallCandidate>::new()
     );
 
     // A content change invalidates the vector; the next sync drops it.
@@ -348,8 +362,8 @@ fn the_index_mirrors_only_the_matching_space_and_revision() {
         .unwrap();
     index.sync(&store, "ene", &two).unwrap();
     assert_eq!(
-        index.ranked("ene", &two, &[1.0, 0.1], 8),
-        [] as [(std::string::String, f32); 0]
+        index.ranked("ene", &two, &[1.0, 0.1], RecallMode::Auto, 8),
+        Vec::<RecallCandidate>::new()
     );
 
     // A vector of another preprocessing version is a different space.
@@ -357,8 +371,8 @@ fn the_index_mirrors_only_the_matching_space_and_revision() {
     embed(&store, &second, legacy, 2, &[1.0, 0.0]);
     index.sync(&store, "ene", legacy).unwrap();
     assert_eq!(
-        index.ranked("ene", legacy, &[1.0, 0.0], 8),
-        [] as [(std::string::String, f32); 0]
+        index.ranked("ene", legacy, &[1.0, 0.0], RecallMode::Auto, 8),
+        Vec::<RecallCandidate>::new()
     );
 }
 
@@ -379,20 +393,20 @@ fn another_companions_vectors_cannot_take_the_companions_top_k() {
     }
     let mut index = CompactVectorIndex::default();
     index.sync(&store, "ene", &space).unwrap();
-    let ranked = index.ranked("ene", &space, &[1.0, 0.0], 1);
+    let ranked = index.ranked("ene", &space, &[1.0, 0.0], RecallMode::Auto, 1);
     assert_eq!(ranked.len(), 1);
     assert_eq!(
-        ranked[0].0, mine.id,
+        ranked[0].id, mine.id,
         "the companion's top-k is not crowded out"
     );
     // Each companion has its own key space: syncing one does not expose
     // another's memories in its ranking.
     index.sync(&store, "other-0", &space).unwrap();
-    let theirs = index.ranked("other-0", &space, &[1.0, 0.0], 10);
+    let theirs = index.ranked("other-0", &space, &[1.0, 0.0], RecallMode::Auto, 10);
     assert_eq!(theirs.len(), 1);
-    assert_eq!(theirs[0].0, others[0].id);
+    assert_eq!(theirs[0].id, others[0].id);
     assert!(
-        theirs.iter().all(|(id, _)| id != &mine.id),
+        theirs.iter().all(|candidate| candidate.id != mine.id),
         "another companion's vector is never in this companion's space"
     );
 }
@@ -418,30 +432,29 @@ fn ranking_keeps_database_order_for_ties_and_bounds_top_k() {
     }
     let mut index = CompactVectorIndex::default();
     index.sync(&store, "ene", &space).unwrap();
-    let rank = |limit| index.ranked("ene", &space, &[1.0, 0.0], limit);
-    assert_eq!(rank(0), [] as [(std::string::String, f32); 0]);
-    assert_eq!(rank(1), [(ids[0].clone(), 1.0)]);
-    assert_eq!(rank(2), [(ids[0].clone(), 1.0), (ids[2].clone(), 1.0)]);
-    assert_eq!(
-        rank(20),
-        [
-            (ids[0].clone(), 1.0),
-            (ids[2].clone(), 1.0),
-            (ids[4].clone(), 1.0),
-            (ids[5].clone(), 0.6),
-            (ids[3].clone(), 0.0),
-            (ids[1].clone(), -1.0),
-        ]
-    );
+    let rank = |limit| {
+        index
+            .ranked("ene", &space, &[1.0, 0.0], RecallMode::Auto, limit)
+            .into_iter()
+            .map(|candidate| candidate.id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rank(0), [] as [String; 0]);
+    assert_eq!(rank(1), [ids[0].clone()]);
+    assert_eq!(rank(2), [ids[0].clone(), ids[2].clone()]);
+    assert_eq!(rank(20), [0, 2, 4, 5, 3, 1].map(|i| ids[i].clone()));
     index.sync(&store, "ene", &space).unwrap();
-    assert_eq!(index.ranked("ene", &space, &[1.0, 0.0], 2)[1].0, ids[2]);
+    assert_eq!(
+        index.ranked("ene", &space, &[1.0, 0.0], RecallMode::Auto, 2)[1].id,
+        ids[2]
+    );
 }
 
 #[test]
-fn invalid_comparisons_stay_finite_zero_evidence() {
+fn invalid_comparisons_do_not_enter_recall() {
     let store = store();
     let space = test_space("fake", 2);
-    let mut ids = Vec::new();
+    let mut candidates = Vec::new();
     for vector in [
         [1.0, 0.0],
         [0.0, 0.0],
@@ -454,26 +467,61 @@ fn invalid_comparisons_stay_finite_zero_evidence() {
             .insert_memory(&memory("vector"))
             .unwrap();
         embed(&store, &memory, &space, 2, &vector);
-        ids.push(memory.id);
+        candidates.push(RecallCandidate::from(&memory));
     }
     let mut index = CompactVectorIndex::default();
     index.sync(&store, "ene", &space).unwrap();
     assert_eq!(
-        index.ranked("ene", &space, &[1.0, 0.0], 20),
-        [
-            (ids[0].clone(), 1.0),
-            (ids[1].clone(), 0.0),
-            (ids[2].clone(), 0.0),
-            (ids[3].clone(), 0.0),
-            (ids[4].clone(), -1.0),
-        ]
+        index.ranked("ene", &space, &[1.0, 0.0], RecallMode::Auto, 20),
+        [candidates[0].clone(), candidates[4].clone()]
     );
     for query in [[0.0, 0.0], [f32::NAN, 0.0], [f32::INFINITY, 0.0]] {
         assert_eq!(
-            index.ranked("ene", &space, &query, 2),
-            [(ids[0].clone(), 0.0), (ids[1].clone(), 0.0)]
+            index.ranked("ene", &space, &query, RecallMode::Auto, 2),
+            [] as [RecallCandidate; 0]
         );
     }
+}
+
+#[test]
+fn eligibility_and_precision_are_applied_before_truncation() {
+    let store = store();
+    let space = test_space("fake", 2);
+    let repo = store.memory_repo();
+    for _ in 0..20 {
+        let mut record = memory("forgotten");
+        record.importance = 0;
+        let forgotten = repo.insert_memory(&record).unwrap();
+        embed(&store, &forgotten, &space, 2, &[1.0, 0.0]);
+    }
+    let approximate = repo.insert_memory(&memory("approximate")).unwrap();
+    let exact = repo.insert_memory(&memory("exact")).unwrap();
+    embed(&store, &approximate, &space, 2, &[1.0, 0.0001]);
+    embed(&store, &exact, &space, 2, &[1.0, 0.0]);
+
+    let mut index = CompactVectorIndex::default();
+    index.sync(&store, "ene", &space).unwrap();
+    let query = [1.0, 0.0];
+    assert_eq!(
+        index.ranked("ene", &space, &query, RecallMode::Auto, 20),
+        [
+            RecallCandidate::from(&exact),
+            RecallCandidate::from(&approximate)
+        ]
+    );
+    assert_eq!(
+        index
+            .ranked("ene", &space, &query, RecallMode::Explicit, 20)
+            .len(),
+        20
+    );
+    repo.control_memory(&exact.id, ene_mind::MemoryActionKind::Forget, "ene")
+        .unwrap();
+    index.sync(&store, "ene", &space).unwrap();
+    assert_eq!(
+        index.ranked("ene", &space, &query, RecallMode::Auto, 20),
+        [RecallCandidate::from(&approximate)]
+    );
 }
 
 #[test]
@@ -658,14 +706,14 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
     assert!(
         store
             .memory_repo()
-            .embedding_blob(&mem_a.id, &target_a.space)
+            .embedding_blob(&RecallCandidate::from(&mem_a), &target_a.space)
             .unwrap()
             .is_some()
     );
     assert!(
         store
             .memory_repo()
-            .embedding_blob(&mem_b.id, &target_a.space)
+            .embedding_blob(&RecallCandidate::from(&mem_b), &target_a.space)
             .unwrap()
             .is_none()
     );
@@ -682,7 +730,7 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
     assert!(
         store
             .memory_repo()
-            .embedding_blob(&mem_b.id, &target_b.space)
+            .embedding_blob(&RecallCandidate::from(&mem_b), &target_b.space)
             .unwrap()
             .is_some()
     );
@@ -690,9 +738,15 @@ async fn q03_backfill_scopes_by_companion_and_prevents_vector_overwrites() {
     // Alpha's space was not polluted by Beta's backfill.
     let mut index = CompactVectorIndex::default();
     index.sync(&store, &comp_a.id, &target_a.space).unwrap();
-    let a_ranked = index.ranked(&comp_a.id, &target_a.space, &[1.0, 0.0], 10);
+    let a_ranked = index.ranked(
+        &comp_a.id,
+        &target_a.space,
+        &[1.0, 0.0],
+        RecallMode::Auto,
+        10,
+    );
     assert_eq!(a_ranked.len(), 1);
-    assert_eq!(a_ranked[0].0, mem_a.id);
+    assert_eq!(a_ranked[0].id, mem_a.id);
 }
 
 #[tokio::test]

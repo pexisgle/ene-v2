@@ -21,8 +21,8 @@ pub use ene_domain::{ModelAssignment, ModelAssignments};
 pub use json::JsonDoc;
 pub use memory::{
     MAX_IMPORTANCE, Memory, MemoryActionKind, MemoryRecord, MindStateChange, MindUpdate, NewMemory,
-    PINNED_BUDGET_CHARS, RecallMode, RecallOutcome, SHARED_SCOPE, Scored, StateUpdate, in_scope,
-    rank_recall, score, tokens,
+    PINNED_BUDGET_CHARS, RecallCandidate, RecallMode, RecallOutcome, SHARED_SCOPE, Scored,
+    StateUpdate, in_scope, rank_recall, score, tokens,
 };
 
 pub type Result<T> = std::result::Result<T, ene_domain::DomainError>;

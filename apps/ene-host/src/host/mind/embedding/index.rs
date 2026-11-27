@@ -6,6 +6,7 @@ use crate::host::{
     error::HostError,
 };
 use bevy_ecs::prelude::*;
+use ene_mind::{RecallCandidate, RecallMode};
 use itertools::Itertools;
 use std::collections::HashMap;
 
@@ -33,25 +34,26 @@ fn decode(bytes: &[u8]) -> Result<Vec<f32>> {
 #[derive(Default)]
 pub(super) struct Space {
     dimensions: usize,
-    entries: Vec<(String, u64)>,
+    entries: Vec<(RecallCandidate, u8)>,
     vectors: Vec<f32>,
+    magnitudes: Vec<f64>,
     by_id: HashMap<String, usize>,
 }
 
 impl Space {
-    fn matches(&self, rows: &[(String, u64)]) -> bool {
+    fn matches(&self, rows: &[(RecallCandidate, u8)]) -> bool {
         self.entries.as_slice() == rows
     }
 
-    pub(super) fn push(&mut self, id: &str, revision: u64, vector: &[f32]) -> bool {
+    pub(super) fn push(&mut self, candidate: &RecallCandidate, importance: u8, vector: &[f32]) {
         if self.dimensions != 0 && vector.len() != self.dimensions {
-            return false;
+            return;
         }
         self.dimensions = vector.len();
-        self.by_id.insert(id.to_owned(), self.entries.len());
-        self.entries.push((id.to_owned(), revision));
+        self.by_id.insert(candidate.id.clone(), self.entries.len());
+        self.entries.push((candidate.clone(), importance));
         self.vectors.extend_from_slice(vector);
-        true
+        self.magnitudes.push(dot(vector, vector).sqrt());
     }
 
     fn vector(&self, index: usize) -> Option<&[f32]> {
@@ -62,9 +64,9 @@ impl Space {
             .get(index * self.dimensions..(index + 1) * self.dimensions)
     }
 
-    fn vector_for(&self, id: &str, revision: u64) -> Option<&[f32]> {
-        let index = *self.by_id.get(id)?;
-        (self.entries.get(index).map(|entry| entry.1) == Some(revision))
+    fn vector_for(&self, candidate: &RecallCandidate) -> Option<&[f32]> {
+        let index = *self.by_id.get(&candidate.id)?;
+        (&self.entries[index].0 == candidate)
             .then(|| self.vector(index))
             .flatten()
     }
@@ -103,15 +105,13 @@ impl CompactVectorIndex {
                 .unwrap_or(0),
             ..Space::default()
         };
-        for (id, revision) in &rows {
-            if let Some(vector) = previous
-                .as_ref()
-                .and_then(|old| old.vector_for(id, *revision))
-            {
-                next.push(id, *revision, vector);
+        for (candidate, importance) in &rows {
+            if let Some(vector) = previous.as_ref().and_then(|old| old.vector_for(candidate)) {
+                next.push(candidate, *importance, vector);
                 continue;
             }
-            let Some((dimensions, bytes)) = store.memory_repo().embedding_blob(id, space)? else {
+            let Some((dimensions, bytes)) = store.memory_repo().embedding_blob(candidate, space)?
+            else {
                 continue;
             };
             let vector = decode(&bytes)?;
@@ -127,7 +127,7 @@ impl CompactVectorIndex {
                 // A vector of another dimension is not part of this space.
                 continue;
             }
-            next.push(id, *revision, &vector);
+            next.push(candidate, *importance, &vector);
         }
         self.spaces.insert(key, next);
         Ok(())
@@ -141,50 +141,48 @@ impl CompactVectorIndex {
         companion: &str,
         space: &str,
         query: &[f32],
+        mode: RecallMode,
         limit: usize,
-    ) -> Vec<(String, f32)> {
+    ) -> Vec<RecallCandidate> {
         let Some(current) = self.spaces.get(&(companion.to_owned(), space.to_owned())) else {
             return Vec::new();
         };
         if query.len() != current.dimensions || limit == 0 {
             return Vec::new();
         }
-        (0..current.entries.len())
-            .map(|index| {
-                let vector = current.vector(index).unwrap_or_default();
-                let similarity = cosine_similarity(query, vector);
-                let score = if similarity.is_finite() {
-                    similarity.clamp(-1.0, 1.0) as f32
-                } else {
-                    0.0
-                };
-                (index, score)
+        let magnitude = dot(query, query).sqrt();
+        if magnitude == 0.0 || !magnitude.is_finite() {
+            return Vec::new();
+        }
+        current
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, importance))| *importance >= mode.minimum_importance())
+            .filter_map(|(index, _)| {
+                let score =
+                    dot(query, current.vector(index)?) / (magnitude * current.magnitudes[index]);
+                score.is_finite().then_some((index, score.clamp(-1.0, 1.0)))
             })
             .k_smallest_by(limit, |(left, left_score), (right, right_score)| {
                 right_score
                     .total_cmp(left_score)
                     .then_with(|| left.cmp(right))
             })
-            .map(|(index, score)| (current.entries[index].0.clone(), score))
+            .map(|(index, _)| current.entries[index].0.clone())
             .collect()
     }
 }
 
-pub(super) fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+pub(super) fn dot(a: &[f32], b: &[f32]) -> f64 {
     // Match Rig's f64 reduction order without widening the stored vectors.
-    let pair_sum = |a: &[f32], b: &[f32], term: fn(f64, f64) -> f64| {
-        a.chunks(256)
-            .zip(b.chunks(256))
-            .map(|(a, b)| {
-                a.iter()
-                    .zip(b)
-                    .map(|(&x, &y)| term(f64::from(x), f64::from(y)))
-                    .sum::<f64>()
-            })
-            .sum::<f64>()
-    };
-    let dot = pair_sum(a, b, |x, y| x * y);
-    let magnitude_a = pair_sum(a, a, |x, _| x.powi(2)).sqrt();
-    let magnitude_b = pair_sum(b, b, |x, _| x.powi(2)).sqrt();
-    dot / (magnitude_a * magnitude_b)
+    a.chunks(256)
+        .zip(b.chunks(256))
+        .map(|(a, b)| {
+            a.iter()
+                .zip(b)
+                .map(|(&x, &y)| f64::from(x) * f64::from(y))
+                .sum::<f64>()
+        })
+        .sum()
 }

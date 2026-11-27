@@ -8,7 +8,7 @@ use super::{
 };
 use crate::StoreError;
 use crate::row::FromRow;
-use ene_mind::{RecallMode, in_scope};
+use ene_mind::{RecallCandidate, RecallMode, in_scope};
 use rusqlite::params;
 use serde_json::json as value;
 use std::collections::{HashMap, HashSet};
@@ -18,7 +18,7 @@ impl<'a> MemoryRepo<'a> {
         &self,
         companion: &str,
         query: &str,
-        semantic: &[String],
+        semantic: &[RecallCandidate],
         limit: usize,
     ) -> Result<Vec<MemoryContext>> {
         if limit == 0 {

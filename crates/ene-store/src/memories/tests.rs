@@ -71,11 +71,13 @@ fn recurring_cached_embedding_writes_keep_bindings_and_revision_guards() {
             .unwrap()
     );
     assert_eq!(
-        repo.embedding_blob(&first.id, "fake:1:v1").unwrap(),
+        repo.embedding_blob(&RecallCandidate::from(&first), "fake:1:v1")
+            .unwrap(),
         Some((1, b.to_vec()))
     );
     assert_eq!(
-        repo.embedding_blob(&second.id, "fake:1:v1").unwrap(),
+        repo.embedding_blob(&RecallCandidate::from(&second), "fake:1:v1")
+            .unwrap(),
         Some((1, a.to_vec()))
     );
 }
@@ -150,7 +152,10 @@ fn hybrid_recall_fuses_and_forgetting_excludes_auto_but_keeps_explicit() {
             "ene",
             "紅茶",
             RecallMode::Auto,
-            &[semantic_only.id.clone(), lexical.id.clone()],
+            &[
+                RecallCandidate::from(&semantic_only),
+                RecallCandidate::from(&lexical),
+            ],
             8,
         )
         .unwrap();
@@ -176,7 +181,7 @@ fn hybrid_recall_fuses_and_forgetting_excludes_auto_but_keeps_explicit() {
             "ene",
             "紅茶",
             RecallMode::Auto,
-            std::slice::from_ref(&lexical.id),
+            &[RecallCandidate::from(&lexical)],
             4,
         )
         .unwrap()
@@ -190,6 +195,36 @@ fn hybrid_recall_fuses_and_forgetting_excludes_auto_but_keeps_explicit() {
             .items
             .len(),
         1
+    );
+}
+
+#[test]
+fn semantic_retrieval_restores_only_current_revisions_in_candidate_order() {
+    let store = store();
+    let repo = store.memory_repo();
+    let first = repo.insert_memory(&new_memory("first", 4)).unwrap();
+    let second = repo.insert_memory(&new_memory("second", 4)).unwrap();
+    let stale = RecallCandidate::from(&first);
+    store
+        .conn()
+        .execute(
+            "UPDATE memories SET content = 'corrected', content_revision = content_revision + 1 \
+         WHERE id = ?1",
+            [&first.id],
+        )
+        .unwrap();
+    let corrected = repo.memory(&first.id).unwrap().unwrap();
+    let second_candidate = RecallCandidate::from(&second);
+    let candidates = [
+        stale,
+        second_candidate.clone(),
+        second_candidate,
+        (&corrected).into(),
+    ];
+    assert_eq!(
+        repo.semantic_memories("ene", RecallMode::Auto, &candidates)
+            .unwrap(),
+        [second, corrected]
     );
 }
 
@@ -322,7 +357,7 @@ fn another_companions_scope_is_private_and_sharing_moves_the_row_to_the_pool() {
             "ene",
             "secret",
             RecallMode::Explicit,
-            std::slice::from_ref(&other.id),
+            &[RecallCandidate::from(&other)],
             8,
         )
         .unwrap();
@@ -343,7 +378,7 @@ fn another_companions_scope_is_private_and_sharing_moves_the_row_to_the_pool() {
             "ene",
             "secret",
             RecallMode::Explicit,
-            std::slice::from_ref(&other.id),
+            &[RecallCandidate::from(&other)],
             8,
         )
         .unwrap();

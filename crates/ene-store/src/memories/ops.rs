@@ -4,7 +4,7 @@ use super::{
     to_json,
 };
 use crate::{Store, StoreError};
-use ene_mind::{dimensions_of_space, in_scope};
+use ene_mind::{RecallCandidate, dimensions_of_space, in_scope};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json as value};
 
@@ -133,25 +133,39 @@ impl<'a> MemoryRepo<'a> {
         Ok(result)
     }
 
-    pub fn embedding_revisions(&self, space: &str, companion: &str) -> Result<Vec<(String, u64)>> {
+    pub fn embedding_revisions(
+        &self,
+        space: &str,
+        companion: &str,
+    ) -> Result<Vec<(RecallCandidate, u8)>> {
         let Some(dimensions) = dimensions_of_space(space) else {
             return Ok(Vec::new());
         };
         let connection = self.0.conn();
         let mut statement = connection.prepare_cached(&format!(
-            "SELECT m.id, m.memory_revision FROM memories m \
+            "SELECT m.id, m.content_revision, m.importance FROM memories m \
              WHERE {VISIBLE} AND m.embedding_model = ?2 AND m.embedding_dimensions = ?3 \
              AND m.embedding IS NOT NULL AND m.embedding_content_revision = m.content_revision \
              ORDER BY m.rowid"
         ))?;
         let rows = statement.query_map(params![companion, space, dimensions as i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            Ok((
+                RecallCandidate {
+                    id: row.get(0)?,
+                    content_revision: row.get(1)?,
+                },
+                row.get(2)?,
+            ))
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
 
-    pub fn embedding_blob(&self, id: &str, space: &str) -> Result<Option<(usize, Vec<u8>)>> {
+    pub fn embedding_blob(
+        &self,
+        candidate: &RecallCandidate,
+        space: &str,
+    ) -> Result<Option<(usize, Vec<u8>)>> {
         let Some(dimensions) = dimensions_of_space(space) else {
             return Ok(None);
         };
@@ -161,11 +175,18 @@ impl<'a> MemoryRepo<'a> {
             .prepare_cached(
                 "SELECT embedding_dimensions, embedding FROM memories WHERE id = ?1 \
                  AND embedding_model = ?2 AND embedding_dimensions = ?3 \
-                 AND embedding IS NOT NULL AND embedding_content_revision = content_revision",
+                 AND embedding IS NOT NULL AND embedding_content_revision = content_revision \
+                 AND content_revision = ?4",
             )?
-            .query_row(params![id, space, dimensions as i64], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
+            .query_row(
+                params![
+                    candidate.id,
+                    space,
+                    dimensions as i64,
+                    candidate.content_revision
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .optional()?;
         Ok(row.map(|(dimensions, bytes)| (dimensions as usize, bytes)))
     }

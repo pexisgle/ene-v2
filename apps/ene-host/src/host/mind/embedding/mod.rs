@@ -27,6 +27,7 @@ use crate::host::{
     settings::{Connection, ConnectionConfig, ConnectionKind},
 };
 use bevy_ecs::prelude::*;
+use ene_mind::{RecallCandidate, RecallMode};
 use parking_lot::Mutex;
 use rig_core::{driver::DynModel, operation::Embedding, providers::registry::ProviderConfig};
 use rig_ecs::prelude::*;
@@ -347,13 +348,14 @@ fn target(
     Ok(Some(target))
 }
 
-pub(crate) async fn semantic_ids(
+pub(crate) async fn semantic_candidates(
     store: &Store,
     embeddings: &Embeddings,
     credentials: Option<&Credentials>,
     companion: &str,
     query: &str,
-) -> Vec<String> {
+    mode: RecallMode,
+) -> Vec<RecallCandidate> {
     let Ok(Some(record)) = store.companion_repo().companion(companion) else {
         return Vec::new();
     };
@@ -370,11 +372,7 @@ pub(crate) async fn semantic_ids(
     if index.sync(store, companion, &target.space).is_err() {
         return Vec::new();
     }
-    index
-        .ranked(companion, &target.space, &vector, 20)
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect()
+    index.ranked(companion, &target.space, &vector, mode, 20)
 }
 
 /// Registers the vector cache and its backfill.

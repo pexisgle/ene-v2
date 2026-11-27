@@ -19,12 +19,13 @@ use crate::{
 };
 pub use ene_mind::{
     Batch, Commit, Fact, MAX_IMPORTANCE, Memory, MemoryActionKind, MemoryContext, MemoryRecord,
-    MindStateChange, MindUpdate, NewMemory, PINNED_BUDGET_CHARS, PendingEmbedding, RecallMode,
-    RecallOutcome, SHARED_SCOPE, Scored, StateUpdate, score, tokens, validate_citations,
+    MindStateChange, MindUpdate, NewMemory, PINNED_BUDGET_CHARS, PendingEmbedding, RecallCandidate,
+    RecallMode, RecallOutcome, SHARED_SCOPE, Scored, StateUpdate, score, tokens,
+    validate_citations,
 };
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 const MAX_INJECTED: usize = 64;
 const KEEP_INJECTED_TURNS: usize = 64;
@@ -196,51 +197,42 @@ impl<'a> MemoryRepo<'a> {
         companion: &str,
         query: &str,
         mode: RecallMode,
-        semantic: &[String],
+        semantic: &[RecallCandidate],
         limit: usize,
     ) -> Result<RecallOutcome> {
         let lexical = self.lexical_candidates(companion, query, mode)?;
-        let semantic = self.memories_by_ids(companion, mode, semantic)?;
+        let semantic = self.semantic_memories(companion, mode, semantic)?;
         Ok(RecallOutcome {
             semantic: !semantic.is_empty(),
             items: ene_mind::rank_recall([lexical, semantic], epoch(&now()).unwrap_or(0), limit),
         })
     }
 
-    fn memories_by_ids(
+    fn semantic_memories(
         &self,
         companion: &str,
         mode: RecallMode,
-        ids: &[String],
+        candidates: &[RecallCandidate],
     ) -> Result<Vec<Memory>> {
         let mut unique = HashSet::new();
-        let ids: Vec<&String> = ids
+        let candidates: Vec<_> = candidates
             .iter()
-            .filter(|id| !id.is_empty() && unique.insert(id.as_str()))
+            .filter(|item| !item.id.is_empty() && unique.insert(*item))
             .take(64)
             .collect();
-        if ids.is_empty() {
+        if candidates.is_empty() {
             return Ok(Vec::new());
         }
-        let minimum = mode.minimum_importance();
-        let connection = self.0.conn();
-        let mut statement = connection.prepare_cached(&format!(
-            "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance >= ?2 \
-             AND m.id IN (SELECT value FROM json_each(?3))"
-        ))?;
-        let rows = statement.query_map(
-            params![companion, minimum, to_json(&ids)?],
+        self.0.fetch_all(
+            &format!(
+                "SELECT {JOINED_COLUMNS} FROM json_each(?3) AS candidate CROSS JOIN memories m \
+                 WHERE m.id = candidate.value ->> '$.id' \
+                 AND m.content_revision = candidate.value ->> '$.content_revision' \
+                 AND {VISIBLE} AND m.importance >= ?2 ORDER BY candidate.key"
+            ),
+            params![companion, mode.minimum_importance(), to_json(&candidates)?],
             Memory::from_row,
-        )?;
-        let mut found: HashMap<String, Memory> = HashMap::new();
-        for memory in rows {
-            let memory = memory?;
-            found.insert(memory.id.clone(), memory);
-        }
-        Ok(ids
-            .into_iter()
-            .filter_map(|id| found.remove(id.as_str()))
-            .collect())
+        )
     }
 
     pub fn pinned(&self, companion: &str) -> Result<Vec<Memory>> {

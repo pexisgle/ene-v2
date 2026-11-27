@@ -130,12 +130,13 @@ pub(crate) async fn pass(
     // memories only as a fallback. Forgotten memories surface when the topic
     // matches, so the model sees that the user asked to forget them.
     let query = turn_query(&turns);
-    let semantic = embedding::semantic_ids(
+    let semantic = embedding::semantic_candidates(
         &services.store,
         &services.embeddings,
         services.credentials.as_ref(),
         companion_id,
         &query,
+        ene_mind::RecallMode::Explicit,
     )
     .await;
     let context = services.store.memory_repo().consolidation_context(

@@ -13,7 +13,7 @@ use crate::host::{
     tools::run_tool,
 };
 use bevy_ecs::prelude::*;
-use ene_mind::RecallMode;
+use ene_mind::{RecallCandidate, RecallMode};
 use ene_store::util::now;
 use rig_ecs::prelude::*;
 use schemars::JsonSchema;
@@ -191,12 +191,13 @@ fn recall(
         &runtime.0,
         services.wake,
         async move {
-            let semantic = embedding::semantic_ids(
+            let semantic = embedding::semantic_candidates(
                 &store,
                 &embeddings,
                 credentials.as_ref(),
                 &companion,
                 &args.query,
+                RecallMode::Explicit,
             )
             .await;
             recall_result(&store, &companion, &args, &semantic)
@@ -208,7 +209,7 @@ fn recall_result(
     store: &Store,
     companion: &str,
     args: &RecallArgs,
-    semantic: &[String],
+    semantic: &[RecallCandidate],
 ) -> Result<String> {
     let limit = args.limit.unwrap_or(8).clamp(1, 16) as usize;
     let outcome = store.memory_repo().recall_hybrid(

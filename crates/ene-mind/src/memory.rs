@@ -60,6 +60,24 @@ impl Memory {
     }
 }
 
+/// A semantic match to the exact text revision that was embedded.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+pub struct RecallCandidate {
+    /// Retained memory identifier.
+    pub id: String,
+    /// Content revision of the vector used to rank this memory.
+    pub content_revision: u64,
+}
+
+impl From<&Memory> for RecallCandidate {
+    fn from(memory: &Memory) -> Self {
+        Self {
+            id: memory.id.clone(),
+            content_revision: memory.content_revision,
+        }
+    }
+}
+
 /// A recall candidate with the score components kept apart for the model.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Scored {
