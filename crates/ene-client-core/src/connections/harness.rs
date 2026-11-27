@@ -44,7 +44,7 @@ mod tests {
         let mut connection = Connection {
             name: input.name,
             id: input.id,
-            kind: input.kind,
+            kind: ConnectionKind::Acp,
             config: input.config,
             enabled: input.enabled,
             last_check: Some(ConnectionCheck {

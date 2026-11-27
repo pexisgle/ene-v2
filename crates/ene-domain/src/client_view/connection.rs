@@ -42,6 +42,20 @@ pub enum ConnectionKind {
     Search,
 }
 
+impl From<settings::ConnectionKind> for ConnectionKind {
+    fn from(kind: settings::ConnectionKind) -> Self {
+        match kind {
+            settings::ConnectionKind::Llm => Self::Llm,
+            settings::ConnectionKind::Tts => Self::Tts,
+            settings::ConnectionKind::Stt => Self::Stt,
+            settings::ConnectionKind::Embedding => Self::Embedding,
+            settings::ConnectionKind::Mcp => Self::Mcp,
+            settings::ConnectionKind::Acp => Self::Acp,
+            settings::ConnectionKind::Search => Self::Search,
+        }
+    }
+}
+
 impl ConnectionKind {
     /// Selectable connection kinds shown in the custom connection creation form.
     pub const ALL_CUSTOM: [Self; 6] = [
@@ -191,8 +205,11 @@ impl Connection {
             name: self.name.clone(),
             enabled: self.enabled,
             expected_revision: self.revision,
-            kind: self.kind,
-            config: self.config.clone(),
+            config: self
+                .config
+                .as_ref()
+                .filter(|config| ConnectionKind::from(config.kind()) == self.kind)
+                .cloned(),
         }
     }
 }
@@ -208,8 +225,6 @@ pub struct ConnectionInput {
     pub enabled: bool,
     /// The revision the edit was based on, so a stale write is refused.
     pub expected_revision: u64,
-    /// Which kind of service the connection reaches.
-    pub kind: ConnectionKind,
     /// Adapter, URL and kind-specific fields.
     pub config: Option<ConnectionConfig>,
 }

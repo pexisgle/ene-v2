@@ -305,7 +305,6 @@ mod tests {
             name: "MCP".into(),
             enabled: true,
             expected_revision: 4,
-            kind: domain::ConnectionKind::Mcp,
             config: Some(domain::ConnectionConfig::Mcp(domain::McpConnection {
                 endpoint: Some(domain::ConnectionEndpoint {
                     adapter: "mcp".into(),
@@ -324,6 +323,7 @@ mod tests {
             })),
         };
         let wire_input: w::ConnectionInput = domain_input.clone().into();
+        assert_eq!(wire_input.kind.as_known(), Some(w::ConnectionKind::Mcp));
         let wire_conn = w::Connection {
             id: wire_input.id,
             name: wire_input.name,
@@ -334,12 +334,14 @@ mod tests {
             credential_state: "environment".into(),
             ..Default::default()
         };
-        let round_trip: domain::Connection = wire_conn.into();
+        let mut round_trip: domain::Connection = wire_conn.into();
         assert_eq!(round_trip.to_input(), domain_input);
         assert_eq!(
             round_trip.credential_state,
             ene_domain::CredentialState::Environment
         );
+        round_trip.kind = domain::ConnectionKind::Llm;
+        assert!(round_trip.to_input().config.is_none());
 
         let rules_update = domain::PolicyRulesUpdate {
             add_or_update: vec![domain::PolicyRule {

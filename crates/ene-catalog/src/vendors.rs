@@ -119,11 +119,21 @@ pub fn default_embedding_dimensions(model_id: &str) -> u32 {
 
 pub fn default_models_for_adapter(adapter: &str) -> &'static [&'static str] {
     match adapter.trim().to_ascii_lowercase().as_str() {
-        "openai" | "openai-responses" => &["gpt-5.4-mini", "gpt-5.4"],
-        "anthropic" => &["claude-sonnet-4-6"],
-        "gemini" | "google" => &["gemini-2.5-flash"],
+        "openai" | "openai-responses" => &["gpt-5.4-mini", "gpt-5.4", "gpt-4o-mini", "gpt-4o"],
+        "anthropic" => &[
+            "claude-sonnet-4-6",
+            "claude-3-5-haiku-latest",
+            "claude-sonnet-4-20250514",
+        ],
+        "gemini" | "google" => &["gemini-2.5-flash", "gemini-2.5-pro"],
         GOOGLE_AGENT_PLATFORM => &[GOOGLE_AGENT_PLATFORM_DEFAULT_MODEL],
-        "openrouter" | "openrouter-wasm" => &["openai/gpt-5.4-mini"],
+        "openrouter" | "openrouter-wasm" => &[
+            "openai/gpt-5.4-mini",
+            "openai/gpt-4o-mini",
+            "openai/gpt-4o",
+            "anthropic/claude-3.5-haiku",
+            "google/gemini-2.5-flash",
+        ],
         "sakura" => SAKURA_CHAT_MODELS,
         "ollama" | "vllm" | "lmstudio" => &["qwen2.5:7b"],
         _ => &[],

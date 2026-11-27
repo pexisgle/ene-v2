@@ -218,25 +218,6 @@ pub(crate) async fn preview_reply(
     Ok(response.text().trim().to_owned())
 }
 
-/// Adapter-default model candidates when neither `model_ids` nor `last_check`
-/// has populated a concrete list, ordered with reliable tool-capable defaults first.
-fn default_models_for(adapter: &str) -> &'static [&'static str] {
-    match adapter {
-        "openrouter" | "openrouter-wasm" => &[
-            "openai/gpt-4o-mini",
-            "openai/gpt-4o",
-            "anthropic/claude-3.5-haiku",
-            "google/gemini-2.5-flash",
-        ],
-        "openai" => &["gpt-4o-mini", "gpt-4o"],
-        "anthropic" => &["claude-3-5-haiku-latest", "claude-sonnet-4-20250514"],
-        "gemini" => &["gemini-2.5-flash", "gemini-2.5-pro"],
-        agent_platform::ADAPTER => &[agent_platform::DEFAULT_MODEL],
-        "sakura" => SAKURA_CHAT_MODELS,
-        _ => &[],
-    }
-}
-
 /// Lists the models a connection serves, putting explicit `model_ids` first,
 /// then probed `last_check.resources` (promoting known tool-capable defaults
 /// first among probed results), and falling back to adapter defaults only when
@@ -246,7 +227,7 @@ pub(crate) fn models(connection: &Connection, catalog: &Catalog) -> Vec<(String,
         return Vec::new();
     };
     let adapter = connection.endpoint().adapter.as_str();
-    let preferred = default_models_for(adapter);
+    let preferred = ene_catalog::default_models_for_adapter(adapter);
     let verified = adapter == agent_platform::ADAPTER
         && connection.last_check.as_ref().is_some_and(|check| {
             check

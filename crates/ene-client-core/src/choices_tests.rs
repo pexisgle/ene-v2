@@ -96,7 +96,12 @@ fn available_models_merges_configured_fetched_and_checked_with_fallback() {
     );
     assert_eq!(
         model.available_models_for_connection("c-empty"),
-        vec![("claude-sonnet-4-6".into(), "claude-sonnet-4-6".into())]
+        [
+            "claude-sonnet-4-6",
+            "claude-3-5-haiku-latest",
+            "claude-sonnet-4-20250514",
+        ]
+        .map(|id| (id.into(), id.into()))
     );
     assert_eq!(
         model.available_models_for_connection("c-gap"),

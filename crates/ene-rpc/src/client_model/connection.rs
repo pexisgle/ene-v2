@@ -9,12 +9,6 @@ from_variants! {
     ]
 }
 
-from_variants! {
-    domain::ConnectionKind => w::ConnectionKind [
-        Unspecified, Llm, Tts, Stt, Embedding, Mcp, Acp, Search,
-    ]
-}
-
 // Clients can display absent endpoints. Persisted connections always carry
 // one, and a write preserves the legacy interpretation of an omitted endpoint.
 macro_rules! connection_configs {
@@ -155,12 +149,16 @@ from_fields! {
 
 impl From<domain::ConnectionInput> for w::ConnectionInput {
     fn from(value: domain::ConnectionInput) -> Self {
+        let kind = value
+            .config
+            .as_ref()
+            .map_or_default(|config| w::ConnectionKind::from(config.kind()));
         Self {
             id: value.id,
             name: value.name,
             enabled: value.enabled,
             expected_revision: value.expected_revision,
-            kind: w::ConnectionKind::from(value.kind).into(),
+            kind: kind.into(),
             config: value.config.map(Into::into).into(),
             ..Default::default()
         }

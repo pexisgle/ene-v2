@@ -1,8 +1,6 @@
 //! Pure MCP server connection target parsing and input builder helpers.
 
-use crate::domain::{
-    ConnectionConfig, ConnectionEndpoint, ConnectionInput, ConnectionKind, McpConnection,
-};
+use crate::domain::{ConnectionConfig, ConnectionEndpoint, ConnectionInput, McpConnection};
 use ene_domain::settings::is_npx_command;
 use std::collections::BTreeMap;
 
@@ -54,7 +52,6 @@ pub fn build_mcp_connection_input(
             name,
             enabled: true,
             expected_revision: 0,
-            kind: ConnectionKind::Mcp,
             config: Some(ConnectionConfig::Mcp(config)),
         };
         extra.apply_to(&mut input);

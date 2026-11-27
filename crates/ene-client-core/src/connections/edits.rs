@@ -197,8 +197,9 @@ fn apply_search_edits(search: &mut SearchConnection, spec: &ConnectionEditSpec<'
 
 /// Applies edited connection fields to produce a `ConnectionInput` update payload.
 pub fn apply_connection_edits(conn: &Connection, spec: &ConnectionEditSpec<'_>) -> ConnectionInput {
-    let mut cfg = conn.config.clone();
-    match cfg.as_mut() {
+    let mut input = conn.to_input();
+    input.name = spec.name.to_owned();
+    match input.config.as_mut() {
         Some(ConnectionConfig::Llm(llm)) => {
             llm.endpoint = Some(updated_endpoint(
                 llm.endpoint.as_ref(),
@@ -215,14 +216,7 @@ pub fn apply_connection_edits(conn: &Connection, spec: &ConnectionEditSpec<'_>) 
         Some(ConnectionConfig::Acp(_)) | None => {}
     }
 
-    ConnectionInput {
-        id: conn.id.clone(),
-        name: spec.name.to_owned(),
-        enabled: conn.enabled,
-        expected_revision: conn.revision,
-        kind: conn.kind,
-        config: cfg,
-    }
+    input
 }
 
 /// Builds a new custom `ConnectionInput` for non-MCP connection kinds.
@@ -239,7 +233,7 @@ pub fn build_custom_connection_input(
         options: "{}".into(),
     };
     let config = match kind {
-        ConnectionKind::Llm | ConnectionKind::Unspecified => ConnectionConfig::Llm(LlmConnection {
+        ConnectionKind::Llm => ConnectionConfig::Llm(LlmConnection {
             endpoint: Some(ep),
             model_ids: Vec::new(),
         }),
@@ -264,7 +258,7 @@ pub fn build_custom_connection_input(
                 dimensions,
             })
         }
-        ConnectionKind::Mcp => return None,
+        ConnectionKind::Mcp | ConnectionKind::Unspecified => return None,
         ConnectionKind::Search => {
             let mut search_ep = ep;
             if search_ep.adapter.trim().is_empty() {
@@ -286,9 +280,8 @@ pub fn build_custom_connection_input(
     Some(ConnectionInput {
         id: uuid::Uuid::new_v4().to_string(),
         name: name.to_owned(),
-        enabled: kind != ConnectionKind::Search,
+        enabled: !matches!(config, ConnectionConfig::Search(_)),
         expected_revision: 0,
-        kind,
         config: Some(config),
     })
 }

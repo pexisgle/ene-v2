@@ -570,6 +570,18 @@ async fn the_probe_lists_models_for_any_adapter() {
 }
 
 #[test]
+fn model_fallback_uses_the_shared_order_and_keeps_openrouter_legacy_ids() {
+    let conn = llm_connection("openrouter", "", &[]);
+    let ids: Vec<_> = models(&conn, Catalog::builtin())
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(ids, ene_catalog::default_models_for_adapter("openrouter"));
+    assert_eq!(ids.first().unwrap(), "openai/gpt-5.4-mini");
+    assert!(ids.iter().any(|id| id == "openai/gpt-4o-mini"));
+}
+
+#[test]
 fn models_merges_configured_and_probed_resources_without_duplicates() {
     let mut conn = llm_connection("openai", "https://api.openai.com/v1", &["gpt-5.4-mini"]);
     conn.last_check = Some(Check {

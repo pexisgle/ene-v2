@@ -70,7 +70,6 @@ pub fn build_search_preset_input(
         name: provider.connection_name.into(),
         enabled: false,
         expected_revision: 0,
-        kind: ConnectionKind::Search,
         config: Some(ConnectionConfig::Search(SearchConnection {
             endpoint: Some(ConnectionEndpoint {
                 adapter: provider.adapter_id.into(),
@@ -119,7 +118,6 @@ pub fn build_llm_provider_input(
         name: provider.name,
         enabled: true,
         expected_revision: 0,
-        kind: ConnectionKind::Llm,
         config: Some(ConnectionConfig::Llm(LlmConnection {
             endpoint: Some(ConnectionEndpoint {
                 adapter: provider.adapter,
@@ -170,7 +168,6 @@ pub fn build_voicevox_preset_input(
         name: "VOICEVOX（ローカル）".into(),
         enabled: true,
         expected_revision: existing_rev,
-        kind: ConnectionKind::Tts,
         config: Some(ConnectionConfig::Tts(TtsConnection {
             endpoint: Some(ConnectionEndpoint {
                 adapter: "voicevox".into(),
@@ -206,7 +203,6 @@ pub fn build_openai_tts_preset_input(endpoint: &str, model: &str, voice: &str) -
         name: "OpenAI互換 TTS".into(),
         enabled: true,
         expected_revision: 0,
-        kind: ConnectionKind::Tts,
         config: Some(ConnectionConfig::Tts(TtsConnection {
             endpoint: Some(ConnectionEndpoint {
                 adapter: "openai".into(),
@@ -260,7 +256,6 @@ pub fn build_stt_preset_input(
         name: spec.name,
         enabled: true,
         expected_revision: existing_rev,
-        kind: ConnectionKind::Stt,
         config: Some(ConnectionConfig::Stt(SttConnection {
             endpoint: Some(ConnectionEndpoint {
                 adapter: spec.adapter.to_owned(),
@@ -291,7 +286,6 @@ pub fn build_sakura_tts_preset_input(connections: &[Connection]) -> ConnectionIn
         name: "さくらのAI Engine TTS".into(),
         enabled: true,
         expected_revision: existing_rev,
-        kind: ConnectionKind::Tts,
         config: Some(ConnectionConfig::Tts(TtsConnection {
             endpoint: Some(ConnectionEndpoint {
                 adapter: "sakura".into(),
@@ -318,7 +312,6 @@ pub fn build_embedding_preset_input(
         name: spec.name.into(),
         enabled: true,
         expected_revision: existing_rev,
-        kind: ConnectionKind::Embedding,
         config: Some(ConnectionConfig::Embedding(EmbeddingConnection {
             endpoint: Some(ConnectionEndpoint {
                 adapter: spec.adapter.into(),
@@ -390,10 +383,10 @@ mod tests {
         let vv = build_voicevox_preset_input(4, 3, Some(1.1));
         assert_eq!(vv.id, "voicevox");
         assert_eq!(vv.expected_revision, 4);
-        assert_eq!(vv.kind, ConnectionKind::Tts);
+        assert!(matches!(vv.config, Some(ConnectionConfig::Tts(_))));
 
         let sakura_tts = build_sakura_tts_preset_input(&[]);
         assert_eq!(sakura_tts.id, "sakura-tts");
-        assert_eq!(sakura_tts.kind, ConnectionKind::Tts);
+        assert!(matches!(sakura_tts.config, Some(ConnectionConfig::Tts(_))));
     }
 }
