@@ -229,9 +229,9 @@ fn render_tts_card(
                             },
                             Tone::Ghost
                                 .icon(if output_muted {
-                                    Icon::Volume
+                                    Icon::Volume2
                                 } else {
-                                    Icon::VolumeOff
+                                    Icon::VolumeX
                                 })
                                 .enabled(matches!(snap.devices.output, Device::Ready(_))),
                             theme,
@@ -242,7 +242,7 @@ fn render_tts_card(
                         .child(pill_button(
                             "voice-speak",
                             "読み上げる",
-                            Tone::Primary.icon(Icon::Volume).enabled(can_speak),
+                            Tone::Primary.icon(Icon::Volume2).enabled(can_speak),
                             theme,
                             move |_, cx| {
                                 hub_speak.update(cx, |hub, cx| hub.speak_probe(&text, cx));

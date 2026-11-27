@@ -169,7 +169,7 @@ fn render_row_header(
                             "確認"
                         },
                         Tone::Ghost
-                            .icon(Icon::Refresh)
+                            .icon(Icon::RefreshCw)
                             .enabled(live && !is_checking),
                         theme,
                         move |_, cx| {

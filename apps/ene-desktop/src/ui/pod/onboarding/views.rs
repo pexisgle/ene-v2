@@ -132,7 +132,7 @@ pub(super) fn render_launch_voicevox_row(
             } else {
                 "VOICEVOXを起動して使う".to_owned()
             },
-            Tone::Soft.icon(Icon::Volume).enabled(!voicevox_checking),
+            Tone::Soft.icon(Icon::Volume2).enabled(!voicevox_checking),
             theme,
             move |_, cx| {
                 let cid = vv_id.clone();

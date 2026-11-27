@@ -5,10 +5,19 @@ use ene_rpc as w;
 use std::{os::unix::fs::PermissionsExt as _, path::Path, time::Duration};
 use tokio::sync::mpsc;
 
+const REPLY_CHUNK: &str = concat!(
+    r#"data: {"id":"chatcmpl-test","object":"chat.completion.chunk","model":"test","created":0,"choices":[{"index":0,"delta":{"role":"assistant","content":"Fixture reply"},"finish_reason":null}]}"#,
+    "\n\n",
+);
+const FINISH_CHUNK: &str = concat!(
+    r#"data: {"id":"chatcmpl-test","object":"chat.completion.chunk","model":"test","created":0,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+    "\n\ndata: [DONE]\n\n",
+);
+
 async fn answer(
     State(seen): State<mpsc::UnboundedSender<(bool, bool)>>,
     headers: HeaderMap,
-) -> ([(&'static str, &'static str); 1], &'static str) {
+) -> ([(&'static str, &'static str); 1], String) {
     seen.send((
         headers
             .get("x-fixture-key")
@@ -18,11 +27,7 @@ async fn answer(
     .unwrap();
     (
         [("content-type", "text/event-stream")],
-        concat!(
-            "data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"model\":\"test\",\"created\":0,\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Fixture reply\"},\"finish_reason\":null}]}\n\n",
-            "data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"model\":\"test\",\"created\":0,\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-            "data: [DONE]\n\n",
-        ),
+        [REPLY_CHUNK, FINISH_CHUNK].concat(),
     )
 }
 
@@ -59,6 +64,13 @@ async fn configure(
         })
         .await
         .unwrap();
+    create_connection(settings, origin).await
+}
+
+async fn create_connection(
+    settings: &w::SettingsServiceClient<HttpClient>,
+    origin: &str,
+) -> w::ModelAssignment {
     settings
         .update_settings(w::UpdateSettingsRequest {
             expected_revision: 1,
@@ -95,6 +107,28 @@ async fn configure(
         model_id: "openai/gpt-4o-mini".into(),
         ..Default::default()
     }
+}
+
+async fn create_companion(
+    host: &w::HostServiceClient<HttpClient>,
+    assignment: w::ModelAssignment,
+) -> String {
+    host.create_companion(w::CreateCompanionRequest {
+        name: "Fixture".into(),
+        mind: "kind".into(),
+        assignments: Some(w::ModelAssignments {
+            companion: Some(assignment.clone()).into(),
+            task: Some(assignment).into(),
+            ..Default::default()
+        })
+        .into(),
+        ..Default::default()
+    })
+    .await
+    .unwrap()
+    .view()
+    .id
+    .to_owned()
 }
 
 async fn enable(settings: &w::SettingsServiceClient<HttpClient>, enabled: bool) {
@@ -155,23 +189,7 @@ async fn a_plugin_bound_model_stays_on_the_plugin_route_across_enablement() {
     let chat = w::ChatServiceClient::new(transport, config);
     let assignment = configure(&settings, source.path(), &origin).await;
     enable(&settings, false).await;
-    let companion = host
-        .create_companion(w::CreateCompanionRequest {
-            name: "Fixture".into(),
-            mind: "kind".into(),
-            assignments: Some(w::ModelAssignments {
-                companion: Some(assignment.clone()).into(),
-                task: Some(assignment).into(),
-                ..Default::default()
-            })
-            .into(),
-            ..Default::default()
-        })
-        .await
-        .unwrap()
-        .view()
-        .id
-        .to_owned();
+    let companion = create_companion(&host, assignment).await;
     let message = |key: &str| w::SendMessageRequest {
         companion_id: companion.clone(),
         request_key: key.into(),
@@ -197,6 +215,74 @@ async fn a_plugin_bound_model_stays_on_the_plugin_route_across_enablement() {
     assert!(chat.send_message(message("removed")).await.is_err());
     assert!(requests.try_recv().is_err());
 
+    stop(&mut child).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_live_text_fragment_reaches_the_subscriber_before_the_reply_finishes() {
+    use axum::body::{Body, Bytes};
+    use std::{convert::Infallible, sync::Arc};
+    use tokio::sync::Notify;
+
+    let finish = Arc::new(Notify::new());
+    let withheld = finish.clone();
+    let router = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let withheld = withheld.clone();
+            async move {
+                let body = Body::from_stream(async_stream::stream! {
+                    yield Ok::<_, Infallible>(Bytes::from_static(REPLY_CHUNK.as_bytes()));
+                    withheld.notified().await;
+                    yield Ok(Bytes::from_static(FINISH_CHUNK.as_bytes()));
+                });
+                ([("content-type", "text/event-stream")], body)
+            }
+        }),
+    );
+    let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", upstream.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(upstream, router).await.unwrap() });
+
+    let root = tempfile::tempdir().unwrap();
+    let run = root.path().join("run");
+    let mut child = spawn(&root.path().join("state"), &run);
+    let (endpoint, token) = discovery(&run).await;
+    let (transport, config) = w::connect(&endpoint, &token).unwrap();
+    let host = w::HostServiceClient::new(transport.clone(), config.clone());
+    let settings = w::SettingsServiceClient::new(transport.clone(), config.clone());
+    let chat = w::ChatServiceClient::new(transport, config);
+    let companion = create_companion(&host, create_connection(&settings, &origin).await).await;
+    let mut stream = host
+        .subscribe(w::SubscribeRequest::default())
+        .await
+        .unwrap();
+    chat.send_message(w::SendMessageRequest {
+        companion_id: companion.clone(),
+        request_key: "fixture-stream".into(),
+        text: "Synthetic prompt".into(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(message) = stream.message().await.unwrap() {
+            if let Some(w::notification::Event::MessageDelta(delta)) =
+                message.to_owned_message().event
+                && delta.companion_id == companion
+                && delta.delta == "Fixture reply"
+            {
+                return;
+            }
+        }
+        panic!("the notification stream ended before its live fragment");
+    })
+    .await
+    .expect("the fragment should be visible while the provider is still streaming");
+    drop(stream);
+    finish.notify_one();
+    wait_for_reply(&chat, &companion).await;
     stop(&mut child).await;
     server.abort();
 }

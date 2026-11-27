@@ -38,7 +38,7 @@ pub(super) fn render_capsule_dock(
     let pod_entity = cx.entity();
     let trigger = floating_orb_button(
         "pod-controls-toggle",
-        Icon::More,
+        Icon::Ellipsis,
         controls_open,
         &theme,
         move |_, cx| {
@@ -265,7 +265,7 @@ fn render_unsent_rows(
                 .child(pill_button(
                     SharedString::from(format!("pod-retry-{idx}")),
                     "再送",
-                    Tone::Primary.icon(Icon::Refresh).enabled(live),
+                    Tone::Primary.icon(Icon::RefreshCw).enabled(live),
                     theme,
                     move |_, cx| {
                         hub_retry.update(cx, |hub, cx| hub.retry_unsent(&key, &retry_text, cx));

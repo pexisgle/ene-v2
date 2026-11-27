@@ -80,13 +80,13 @@ impl SettingsStudio {
                     .gap(px(6.))
                     .child(circle_icon_button(
                         "studio-win-min",
-                        CircleButtonStyle::new(Icon::Minimize, 24., 12.),
+                        CircleButtonStyle::new(Icon::WindowMinimize, 24., 12.),
                         theme,
                         |window, _| window.minimize_window(),
                     ))
                     .child(circle_icon_button(
                         "studio-win-max",
-                        CircleButtonStyle::new(Icon::Maximize, 24., 12.),
+                        CircleButtonStyle::new(Icon::WindowMaximize, 24., 12.),
                         theme,
                         |window, _| window.zoom_window(),
                     ))
@@ -170,7 +170,7 @@ impl SettingsStudio {
                         this.child(pill_button(
                             SharedString::from(format!("studio-notice-reload-{idx}")),
                             "再読み込み",
-                            Tone::Soft.icon(Icon::Refresh),
+                            Tone::Soft.icon(Icon::RefreshCw),
                             theme,
                             move |_, cx| {
                                 hub_reload.update(cx, |hub, cx| {

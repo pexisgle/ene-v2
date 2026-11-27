@@ -51,7 +51,7 @@ pub(super) fn render_plugins_section(
                 .flex_row()
                 .items_center()
                 .gap(px(6.))
-                .child(pill_button("dev-plugins-refresh", "更新", Tone::Ghost.icon(Icon::Refresh).enabled(snap.live), theme, {
+                .child(pill_button("dev-plugins-refresh", "更新", Tone::Ghost.icon(Icon::RefreshCw).enabled(snap.live), theme, {
                         let hub = pane.hub.clone();
                         move |_, cx| hub.update(cx, super::super::hub::Hub::load_plugins)
                     }))

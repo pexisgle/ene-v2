@@ -150,7 +150,7 @@ fn picker_header(
                 } else {
                     labels.refresh
                 },
-                Tone::Ghost.icon(Icon::Refresh).enabled(live && !checking),
+                Tone::Ghost.icon(Icon::RefreshCw).enabled(live && !checking),
                 theme,
                 refresh,
             ))

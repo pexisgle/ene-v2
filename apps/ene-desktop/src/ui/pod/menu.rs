@@ -180,7 +180,7 @@ fn render_media_controls(
             &ControlButtonSpec {
                 id: "pod-control-companions",
                 label: "コンパニオン",
-                icon: Icon::UserBook,
+                icon: Icon::BookUser,
                 tone: Tone::Ghost,
                 action: ChatControl::Companions,
             },
@@ -203,9 +203,9 @@ fn render_media_controls(
                 id: "pod-control-speaker",
                 label: speaker_label,
                 icon: if speaker_on {
-                    Icon::Volume
+                    Icon::Volume2
                 } else {
-                    Icon::VolumeOff
+                    Icon::VolumeX
                 },
                 tone: if speaker_on { Tone::Mint } else { Tone::Ghost },
                 action: ChatControl::Speaker {
@@ -299,9 +299,9 @@ fn render_nav_controls(expanded: bool, theme: &Theme, cx: &Context<CompanionPod>
                     "履歴を表示"
                 },
                 icon: if expanded {
-                    Icon::ChatCollapse
+                    Icon::Minimize2
                 } else {
-                    Icon::ChatBubble
+                    Icon::MessageCircle
                 },
                 tone: Tone::Ghost,
                 action: ChatControl::History,

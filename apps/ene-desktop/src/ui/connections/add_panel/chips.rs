@@ -31,21 +31,21 @@ pub(super) fn build_voice_embedding_chips(
         PresetChipSpec {
             id: "add-preset-voicevox",
             label: "VOICEVOX（ローカル）",
-            style: Tone::Mint.icon(Icon::Volume).enabled(live),
+            style: Tone::Mint.icon(Icon::Volume2).enabled(live),
             expand_id: Some("voicevox"),
             action: |hub, cx| presets::add_voicevox_preset(hub, 3, None, cx),
         },
         PresetChipSpec {
             id: "add-preset-sakura-tts",
             label: "さくらのAI Engine TTS",
-            style: Tone::Soft.icon(Icon::Volume).enabled(live),
+            style: Tone::Soft.icon(Icon::Volume2).enabled(live),
             expand_id: Some("sakura-tts"),
             action: |hub, cx| presets::add_sakura_tts_preset(hub, cx),
         },
         PresetChipSpec {
             id: "add-preset-openai-tts",
             label: "OpenAI互換 TTS",
-            style: Tone::Ghost.icon(Icon::Volume).enabled(live),
+            style: Tone::Ghost.icon(Icon::Volume2).enabled(live),
             expand_id: None,
             action: |hub, cx| {
                 presets::add_openai_tts_preset(

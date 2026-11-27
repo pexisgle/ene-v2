@@ -234,9 +234,9 @@ fn render_pod_window_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Theme
             if pod_visible { "隠す" } else { "開く" },
             ButtonStyle::new(if pod_visible { Tone::Ghost } else { Tone::Soft }).maybe_icon(Some(
                 if pod_visible {
-                    Icon::Minimize
+                    Icon::WindowMinimize
                 } else {
-                    Icon::ChatBubble
+                    Icon::MessageCircle
                 },
             )),
             theme,

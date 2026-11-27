@@ -2,25 +2,24 @@
 
 use crate::state::Model;
 use ene_client_core::domain::{MessageRole, TurnStatus};
+use ene_voice::speech::strip_motion_leak;
 use gpui::{ElementId, ImageSource, base::text::TextView};
 use std::sync::Arc;
 use url::Url;
 
-pub(crate) fn active_mini_speech_text(model: &Model) -> String {
-    let streaming: String = model
+pub(super) fn streaming_text(model: &Model) -> String {
+    let id = model.companions.chat.companion_id.as_ref();
+    model
         .companions
         .streaming
         .iter()
-        .filter(|((c, _), _)| {
-            model
-                .companions
-                .chat
-                .companion_id
-                .as_ref()
-                .is_some_and(|id| c == id.as_str())
-        })
+        .filter(|((companion, _), _)| id.is_some_and(|id| companion == id.as_str()))
         .map(|(_, text)| text.as_str())
-        .collect();
+        .collect()
+}
+
+pub(crate) fn active_mini_speech_text(model: &Model) -> String {
+    let streaming = streaming_text(model);
     if !streaming.is_empty() {
         return streaming;
     }
@@ -47,43 +46,20 @@ pub(crate) fn active_mini_speech_text(model: &Model) -> String {
         )
 }
 
-fn is_motion_leak_line(line: &str) -> bool {
-    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(line) else {
-        return false;
-    };
-    !items.is_empty()
-        && items.iter().all(|item| {
-            item.as_object().is_some_and(|obj| {
-                !obj.is_empty()
-                    && obj.iter().all(|(key, value)| {
-                        matches!(key.as_str(), "motion" | "expression") && value.is_string()
-                    })
-            })
-        })
-}
-
-fn strip_motion_leak(raw: &str) -> String {
-    let trimmed = raw.trim();
-    let first = trimmed.lines().next().unwrap_or("");
-    if is_motion_leak_line(first) {
-        trimmed[first.len()..].trim_start().to_owned()
-    } else {
-        trimmed.to_owned()
-    }
-}
-
 pub(crate) fn preview_text(raw: &str) -> String {
-    // Hold an unfinished leading motion-control JSON line until its shape is known,
-    // while preserving Markdown, URLs, code blocks and emojis verbatim.
-    let (complete, tail) = raw.rsplit_once('\n').unwrap_or(("", raw));
-    if complete.is_empty() && tail.trim_start().starts_with('[') {
+    // A leading JSON array may be a motion cue. A Markdown link can start
+    // with the same bracket, so hold only a plausible unfinished JSON array.
+    let trimmed = raw.trim();
+    if !trimmed.contains('\n')
+        && trimmed.strip_prefix('[').is_some_and(|rest| {
+            let rest = rest.trim_start();
+            rest.is_empty() || rest.starts_with('{')
+        })
+        && serde_json::from_str::<serde_json::Value>(trimmed).is_err_and(|error| error.is_eof())
+    {
         return String::new();
     }
-    if tail.trim_start().starts_with('[') && !tail.trim_end().ends_with(']') {
-        strip_motion_leak(complete)
-    } else {
-        strip_motion_leak(raw)
-    }
+    strip_motion_leak(raw)
 }
 
 pub(super) fn reply_view(id: impl Into<ElementId>, text: String) -> TextView {
@@ -120,6 +96,8 @@ mod tests {
     fn preview_preserves_reply_markup() {
         let raw = "### 結果\n- **公式**: [出典](https://example.com/docs) を確認 👍";
         assert_eq!(preview_text(raw), raw);
+        let link = "[出典](https://example.com/docs)";
+        assert_eq!(preview_text(link), link);
     }
 
     #[test]

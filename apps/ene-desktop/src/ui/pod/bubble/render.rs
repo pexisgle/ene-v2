@@ -86,7 +86,7 @@ pub(super) fn render_notice_strip(notice: &Notice, hub: &Entity<Hub>, theme: &Th
             this.child(pill_button(
                 "pod-notice-reload",
                 "再読み込み",
-                Tone::Soft.icon(Icon::Refresh),
+                Tone::Soft.icon(Icon::RefreshCw),
                 theme,
                 move |_, cx| {
                     hub_resync.update(cx, |hub, cx| {
@@ -470,7 +470,7 @@ pub(super) fn render_stop_button(
         } else {
             "応答を停止"
         },
-        Tone::Danger.icon(Icon::Stop).enabled(!stop_requested),
+        Tone::Danger.icon(Icon::SquareStop).enabled(!stop_requested),
         theme,
         move |_, cx| {
             hub_stop.update(cx, crate::ui::hub::Hub::stop);

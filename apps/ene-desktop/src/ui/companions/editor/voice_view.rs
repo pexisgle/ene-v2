@@ -136,7 +136,7 @@ pub(super) fn render_voice_header_row(
                     "話者一覧を取得"
                 },
                 Tone::Ghost
-                    .icon(Icon::Refresh)
+                    .icon(Icon::RefreshCw)
                     .enabled(ctx.live && !voice_checking),
                 theme,
                 move |_, cx| {

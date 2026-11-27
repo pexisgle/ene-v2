@@ -89,7 +89,11 @@ impl Plugin for AgentPlugin {
                     super::client::device::expire.after(AgentLoop),
                 ),
             )
-            .add_systems(AgentPass, stream_deltas.in_set(ReviewSystems::Edit));
+            .add_systems(
+                AgentPass,
+                // Rig can receive partial text between turn state changes.
+                stream_deltas.after(Stage::Arrive).before(Stage::Review),
+            );
     }
 }
 

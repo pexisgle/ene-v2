@@ -301,7 +301,7 @@ pub(super) fn render_connection_header(
         .child(pill_button(
             "setup-open-settings",
             "詳細設定",
-            Tone::Ghost.icon(Icon::Sliders).enabled(enabled),
+            Tone::Ghost.icon(Icon::SlidersVertical).enabled(enabled),
             theme,
             move |_, cx| {
                 hub_open.update(cx, |hub, cx| {

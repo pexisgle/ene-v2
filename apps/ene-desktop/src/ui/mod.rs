@@ -100,7 +100,7 @@ impl SettingsSection {
             Self::Companions => icons::Icon::Sparkles,
             Self::Connections => icons::Icon::Plug,
             Self::Voice => icons::Icon::Mic,
-            Self::Device => icons::Icon::Sliders,
+            Self::Device => icons::Icon::SlidersVertical,
         }
     }
 
@@ -129,17 +129,7 @@ impl DraftStore {
         initial: Option<&str>,
         theme: &theme::Theme,
     ) -> Entity<crate::input::Draft> {
-        window_draft(
-            &mut self.drafts,
-            cx,
-            DraftSpec {
-                key: key.into(),
-                placeholder,
-                initial,
-                look: theme.field_look(false),
-                multiline: false,
-            },
-        )
+        self.field(cx, key.into(), placeholder, initial, (theme, false))
     }
 
     pub(crate) fn description_draft(
@@ -150,17 +140,34 @@ impl DraftStore {
         initial: Option<&str>,
         theme: &theme::Theme,
     ) -> Entity<crate::input::Draft> {
-        window_draft(
-            &mut self.drafts,
-            cx,
-            DraftSpec {
-                key: key.into(),
-                placeholder,
-                initial,
-                look: theme.field_look(false),
-                multiline: true,
-            },
-        )
+        self.field(cx, key.into(), placeholder, initial, (theme, true))
+    }
+
+    fn field(
+        &mut self,
+        cx: &mut gpui::App,
+        key: String,
+        placeholder: &'static str,
+        initial: Option<&str>,
+        (theme, multiline): (&theme::Theme, bool),
+    ) -> Entity<crate::input::Draft> {
+        let entity = self
+            .drafts
+            .entry(key)
+            .or_insert_with(|| {
+                cx.new(|cx| {
+                    let mut draft = crate::input::Draft::new(placeholder, multiline);
+                    if let Some(value) = initial {
+                        draft.set(value.to_owned(), cx);
+                    }
+                    draft
+                })
+            })
+            .clone();
+        entity.update(cx, |draft, cx| {
+            draft.apply_look(theme.field_look(false), cx)
+        });
+        entity
     }
 
     pub(crate) fn masked_draft(
@@ -191,35 +198,4 @@ impl DraftStore {
     pub(crate) fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
         self.drafts.retain(|key, _| keep(key));
     }
-}
-
-/// Configuration for fetching or initializing a draft input in [`window_draft`].
-pub(crate) struct DraftSpec<'a> {
-    pub key: String,
-    pub placeholder: &'static str,
-    pub initial: Option<&'a str>,
-    pub look: crate::input::FieldLook,
-    pub multiline: bool,
-}
-
-/// Keeps a per-window draft entity map synced with the active field theme.
-pub(crate) fn window_draft(
-    drafts: &mut BTreeMap<String, Entity<crate::input::Draft>>,
-    cx: &mut gpui::App,
-    spec: DraftSpec<'_>,
-) -> Entity<crate::input::Draft> {
-    let entity = drafts
-        .entry(spec.key)
-        .or_insert_with(|| {
-            cx.new(|cx| {
-                let mut draft = crate::input::Draft::new(spec.placeholder, spec.multiline);
-                if let Some(value) = spec.initial {
-                    draft.set(value.to_owned(), cx);
-                }
-                draft
-            })
-        })
-        .clone();
-    entity.update(cx, |draft, cx| draft.apply_look(spec.look, cx));
-    entity
 }
