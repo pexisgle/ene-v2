@@ -183,10 +183,56 @@ async fn disabling_a_live_harness_survives_restart_and_expires_its_approval() {
     assert!(work.start_work(start.clone()).await.is_err());
     stop(&mut child).await;
 
-    let mut child = spawn(&state, &runtime);
-    let (endpoint, token) = discovery(&runtime).await;
+    unavailable_executor_is_not_recovered_as_rig(&state, &runtime, start).await;
+}
+
+async fn unavailable_executor_is_not_recovered_as_rig(
+    state: &Path,
+    runtime: &Path,
+    start: w::StartWorkRequest,
+) {
+    let mut child = spawn(state, runtime);
+    let (endpoint, token) = discovery(runtime).await;
+    let (transport, config) = w::connect(&endpoint, &token).unwrap();
+    let settings = w::SettingsServiceClient::new(transport.clone(), config.clone());
+    let work = w::WorkServiceClient::new(transport, config);
+    assert!(work.start_work(start.clone()).await.is_err());
+    settings
+        .set_plugin_enabled(w::SetPluginEnabledRequest {
+            plugin_id: "reference".into(),
+            enabled: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let work_id = work.start_work(start).await.unwrap().view().id.to_owned();
+    pending_request(&work, &work_id).await;
+    child.signal(9).unwrap();
+    let exit = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!exit.success());
+    std::fs::remove_file(runtime.join("connection.json")).unwrap();
+    std::fs::rename(
+        state.join("plugins/reference"),
+        state.join("reference-offline"),
+    )
+    .unwrap();
+
+    let mut child = spawn(state, runtime);
+    let (endpoint, token) = discovery(runtime).await;
     let (transport, config) = w::connect(&endpoint, &token).unwrap();
     let work = w::WorkServiceClient::new(transport, config);
-    assert!(work.start_work(start).await.is_err());
+    let detail = work
+        .get_work(w::WorkRequest {
+            work_id,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let run = detail.view().runs.iter().next().unwrap();
+    assert_eq!(run.state.as_known(), Some(w::RunStatus::RUN_STATUS_FAILED));
+    assert!(run.pending_request_id.is_none());
     stop(&mut child).await;
 }

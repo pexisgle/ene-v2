@@ -155,6 +155,10 @@ impl Running {
         self.cancel.is_cancelled()
     }
 
+    pub(crate) fn package_revision(&self) -> &str {
+        &self.loaded.package.revision
+    }
+
     async fn reload(&self) -> Result<Instance, HostError> {
         Instance::load(
             self.loaded.package.clone(),

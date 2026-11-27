@@ -19,7 +19,7 @@
 //! restart loses the guest state entirely, so a restore settles an open
 //! plugin-hand run as failed instead of pretending the turn survived.
 
-use super::{Run, RunState, WorkSession};
+use super::{Run, WorkSession};
 use crate::host::{
     background::{self, AbortOnDropHandle},
     db::{Result, Store},
@@ -103,25 +103,44 @@ pub(super) struct Pending {
     pub(super) options: Vec<PermissionOption>,
 }
 
-/// The harness a companion's task assignment names, when it is an ACP
-/// connection onto an installed harness plugin. Anything else keeps the
-/// in-process rig agent.
-pub(crate) fn selected(
+pub(super) struct SelectedHarness {
+    pub(super) connection_id: ene_domain::ConnectionId,
+    pub(super) adapter: String,
+    pub(super) running: Arc<Running>,
+}
+
+/// Selects the installed harness for an explicit ACP task assignment.
+pub(super) fn selected(
     store: &Store,
     providers: Option<&Providers>,
     companion: &crate::host::mind::Companion,
-) -> Option<(String, Arc<Running>)> {
-    let assignment = companion.model(crate::host::mind::Role::Task)?;
-    let connection = store
+) -> Result<Option<SelectedHarness>> {
+    let Some(assignment) = companion.model(crate::host::mind::Role::Task) else {
+        return Ok(None);
+    };
+    let Some(connection) = store
         .settings_repo()
-        .connection(&assignment.connection_id)
-        .ok()??;
-    if !connection.enabled || connection.kind != crate::host::settings::ConnectionKind::Acp {
-        return None;
+        .connection(&assignment.connection_id)?
+    else {
+        return Ok(None);
+    };
+    if connection.kind != crate::host::settings::ConnectionKind::Acp {
+        return Ok(None);
     }
-    let adapter = &connection.endpoint().adapter;
-    let running = providers?.running(adapter, Extension::Harness)?;
-    Some((adapter.clone(), running))
+    if !connection.enabled {
+        return Err(HostError::FailedPrecondition(
+            "the assigned harness connection is disabled".into(),
+        ));
+    }
+    let adapter = connection.endpoint().adapter.clone();
+    let running = providers
+        .and_then(|providers| providers.running(&adapter, Extension::Harness))
+        .ok_or_else(|| HostError::Unavailable(format!("harness `{adapter}` is unavailable")))?;
+    Ok(Some(SelectedHarness {
+        connection_id: connection.id,
+        adapter,
+        running,
+    }))
 }
 
 /// The session, run and instruction an invocation is started for.
@@ -282,21 +301,6 @@ pub(crate) fn release(calls: &mut CallDespawner<'_>, hands: &mut Hands, work_id:
     {
         hand.running.note_cancelled();
     }
-}
-
-/// Restores nothing but settles honestly: a restart lost the guest's session
-/// state, so an open run this backend would serve reads failed naming the
-/// restart. Runs the rig agent serves keep their own restore path.
-pub(crate) fn settle_restarts(world: &mut World, run: Run) {
-    super::finish_run(
-        world,
-        run,
-        RunState::Failed,
-        Some(
-            "作業を続けられませんでした: ホストの再起動でハーネスのセッション状態が失われました"
-                .to_owned(),
-        ),
-    );
 }
 
 /// Takes the pending approval out of the hand and drops its held call, which

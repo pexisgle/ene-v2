@@ -1,7 +1,7 @@
 //! Work session and run lifecycle domain models.
 
 use crate::Failure;
-use crate::ids::CompanionId;
+use crate::ids::{CompanionId, ConnectionId};
 use serde::{Deserialize, Serialize};
 use strum::{EnumString, IntoStaticStr};
 
@@ -76,6 +76,25 @@ pub struct WorkSession {
     pub created_at: String,
     /// Last update, UTC RFC 3339 at whole-second precision.
     pub updated_at: String,
+}
+
+/// Executor selected before a run starts. Recovery uses this recorded choice.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RunExecutor {
+    /// A run recorded before executor identities were saved.
+    Unrecorded,
+    /// The host's persistent Rig agent.
+    Rig,
+    /// A volatile Wasm harness instance.
+    Harness {
+        /// Connection selected for the companion's task role.
+        connection_id: ConnectionId,
+        /// Installed package supplying the harness.
+        plugin_id: String,
+        /// Verified revision of the package at the start of the run.
+        plugin_revision: String,
+    },
 }
 
 /// Persistent record of one instruction turn inside a work session.

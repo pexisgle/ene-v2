@@ -28,4 +28,4 @@ pub use settings::{
     EmbeddingConnection, Endpoint, LlmConnection, McpConnection, SearchConnection, Settings,
     SttConnection, TtsConnection,
 };
-pub use work::{Run, RunState, WorkSession, WorkStatus};
+pub use work::{Run, RunExecutor, RunState, WorkSession, WorkStatus};

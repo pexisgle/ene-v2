@@ -37,9 +37,11 @@ use rig_core::completion::Message;
 #[cfg(test)]
 use std::time::Instant;
 
+use ene_domain::RunExecutor;
 pub(crate) use ene_domain::{Run, RunState, WorkSession, WorkStatus};
 pub(crate) use ene_work::{STALL_TIMEOUT, new_run};
-use lifecycle::{agent_of, bind_work_agent, detect_stalls, ensure, restore, retire};
+pub(crate) use lifecycle::restore;
+use lifecycle::{agent_of, bind_work_agent, detect_stalls, ensure, retire};
 use notify::{inform, notify_finished, notify_run, notify_status};
 pub(crate) use reads::{get, list};
 pub(crate) use settle::settle_run;
@@ -90,7 +92,6 @@ impl Plugin for WorkPlugin {
         app.init_resource::<Runs>()
             .init_resource::<Receipts>()
             .init_resource::<hand::Hands>()
-            .add_systems(Startup, restore)
             .add_systems(
                 Update,
                 (hand_collect::collect, detect_stalls)
@@ -165,20 +166,28 @@ pub(crate) fn start_run(
         )));
     }
     let companion = require_companion(&store, session.companion_id.as_str())?;
+    let harness = hand::selected(&store, world.get_resource::<Providers>(), &companion)?;
+    let executor = harness
+        .as_ref()
+        .map_or(RunExecutor::Rig, |harness| RunExecutor::Harness {
+            connection_id: harness.connection_id.clone(),
+            plugin_id: harness.adapter.clone(),
+            plugin_revision: harness.running.package_revision().to_owned(),
+        });
     let run = new_run(
         uuid::Uuid::new_v4().to_string(),
         &session.id,
         instruction,
         RunState::Running,
     );
-    store.work_repo().insert_run(&run)?;
+    store.work_repo().insert_run(&run, &executor)?;
     store
         .work_repo()
         .set_work_status(&session.id, WorkStatus::Active)?;
     // The backend pick: a task assignment onto an installed harness plugin
     // runs the session on the plugin hand; anything else keeps the rig agent.
-    let failure = match hand::selected(&store, world.get_resource::<Providers>(), &companion) {
-        Some((adapter, running)) => {
+    let failure = match harness {
+        Some(harness) => {
             let mut hands = std::mem::take(&mut *world.resource_mut::<hand::Hands>());
             let outcome = hand::start_run(
                 world,
@@ -188,8 +197,8 @@ pub(crate) fn start_run(
                     run: &run,
                     instruction,
                 },
-                &adapter,
-                running,
+                &harness.adapter,
+                harness.running,
             );
             *world.resource_mut::<hand::Hands>() = hands;
             outcome.err()

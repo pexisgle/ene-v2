@@ -338,6 +338,10 @@ fn work_wait_state_is_recovered_from_current_approvals() {
     let store = Store::open(&path).unwrap();
     let work = store.work_repo();
     let run = work.active_run("work").unwrap().unwrap();
+    assert_eq!(
+        work.run_executor(&run.run_id).unwrap(),
+        Some(ene_domain::RunExecutor::Unrecorded)
+    );
     assert_eq!(run.state, RunState::WaitingInput);
     assert_eq!(run.pending_request_id.as_deref(), Some("first"));
     assert_eq!(work.runs("work").unwrap(), [run]);

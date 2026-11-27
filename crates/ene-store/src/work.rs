@@ -4,10 +4,10 @@ use crate::row::{FromRow, row_fields};
 use crate::{
     Store, StoreError,
     error::Result,
-    require_found, to_json,
+    json_column, require_found, to_json,
     util::{now, or_stamp},
 };
-use ene_domain::{Failure, Run, RunState, WorkSession, WorkStatus};
+use ene_domain::{Failure, Run, RunExecutor, RunState, WorkSession, WorkStatus};
 use rusqlite::params;
 
 row_fields!(WorkSession, SESSION_COLUMNS {
@@ -161,13 +161,21 @@ impl<'a> WorkRepo<'a> {
         )
     }
 
-    pub fn insert_run(&self, run: &Run) -> Result<()> {
+    pub fn run_executor(&self, run_id: &str) -> Result<Option<RunExecutor>> {
+        self.0.fetch(
+            "SELECT executor FROM work_runs WHERE run_id = ?1",
+            [run_id],
+            |row| json_column(row, "executor", "invalid stored work executor"),
+        )
+    }
+
+    pub fn insert_run(&self, run: &Run, executor: &RunExecutor) -> Result<()> {
         let stamp = now();
         self.0
             .conn()
             .prepare_cached(
-                "INSERT INTO work_runs (run_id, work_id, instruction, state, failure, started_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+                "INSERT INTO work_runs (run_id, work_id, instruction, state, failure, started_at, updated_at, executor)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
             )?
             .execute(params![
                 run.run_id,
@@ -177,6 +185,7 @@ impl<'a> WorkRepo<'a> {
                 run.failure.as_ref().map(to_json).transpose()?,
                 or_stamp(&run.started_at, &stamp),
                 stamp,
+                to_json(executor)?,
             ])?;
         Ok(())
     }

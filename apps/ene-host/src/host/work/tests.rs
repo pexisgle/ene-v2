@@ -3,6 +3,7 @@ use super::*;
 fn store() -> (tempfile::TempDir, Store) {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
+    store.companion_repo().seed_initial_companion().unwrap();
     (root, store)
 }
 
@@ -22,7 +23,10 @@ fn session(store: &Store) -> WorkSession {
 
 fn run(store: &Store, run_id: &str, state: RunState) {
     let run = new_run(run_id.into(), "w1", "do it", state);
-    store.work_repo().insert_run(&run).unwrap();
+    store
+        .work_repo()
+        .insert_run(&run, &RunExecutor::Rig)
+        .unwrap();
 }
 
 fn world(store: Store) -> World {
@@ -84,7 +88,7 @@ fn a_session_keeps_one_agent_across_runs_and_retires_it_with_the_session() {
         .work_repo()
         .set_work_status("w1", WorkStatus::Active)
         .unwrap();
-    restore(&mut world);
+    restore(&mut world).unwrap();
     assert_eq!(agent_of(&mut world, "w1"), Some(kept));
     assert!(world.get::<WorkAgent>(stale).is_none());
 
@@ -92,7 +96,7 @@ fn a_session_keeps_one_agent_across_runs_and_retires_it_with_the_session() {
         .work_repo()
         .set_work_status("w1", WorkStatus::Closed)
         .unwrap();
-    restore(&mut world);
+    restore(&mut world).unwrap();
     assert!(agent_of(&mut world, "w1").is_none());
 }
 

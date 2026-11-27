@@ -28,7 +28,7 @@ use rusqlite_migration::{HookResult, M, Migrations};
 pub const BASELINE_VERSION: i64 = 6;
 
 /// Latest database schema version managed by [`ladder_steps`].
-pub const VERSION: i64 = 14;
+pub const VERSION: i64 = 15;
 
 /// Every version this host applies above the baseline, in order. The position
 /// in this table is the version, so adding a row is the only way to add a
@@ -100,6 +100,10 @@ const STEPS_ABOVE_BASELINE: &[(&str, &str)] = &[
                   AND p.work_id = r.work_id AND p.run_id = r.run_id
                 ORDER BY p.created_at, p.request_id LIMIT 1
           );",
+    ),
+    (
+        "0015_record_work_executor",
+        r#"ALTER TABLE work_runs ADD COLUMN executor TEXT NOT NULL DEFAULT '{"type":"unrecorded"}';"#,
     ),
 ];
 

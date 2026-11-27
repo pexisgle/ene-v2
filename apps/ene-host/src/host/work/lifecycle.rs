@@ -1,15 +1,15 @@
 //! The one agent a work session keeps: spawning it, rebinding it to the run it
 //! serves, retiring it, and reconciling it with the store after a restart.
-use super::{RunState, Runs, STALL_TIMEOUT, WorkStatus, hand};
+use super::{RunExecutor, RunState, Runs, STALL_TIMEOUT, WorkStatus, finish_run};
 use crate::host::{
     agent::{self, WorkAgent},
-    db::Store,
+    db::{Result, Store},
+    error::HostError,
     mind::Companion,
-    providers::Providers,
 };
 use bevy_ecs::prelude::*;
 use rig_ecs::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 pub(super) fn agent_of(world: &mut World, work_id: &str) -> Option<Entity> {
@@ -66,92 +66,75 @@ pub(super) fn retire(world: &mut World, work_id: &str) {
     }
 }
 
-/// Keeps one agent per open session after a restart and restarts the stall
-/// clock of each open run. The active run's agent (else the first) wins.
-pub(super) fn restore(world: &mut World) {
+/// Recovers runs using their recorded executor and retains the matching agent.
+pub(crate) fn restore(world: &mut World) -> Result<()> {
     let store = world.resource::<Store>().clone();
-    let agents: Vec<(Entity, String, String)> = {
-        let mut query = world.query::<(Entity, &WorkAgent)>();
-        query
-            .iter(world)
-            .map(|(entity, agent)| (entity, agent.work_id.clone(), agent.run_id.clone()))
-            .collect()
-    };
-    let mut kept: HashMap<String, Entity> = HashMap::new();
-    for (entity, work_id, run_id) in &agents {
-        let active = match store.work_repo().active_run(work_id) {
-            Ok(active) => active.map(|run| run.run_id),
-            Err(error) => {
-                if error.is_storage() {
-                    super::super::fail(world, &error.to_string());
-                    return;
-                }
-                None
+    let work = store.work_repo();
+    let companions: HashSet<_> = store
+        .companion_repo()
+        .companions()?
+        .into_iter()
+        .map(|companion| companion.id)
+        .collect();
+    let restored: HashSet<_> = world
+        .query::<&AgentId>()
+        .iter(world)
+        .filter(|agent| agent.0.starts_with("work-"))
+        .map(|agent| agent.0.clone())
+        .collect();
+    let mut open = HashMap::new();
+    for session in work.all_work_sessions()? {
+        if session.status == WorkStatus::Closed {
+            continue;
+        }
+        let mut active_id = None;
+        if let Some(run) = work.active_run(&session.id)? {
+            let executor = work.run_executor(&run.run_id)?.ok_or_else(|| {
+                HostError::Storage("the work run disappeared during recovery".into())
+            })?;
+            let recoverable = match executor {
+                RunExecutor::Rig => true,
+                RunExecutor::Harness { .. } => false,
+                RunExecutor::Unrecorded => work
+                    .runs(&session.id)?
+                    .iter()
+                    .any(|previous| restored.contains(&agent::work_agent_id(&previous.run_id))),
+            };
+            if recoverable && companions.contains(session.companion_id.as_str()) {
+                world.resource_mut::<Runs>().begin(&run.run_id);
+                active_id = Some(run.run_id);
+            } else {
+                finish_run(
+                    world,
+                    run,
+                    RunState::Failed,
+                    Some(
+                        "作業を続けられませんでした。ホスト再起動後に実行環境を復元できません。"
+                            .into(),
+                    ),
+                );
             }
-        };
-        let open = match store.work_repo().work_session(work_id) {
-            Ok(session) => session.is_some_and(|session| session.status != WorkStatus::Closed),
-            Err(error) => {
-                if error.is_storage() {
-                    super::super::fail(world, &error.to_string());
-                    return;
-                }
-                false
-            }
-        };
-        if open && (active.as_deref() == Some(run_id.as_str()) || !kept.contains_key(work_id)) {
-            kept.insert(work_id.clone(), *entity);
+        }
+        if companions.contains(session.companion_id.as_str()) {
+            open.insert(session.id, active_id);
         }
     }
-    for (entity, work_id, _) in agents {
-        if kept.get(&work_id) != Some(&entity) {
-            retire_entity(world, entity);
-        }
+    let mut retained = HashSet::new();
+    let obsolete: Vec<_> = world
+        .query::<(Entity, &WorkAgent)>()
+        .iter(world)
+        .filter_map(|(entity, agent)| {
+            let keep = open.get(&agent.work_id).is_some_and(|active| {
+                active.as_ref().is_none_or(|run_id| run_id == &agent.run_id)
+                    && retained.insert(agent.work_id.clone())
+            });
+            (!keep).then_some(entity)
+        })
+        .collect();
+    for entity in obsolete {
+        retire_entity(world, entity);
     }
-    let companions = match store.companion_repo().companions() {
-        Ok(companions) => companions,
-        Err(error) => {
-            if error.is_storage() {
-                super::super::fail(world, &error.to_string());
-            }
-            return;
-        }
-    };
-    for companion in companions {
-        let plugin =
-            hand::selected(&store, world.get_resource::<Providers>(), &companion).is_some();
-        let sessions = match store.work_repo().work_sessions(&companion.id) {
-            Ok(sessions) => sessions,
-            Err(error) => {
-                if error.is_storage() {
-                    super::super::fail(world, &error.to_string());
-                    return;
-                }
-                continue;
-            }
-        };
-        for session in sessions {
-            match store.work_repo().active_run(&session.id) {
-                Ok(Some(run)) => {
-                    if plugin {
-                        // A restart lost the harness guest's session state, so an
-                        // open plugin-hand run settles failed instead of keeping
-                        // a stall clock that can never tick again.
-                        hand::settle_restarts(world, run);
-                    } else {
-                        world.resource_mut::<Runs>().begin(&run.run_id);
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    if error.is_storage() {
-                        super::super::fail(world, &error.to_string());
-                        return;
-                    }
-                }
-            }
-        }
-    }
+    Ok(())
 }
 
 pub(super) fn detect_stalls(world: &mut World) {

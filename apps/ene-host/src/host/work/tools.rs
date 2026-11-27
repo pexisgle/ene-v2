@@ -317,7 +317,10 @@ mod tests {
             .unwrap();
         store
             .work_repo()
-            .insert_run(&new_run("run-b".into(), "w1", "do it", RunState::Running))
+            .insert_run(
+                &new_run("run-b".into(), "w1", "do it", RunState::Running),
+                &ene_domain::RunExecutor::Rig,
+            )
             .unwrap();
         let mut world = World::new();
         world.insert_resource(store);

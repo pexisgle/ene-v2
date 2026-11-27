@@ -363,6 +363,7 @@ fn restore(store: &Store) -> Result<()> {
 /// capability tools. It runs after the first frame, so the kernel's restore and
 /// its startup systems are done before the host adopts or retires an agent.
 fn restore_after_first_frame(world: &mut World) -> Result<()> {
+    work::restore(world)?;
     agent::reconcile(world)?;
     // The parents exist once the reconciliation has bound them, so publishing
     // now puts a restored active client's tools on every parent before the
