@@ -1,23 +1,76 @@
 //! Clip playback for a character: the pending change, the crossfade, and the
 //! systems that apply them.
 
-use super::{AvatarState, Character, Notification};
-use bevy::{animation::graph::AnimationNodeType, asset::LoadState, prelude::*};
+use super::{AvatarState, Character, Notification, load_error, load_motion};
+use bevy::{animation::graph::AnimationNodeType, prelude::*};
 use ene_avatar_ipc::AvatarEvent;
 
 const MOTION_FADE_SECS: f32 = 0.3;
 
-/// A motion change that waits for its clip to load.
 pub(super) enum Pending {
-    /// The client asked for this clip; it is loaded and faded in when ready.
-    Fade(Handle<AnimationClip>),
-    /// The leaf was written this frame. Bevy threads it on the next frame.
-    Play {
+    Initial(u64),
+    Change(MotionChange),
+}
+
+pub(super) struct MotionChange {
+    path: Option<String>,
+    looping: bool,
+    request: Option<u64>,
+    phase: ClipChange,
+}
+
+enum ClipChange {
+    Loading(Handle<AnimationClip>),
+    // Bevy threads a newly assigned graph leaf on the next frame.
+    Attaching {
         clip: Handle<AnimationClip>,
         node: AnimationNodeIndex,
     },
-    /// The client asked for no clip; the character returns to its rest pose.
     Rest,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum MotionFailure {
+    #[error("the animation asset could not be loaded")]
+    Asset,
+    #[error("a newer operation superseded this motion")]
+    Superseded,
+}
+
+#[derive(Message)]
+pub(crate) struct MotionOutcome {
+    pub(crate) request: u64,
+    pub(crate) result: Result<(), MotionFailure>,
+}
+
+impl Pending {
+    pub(super) fn change(
+        server: &AssetServer,
+        path: Option<String>,
+        looping: bool,
+        request: Option<u64>,
+    ) -> Self {
+        let phase = path.as_ref().map_or(ClipChange::Rest, |path| {
+            ClipChange::Loading(load_motion(server, path))
+        });
+        Self::Change(MotionChange {
+            path,
+            looping,
+            request,
+            phase,
+        })
+    }
+
+    pub(super) fn superseded(&self) -> Option<MotionOutcome> {
+        let request = match self {
+            Self::Initial(request) => Some(*request),
+            Self::Change(change) => change.request,
+        }?;
+        Some(MotionOutcome {
+            request,
+            result: Err(MotionFailure::Superseded),
+        })
+    }
 }
 
 pub(super) struct FadingMotion {
@@ -87,57 +140,89 @@ pub(super) fn motion_change(
     mut graphs: ResMut<Assets<AnimationGraph>>,
     mut characters: Query<&mut Character>,
     mut roots: Query<(&mut AnimationPlayer, &AnimationGraphHandle)>,
+    mut outcomes: MessageWriter<MotionOutcome>,
 ) {
     let server = server.into_inner();
     for mut c in &mut characters {
-        let Some(root) = c.root else { continue };
         let Some(pending) = c.pending.take() else {
             continue;
         };
-        let Ok((mut player, handle)) = roots.get_mut(root) else {
-            c.pending = Some(pending);
-            continue;
-        };
-        let (clip, node) = match pending {
-            Pending::Rest => {
-                player.stop_all();
-                c.motion = None;
-                c.main = None;
-                c.fading.clear();
-                if let Some(mut graph) = graphs.get_mut(&handle.0)
-                    && graph.nodes().count() > 1
-                {
-                    *graph = AnimationGraph::new();
-                }
-                continue;
-            }
-            Pending::Fade(clip) => {
-                if server
-                    .get_load_states(clip.id())
-                    .is_some_and(|(state, _, _)| matches!(state, LoadState::Failed(_)))
-                {
-                    warn!("the motion {:?} did not load", c.config.motion);
+        let (request, result) = match pending {
+            Pending::Initial(request) => match &c.state {
+                AvatarState::Loading => {
+                    c.pending = Some(Pending::Initial(request));
                     continue;
+                }
+                AvatarState::Ready | AvatarState::Suspended => (Some(request), Ok(())),
+                AvatarState::Error(_) => (Some(request), Err(MotionFailure::Asset)),
+            },
+            Pending::Change(mut change) => {
+                match change.advance(server, &mut graphs, &mut roots, &mut c) {
+                    Some(result) => (change.request, result),
+                    None => {
+                        c.pending = Some(Pending::Change(change));
+                        continue;
+                    }
+                }
+            }
+        };
+        if let Some(request) = request {
+            outcomes.write(MotionOutcome { request, result });
+        }
+    }
+}
+
+impl MotionChange {
+    fn advance(
+        &mut self,
+        server: &AssetServer,
+        graphs: &mut Assets<AnimationGraph>,
+        roots: &mut Query<(&mut AnimationPlayer, &AnimationGraphHandle)>,
+        c: &mut Character,
+    ) -> Option<Result<(), MotionFailure>> {
+        if matches!(c.state, AvatarState::Error(_)) {
+            return Some(Err(MotionFailure::Asset));
+        }
+        let (mut player, handle) = roots.get_mut(c.root?).ok()?;
+        let playing = match &self.phase {
+            ClipChange::Rest => None,
+            ClipChange::Loading(clip) => {
+                if let Some(error) = load_error(server, clip.id().untyped(), false) {
+                    warn!(character = %c.id, %error, "the motion did not load");
+                    return Some(Err(MotionFailure::Asset));
                 }
                 if !server.is_loaded_with_dependencies(clip.id()) {
-                    c.pending = Some(Pending::Fade(clip));
-                    continue;
+                    return None;
                 }
-                let Some((node, rebuild)) = motion_node(&mut graphs, &handle.0, &player, &clip)
-                else {
-                    c.pending = Some(Pending::Fade(clip));
-                    continue;
-                };
+                let (node, rebuild) = motion_node(graphs, &handle.0, &player, clip)?;
                 if rebuild {
-                    c.pending = Some(Pending::Play { clip, node });
-                    continue;
+                    self.phase = ClipChange::Attaching {
+                        clip: clip.clone(),
+                        node,
+                    };
+                    return None;
                 }
-                (clip, node)
+                Some((clip.clone(), node))
             }
-            Pending::Play { clip, node } => (clip, node),
+            ClipChange::Attaching { clip, node } => Some((clip.clone(), *node)),
         };
-        c.play_motion(&mut player, node);
-        c.motion = Some(clip);
+        c.config.motion = self.path.take();
+        c.config.looping = self.looping;
+        if let Some((clip, node)) = playing {
+            c.play_motion(&mut player, node);
+            c.motion = Some(clip);
+        } else {
+            player.stop_all();
+            c.motion = None;
+            c.main = None;
+            c.fading.clear();
+            if let Some(mut graph) = graphs.get_mut(&handle.0)
+                && graph.nodes().count() > 1
+            {
+                *graph = AnimationGraph::new();
+            }
+        }
+        Some(Ok(()))
     }
 }
 
@@ -197,7 +282,6 @@ pub fn notify_finished(
     for c in &characters {
         if c.config.playing
             && !c.config.looping
-            && c.pending.is_none()
             && c.state == AvatarState::Ready
             && let Some(animation) = c
                 .main

@@ -120,8 +120,11 @@ impl Character {
     }
 }
 
+pub(crate) use motion::MotionOutcome;
+
 pub fn setup(app: &mut App) {
     app.add_message::<Notification>()
+        .add_message::<MotionOutcome>()
         .add_observer(|event: On<WorldInstanceReady>, params: SceneReadyParams| {
             scene_ready(event.entity, params);
         })
@@ -152,7 +155,8 @@ pub fn setup(app: &mut App) {
         );
 }
 
-pub fn reload(world: &mut World, entity: Entity) {
+pub fn reload(world: &mut World, entity: Entity, request: Option<u64>) {
+    cancel_motion(world, entity);
     let Some(character) = world.get::<Character>(entity) else {
         return;
     };
@@ -189,7 +193,7 @@ pub fn reload(world: &mut World, entity: Entity) {
     };
     character.model = model;
     character.motion = motion;
-    character.pending = None;
+    character.pending = request.map(Pending::Initial);
     character.main = None;
     character.fading.clear();
     character.root = None;
@@ -207,19 +211,27 @@ fn load_motion(server: &AssetServer, path: &str) -> Handle<AnimationClip> {
         .load(GltfAssetLabel::Animation(0).from_asset(path.to_owned()))
 }
 
-pub fn queue_motion(world: &mut World, entity: Entity) {
-    let Some(path) = world
-        .get::<Character>(entity)
-        .and_then(|character| character.config.motion.as_deref())
-    else {
-        if let Some(mut character) = world.get_mut::<Character>(entity) {
-            character.pending = Some(Pending::Rest);
-        }
-        return;
-    };
-    let pending = Pending::Fade(load_motion(world.resource::<AssetServer>(), path));
+pub fn queue_motion(
+    world: &mut World,
+    entity: Entity,
+    path: Option<String>,
+    looping: bool,
+    request: Option<u64>,
+) {
+    cancel_motion(world, entity);
+    let pending = Pending::change(world.resource::<AssetServer>(), path, looping, request);
     if let Some(mut character) = world.get_mut::<Character>(entity) {
         character.pending = Some(pending);
+    }
+}
+
+pub fn cancel_motion(world: &mut World, entity: Entity) {
+    if let Some(pending) = world
+        .get_mut::<Character>(entity)
+        .and_then(|mut c| c.pending.take())
+        && let Some(outcome) = pending.superseded()
+    {
+        world.write_message(outcome);
     }
 }
 
