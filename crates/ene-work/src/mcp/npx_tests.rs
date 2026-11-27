@@ -346,9 +346,16 @@ result = {
         };
 
         let registry = rig_agent::tool::server::ToolServer::new().run();
+        let stop = tokio_util::sync::CancellationToken::new();
         let connection = tokio::time::timeout(
             Duration::from_secs(20),
-            crate::mcp::transport::open(&want, None, registry.clone(), reqwest::Client::new()),
+            crate::mcp::transport::open(
+                &want,
+                None,
+                registry.clone(),
+                reqwest::Client::new(),
+                &stop,
+            ),
         )
         .await
         .expect("MCP open should complete within timeout")
