@@ -896,6 +896,7 @@ message PreviewCompanionRequest {
   MindProfile profile = 4;
   ModelAssignment model = 5;
   string user_message = 6;
+  optional uint64 expected_settings_revision = 7;
 }
 message PreviewCompanionResponse { string reply = 1; }
 

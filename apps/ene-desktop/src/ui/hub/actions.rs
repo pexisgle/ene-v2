@@ -402,12 +402,12 @@ impl Hub {
 
     pub(crate) fn preview_companion(
         &mut self,
-        name: String,
-        mind: String,
-        persona: String,
+        spec: NewCompanionSpec,
+        model: ModelAssignment,
+        revision: u64,
         cx: &mut Context<Self>,
-    ) {
-        companions::preview_companion(self, name, mind, persona, cx);
+    ) -> bool {
+        companions::preview_companion(self, spec, model, revision, cx)
     }
 
     pub(crate) fn assign_model(

@@ -151,8 +151,10 @@ pub(super) fn render_create_panel(
 
     let template_chips =
         create_template_chips(&snap.templates, &name_d, &mind_d, &persona_d, theme);
-    let no_models_banner =
-        (!snap.has_models).then(|| render_missing_model_banner(pane.hub.clone(), theme));
+    let no_models_banner = snap
+        .preview
+        .is_none()
+        .then(|| render_missing_model_banner(pane.hub.clone(), theme));
     let actions = render_create_actions(
         pane,
         snap,
@@ -196,6 +198,12 @@ pub(super) fn render_create_panel(
         .child(labeled_field("名前", name_d, theme))
         .child(labeled_field("人格の核", mind_d, theme))
         .child(labeled_field("話し方", persona_d, theme))
+        .when_some(snap.preview.as_ref(), |panel, target| {
+            panel.child(div().text_xs().text_color(theme.ink_muted).child(format!(
+                "プレビューでは {} に名前・人格・話し方とテスト用の挨拶を送信します。",
+                target.recipient
+            )))
+        })
         .when_some(snap.preview_reply.as_ref().cloned(), |this, outcome| {
             this.child(render_preview_outcome(outcome, theme))
         })
@@ -217,14 +225,13 @@ fn render_create_actions(
     let pane_preview = cx.entity();
     let preview_pending = pane.form.preview_pending;
     let can_preview = snap.live
-        && snap.has_models
+        && snap.preview.is_some()
         && !preview_pending
         && !spec.name.is_empty()
         && !spec.mind.is_empty();
     let can_create = snap.live && !spec.name.is_empty();
-    let name_for_preview = spec.name.clone();
-    let mind_for_preview = spec.mind.clone();
-    let persona_for_preview = spec.persona.clone();
+    let preview_spec = spec.clone();
+    let preview = snap.preview.clone();
 
     div()
         .flex()
@@ -254,18 +261,23 @@ fn render_create_actions(
             Tone::Soft.icon(Icon::Sparkles).enabled(can_preview),
             theme,
             move |_, cx| {
-                pane_preview.update(cx, |this, cx| {
-                    this.form.preview_pending = true;
-                    cx.notify();
-                });
-                hub_preview.update(cx, |hub, cx| {
+                let Some(target) = preview.clone() else {
+                    return;
+                };
+                let admitted = hub_preview.update(cx, |hub, cx| {
                     hub.preview_companion(
-                        name_for_preview.clone(),
-                        mind_for_preview.clone(),
-                        persona_for_preview.clone(),
+                        preview_spec.clone(),
+                        target.assignment,
+                        target.revision,
                         cx,
-                    );
+                    )
                 });
+                if admitted {
+                    pane_preview.update(cx, |this, cx| {
+                        this.form.preview_pending = true;
+                        cx.notify();
+                    });
+                }
             },
         ))
         .child(pill_button(
@@ -364,7 +376,7 @@ fn render_missing_model_banner(hub: Entity<crate::ui::Hub>, theme: &Theme) -> An
             div()
                 .text_xs()
                 .text_color(theme.amber_fg)
-                .child("有効なAIモデルが未設定です。接続からLLMを追加すると会話できます。"),
+                .child("プレビューに使う会話モデルを接続設定で割り当ててください。"),
         )
         .child(pill_button(
             "comp-goto-conn",

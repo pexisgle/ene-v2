@@ -201,9 +201,10 @@ impl w::HostService for Services {
                 model_id: m.model_id,
             });
         let user_message = req.user_message;
+        let expected = req.expected_settings_revision;
         let model = self
             .runtime
-            .read_kernel(move |kernel| kernel.preview_model(requested_model))
+            .read_kernel(move |kernel| kernel.preview_model(&requested_model, expected))
             .await
             .map_err(ConnectError::from)?;
         let reply = host::model::preview_reply(model, system_prompt, user_message)

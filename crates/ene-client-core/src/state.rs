@@ -1,8 +1,8 @@
 //! Client domain state models organized by responsibility.
 
 use crate::domain::{
-    Activation, ApprovalRequest, Companion, CompanionTemplate, LlmProvider, Message, MindView,
-    ModelInfo, PluginInfo, PolicyText, Settings, Snapshot, TurnEvent,
+    Activation, ApprovalRequest, Companion, CompanionTemplate, Connection, LlmProvider, Message,
+    MindView, ModelAssignment, ModelInfo, PluginInfo, PolicyText, Settings, Snapshot, TurnEvent,
 };
 use crate::update::{CaptureMode, ReplyTarget};
 use ene_domain::CompanionId;
@@ -400,11 +400,28 @@ impl Model {
             .find(|companion| companion.id == id)
     }
 
-    /// Whether the selected companion has an explicit dialogue binding, even if it is offline.
-    pub fn has_dialogue_assignment(&self) -> bool {
-        self.companion()
-            .and_then(|companion| companion.assignments.as_ref())
-            .is_some_and(|assignments| !assignments.companion.connection_id.is_empty())
+    /// The selected companion's dialogue model, including an unavailable saved assignment.
+    pub fn dialogue_assignment(&self) -> Option<&ModelAssignment> {
+        let assignment = &self.companion()?.assignments.as_ref()?.companion;
+        assignment.is_set().then_some(assignment)
+    }
+
+    /// Effective receiver displayed before sending data to a saved dialogue model.
+    pub fn dialogue_receiver(&self, connection: &Connection) -> Option<String> {
+        let endpoint = connection.llm_endpoint()?;
+        if endpoint.adapter == crate::GOOGLE_AGENT_PLATFORM {
+            return ene_domain::settings::agent_platform_publisher_endpoint(endpoint).ok();
+        }
+        if !endpoint.endpoint.trim().is_empty() {
+            return Some(endpoint.endpoint.trim().to_owned());
+        }
+        self.connections
+            .providers
+            .as_ref()?
+            .iter()
+            .find(|provider| provider.adapter == endpoint.adapter)
+            .map(|provider| provider.endpoint.clone())
+            .filter(|endpoint| !endpoint.is_empty())
     }
 
     /// The activation the host holds for the shown companion.

@@ -82,16 +82,27 @@ impl<'a> AgentKernel<'a> {
 
     pub(crate) fn preview_model(
         &self,
-        requested: mind::ModelAssignment,
+        assignment: &mind::ModelAssignment,
+        expected_settings_revision: Option<u64>,
     ) -> Result<DynModel<Completion>> {
         let services = self.services;
-        let catalog = self.catalog();
-        let assignment = model::preview_assignment(&services.store, catalog, requested)?;
+        if !assignment.is_set() {
+            return Err(HostError::FailedPrecondition(
+                "a dialogue model must be selected for preview".into(),
+            ));
+        }
+        if let Some(expected) = expected_settings_revision
+            && services.store.settings_repo().settings_revision()? != expected
+        {
+            return Err(HostError::Conflict(
+                "the preview connection settings changed".into(),
+            ));
+        }
         model::connect_assignment(
             &services.store,
             &services.credentials,
-            catalog,
-            &assignment,
+            self.catalog(),
+            assignment,
             &services.providers,
         )
     }

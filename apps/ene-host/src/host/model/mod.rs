@@ -194,39 +194,6 @@ pub(crate) fn connect_assignment(
     Ok(model)
 }
 
-/// Picks either the requested `ModelAssignment` or the first enabled LLM connection + model
-/// for ephemeral preview without mutating companion/session state.
-pub(crate) fn preview_assignment(
-    store: &Store,
-    catalog: &Catalog,
-    requested: super::mind::ModelAssignment,
-) -> Result<super::mind::ModelAssignment> {
-    if requested.is_set() {
-        return Ok(requested);
-    }
-    let settings = store.settings_repo().settings()?;
-    let connection = settings
-        .connections
-        .into_iter()
-        .find(|conn| conn.enabled && conn.kind == ConnectionKind::Llm)
-        .ok_or_else(|| {
-            HostError::FailedPrecondition(
-                ("an enabled LLM connection is required for preview").into(),
-            )
-        })?;
-    let model_id = models(&connection, catalog)
-        .into_iter()
-        .map(|(id, _)| id)
-        .next()
-        .ok_or_else(|| {
-            HostError::FailedPrecondition(("no model is available on the LLM connection").into())
-        })?;
-    Ok(super::mind::ModelAssignment {
-        connection_id: connection.id.into(),
-        model_id,
-    })
-}
-
 /// Runs a single stateless, tool-less completion call for companion preview.
 pub(crate) async fn preview_reply(
     model: DynModel<Completion>,

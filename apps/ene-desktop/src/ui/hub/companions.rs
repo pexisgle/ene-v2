@@ -5,50 +5,14 @@ use crate::{rpc, state::NoticeKind};
 use ene_client_core::{
     ModelRoleSlot,
     domain::{
-        CompanionProfilePatch, CompanionTemplate, ConnectionConfig, ConnectionKind, MindProfile,
-        ModelAssignment, NewCompanionSpec,
+        CompanionProfilePatch, CompanionTemplate, MindProfile, ModelAssignment, NewCompanionSpec,
     },
     templates::parse_template_json,
 };
 use gpui::Context;
 
-fn default_model(hub: &Hub) -> Option<ModelAssignment> {
-    hub.model
-        .model_choices()
-        .into_iter()
-        .next()
-        .map(|(connection_id, model_id, _)| ModelAssignment {
-            connection_id,
-            model_id,
-        })
-}
-
 pub(super) fn create_companion(hub: &mut Hub, spec: NewCompanionSpec, cx: &mut Context<Hub>) {
-    let default_model = default_model(hub);
-    let voice = spec
-        .voice_identifier
-        .clone()
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| {
-            hub.model.settings().and_then(|settings| {
-                settings
-                    .connections
-                    .iter()
-                    .find(|connection| connection.kind == ConnectionKind::Tts)
-                    .and_then(|connection| connection.config.as_ref())
-                    .and_then(|config| match config {
-                        ConnectionConfig::Tts(tts) => tts.voice_ids.first().cloned(),
-                        _ => None,
-                    })
-            })
-        });
-    rpc::companions::create_companion(
-        &hub.rpc,
-        hub.model.connections.link_epoch,
-        spec,
-        voice,
-        default_model,
-    );
+    rpc::companions::create_companion(&hub.rpc, hub.model.connections.link_epoch, spec);
     cx.notify();
 }
 
@@ -95,37 +59,29 @@ pub(super) fn import_companion_template(
     template: CompanionTemplate,
     cx: &mut Context<Hub>,
 ) {
-    let default_model = default_model(hub);
-    rpc::companions::import_companion(
-        &hub.rpc,
-        hub.model.connections.link_epoch,
-        template,
-        default_model,
-    );
+    rpc::companions::import_companion(&hub.rpc, hub.model.connections.link_epoch, template);
     cx.notify();
 }
 
 pub(super) fn preview_companion(
     hub: &mut Hub,
-    name: String,
-    mind: String,
-    persona: String,
+    spec: NewCompanionSpec,
+    model: ModelAssignment,
+    revision: u64,
     cx: &mut Context<Hub>,
-) {
-    if hub.rpc.host().is_none() {
-        return;
-    }
-    hub.model.companions.preview_reply = None;
-    let model = default_model(hub);
-    rpc::companions::preview_companion(
+) -> bool {
+    let admitted = rpc::companions::preview_companion(
         &hub.rpc,
         hub.model.connections.link_epoch,
-        name,
-        mind,
-        persona,
+        spec,
         model,
+        revision,
     );
-    cx.notify();
+    if admitted {
+        hub.model.companions.preview_reply = None;
+        cx.notify();
+    }
+    admitted
 }
 
 pub(super) fn assign_model(

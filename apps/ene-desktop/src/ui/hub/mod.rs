@@ -147,7 +147,10 @@ impl Hub {
 
     fn apply_ui_update_bookkeeping(&mut self, update: &Update, cx: &mut Context<Self>) {
         match update {
-            Update::Link(link) if !link.is_live() => self.setup.disconnect(),
+            Update::Link(link) if !link.is_live() => {
+                self.setup.disconnect();
+                cx.emit(HubEvent::CompanionPreviewFinished);
+            }
             Update::CredentialRegistered { connection_id } => {
                 cx.emit(HubEvent::CredentialsSaved(connection_id.clone()));
             }

@@ -45,25 +45,21 @@ fn binding_document(schema: &str, value: &impl serde::Serialize) -> Option<w::Js
         })
 }
 
-pub(crate) fn create_companion(
-    rpc: &RpcDispatcher,
-    epoch: u64,
-    spec: NewCompanionSpec,
-    voice: Option<String>,
-    default_model: Option<ModelAssignment>,
-) {
-    let assignments = default_model.map(shared_model_assignments);
+pub(crate) fn create_companion(rpc: &RpcDispatcher, epoch: u64, spec: NewCompanionSpec) {
     rpc.call_owned(
         epoch,
         "コンパニオンの作成",
-        request!(host.create_companion(w::CreateCompanionRequest {
-            name: spec.name,
-            mind: spec.mind,
-            persona: (!spec.persona.trim().is_empty()).then_some(spec.persona),
-            voice_identifier: voice,
-            assignments: assignments.into(),
-            ..Default::default()
-        })),
+        request!(
+            host.create_companion(w::CreateCompanionRequest {
+                name: spec.name,
+                mind: spec.mind,
+                persona: (!spec.persona.trim().is_empty()).then_some(spec.persona),
+                voice_identifier: spec
+                    .voice_identifier
+                    .filter(|voice| !voice.trim().is_empty()),
+                ..Default::default()
+            })
+        ),
         |companion| Update::Created(companion.id),
     );
 }
@@ -179,19 +175,12 @@ pub(crate) fn export_companion(rpc: &RpcDispatcher, epoch: u64, companion_id: St
     );
 }
 
-pub(crate) fn import_companion(
-    rpc: &RpcDispatcher,
-    epoch: u64,
-    template: CompanionTemplate,
-    default_model: Option<ModelAssignment>,
-) {
-    let assignments = default_model.map(shared_model_assignments);
+pub(crate) fn import_companion(rpc: &RpcDispatcher, epoch: u64, template: CompanionTemplate) {
     rpc.call_owned(
         epoch,
         "テンプレートから作成",
         request!(host.import_companion(w::ImportCompanionRequest {
             template: Some(template.into()).into(),
-            assignments: assignments.into(),
             ..Default::default()
         })),
         |companion| Update::Created(companion.id),
@@ -201,31 +190,40 @@ pub(crate) fn import_companion(
 pub(crate) fn preview_companion(
     rpc: &RpcDispatcher,
     epoch: u64,
-    name: String,
-    mind: String,
-    persona: String,
-    model: Option<ModelAssignment>,
-) {
+    spec: NewCompanionSpec,
+    model: ModelAssignment,
+    revision: u64,
+) -> bool {
     let request = w::PreviewCompanionRequest {
-        name,
-        mind,
-        persona: (!persona.trim().is_empty()).then_some(persona),
-        model: model.map(Into::into).into(),
+        name: spec.name,
+        mind: spec.mind,
+        persona: (!spec.persona.trim().is_empty()).then_some(spec.persona),
+        model: Some(model.into()).into(),
         user_message: "はじめまして！短く自己紹介してください。".into(),
+        expected_settings_revision: Some(revision),
         ..Default::default()
     };
-    rpc.call_update(epoch, |host| async move {
-        match host.host.preview_companion(request).await {
-            Ok(resp) => Update::CompanionPreview {
-                reply: Some(resp.view().reply.to_owned()),
-                error: None,
-            },
-            Err(err) => Update::CompanionPreview {
-                reply: None,
-                error: Some(err.to_string()),
-            },
-        }
-    });
+    rpc.call_with(
+        epoch,
+        "会話のプレビュー",
+        |host| async move {
+            Ok(host
+                .host
+                .preview_companion(request)
+                .await?
+                .view()
+                .reply
+                .to_owned())
+        },
+        |reply| Update::CompanionPreview {
+            reply: Some(reply),
+            error: None,
+        },
+        |_, error| Update::CompanionPreview {
+            reply: None,
+            error: Some(error.to_string()),
+        },
+    )
 }
 
 pub(crate) fn load_mind(rpc: &RpcDispatcher, epoch: u64, companion_id: String) {

@@ -12,7 +12,9 @@ use super::icons::Icon;
 use super::theme::Theme;
 use super::widgets::{ButtonStyle, Tone, pill_button};
 use super::{DraftStore, Hub};
-use ene_client_core::domain::{Companion, CompanionTemplate, ConnectionKind, MindView};
+use ene_client_core::domain::{
+    Companion, CompanionTemplate, ConnectionKind, MindView, ModelAssignment,
+};
 use gpui::{AnyElement, Context, Entity, FontWeight, Subscription, div, prelude::*, px};
 use std::collections::BTreeMap;
 
@@ -49,13 +51,43 @@ pub(super) struct CompanionsSnapshot {
     pub(super) companions: Vec<Companion>,
     pub(super) active_id: Option<String>,
     pub(super) resident_ids: Vec<String>,
-    pub(super) has_models: bool,
+    pub(super) preview: Option<PreviewTarget>,
     pub(super) tts_voices: Vec<(String, String, String, String)>,
     pub(super) tts_conn_ids: Vec<String>,
     pub(super) minds: BTreeMap<String, MindView>,
     pub(super) templates: Vec<CompanionTemplate>,
     pub(super) exported_template: Option<(String, String)>,
     pub(super) preview_reply: Option<Result<String, ene_client_core::state::PreviewError>>,
+}
+
+#[derive(Clone)]
+pub(super) struct PreviewTarget {
+    assignment: ModelAssignment,
+    recipient: String,
+    revision: u64,
+}
+
+fn preview_target(hub: &Hub) -> Option<PreviewTarget> {
+    let assignment = hub.model.dialogue_assignment()?;
+    let settings = hub.model.settings()?;
+    let connection = settings
+        .connections
+        .iter()
+        .find(|connection| connection.id == assignment.connection_id)?;
+    let providers = hub
+        .model
+        .connections
+        .providers
+        .as_deref()
+        .unwrap_or_default();
+    if !connection.can_start_chat(providers) {
+        return None;
+    }
+    Some(PreviewTarget {
+        assignment: assignment.clone(),
+        recipient: hub.model.dialogue_receiver(connection)?,
+        revision: settings.revision,
+    })
 }
 
 impl CompanionsSnapshot {
@@ -75,7 +107,7 @@ impl CompanionsSnapshot {
                 .map_or_default(|s| s.companions.clone()),
             active_id: hub.model.companion_id().map(str::to_owned),
             resident_ids: hub.model.resident_companions(&hub.options.id),
-            has_models: !hub.model.model_choices().is_empty(),
+            preview: preview_target(hub),
             tts_voices: hub.model.tts_voice_choices(),
             tts_conn_ids,
             minds: hub.model.companions.minds.clone(),
