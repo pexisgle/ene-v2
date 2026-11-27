@@ -267,15 +267,13 @@ impl Encodable<w::Notification> for NotificationBody {
     }
 }
 
-/// A notification addressed to one client is not sent to another.
+/// Addressed events require the same subscription selector on replay and live.
 fn visible(event: &w::Notification, subscriber: Option<&str>, diagnostics: bool) -> bool {
-    if event.kind == host::notify::DIAGNOSTIC {
-        return diagnostics;
-    }
-    match (event.client_id.as_deref(), subscriber) {
-        (Some(target), Some(subscriber)) => target == subscriber,
-        _ => true,
-    }
+    event
+        .client_id
+        .as_deref()
+        .is_none_or(|target| subscriber == Some(target))
+        && (event.kind != host::notify::DIAGNOSTIC || diagnostics)
 }
 
 #[cfg(test)]
@@ -292,6 +290,21 @@ mod tests {
             kind: label.into(),
             ..Default::default()
         }))
+    }
+
+    async fn notification_stream(
+        service: &Services,
+        request: &w::SubscribeRequest,
+    ) -> ServiceStream<NotificationBody> {
+        let message = StreamMessage::from_message(request);
+        service
+            .subscribe(
+                RequestContext::new(http::HeaderMap::new()),
+                ServiceRequest::from_parts(message.view(), message.bytes()),
+            )
+            .await
+            .unwrap()
+            .body
     }
 
     #[tokio::test]
@@ -329,47 +342,50 @@ mod tests {
                     &serde_json::json!({"bytes": 10}),
                 );
                 notifier.push(None, Some("c1"), event("replayed"));
+                notifier.push(None, None, event("global replay"));
                 Ok(())
             })
             .await
             .unwrap();
         let shutdown = CancellationToken::new();
         let service = Services::new(runtime.clone(), shutdown.clone());
-        let mut stream = {
-            let message = StreamMessage::from_message(&w::SubscribeRequest {
+        let mut stream = notification_stream(
+            &service,
+            &w::SubscribeRequest {
                 client_id: "c1".into(),
                 cursor: Some(cursor.clone()).into(),
                 ..Default::default()
-            });
-            service
-                .subscribe(
-                    RequestContext::new(http::HeaderMap::new()),
-                    ServiceRequest::from_parts(message.view(), message.bytes()),
-                )
-                .await
-                .unwrap()
-                .body
-        };
+            },
+        )
+        .await;
         let NotificationBody(replayed) = stream.next().await.unwrap().unwrap();
         assert_eq!(replayed.client_id.as_deref(), Some("c1"));
         assert!(
             matches!(replayed.event, Some(w::notification::Event::Generic(ref item)) if item.kind == "replayed")
         );
-        {
-            let message = StreamMessage::from_message(&w::SubscribeRequest {
-                client_id: "c1".into(),
-                cursor: Some(cursor).into(),
-                include_diagnostics: true,
+        let mut global = notification_stream(
+            &service,
+            &w::SubscribeRequest {
+                cursor: Some(cursor.clone()).into(),
                 ..Default::default()
-            });
-            let mut diagnostics = service
-                .subscribe(
-                    RequestContext::new(http::HeaderMap::new()),
-                    ServiceRequest::from_parts(message.view(), message.bytes()),
-                )
-                .await
-                .unwrap()
-                .body;
+            },
+        )
+        .await;
+        let NotificationBody(global_replay) = global.next().await.unwrap().unwrap();
+        assert!(
+            matches!(global_replay.event, Some(w::notification::Event::Generic(ref item)) if item.kind == "global replay")
+        );
+        {
+            let mut diagnostics = notification_stream(
+                &service,
+                &w::SubscribeRequest {
+                    client_id: "c1".into(),
+                    cursor: Some(cursor).into(),
+                    include_diagnostics: true,
+                    ..Default::default()
+                },
+            )
+            .await;
             let NotificationBody(diagnostic) = diagnostics.next().await.unwrap().unwrap();
             assert_eq!(diagnostic.kind, host::notify::DIAGNOSTIC);
         }
@@ -378,15 +394,22 @@ mod tests {
                 let notifier = app.world_mut().resource_mut::<Notifier>();
                 notifier.push(None, Some("other"), event("hidden live"));
                 notifier.push(None, Some("c1"), event("live"));
+                notifier.push(None, None, event("global live"));
                 Ok(())
             })
             .await
             .unwrap();
+        let NotificationBody(broadcast) = stream.next().await.unwrap().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&broadcast, &global_replay));
         let NotificationBody(live) = stream.next().await.unwrap().unwrap();
         assert!(
             matches!(live.event, Some(w::notification::Event::Generic(ref item)) if item.kind == "live")
         );
         assert!(live.cursor.as_option().unwrap().seq > replayed.cursor.as_option().unwrap().seq);
+        let NotificationBody(global_live) = global.next().await.unwrap().unwrap();
+        assert!(
+            matches!(global_live.event, Some(w::notification::Event::Generic(ref item)) if item.kind == "global live")
+        );
         shutdown.cancel();
         assert!(stream.next().await.is_none());
         runtime.shutdown().await.unwrap();
