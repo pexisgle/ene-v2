@@ -248,10 +248,13 @@ impl<'a> MemoryRepo<'a> {
             let memory = memory?;
             let length = memory.content.chars().count();
             if length > budget {
-                break;
+                continue;
             }
             budget -= length;
             pinned.push(memory);
+            if budget == 0 {
+                break;
+            }
         }
         Ok(pinned)
     }
@@ -262,26 +265,26 @@ impl<'a> MemoryRepo<'a> {
         cursor: Option<i64>,
         limit: usize,
     ) -> Result<(Vec<Memory>, Option<i64>)> {
+        if limit == 0 {
+            return Ok((Vec::new(), None));
+        }
         let connection = self.0.conn();
         let mut statement = connection.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.rowid > ?2 \
              ORDER BY m.rowid LIMIT ?3"
         ))?;
-        let rows = statement.query_map(
-            params![companion, cursor.unwrap_or(0), (limit + 1) as i64],
-            |row| Ok((row.get::<_, i64>("rowid")?, Memory::from_row(row)?)),
-        )?;
+        let lookahead = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+        let mut rows = statement.query(params![companion, cursor.unwrap_or(0), lookahead])?;
         let mut items = Vec::new();
-        let mut next = None;
-        for row in rows {
-            let (rowid, memory) = row?;
+        let mut last = None;
+        while let Some(row) = rows.next()? {
             if items.len() == limit {
-                next = Some(rowid);
-                break;
+                return Ok((items, last));
             }
-            items.push(memory);
+            last = Some(row.get("rowid")?);
+            items.push(Memory::from_row(row)?);
         }
-        Ok((items, next))
+        Ok((items, None))
     }
 
     fn lexical_candidates(

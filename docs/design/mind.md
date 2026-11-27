@@ -247,7 +247,7 @@ for candidate in &mut fused_candidates {
 - **Recency（直近性 / 時間減衰: $0.0 \sim 1.0$）**:
   $$\text{Recency} = e^{-\lambda \Delta t}$$
   - $\lambda \approx 0.05$（半減期約14日）。
-  - $\Delta t$: 最終アクセス日時または発生日時（`COALESCE(last_accessed_at, occurred_at, recorded_at)`）からの経過日数。引用ガードにより実際に会話で参照された記憶は `last_accessed_at` が更新されて直近性がリセットされ、未参照の記憶は時間とともに自然減衰する。
+  - $\Delta t$: 最終アクセス日時・発生日時・記録日時の順に、最初に解釈できる日時からの経過日数。有効な日時がない場合の直近性は 0。引用ガードにより実際に会話で参照された記憶は `last_accessed_at` が更新され、未参照の記憶は時間とともに自然減衰する。
 
 ### 4.2 引用ガード（想起自己汚染の低減）
 
@@ -281,7 +281,7 @@ for candidate in &mut fused_candidates {
 1. **優先度低下・訂正の適用**: 訂正されて `superseded_by` を持つ古い記憶や、忘却（想起優先度引き下げ）された記憶は、重要度10を満たさないためPinned枠へ注入されない。
 2. **トークン予算上限（Token Budget）**:
    - Pinned Memory枠には最大トークン予算（例: 最大 1,000 トークン）を設定する。
-   - 自動整理モデルが誤って重要度10を大量生成した場合でも、Pinned枠だけでプロンプト全体が圧迫される事故を防止する。予算超過時は最新の `last_accessed_at`（未引用時は `recorded_at`）順で収容する。
+   - 自動整理モデルが誤って重要度10を大量生成した場合でも、Pinned枠だけでプロンプト全体が圧迫される事故を防止する。最新の `last_accessed_at`（未引用時は `recorded_at`）順に、残りの予算に収まる記憶を収容する。
 
 ---
 

@@ -103,17 +103,21 @@ pub fn score(
     let importance = f64::from(importance) / 10.0;
     let decay = (importance / 0.3).min(1.0);
     let relevance = relevance.clamp(0.0, 1.0);
-    let touched = last_touched.or(occurred_at).unwrap_or(recorded_at);
-    let days =
-        parse_epoch(touched).map_or(0.0, |then| ((now_epoch - then) as f64 / 86_400.0).max(0.0));
-    let recency = (-0.05 * days).exp();
+    let recency = [last_touched, occurred_at, Some(recorded_at)]
+        .into_iter()
+        .flatten()
+        .find_map(parse_epoch)
+        .map_or(0.0, |then| {
+            let days = now_epoch.saturating_sub(then).max(0) as f64 / 86_400.0;
+            (-0.05 * days).exp()
+        });
     decay * (0.5 * relevance + 0.3 * importance + 0.2 * recency)
 }
 
 /// Combines lexical and semantic rank, then applies the memory scoring rule.
 pub fn rank_recall(lists: [Vec<Memory>; 2], now_epoch: i64, limit: usize) -> Vec<Scored> {
     const K: f64 = 60.0;
-    let ceiling = lists.iter().filter(|list| !list.is_empty()).count().max(1) as f64 / (K + 1.0);
+    const CEILING: f64 = 2.0 / (K + 1.0);
     let mut fused = std::collections::HashMap::new();
     for list in lists {
         for (index, memory) in list.into_iter().enumerate() {
@@ -124,7 +128,7 @@ pub fn rank_recall(lists: [Vec<Memory>; 2], now_epoch: i64, limit: usize) -> Vec
     let mut ranked: Vec<Scored> = fused
         .into_values()
         .map(|(memory, sum)| {
-            let relevance = (sum / ceiling).clamp(0.0, 1.0);
+            let relevance = (sum / CEILING).clamp(0.0, 1.0);
             let score = score(
                 relevance,
                 memory.importance,
@@ -348,14 +352,13 @@ mod property_tests {
                 *sums.entry(&item.id).or_default() += 1.0 / (60.0 + (i + 1) as f64);
             }
         }
-        let ceiling = lists.iter().filter(|list| !list.is_empty()).count().max(1) as f64 / 61.0;
         let mut seen = HashSet::new();
         let mut scored: Vec<_> = lists
             .iter()
             .flatten()
             .filter(|memory| seen.insert(memory.id.as_str()))
             .map(|memory| {
-                let relevance = (sums[memory.id.as_str()] / ceiling).clamp(0.0, 1.0);
+                let relevance = (sums[memory.id.as_str()] / (2.0 / 61.0)).clamp(0.0, 1.0);
                 Scored {
                     memory: memory.clone(),
                     relevance,
@@ -381,8 +384,9 @@ mod property_tests {
 
     proptest! {
         #[test]
-        fn fusing_is_idempotent(a in ids()) {
-            let list = records(&a);
+        fn identical_channels_keep_the_rank_order(a in ids()) {
+            let mut seen = HashSet::new();
+            let list = records(&a.into_iter().filter(|id| seen.insert(id.clone())).collect::<Vec<_>>());
             let once = rank_recall([list.clone(), Vec::new()], 0, usize::MAX);
             let twice = rank_recall([list.clone(), list], 0, usize::MAX);
             let order = |v: Vec<Scored>| v.into_iter().map(|item| item.memory.id).collect::<Vec<_>>();
@@ -421,5 +425,20 @@ mod property_tests {
             expected.truncate(limit);
             prop_assert_eq!(rank_recall(lists, now, limit), expected);
         }
+    }
+
+    #[test]
+    fn missing_channels_and_invalid_dates_do_not_inflate_scores() {
+        let list = records(&["find".into()]);
+        let today = parse_epoch("2026-11-27T00:00:00Z").unwrap();
+        let one = rank_recall([list.clone(), Vec::new()], today, 1);
+        let both = rank_recall([list.clone(), list], today, 1);
+        assert!((one[0].relevance - 0.5).abs() < 1e-12);
+        assert!((both[0].relevance - 1.0).abs() < 1e-12);
+        let past = "2024-01-01T00:00:00Z";
+        let undated = score(0.5, 5, None, None, past, today);
+        let damaged = score(0.5, 5, Some("broken"), Some("invalid"), past, today);
+        assert!((damaged - undated).abs() < 1e-12);
+        assert!((score(0.5, 5, None, None, "unreadable", today) - 0.4).abs() < 1e-12);
     }
 }

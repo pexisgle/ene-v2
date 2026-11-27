@@ -448,6 +448,36 @@ fn another_companions_scope_is_private_and_sharing_moves_the_row_to_the_pool() {
 }
 
 #[test]
+fn memory_pages_include_the_lookahead_row_on_the_next_page() {
+    let store = store();
+    let repo = store.memory_repo();
+    let first = repo.insert_memory(&new_memory("first", 4)).unwrap();
+    let mut hidden = new_memory("different scope", 4);
+    hidden.scope = "other".into();
+    repo.insert_memory(&hidden).unwrap();
+    let second = repo.insert_memory(&new_memory("second", 4)).unwrap();
+    let third = repo.insert_memory(&new_memory("third", 4)).unwrap();
+
+    let (page, cursor) = repo.list_memories("ene", None, 1).unwrap();
+    assert_eq!(page, [first]);
+    let (page, cursor) = repo.list_memories("ene", cursor, 1).unwrap();
+    assert_eq!(page, [second]);
+    let (page, cursor) = repo.list_memories("ene", cursor, 1).unwrap();
+    assert_eq!(page, [third]);
+    assert_eq!(cursor, None);
+}
+
+#[test]
+fn pinned_memory_that_exceeds_the_budget_leaves_room_for_the_next_row() {
+    let store = store();
+    let repo = store.memory_repo();
+    let small = repo.insert_memory(&new_memory("短い記憶", 10)).unwrap();
+    let oversized = "長".repeat(PINNED_BUDGET_CHARS + 1);
+    repo.insert_memory(&new_memory(&oversized, 10)).unwrap();
+    assert_eq!(repo.pinned("ene").unwrap(), [small]);
+}
+
+#[test]
 fn a_shared_pinned_memory_is_injected_for_every_companion() {
     let store = store();
     let repo = store.memory_repo();
