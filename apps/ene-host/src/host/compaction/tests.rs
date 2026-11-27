@@ -175,7 +175,11 @@ fn the_summary_cursor_covers_only_the_complete_turns_in_its_actual_request() {
 
     let spec = ModelSpec::new(ProviderId::catalog("openai").unwrap(), "summary-test")
         .with_context_window(1_200);
-    let (through, request) = job::plan_summary(&history, None, &spec).unwrap();
+    let (through, job::SummaryInput::Single(request)) =
+        job::plan_summary(&history, None, &spec).unwrap()
+    else {
+        panic!("the first complete turn fits in one request")
+    };
     let serialized = serde_json::to_string(&request).unwrap();
     assert_eq!(through, first_end.get());
     assert!(serialized.contains("the first essential fact"));
@@ -188,7 +192,65 @@ fn the_summary_cursor_covers_only_the_complete_turns_in_its_actual_request() {
     };
     assert!(matches!(
         job::plan_summary(&history, Some(&existing), &spec),
-        Err(job::CompactionError::TurnTooLarge)
+        Ok((_, job::SummaryInput::Segments { .. }))
+    ));
+}
+
+#[tokio::test]
+async fn a_turn_larger_than_one_summary_request_is_covered_without_a_gap() {
+    use rig_core::message::UserContent;
+
+    let mut history = History::new();
+    let input = format!(
+        "start-of-old-turn {} end-of-old-turn",
+        "長い日本語の発話 ".repeat(500)
+    );
+    history.push(Message::user(&input));
+    history.open_turn();
+    let through = history.push(Message::assistant("old reply"));
+    history.end_turn(TurnEnd::Answered { answer: None });
+    history.push(Message::user("latest question"));
+    history.open_turn();
+    history.push(Message::assistant("latest answer"));
+    history.end_turn(TurnEnd::Answered { answer: None });
+    let spec = ModelSpec::new(ProviderId::catalog("openai").unwrap(), "summary-test")
+        .with_context_window(1_200);
+    let model = MockCompletionModel::from_turns((0..32).map(|_| MockTurn::text("rolling summary")));
+    let observed = model.clone();
+    let result = job::summarize(&history, None, &spec, &model.into())
+        .await
+        .unwrap();
+    assert_eq!(result.through_message_id, through.get());
+    let requests = observed.requests();
+    assert!(requests.len() > 1);
+    let mut combined = String::new();
+    for request in requests {
+        let Message::User { content } = request.chat_history.last().unwrap().as_ref() else {
+            panic!("the last message contains a transcript segment")
+        };
+        let UserContent::Text(prompt) = &content[0] else {
+            panic!("the summary prompt is text")
+        };
+        let segment = prompt
+            .text
+            .split_once("<conversation>\n")
+            .unwrap()
+            .1
+            .split_once("\n</conversation>")
+            .unwrap()
+            .0;
+        combined.push_str(segment);
+    }
+    assert_eq!(
+        combined,
+        rig_memory::serialize_conversation(&history.messages()[..2])
+    );
+
+    let failing =
+        MockCompletionModel::from_turns([MockTurn::text("first fragment"), MockTurn::text("")]);
+    assert!(matches!(
+        job::summarize(&history, None, &spec, &failing.into()).await,
+        Err(job::CompactionError::Model(_))
     ));
 }
 
