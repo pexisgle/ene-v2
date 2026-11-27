@@ -138,12 +138,6 @@ impl Default for Options {
 /// reconnects, so a request can never use a token the host has already rotated.
 pub type Connection = Arc<RwLock<Option<Host>>>;
 
-/// The companion this client is the active device for.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Binding {
-    companion_id: String,
-}
-
 /// Why one attempt at serving the host ended.
 pub(super) enum Outcome {
     Closed,
@@ -351,10 +345,19 @@ impl Session {
         if changed {
             self.devices.sensor = Sensor::default();
         }
-        self.report_phase(ConnectionPhase::Live {
-            version: snapshot.server_version.clone(),
-        })
-        .await;
+        let version = snapshot.server_version.clone();
+        notify_ui(
+            &self.updates,
+            Update::Notification(Box::new(
+                w::Notification {
+                    cursor: snapshot.cursor.clone(),
+                    event: Some(w::notification::Event::InitialState(Box::new(snapshot))),
+                    ..Default::default()
+                }
+                .into(),
+            )),
+        );
+        self.report_phase(ConnectionPhase::Live { version }).await;
 
         self.open_devices().await;
         Box::pin(self.serve(host)).await
@@ -457,8 +460,7 @@ pub(super) fn persistent(error: &connectrpc::ConnectError) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::commands::MotionPlan;
-    use super::stream::{Claim, admits};
+    use super::commands::{Claim, MotionPlan, admits};
     use super::*;
 
     /// Every phase must map to the link state the window expects, and only
@@ -534,12 +536,6 @@ mod tests {
         }
     }
 
-    fn held() -> Binding {
-        Binding {
-            companion_id: "companion".into(),
-        }
-    }
-
     /// Every case the guard can distinguish: our own identity, our own
     /// subscription, whether we hold the companion, and whether the operation
     /// carries a work session id, each against every operation claim.
@@ -559,7 +555,6 @@ mod tests {
                     for claim_subscription in claim_subscriptions {
                         for holds in held_bindings {
                             for work_id in work_ids {
-                                let binding = holds.then(held);
                                 let claim = Claim {
                                     client_id: claim_id,
                                     subscription_id: claim_subscription,
@@ -571,8 +566,7 @@ mod tests {
                                     && (our_subscription.is_empty()
                                         || claim_subscription == our_subscription)
                                     && (holds || has_work);
-                                let allowed =
-                                    admits(our_id, our_subscription, binding.as_ref(), &claim);
+                                let allowed = admits(our_id, our_subscription, holds, &claim);
                                 assert_eq!(
                                     allowed.is_ok(),
                                     expected,
@@ -591,13 +585,12 @@ mod tests {
 
     #[test]
     fn a_refusal_says_which_part_does_not_match() {
-        let binding = held();
         let stale = Claim {
             client_id: "desktop",
             subscription_id: "sub-1",
             work_id: None,
         };
-        let refused = admits("desktop", "sub-2", Some(&binding), &stale)
+        let refused = admits("desktop", "sub-2", true, &stale)
             .unwrap_err()
             .to_string();
         assert!(refused.contains("older device stream"), "{refused}");
@@ -607,12 +600,12 @@ mod tests {
             subscription_id: "sub-1",
             work_id: None,
         };
-        let refused = admits("desktop", "sub-1", Some(&binding), &elsewhere)
+        let refused = admits("desktop", "sub-1", true, &elsewhere)
             .unwrap_err()
             .to_string();
         assert!(refused.contains("desk-1"), "{refused}");
 
-        let unbound = admits("desktop", "sub-1", None, &stale)
+        let unbound = admits("desktop", "sub-1", false, &stale)
             .unwrap_err()
             .to_string();
         assert!(unbound.contains("not the active device"), "{unbound}");
@@ -622,7 +615,7 @@ mod tests {
             subscription_id: "sub-1",
             work_id: Some("w1"),
         };
-        assert!(admits("desktop", "sub-1", None, &work_op).is_ok());
+        assert!(admits("desktop", "sub-1", false, &work_op).is_ok());
     }
 
     #[test]

@@ -188,7 +188,7 @@ impl AudioPipeline {
         let target = self
             .speaking_companion
             .as_deref()
-            .filter(|id| transport.bindings.contains_key(*id))
+            .filter(|id| transport.bindings.contains(*id))
             .or_else(|| transport.focused_companion_id())
             .map(str::to_owned);
         let Some(avatar) = avatar else {

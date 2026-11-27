@@ -1,17 +1,21 @@
 //! Host connection, registration, companion activation bindings, and capability specs.
 
-use super::{Binding, Connection, DeviceBridge, Options, Outcome};
+use super::{Connection, DeviceBridge, Options, Outcome};
 use crate::{avatar, capabilities, host::Host, plugins::ClientPlugins, work_tools::Workspace};
 use buffa::view::MessageView;
 use ene_rpc as w;
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 pub(super) struct SessionTransport {
     pub(super) path: PathBuf,
     pub(super) options: Options,
     pub(super) connection: Connection,
     /// Companions currently resident (activated) on this client, keyed by companion ID.
-    pub(super) bindings: BTreeMap<String, Binding>,
+    pub(super) bindings: BTreeSet<String>,
     /// Companion currently focused by the pod / interactive controls.
     pub(super) focused: Option<String>,
     /// Latest companion records from the host, used to resolve body/model per resident companion.
@@ -49,7 +53,7 @@ impl SessionTransport {
             path,
             options,
             connection,
-            bindings: BTreeMap::new(),
+            bindings: BTreeSet::new(),
             focused: None,
             companions: BTreeMap::new(),
             may_activate: true,
@@ -63,13 +67,8 @@ impl SessionTransport {
     pub(super) fn focused_companion_id(&self) -> Option<&str> {
         self.focused
             .as_deref()
-            .filter(|id| self.bindings.contains_key(*id))
-            .or_else(|| self.bindings.keys().next().map(String::as_str))
-    }
-
-    pub(super) fn focused_binding(&self) -> Option<&Binding> {
-        self.focused_companion_id()
-            .and_then(|id| self.bindings.get(id))
+            .filter(|id| self.bindings.contains(*id))
+            .or_else(|| self.bindings.first().map(String::as_str))
     }
 
     pub(super) fn body_binding_for(&self, companion_id: &str) -> ene_domain::BodyBinding {
@@ -173,39 +172,63 @@ impl SessionTransport {
             .map_err(|error| connectrpc::ConnectError::internal(error.to_string()))
     }
 
-    /// Binds this client to its resident companions from `snapshot` without
-    /// stealing companions already held by other devices. Returns whether
-    /// resident bindings changed.
-    pub(super) async fn bind(
-        &mut self,
-        host: &Host,
-        snapshot: &w::Snapshot,
-    ) -> Result<bool, Outcome> {
-        let previous = self.bindings.clone();
+    /// Installs the host snapshot and the cursor at which it was taken.
+    pub(super) fn restore_snapshot(&mut self, snapshot: &w::Snapshot) -> BTreeSet<String> {
         self.companions = snapshot
             .companions
             .iter()
             .map(|companion| (companion.id.clone(), companion.clone()))
             .collect();
-        self.bindings = snapshot
-            .activations
-            .iter()
-            .filter(|activation| activation.client_id.as_deref() == Some(self.options.id.as_str()))
-            .map(|activation| {
-                (
-                    activation.companion_id.clone(),
-                    Binding {
-                        companion_id: activation.companion_id.clone(),
-                    },
-                )
-            })
-            .collect();
+        let previous = std::mem::replace(
+            &mut self.bindings,
+            snapshot
+                .activations
+                .iter()
+                .filter(|activation| {
+                    activation.client_id.as_deref() == Some(self.options.id.as_str())
+                })
+                .filter(|activation| self.companions.contains_key(&activation.companion_id))
+                .map(|activation| activation.companion_id.clone())
+                .collect(),
+        );
+        if self
+            .focused
+            .as_deref()
+            .is_none_or(|id| !self.bindings.contains(id))
+        {
+            self.focused = snapshot
+                .active_companion_id
+                .as_deref()
+                .filter(|id| self.bindings.contains(*id))
+                .map(str::to_owned)
+                .or_else(|| self.bindings.first().cloned());
+        }
+        self.cursor = snapshot.cursor.as_option().cloned();
+        previous
+    }
 
+    /// Binds this client to the host state and applies pending activation intent.
+    pub(super) async fn bind(
+        &mut self,
+        host: &Host,
+        snapshot: &w::Snapshot,
+    ) -> Result<bool, Outcome> {
+        let previous = self.restore_snapshot(snapshot);
         if !self.bindings.is_empty() {
             // Re-attaching to an existing host activation must consume initial
             // activation intent so a future move away never auto-steals back (B16).
             self.may_activate = false;
-            self.rebind_existing(host, snapshot).await?;
+            if let Some(target) = self.pending.take() {
+                if !self.bindings.contains(&target) && self.companions.contains_key(&target) {
+                    self.activate_one(host, &target)
+                        .await
+                        .map_err(|error| self.classify(&error))?;
+                    self.bindings.insert(target.clone());
+                }
+                if self.bindings.contains(&target) {
+                    self.focused = Some(target);
+                }
+            }
             return Ok(previous != self.bindings);
         }
 
@@ -234,8 +257,8 @@ impl SessionTransport {
             return Ok(previous != self.bindings);
         }
         match self.activate_one(host, &wanted).await {
-            Ok(binding) => {
-                self.bindings.insert(wanted.clone(), binding);
+            Ok(()) => {
+                self.bindings.insert(wanted.clone());
                 self.focused = Some(wanted);
                 self.may_activate = false;
                 self.pending = None;
@@ -245,46 +268,13 @@ impl SessionTransport {
         }
     }
 
-    async fn rebind_existing(
-        &mut self,
-        host: &Host,
-        snapshot: &w::Snapshot,
-    ) -> Result<(), Outcome> {
-        if let Some(target) = self.pending.take() {
-            if !self.bindings.contains_key(&target) && self.companions.contains_key(&target) {
-                match self.activate_one(host, &target).await {
-                    Ok(binding) => {
-                        self.bindings.insert(target.clone(), binding);
-                    }
-                    Err(error) => return Err(self.classify(&error)),
-                }
-            }
-            if self.bindings.contains_key(&target) {
-                self.focused = Some(target);
-            }
-        }
-        if self
-            .focused
-            .as_deref()
-            .is_none_or(|id| !self.bindings.contains_key(id))
-        {
-            self.focused = snapshot
-                .active_companion_id
-                .as_deref()
-                .filter(|id| self.bindings.contains_key(*id))
-                .map(str::to_owned)
-                .or_else(|| self.bindings.keys().next().cloned());
-        }
-        Ok(())
-    }
-
     /// Activates `companion_id` onto this client without releasing other
     /// companions already resident here.
     pub(super) async fn activate_one(
         &self,
         host: &Host,
         companion_id: &str,
-    ) -> Result<Binding, connectrpc::ConnectError> {
+    ) -> Result<(), connectrpc::ConnectError> {
         let activation = host
             .client
             .activate(w::ActivationRequest {
@@ -301,9 +291,7 @@ impl SessionTransport {
             companion = %activation.companion_id,
             "the client is an active device"
         );
-        Ok(Binding {
-            companion_id: activation.companion_id,
-        })
+        Ok(())
     }
 
     /// Releases `companion_id` from this client.
@@ -343,5 +331,63 @@ impl SessionTransport {
             event: Some(event),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_replacement_snapshot_changes_residents_and_cursor_together() {
+        let mut transport = SessionTransport::new(
+            PathBuf::new(),
+            Options::default(),
+            Connection::default(),
+            None,
+            &Arc::new(ClientPlugins::default()),
+        );
+        let snapshot = |epoch: &str, seq, resident: &str, other: &str| w::Snapshot {
+            active_companion_id: Some(resident.into()),
+            cursor: Some(w::Cursor {
+                epoch: epoch.into(),
+                seq,
+                ..Default::default()
+            })
+            .into(),
+            companions: [resident, other]
+                .into_iter()
+                .map(|id| w::Companion {
+                    id: id.into(),
+                    ..Default::default()
+                })
+                .collect(),
+            activations: [
+                (resident, "desktop"),
+                (other, "phone"),
+                ("absent", "desktop"),
+            ]
+            .into_iter()
+            .map(|(id, client)| w::Activation {
+                companion_id: id.into(),
+                client_id: Some(client.into()),
+                ..Default::default()
+            })
+            .collect(),
+            ..Default::default()
+        };
+        let first = snapshot("boot-a", 9, "ene", "kai");
+        assert_eq!(transport.restore_snapshot(&first), BTreeSet::new());
+        assert_eq!(transport.focused_companion_id(), Some("ene"));
+        assert_eq!(transport.cursor.as_ref(), first.cursor.as_option());
+
+        let replacement = snapshot("boot-b", 1, "kai", "ene");
+        assert_eq!(
+            transport.restore_snapshot(&replacement),
+            BTreeSet::from(["ene".to_owned()])
+        );
+        assert_eq!(transport.bindings, BTreeSet::from(["kai".to_owned()]));
+        assert_eq!(transport.focused_companion_id(), Some("kai"));
+        assert_eq!(transport.cursor.as_ref(), replacement.cursor.as_option());
     }
 }

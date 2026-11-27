@@ -81,10 +81,10 @@ pub(super) async fn command(session: &mut Session, host: &Host, command: Command
 async fn cmd_serve(session: &mut Session, host: &Host, companion_id: String) -> Step {
     let was_empty = session.transport.bindings.is_empty();
     session.transport.focused = Some(companion_id.clone());
-    if !session.transport.bindings.contains_key(&companion_id) {
+    if !session.transport.bindings.contains(&companion_id) {
         match session.transport.activate_one(host, &companion_id).await {
-            Ok(binding) => {
-                session.transport.bindings.insert(companion_id, binding);
+            Ok(()) => {
+                session.transport.bindings.insert(companion_id);
                 session.transport.may_activate = false;
                 session.sync_avatars().await;
                 if was_empty {
@@ -107,13 +107,10 @@ async fn cmd_serve(session: &mut Session, host: &Host, companion_id: String) -> 
 
 async fn cmd_activate_companion(session: &mut Session, host: &Host, companion_id: String) -> Step {
     let was_empty = session.transport.bindings.is_empty();
-    if !session.transport.bindings.contains_key(&companion_id) {
+    if !session.transport.bindings.contains(&companion_id) {
         match session.transport.activate_one(host, &companion_id).await {
-            Ok(binding) => {
-                session
-                    .transport
-                    .bindings
-                    .insert(companion_id.clone(), binding);
+            Ok(()) => {
+                session.transport.bindings.insert(companion_id.clone());
                 if session.transport.focused.is_none() {
                     session.transport.focused = Some(companion_id);
                 }
@@ -151,7 +148,7 @@ async fn cmd_release_companion(session: &mut Session, host: &Host, companion_id:
     session.transport.bindings.remove(&companion_id);
     session.audio.clear_speaking_if(&companion_id);
     if session.transport.focused.as_deref() == Some(companion_id.as_str()) {
-        session.transport.focused = session.transport.bindings.keys().next().cloned();
+        session.transport.focused = session.transport.bindings.first().cloned();
     }
     session.sync_avatars().await;
     if session.transport.bindings.is_empty() {
@@ -166,7 +163,7 @@ async fn cmd_set_avatar_scale(session: &mut Session, scale: f32) -> Step {
     let scale = scale.clamp(50., 200.);
     session.devices.avatar_scale = scale;
     let target_ids: Vec<String> = session.transport.focused_companion_id().map_or_else(
-        || session.transport.bindings.keys().cloned().collect(),
+        || session.transport.bindings.iter().cloned().collect(),
         |id| vec![id.to_owned()],
     );
     if target_ids.is_empty() || session.devices.avatar.is_none() {

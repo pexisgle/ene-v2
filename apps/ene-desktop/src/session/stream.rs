@@ -4,7 +4,7 @@
 
 use super::device_commands::OperationOutput;
 use super::{
-    Binding, CAPTURE, LIP, Outcome, SAMPLE, Session, Step,
+    CAPTURE, LIP, Outcome, SAMPLE, Session, Step,
     commands::OperationError,
     stream_audio::{
         AudioOutStream, MicRecvHalf, MicSendHalf, audio_message, handle_audio_frame,
@@ -354,11 +354,28 @@ impl Session {
             Some(w::notification::Event::ActivationUpdated(activation)) => {
                 restart = self.handle_activation_update(activation).await;
             }
+            Some(w::notification::Event::InitialState(snapshot)) => {
+                let previous = self.transport.restore_snapshot(snapshot);
+                restart = previous != self.transport.bindings;
+                if restart {
+                    if self
+                        .audio
+                        .speaking_companion
+                        .as_deref()
+                        .is_some_and(|id| !self.transport.bindings.contains(id))
+                    {
+                        self.audio.stop_playback();
+                        self.audio.speaking_companion = None;
+                    }
+                    self.devices.sensor = Sensor::default();
+                }
+                self.sync_avatars().await;
+            }
             Some(w::notification::Event::Companion(companion)) => {
                 self.transport
                     .companions
                     .insert(companion.id.clone(), (**companion).clone());
-                if self.transport.bindings.contains_key(&companion.id) {
+                if self.transport.bindings.contains(&companion.id) {
                     self.sync_avatars().await;
                 }
                 if self.transport.pending.as_deref() == Some(companion.id.as_str()) {
@@ -391,32 +408,21 @@ impl Session {
     async fn handle_activation_update(&mut self, activation: &w::Activation) -> bool {
         let ours = activation.client_id.as_deref() == Some(self.transport.options.id.as_str());
         if ours {
-            if !self
+            if self
                 .transport
                 .bindings
-                .contains_key(&activation.companion_id)
+                .insert(activation.companion_id.clone())
             {
-                self.transport.bindings.insert(
-                    activation.companion_id.clone(),
-                    Binding {
-                        companion_id: activation.companion_id.clone(),
-                    },
-                );
                 if self.transport.focused.is_none() {
                     self.transport.focused = Some(activation.companion_id.clone());
                 }
                 self.sync_avatars().await;
                 return self.transport.bindings.len() == 1;
             }
-        } else if self
-            .transport
-            .bindings
-            .remove(&activation.companion_id)
-            .is_some()
-        {
+        } else if self.transport.bindings.remove(&activation.companion_id) {
             self.audio.clear_speaking_if(&activation.companion_id);
             if self.transport.focused.as_deref() == Some(activation.companion_id.as_str()) {
-                self.transport.focused = self.transport.bindings.keys().next().cloned();
+                self.transport.focused = self.transport.bindings.first().cloned();
             }
             self.sync_avatars().await;
             if self.transport.bindings.is_empty() {
@@ -449,49 +455,4 @@ fn interval(period: Duration) -> tokio::time::Interval {
     let mut interval = tokio::time::interval(period);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     interval
-}
-
-/// What one operation claims about the client it was sent to.
-pub(super) struct Claim<'a> {
-    pub(super) client_id: &'a str,
-    pub(super) subscription_id: &'a str,
-    pub(super) work_id: Option<&'a str>,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(super) enum AdmitError {
-    #[error("this operation is addressed to `{0}`")]
-    WrongClient(String),
-    #[error("this operation belongs to an older device stream")]
-    StaleStream,
-    #[error("this client is not the active device for any companion")]
-    NotActiveDevice,
-}
-
-/// Whether this client may execute the operation, or why it must not.
-///
-/// An operation executes when it names this client's own identity and its
-/// current device stream, and either belongs to a work session bound to this
-/// client or this client is the active device for a companion. The tests below
-/// enumerate every combination of the fields, so this decision is checked in
-/// full rather than sampled.
-pub(super) fn admits(
-    our_id: &str,
-    our_subscription: &str,
-    binding: Option<&Binding>,
-    claim: &Claim<'_>,
-) -> Result<(), AdmitError> {
-    if claim.client_id != our_id {
-        return Err(AdmitError::WrongClient(claim.client_id.to_owned()));
-    }
-    if !our_subscription.is_empty() && claim.subscription_id != our_subscription {
-        return Err(AdmitError::StaleStream);
-    }
-    if claim.work_id.is_some_and(|work_id| !work_id.is_empty()) {
-        return Ok(());
-    }
-    match binding {
-        Some(_) => Ok(()),
-        None => Err(AdmitError::NotActiveDevice),
-    }
 }

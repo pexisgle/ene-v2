@@ -4,7 +4,6 @@
 
 use super::Session;
 use super::device_commands::{LookAtInput, MotionInput, OperationOutput, PerchInput};
-use super::stream::{AdmitError, Claim, admits};
 #[cfg(windows)]
 use crate::avatar::Avatar;
 use crate::{avatar, capabilities, host::Host, perception::Watch};
@@ -178,7 +177,7 @@ impl Session {
             .as_option()
             .ok_or(OperationError::WorkSessionUnavailable)?;
         if session.client_id != self.transport.options.id
-            || !self.transport.bindings.contains_key(session.companion_id)
+            || !self.transport.bindings.contains(session.companion_id)
             || !work
                 .runs
                 .iter()
@@ -265,15 +264,15 @@ impl Session {
             subscription_id: &operation.subscription_id,
             work_id: operation.work_id.as_deref(),
         };
-        let binding = if !operation.companion_id.is_empty() {
-            self.transport.bindings.get(&operation.companion_id)
+        let holds_companion = if !operation.companion_id.is_empty() {
+            self.transport.bindings.contains(&operation.companion_id)
         } else {
-            self.transport.focused_binding()
+            self.transport.focused_companion_id().is_some()
         };
         admits(
             &self.transport.options.id,
             &self.transport.subscription,
-            binding,
+            holds_companion,
             &claim,
         )
         .err()
@@ -448,5 +447,48 @@ impl Session {
             applied: true,
             enabled,
         })
+    }
+}
+
+/// What one operation claims about the client it was sent to.
+pub(super) struct Claim<'a> {
+    pub(super) client_id: &'a str,
+    pub(super) subscription_id: &'a str,
+    pub(super) work_id: Option<&'a str>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum AdmitError {
+    #[error("this operation is addressed to `{0}`")]
+    WrongClient(String),
+    #[error("this operation belongs to an older device stream")]
+    StaleStream,
+    #[error("this client is not the active device for any companion")]
+    NotActiveDevice,
+}
+
+/// Whether this client may execute the operation, or why it must not.
+///
+/// An operation executes when it names this client's own identity and its
+/// current device stream, and either belongs to a work session bound to this
+/// client or this client is the active device for a companion. The tests below
+/// enumerate every combination of the fields, so this decision is checked in
+/// full rather than sampled.
+pub(super) fn admits(
+    our_id: &str,
+    our_subscription: &str,
+    holds_companion: bool,
+    claim: &Claim<'_>,
+) -> Result<(), AdmitError> {
+    if claim.client_id != our_id {
+        return Err(AdmitError::WrongClient(claim.client_id.to_owned()));
+    }
+    if !our_subscription.is_empty() && claim.subscription_id != our_subscription {
+        return Err(AdmitError::StaleStream);
+    }
+    if holds_companion || claim.work_id.is_some_and(|work_id| !work_id.is_empty()) {
+        Ok(())
+    } else {
+        Err(AdmitError::NotActiveDevice)
     }
 }

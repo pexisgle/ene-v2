@@ -89,7 +89,7 @@ impl DeviceBridge {
         }
         let resident: Vec<(String, ene_domain::BodyBinding, Option<PathBuf>)> = transport
             .bindings
-            .keys()
+            .iter()
             .map(|id| {
                 let body = transport.body_binding_for(id);
                 let model = transport.model_for(id);
@@ -141,7 +141,7 @@ impl DeviceBridge {
     ) {
         match event {
             AvatarEvent::Finished { character } => {
-                if transport.bindings.contains_key(&character)
+                if transport.bindings.contains(&character)
                     && let Some(model) = transport.model_for(&character)
                     && let Err(error) = avatar.return_to_idle(&character, &model).await
                 {
@@ -167,7 +167,7 @@ impl DeviceBridge {
             .last_avatar_interaction
             .get(&character)
             .is_none_or(|prev| now.duration_since(*prev) >= DEBOUNCE);
-        if !allow || !transport.bindings.contains_key(&character) {
+        if !allow || !transport.bindings.contains(&character) {
             return;
         }
         self.last_avatar_interaction.insert(character.clone(), now);
@@ -333,7 +333,7 @@ impl DeviceBridge {
             Some(avatar) => {
                 let mut labels: Vec<String> = transport
                     .bindings
-                    .keys()
+                    .iter()
                     .filter_map(|id| avatar.describe(id))
                     .collect();
                 if labels.is_empty() {
