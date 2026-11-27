@@ -4353,6 +4353,7 @@ version = "0.1.8"
 dependencies = [
  "bevy",
  "gltf",
+ "petgraph",
  "serde",
  "serde_json",
  "tempfile",

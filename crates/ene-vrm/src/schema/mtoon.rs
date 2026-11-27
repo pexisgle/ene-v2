@@ -1,9 +1,13 @@
+use crate::loader::invalid;
 use bevy::{
     math::{Affine2, Mat3},
     prelude::*,
     render::render_resource::ShaderType,
 };
-use vrm_spec::vrmc_materials_mtoon_1_0::{OutlineWidthMode, VrmcMaterialsMtoonSchema};
+use serde::Deserialize as _;
+use vrm_spec::vrmc_materials_mtoon_1_0::{
+    OutlineWidthMode, VRMC_MATERIALS_MTOON, VrmcMaterialsMtoonSchema,
+};
 
 #[derive(Clone)]
 pub(crate) struct Toon {
@@ -199,18 +203,21 @@ impl UvTransform {
 }
 
 impl Toon {
-    pub fn compile(schema: VrmcMaterialsMtoonSchema) -> serde_json::Result<Self> {
+    pub fn compile(value: &serde_json::Value) -> std::io::Result<Self> {
+        let shift = value
+            .get("shadingShiftTexture")
+            .filter(|shift| !shift.is_null())
+            .map(gltf::json::texture::Info::deserialize)
+            .transpose()
+            .map_err(invalid)?;
+        let schema = VrmcMaterialsMtoonSchema::deserialize(value).map_err(invalid)?;
+        super::require_v1(&schema.spec_version, VRMC_MATERIALS_MTOON)?;
         let mut params = ToonParams::from(&schema);
         params.shading_shift_texture_scale = schema
             .shading_shift_texture
             .as_ref()
             .and_then(|slot| slot.scale)
             .unwrap_or(1.) as f32;
-        let shift = schema
-            .shading_shift_texture
-            .as_ref()
-            .map(|slot| serde_json::from_value(serde_json::to_value(slot)?))
-            .transpose()?;
         let outline = match schema.outline_width_mode {
             Some(OutlineWidthMode::WorldCoordinates) => OutlineMode::WorldCoordinates,
             Some(OutlineWidthMode::ScreenCoordinates) => OutlineMode::ScreenCoordinates,
@@ -256,7 +263,7 @@ mod tests {
 
     #[test]
     fn native_defaults_and_shift_transform_are_compiled() {
-        let compile = |value| Toon::compile(serde_json::from_value(value).unwrap()).unwrap();
+        let compile = |value| Toon::compile(&value).unwrap();
         let defaults = compile(json!({"specVersion":"1.0"}));
         assert_eq!(defaults.params.shade_color_factor, Vec3::ZERO);
         assert_eq!(defaults.params.matcap_factor, Vec3::ONE);
@@ -290,10 +297,9 @@ mod tests {
 
     #[test]
     fn malformed_native_shift_transform_is_not_ignored() {
-        let authored = serde_json::from_value(json!({"specVersion":"1.0", "shadingShiftTexture":{
+        let authored = json!({"specVersion":"1.0", "shadingShiftTexture":{
             "index":0,"extensions":{"KHR_texture_transform":{"scale":[1]}}
-        }}))
-        .unwrap();
-        assert!(Toon::compile(authored).is_err());
+        }});
+        assert!(Toon::compile(&authored).is_err());
     }
 }

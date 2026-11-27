@@ -26,7 +26,7 @@ use bevy::{
     ecs::entity::MapEntities, platform::collections::HashMap, prelude::*,
     transform::helper::TransformHelper,
 };
-use std::collections::VecDeque;
+use petgraph::{algo::toposort, graphmap::DiGraphMap};
 
 /// What a constrained node takes from its source.
 #[derive(Clone, Copy, Reflect)]
@@ -133,50 +133,21 @@ pub(crate) fn compile_constraints(
 }
 
 /// Orders bindings so a reader never runs before the binding that writes what
-/// it reads. Kahn's algorithm also reports the cycles the spec forbids.
+/// it reads. A self reference or other dependency cycle is invalid.
 fn dependency_order(pending: &[Pending]) -> std::io::Result<Vec<usize>> {
-    // A node carries at most one constraint, so one writer per target is
-    // enough. A binding that reads its own output becomes a self edge and is
-    // reported as a cycle, as the spec requires.
-    let mut writer: HashMap<Entity, usize> = HashMap::default();
-    for (index, item) in pending.iter().enumerate() {
-        writer.insert(item.binding.target, index);
-    }
-    let mut followers = vec![Vec::new(); pending.len()];
-    let mut prerequisites = vec![0usize; pending.len()];
-    for (index, item) in pending.iter().enumerate() {
-        let mut read_by: Vec<usize> = item
-            .reads
-            .iter()
-            .filter_map(|entity| writer.get(entity).copied())
-            .collect();
-        read_by.sort_unstable();
-        read_by.dedup();
-        for prerequisite in read_by {
-            // Every prerequisite writes a node this binding reads, including
-            // the binding itself for a self reference.
-            followers[prerequisite].push(index);
-            prerequisites[index] += 1;
-        }
-    }
-    let mut ready: VecDeque<usize> = (0..pending.len())
-        .filter(|&index| prerequisites[index] == 0)
+    let writer: HashMap<_, _> = pending
+        .iter()
+        .enumerate()
+        .map(|(index, item)| (item.binding.target, index))
         .collect();
-    let mut order = Vec::with_capacity(pending.len());
-    while let Some(next) = ready.pop_front() {
-        order.push(next);
-        for &follower in &followers[next] {
-            prerequisites[follower] -= 1;
-            if prerequisites[follower] == 0 {
-                ready.push_back(follower);
-            }
+    let mut graph = DiGraphMap::<usize, ()>::with_capacity(pending.len(), pending.len());
+    for (index, item) in pending.iter().enumerate() {
+        graph.add_node(index);
+        for prerequisite in item.reads.iter().filter_map(|entity| writer.get(entity)) {
+            graph.add_edge(*prerequisite, index, ());
         }
     }
-    if order.len() == pending.len() {
-        Ok(order)
-    } else {
-        Err(invalid("VRMC constraint cycle"))
-    }
+    toposort(&graph, None).map_err(|_| invalid("VRMC constraint cycle"))
 }
 
 fn run_constraints(
