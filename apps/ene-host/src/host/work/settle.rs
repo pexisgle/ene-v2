@@ -1,12 +1,7 @@
 //! Settling a run: the terminal state it records, the session it returns to
 //! idle, the parent it reports to and the stall clock it releases.
-use super::{Run, RunState, Runs, WorkStatus, notify_finished, notify_status, retire};
-use crate::host::{
-    agent::{self, WorkReports},
-    db::Store,
-    error::Failure,
-    notify::Notifier,
-};
+use super::{Run, RunState, Runs, WorkStatus, inform, notify_finished, notify_status, retire};
+use crate::host::{agent::WorkReports, db::Store, error::Failure, notify::Notifier};
 use bevy_ecs::prelude::*;
 use rig_core::completion::Message;
 use rig_ecs::prelude::*;
@@ -79,47 +74,38 @@ pub(super) fn finish_run(world: &mut World, mut run: Run, state: RunState, text:
             return;
         }
     };
-    if was_active && let Some(session) = &session {
-        if session.status != WorkStatus::Closed {
-            let _written = store
-                .work_repo()
-                .set_work_status(&session.id, WorkStatus::Idle);
-        }
-        if let Ok(Some(session)) = store.work_repo().work_session(&session.id) {
-            {
-                let mut notifier = world.resource_mut::<Notifier>();
-                notify_status(&mut notifier, &session);
-                notify_finished(&mut notifier, &session, &run);
+    if let Some(session) = &session {
+        {
+            let mut notifier = world.resource_mut::<Notifier>();
+            if was_active {
+                notify_status(&mut notifier, session);
             }
-            if let Some(parent) = agent::agent_of(world, session.companion_id.as_str()) {
-                let raw_report = text.unwrap_or_else(|| {
-                    match state {
-                        RunState::Cancelled => "作業を中断しました",
-                        _ => "作業が終わりました",
-                    }
-                    .to_owned()
-                });
-                let report = if raw_report.starts_with('[') {
-                    raw_report
-                } else {
-                    format!("[作業結果 (work_id: {})] {raw_report}", session.id)
-                };
-                let author = Author::agent(
-                    agent::work_agent_id(&session.id),
-                    Some(RequestId(run_id.clone())),
-                );
-                world
-                    .trigger(Deliver::new(parent, report, DeliveryMode::Queue).with_author(author));
-            }
+            notify_finished(&mut notifier, session, &run);
         }
-    } else if let Some(session) = &session {
-        notify_finished(&mut world.resource_mut::<Notifier>(), session, &run);
-    }
-    if session
-        .as_ref()
-        .is_some_and(|session| session.status == WorkStatus::Closed)
-    {
-        retire(world, &run.work_id);
+        if was_active {
+            let raw_report = text.unwrap_or_else(|| {
+                match state {
+                    RunState::Cancelled => "作業を中断しました",
+                    _ => "作業が終わりました",
+                }
+                .to_owned()
+            });
+            let report = if raw_report.starts_with('[') {
+                raw_report
+            } else {
+                format!("[作業結果 (work_id: {})] {raw_report}", session.id)
+            };
+            inform(
+                world,
+                session.companion_id.as_str(),
+                &run,
+                report,
+                DeliveryMode::Queue,
+            );
+        }
+        if session.status == WorkStatus::Closed {
+            retire(world, &run.work_id);
+        }
     }
     world.resource_mut::<Runs>().forget(&run.run_id);
     let reports = &mut world.resource_mut::<WorkReports>();

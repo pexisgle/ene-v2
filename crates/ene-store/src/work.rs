@@ -2,7 +2,7 @@
 
 use crate::row::{FromRow, row_fields};
 use crate::{
-    Store, StoreError,
+    Store,
     error::Result,
     json_column, require_found, to_json,
     util::{now, or_stamp},
@@ -66,7 +66,7 @@ impl<'a> WorkRepo<'a> {
     pub fn work_sessions(&self, companion: &str) -> Result<Vec<WorkSession>> {
         self.0.fetch_all(
             &format!(
-                "SELECT {SESSION_COLUMNS} FROM work_sessions WHERE companion_id = ?1 \
+                "SELECT {SESSION_COLUMNS} FROM work_session_view WHERE companion_id = ?1 \
                  ORDER BY updated_at DESC, id"
             ),
             [companion],
@@ -81,7 +81,7 @@ impl<'a> WorkRepo<'a> {
     pub fn all_work_sessions(&self) -> Result<Vec<WorkSession>> {
         self.0.fetch_all(
             &format!(
-                "SELECT {SESSION_COLUMNS} FROM work_sessions \
+                "SELECT {SESSION_COLUMNS} FROM work_session_view \
                  ORDER BY companion_id, updated_at DESC, id"
             ),
             [],
@@ -91,7 +91,7 @@ impl<'a> WorkRepo<'a> {
 
     pub fn work_session(&self, id: &str) -> Result<Option<WorkSession>> {
         self.0.fetch(
-            &format!("SELECT {SESSION_COLUMNS} FROM work_sessions WHERE id = ?1"),
+            &format!("SELECT {SESSION_COLUMNS} FROM work_session_view WHERE id = ?1"),
             [id],
             WorkSession::from_row,
         )
@@ -108,7 +108,11 @@ impl<'a> WorkRepo<'a> {
                 session.id,
                 session.companion_id.as_str(),
                 session.title,
-                session.status.as_str(),
+                if session.status == WorkStatus::Closed {
+                    "closed"
+                } else {
+                    "idle"
+                },
                 session.client_id,
                 or_stamp(&session.created_at, &stamp),
                 or_stamp(&session.updated_at, &stamp),
@@ -116,23 +120,16 @@ impl<'a> WorkRepo<'a> {
         Ok(())
     }
 
-    pub fn set_work_status(&self, id: &str, status: WorkStatus) -> Result<()> {
+    pub fn close_work(&self, id: &str) -> Result<()> {
         let changed = self
             .0
             .conn()
-            .prepare_cached("UPDATE work_sessions SET status = ?2, updated_at = ?3 WHERE id = ?1")?
-            .execute(params![id, status.as_str(), now()])?;
+            .prepare_cached(
+                "UPDATE work_sessions SET status = 'closed',
+                    updated_at = CASE WHEN status = 'closed' THEN updated_at ELSE ?2 END WHERE id = ?1",
+            )?
+            .execute(params![id, now()])?;
         require_found(changed, "work session not found")
-    }
-
-    pub fn close_work(&self, id: &str) -> Result<()> {
-        let session = self
-            .work_session(id)?
-            .ok_or_else(|| StoreError::NotFound("work session not found".into()))?;
-        if session.status == WorkStatus::Closed {
-            return Ok(());
-        }
-        self.set_work_status(id, WorkStatus::Closed)
     }
 
     /// Reads the run history, including any currently pending approval.
@@ -199,7 +196,7 @@ impl<'a> WorkRepo<'a> {
         self.0.write_tx(|transaction| {
             if open_state(run.state) {
                 let changed = transaction.prepare_cached(
-                    "UPDATE work_sessions SET status = 'active', updated_at = ?2 WHERE id = ?1 AND status <> 'closed'",
+                    "UPDATE work_sessions SET updated_at = ?2 WHERE id = ?1 AND status <> 'closed'",
                 )?.execute(params![run.work_id, stamp])?;
                 require_found(changed, "no open work session")?;
             }
@@ -239,6 +236,9 @@ impl<'a> WorkRepo<'a> {
                 ])?;
             require_found(changed, "run not found")?;
             if run.state.is_terminal() {
+                transaction.prepare_cached(
+                    "UPDATE work_sessions SET updated_at = ?2 WHERE id = ?1 AND status <> 'closed'",
+                )?.execute(params![run.work_id, now])?;
                 let failure = Failure::new(
                     "work_run_finished",
                     "the operation was still queued when its work run ended",

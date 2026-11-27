@@ -28,7 +28,7 @@ use rusqlite_migration::{HookResult, M, Migrations};
 pub const BASELINE_VERSION: i64 = 6;
 
 /// Latest database schema version managed by [`ladder_steps`].
-pub const VERSION: i64 = 17;
+pub const VERSION: i64 = 18;
 
 /// Every version this host applies above the baseline, in order. The position
 /// in this table is the version, so adding a row is the only way to add a
@@ -118,6 +118,20 @@ const STEPS_ABOVE_BASELINE: &[(&str, &str)] = &[
             request_id TEXT NOT NULL,
             PRIMARY KEY (work_id, request_key)
         ) WITHOUT ROWID;",
+    ),
+    (
+        "0018_derive_work_session_activity",
+        "UPDATE work_sessions SET status = 'idle' WHERE status = 'active';
+        CREATE VIEW work_session_view AS
+          SELECT s.id, s.companion_id, s.title,
+                 CASE
+                   WHEN s.status = 'closed' THEN 'closed'
+                   WHEN EXISTS (SELECT 1 FROM work_runs r
+                                WHERE r.work_id = s.id AND r.state IN ('starting','running')) THEN 'active'
+                   ELSE s.status
+                 END AS status,
+                 s.client_id, s.created_at, s.updated_at
+            FROM work_sessions s;",
     ),
 ];
 

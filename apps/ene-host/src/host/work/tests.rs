@@ -84,18 +84,11 @@ fn a_session_keeps_one_agent_across_runs_and_retires_it_with_the_session() {
 
     run(&store, "run-b", RunState::Running);
     let stale = agent(&mut world, "run-a");
-    store
-        .work_repo()
-        .set_work_status("w1", WorkStatus::Active)
-        .unwrap();
     restore(&mut world).unwrap();
     assert_eq!(agent_of(&mut world, "w1"), Some(kept));
     assert!(world.get::<WorkAgent>(stale).is_none());
 
-    store
-        .work_repo()
-        .set_work_status("w1", WorkStatus::Closed)
-        .unwrap();
+    store.work_repo().close_work("w1").unwrap();
     restore(&mut world).unwrap();
     assert!(agent_of(&mut world, "w1").is_none());
 }

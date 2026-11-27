@@ -118,9 +118,7 @@ pub(crate) fn start(world: &mut World, request: &w::StartWorkRequest) -> Result<
     };
     store.work_repo().insert_work_session(&session)?;
     if let Err(error) = start_run(world, &session, &request.instruction, None) {
-        let _written = store
-            .work_repo()
-            .set_work_status(&session.id, WorkStatus::Closed);
+        store.work_repo().close_work(&session.id)?;
         retire(world, &session.id);
         return Err(error);
     }
@@ -202,9 +200,6 @@ pub(crate) fn start_run(
     };
     if let Some(error) = failure {
         let failed = fail_run(&store, &run, &error)?;
-        store
-            .work_repo()
-            .set_work_status(&session.id, WorkStatus::Idle)?;
         let session = require_session(&store, &session.id)?;
         let mut notifier = world.resource_mut::<Notifier>();
         notify_status(&mut notifier, &session);

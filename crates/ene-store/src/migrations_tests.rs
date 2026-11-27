@@ -201,7 +201,7 @@ fn upgrades_v6_database_in_place_preserving_existing_rows() {
     assert_eq!(client.granted_capabilities, [] as [String; 0]);
 
     let work: WorkSession = store.work_repo().work_session("work-v6").unwrap().unwrap();
-    assert_eq!(work.status, WorkStatus::Active);
+    assert_eq!(work.status, WorkStatus::Idle);
 
     let recorded: i64 = store
         .conn()
@@ -315,7 +315,7 @@ fn v11_operations_without_a_recorded_owner_are_never_replayed() {
 
 #[test]
 fn work_wait_state_is_recovered_from_current_approvals() {
-    use ene_domain::RunState;
+    use ene_domain::{RunState, WorkStatus};
     use ene_policy::ApprovalStatus;
 
     let dir = tempfile::tempdir().unwrap();
@@ -324,7 +324,11 @@ fn work_wait_state_is_recovered_from_current_approvals() {
         let mut conn = Connection::open(&path).unwrap();
         apply_ladder(&mut conn, ladder_steps().into_iter().take(13).collect()).unwrap();
         conn.execute_batch(
-            "INSERT INTO work_runs (run_id, work_id, instruction, state, pending_request_id,
+            "INSERT INTO work_sessions (id, companion_id, title, status, created_at, updated_at)
+                  VALUES ('work', 'ene', 'with run', 'idle', '2026-01-01', '2026-01-01'),
+                         ('old-active', 'ene', 'no run', 'active', '2026-01-01', '2026-01-01'),
+                         ('closed', 'ene', 'closed', 'closed', '2026-01-01', '2026-01-01');
+             INSERT INTO work_runs (run_id, work_id, instruction, state, pending_request_id,
                                     started_at, updated_at)
                   VALUES ('run', 'work', 'continue', 'waiting_input', 'stale', '2026-01-01', '2026-01-01');
              INSERT INTO approval_requests (request_id, session_id, run_id, work_id,
@@ -337,6 +341,10 @@ fn work_wait_state_is_recovered_from_current_approvals() {
     }
     let store = Store::open(&path).unwrap();
     let work = store.work_repo();
+    let state = |id| work.work_session(id).unwrap().unwrap().status;
+    assert_eq!(state("old-active"), WorkStatus::Idle);
+    assert_eq!(state("closed"), WorkStatus::Closed);
+    assert_eq!(state("work"), WorkStatus::Active);
     let run = work.active_run("work").unwrap().unwrap();
     assert_eq!(
         work.run_executor(&run.run_id).unwrap(),
@@ -362,6 +370,7 @@ fn work_wait_state_is_recovered_from_current_approvals() {
     approvals.request_user_approval("auto").unwrap();
     run.state = RunState::Cancelled;
     work.update_run(&run).unwrap();
+    assert_eq!(state("work"), WorkStatus::Idle);
     let terminal = work.run("run").unwrap().unwrap();
     assert_eq!(terminal.state, RunState::Cancelled);
     assert!(terminal.pending_request_id.is_none());
