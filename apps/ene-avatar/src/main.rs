@@ -130,13 +130,14 @@
 //! ```json
 //! {"event":"state","character":"ene","status":"ready","error":null}
 //! {"event":"state","character":"ene","status":"error","error":"読み込み失敗の理由"}
-//! {"event":"finished","character":"ene"}
+//! {"event":"finished","character":"ene","request_id":9}
 //! {"event":"click","character":"ene"}
 //! ```
 //!
 //! 状態は`loading`、`ready`、`suspended`（出力なし）、`error`です。
 //! 失敗したファイルを修復した後は同じ設定を`set`すると再試行します。
 //! `finished`はループしないモーションの終了、`click`はドラッグせずにクリックした通知です。
+//! `finished`の`request_id`は再生を開始した`motion`要求のIDがあるときに付きます。
 //!
 //! 入力は1行64KiB以内です。不正なJSONなど要求IDを取得できない入力のエラーは`id:0`で返します。
 //! 標準入力のEOFでも終了します。終了時も標準出力を読み続けてください。

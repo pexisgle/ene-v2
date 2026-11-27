@@ -164,6 +164,9 @@ pub enum AvatarEvent {
     },
     Finished {
         character: String,
+        /// The motion request that began this playback, when there was one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
     },
     Click {
         character: String,
@@ -174,7 +177,7 @@ impl AvatarEvent {
     pub fn character(&self) -> &str {
         match self {
             Self::State { character, .. }
-            | Self::Finished { character }
+            | Self::Finished { character, .. }
             | Self::Click { character } => character,
         }
     }

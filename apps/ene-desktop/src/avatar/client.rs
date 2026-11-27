@@ -91,6 +91,7 @@ pub(super) struct ShownCharacter {
     pub(super) state: ModelState,
     pub(super) base_motion: Option<String>,
     pub(super) last_motion: Option<String>,
+    pub(super) motion_request: Option<u64>,
 }
 
 impl ShownCharacter {
@@ -100,6 +101,7 @@ impl ShownCharacter {
             state,
             base_motion: None,
             last_motion: None,
+            motion_request: None,
         }
     }
 }
@@ -201,7 +203,7 @@ impl Avatar {
     }
 
     /// The timeout covers queueing, pipe writes and the renderer reply.
-    pub(super) async fn call(&mut self, command: Command) -> Result<(), AvatarError> {
+    pub(super) async fn call(&mut self, command: Command) -> Result<u64, AvatarError> {
         if !self.is_healthy() {
             return Err(AvatarError::Unhealthy);
         }
@@ -221,7 +223,7 @@ impl Avatar {
             answer.await.map_err(|_| AvatarError::Exited)?
         };
         match tokio::time::timeout(AVATAR_CALL_TIMEOUT, exchange).await {
-            Ok(result) => result,
+            Ok(result) => result.map(|()| id),
             Err(_) => {
                 if let Some(worker) = &self.worker {
                     worker.abort();

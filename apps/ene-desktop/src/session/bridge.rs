@@ -158,9 +158,12 @@ impl DeviceBridge {
         event: AvatarEvent,
     ) {
         match event {
-            AvatarEvent::Finished { character } => {
+            AvatarEvent::Finished {
+                character,
+                request_id,
+            } => {
                 if transport.bindings.contains(&character)
-                    && let Err(error) = avatar.return_to_idle(&character).await
+                    && let Err(error) = avatar.return_to_idle(&character, request_id).await
                 {
                     tracing::warn!(%character, %error, "the renderer could not return to idle");
                 }

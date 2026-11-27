@@ -25,6 +25,7 @@ pub struct Character {
     pub root: Option<Entity>,
     model: Handle<Gltf>,
     motion: Option<Handle<AnimationClip>>,
+    motion_request: Option<u64>,
     /// A motion the renderer is waiting to load before it fades to it.
     pending: Option<Pending>,
     /// The playback node for the latest motion, separate from fading clips.
@@ -193,6 +194,7 @@ pub fn reload(world: &mut World, entity: Entity, request: Option<u64>) {
     };
     character.model = model;
     character.motion = motion;
+    character.motion_request = request;
     character.pending = request.map(Pending::Initial);
     character.main = None;
     character.fading.clear();

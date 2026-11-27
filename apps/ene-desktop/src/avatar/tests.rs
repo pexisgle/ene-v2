@@ -290,6 +290,55 @@ fn recovery_replaces_the_previous_renderer_error() {
     }
 }
 
+#[tokio::test]
+async fn a_finish_queued_with_its_reply_returns_only_the_matching_motion_to_idle() {
+    let shown = CharacterConfig::for_model("ene.vrm");
+    let (mut avatar, mut renderer) = Avatar::for_test(HashMap::from([("ene".to_owned(), shown)]));
+    let peer = tokio::spawn(async move {
+        let Some(WriteItem::Request { id, reply, .. }) = renderer.requests.recv().await else {
+            panic!("expected a motion request");
+        };
+        for request_id in [id - 1, id] {
+            renderer
+                .events
+                .try_send(AvatarEvent::Finished {
+                    character: "ene".into(),
+                    request_id: Some(request_id),
+                })
+                .unwrap();
+        }
+        reply.send(Ok(())).unwrap();
+
+        let Some(WriteItem::Request { line, reply, .. }) = renderer.requests.recv().await else {
+            panic!("the matching finish must request the idle motion");
+        };
+        assert!(matches!(
+            serde_json::from_str::<Request>(&line).unwrap().command,
+            Command::Motion { looping: true, .. }
+        ));
+        reply.send(Ok(())).unwrap();
+    });
+    avatar
+        .show_preset("ene", "wave", Some(Path::new("wave.vrma")))
+        .await
+        .unwrap();
+
+    let finishes = avatar.notifications();
+    assert_eq!(finishes.len(), 2);
+    for (index, event) in finishes.into_iter().enumerate() {
+        let AvatarEvent::Finished {
+            character,
+            request_id,
+        } = event
+        else {
+            panic!("expected a playback completion");
+        };
+        avatar.return_to_idle(&character, request_id).await.unwrap();
+        assert_eq!(avatar.shown["ene"].config.looping, index == 1);
+    }
+    peer.await.unwrap();
+}
+
 /// Explicit body placement is sent atomically. Unrelated scale changes keep
 /// the renderer's current placement, independently of cached body settings.
 #[tokio::test]

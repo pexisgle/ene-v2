@@ -212,6 +212,7 @@ impl MotionChange {
         };
         c.config.motion = self.path.take();
         c.config.looping = self.looping;
+        c.motion_request = self.request;
         if let Some((clip, node)) = playing {
             c.play_motion(&mut player, node);
             c.motion = Some(clip);
@@ -296,6 +297,7 @@ pub fn notify_finished(
         {
             events.write(Notification(AvatarEvent::Finished {
                 character: c.id.clone(),
+                request_id: c.motion_request,
             }));
         }
     }

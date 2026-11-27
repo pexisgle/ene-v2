@@ -78,22 +78,27 @@ impl Avatar {
             .shown
             .get(character)
             .ok_or(AvatarError::UnknownCharacter)?;
-        if !looping || !shown.config.looping || shown.config.motion != clip {
-            self.call(Command::Motion {
-                character: character.to_owned(),
-                motion: clip.clone(),
-                looping,
-            })
-            .await?;
+        let request = if !looping || !shown.config.looping || shown.config.motion != clip {
+            let id = self
+                .call(Command::Motion {
+                    character: character.to_owned(),
+                    motion: clip.clone(),
+                    looping,
+                })
+                .await?;
             self.drain_incoming_events();
             self.events.retain(|event| {
-                !(matches!(event, AvatarEvent::Finished { .. }) && event.character() == character)
+                !matches!(event, AvatarEvent::Finished { character: source, request_id: None } if source == character)
             });
-        }
+            Some(id)
+        } else {
+            shown.motion_request
+        };
         if let Some(shown) = self.shown.get_mut(character) {
             shown.config.motion = clip;
             shown.config.looping = looping;
             shown.last_motion = Some(preset.to_owned());
+            shown.motion_request = request;
             if is_persistent_idle(preset) {
                 shown.base_motion = Some(preset.to_owned());
             }
@@ -101,12 +106,14 @@ impl Avatar {
         Ok(())
     }
 
-    pub async fn return_to_idle(&mut self, character: &str) -> Result<(), AvatarError> {
-        if let Some(shown) = self
-            .shown
-            .get(character)
-            .filter(|shown| !shown.config.looping)
-        {
+    pub async fn return_to_idle(
+        &mut self,
+        character: &str,
+        request_id: Option<u64>,
+    ) -> Result<(), AvatarError> {
+        if let Some(shown) = self.shown.get(character).filter(|shown| {
+            !shown.config.looping && request_id.is_none_or(|id| shown.motion_request == Some(id))
+        }) {
             let preset =
                 idle_return_preset(shown.base_motion.as_deref(), shown.last_motion.as_deref());
             self.show_preset(character, preset, motion(preset).as_deref())
@@ -144,6 +151,7 @@ impl Avatar {
         if let Some(shown) = self.shown.get_mut(character) {
             if shown.config.model != next.model {
                 shown.state = ModelState::Loading;
+                shown.motion_request = None;
             }
             shown.config = next;
         } else {
@@ -222,7 +230,8 @@ impl Avatar {
             monitor,
             position,
         })
-        .await
+        .await?;
+        Ok(())
     }
 
     /// Queues one mouth amplitude non-blockingly; drops frames when congested.
