@@ -86,10 +86,8 @@ pub(super) enum OperationError {
     #[cfg(windows)]
     #[error("Computer Use requires a bound run")]
     ComputerUseMissingRun,
-    #[cfg(windows)]
     #[error("could not verify the active run in time")]
     RunVerifyTimeout,
-    #[cfg(windows)]
     #[error("could not verify the active run")]
     RunVerifyFailed,
     #[cfg(windows)]
@@ -112,8 +110,10 @@ pub(super) enum OperationError {
     NoRendererForMotion,
     #[error("「目」はオフです")]
     EyesDisabled,
-    #[error("workspace operations require a work session")]
+    #[error("workspace operations require a work session and run")]
     WorkMissingSession,
+    #[error("the workspace operation is no longer active")]
+    WorkOperationInactive,
     #[error("the workspace is busy")]
     WorkspaceBusy,
     #[error("no workspace is configured")]

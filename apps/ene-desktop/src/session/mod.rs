@@ -28,6 +28,7 @@ mod stream;
 mod stream_audio;
 mod transport;
 mod window_commands;
+mod workspace_calls;
 
 use self::{
     audio_pipeline::AudioPipeline, bridge::DeviceBridge, phase::ConnectionPhase,

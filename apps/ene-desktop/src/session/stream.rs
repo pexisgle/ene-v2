@@ -2,6 +2,7 @@
 //!
 //! The audio and capture branches of the loop live in [`super::stream_audio`].
 
+#[cfg(windows)]
 use super::device_commands::OperationOutput;
 use super::{
     CAPTURE, LIP, Outcome, SAMPLE, Session, Step,
@@ -11,6 +12,7 @@ use super::{
         handle_capture_tick, handle_mic_retry, handle_transcription_frame, open_audio_input_stream,
         open_audio_output_stream, retry_wait, transcription_message,
     },
+    workspace_calls::WorkspaceCalls,
 };
 use crate::{
     host::Host,
@@ -20,8 +22,6 @@ use crate::{
 };
 use ene_rpc as w;
 use std::time::Duration;
-use tokio::task::JoinSet;
-use tokio_util::sync::{CancellationToken, DropGuard};
 
 type DeviceStream = connectrpc::client::ServerStream<
     <connectrpc::client::HttpClient as connectrpc::client::ClientTransport>::ResponseBody,
@@ -37,12 +37,6 @@ struct PeriodicTimers {
     capture: tokio::time::Interval,
     lip: tokio::time::Interval,
     observations: tokio::task::JoinSet<()>,
-}
-
-struct WorkspaceCalls {
-    // Cancel blocking workers before dropping their async result handles.
-    stop: DropGuard,
-    tasks: JoinSet<w::DeviceOperationResult>,
 }
 
 pub(super) struct StreamLoopState {
@@ -100,8 +94,8 @@ impl Session {
                 let parsed = frame.map(|opt| opt.map(|m| m.to_owned_message()));
                 self.handle_device_frame(host, &mut state.work, parsed).await
             }
-            Some(result) = state.work.tasks.join_next(), if !state.work.tasks.is_empty() => {
-                self.finish_workspace_operation(host, result).await;
+            Some(result) = state.work.finished() => {
+                WorkspaceCalls::report(host, result).await;
                 None
             }
             frame = audio_message(&mut state.output) => {
@@ -121,7 +115,7 @@ impl Session {
             }
             frame = state.subscription.message() => {
                 let parsed = frame.map(|opt| opt.map(|m| m.to_owned_message()));
-                self.handle_subscription_frame(parsed).await
+                self.handle_subscription_frame(&state.work, parsed).await
             }
             Some(command) = self.commands.recv() => {
                 self.handle_loop_command(host, state, command).await
@@ -161,17 +155,6 @@ impl Session {
         }
     }
 
-    async fn finish_workspace_operation(
-        &self,
-        host: &Host,
-        result: Result<w::DeviceOperationResult, tokio::task::JoinError>,
-    ) {
-        match result {
-            Ok(result) => Self::report_operation(host, result).await,
-            Err(error) => tracing::warn!("workspace operation did not finish: {error}"),
-        }
-    }
-
     async fn open_media_streams(
         &mut self,
         host: &Host,
@@ -182,10 +165,7 @@ impl Session {
         let (mic_send, mic_recv) = open_audio_input_stream(self, host).await;
         StreamLoopState {
             device,
-            work: WorkspaceCalls {
-                stop: CancellationToken::new().drop_guard(),
-                tasks: JoinSet::new(),
-            },
+            work: WorkspaceCalls::new(),
             subscription,
             output,
             mic_send,
@@ -228,14 +208,18 @@ impl Session {
 
     async fn handle_subscription_frame(
         &mut self,
+        work: &WorkspaceCalls,
         frame: Result<Option<w::Notification>, connectrpc::ConnectError>,
     ) -> Option<Outcome> {
         match frame {
-            Ok(Some(notification)) => match self.notification(notification).await {
-                Step::Continue => None,
-                Step::Restart => Some(Outcome::Resync("resync requested".into())),
-                Step::Stop => Some(Outcome::Closed),
-            },
+            Ok(Some(notification)) => {
+                work.on_notification(&notification);
+                match self.notification(notification).await {
+                    Step::Continue => None,
+                    Step::Restart => Some(Outcome::Resync("resync requested".into())),
+                    Step::Stop => Some(Outcome::Closed),
+                }
+            }
             Ok(None) => Some(Outcome::Resync("the host closed the subscription".into())),
             Err(error) => Some(self.transport.classify(&error)),
         }
@@ -306,7 +290,7 @@ impl Session {
         &mut self,
         host: &Host,
         work: &mut WorkspaceCalls,
-        mut operation: w::DeviceOperation,
+        operation: w::DeviceOperation,
     ) {
         let refusal = self.refusal(&operation);
         #[cfg(windows)]
@@ -323,33 +307,15 @@ impl Session {
         }
         if operation.capability.starts_with(work_tools::PREFIX) {
             let workspace = self.devices.workspace.clone();
-            let active_work = work.tasks.len();
             let request: Result<_, OperationError> = (|| {
                 if let Some(reason) = refusal {
                     return Err(reason.into());
                 }
-                if operation.work_id.as_deref().is_none_or(str::is_empty) {
-                    return Err(OperationError::WorkMissingSession);
-                }
-                if active_work >= 8 {
-                    return Err(OperationError::WorkspaceBusy);
-                }
-                workspace.ok_or(OperationError::NoWorkspace)
+                let workspace = workspace.ok_or(OperationError::NoWorkspace)?;
+                Ok((work.admit(&operation)?, workspace))
             })();
             match request {
-                Ok(workspace) => {
-                    let client_id = self.transport.options.id.clone();
-                    let input = std::mem::take(&mut operation.input);
-                    let stop = work.stop.token().clone();
-                    work.tasks.spawn(async move {
-                        let output =
-                            Box::pin(workspace.execute(&operation.capability, input, stop))
-                                .await
-                                .map(OperationOutput::External)
-                                .map_err(OperationError::from);
-                        Self::operation_result(&client_id, &operation, output)
-                    });
-                }
+                Ok((run_id, workspace)) => work.spawn(host, operation, run_id, workspace),
                 Err(reason) => {
                     let result =
                         Self::operation_result(&self.transport.options.id, &operation, Err(reason));

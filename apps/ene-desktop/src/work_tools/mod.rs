@@ -32,7 +32,7 @@ const REAP_TIMEOUT: Duration = Duration::from_millis(200);
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum WorkToolError {
-    #[error("the workspace operation lost its device stream")]
+    #[error("the workspace operation was cancelled")]
     Cancelled,
     #[error("the workspace has changed")]
     WorkspaceChanged,

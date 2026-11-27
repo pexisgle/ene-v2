@@ -301,8 +301,10 @@ impl<'a> WorkRepo<'a> {
                     "the operation was still queued when its work run ended",
                 );
                 transaction.prepare_cached(
-                    "UPDATE device_operations SET status = 'failed', failure = ?2, updated_at = ?3
-                     WHERE run_id = ?1 AND status = 'pending'",
+                    "UPDATE device_operations
+                     SET status = CASE status WHEN 'pending' THEN 'failed' ELSE 'uncertain' END,
+                         failure = CASE status WHEN 'pending' THEN ?2 END, updated_at = ?3
+                     WHERE run_id = ?1 AND status IN ('pending','dispatched')",
                 )?.execute(params![run.run_id, to_json(&failure)?, now])?;
             }
             Ok(())
