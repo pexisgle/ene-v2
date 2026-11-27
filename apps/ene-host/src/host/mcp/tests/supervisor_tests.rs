@@ -263,8 +263,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
         Event::Failed {
             id: "c1".into(),
             launch: old_launch.clone(),
-            reason: "old failure".into(),
-            config_error: false,
+            failure: ene_work::mcp::ConnectFailure::Transient("old failure".into()),
         },
         &runtime,
     );
@@ -277,8 +276,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
         Event::Failed {
             id: "c1".into(),
             launch: new_launch.clone(),
-            reason: "obsolete revision".into(),
-            config_error: false,
+            failure: ene_work::mcp::ConnectFailure::Transient("obsolete revision".into()),
         },
         &runtime,
     );

@@ -174,7 +174,7 @@ mod windows_tests {
         let err = resolve_launch("npx", &[empty_dir], None, "", &BTreeMap::new())
             .await
             .unwrap_err();
-        assert!(err.config_error);
+        assert!(matches!(err, ConnectFailure::Configuration(_)));
     }
 
     #[tokio::test]

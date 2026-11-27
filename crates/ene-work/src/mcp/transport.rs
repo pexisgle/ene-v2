@@ -4,13 +4,16 @@ use backon::{BackoffBuilder as _, ExponentialBuilder};
 use ene_domain::settings::McpConnection as McpConfig;
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use rig_agent::tool::server::ToolServerHandle;
-use rig_rmcp::{McpClientHandler, McpConnection};
+use rig_rmcp::{McpClientError, McpClientHandler, McpConnection};
 use rmcp::{
+    ServiceError,
     model::ClientConfig,
+    service::ClientInitializeError,
     transport::{
+        DynamicTransportError,
         child_process::TokioChildProcess,
         streamable_http_client::{
-            StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+            StreamableHttpClientTransport, StreamableHttpClientTransportConfig, StreamableHttpError,
         },
     },
 };
@@ -23,9 +26,17 @@ const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConnectFailure {
-    pub reason: String,
-    pub config_error: bool,
+pub enum ConnectFailure {
+    Configuration(String),
+    Transient(String),
+}
+
+impl ConnectFailure {
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::Configuration(reason) | Self::Transient(reason) => reason,
+        }
+    }
 }
 
 /// Jitters retries within the second half of the exponential delay window.
@@ -43,20 +54,62 @@ pub fn backoff_delay(attempts: u32) -> Duration {
         .unwrap_or(MAX_BACKOFF)
 }
 
-pub fn is_config_error_message(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("auth required")
-        || lower.contains("authrequired")
-        || lower.contains("insufficient scope")
-        || lower.contains("insufficientscope")
-        || lower.contains("401")
-        || lower.contains("403")
-        || lower.contains("unauthorized")
-        || lower.contains("forbidden")
-        || lower.contains("cannot find the file")
-        || lower.contains("no such file")
-        || lower.contains("not found on path")
-        || lower.contains("neither a command nor an endpoint")
+fn connect_failure(error: McpClientError) -> ConnectFailure {
+    match error {
+        McpClientError::Connection(error) => handshake_failure(&error),
+        McpClientError::Request(ServiceError::TransportSend(error)) => transport_failure(&error),
+        McpClientError::Timeout(_) => {
+            ConnectFailure::Transient("MCP tool discovery timed out".into())
+        }
+        McpClientError::Request(_) => ConnectFailure::Transient("MCP tool discovery failed".into()),
+    }
+}
+
+fn handshake_failure(error: &ClientInitializeError) -> ConnectFailure {
+    if error.is_authorization_required() {
+        return ConnectFailure::Configuration("MCP authorization was rejected".into());
+    }
+    match error {
+        ClientInitializeError::LegacyFallbackFailed { fallback, .. } => handshake_failure(fallback),
+        ClientInitializeError::TransportError { error, .. } => transport_failure(error),
+        ClientInitializeError::NoCompatibleProtocolVersion { .. } => {
+            ConnectFailure::Configuration("no compatible MCP protocol version".into())
+        }
+        _ => ConnectFailure::Transient("MCP initialization did not complete".into()),
+    }
+}
+
+fn transport_failure(error: &DynamicTransportError) -> ConnectFailure {
+    use ConnectFailure::{Configuration, Transient};
+    match error
+        .error
+        .downcast_ref::<StreamableHttpError<reqwest::Error>>()
+    {
+        Some(StreamableHttpError::AuthRequired(_) | StreamableHttpError::InsufficientScope(_)) => {
+            Configuration("MCP authorization was rejected".into())
+        }
+        Some(StreamableHttpError::ReservedHeaderConflict(_)) => {
+            Configuration("an MCP header conflicts with a protocol header".into())
+        }
+        Some(StreamableHttpError::HttpStatus(error)) => {
+            Transient(format!("MCP server returned HTTP {}", error.status))
+        }
+        Some(StreamableHttpError::UnexpectedServerResponse(message)) => {
+            // This locked backend puts an unchallenged HTTP status before the peer body.
+            // Only the status token may cross the diagnostic boundary.
+            match message
+                .strip_prefix("HTTP ")
+                .and_then(|rest| rest.split_once(' '))
+            {
+                Some(("401" | "403", _)) => Configuration("MCP authorization was rejected".into()),
+                _ => Transient("MCP server returned an unexpected response".into()),
+            }
+        }
+        Some(StreamableHttpError::Client(error)) if error.is_builder() => {
+            Configuration("MCP HTTP request configuration is invalid".into())
+        }
+        _ => Transient("MCP transport did not complete the request".into()),
+    }
 }
 
 /// Opens either a stdio child-process MCP server or a streamable HTTP MCP server.
@@ -71,10 +124,9 @@ pub async fn open(
     } else if !want.endpoint.endpoint.trim().is_empty() {
         Box::pin(open_http(want, secret, registry, http_client)).await
     } else {
-        Err(ConnectFailure {
-            reason: "the MCP connection names neither a command nor an endpoint".to_owned(),
-            config_error: true,
-        })
+        Err(ConnectFailure::Configuration(
+            "the MCP connection names neither a command nor an endpoint".into(),
+        ))
     }
 }
 
@@ -124,17 +176,17 @@ async fn open_stdio(
         wrap.wrap(process_wrap::tokio::JobObject);
     }
     wrap.wrap(process_wrap::tokio::KillOnDrop);
-    let transport = TokioChildProcess::new(wrap).map_err(|error| ConnectFailure {
-        config_error: error.kind() == std::io::ErrorKind::NotFound,
-        reason: error.to_string(),
-    })?;
-    Box::pin(handler.connect(transport)).await.map_err(|error| {
-        let reason = error.to_string();
-        ConnectFailure {
-            config_error: is_config_error_message(&reason),
-            reason,
+    let transport = TokioChildProcess::new(wrap).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound
+        | std::io::ErrorKind::PermissionDenied
+        | std::io::ErrorKind::InvalidInput => {
+            ConnectFailure::Configuration(format!("MCP process could not start: {error}"))
         }
-    })
+        _ => ConnectFailure::Transient(format!("MCP process could not start: {error}")),
+    })?;
+    Box::pin(handler.connect(transport))
+        .await
+        .map_err(connect_failure)
 }
 
 async fn open_http(
@@ -146,26 +198,17 @@ async fn open_http(
     let handler = McpClientHandler::new(ClientConfig::default(), registry);
     let mut config = StreamableHttpClientTransportConfig::with_uri(want.endpoint.endpoint.trim());
     for (name, value) in &want.headers {
-        let header_name =
-            HeaderName::from_bytes(name.trim().as_bytes()).map_err(|error| ConnectFailure {
-                reason: format!("invalid MCP header `{name}`: {error}"),
-                config_error: true,
-            })?;
-        let header_value = HeaderValue::from_str(value).map_err(|error| ConnectFailure {
-            reason: format!("invalid MCP header value for `{name}`: {error}"),
-            config_error: true,
+        let header_name = HeaderName::from_bytes(name.trim().as_bytes()).map_err(|error| {
+            ConnectFailure::Configuration(format!("invalid MCP header name: {error}"))
         })?;
+        let header_value = sensitive_header(value)?;
         config.custom_headers.insert(header_name, header_value);
     }
     apply_http_auth_headers(&mut config, &want.auth_header, secret)?;
     let transport = StreamableHttpClientTransport::with_client(client, config);
-    Box::pin(handler.connect(transport)).await.map_err(|error| {
-        let reason = error.to_string();
-        ConnectFailure {
-            config_error: is_config_error_message(&reason),
-            reason,
-        }
-    })
+    Box::pin(handler.connect(transport))
+        .await
+        .map_err(connect_failure)
 }
 
 fn apply_http_auth_headers(
@@ -178,6 +221,7 @@ fn apply_http_auth_headers(
     };
     let auth_header = auth_header.trim();
     if auth_header.is_empty() || auth_header.eq_ignore_ascii_case("authorization") {
+        config.custom_headers.remove(&AUTHORIZATION);
         if let Some(bearer) = secret
             .strip_prefix("Bearer ")
             .or_else(|| secret.strip_prefix("bearer "))
@@ -185,27 +229,29 @@ fn apply_http_auth_headers(
         {
             config.auth_header = Some(bearer.to_owned());
         } else if secret.contains(char::is_whitespace) {
-            let header_value = HeaderValue::from_str(secret).map_err(|error| ConnectFailure {
-                reason: format!("invalid MCP credential header: {error}"),
-                config_error: true,
-            })?;
-            config.custom_headers.insert(AUTHORIZATION, header_value);
+            config
+                .custom_headers
+                .insert(AUTHORIZATION, sensitive_header(secret)?);
         } else {
             config.auth_header = Some(secret.to_owned());
         }
         return Ok(());
     }
-    let header_name =
-        HeaderName::from_bytes(auth_header.as_bytes()).map_err(|error| ConnectFailure {
-            reason: format!("invalid MCP auth_header `{auth_header}`: {error}"),
-            config_error: true,
-        })?;
-    let header_value = HeaderValue::from_str(secret).map_err(|error| ConnectFailure {
-        reason: format!("invalid MCP credential value: {error}"),
-        config_error: true,
+    let name = HeaderName::from_bytes(auth_header.as_bytes()).map_err(|error| {
+        ConnectFailure::Configuration(format!("invalid MCP auth header: {error}"))
     })?;
-    config.custom_headers.insert(header_name, header_value);
+    config
+        .custom_headers
+        .insert(name, sensitive_header(secret)?);
     Ok(())
+}
+
+fn sensitive_header(value: &str) -> Result<HeaderValue, ConnectFailure> {
+    let mut header = HeaderValue::from_str(value).map_err(|error| {
+        ConnectFailure::Configuration(format!("invalid MCP header value: {error}"))
+    })?;
+    header.set_sensitive(true);
+    Ok(header)
 }
 
 /// The model-facing name for one server's tool: `mcp_<server>_<tool>`.
@@ -255,11 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn config_errors_and_exposed_names_behave_deterministically() {
-        assert!(is_config_error_message("HTTP 401 Unauthorized"));
-        assert!(is_config_error_message("ENOENT: no such file"));
-        assert!(!is_config_error_message("connection reset by peer"));
-
+    fn exposed_names_behave_deterministically() {
         assert_eq!(
             exposed_name("notes", "id-1234", "search").as_deref(),
             Some("mcp_notes_search")
@@ -274,7 +316,10 @@ mod tests {
     #[test]
     fn http_auth_headers_apply_bearer_custom_scheme_and_named_header() {
         let mut cfg = StreamableHttpClientTransportConfig::with_uri("http://127.0.0.1");
+        cfg.custom_headers
+            .insert(AUTHORIZATION, HeaderValue::from_static("stale"));
         apply_http_auth_headers(&mut cfg, "", Some("Bearer tok-1")).unwrap();
+        assert!(!cfg.custom_headers.contains_key(&AUTHORIZATION));
         assert_eq!(cfg.auth_header.as_deref(), Some("tok-1"));
 
         let mut cfg = StreamableHttpClientTransportConfig::with_uri("http://127.0.0.1");
@@ -301,7 +346,7 @@ mod tests {
         else {
             panic!("expected empty command and endpoint to fail");
         };
-        assert!(err.config_error);
-        assert!(err.reason.contains("neither a command nor an endpoint"));
+        assert!(matches!(err, ConnectFailure::Configuration(_)));
+        assert!(err.reason().contains("neither a command nor an endpoint"));
     }
 }

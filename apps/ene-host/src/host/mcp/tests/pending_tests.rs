@@ -217,8 +217,7 @@ fn assert_late_failure_ignored(mcp: &Mcp, id: &str, old_launch: Launch, new_laun
         Event::Failed {
             id: id.to_owned(),
             launch: old_launch,
-            reason: "late failure".into(),
-            config_error: false,
+            failure: ene_work::mcp::ConnectFailure::Transient("late failure".into()),
         },
         &tokio::runtime::Handle::current(),
     );

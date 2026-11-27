@@ -1,10 +1,7 @@
 //! Backoff, jitter and configuration-hold bookkeeping for failing MCP
 //! connections.
-use super::{
-    settings::{ConnectionStamp, DesiredServers},
-    supervisor::Launch,
-};
-use ene_work::mcp::{backoff_delay, is_config_error_message};
+use super::settings::{ConnectionStamp, DesiredServers};
+use ene_work::mcp::{ConnectFailure, backoff_delay};
 use rig_ecs::prelude::*;
 use std::{collections::HashMap, time::Instant};
 use tokio_util::task::AbortOnDropHandle;
@@ -20,7 +17,7 @@ pub(super) enum FailureKind {
 
 pub(super) struct FailureState {
     pub(super) stamp: ConnectionStamp,
-    pub(super) reason: String,
+    pub(super) failure: ConnectFailure,
     pub(super) kind: FailureKind,
 }
 
@@ -36,30 +33,19 @@ pub(super) fn prune_failures(failures: &mut McpFailures, wanted: &DesiredServers
     });
 }
 
-pub(super) struct FailureReport {
-    pub(super) id: String,
-    pub(super) launch: Launch,
-    pub(super) reason: String,
-    pub(super) config_error: bool,
-}
-
 pub(super) fn record_failure(
     failures: &mut McpFailures,
-    report: FailureReport,
+    id: String,
+    stamp: ConnectionStamp,
+    failure: ConnectFailure,
     wake: Option<Wake>,
     runtime: &tokio::runtime::Handle,
 ) {
-    let FailureReport {
-        id,
-        launch,
-        reason,
-        config_error,
-    } = report;
-    let kind = if config_error || is_config_error_message(&reason) {
+    let kind = if matches!(failure, ConnectFailure::Configuration(_)) {
         FailureKind::ConfigHold
     } else {
         let prev_attempts = match failures.0.get(&id) {
-            Some(prev) if prev.stamp == launch.stamp => match prev.kind {
+            Some(prev) if prev.stamp == stamp => match prev.kind {
                 FailureKind::Transient { attempts, .. } => attempts,
                 FailureKind::ConfigHold => 0,
             },
@@ -83,8 +69,8 @@ pub(super) fn record_failure(
     failures.0.insert(
         id,
         FailureState {
-            stamp: launch.stamp,
-            reason,
+            stamp,
+            failure,
             kind,
         },
     );

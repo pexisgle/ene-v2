@@ -12,6 +12,7 @@ use crate::{
 use std::error::Error;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::{EnvFilter, filter::filter_fn, prelude::*};
 
 pub fn reset_history(args: &HostArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (state, runtime) = args.paths()?;
@@ -24,12 +25,17 @@ pub async fn run(config: &HostArgs) -> Result<(), Box<dyn Error + Send + Sync>> 
     let (state, runtime_path) = config.paths()?;
     // The host runs for one desktop: its log goes to stderr, warnings and
     // above unless `RUST_LOG` asks for more.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
+    // The MCP dependencies log raw peer errors, including HTTP response bodies.
+    // The host emits classified failures without forwarding those diagnostics.
+    let output = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
+        .with_filter(filter_fn(|meta| {
+            let target = meta.target();
+            !matches!(target.split("::").next(), Some("rmcp" | "rig_rmcp"))
+        }));
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")))
+        .with(output)
         .init();
     // The directories are the first thing the host touches, and a profile that
     // refuses them otherwise fails with a bare `PermissionDenied`.
@@ -44,7 +50,7 @@ pub async fn run(config: &HostArgs) -> Result<(), Box<dyn Error + Send + Sync>> 
     history::reset(&state, false)?;
     let approval_key = access
         .approval_key()
-        .inspect_err(|error| tracing::warn!(%error, "cannot use saved search approvals"))
+        .inspect_err(|error| tracing::warn!(%error, "cannot use saved external approvals"))
         .ok();
     let runtime = Runtime::start_with(
         &state,

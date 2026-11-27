@@ -207,10 +207,7 @@ async fn resolve_launch(
     } else {
         "node.exe (and npx) was not found on PATH".to_owned()
     };
-    Err(ConnectFailure {
-        reason,
-        config_error: true,
-    })
+    Err(ConnectFailure::Configuration(reason))
 }
 
 #[cfg(windows)]

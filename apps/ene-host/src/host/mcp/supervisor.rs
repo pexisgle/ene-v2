@@ -3,7 +3,7 @@
 //! lifecycle management.
 pub(super) use super::settings::Desired;
 use super::{
-    failures::{FailureKind, FailureReport, McpFailures, prune_failures, record_failure},
+    failures::{FailureKind, McpFailures, prune_failures, record_failure},
     projection::{project_servers, snapshot_tools},
     registration::{McpRegistration, Receiver},
     settings::{
@@ -72,8 +72,7 @@ pub(super) enum Event {
     Failed {
         id: String,
         launch: Launch,
-        reason: String,
-        config_error: bool,
+        failure: ConnectFailure,
     },
 }
 
@@ -301,8 +300,7 @@ fn spawn_connect_tasks(
                     Err(failure) => Event::Failed {
                         id: event_id,
                         launch: event_launch,
-                        reason: failure.reason,
-                        config_error: failure.config_error,
+                        failure,
                     },
                 };
                 match sender.send(event).await {
@@ -376,18 +374,14 @@ pub(super) fn accept_event(
         Event::Failed {
             id,
             launch,
-            reason,
-            config_error,
+            failure,
         } => {
-            tracing::warn!(connection = %id, config_error, "the MCP server did not connect: {reason}");
+            tracing::warn!(connection = %id, reason = failure.reason(), "the MCP server did not connect");
             record_failure(
                 &mut supervisor.failures,
-                FailureReport {
-                    id,
-                    launch,
-                    reason,
-                    config_error,
-                },
+                id,
+                launch.stamp,
+                failure,
                 supervisor.wake.clone(),
                 runtime,
             );
@@ -400,10 +394,8 @@ pub(super) async fn open(
     registry: ToolServerHandle,
 ) -> Result<McpConnection, ConnectFailure> {
     let secret = want.secret.as_ref().map_err(Clone::clone)?.as_deref();
-    let client = crate::host::net::client().map_err(|error| ConnectFailure {
-        reason: error.to_string(),
-        config_error: true,
-    })?;
+    let client = crate::host::net::client()
+        .map_err(|error| ConnectFailure::Configuration(error.to_string()))?;
     ene_work::mcp::open(&want.config, secret, registry, client).await
 }
 
@@ -430,7 +422,7 @@ fn check_state(supervisor: &McpSupervisor, id: &str, stamp: ConnectionStamp) -> 
             .get(id)
             .is_some_and(|pending| pending.launch.stamp == stamp)
     {
-        return CheckState::Failed(failure.reason.clone());
+        return CheckState::Failed(failure.failure.reason().to_owned());
     }
     CheckState::Connecting
 }

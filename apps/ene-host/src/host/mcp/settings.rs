@@ -1,7 +1,7 @@
 //! The enabled MCP connection configurations the supervisor reconciles.
 use super::supervisor::{Connecting, McpServers};
-use crate::host::{db::Store, model::Credentials, providers::Providers};
-use ene_domain::settings::{ConnectionConfig, McpConnection};
+use crate::host::{db::Store, model::Credentials};
+use ene_domain::settings::{ConnectionConfig, CredentialState, McpConnection};
 use ene_work::mcp::ConnectFailure;
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -71,22 +71,28 @@ fn desired(
     store: &Store,
     credentials: Option<&Credentials>,
 ) -> crate::host::db::Result<DesiredServers> {
-    let no_providers = Providers::none();
     Ok(store
         .settings_repo()
         .enabled_mcp_connections()?
         .into_iter()
         .filter_map(|(connection, created_revision)| {
-            let secret =
-                crate::host::model::connection_secret(&connection, credentials, &no_providers)
-                    .map_err(|error| ConnectFailure {
-                        reason: error.to_string(),
-                        config_error: true,
-                    });
             let ConnectionConfig::Mcp(config) = connection.config else {
                 return None;
             };
             let id = connection.id.as_str();
+            let secret = credentials
+                .map_or(Ok(None), |keys| keys.secret(id))
+                .map_err(|_| {
+                    ConnectFailure::Transient("MCP credential store could not be read".into())
+                })
+                .and_then(|key| {
+                    if key.is_none() && connection.credential_state == CredentialState::Registered {
+                        return Err(ConnectFailure::Configuration(
+                            "the registered MCP credential is unavailable".into(),
+                        ));
+                    }
+                    Ok(key)
+                });
             Some((
                 id.to_owned(),
                 Desired {

@@ -18,6 +18,9 @@ use ene_rpc as w;
 
 /// Resolves the environment-variable name that may supply the secret for `connection`.
 pub(crate) fn environment_variable(connection: &Connection, loaded: &Providers) -> Option<String> {
+    if connection.kind == ConnectionKind::Mcp {
+        return None;
+    }
     if connection.kind == ConnectionKind::Search {
         return SearchAdapter::parse(&connection.endpoint().adapter)
             .and_then(|adapter| adapter.provider().key_environment)
