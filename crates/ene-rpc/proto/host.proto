@@ -575,6 +575,7 @@ message CredentialRequest {
   string id = 1;
   optional string secret = 2;
   optional string source = 3;
+  optional uint64 expected_settings_revision = 4;
 }
 message CredentialResult { string credential_state = 1; }
 message CheckRequest {
@@ -582,6 +583,7 @@ message CheckRequest {
   string request_key = 2;
   optional string companion_id = 3;
   optional string resource_id = 4;  // モデル・音声・ツール等の種別固有ID
+  optional uint64 expected_settings_revision = 5;
 }
 message CheckResult {
   string request_id = 1;

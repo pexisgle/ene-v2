@@ -242,6 +242,11 @@ pub(super) fn render_cred_secret_row(
     let secret_save = secret_val.clone();
     let ids_all = sakura_ids.to_vec();
     let hub_all = hub.clone();
+    let revision = hub
+        .read(cx)
+        .model
+        .settings()
+        .map(|settings| settings.revision);
 
     secret_row(
         format!("conn-eye-{id}"),
@@ -262,7 +267,14 @@ pub(super) fn render_cred_secret_row(
             theme,
             move |_, cx| {
                 hub_all.update(cx, |hub, cx| {
-                    hub.register_secret_for_connections(ids_all.clone(), &sec_all, cx);
+                    if let Some(revision) = revision {
+                        hub.register_secret_for_connections(
+                            ids_all.clone(),
+                            &sec_all,
+                            revision,
+                            cx,
+                        );
+                    }
                 });
             },
         ))
@@ -276,7 +288,9 @@ pub(super) fn render_cred_secret_row(
         theme,
         move |_, cx| {
             hub_reg.update(cx, |hub, cx| {
-                hub.register_secret(&reg_id, &secret_save, cx);
+                if let Some(revision) = revision {
+                    hub.register_secret(&reg_id, &secret_save, Some(revision), cx);
+                }
             });
         },
     ))

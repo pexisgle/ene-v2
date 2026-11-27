@@ -77,6 +77,11 @@ fn render_row_header(
     let id = &conn.id;
     let kind = conn.kind;
     let hub_check = pane.hub.clone();
+    let revision = hub_check
+        .read(cx)
+        .model
+        .settings()
+        .map(|settings| settings.revision);
     let is_checking = hub_check.read(cx).setup.checking_connections.contains(id);
     let is_voicevox = ConnectionResource::for_connection(conn) == Some(ConnectionResource::Speaker);
     let hub_expand_probe = hub_check.clone();
@@ -138,7 +143,11 @@ fn render_row_header(
                         .enabled(live && !is_checking),
                     theme,
                     move |_, cx| {
-                        hub_check.update(cx, |hub, cx| hub.check_connection(check_id.clone(), cx));
+                        if let Some(revision) = revision {
+                            hub_check.update(cx, |hub, cx| {
+                                hub.check_connection_at(check_id.clone(), revision, cx)
+                            });
+                        }
                     },
                 ))
                 .child(pill_button(
@@ -166,9 +175,10 @@ fn render_row_header(
                                 && should_auto_probe
                                 && this.form.auto_probed_connections.insert(expand_id.clone())
                         });
-                        if probe {
-                            hub_expand_probe
-                                .update(cx, |hub, cx| hub.check_connection(expand_id.clone(), cx));
+                        if probe && let Some(revision) = revision {
+                            hub_expand_probe.update(cx, |hub, cx| {
+                                hub.check_connection_at(expand_id.clone(), revision, cx)
+                            });
                         }
                     },
                 )),

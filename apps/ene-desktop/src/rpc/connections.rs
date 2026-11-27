@@ -32,10 +32,10 @@ pub(crate) struct SetupSelection {
     pub(crate) voice_identifier: Option<String>,
 }
 
-async fn run_connection_probe(host: Host, connection_id: String) -> Update {
+async fn run_connection_probe(host: Host, connection_id: String, revision: u64) -> Update {
     match host
         .settings
-        .check_connection(check_request(connection_id.clone()))
+        .check_connection(check_request(connection_id.clone(), revision))
         .await
     {
         Ok(resp) => Update::Checked {
@@ -51,9 +51,14 @@ async fn run_connection_probe(host: Host, connection_id: String) -> Update {
     }
 }
 
-fn spawn_connection_probe(host: Host, connection_id: String, updates: UnboundedSender<Update>) {
+fn spawn_connection_probe(
+    host: Host,
+    connection_id: String,
+    revision: u64,
+    updates: UnboundedSender<Update>,
+) {
     tokio::spawn(async move {
-        let update = run_connection_probe(host, connection_id).await;
+        let update = run_connection_probe(host, connection_id, revision).await;
         crate::session::notify_ui(&updates, update);
     });
 }
@@ -106,7 +111,7 @@ pub(crate) fn update_settings(
         |host| async move {
             let response = host.settings.update_settings(request).await?;
             if let Some(id) = probe {
-                spawn_connection_probe(host, id, updates);
+                spawn_connection_probe(host, id, response.view().revision, updates);
             }
             Ok(response)
         },
@@ -122,18 +127,20 @@ fn settings_request(revision: u64, inputs: Vec<ConnectionInput>) -> w::UpdateSet
     }
 }
 
-fn credential_request(id: String, secret: String) -> w::CredentialRequest {
+fn credential_request(id: String, secret: String, revision: Option<u64>) -> w::CredentialRequest {
     w::CredentialRequest {
         id,
         secret: Some(secret),
+        expected_settings_revision: revision,
         ..Default::default()
     }
 }
 
-fn check_request(id: String) -> w::CheckRequest {
+fn check_request(id: String, revision: u64) -> w::CheckRequest {
     w::CheckRequest {
         id,
         request_key: uuid::Uuid::new_v4().to_string(),
+        expected_settings_revision: Some(revision),
         ..Default::default()
     }
 }
@@ -151,8 +158,15 @@ pub(crate) fn delete_connection(rpc: &RpcDispatcher, epoch: u64, id: String, rev
     );
 }
 
-pub(crate) fn probe_connection(rpc: &RpcDispatcher, epoch: u64, connection_id: String) {
-    rpc.call_update(epoch, |host| run_connection_probe(host, connection_id));
+pub(crate) fn probe_connection(
+    rpc: &RpcDispatcher,
+    epoch: u64,
+    connection_id: String,
+    revision: u64,
+) {
+    rpc.call_update(epoch, |host| {
+        run_connection_probe(host, connection_id, revision)
+    });
 }
 
 pub(crate) fn register_secret(
@@ -160,8 +174,9 @@ pub(crate) fn register_secret(
     epoch: u64,
     connection_id: String,
     secret: String,
+    revision: Option<u64>,
 ) {
-    let request = credential_request(connection_id.clone(), secret);
+    let request = credential_request(connection_id.clone(), secret, revision);
     rpc.call_owned(
         epoch,
         "資格情報の登録",
@@ -175,6 +190,7 @@ pub(crate) fn register_secret_for_connections(
     epoch: u64,
     connection_ids: Vec<String>,
     secret: String,
+    revision: u64,
 ) {
     rpc.call(
         epoch,
@@ -182,7 +198,7 @@ pub(crate) fn register_secret_for_connections(
         |host| async move {
             for id in connection_ids {
                 host.settings
-                    .register_credentials(credential_request(id, secret.clone()))
+                    .register_credentials(credential_request(id, secret.clone(), Some(revision)))
                     .await?;
             }
             Ok::<_, connectrpc::ConnectError>(())
@@ -207,19 +223,27 @@ pub(crate) fn revoke_secret(rpc: &RpcDispatcher, epoch: u64, connection_id: Stri
 pub(crate) fn quick_connect_llm(rpc: &RpcDispatcher, epoch: u64, req: QuickConnectRequest) {
     rpc.call_update(epoch, |host| async move {
         let outcome: Result<Update, connectrpc::ConnectError> = async {
-            if req.create {
+            let revision = if req.create {
                 host.settings
                     .update_settings(settings_request(req.revision, vec![req.input]))
-                    .await?;
-            }
+                    .await?
+                    .view()
+                    .revision
+            } else {
+                req.revision
+            };
             if !req.secret.is_empty() {
                 host.settings
-                    .register_credentials(credential_request(req.id.clone(), req.secret))
+                    .register_credentials(credential_request(
+                        req.id.clone(),
+                        req.secret,
+                        Some(revision),
+                    ))
                     .await?;
             }
             let probe = host
                 .settings
-                .check_connection(check_request(req.id.clone()))
+                .check_connection(check_request(req.id.clone(), revision))
                 .await?;
             let check = &probe.view().check;
             Ok(Update::SetupFinished {

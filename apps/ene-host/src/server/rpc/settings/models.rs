@@ -1,6 +1,7 @@
 //! Settings service.
 
 use super::super::Services;
+use super::connections::validate_settings_revision;
 use super::{model_item, notify_settings, parse_connection_id};
 use crate::host::error::HostError;
 use crate::host::model;
@@ -55,6 +56,7 @@ pub(super) async fn register_credentials(
     request: ServiceRequest<'_, w::CredentialRequest>,
 ) -> ServiceResult<w::CredentialResult> {
     let id = parse_connection_id(request.id)?;
+    let expected = request.expected_settings_revision;
     let secret = request
         .secret
         .filter(|secret| !secret.is_empty())
@@ -63,17 +65,14 @@ pub(super) async fn register_credentials(
     services
         .change(move |services| {
             let store = &services.store;
-            if store.settings_repo().connection(id.as_str())?.is_none() {
+            let repo = store.settings_repo();
+            validate_settings_revision(&repo, expected)?;
+            if repo.connection(id.as_str())?.is_none() {
                 return Err(HostError::NotFound("connection not found".into()));
             }
             model::save_secret(&services.credentials, id.as_str(), &secret)?;
-            store
-                .settings_repo()
-                .set_credential_state(&id, CredentialState::Registered)?;
-            notify_settings(
-                &services.notifier,
-                w::Settings::from(&store.settings_repo().settings()?),
-            );
+            repo.set_credential_state(&id, CredentialState::Registered)?;
+            notify_settings(&services.notifier, w::Settings::from(&repo.settings()?));
             Ok(w::CredentialResult {
                 credential_state: CredentialState::Registered.as_str().into(),
                 ..Default::default()

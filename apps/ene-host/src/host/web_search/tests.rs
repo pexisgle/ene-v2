@@ -622,16 +622,41 @@ async fn exa_and_tavily_work_end_to_end_and_switch_cleanly_in_work_agent() {
         .update_settings(rev, &[(exa_conn.clone(), 0), (tavily_conn.clone(), 0)])
         .unwrap();
     let probe_creds = harness.app.world().resource::<Credentials>().clone();
-    assert!(
-        probe(&exa_conn, &probe_creds, &Providers::none())
+    let store = harness.store();
+    let providers = Providers::none();
+    for id in ["search-exa", "search-tavily"] {
+        let (admitted, created) = store
+            .settings_repo()
+            .connection_with_creation(id)
+            .unwrap()
+            .unwrap();
+        let generation = probe_creds.generation_of(id);
+        assert!(
+            probe(
+                &store,
+                &admitted,
+                created,
+                &probe_creds,
+                &providers,
+                generation
+            )
             .await
             .healthy
-    );
-    assert!(
-        probe(&tavily_conn, &probe_creds, &Providers::none())
+        );
+        // An unchanged row revision from a different creation cannot send.
+        assert!(
+            !probe(
+                &store,
+                &admitted,
+                created + 1,
+                &probe_creds,
+                &providers,
+                generation
+            )
             .await
             .healthy
-    );
+        );
+    }
 
     crate::host::work::start(
         harness.app.world_mut(),

@@ -146,7 +146,10 @@ impl SearchBinding {
         providers: &Providers,
     ) -> Result<(), SearchConfigError> {
         let resolved = resolve(store, credentials, providers)?;
-        let current = &resolved.binding;
+        self.validate_unchanged(&resolved.binding)
+    }
+
+    fn validate_unchanged(&self, current: &Self) -> Result<(), SearchConfigError> {
         use subtle::ConstantTimeEq as _;
         let same_secret = match (self.secret.as_deref(), current.secret.as_deref()) {
             (None, None) => true,
@@ -368,24 +371,52 @@ pub(crate) fn resolve_connection(
 
 /// Probes a `Search` connection from Settings -> CheckConnection.
 pub(crate) async fn probe(
+    store: &Store,
     connection: &Connection,
+    created_revision: u64,
     credentials: &Credentials,
     providers: &Providers,
+    admitted_credential_generation: u64,
 ) -> Check {
     let checked_at = util::now();
-    let failure = match resolve_connection(connection, Some(credentials), providers, 0) {
-        Ok(resolved) => execute(&resolved, "rust programming", 1, || Ok(()))
+    let failure =
+        match resolve_connection(connection, Some(credentials), providers, created_revision) {
+            Ok(resolved) => execute(&resolved, "rust programming", 1, || {
+                if credentials.generation_of(connection.id.as_str())
+                    != admitted_credential_generation
+                {
+                    return Err(ToolExecutionError::other(
+                        SearchConfigError::ConnectionChanged.to_string(),
+                    ));
+                }
+                recheck_named_probe(&resolved.binding, store, credentials, providers)
+                    .map_err(|error| ToolExecutionError::other(error.to_string()))
+            })
             .await
             .err()
             .map(|error| Failure::new("connection_check", error.to_string())),
-        Err(error) => Some(Failure::new("connection_check", error.to_string())),
-    };
+            Err(error) => Some(Failure::new("connection_check", error.to_string())),
+        };
     Check {
         healthy: failure.is_none(),
         checked_at,
         failure,
         ..Default::default()
     }
+}
+
+fn recheck_named_probe(
+    binding: &SearchBinding,
+    store: &Store,
+    credentials: &Credentials,
+    providers: &Providers,
+) -> Result<(), SearchConfigError> {
+    let (current, created) = store
+        .settings_repo()
+        .connection_with_creation(binding.connection.as_str())?
+        .ok_or(SearchConfigError::ConnectionChanged)?;
+    let current = resolve_connection(&current, Some(credentials), providers, created)?;
+    binding.validate_unchanged(&current.binding)
 }
 
 async fn execute(

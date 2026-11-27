@@ -101,6 +101,15 @@ impl<'a> SettingsRepo<'a> {
         )
     }
 
+    /// Reads a connection with the settings revision at which its ID was created.
+    pub fn connection_with_creation(&self, id: &str) -> Result<Option<(Connection, u64)>> {
+        self.0.fetch(
+            &format!("SELECT {COLUMNS}, created_revision FROM connections WHERE id = ?1"),
+            [id],
+            |row| Ok((Connection::from_row(row)?, row.get("created_revision")?)),
+        )
+    }
+
     /// Enabled search connections in selection order, with their original settings revision.
     /// The revision survives edits and differs when the same ID is deleted and created again.
     pub fn enabled_search_connections(&self) -> Result<Vec<(Connection, u64)>> {
@@ -274,16 +283,28 @@ impl<'a> SettingsRepo<'a> {
         Ok((self.settings()?, companions))
     }
 
-    /// Saves a probe only while the checked connection revision still exists.
-    pub fn set_check(&self, id: &ConnectionId, revision: u64, check: &Check) -> Result<()> {
+    /// Saves a probe only for the checked incarnation and revision.
+    pub fn set_check(
+        &self,
+        id: &ConnectionId,
+        revision: u64,
+        created_revision: u64,
+        check: &Check,
+    ) -> Result<()> {
         let changed = self
             .0
             .conn()
             .prepare_cached(
                 "UPDATE connections SET last_check = ?3, updated_at = ?4
-                 WHERE id = ?1 AND revision = ?2",
+                 WHERE id = ?1 AND revision = ?2 AND created_revision = ?5",
             )?
-            .execute(params![id.as_str(), revision, to_json(check)?, now()])?;
+            .execute(params![
+                id.as_str(),
+                revision,
+                to_json(check)?,
+                now(),
+                created_revision
+            ])?;
         if changed == 0 {
             return Err(StoreError::Conflict(
                 "connection changed during the check".into(),
@@ -409,6 +430,7 @@ mod tests {
             repo.set_check(
                 &ConnectionId::parse("missing").unwrap(),
                 1,
+                2,
                 &Check::default()
             ),
             Err(StoreError::Conflict(_))
@@ -424,7 +446,7 @@ mod tests {
             assert_eq!(stored.name, changed.name);
             assert_eq!(stored.revision, expected + 1);
             assert!(matches!(
-                repo.set_check(&stored.id, expected, &Check::default()),
+                repo.set_check(&stored.id, expected, 2, &Check::default()),
                 Err(StoreError::Conflict(_))
             ));
             assert!(repo.connection(id).unwrap().unwrap().last_check.is_none());
@@ -434,12 +456,23 @@ mod tests {
             ..Default::default()
         };
         let current = repo.connection("c1").unwrap().unwrap();
-        repo.set_check(&current.id, current.revision, &check)
+        repo.set_check(&current.id, current.revision, 2, &check)
             .unwrap();
         assert_eq!(
             repo.connection("c1").unwrap().unwrap().last_check,
             Some(check)
         );
+        let (settings, _) = repo
+            .delete_connection(&current.id, current.revision, || Ok::<_, StoreError>(()))
+            .unwrap();
+        repo.update_settings(settings.revision, &[(connection("c1"), 0)])
+            .unwrap();
+        let (replacement, created) = repo.connection_with_creation("c1").unwrap().unwrap();
+        assert_ne!(created, 2);
+        assert!(matches!(
+            repo.set_check(&replacement.id, replacement.revision, 2, &Check::default()),
+            Err(StoreError::Conflict(_))
+        ));
     }
 
     #[test]

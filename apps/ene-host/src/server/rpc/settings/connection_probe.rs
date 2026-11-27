@@ -15,6 +15,8 @@ pub(super) async fn run_connection_probe(
     services: &Services,
     credentials: &model::Credentials,
     connection: &Connection,
+    created_revision: u64,
+    credential_generation: u64,
 ) -> Result<Check> {
     let providers = services.runtime.providers();
     Ok(match &connection.config {
@@ -38,7 +40,15 @@ pub(super) async fn run_connection_probe(
             probe_embedding(connection, credentials, &providers, config.dimensions).await
         }
         ConnectionConfig::Search(_) => {
-            crate::host::web_search::probe(connection, credentials, &providers).await
+            crate::host::web_search::probe(
+                &services.runtime.services().store,
+                connection,
+                created_revision,
+                credentials,
+                &providers,
+                credential_generation,
+            )
+            .await
         }
         _ => model::probe(credentials, connection, &providers).await,
     })

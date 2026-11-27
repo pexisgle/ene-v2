@@ -64,18 +64,20 @@ pub(super) async fn check_connection(
     request: ServiceRequest<'_, w::CheckRequest>,
 ) -> ServiceResult<w::CheckResult> {
     let id = parse_connection_id(request.id)?;
-    let (connection, credentials, generation) = services
+    let expected = request.expected_settings_revision;
+    let (connection, created, credentials, generation) = services
         .runtime
         .inspect(move |services| {
-            let connection = services
-                .store
-                .settings_repo()
-                .connection(id.as_str())?
+            let repo = services.store.settings_repo();
+            validate_settings_revision(&repo, expected)?;
+            let (connection, created) = repo
+                .connection_with_creation(id.as_str())?
                 .ok_or_else(|| HostError::NotFound(("connection not found").into()))?;
             Ok((
                 connection,
+                created,
                 services.credentials.clone(),
-                services.credentials.generation(),
+                services.credentials.generation_of(id.as_str()),
             ))
         })
         .await
@@ -86,19 +88,22 @@ pub(super) async fn check_connection(
             settings::ConnectionKind::Mcp | settings::ConnectionKind::Search
         );
     let revision = connection.revision;
-    let check = run_connection_probe(services, &credentials, &connection).await?;
+    let check =
+        run_connection_probe(services, &credentials, &connection, created, generation).await?;
     let request_id = request.request_key.to_owned();
     let resource_id = request.resource_id.map(str::to_owned);
     let id = connection.id;
     services
         .change(move |services| {
-            if services.credentials.generation() != generation {
+            if services.credentials.generation_of(id.as_str()) != generation {
                 return Err(HostError::Conflict(
                     "credentials changed during the check".into(),
                 ));
             }
             let store = &services.store;
-            store.settings_repo().set_check(&id, revision, &check)?;
+            store
+                .settings_repo()
+                .set_check(&id, revision, created, &check)?;
             if notify {
                 notify_settings(
                     &services.notifier,
@@ -114,6 +119,20 @@ pub(super) async fn check_connection(
             })
         })
         .await
+}
+
+pub(super) fn validate_settings_revision(
+    repo: &ene_store::settings::SettingsRepo<'_>,
+    expected: Option<u64>,
+) -> crate::host::error::Result<()> {
+    if let Some(expected) = expected
+        && repo.settings_revision()? != expected
+    {
+        return Err(HostError::Conflict(
+            "settings changed since the connection was shown".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) async fn list_pending_approvals(

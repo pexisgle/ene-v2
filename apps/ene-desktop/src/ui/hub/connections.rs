@@ -96,6 +96,18 @@ impl Hub {
     }
 
     pub(crate) fn check_connection(&mut self, connection_id: String, cx: &mut Context<Self>) {
+        let Some(revision) = self.model.settings().map(|settings| settings.revision) else {
+            return;
+        };
+        self.check_connection_at(connection_id, revision, cx);
+    }
+
+    pub(crate) fn check_connection_at(
+        &mut self,
+        connection_id: String,
+        revision: u64,
+        cx: &mut Context<Self>,
+    ) {
         if self.rpc.host().is_none() || self.setup.checking_connections.contains(&connection_id) {
             return;
         }
@@ -106,6 +118,7 @@ impl Hub {
             &self.rpc,
             self.model.connections.link_epoch,
             connection_id,
+            revision,
         );
         cx.notify();
     }
@@ -192,6 +205,7 @@ impl Hub {
         &mut self,
         connection_id: &str,
         secret: &str,
+        revision: Option<u64>,
         cx: &mut Context<Self>,
     ) {
         let secret = secret.trim();
@@ -203,6 +217,7 @@ impl Hub {
             self.model.connections.link_epoch,
             connection_id.to_owned(),
             secret.to_owned(),
+            revision,
         );
         cx.notify();
     }
@@ -211,6 +226,7 @@ impl Hub {
         &mut self,
         connection_ids: Vec<String>,
         secret: &str,
+        revision: u64,
         cx: &mut Context<Self>,
     ) {
         let secret = secret.trim();
@@ -222,6 +238,7 @@ impl Hub {
             self.model.connections.link_epoch,
             connection_ids,
             secret.to_owned(),
+            revision,
         );
         cx.notify();
     }
