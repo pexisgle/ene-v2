@@ -4112,6 +4112,7 @@ dependencies = [
 name = "ene-host"
 version = "0.1.8"
 dependencies = [
+ "apple-native-keyring-store",
  "async-stream",
  "axum",
  "base64 0.23.1",
@@ -4146,7 +4147,8 @@ dependencies = [
  "io-lifetimes 3.0.1",
  "itertools 0.15.0",
  "jiff 1.0.3",
- "keyring",
+ "keyring-core",
+ "once_cell",
  "parking_lot 0.13.0",
  "private-fs",
  "proc-macro2",
@@ -4177,6 +4179,8 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "windows-native-keyring-store",
+ "zbus-secret-service-keyring-store",
 ]
 
 [[package]]
@@ -7355,18 +7359,6 @@ checksum = "0fbe853b403ae61a04233030ae8a79d94975281ed9770a1f9e246732b534b28d"
 dependencies = [
  "bitflags 2.13.2",
  "serde",
-]
-
-[[package]]
-name = "keyring"
-version = "4.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2270074a3d26bcac93c1dc5d2845eb4c089e8d761ccf6e0ea266a16004640627"
-dependencies = [
- "apple-native-keyring-store",
- "keyring-core",
- "windows-native-keyring-store",
- "zbus-secret-service-keyring-store",
 ]
 
 [[package]]

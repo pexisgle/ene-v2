@@ -7,11 +7,19 @@
 use crate::host::db::{Result, Store};
 use crate::host::error::HostError;
 use crate::host::settings::{Connection, ConnectionConfig, CredentialState, environment_secret};
+#[cfg(target_os = "macos")]
+use apple_native_keyring_store::keychain::Store as PlatformVault;
 use ene_domain::ConnectionId;
 use ene_store::credentials::VaultSlot;
+use keyring_core::api::CredentialStoreApi as _;
+use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, path::Path, sync::Arc};
+#[cfg(windows)]
+use windows_native_keyring_store::Store as PlatformVault;
+#[cfg(target_os = "linux")]
+use zbus_secret_service_keyring_store::Store as PlatformVault;
 
 const KEYRING_SERVICE: &str = "ene-host";
 
@@ -40,6 +48,7 @@ struct ManagedVault {
     store: Store,
     namespace: String,
     mutations: Mutex<()>,
+    platform: OnceCell<Arc<PlatformVault>>,
 }
 
 impl CredentialMemory {
@@ -88,6 +97,7 @@ impl Credentials {
                 store: store.clone(),
                 namespace: ene_policy::hex_digest(&digest),
                 mutations: Mutex::new(()),
+                platform: OnceCell::new(),
             })),
             session_only,
             ..Self::default()
@@ -166,7 +176,7 @@ impl Credentials {
         }
         match vault.entry(binding.slot)?.get_password() {
             Ok(secret) => Ok(Some(secret)),
-            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(keyring_core::Error::NoEntry) => Ok(None),
             Err(error) => Err(vault_error(&error)),
         }
     }
@@ -199,7 +209,7 @@ impl Credentials {
                 continue;
             } else {
                 match vault.entry(slot)?.delete_credential() {
-                    Ok(()) | Err(keyring::Error::NoEntry) => {}
+                    Ok(()) | Err(keyring_core::Error::NoEntry) => {}
                     Err(error) => return Err(vault_error(&error)),
                 }
             }
@@ -210,16 +220,21 @@ impl Credentials {
 }
 
 impl ManagedVault {
-    fn entry(&self, slot: VaultSlot) -> Result<keyring::Entry> {
-        keyring::Entry::new(
-            KEYRING_SERVICE,
-            &format!("v2:{}:{}", self.namespace, slot.id),
-        )
-        .map_err(|error| vault_error(&error))
+    fn entry(&self, slot: VaultSlot) -> Result<keyring_core::Entry> {
+        self.platform
+            .get_or_try_init(PlatformVault::new)
+            .and_then(|store| {
+                store.build(
+                    KEYRING_SERVICE,
+                    &format!("v2:{}:{}", self.namespace, slot.id),
+                    None,
+                )
+            })
+            .map_err(|error| vault_error(&error))
     }
 }
 
-fn vault_error(error: &keyring::Error) -> HostError {
+fn vault_error(error: &keyring_core::Error) -> HostError {
     HostError::Unavailable(format!("credential store: {error}"))
 }
 
@@ -228,6 +243,12 @@ pub(crate) fn save_secret(credentials: &Credentials, connection: &str, secret: &
     if secret.is_empty() || secret.chars().count() > 8_192 {
         return Err(HostError::Invalid(
             ("credential must be 1-8192 characters").into(),
+        ));
+    }
+    #[cfg(windows)]
+    if !credentials.session_only() && secret.encode_utf16().count() > 1_280 {
+        return Err(HostError::Invalid(
+            "Windows の資格情報ストアに保存できる長さを超えています。".into(),
         ));
     }
     let Some(vault) = &credentials.vault else {
