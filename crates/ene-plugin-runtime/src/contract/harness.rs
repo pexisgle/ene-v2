@@ -188,7 +188,7 @@ mod tests {
 
     fn events() -> Events {
         Events::new(&Operation::Harness {
-            input: HarnessInput::Cancel,
+            input: HarnessInput::Prompt { prompt: vec![] },
         })
     }
 
@@ -274,7 +274,9 @@ mod tests {
     #[test]
     fn a_permission_request_must_end_the_invocation() {
         let mut events = events();
+        assert!(events.finish().is_err());
         accept(&mut events, permission("p", vec![option("allow")])).unwrap();
+        assert!(events.finish().is_ok());
         assert!(
             accept(
                 &mut events,
@@ -293,7 +295,28 @@ mod tests {
             stop_reason: StopReason::EndTurn,
         };
         accept(&mut events, stop()).unwrap();
+        assert!(events.finish().is_ok());
         assert!(accept(&mut events, stop()).is_err());
+    }
+
+    #[test]
+    fn cancelling_a_harness_requires_a_stop() {
+        let operation = Operation::Harness {
+            input: HarnessInput::Cancel,
+        };
+        let mut events = Events::new(&operation);
+        assert!(events.finish().is_err());
+        accept(&mut events, permission("p", vec![option("allow")])).unwrap();
+        assert!(events.finish().is_err());
+        let mut events = Events::new(&operation);
+        accept(
+            &mut events,
+            HarnessEvent::Stop {
+                stop_reason: StopReason::Cancelled,
+            },
+        )
+        .unwrap();
+        assert!(events.finish().is_ok());
     }
 
     #[test]

@@ -3,11 +3,9 @@ use super::Loaded;
 use crate::host::error::HostError;
 use ene_plugin::{Extension, ProviderConfiguration};
 use ene_plugin_runtime::instance::{Instance, Services};
+use parking_lot::Mutex;
 use rig_core::providers::registry::ProviderId;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio_util::context::TokioContext;
 use tokio_util::sync::CancellationToken;
@@ -33,10 +31,15 @@ pub(crate) struct Running {
     entrypoint: String,
     runtime: Handle,
     cancel: CancellationToken,
-    /// A caller dropped a call before it reported. The next request releases
-    /// the dead instance and reloads; a call that failed on its own keeps the
-    /// old policy and is not restarted automatically.
-    cancelled: AtomicBool,
+    restart: Mutex<Restart>,
+}
+
+#[derive(Default)]
+enum Restart {
+    #[default]
+    Keep,
+    IfUnusable,
+    FreshSession,
 }
 
 impl Running {
@@ -89,7 +92,7 @@ impl Running {
             entrypoint,
             runtime,
             cancel,
-            cancelled: AtomicBool::new(false),
+            restart: Mutex::new(Restart::Keep),
         })
     }
 
@@ -130,13 +133,13 @@ impl Running {
             .run_until_cancelled(self.instance.lock())
             .await
             .ok_or_else(|| HostError::Unavailable("the plugin was disabled".into()))?;
-        if self.cancelled.swap(false, Ordering::SeqCst)
-            && slot.as_ref().is_none_or(|instance| !instance.is_usable())
-        {
-            // A dropped caller cancelled the previous call before it could
-            // report, leaving the instance without its plugin. Drop it first,
-            // releasing its execution slot, then load a fresh instance for the
-            // next, distinct request.
+        let restart = match std::mem::take(&mut *self.restart.lock()) {
+            Restart::Keep => false,
+            Restart::IfUnusable => slot.as_ref().is_none_or(|instance| !instance.is_usable()),
+            Restart::FreshSession => true,
+        };
+        if restart {
+            // Release the execution slot before loading the replacement.
             *slot = None;
             *slot = Some(self.reload().await?);
         }
@@ -155,7 +158,15 @@ impl Running {
     /// Notes that a caller dropped a call before it reported. The next request
     /// reloads; the dropped operation itself is never replayed.
     pub(crate) fn note_cancelled(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
+        let mut restart = self.restart.lock();
+        if matches!(*restart, Restart::Keep) {
+            *restart = Restart::IfUnusable;
+        }
+    }
+
+    /// The next distinct work session starts with no state from its predecessor.
+    pub(crate) fn discard_harness_session(&self) {
+        *self.restart.lock() = Restart::FreshSession;
     }
 
     pub(crate) fn revoked(&self) -> bool {

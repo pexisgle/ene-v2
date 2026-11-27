@@ -6,7 +6,7 @@
 //! session's next turn. The hand state it reads is `hand`'s; this module only
 //! turns what arrived into host effects.
 
-use super::hand::{CallDespawner, Hand, Hands, Pending, Turn, dispatch};
+use super::hand::{Hand, Hands, Pending, Turn, dispatch};
 use super::{Run, RunState, WorkSession, WorkStatus};
 use crate::host::{
     db::Store,
@@ -39,7 +39,9 @@ pub(crate) fn collect(world: &mut World) {
         .map(|hand| hand.work_id.clone())
         .collect();
     for work in revoked {
-        super::hand::release(&mut CallDespawner::new(world), &mut hands, &work);
+        if let Some(call) = super::hand::release(&mut hands, &work) {
+            let _removed = world.try_despawn(call);
+        }
         match store.work_repo().active_run(&work) {
             Ok(Some(run)) => super::finish_run(
                 world,
@@ -121,11 +123,10 @@ fn collect_hand(world: &mut World, store: &Store, hand: &mut Hand) -> Option<Har
                     if let Some(run) = active.take() {
                         super::finish_run(world, run, RunState::Failed, Some(why));
                     }
-                } else {
-                    hand.running.note_cancelled();
                 }
+                hand.running.discard_harness_session();
                 if let Some(pending) = hand.pending.take() {
-                    CallDespawner::new(world).despawn(pending.call);
+                    let _removed = world.try_despawn(pending.call);
                 }
                 hand.turn = Turn::New;
             }

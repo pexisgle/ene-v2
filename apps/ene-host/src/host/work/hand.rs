@@ -37,28 +37,6 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-/// The one ECS operation the hand needs: despawning a held tool-call entity.
-///
-/// Isolating it keeps the hand's session bookkeeping independent of `World`;
-/// the host supplies the real implementation, tests can supply a stub.
-pub(crate) struct CallDespawner<'w> {
-    world: &'w mut World,
-}
-
-impl<'w> CallDespawner<'w> {
-    pub(crate) fn new(world: &'w mut World) -> Self {
-        Self { world }
-    }
-
-    /// Despawns `call` when it is still alive. A stale entity is not an error:
-    /// permission cleanup may already have removed it.
-    pub(super) fn despawn(&mut self, call: Entity) {
-        if self.world.get_entity(call).is_ok() {
-            self.world.entity_mut(call).despawn();
-        }
-    }
-}
-
 /// The plugin hands this host is running, keyed by the adapter each holds.
 /// One hand per adapter, for as long as the work session it serves is open.
 #[derive(Resource, Default)]
@@ -154,16 +132,14 @@ pub(super) fn selected(
 /// instruction only after any invocation left by the previous run is drained.
 pub(crate) fn claim(
     hands: &mut Hands,
-    calls: &mut CallDespawner<'_>,
     session: &WorkSession,
     harness: Option<SelectedHarness>,
-) -> Result<()> {
+) -> Result<Option<Entity>> {
     let Some(SelectedHarness {
         adapter, running, ..
     }) = harness
     else {
-        release(calls, hands, &session.id);
-        return Ok(());
+        return Ok(release(hands, &session.id));
     };
     if let Some(owner) = hands.by_adapter.get(&adapter) {
         if owner.work_id != session.id {
@@ -173,10 +149,10 @@ pub(crate) fn claim(
             )));
         }
         if Arc::ptr_eq(&owner.running, &running) {
-            return Ok(());
+            return Ok(None);
         }
     }
-    release(calls, hands, &session.id);
+    let released = release(hands, &session.id);
     hands.by_adapter.insert(
         adapter,
         Hand {
@@ -190,7 +166,7 @@ pub(crate) fn claim(
             pending: None,
         },
     );
-    Ok(())
+    Ok(released)
 }
 
 /// Whether a work session runs on the plugin hand.
@@ -213,38 +189,28 @@ pub(crate) fn steer(hands: &mut Hands, work_id: &str, text: &str) {
 
 /// Stops the exact persisted run, including one that was accepted while the
 /// guest was still cancelling its predecessor.
-pub(crate) fn stop(hands: &mut Hands, calls: &mut CallDespawner<'_>, run: &Run) {
-    let Some(adapter) = adapter_of(hands, &run.work_id) else {
-        return;
-    };
-    let Some(hand) = hands.by_adapter.get_mut(&adapter) else {
-        return;
-    };
+pub(crate) fn stop(hands: &mut Hands, run: &Run) -> Option<Entity> {
+    let adapter = adapter_of(hands, &run.work_id)?;
+    let hand = hands.by_adapter.get_mut(&adapter)?;
     hand.parked.clear();
     if !matches!(&hand.turn, Turn::Run(id) if *id == run.run_id) {
-        return;
+        return None;
     }
     if let Some(pending) = hand.pending.take() {
-        calls.despawn(pending.call);
         hand.buffer = HarnessBuffer::default();
         hand.turn = Turn::Cancel;
+        Some(pending.call)
     } else {
-        release(calls, hands, &run.work_id);
+        release(hands, &run.work_id)
     }
 }
 
-pub(crate) fn release(calls: &mut CallDespawner<'_>, hands: &mut Hands, work_id: &str) {
-    let Some(adapter) = adapter_of(hands, work_id) else {
-        return;
-    };
-    if let Some(mut hand) = hands.by_adapter.remove(&adapter) {
-        if let Some(pending) = hand.pending.take() {
-            calls.despawn(pending.call);
-        }
-        if hand.invocation.take().is_some() {
-            hand.running.note_cancelled();
-        }
-    }
+pub(crate) fn release(hands: &mut Hands, work_id: &str) -> Option<Entity> {
+    let adapter = adapter_of(hands, work_id)?;
+    let hand = hands.by_adapter.remove(&adapter)?;
+    drop(hand.invocation);
+    hand.running.discard_harness_session();
+    hand.pending.map(|pending| pending.call)
 }
 
 fn adapter_of(hands: &Hands, work_id: &str) -> Option<String> {

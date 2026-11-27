@@ -20,6 +20,7 @@ pub struct Events {
     extension: Extension,
     models: bool,
     raw: bool,
+    cancelling_harness: bool,
     state: StreamState,
     count: u64,
     character: Option<CharacterTarget>,
@@ -31,6 +32,12 @@ impl Events {
             extension: operation.extension(),
             models: matches!(operation, Operation::ListModels { .. }),
             raw: matches!(operation, Operation::GenerateHttp { .. }),
+            cancelling_harness: matches!(
+                operation,
+                Operation::Harness {
+                    input: HarnessInput::Cancel
+                }
+            ),
             state: StreamState::Streaming,
             count: 0,
             character: match operation {
@@ -133,10 +140,17 @@ impl Events {
     }
 
     pub fn finish(&self) -> Result<()> {
-        if matches!(self.extension, Extension::Llm) && self.state != StreamState::Finished {
-            return Err(Error::Protocol);
+        let complete = match self.extension {
+            Extension::Llm => self.state == StreamState::Finished,
+            Extension::Harness if self.cancelling_harness => self.state == StreamState::Finished,
+            Extension::Harness => self.state != StreamState::Streaming,
+            _ => true,
+        };
+        if complete {
+            Ok(())
+        } else {
+            Err(Error::Protocol)
         }
-        Ok(())
     }
 }
 

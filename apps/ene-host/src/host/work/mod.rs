@@ -167,17 +167,15 @@ pub(crate) fn start_run(
             .get_resource::<hand::Hands>()
             .is_some_and(|hands| hand::owns(hands, &session.id))
     {
-        world.resource_scope(|world, mut hands: Mut<hand::Hands>| {
-            hand::claim(
-                &mut hands,
-                &mut hand::CallDespawner::new(world),
-                session,
-                harness,
-            )
-        })
+        hand::claim(&mut world.resource_mut(), session, harness)
     } else {
-        Ok(())
+        Ok(None)
     };
+    let claimed = claimed.map(|released| {
+        if let Some(call) = released {
+            let _removed = world.try_despawn(call);
+        }
+    });
     let failure = match claimed {
         Err(error) => Some(error),
         Ok(()) if is_harness => {
@@ -279,9 +277,9 @@ pub(crate) fn stop_with(world: &mut World, work_id: &str, reason: Option<&str>) 
         return Ok(());
     };
     if hand::owns(world.resource::<hand::Hands>(), work_id) {
-        let mut hands = std::mem::take(&mut *world.resource_mut::<hand::Hands>());
-        hand::stop(&mut hands, &mut hand::CallDespawner::new(world), &run);
-        *world.resource_mut::<hand::Hands>() = hands;
+        if let Some(call) = hand::stop(&mut world.resource_mut(), &run) {
+            let _removed = world.try_despawn(call);
+        }
     } else if let Some(agent) = agent_of(world, work_id) {
         let stop = reason.map_or_else(
             || StopTurn::new(agent),
@@ -303,12 +301,9 @@ pub(crate) fn close(world: &mut World, work_id: &str) -> Result<()> {
     if let Ok(Some(session)) = store.work_repo().work_session(work_id) {
         notify_status(&mut world.resource_mut::<Notifier>(), &session);
     }
-    let mut hands = std::mem::take(&mut *world.resource_mut::<hand::Hands>());
-    {
-        let mut calls = hand::CallDespawner::new(world);
-        hand::release(&mut calls, &mut hands, work_id);
+    if let Some(call) = hand::release(&mut world.resource_mut(), work_id) {
+        let _removed = world.try_despawn(call);
     }
-    *world.resource_mut::<hand::Hands>() = hands;
     retire(world, work_id);
     Ok(())
 }
