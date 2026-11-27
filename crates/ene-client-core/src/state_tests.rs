@@ -1,8 +1,8 @@
 use crate::{
     domain::{
-        Activation, ApprovalRequest, ApprovalStatus, Companion, HostCursor, HostNotification,
-        Message, MessageDelta, MessageRole, NotificationEvent, PolicyText, Settings, Snapshot,
-        TurnEvent, TurnStatus, WorkStatus,
+        Activation, ApprovalRequest, ApprovalStatus, Companion, HostCursor, HostEvent,
+        HostNotification, JsonDocument, Message, MessageDelta, MessageRole, NotificationEvent,
+        PolicyText, Settings, Snapshot, TurnEvent, TurnStatus, WorkStatus,
     },
     reducer::is_user_facing_message,
     state::{Link, Model, Sending},
@@ -205,16 +205,23 @@ fn a_resolved_approval_leaves_the_pending_list() {
         NotificationEvent::ApprovalRequested(Some(Box::new(pending(ApprovalStatus::Pending)))),
     ))));
     assert_eq!(model.approvals().len(), 1);
-    model.apply(Update::Resolved {
-        request_id: "r1".into(),
-        rule_warning: None,
-    });
+    let effects = model.apply(Update::Resolved { rule_warning: None });
+    assert!(effects.snapshot);
+    assert_eq!(model.approvals().len(), 1);
+    model.apply(Update::Notification(Box::new(notification(
+        NotificationEvent::Generic(HostEvent {
+            kind: "notice".into(),
+            payload: Some(JsonDocument {
+                json: r#"{"code":"approval_resolved","message":"r1: approved"}"#.into(),
+                ..Default::default()
+            }),
+        }),
+    ))));
     assert!(
         model.approvals().is_empty(),
         "a resolved approval is not pending"
     );
     model.apply(Update::Resolved {
-        request_id: "r2".into(),
         rule_warning: Some("rule save failed".into()),
     });
     assert!(
@@ -421,7 +428,7 @@ fn becoming_live_after_a_drop_refetches_what_the_snapshot_cannot_carry() {
     let effects = model.apply(Update::Link(Box::new(Link::Live {
         version: "1".into(),
     })));
-    assert!(effects.history && effects.approvals);
+    assert!(effects.history && effects.snapshot);
 }
 
 #[test]

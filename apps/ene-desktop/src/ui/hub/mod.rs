@@ -219,8 +219,9 @@ impl Hub {
             self.maybe_auto_assign_default_model();
         }
         if flags.conflicted {
-            self.resnapshot();
             self.refresh_active_data(cx);
+        } else if effects.snapshot {
+            self.resnapshot();
         }
         if self.model.approvals().len() > had_approvals
             || flags.message_arrived
@@ -231,9 +232,6 @@ impl Hub {
         if effects.history || selected_now {
             self.load_history(cx);
         }
-        if effects.approvals || selected_now {
-            self.load_approvals(cx);
-        }
         if effects.mind || selected_now {
             self.load_mind(cx);
         }
@@ -242,8 +240,6 @@ impl Hub {
         }
         if selected_now {
             self.load_models(cx);
-            self.load_policy_rules(cx);
-            self.load_policy_texts(cx);
         }
         self.sync_tray_state();
         cx.notify();
@@ -273,13 +269,11 @@ impl Hub {
     }
 
     pub(crate) fn refresh_active_data(&mut self, cx: &mut Context<Self>) {
+        self.resnapshot();
         self.load_history(cx);
-        self.load_approvals(cx);
         self.load_providers(cx);
         self.load_models(cx);
         self.load_mind(cx);
-        self.load_policy_rules(cx);
-        self.load_policy_texts(cx);
     }
 
     pub(crate) fn resnapshot(&self) {

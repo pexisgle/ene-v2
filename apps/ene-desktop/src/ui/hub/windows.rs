@@ -191,7 +191,6 @@ pub(super) fn open_settings(hub: &mut Hub, section: SettingsSection, cx: &mut Co
     hub.load_models(cx);
     hub.load_mind(cx);
     hub.load_companion_templates(cx);
-    hub.load_policy_rules(cx);
     hub.load_plugins(cx);
     cx.notify();
 

@@ -6,15 +6,6 @@ use ene_client_core::domain::{ApprovalDecision, PolicyRulesUpdate, PolicyTextsUp
 use ene_rpc as w;
 use std::future::Future;
 
-load! {
-    load_approvals: settings.list_pending_approvals("承認一覧の取得") =>
-        |approvals| Update::Approvals(approvals.items.into_iter().map(Into::into).collect());
-    load_policy_rules: settings.list_policy_rules("許可ルールの取得") =>
-        |rules| Update::PolicyRules(ene_rpc::client_model::policy_rules(rules.items));
-    load_policy_texts: settings.list_policy_texts("自由文ポリシーの取得") =>
-        |texts| Update::PolicyTexts(texts.items.into_iter().map(Into::into).collect());
-}
-
 pub(crate) fn load_plugins(rpc: &RpcDispatcher, epoch: u64) {
     rpc.call(
         epoch,
@@ -30,7 +21,6 @@ pub(crate) fn resolve_approval(
     request_id: String,
     decision: ApprovalDecision,
 ) {
-    let resolved = request_id.clone();
     let stale = request_id.clone();
     let always_approve = decision == ApprovalDecision::AlwaysApprove;
     let wire_decision = w::ApprovalDecision::from(decision);
@@ -45,7 +35,6 @@ pub(crate) fn resolve_approval(
         move |response| {
             let reply = response.into_owned();
             Update::Resolved {
-                request_id: resolved,
                 rule_warning: (always_approve && !reply.rule_saved).then(|| {
                     reply
                         .rule_error
@@ -69,11 +58,11 @@ pub(crate) fn update_policy_rules(
     update: PolicyRulesUpdate,
 ) {
     let request: w::UpdatePolicyRulesRequest = update.into();
-    rpc.call_owned(
+    rpc.call(
         epoch,
         context,
         request!(settings.update_policy_rules(request)),
-        |rules| Update::PolicyRules(ene_rpc::client_model::policy_rules(rules.items)),
+        |_| Update::Resnapshot,
     );
 }
 
@@ -84,11 +73,11 @@ pub(crate) fn update_policy_texts(
     update: PolicyTextsUpdate,
 ) {
     let request: w::UpdatePolicyTextsRequest = update.into();
-    rpc.call_owned(
+    rpc.call(
         epoch,
         context,
         request!(settings.update_policy_texts(request)),
-        |texts| Update::PolicyTexts(texts.items.into_iter().map(Into::into).collect()),
+        |_| Update::Resnapshot,
     );
 }
 

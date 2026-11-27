@@ -121,7 +121,7 @@ fn apply_link(model: &mut Model, link: Link, effects: &mut Effects) {
     }
     if appeared {
         effects.history = true;
-        effects.approvals = true;
+        effects.snapshot = model.snapshot().is_none();
     }
 }
 
@@ -139,11 +139,16 @@ fn apply_domain_update(model: &mut Model, update: Update, effects: &mut Effects)
         Update::Gone { companion_id } => {
             notifications::remove_companion(model, &companion_id, effects);
         }
-        Update::Approvals(_)
-        | Update::Resolved { .. }
-        | Update::ApprovalStale { .. }
-        | Update::PolicyRules(_)
-        | Update::PolicyTexts(_) => apply_approval_update(model, update, effects),
+        Update::Resolved { rule_warning } => {
+            if let Some(warning) = rule_warning {
+                model.notice(NoticeKind::Failed, "許可ルールの保存", warning);
+            }
+            effects.snapshot = true;
+        }
+        Update::ApprovalStale { message } => {
+            model.notice(NoticeKind::Conflict, "承認", message);
+            effects.snapshot = true;
+        }
         Update::AudioLevel { .. }
         | Update::AudioMute { .. }
         | Update::CaptureModeChanged { .. }
@@ -251,45 +256,6 @@ fn apply_history(chat: &mut Chat, companion_id: &str, messages: Vec<Message>) {
             .iter()
             .any(|message| message.role == MessageRole::User && message.text == sending.text)
     });
-}
-
-fn apply_approval_update(model: &mut Model, update: Update, effects: &mut Effects) {
-    match update {
-        Update::Approvals(items) => {
-            if let Some(snapshot) = model.snapshot.as_mut() {
-                snapshot.pending_approvals = items;
-            }
-        }
-        Update::Resolved {
-            request_id,
-            rule_warning,
-        } => {
-            if let Some(snapshot) = model.snapshot.as_mut() {
-                snapshot
-                    .pending_approvals
-                    .retain(|approval| approval.request_id != request_id);
-            }
-            if let Some(warning) = rule_warning {
-                model.notice(NoticeKind::Failed, "許可ルールの保存", warning);
-            }
-        }
-        Update::ApprovalStale { message } => {
-            model.notice(NoticeKind::Conflict, "承認", message);
-            effects.approvals = true;
-        }
-        Update::PolicyRules(rules) => {
-            if let Some(snapshot) = model.snapshot.as_mut() {
-                snapshot.policy_rules = rules;
-            }
-        }
-        Update::PolicyTexts(texts) => {
-            if let Some(snapshot) = model.snapshot.as_mut() {
-                let settings = snapshot.settings.get_or_insert_with(Default::default);
-                settings.policy_texts = texts;
-            }
-        }
-        _ => {}
-    }
 }
 
 fn apply_audio_update(audio: &mut AudioState, update: Update) {

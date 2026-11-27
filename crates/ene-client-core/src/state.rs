@@ -176,8 +176,8 @@ pub struct SpeechReport {
 pub struct Effects {
     /// The conversation history needs refetching.
     pub history: bool,
-    /// The pending approvals need refetching.
-    pub approvals: bool,
+    /// The host state needs a fresh snapshot.
+    pub snapshot: bool,
     /// The mind view needs refetching.
     pub mind: bool,
 }

@@ -174,10 +174,6 @@ impl Hub {
         }
     }
 
-    pub(crate) fn load_approvals(&mut self, _cx: &mut Context<Self>) {
-        rpc::policy::load_approvals(&self.rpc, self.model.connections.link_epoch);
-    }
-
     pub(crate) fn resolve_approval(
         &mut self,
         request_id: &str,
@@ -191,10 +187,6 @@ impl Hub {
             decision,
         );
         cx.notify();
-    }
-
-    pub(crate) fn load_policy_rules(&mut self, _cx: &mut Context<Self>) {
-        rpc::policy::load_policy_rules(&self.rpc, self.model.connections.link_epoch);
     }
 
     pub(crate) fn add_policy_rule(
@@ -245,10 +237,6 @@ impl Hub {
             update,
         );
         cx.notify();
-    }
-
-    pub(crate) fn load_policy_texts(&mut self, _cx: &mut Context<Self>) {
-        rpc::policy::load_policy_texts(&self.rpc, self.model.connections.link_epoch);
     }
 
     pub(crate) fn upsert_policy_text(

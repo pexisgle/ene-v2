@@ -90,7 +90,6 @@ pub(super) fn render_notice_strip(notice: &Notice, hub: &Entity<Hub>, theme: &Th
                 theme,
                 move |_, cx| {
                     hub_resync.update(cx, |hub, cx| {
-                        hub.resnapshot();
                         hub.refresh_active_data(cx);
                         hub.dismiss_notice(0, cx);
                     });

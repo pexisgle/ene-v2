@@ -150,7 +150,6 @@ impl SettingsStudio {
                             } else if section == SettingsSection::Voice {
                                 hub.load_providers(cx);
                             } else if section == SettingsSection::Device {
-                                hub.load_policy_rules(cx);
                                 hub.load_plugins(cx);
                             }
                             cx.notify();
@@ -245,7 +244,6 @@ impl SettingsStudio {
                             theme,
                             move |_, cx| {
                                 hub_reload.update(cx, |hub, cx| {
-                                    hub.resnapshot();
                                     hub.refresh_active_data(cx);
                                     hub.dismiss_notice(idx, cx);
                                 });

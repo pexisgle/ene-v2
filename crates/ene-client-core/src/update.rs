@@ -2,8 +2,8 @@
 //! reports to the window, and the window asks the session to act.
 
 use crate::domain::{
-    ApprovalRequest, CompanionTemplate, ConnectionCheck, HostNotification, LlmProvider, Message,
-    MindView, ModelInfo, PluginInfo, PolicyRule, PolicyText,
+    CompanionTemplate, ConnectionCheck, HostNotification, LlmProvider, Message, MindView,
+    ModelInfo, PluginInfo,
 };
 use crate::state::{Devices, Link, Notice};
 
@@ -121,8 +121,6 @@ pub enum Update {
         /// The probe result.
         result: Result<ConnectionCheck, Notice>,
     },
-    /// The host's pending approvals, as refetched.
-    Approvals(Vec<ApprovalRequest>),
     /// An approval is no longer pending.
     ApprovalStale {
         /// What happened, written for the operator.
@@ -130,8 +128,6 @@ pub enum Update {
     },
     /// An approval was resolved by this window.
     Resolved {
-        /// Host id the accepted message was recorded under.
-        request_id: String,
         /// A warning about the saved rule, when one is worth saying.
         rule_warning: Option<String>,
     },
@@ -197,10 +193,6 @@ pub enum Update {
         /// The mind view that was loaded.
         view: Box<MindView>,
     },
-    /// The host's permission policy rules, refetched or updated.
-    PolicyRules(Vec<PolicyRule>),
-    /// The host's free-text permission policies, refetched or updated.
-    PolicyTexts(Vec<PolicyText>),
     /// Avatar scale confirmed by the renderer session.
     AvatarScaleChanged(f32),
     /// Epoch- and sequence-tagged RPC response so stale replies after reconnect drop.
@@ -248,9 +240,6 @@ pub(crate) enum ReplyTarget {
     Credential(String),
     History(String),
     Mind(String),
-    Approvals,
-    PolicyRules,
-    PolicyTexts,
     Plugins,
     Templates,
     Preview,
@@ -269,9 +258,6 @@ impl Update {
                 ReplyTarget::History(companion_id.clone())
             }
             Self::MindLoaded { companion_id, .. } => ReplyTarget::Mind(companion_id.clone()),
-            Self::Approvals(_) => ReplyTarget::Approvals,
-            Self::PolicyRules(_) => ReplyTarget::PolicyRules,
-            Self::PolicyTexts(_) => ReplyTarget::PolicyTexts,
             Self::Plugins(_) => ReplyTarget::Plugins,
             Self::CompanionTemplates(_) => ReplyTarget::Templates,
             Self::CompanionPreview { .. } => ReplyTarget::Preview,

@@ -79,7 +79,7 @@ pub(crate) fn merge_notification(
             | NotificationEvent::SettingsUpdated(_)
             | NotificationEvent::ClientUpdated(_)
             | NotificationEvent::ActivationUpdated(_)),
-        ) => merge_snapshot_event(model, event, effects),
+        ) => merge_snapshot_event(model, event),
         Some(
             event @ (NotificationEvent::MessageCreated(_)
             | NotificationEvent::MessageDelta(_)
@@ -157,14 +157,13 @@ pub(crate) fn remove_companion(model: &mut Model, companion_id: &str, effects: &
     }
 }
 
-fn merge_snapshot_event(model: &mut Model, event: NotificationEvent, effects: &mut Effects) {
+fn merge_snapshot_event(model: &mut Model, event: NotificationEvent) {
     match event {
         NotificationEvent::InitialState(mut snapshot) => {
             snapshot
                 .companions
                 .sort_by(|left, right| left.name.cmp(&right.name));
             model.snapshot = Some(*snapshot);
-            effects.approvals = false;
         }
         NotificationEvent::Companion(companion) => {
             if let Some(snapshot) = model.snapshot.as_mut() {
@@ -280,7 +279,7 @@ fn merge_approval_event(model: &mut Model, event: NotificationEvent, effects: &m
             {
                 upsert_approval(&mut snapshot.pending_approvals, *request);
             } else {
-                effects.approvals = true;
+                effects.snapshot = true;
             }
         }
         NotificationEvent::PolicyRulesUpdated(rules) => {
