@@ -20,7 +20,7 @@ use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::
 use super::form::*;
 
 pub(super) fn render_voice_selector(
-    pane: &mut CompanionsPane,
+    pane: &CompanionsPane,
     ctx: &EditorContext<'_>,
     drafts: &CompanionEditorDrafts,
     voice_selection: (&str, Option<&str>, Option<&str>),
@@ -30,27 +30,10 @@ pub(super) fn render_voice_selector(
     let id = &ctx.comp.id;
     let (voice_key_val, picked_conn_id, picked_voice_id) = voice_selection;
     let voice_dd_key = format!("comp-voice:{id}");
-    let voice_dd_open = pane.open_dropdown.as_deref() == Some(voice_dd_key.as_str());
-    let voice_filter_d = pane.drafts.draft(
-        cx,
-        format!("comp:{id}:voice-filter"),
-        "話者名・IDで絞り込み…",
-        None,
-        theme,
-    );
-    let voice_filter_txt = voice_filter_d.read(cx).text().to_owned();
     let voice_options = build_voice_options(ctx.tts_voices);
     let selected_voice_label =
         format_selected_voice_label(ctx.tts_voices, picked_conn_id, picked_voice_id);
-    let selected_dropdown_val = if !voice_key_val.is_empty() {
-        Some(voice_key_val)
-    } else {
-        Some("")
-    };
-
-    let pane_voice_toggle = cx.entity();
-    let pane_voice_pick = cx.entity();
-    let toggle_key = voice_dd_key.clone();
+    let pane_voice_pick = cx.weak_entity();
     let voice_key_d_pick = drafts.voice_key_d.clone();
     let voice_d_pick = drafts.voice_d.clone();
     let voice_checking = {
@@ -76,28 +59,15 @@ pub(super) fn render_voice_selector(
         .child(dropdown_select(
             DropdownSpec {
                 id: voice_dd_key,
-                selected_value: selected_dropdown_val,
-                selected_label: selected_voice_label.as_deref(),
-                placeholder: "接続の既定を使用",
-                options: &voice_options,
-                open: voice_dd_open,
+                selected_value: Some(voice_key_val.to_owned()),
+                placeholder: selected_voice_label
+                    .unwrap_or_else(|| "接続の既定を使用".into())
+                    .into(),
+                options: voice_options,
                 enabled: true,
                 max_list_height: 210.,
-                filter_draft: Some(voice_filter_d),
-                filter_text: &voice_filter_txt,
+                search_placeholder: "話者名・IDで絞り込み…",
                 empty_label: "有効なTTS接続から話者を取得できませんでした",
-            },
-            theme,
-            move |_, cx| {
-                pane_voice_toggle.update(cx, |this, cx| {
-                    this.open_dropdown =
-                        if this.open_dropdown.as_deref() == Some(toggle_key.as_str()) {
-                            None
-                        } else {
-                            Some(toggle_key.clone())
-                        };
-                    cx.notify();
-                });
             },
             move |picked, _, cx| {
                 let raw_vid = picked
@@ -105,10 +75,7 @@ pub(super) fn render_voice_selector(
                     .map_or_else(|| picked.clone(), |(_, v)| v.to_owned());
                 voice_key_d_pick.update(cx, |d, cx| d.set(picked, cx));
                 voice_d_pick.update(cx, |d, cx| d.set(raw_vid, cx));
-                pane_voice_pick.update(cx, |this, cx| {
-                    this.open_dropdown = None;
-                    cx.notify();
-                });
+                _ = pane_voice_pick.update(cx, |_, cx| cx.notify());
             },
         ))
         .when(ctx.tts_voices.is_empty(), |this| {

@@ -1,13 +1,11 @@
-//! Search and selection for app data shown in a GPUI Kit popover.
+//! Application choices rendered by GPUI Kit's searchable select.
 
-use crate::input::Draft;
-use crate::ui::icons::{Icon, icon};
-use crate::ui::theme::{Theme, radius};
-use gpui::component::Disableable;
-use gpui::component::button::{Button, ButtonVariants};
-use gpui::component::list::ListItem;
-use gpui::component::popover::Popover;
-use gpui::{AnyElement, App, Entity, SharedString, StyleRefinement, Window, div, prelude::*, px};
+use gpui::component::{
+    IndexPath,
+    searchable_list::{SearchableListItem, SearchableVec},
+    select::{Select, SelectEvent, SelectState},
+};
+use gpui::{App, Entity, SharedString, Subscription, Window, div, prelude::*, px};
 use std::rc::Rc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,175 +15,148 @@ pub struct DropdownOption {
     pub detail: Option<String>,
 }
 
-pub struct DropdownSpec<'a> {
-    pub id: String,
-    pub selected_value: Option<&'a str>,
-    pub selected_label: Option<&'a str>,
-    pub placeholder: &'a str,
-    pub options: &'a [DropdownOption],
-    pub open: bool,
-    pub enabled: bool,
-    pub max_list_height: f32,
-    pub filter_draft: Option<Entity<Draft>>,
-    pub filter_text: &'a str,
-    pub empty_label: &'a str,
-}
+impl SearchableListItem for DropdownOption {
+    type Value = String;
 
-pub fn dropdown_select<T, S>(
-    spec: DropdownSpec<'_>,
-    theme: &Theme,
-    on_toggle: T,
-    on_select: S,
-) -> AnyElement
-where
-    T: Fn(&mut Window, &mut App) + 'static,
-    S: Fn(String, &mut Window, &mut App) + 'static,
-{
-    let selected_label = spec.selected_label.filter(|label| !label.is_empty());
-    let fg = if spec.enabled && selected_label.is_some() {
-        theme.ink
-    } else {
-        theme.ink_placeholder
-    };
-    let trigger = Button::new(SharedString::from(format!("{}-trigger", spec.id)))
-        .ghost()
-        .disabled(!spec.enabled)
-        .w_full()
-        .min_w_0()
-        .justify_between()
-        .rounded(radius::medium())
-        .bg(if spec.enabled {
-            theme.bg_input
-        } else {
-            theme.bg_blush
-        })
-        .border_1()
-        .border_color(if spec.open {
-            theme.accent
-        } else {
-            theme.border
-        })
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_sm()
-                .text_color(fg)
-                .truncate()
-                .child(selected_label.unwrap_or(spec.placeholder).to_owned()),
-        )
-        .child(icon(
-            if spec.open {
-                Icon::ChevronUp
-            } else {
-                Icon::ChevronDown
-            },
-            14.,
-            theme.ink_muted,
-        ));
-    if !spec.enabled {
-        return trigger.into_any_element();
+    fn title(&self) -> SharedString {
+        self.label.clone().into()
     }
 
-    let open = spec.open;
-    let menu = open.then(|| dropdown_menu(&spec, theme, on_select));
-    Popover::new(SharedString::from(spec.id))
-        .trigger(trigger)
-        .trigger_style(StyleRefinement::default().w_full().min_w_0())
-        .open(open)
-        .on_open_change(move |next, window, cx| {
-            if *next != open {
-                on_toggle(window, cx);
-            }
-        })
-        .p(px(6.))
-        .children(menu)
-        .into_any_element()
+    fn value(&self) -> &String {
+        &self.value
+    }
+
+    fn matches(&self, query: &str) -> bool {
+        let query = query.to_lowercase();
+        [&self.label, &self.value]
+            .into_iter()
+            .chain(self.detail.iter())
+            .any(|text| text.to_lowercase().contains(&query))
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .child(div().truncate().child(self.title()))
+            .when_some(self.detail.clone(), |row, detail| {
+                row.child(div().truncate().text_xs().opacity(0.7).child(detail))
+            })
+    }
 }
 
-fn dropdown_menu(
-    spec: &DropdownSpec<'_>,
-    theme: &Theme,
-    on_select: impl Fn(String, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    let query = spec.filter_text.trim().to_lowercase();
-    let on_select = Rc::new(on_select);
-    let rows: Vec<_> = spec
-        .options
-        .iter()
-        .filter(|option| option_matches_query(option, &query))
-        .enumerate()
-        .map(|(idx, option)| {
-            let selected = spec.selected_value == Some(option.value.as_str());
-            let select = on_select.clone();
-            let value = option.value.clone();
-            let label = SharedString::from(option.label.clone());
-            ListItem::new(idx)
-                .selected(selected)
-                .accessibility_label(label.clone())
-                .on_click(move |_, window, cx| select(value.clone(), window, cx))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(div().text_xs().truncate().child(label))
-                        .when_some(option.detail.clone(), |this, detail| {
-                            this.child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(theme.ink_muted)
-                                    .truncate()
-                                    .child(detail),
-                            )
-                        }),
-                )
-        })
-        .collect();
-    let empty = rows.is_empty();
-    div()
-        .min_w(px(240.))
-        .max_w(px(360.))
-        .flex()
-        .flex_col()
-        .gap(px(4.))
-        .when_some(
-            spec.filter_draft.clone().filter(|_| spec.options.len() > 8),
-            gpui::ParentElement::child,
-        )
-        .child(
-            div()
-                .id("options")
-                .max_h(px(spec.max_list_height))
-                .overflow_y_scroll()
-                .children(rows)
-                .when(empty, |this| {
-                    let message = if query.is_empty() {
-                        spec.empty_label
-                    } else {
-                        "該当する候補がありません"
-                    };
-                    this.child(
-                        div()
-                            .p_2()
-                            .text_xs()
-                            .text_color(theme.ink_muted)
-                            .child(message.to_owned()),
+pub struct DropdownSpec {
+    pub id: String,
+    pub selected_value: Option<String>,
+    pub placeholder: SharedString,
+    pub options: Vec<DropdownOption>,
+    pub enabled: bool,
+    pub max_list_height: f32,
+    pub search_placeholder: &'static str,
+    pub empty_label: &'static str,
+}
+
+type OnSelect = Rc<dyn Fn(String, &mut Window, &mut App)>;
+
+#[derive(IntoElement)]
+struct Dropdown {
+    spec: DropdownSpec,
+    on_select: OnSelect,
+}
+
+struct Binding {
+    options: Vec<DropdownOption>,
+    select: Entity<SelectState<SearchableVec<DropdownOption>>>,
+    on_select: OnSelect,
+    _confirmed: Subscription,
+}
+
+impl RenderOnce for Dropdown {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let Dropdown { spec, on_select } = self;
+        let binding = window.use_keyed_state(spec.id.clone(), cx, |_, _| None::<Binding>);
+        let select = binding.update(cx, |state, cx| {
+            let selected_index = spec.selected_value.as_ref().and_then(|value| {
+                spec.options
+                    .iter()
+                    .position(|item| &item.value == value)
+                    .map(|row| IndexPath::default().row(row))
+            });
+            let value = selected_index.and(spec.selected_value.as_ref());
+            let binding = state.get_or_insert_with(|| {
+                let select = cx.new(|cx| {
+                    SelectState::new(
+                        SearchableVec::new(spec.options.clone()),
+                        selected_index,
+                        window,
+                        cx,
                     )
-                }),
-        )
-        .into_any_element()
+                    .searchable(true)
+                });
+                let _confirmed =
+                    cx.subscribe_in(&select, window, |binding, _, event, window, cx| {
+                        if let (Some(binding), SelectEvent::Confirm(Some(value))) = (binding, event)
+                        {
+                            (binding.on_select)(value.clone(), window, cx);
+                        }
+                    });
+                Binding {
+                    options: spec.options.clone(),
+                    select,
+                    on_select: on_select.clone(),
+                    _confirmed,
+                }
+            });
+            binding.on_select = on_select;
+            if binding.options != spec.options {
+                binding.options = spec.options;
+                binding.select.update(cx, |state, cx| {
+                    state.set_items(SearchableVec::new(binding.options.clone()), window, cx);
+                    // Set the committed value on the full list after refreshing the items.
+                    select_value(state, value, window, cx);
+                });
+            } else if binding.select.read(cx).selected_value() != value {
+                binding.select.update(cx, |state, cx| {
+                    select_value(state, value, window, cx);
+                });
+            }
+            binding.select.clone()
+        });
+        Select::new(&select)
+            .id(spec.id)
+            .w_full()
+            .min_w_0()
+            .disabled(!spec.enabled)
+            .menu_max_h(px(spec.max_list_height))
+            .placeholder(spec.placeholder)
+            .search_placeholder(spec.search_placeholder)
+            .empty(move |_, _| div().p_2().text_xs().child(spec.empty_label))
+    }
 }
 
-fn option_matches_query(option: &DropdownOption, query: &str) -> bool {
-    query.is_empty()
-        || option.label.to_lowercase().contains(query)
-        || option.value.to_lowercase().contains(query)
-        || option
-            .detail
-            .as_deref()
-            .is_some_and(|detail| detail.to_lowercase().contains(query))
+fn select_value(
+    state: &mut SelectState<SearchableVec<DropdownOption>>,
+    value: Option<&String>,
+    window: &mut Window,
+    cx: &mut gpui::Context<SelectState<SearchableVec<DropdownOption>>>,
+) {
+    if let Some(value) = value {
+        state.set_selected_value(value, window, cx);
+    } else if state.selected_value().is_some() {
+        state.set_selected_index(None::<IndexPath>, window, cx);
+    }
+}
+
+pub fn dropdown_select(
+    spec: DropdownSpec,
+    on_select: impl Fn(String, &mut Window, &mut App) + 'static,
+) -> gpui::AnyElement {
+    Dropdown {
+        spec,
+        on_select: Rc::new(on_select),
+    }
+    .into_any_element()
 }
 
 #[cfg(test)]
@@ -195,45 +166,29 @@ mod tests {
     use gpui::{AppContext, Context, TestAppContext, WindowOptions};
 
     #[derive(Default)]
-    struct Picker {
-        open: bool,
-        selected: Option<String>,
-    }
+    struct Picker(Option<String>);
 
     impl Render for Picker {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let entity = cx.entity();
-            let select = entity.clone();
-            let options = [DropdownOption {
-                value: "voice".into(),
-                label: "話者".into(),
-                detail: Some("日本語".into()),
-            }];
+            let picker = cx.weak_entity();
             div().w(px(320.)).child(dropdown_select(
                 DropdownSpec {
-                    id: "voice-picker".into(),
-                    selected_value: self.selected.as_deref(),
-                    selected_label: self.selected.as_ref().map(|_| "話者"),
-                    placeholder: "話者を選択",
-                    options: &options,
-                    open: self.open,
+                    id: "test-picker".into(),
+                    selected_value: self.0.clone(),
+                    placeholder: "話者を選択".into(),
+                    options: vec![DropdownOption {
+                        value: "voice".into(),
+                        label: "日本語".into(),
+                        detail: None,
+                    }],
                     enabled: true,
                     max_list_height: 148.,
-                    filter_draft: None,
-                    filter_text: "",
+                    search_placeholder: "話者を検索…",
                     empty_label: "話者が見つかりません",
                 },
-                &Theme::default(),
-                move |_, cx| {
-                    entity.update(cx, |picker, cx| {
-                        picker.open = !picker.open;
-                        cx.notify();
-                    });
-                },
                 move |value, _, cx| {
-                    select.update(cx, |picker, cx| {
-                        picker.selected = Some(value);
-                        picker.open = false;
+                    _ = picker.update(cx, |this, cx| {
+                        this.0 = Some(value);
                         cx.notify();
                     });
                 },
@@ -242,7 +197,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn dropdown_selects_a_row_and_dismisses_with_escape(cx: &mut TestAppContext) {
+    fn keyboard_confirmation_commits_and_escape_dismisses(cx: &mut TestAppContext) {
         let (window, picker) = cx.update(|cx| {
             crate::ui::theme::init_components(cx);
             gpui::open_window(WindowOptions::default(), cx, |_, cx| {
@@ -252,17 +207,18 @@ mod tests {
         });
         window
             .update(cx, |_, window, cx| {
-                window.click("voice-picker-trigger", cx);
-                assert!(picker.read(cx).open);
-                window.click(0usize, cx);
-                assert_eq!(picker.read(cx).selected.as_deref(), Some("voice"));
-                assert!(!picker.read(cx).open);
-
-                window.click("voice-picker-trigger", cx);
-                assert!(picker.read(cx).open);
+                window.click("input", cx);
                 window.press("escape", cx);
-                assert!(!picker.read(cx).open);
             })
             .unwrap();
+        cx.read(|cx| assert!(picker.read(cx).0.is_none()));
+        window
+            .update(cx, |_, window, cx| {
+                window.click("input", cx);
+                window.press("down", cx);
+                window.press("enter", cx);
+            })
+            .unwrap();
+        cx.read(|cx| assert_eq!(picker.read(cx).0.as_deref(), Some("voice")));
     }
 }

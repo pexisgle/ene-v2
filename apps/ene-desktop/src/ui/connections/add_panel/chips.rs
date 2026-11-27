@@ -124,7 +124,6 @@ fn preset_chip(
             this.form.add = AddFlow::Closed;
             if let Some(eid) = expand_id {
                 this.form.open_editor(eid.into());
-                this.open_dropdown = None;
             }
             cx.notify();
         });
@@ -164,7 +163,6 @@ pub(in crate::ui::connections) fn build_search_preset_chips(
                 pane_s.update(cx, |this, cx| {
                     this.form.add = AddFlow::Closed;
                     this.form.open_editor(target_id);
-                    this.open_dropdown = None;
                     cx.notify();
                 });
             },

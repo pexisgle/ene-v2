@@ -116,7 +116,6 @@ pub(crate) struct ConnectionsPane {
     pub(crate) hub: Entity<Hub>,
     pub(super) drafts: DraftStore,
     form: ConnectionFormState,
-    pub(super) open_dropdown: Option<String>,
     _events: Subscription,
 }
 
@@ -126,24 +125,6 @@ impl std::fmt::Debug for ConnectionsPane {
     }
 }
 
-fn toggle_pane_dropdown(pane: &Entity<ConnectionsPane>, key: &str, cx: &mut gpui::App) {
-    pane.update(cx, |this, cx| {
-        this.open_dropdown = if this.open_dropdown.as_deref() == Some(key) {
-            None
-        } else {
-            Some(key.to_owned())
-        };
-        cx.notify();
-    });
-}
-
-fn close_pane_dropdown(pane: &Entity<ConnectionsPane>, cx: &mut gpui::App) {
-    pane.update(cx, |this, cx| {
-        this.open_dropdown = None;
-        cx.notify();
-    });
-}
-
 impl ConnectionsPane {
     pub(crate) fn new(hub: Entity<Hub>, cx: &mut Context<Self>) -> Self {
         let _events = cx.subscribe(&hub, Self::on_hub_event);
@@ -151,13 +132,11 @@ impl ConnectionsPane {
             hub,
             drafts: DraftStore::default(),
             form: ConnectionFormState::default(),
-            open_dropdown: None,
             _events,
         }
     }
 
     pub(crate) fn on_leave(&mut self) {
-        self.open_dropdown = None;
         if let Some(editor) = &mut self.form.expanded {
             editor.mode = EditorMode::Editing;
             editor.key_visible = false;

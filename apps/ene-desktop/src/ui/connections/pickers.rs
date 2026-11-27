@@ -1,4 +1,4 @@
-use super::{ConnectionsPane, close_pane_dropdown, toggle_pane_dropdown};
+use super::ConnectionsPane;
 use crate::input::Draft;
 use crate::ui::default_embedding_dimensions;
 use crate::ui::icons::Icon;
@@ -8,7 +8,6 @@ use crate::ui::widgets::{
 };
 use ene_client_core::{connections::ConnectionResource, domain::ConnectionEndpoint};
 use gpui::{App, Context, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
-use std::borrow::Cow;
 
 pub(super) struct PickerInput<'a> {
     pub(super) id: &'a str,
@@ -20,7 +19,7 @@ pub(super) struct PickerInput<'a> {
 }
 
 pub(super) fn render_resource_picker(
-    pane: &mut ConnectionsPane,
+    pane: &ConnectionsPane,
     input: &PickerInput<'_>,
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
@@ -57,22 +56,9 @@ pub(super) fn render_resource_picker(
             label,
         })
         .collect();
-    let selected_label = selected
-        .as_deref()
-        .map(|value| selected_label(resource, value, &options));
+    let placeholder = selected.as_deref().unwrap_or(labels.placeholder).to_owned();
     let key = format!("{}:{id}", labels.dropdown);
-    let open = pane.open_dropdown.as_deref() == Some(key.as_str());
-    let filter = pane.drafts.draft(
-        cx,
-        format!("conn:{id}:{}-filter", labels.filter),
-        labels.search,
-        None,
-        theme,
-    );
-    let filter_text = filter.read(cx).text().to_owned();
-    let pane_entity = cx.entity();
-    let toggle = pane_entity.clone();
-    let toggle_key = key.clone();
+    let pane_entity = cx.weak_entity();
     let refresh_hub = pane.hub.clone();
     let id = id.to_owned();
     let refresh_id = id.clone();
@@ -98,19 +84,14 @@ pub(super) fn render_resource_picker(
         .child(dropdown_select(
             DropdownSpec {
                 id: key,
-                selected_value: selected.as_deref(),
-                selected_label: selected_label.as_deref(),
-                placeholder: labels.placeholder,
-                options: &options,
-                open,
+                selected_value: selected,
+                placeholder: placeholder.into(),
+                options,
                 enabled: live,
                 max_list_height: labels.height,
-                filter_draft: Some(filter),
-                filter_text: &filter_text,
+                search_placeholder: labels.search,
                 empty_label: labels.empty,
             },
-            theme,
-            move |_, cx| toggle_pane_dropdown(&toggle, &toggle_key, cx),
             move |picked, _, cx| {
                 list_d.update(cx, |draft, cx| draft.set(picked.clone(), cx));
                 if let Some(dimensions) = &dim_d {
@@ -118,29 +99,12 @@ pub(super) fn render_resource_picker(
                         draft.set(default_embedding_dimensions(&picked).to_string(), cx)
                     });
                 }
-                close_pane_dropdown(&pane_entity, cx);
+                _ = pane_entity.update(cx, |_, cx| cx.notify());
             },
         ))
         .when_some(labels.hint, |this, hint| {
             this.child(div().text_xs().text_color(theme.ink_muted).child(hint))
         })
-}
-
-fn selected_label<'a>(
-    resource: ConnectionResource,
-    value: &'a str,
-    options: &'a [DropdownOption],
-) -> Cow<'a, str> {
-    let option = options.iter().find(|option| option.value == value);
-    match (resource, option) {
-        (ConnectionResource::Speaker, Some(option)) => {
-            Cow::Owned(format!("{} (ID: {value})", option.label))
-        }
-        (ConnectionResource::ChatModel | ConnectionResource::Voice, Some(option)) => {
-            Cow::Borrowed(&option.label)
-        }
-        _ => Cow::Borrowed(value),
-    }
 }
 
 fn picker_header(
@@ -188,7 +152,6 @@ fn picker_header(
 struct PickerLabels {
     dropdown: &'static str,
     fetch: &'static str,
-    filter: &'static str,
     title: &'static str,
     count: &'static str,
     checking: &'static str,
@@ -206,7 +169,6 @@ impl PickerLabels {
             ConnectionResource::ChatModel => Self {
                 dropdown: "conn-model",
                 fetch: "models",
-                filter: "model",
                 title: "使用するモデル",
                 count: "件の候補",
                 checking: "取得中…",
@@ -220,7 +182,6 @@ impl PickerLabels {
             ConnectionResource::Speaker => Self {
                 dropdown: "conn-vv-speaker",
                 fetch: "vv",
-                filter: "vv",
                 title: "既定の話者",
                 count: "件取得済み",
                 checking: "起動・取得中…",
@@ -234,7 +195,6 @@ impl PickerLabels {
             ConnectionResource::Voice => Self {
                 dropdown: "conn-sakura-tts",
                 fetch: "sakura-tts",
-                filter: "sakura-tts",
                 title: "話者モデル・スタイル",
                 count: "件利用可能",
                 checking: "取得中…",
@@ -250,7 +210,6 @@ impl PickerLabels {
             ConnectionResource::TranscriptionModel => Self {
                 dropdown: "conn-stt-model",
                 fetch: "stt",
-                filter: "stt",
                 title: "音声認識モデル",
                 count: "件取得済み",
                 checking: "取得中…",
@@ -264,7 +223,6 @@ impl PickerLabels {
             ConnectionResource::EmbeddingModel => Self {
                 dropdown: "conn-emb-model",
                 fetch: "emb",
-                filter: "emb",
                 title: "埋め込みモデル",
                 count: "件利用可能",
                 checking: "確認・取得中…",

@@ -314,7 +314,6 @@ fn render_mcp_submit(
                 this.clear_mcp_drafts();
                 this.form.open_editor(id);
                 this.form.add = AddFlow::Closed;
-                this.open_dropdown = None;
                 cx.notify();
             });
         },

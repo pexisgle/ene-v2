@@ -20,14 +20,12 @@ pub(super) struct SetupChoices {
     target_conn_id: Option<String>,
     model_options: Vec<DropdownOption>,
     selected_model: Option<String>,
-    selected_model_label: Option<String>,
     checking_models: bool,
     voicevox_conn_id: Option<String>,
     voicevox_enabled: bool,
     voicevox_checking: bool,
     voice_options: Vec<DropdownOption>,
     selected_voice: Option<String>,
-    selected_voice_label: Option<String>,
 }
 
 pub(super) fn render_onboarding_body(
@@ -130,17 +128,13 @@ pub(super) fn render_model_voice_onboarding(
 ) -> AnyElement {
     let look = theme.field_look(false);
     pod.onboard_name.update(cx, |d, cx| d.apply_look(look, cx));
-    pod.setup_model_filter
-        .update(cx, |d, cx| d.apply_look(look, cx));
-    pod.setup_voice_filter
-        .update(cx, |d, cx| d.apply_look(look, cx));
     let companions_empty = pod
         .hub
         .read(cx)
         .model
         .snapshot()
         .is_none_or(|snap| snap.companions.is_empty());
-    let choices = collect_setup_choices(pod, cx);
+    let mut choices = collect_setup_choices(pod, cx);
 
     let name = pod.onboard_name.read(cx).text().trim().to_owned();
     let can_finish = (!companions_empty || !name.is_empty())
@@ -154,9 +148,9 @@ pub(super) fn render_model_voice_onboarding(
     );
 
     if let Some(refresh_cid) = choices.target_conn_id.clone() {
-        body = append_setup_model_section(pod, body, &refresh_cid, &choices, theme, cx);
+        body = append_setup_model_section(pod, body, &refresh_cid, &mut choices, theme, cx);
     }
-    body = append_setup_voice_section(pod, body, &choices, theme, cx);
+    body = append_setup_voice_section(pod, body, &mut choices, theme, cx);
     if companions_empty {
         body = body
             .child(

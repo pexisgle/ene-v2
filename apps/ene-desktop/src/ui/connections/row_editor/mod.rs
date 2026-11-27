@@ -162,7 +162,6 @@ fn render_row_header(
                             } else {
                                 this.form.close_editor();
                             }
-                            this.open_dropdown = None;
                             cx.notify();
                         });
                     },

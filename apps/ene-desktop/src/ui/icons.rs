@@ -151,6 +151,8 @@ impl Icon {
     }
 }
 
+gpui::assets::icon_assets!(SelectAssets, [ChevronDown, Loader]);
+
 impl AssetSource for EmbeddedAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let found = Icon::ALL
@@ -159,12 +161,16 @@ impl AssetSource for EmbeddedAssets {
             .map(|icon| Cow::Borrowed(icon.svg_bytes()));
         match found {
             Some(icon) => Ok(Some(icon)),
-            None => gpui::assets::Assets.load(path),
+            None => match SelectAssets.load(path)? {
+                Some(icon) => Ok(Some(icon)),
+                None => gpui::assets::Assets.load(path),
+            },
         }
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut assets = gpui::assets::Assets.list(path)?;
+        assets.extend(SelectAssets.list(path)?);
         assets.extend(
             Icon::ALL
                 .into_iter()

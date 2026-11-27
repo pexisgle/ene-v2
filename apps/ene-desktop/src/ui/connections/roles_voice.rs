@@ -1,7 +1,7 @@
 //! Voice role rows backed by a connection.
 
+use super::ConnectionsPane;
 use super::roles_panel::render_role_row_header;
-use super::{ConnectionsPane, close_pane_dropdown, toggle_pane_dropdown};
 use crate::ui::Hub;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
@@ -62,9 +62,7 @@ pub(super) fn collect_roles_context(hub: &Hub) -> RolesContext {
 pub(super) struct VoiceRoleSpec {
     title: &'static str,
     dd_key: &'static str,
-    filter_key: &'static str,
     filter_placeholder: &'static str,
-    pick_placeholder: &'static str,
     off_label: &'static str,
     empty_dropdown_label: &'static str,
     empty_hint: &'static str,
@@ -75,7 +73,7 @@ pub(super) struct VoiceRoleSpec {
 }
 
 pub(super) fn render_voice_role_row(
-    pane: &mut ConnectionsPane,
+    pane: &ConnectionsPane,
     spec: &VoiceRoleSpec,
     conn_names: &BTreeMap<String, String>,
     live: bool,
@@ -83,15 +81,6 @@ pub(super) fn render_voice_role_row(
     cx: &mut Context<ConnectionsPane>,
 ) -> AnyElement {
     let current_text = resolve_voice_label(spec, conn_names);
-    let dd_open = pane.open_dropdown.as_deref() == Some(spec.dd_key);
-    let filter_d = pane.drafts.draft(
-        cx,
-        spec.filter_key.to_owned(),
-        spec.filter_placeholder,
-        None,
-        theme,
-    );
-    let filter_txt = filter_d.read(cx).text().to_owned();
     let options = build_voice_role_options(spec);
     let current_value = spec.active.as_ref().map_or_else(
         || "__off__".to_owned(),
@@ -99,10 +88,7 @@ pub(super) fn render_voice_role_row(
     );
     let no_choices = spec.choices.is_empty();
     let assign_fn = spec.assign;
-    let pane_toggle = cx.entity();
-    let pane_pick = cx.entity();
     let hub_assign = pane.hub.clone();
-    let toggle_key = spec.dd_key.to_owned();
 
     div()
         .border_t_1()
@@ -115,19 +101,14 @@ pub(super) fn render_voice_role_row(
         .child(dropdown_select(
             DropdownSpec {
                 id: spec.dd_key.to_owned(),
-                selected_value: Some(current_value.as_str()),
-                selected_label: Some(current_text.as_str()),
-                placeholder: spec.pick_placeholder,
-                options: &options,
-                open: dd_open,
+                selected_value: Some(current_value),
+                placeholder: current_text.into(),
+                options,
                 enabled: live,
                 max_list_height: 200.,
-                filter_draft: Some(filter_d),
-                filter_text: &filter_txt,
+                search_placeholder: spec.filter_placeholder,
                 empty_label: spec.empty_dropdown_label,
             },
-            theme,
-            move |_, cx| toggle_pane_dropdown(&pane_toggle, &toggle_key, cx),
             move |picked, _, cx| {
                 if picked == "__off__" {
                     hub_assign.update(cx, |hub, cx| assign_fn(hub, None, cx));
@@ -136,7 +117,6 @@ pub(super) fn render_voice_role_row(
                         assign_fn(hub, Some((cid.as_str(), vid.as_str())), cx)
                     });
                 }
-                close_pane_dropdown(&pane_pick, cx);
             },
         ))
         .when(no_choices, |this| {
@@ -155,9 +135,7 @@ pub(super) fn voice_role_specs(ctx: &RolesContext) -> [VoiceRoleSpec; 2] {
         VoiceRoleSpec {
             title: "音声認識（STT）",
             dd_key: "adv-role:stt",
-            filter_key: "adv-role:stt:filter",
             filter_placeholder: "モデル名で絞り込み…",
-            pick_placeholder: "モデルを選択…",
             off_label: "無効（音声入力オフ）",
             empty_dropdown_label: "利用可能な音声認識モデルがありません（「接続を追加」から追加してください）",
             empty_hint: "音声認識（STT）接続がありません。「接続を追加」から追加してください。",
@@ -169,9 +147,7 @@ pub(super) fn voice_role_specs(ctx: &RolesContext) -> [VoiceRoleSpec; 2] {
         VoiceRoleSpec {
             title: "音声合成（TTS）",
             dd_key: "adv-role:tts",
-            filter_key: "adv-role:tts:filter",
             filter_placeholder: "話者名・接続名で絞り込み…",
-            pick_placeholder: "話者を選択…",
             off_label: "無効（読み上げオフ）",
             empty_dropdown_label: "利用可能な音声合成話者がありません（「接続を追加」から追加してください）",
             empty_hint: "音声合成（TTS）接続がありません。「接続を追加」から追加してください。",

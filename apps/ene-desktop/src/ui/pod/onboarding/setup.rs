@@ -3,8 +3,8 @@
 use super::CompanionPod;
 use super::SetupChoices;
 use super::views::{
-    build_model_options, build_voice_options, find_option_label, is_voicevox_connection,
-    render_launch_voicevox_row, resolve_selected_option,
+    build_model_options, build_voice_options, is_voicevox_connection, render_launch_voicevox_row,
+    resolve_selected_option,
 };
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
@@ -27,7 +27,6 @@ pub(super) fn collect_setup_choices(pod: &CompanionPod, cx: &App) -> SetupChoice
     });
     let model_options = build_model_options(hub, target_conn_id.as_deref());
     let selected_model = resolve_selected_option(pod.setup_model_id.as_deref(), &model_options);
-    let selected_model_label = find_option_label(&model_options, selected_model.as_deref());
     let checking_models = target_conn_id
         .as_deref()
         .is_some_and(|cid| hub.setup.checking_connections.contains_key(cid));
@@ -47,20 +46,17 @@ pub(super) fn collect_setup_choices(pod: &CompanionPod, cx: &App) -> SetupChoice
     let voice_options = build_voice_options(hub, voicevox_conn_id.as_deref());
     let selected_voice =
         resolve_selected_option(pod.setup_voice_speaker_id.as_deref(), &voice_options);
-    let selected_voice_label = find_option_label(&voice_options, selected_voice.as_deref());
 
     SetupChoices {
         target_conn_id,
         model_options,
         selected_model,
-        selected_model_label,
         checking_models,
         voicevox_conn_id,
         voicevox_enabled,
         voicevox_checking,
         voice_options,
         selected_voice,
-        selected_voice_label,
     }
 }
 
@@ -68,13 +64,11 @@ pub(super) fn append_setup_model_section(
     pod: &CompanionPod,
     body: gpui::Div,
     refresh_cid: &str,
-    choices: &SetupChoices,
+    choices: &mut SetupChoices,
     theme: &Theme,
     cx: &Context<CompanionPod>,
 ) -> gpui::Div {
-    let model_filter_text = pod.setup_model_filter.read(cx).text().to_owned();
-    let pod_model_toggle = cx.entity();
-    let pod_model_select = cx.entity();
+    let pod_model_select = cx.weak_entity();
     let hub_refresh_models = pod.hub.clone();
     let refresh_id = refresh_cid.to_owned();
     let checking = choices.checking_models;
@@ -110,37 +104,22 @@ pub(super) fn append_setup_model_section(
     .child(dropdown_select(
         DropdownSpec {
             id: "onboard-model-dropdown".to_owned(),
-            selected_value: choices.selected_model.as_deref(),
-            selected_label: choices.selected_model_label.as_deref(),
+            selected_value: choices.selected_model.clone(),
             placeholder: if checking {
                 "モデル一覧を取得中…"
             } else {
                 "モデルを選択…"
-            },
-            options: &choices.model_options,
-            open: pod.setup_model_dropdown_open,
+            }
+            .into(),
+            options: std::mem::take(&mut choices.model_options),
             enabled: !checking,
             max_list_height: 168.,
-            filter_draft: Some(pod.setup_model_filter.clone()),
-            filter_text: &model_filter_text,
+            search_placeholder: "モデルを検索…",
             empty_label: "取得済みのモデルがありません（「再取得」で確認）",
         },
-        theme,
-        move |_, cx| {
-            pod_model_toggle.update(cx, |this, cx| {
-                this.setup_model_dropdown_open = !this.setup_model_dropdown_open;
-                if this.setup_model_dropdown_open {
-                    this.setup_voice_dropdown_open = false;
-                }
-                cx.notify();
-            });
-        },
         move |val, _, cx| {
-            pod_model_select.update(cx, |this, cx| {
-                this.setup_model_id = Some(val.clone());
-                this.setup_model_dropdown_open = false;
-                this.setup_model_filter
-                    .update(cx, crate::input::Draft::clear);
+            _ = pod_model_select.update(cx, |this, cx| {
+                this.setup_model_id = Some(val);
                 cx.notify();
             });
         },
@@ -150,7 +129,7 @@ pub(super) fn append_setup_model_section(
 pub(super) fn append_setup_voice_section(
     pod: &CompanionPod,
     body: gpui::Div,
-    choices: &SetupChoices,
+    choices: &mut SetupChoices,
     theme: &Theme,
     cx: &Context<CompanionPod>,
 ) -> gpui::Div {
@@ -164,9 +143,7 @@ pub(super) fn append_setup_voice_section(
         ));
     }
 
-    let voice_filter_text = pod.setup_voice_filter.read(cx).text().to_owned();
-    let pod_voice_toggle = cx.entity();
-    let pod_voice_select = cx.entity();
+    let pod_voice_select = cx.weak_entity();
     let vv_refresh = pod.hub.clone();
     let vv_cid = choices.voicevox_conn_id.clone();
     let checking = choices.voicevox_checking;
@@ -203,33 +180,17 @@ pub(super) fn append_setup_voice_section(
     .child(dropdown_select(
         DropdownSpec {
             id: "onboard-voice-dropdown".to_owned(),
-            selected_value: choices.selected_voice.as_deref(),
-            selected_label: choices.selected_voice_label.as_deref(),
-            placeholder: "話者を選択…",
-            options: &choices.voice_options,
-            open: pod.setup_voice_dropdown_open,
+            selected_value: choices.selected_voice.clone(),
+            placeholder: "話者を選択…".into(),
+            options: std::mem::take(&mut choices.voice_options),
             enabled: !checking,
             max_list_height: 148.,
-            filter_draft: Some(pod.setup_voice_filter.clone()),
-            filter_text: &voice_filter_text,
+            search_placeholder: "話者を検索…",
             empty_label: "話者が見つかりません",
         },
-        theme,
-        move |_, cx| {
-            pod_voice_toggle.update(cx, |this, cx| {
-                this.setup_voice_dropdown_open = !this.setup_voice_dropdown_open;
-                if this.setup_voice_dropdown_open {
-                    this.setup_model_dropdown_open = false;
-                }
-                cx.notify();
-            });
-        },
         move |val, _, cx| {
-            pod_voice_select.update(cx, |this, cx| {
-                this.setup_voice_speaker_id = Some(val.clone());
-                this.setup_voice_dropdown_open = false;
-                this.setup_voice_filter
-                    .update(cx, crate::input::Draft::clear);
+            _ = pod_voice_select.update(cx, |this, cx| {
+                this.setup_voice_speaker_id = Some(val);
                 cx.notify();
             });
         },

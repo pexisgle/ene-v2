@@ -50,11 +50,7 @@ pub struct CompanionPod {
     pub(super) onboard_key: Entity<Draft>,
     pub(super) onboard_name: Entity<Draft>,
     pub(super) setup_model_id: Option<String>,
-    pub(super) setup_model_dropdown_open: bool,
-    pub(super) setup_model_filter: Entity<Draft>,
     pub(super) setup_voice_speaker_id: Option<String>,
-    pub(super) setup_voice_dropdown_open: bool,
-    pub(super) setup_voice_filter: Entity<Draft>,
     pub(super) selected_provider_id: Option<String>,
     pub(super) choosing_provider: bool,
     key_focused: bool,
@@ -99,8 +95,6 @@ impl CompanionPod {
             draft.set("ene", cx);
             draft
         });
-        let setup_model_filter = cx.new(|_| Draft::new("モデルを検索…", false));
-        let setup_voice_filter = cx.new(|_| Draft::new("話者を検索…", false));
         let _observe = cx.observe(&hub, |_, _, cx| cx.notify());
         Self {
             hub,
@@ -108,11 +102,7 @@ impl CompanionPod {
             onboard_key,
             onboard_name,
             setup_model_id: None,
-            setup_model_dropdown_open: false,
-            setup_model_filter,
             setup_voice_speaker_id: None,
-            setup_voice_dropdown_open: false,
-            setup_voice_filter,
             selected_provider_id: None,
             choosing_provider: false,
             key_focused: false,
@@ -172,7 +162,7 @@ impl CompanionPod {
             if companions_empty {
                 &self.onboard_name
             } else {
-                &self.setup_model_filter
+                return;
             }
         } else {
             &self.chat_input
@@ -217,8 +207,6 @@ impl CompanionPod {
             } else {
                 496.
             }
-        } else if self.setup_model_dropdown_open || self.setup_voice_dropdown_open {
-            580.
         } else {
             492.
         };
@@ -276,10 +264,7 @@ impl CompanionPod {
             cx.notify();
             return;
         }
-        if self.setup_model_dropdown_open || self.setup_voice_dropdown_open {
-            self.setup_model_dropdown_open = false;
-            self.setup_voice_dropdown_open = false;
-            cx.notify();
+        if self.in_model_setup(cx) {
             return;
         }
         if self.roster_open {

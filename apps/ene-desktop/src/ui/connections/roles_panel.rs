@@ -1,5 +1,5 @@
+use super::ConnectionsPane;
 use super::roles_voice::{collect_roles_context, render_voice_role_row, voice_role_specs};
-use super::{ConnectionsPane, close_pane_dropdown, toggle_pane_dropdown};
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{DropdownOption, DropdownSpec, Tone, dropdown_select, pill_button};
@@ -56,7 +56,6 @@ pub(super) fn render_advanced_roles_panel(
                     live,
                 },
                 theme,
-                cx,
             )
         })
         .collect();
@@ -107,7 +106,6 @@ fn render_model_role_row(
     pane: &mut ConnectionsPane,
     row: &ModelRoleRowCtx<'_>,
     theme: &Theme,
-    cx: &mut Context<ConnectionsPane>,
 ) -> AnyElement {
     let ModelRoleRowCtx {
         idx,
@@ -134,15 +132,6 @@ fn render_model_role_row(
     );
 
     let dd_key = format!("adv-role:{slot:?}");
-    let dd_open = pane.open_dropdown.as_deref() == Some(dd_key.as_str());
-    let filter_d = pane.drafts.draft(
-        cx,
-        format!("adv-role:{slot:?}:filter"),
-        "モデル名で絞り込み…",
-        None,
-        theme,
-    );
-    let filter_txt = filter_d.read(cx).text().to_owned();
     let options = build_slot_model_options(slot, slot_models.iter().chain(harnesses));
     let current_value = current
         .as_ref()
@@ -151,10 +140,7 @@ fn render_model_role_row(
             (!matches!(slot, ModelRoleSlot::Companion | ModelRoleSlot::Task))
                 .then(|| "__auto__".to_owned())
         });
-    let pane_toggle = cx.entity();
-    let pane_pick = cx.entity();
     let hub_assign = pane.hub.clone();
-    let toggle_key = dd_key.clone();
 
     div()
         .when(idx > 0, |this| {
@@ -167,26 +153,20 @@ fn render_model_role_row(
         .child(dropdown_select(
             DropdownSpec {
                 id: dd_key,
-                selected_value: current_value.as_deref(),
-                selected_label: Some(current_text.as_str()),
-                placeholder: "モデルを選択…",
-                options: &options,
-                open: dd_open,
+                selected_value: current_value,
+                placeholder: current_text.into(),
+                options,
                 enabled: live,
                 max_list_height: 200.,
-                filter_draft: Some(filter_d),
-                filter_text: &filter_txt,
+                search_placeholder: "モデル名で絞り込み…",
                 empty_label: "利用可能なモデルがありません（接続を追加・確認してください）",
             },
-            theme,
-            move |_, cx| toggle_pane_dropdown(&pane_toggle, &toggle_key, cx),
             move |picked, _, cx| {
                 if picked == "__auto__" {
                     hub_assign.update(cx, |hub, cx| hub.assign_model(slot, None, cx));
                 } else if let Some((cid, mid)) = decode_model_choice(&picked) {
                     hub_assign.update(cx, |hub, cx| hub.assign_model(slot, Some((cid, mid)), cx));
                 }
-                close_pane_dropdown(&pane_pick, cx);
             },
         ))
         .into_any_element()

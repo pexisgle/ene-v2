@@ -131,7 +131,6 @@ impl SettingsStudio {
                     })
                     .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _, cx| {
                         studio.update(cx, |this, cx| {
-                            this.companions.update(cx, |p, _| p.on_leave());
                             this.connections.update(cx, |p, _| p.on_leave());
                             this.device.update(cx, |p, _| p.on_leave());
                             this.content_scroll.set_offset(gpui::point(px(0.), px(0.)));

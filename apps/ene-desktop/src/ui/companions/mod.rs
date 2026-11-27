@@ -32,7 +32,6 @@ pub(crate) struct CompanionsPane {
     pub(crate) hub: Entity<Hub>,
     pub(super) drafts: DraftStore,
     pub(super) form: CompanionFormState,
-    pub(super) open_dropdown: Option<String>,
     initialized: bool,
     _events: Subscription,
 }
@@ -94,14 +93,9 @@ impl CompanionsPane {
             hub,
             drafts: DraftStore::default(),
             form: CompanionFormState::default(),
-            open_dropdown: None,
             initialized: false,
             _events,
         }
-    }
-
-    pub(crate) fn on_leave(&mut self) {
-        self.open_dropdown = None;
     }
 
     fn on_hub_event(&mut self, _: Entity<Hub>, event: &HubEvent, cx: &mut Context<Self>) {

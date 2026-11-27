@@ -113,18 +113,6 @@ pub(super) fn resolve_selected_option(
         .map(str::to_owned)
 }
 
-pub(super) fn find_option_label(
-    options: &[DropdownOption],
-    selected: Option<&str>,
-) -> Option<String> {
-    selected.and_then(|id| {
-        options
-            .iter()
-            .find(|opt| opt.value == id)
-            .map(|opt| opt.label.clone())
-    })
-}
-
 pub(super) fn render_launch_voicevox_row(
     vv_id: Option<String>,
     voicevox_enabled: bool,
