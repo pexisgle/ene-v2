@@ -383,17 +383,15 @@ fn fit(
     for (mut call, adapted, mut decision, of) in &mut calls {
         let limit = adapted.0.spec.input_limit().map_or(128_000, u64::from);
         let reserve = u64::from(adapted.0.spec.max_output_tokens.unwrap_or(4_096)) + limit / 10;
-        // The request's parts are borrowed apart so the history can be
-        // edited while the system prompt and tool schemas are weighed.
-        let ModelRequest {
-            request,
-            history,
-            prompt,
-            ..
-        } = &mut *call;
-        let prompt = prompt
-            .as_ref()
-            .map(rig_core::completion::SystemPrompt::text);
+        if call.history.is_none() {
+            continue;
+        }
+        let prefix = adapted.sent(&ModelRequest {
+            request: call.request.clone(),
+            connection: None,
+            prompt: call.prompt.clone(),
+            history: Some(Default::default()),
+        });
         let model = adapted.0.spec.reference();
         let agent = of.map(|of| of.0);
         let anchor = agent
@@ -402,13 +400,12 @@ fn fit(
         let sent = agent
             .and_then(|agent| usages.get(agent).ok())
             .and_then(|(_, sent)| sent.map(|sent| sent.0));
-        let Some(view) = history.as_mut() else {
+        let Some(view) = call.history.as_mut() else {
             continue;
         };
         let request = compaction::FitRequest {
             model: &model,
-            prompt: prompt.as_deref(),
-            tools: &request.tools,
+            prefix: &prefix,
             anchor: anchor.as_ref(),
             sent,
             budget: limit.saturating_sub(reserve),

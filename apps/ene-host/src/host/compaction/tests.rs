@@ -1,10 +1,10 @@
-use super::budget::{cut, whole_tokens};
+use super::budget::cut;
 use super::*;
 use crate::host::mind::{Companion, ModelAssignment, ModelAssignments, Profile, State};
 use ene_mind::JsonDoc;
 use rig_core::catalog::{Catalog, Connector, ModelSpec};
-use rig_core::completion::ToolDefinition;
 use rig_core::completion::{AssistantContent, AssistantMessage};
+use rig_core::completion::{CompletionRequest, ToolDefinition};
 use rig_core::conversation::TurnEnd;
 use rig_core::message::{CallId, ToolCall, ToolFunction, ToolName};
 use rig_core::providers::registry::ProviderId;
@@ -46,6 +46,12 @@ fn tool(description: &str) -> Arc<ToolDefinition> {
         description,
         serde_json::json!({ "type": "object", "properties": {} }),
     ))
+}
+
+fn empty_request() -> CompletionRequest {
+    let mut request = CompletionRequest::new("");
+    request.chat_history.clear();
+    request
 }
 
 fn noticed(history: &History) -> bool {
@@ -93,8 +99,7 @@ fn a_fit_keeps_tool_pairs_and_drops_whole_turns() {
         &mut history,
         &FitRequest {
             model: "",
-            prompt: None,
-            tools: &[],
+            prefix: &empty_request(),
             anchor: None,
             sent: None,
             budget: 550,
@@ -121,8 +126,7 @@ fn fitting_clears_large_tool_outputs_only_in_the_request_view() {
         &mut request,
         &FitRequest {
             model: "",
-            prompt: None,
-            tools: &[],
+            prefix: &empty_request(),
             anchor: None,
             sent: None,
             budget: 500,
@@ -148,8 +152,7 @@ fn a_fit_refuses_a_single_oversized_message() {
         &mut history,
         &FitRequest {
             model: "",
-            prompt: None,
-            tools: &[],
+            prefix: &empty_request(),
             anchor: None,
             sent: None,
             budget: 900,
@@ -166,10 +169,10 @@ fn measured_usage_applies_only_to_the_same_request_prefix() {
         through: history.id(0).unwrap(),
         usage: rig_core::completion::Usage::default().total_tokens(501),
     };
+    let prefix = empty_request();
     let mut request = FitRequest {
         model: "test/model",
-        prompt: None,
-        tools: &[],
+        prefix: &prefix,
         anchor: Some(&anchor),
         sent: None,
         budget: 500,
@@ -177,22 +180,23 @@ fn measured_usage_applies_only_to_the_same_request_prefix() {
     request.sent = Some(request.start(&history));
     assert!(!fit(&mut history, &request));
 
-    request.prompt = Some("A different system prompt");
+    let changed = CompletionRequest::new(Message::system("A different system prompt"));
+    request.prefix = &changed;
     assert!(fit(&mut history, &request));
 }
 
 #[test]
 fn the_fixed_request_weight_counts_against_the_window() {
     let prompt = "あなたはデスクトップ常駐AIコンパニオンです。".repeat(60);
-    let tools = [tool(&"t".repeat(2_000))];
+    let mut prefix = CompletionRequest::new(Message::system(&prompt));
+    prefix.tools.push(tool(&"t".repeat(2_000)));
     let mut history = conversation(6);
     assert!(message_tokens(history.messages().iter().map(Arc::as_ref)) <= 1_100);
     assert!(!fit(
         &mut history,
         &FitRequest {
             model: "test/model",
-            prompt: Some(&prompt),
-            tools: &tools,
+            prefix: &prefix,
             anchor: None,
             sent: None,
             budget: 1_100,
@@ -204,14 +208,17 @@ fn the_fixed_request_weight_counts_against_the_window() {
         &mut history,
         &FitRequest {
             model: "test/model",
-            prompt: Some(&prompt),
-            tools: &tools,
+            prefix: &prefix,
             anchor: None,
             sent: None,
             budget: 1_900,
         },
     ));
-    assert!(whole_tokens(&history, Some(&prompt), &tools) <= 1_900);
+    assert!(
+        rig_memory::request_estimate(&prefix)
+            + message_tokens(history.messages().iter().map(Arc::as_ref))
+            <= 1_900
+    );
     assert!(noticed(&history));
 }
 
@@ -319,8 +326,7 @@ fn injected_blocks_are_system_and_never_two_user_messages() {
         &mut history,
         &FitRequest {
             model: "",
-            prompt: None,
-            tools: &[],
+            prefix: &empty_request(),
             anchor: None,
             sent: None,
             budget: 650,

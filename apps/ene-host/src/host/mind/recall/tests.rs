@@ -11,6 +11,58 @@ use std::{sync::Arc, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
+async fn context_fit_does_not_charge_tools_the_model_cannot_receive() {
+    fn offer_large_tool(mut calls: Query<&mut ModelRequest, Added<Admitted>>) {
+        for mut call in &mut calls {
+            call.request_mut()
+                .tools
+                .push(Arc::new(rig_core::completion::ToolDefinition::new(
+                    rig_core::message::ToolName::new("large_schema").unwrap(),
+                    "x".repeat(64_000),
+                    serde_json::json!({"type": "object"}),
+                )));
+        }
+    }
+
+    use crate::host::tests::{Harness, text_turn};
+    let mut spec = Catalog::builtin()
+        .resolve("deepseek/deepseek-flash")
+        .unwrap()
+        .shared()
+        .as_ref()
+        .clone();
+    spec.context_window = Some(8_192);
+    spec.max_output_tokens = Some(256);
+    spec.tools = false;
+    let model = MockCompletionModel::from_stream_turns([text_turn("short answer")]);
+    let observed = model.clone();
+    let spec = Arc::new(spec);
+    let mut harness = Harness::new([]);
+    harness
+        .app
+        .insert_resource(ModelFactory(Arc::new(move |_, _, _, _, _, _| {
+            Ok(model.clone().priced_as(spec.clone()).into())
+        })));
+    harness
+        .app
+        .add_systems(AgentPass, offer_large_tool.in_set(PrepareSystems::Edit));
+    harness.accept("adapted-budget", "short question").unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            harness.tick();
+            if let Some(request) = observed.requests().first() {
+                assert_eq!(request.tools.len(), 0);
+                assert!(rig_memory::request_estimate(request) < 8_192 - 256 - 819);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a fitting adapted request reaches the model");
+}
+
+#[tokio::test]
 async fn a_slow_embedding_holds_the_model_call_without_blocking_the_host() {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
