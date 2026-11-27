@@ -1,6 +1,6 @@
 //! Wasm plugin management UI section for `この端末`.
 
-use super::{DevicePane, DeviceSnapshot};
+use super::DevicePane;
 use crate::ui::{
     Hub,
     icons::Icon,
@@ -8,11 +8,13 @@ use crate::ui::{
     theme::Theme,
     widgets::{ButtonStyle, Tone, pill_button},
 };
+use ene_client_core::domain::PluginInfo;
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
 pub(super) fn render_plugins_section(
     pane: &mut DevicePane,
-    snap: &DeviceSnapshot,
+    plugins: &[PluginInfo],
+    live: bool,
     theme: &Theme,
     cx: &mut Context<DevicePane>,
 ) -> (AnyElement, Option<AnyElement>, AnyElement) {
@@ -51,11 +53,11 @@ pub(super) fn render_plugins_section(
                 .flex_row()
                 .items_center()
                 .gap(px(6.))
-                .child(pill_button("dev-plugins-refresh", "更新", Tone::Ghost.icon(Icon::RefreshCw).enabled(snap.live), theme, {
+                .child(pill_button("dev-plugins-refresh", "更新", Tone::Ghost.icon(Icon::RefreshCw).enabled(live), theme, {
                         let hub = pane.hub.clone();
                         move |_, cx| hub.update(cx, super::super::hub::Hub::load_plugins)
                     }))
-                .child(pill_button("dev-plugins-toggle-add", if adding_plugin { "閉じる" } else { "追加" }, ButtonStyle::new(if adding_plugin { Tone::Ghost } else { Tone::Primary }).maybe_icon((!adding_plugin).then_some(Icon::Plus)).enabled(snap.live), theme, move |_, cx| {
+                .child(pill_button("dev-plugins-toggle-add", if adding_plugin { "閉じる" } else { "追加" }, ButtonStyle::new(if adding_plugin { Tone::Ghost } else { Tone::Primary }).maybe_icon((!adding_plugin).then_some(Icon::Plus)).enabled(live), theme, move |_, cx| {
                         pane_add_plugin.update(cx, |this, cx| {
                             this.form.adding_plugin_open = !this.form.adding_plugin_open;
                             cx.notify();
@@ -64,9 +66,8 @@ pub(super) fn render_plugins_section(
         )
         .into_any_element();
 
-    let add_plugin_panel =
-        adding_plugin.then(|| render_add_plugin_panel(pane, snap.live, theme, cx));
-    let plugins_card = render_plugins_card(&pane.hub, &snap.plugins, snap.live, theme);
+    let add_plugin_panel = adding_plugin.then(|| render_add_plugin_panel(pane, live, theme, cx));
+    let plugins_card = render_plugins_card(&pane.hub, plugins, live, theme);
 
     (plugins_heading, add_plugin_panel, plugins_card)
 }

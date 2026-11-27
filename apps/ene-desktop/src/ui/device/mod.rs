@@ -11,13 +11,10 @@ use super::theme::Theme;
 use super::widgets::{Tone, pill_button, status_pill};
 use super::{DraftStore, Hub};
 use crate::WORKSPACE_FILE_CAPABILITIES;
-use crate::state::{Device, Link};
-#[cfg(windows)]
-use ene_client_core::domain::COMPUTER_USE;
+use crate::state::Device;
 use ene_client_core::domain::{
-    ConnectionKind, PluginInfo, PolicyEffect, PolicyRule, PolicyRulesUpdate, PolicyText,
-    SKIP_TOOL_CONFIRMATION_ID, is_file_confirmation_rule as domain_is_file_confirmation,
-    tool_confirmation_update,
+    PolicyEffect, PolicyRule, PolicyRulesUpdate, SKIP_TOOL_CONFIRMATION_ID,
+    is_file_confirmation_rule as domain_is_file_confirmation, tool_confirmation_update,
 };
 use gpui::{AnyElement, Context, Entity, FontWeight, Window, div, prelude::*, px};
 
@@ -75,74 +72,6 @@ pub(super) fn tool_confirmation_request(skip: bool) -> PolicyRulesUpdate {
     tool_confirmation_update(skip, WORKSPACE_FILE_CAPABILITIES)
 }
 
-pub(super) struct DeviceSnapshot {
-    pub(super) live: bool,
-    pub(super) link: Link,
-    pub(super) is_active_client: bool,
-    pub(super) has_companion: bool,
-    pub(super) devices: crate::state::Devices,
-    pub(super) mic_muted: bool,
-    pub(super) output_muted: bool,
-    pub(super) mic_configured: bool,
-    pub(super) output_configured: bool,
-    pub(super) eyes: crate::state::EyesState,
-    pub(super) eyes_status: Option<String>,
-    pub(super) avatar_scale: f32,
-    pub(super) rules: Vec<PolicyRule>,
-    pub(super) policy_texts: Vec<PolicyText>,
-    pub(super) client_caps: Vec<String>,
-    pub(super) plugins: Vec<PluginInfo>,
-    pub(super) tray_resident: bool,
-    pub(super) pod_visible: bool,
-    #[cfg(windows)]
-    pub(super) computer_use: bool,
-    #[cfg(windows)]
-    pub(super) computer_granted: bool,
-}
-
-impl DeviceSnapshot {
-    fn capture(hub: &Hub) -> Self {
-        let our_id = &hub.options.id;
-        let client = hub
-            .model
-            .snapshot()
-            .and_then(|s| s.clients.iter().find(|c| c.id == *our_id));
-        #[cfg(windows)]
-        let computer_granted = client.is_some_and(|c| {
-            c.granted_capabilities
-                .iter()
-                .any(|name| name == COMPUTER_USE)
-        });
-        Self {
-            live: hub.live(),
-            link: hub.model.connections.link.clone(),
-            is_active_client: hub.model.is_active_client(our_id),
-            has_companion: hub.model.companion_id().is_some(),
-            devices: hub.model.connections.devices.clone(),
-            mic_muted: hub.model.audio.mic_muted,
-            output_muted: hub.model.audio.output_muted,
-            mic_configured: hub.has_audio_connection(ConnectionKind::Stt),
-            output_configured: hub.has_audio_connection(ConnectionKind::Tts),
-            eyes: hub.model.perception.eyes,
-            eyes_status: hub.model.perception.eyes_status.clone(),
-            avatar_scale: hub.model.perception.avatar_scale,
-            rules: hub
-                .model
-                .snapshot()
-                .map_or_default(|s| s.policy_rules.clone()),
-            policy_texts: hub.model.policy_texts().to_vec(),
-            client_caps: client.map_or_default(|c| c.capabilities.clone()),
-            plugins: hub.model.connections.plugins.clone(),
-            tray_resident: hub.is_tray_resident(),
-            pod_visible: hub.is_pod_visible(),
-            #[cfg(windows)]
-            computer_use: hub.model.perception.computer_use_enabled,
-            #[cfg(windows)]
-            computer_granted,
-        }
-    }
-}
-
 impl DevicePane {
     pub(crate) fn new(hub: Entity<Hub>, cx: &mut Context<Self>) -> Self {
         remote::load(cx);
@@ -160,20 +89,35 @@ impl DevicePane {
 
 impl gpui::Render for DevicePane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (theme, snap) = {
+        let (theme, live, header, device_card, rules, policy_texts, plugins) = {
             let hub = self.hub.read(cx);
-            (hub.theme(), DeviceSnapshot::capture(hub))
+            let theme = hub.theme();
+            // The session can replace the RPC connection while the view is rendering.
+            let live = hub.live();
+            let header = render_device_header(hub.is_tray_resident(), &theme);
+            let device_card = hardware::render_device_status_card(self, hub, live, &theme);
+            let rules = hub
+                .model
+                .snapshot()
+                .map_or_default(|s| s.policy_rules.clone());
+            (
+                theme,
+                live,
+                header,
+                device_card,
+                rules,
+                hub.model.policy_texts().to_vec(),
+                hub.model.connections.plugins.clone(),
+            )
         };
-        let header = render_device_header(snap.tray_resident, &theme);
-        let device_card = hardware::render_device_status_card(self, &snap, &theme);
         let (policy_heading, policy_card, add_toggle, add_panel) =
-            policy::render_policy_rules_section(self, &snap, &theme, cx);
+            policy::render_policy_rules_section(self, &rules, live, &theme, cx);
         let (policy_text_heading, policy_text_card, add_txt_toggle, add_txt_panel) =
-            policy::render_policy_texts_section(self, &snap, &theme, cx);
+            policy::render_policy_texts_section(self, &policy_texts, live, &theme, cx);
         let (plugins_heading, add_plugin_panel, plugins_card) =
-            plugins::render_plugins_section(self, &snap, &theme, cx);
+            plugins::render_plugins_section(self, &plugins, live, &theme, cx);
         let (remote_heading, remote_card) = remote::render_remote_host_section(self, &theme, cx);
-        let reset_history = render_history_reset_card(snap.live, &theme, cx);
+        let reset_history = render_history_reset_card(live, &theme, cx);
 
         div()
             .w_full()

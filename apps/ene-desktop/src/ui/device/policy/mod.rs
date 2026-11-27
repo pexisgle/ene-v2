@@ -4,7 +4,7 @@ mod rules;
 mod texts;
 
 use super::{
-    DevicePane, DeviceSnapshot, SKIP_TOOL_CONFIRMATION_ID, is_file_confirmation_rule, row_frame,
+    DevicePane, SKIP_TOOL_CONFIRMATION_ID, is_file_confirmation_rule, row_frame,
     tool_confirmation_request,
 };
 use crate::ui::{theme::Theme, widgets::disclosure_row};
@@ -15,7 +15,8 @@ use texts::*;
 
 pub(super) fn render_policy_rules_section(
     pane: &mut DevicePane,
-    snap: &DeviceSnapshot,
+    rules: &[ene_client_core::domain::PolicyRule],
+    live: bool,
     theme: &Theme,
     cx: &mut Context<DevicePane>,
 ) -> (AnyElement, AnyElement, AnyElement, Option<AnyElement>) {
@@ -26,18 +27,15 @@ pub(super) fn render_policy_rules_section(
         .child("許可ルール")
         .into_any_element();
 
-    let skip_tool_confirmation = snap
-        .rules
+    let skip_tool_confirmation = rules
         .iter()
         .any(|rule| rule.id == SKIP_TOOL_CONFIRMATION_ID);
-    let skip_files_only =
-        !skip_tool_confirmation && snap.rules.iter().any(is_file_confirmation_rule);
+    let skip_files_only = !skip_tool_confirmation && rules.iter().any(is_file_confirmation_rule);
 
-    let mut rule_items: Vec<AnyElement> = snap
-        .rules
+    let mut rule_items: Vec<AnyElement> = rules
         .iter()
         .filter(|rule| rule.id != SKIP_TOOL_CONFIRMATION_ID && !is_file_confirmation_rule(rule))
-        .map(|rule| render_policy_rule_row(pane, rule, snap.live, theme, cx))
+        .map(|rule| render_policy_rule_row(pane, rule, live, theme, cx))
         .collect();
 
     if rule_items.is_empty() {
@@ -56,7 +54,7 @@ pub(super) fn render_policy_rules_section(
 
     let confirm_row = render_confirmation_skip_row(
         pane,
-        snap.live,
+        live,
         skip_tool_confirmation,
         skip_files_only,
         theme,
@@ -88,14 +86,15 @@ pub(super) fn render_policy_rules_section(
             });
         },
     );
-    let add_panel = add_open.then(|| render_add_policy_panel(pane, snap.live, theme, cx));
+    let add_panel = add_open.then(|| render_add_policy_panel(pane, live, theme, cx));
 
     (policy_heading, policy_card, add_toggle, add_panel)
 }
 
 pub(super) fn render_policy_texts_section(
     pane: &mut DevicePane,
-    snap: &DeviceSnapshot,
+    texts: &[ene_client_core::domain::PolicyText],
+    live: bool,
     theme: &Theme,
     cx: &mut Context<DevicePane>,
 ) -> (AnyElement, AnyElement, AnyElement, Option<AnyElement>) {
@@ -118,15 +117,14 @@ pub(super) fn render_policy_texts_section(
         )
         .into_any_element();
 
-    let text_items: Vec<AnyElement> = snap
-        .policy_texts
+    let text_items: Vec<AnyElement> = texts
         .iter()
         .enumerate()
         .map(|(index, item)| {
             if pane.form.editing_policy_text_id.as_deref() == Some(item.id.as_str()) {
-                render_policy_text_editor(pane, index, item, snap.live, theme, cx)
+                render_policy_text_editor(pane, index, item, live, theme, cx)
             } else {
-                render_policy_text_row(pane, index, item, snap.live, theme, cx)
+                render_policy_text_row(pane, index, item, live, theme, cx)
             }
         })
         .collect();
@@ -164,8 +162,7 @@ pub(super) fn render_policy_texts_section(
             });
         },
     );
-    let add_txt_panel =
-        add_txt_open.then(|| render_add_policy_text_panel(pane, snap.live, theme, cx));
+    let add_txt_panel = add_txt_open.then(|| render_add_policy_text_panel(pane, live, theme, cx));
 
     (heading, policy_text_card, add_txt_toggle, add_txt_panel)
 }

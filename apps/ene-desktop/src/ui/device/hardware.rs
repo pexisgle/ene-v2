@@ -1,21 +1,30 @@
 //! Hardware, audio, perception, pod window, avatar, and capability status card for `この端末`.
 
-use super::{DevicePane, DeviceSnapshot, device_pill, row_frame};
+use super::{DevicePane, device_pill, row_frame};
 use crate::{
     state::{Device, Link},
     ui::{
+        Hub,
         icons::Icon,
         theme::Theme,
         widgets::{ButtonStyle, Tone, kind_pill, pill_button, status_pill, toggle_switch},
     },
 };
-use gpui::{AnyElement, FontWeight, SharedString, div, prelude::*, px};
+#[cfg(windows)]
+use ene_client_core::domain::ClientInfo;
+use ene_client_core::domain::ConnectionKind;
+use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
 pub(super) fn render_device_status_card(
     pane: &DevicePane,
-    snap: &DeviceSnapshot,
+    hub: &Hub,
+    live: bool,
     theme: &Theme,
 ) -> AnyElement {
+    let client = hub
+        .model
+        .snapshot()
+        .and_then(|snapshot| snapshot.clients.iter().find(|c| c.id == hub.options.id));
     let card = div()
         .w_full()
         .bg(theme.bg_surface)
@@ -24,27 +33,28 @@ pub(super) fn render_device_status_card(
         .rounded(crate::ui::theme::radius::surface())
         .flex()
         .flex_col()
-        .child(render_active_client_row(pane, snap, theme))
-        .child(render_mic_row(pane, snap, theme))
-        .child(render_output_row(pane, snap, theme))
-        .child(render_eyes_row(pane, snap, theme))
+        .child(render_active_client_row(pane, hub, live, theme))
+        .child(render_audio_row(pane, hub, AudioControl::Microphone, theme))
+        .child(render_audio_row(pane, hub, AudioControl::Speaker, theme))
+        .child(render_eyes_row(pane, hub, live, theme))
         .child(eyes_description_note(theme));
 
     // `card` is shadowed rather than reassigned: the Windows-only rows append
     // through a new binding, so no platform has an unused `mut`.
     #[cfg(windows)]
     let card = card
-        .child(render_computer_use_row(pane, snap, theme))
+        .child(render_computer_use_row(pane, hub, client, live, theme))
         .child(computer_use_note(theme));
 
-    card.child(render_pod_window_row(pane, snap, theme))
-        .child(render_avatar_controls_row(pane, snap, theme))
-        .child(render_capabilities_row(&snap.client_caps, theme))
+    let caps = client.map_or(&[][..], |c| c.capabilities.as_slice());
+    card.child(render_pod_window_row(pane, hub, theme))
+        .child(render_avatar_controls_row(pane, hub, theme))
+        .child(render_capabilities_row(caps, theme))
         .into_any_element()
 }
 
-fn render_active_client_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Theme) -> AnyElement {
-    let (link_text, link_dot, link_bg, link_fg) = match &snap.link {
+fn render_active_client_row(pane: &DevicePane, hub: &Hub, live: bool, theme: &Theme) -> AnyElement {
+    let (link_text, link_dot, link_bg, link_fg) = match &hub.model.connections.link {
         Link::Live { version } => (
             format!("接続中 (v{version})"),
             theme.mint,
@@ -69,7 +79,7 @@ fn render_active_client_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Th
         false,
         "対話の担当端末",
         Some(status_pill(link_text, Some(link_dot), link_bg, link_fg)),
-        if snap.is_active_client {
+        if hub.model.is_active_client(&hub.options.id) {
             status_pill(
                 "この端末で対話中",
                 Some(theme.mint),
@@ -82,7 +92,7 @@ fn render_active_client_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Th
                 "この端末に切り替える",
                 Tone::Primary
                     .icon(Icon::Check)
-                    .enabled(snap.live && snap.has_companion),
+                    .enabled(live && hub.model.companion_id().is_some()),
                 theme,
                 move |_, cx| hub_activate.update(cx, super::super::hub::Hub::activate_this_client),
             )
@@ -91,72 +101,66 @@ fn render_active_client_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Th
     )
 }
 
-fn render_mic_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Theme) -> AnyElement {
-    let mic_ready = snap.mic_configured && matches!(snap.devices.input, Device::Ready(_));
-    let hub_mic = pane.hub.clone();
-    row_frame(
-        true,
-        "声で話す",
-        Some(if snap.mic_configured {
-            device_pill(&snap.devices.input, !snap.mic_muted, theme)
-        } else {
-            status_pill(
-                "音声認識の接続が必要",
-                None,
-                theme.amber_soft,
-                theme.amber_fg,
-            )
-        }),
-        toggle_switch(
+#[derive(Clone, Copy)]
+enum AudioControl {
+    Microphone,
+    Speaker,
+}
+
+fn render_audio_row(
+    pane: &DevicePane,
+    hub: &Hub,
+    control: AudioControl,
+    theme: &Theme,
+) -> AnyElement {
+    let devices = &hub.model.connections.devices;
+    let audio = &hub.model.audio;
+    let (id, title, missing, kind, device, muted, toggle) = match control {
+        AudioControl::Microphone => (
             "dev-mic-toggle",
-            mic_ready && !snap.mic_muted,
-            mic_ready,
-            theme,
-            move |_, cx| {
-                hub_mic.update(cx, super::super::hub::Hub::toggle_mic_mute);
-            },
+            "声で話す",
+            "音声認識の接続が必要",
+            ConnectionKind::Stt,
+            &devices.input,
+            audio.mic_muted,
+            Hub::toggle_mic_mute as fn(&mut Hub, &mut Context<Hub>),
         ),
-        theme,
-    )
-}
-
-fn render_output_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Theme) -> AnyElement {
-    let output_ready = snap.output_configured && matches!(snap.devices.output, Device::Ready(_));
-    let hub_out = pane.hub.clone();
+        AudioControl::Speaker => (
+            "dev-out-toggle",
+            "返事を読み上げる",
+            "読み上げの接続が必要",
+            ConnectionKind::Tts,
+            &devices.output,
+            audio.output_muted,
+            Hub::toggle_output_mute as fn(&mut Hub, &mut Context<Hub>),
+        ),
+    };
+    let configured = hub.has_audio_connection(kind);
+    let ready = configured && matches!(device, Device::Ready(_));
+    let handle = pane.hub.clone();
     row_frame(
         true,
-        "返事を読み上げる",
-        Some(if snap.output_configured {
-            device_pill(&snap.devices.output, !snap.output_muted, theme)
+        title,
+        Some(if configured {
+            device_pill(device, !muted, theme)
         } else {
-            status_pill(
-                "読み上げの接続が必要",
-                None,
-                theme.amber_soft,
-                theme.amber_fg,
-            )
+            status_pill(missing, None, theme.amber_soft, theme.amber_fg)
         }),
-        toggle_switch(
-            "dev-out-toggle",
-            output_ready && !snap.output_muted,
-            output_ready,
-            theme,
-            move |_, cx| {
-                hub_out.update(cx, super::super::hub::Hub::toggle_output_mute);
-            },
-        ),
+        toggle_switch(id, ready && !muted, ready, theme, move |_, cx| {
+            handle.update(cx, toggle);
+        }),
         theme,
     )
 }
 
-fn render_eyes_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Theme) -> AnyElement {
+fn render_eyes_row(pane: &DevicePane, hub: &Hub, live: bool, theme: &Theme) -> AnyElement {
     use crate::state::EyesState;
 
     let eyes_supported = cfg!(any(windows, target_os = "linux"));
     let eyes_label = match (
-        snap.eyes,
-        snap.live && snap.is_active_client,
-        snap.eyes_status.as_deref(),
+        hub.model.perception.eyes,
+        live && hub.model.is_active_client(&hub.options.id),
+        hub.model.perception.eyes_status.as_deref(),
     ) {
         _ if !eyes_supported => "この環境では取得不可",
         (EyesState::Off, _, _) => "オフ",
@@ -168,7 +172,7 @@ fn render_eyes_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Theme) -> A
         _ => "モデル確認中",
     };
     let hub_eyes = pane.hub.clone();
-    let enabled = snap.eyes.enabled();
+    let enabled = hub.model.perception.eyes.enabled();
     row_frame(
         true,
         "目",
@@ -190,13 +194,24 @@ fn render_eyes_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Theme) -> A
 }
 
 #[cfg(windows)]
-fn render_computer_use_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Theme) -> AnyElement {
+fn render_computer_use_row(
+    pane: &DevicePane,
+    hub: &Hub,
+    client: Option<&ClientInfo>,
+    live: bool,
+    theme: &Theme,
+) -> AnyElement {
     let hub_computer = pane.hub.clone();
-    let computer_use = snap.computer_use;
+    let computer_use = hub.model.perception.computer_use_enabled;
+    let granted = client.is_some_and(|c| {
+        c.granted_capabilities
+            .iter()
+            .any(|id| id == ene_client_core::domain::COMPUTER_USE)
+    });
     row_frame(
         true,
         "手に画面操作を許可",
-        (snap.live && computer_use && !snap.computer_granted)
+        (live && computer_use && !granted)
             .then(|| status_pill("ホストの許可が必要", None, theme.amber_soft, theme.amber_fg)),
         toggle_switch(
             "dev-computer-use",
@@ -213,9 +228,9 @@ fn render_computer_use_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &The
     )
 }
 
-fn render_pod_window_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Theme) -> AnyElement {
+fn render_pod_window_row(pane: &DevicePane, hub: &Hub, theme: &Theme) -> AnyElement {
     let hub_pod = pane.hub.clone();
-    let pod_visible = snap.pod_visible;
+    let pod_visible = hub.is_pod_visible();
     row_frame(
         true,
         "対話ウィンドウ",
@@ -254,17 +269,13 @@ fn render_pod_window_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Theme
     )
 }
 
-fn render_avatar_controls_row(
-    pane: &DevicePane,
-    snap: &DeviceSnapshot,
-    theme: &Theme,
-) -> AnyElement {
-    let avatar_ready = matches!(snap.devices.avatar, Device::Ready(_));
+fn render_avatar_controls_row(pane: &DevicePane, hub: &Hub, theme: &Theme) -> AnyElement {
+    let avatar_ready = matches!(hub.model.connections.devices.avatar, Device::Ready(_));
     let hub_center = pane.hub.clone();
     let scale_chips: Vec<AnyElement> = [75.0f32, 100.0, 125.0, 150.0]
         .into_iter()
         .map(|pct| {
-            let selected = (snap.avatar_scale - pct).abs() < 1.0;
+            let selected = (hub.model.perception.avatar_scale - pct).abs() < 1.0;
             let hub_scale = pane.hub.clone();
             pill_button(
                 SharedString::from(format!("dev-scale-{}", pct as u32)),
@@ -307,7 +318,11 @@ fn render_avatar_controls_row(
                                 .text_color(theme.ink)
                                 .child("アバター表示"),
                         )
-                        .child(device_pill(&snap.devices.avatar, avatar_ready, theme)),
+                        .child(device_pill(
+                            &hub.model.connections.devices.avatar,
+                            avatar_ready,
+                            theme,
+                        )),
                 )
                 .child(pill_button(
                     "dev-avatar-center",
