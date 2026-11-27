@@ -57,56 +57,57 @@ impl EchoSuppressor {
     }
 }
 
-/// Push-to-Talk capture state machine (`F07`).
+/// A push-to-talk take stays local until the operator commits it.
 #[derive(Default)]
-pub(super) struct PttController {
-    active: bool,
-    has_audio: bool,
-    pending_commit: bool,
+pub(super) enum PttController {
+    #[default]
+    Idle,
+    Recording(Vec<u8>),
+    Ready(Vec<u8>),
 }
 
 impl PttController {
     pub(super) fn start(&mut self) {
-        self.active = true;
-        self.has_audio = false;
-        self.pending_commit = false;
+        *self = Self::Recording(Vec::new());
+    }
+
+    fn append(&mut self, samples: &[f32]) {
+        if let Self::Recording(pcm) = self {
+            let capacity = (ene_voice::MAX_STT_BYTES - pcm.len()) / 2;
+            pcm.extend(encode(&samples[..samples.len().min(capacity)]));
+        }
     }
 
     pub(super) fn commit(&mut self) {
-        if self.active {
-            self.active = false;
-            self.pending_commit = self.has_audio;
-            self.has_audio = false;
+        if matches!(self, Self::Recording(_))
+            && let Self::Recording(pcm) = std::mem::take(self)
+            && !pcm.is_empty()
+        {
+            *self = Self::Ready(pcm);
         }
     }
 
     pub(super) fn cancel(&mut self) {
-        self.active = false;
-        self.has_audio = false;
-        self.pending_commit = false;
+        *self = Self::Idle;
     }
 
     pub(super) fn process(&mut self, samples: &[f32]) -> CaptureOutput {
-        let mut chunks = Vec::new();
-        if self.active {
-            if !samples.is_empty() {
-                chunks.push(encode(samples));
-                self.has_audio = true;
-            }
+        self.append(samples);
+        if matches!(self, Self::Ready(_))
+            && let Self::Ready(pcm) = std::mem::take(self)
+        {
             return CaptureOutput {
-                chunks,
-                open: true,
-                barge_in: false,
+                chunks: pcm
+                    .chunks(64 * 1024)
+                    .map(<[u8]>::to_vec)
+                    .chain(std::iter::once(Vec::new()))
+                    .collect(),
+                ..Default::default()
             };
         }
-        if self.pending_commit {
-            self.pending_commit = false;
-            chunks.push(Vec::new());
-        }
         CaptureOutput {
-            chunks,
-            open: false,
-            barge_in: false,
+            open: matches!(self, Self::Recording(_)),
+            ..Default::default()
         }
     }
 }
@@ -267,42 +268,62 @@ impl Microphone {
         if self.mode != mode {
             self.mode = mode;
             self.ptt.cancel();
+            self.clear_captured_input();
             let _discarded = self.voice_gate.reset();
             self.echo.reset();
         }
     }
 
     pub fn ptt_start(&mut self) {
-        if self.mode == CaptureMode::Ptt {
+        if self.mode == CaptureMode::Ptt && !self.is_muted() {
+            self.clear_captured_input();
             self.ptt.start();
         }
     }
 
     pub fn ptt_commit(&mut self) {
-        if self.mode == CaptureMode::Ptt {
-            self.ptt.commit();
+        if self.mode != CaptureMode::Ptt || !matches!(self.ptt, PttController::Recording(_)) {
+            return;
         }
+        // Take the final callback frames at the release boundary, before any later audio.
+        let samples: Vec<_> = self.frames.lock().drain(..).collect();
+        let converted = self.convert_ptt(samples);
+        self.ptt.append(&converted);
+        if let Some(filter) = self.filter.as_mut()
+            && let Ok(tail) = filter.finish()
+        {
+            self.ptt.append(&tail);
+        }
+        self.ptt.commit();
     }
 
     pub fn ptt_cancel(&mut self) {
         if self.mode == CaptureMode::Ptt {
             self.ptt.cancel();
-            if let Some(mut frames) = self.frames.try_lock() {
-                frames.clear();
-            }
-            if let Some(filter) = &mut self.filter {
-                filter.reset();
-            }
+            self.clear_captured_input();
         }
     }
 
-    pub fn set_muted(&self, muted: bool) {
+    fn clear_captured_input(&mut self) {
+        self.frames.lock().clear();
+        if let Some(filter) = self.filter.as_mut() {
+            filter.reset();
+        }
+    }
+
+    fn convert_ptt(&mut self, samples: Vec<f32>) -> Vec<f32> {
+        match self.filter.as_mut() {
+            Some(filter) => filter.push(&samples).unwrap_or_default(),
+            None => samples,
+        }
+    }
+
+    pub fn set_muted(&mut self, muted: bool) {
         self.muted.store(muted, Ordering::Relaxed);
         if muted {
             self.level.store(0f32.to_bits(), Ordering::Relaxed);
-            if let Some(mut frames) = self.frames.try_lock() {
-                frames.clear();
-            }
+            self.clear_captured_input();
+            self.ptt.cancel();
         }
     }
 
@@ -320,10 +341,7 @@ impl Microphone {
 
     pub fn take(&mut self, companion_speaking: bool, far_end_level: f32) -> CaptureOutput {
         if self.is_muted() {
-            self.frames.lock().clear();
-            if let Some(filter) = &mut self.filter {
-                filter.reset();
-            }
+            self.clear_captured_input();
             self.echo.reset();
             self.ptt.cancel();
             return CaptureOutput {
@@ -334,13 +352,14 @@ impl Microphone {
         }
         let samples: Vec<f32> = self.frames.lock().drain(..).collect();
         if self.mode == CaptureMode::Ptt {
-            let barge_in = self.ptt.active && companion_speaking;
-            let converted = match self.filter.as_mut() {
-                Some(filter) => filter.push(&samples).unwrap_or_default(),
-                None => samples,
+            let recording = matches!(self.ptt, PttController::Recording(_));
+            let converted = if recording {
+                self.convert_ptt(samples)
+            } else {
+                Vec::new()
             };
             let mut out = self.ptt.process(&converted);
-            out.barge_in = barge_in;
+            out.barge_in = recording && companion_speaking;
             return out;
         }
         let near_rms = self.level();

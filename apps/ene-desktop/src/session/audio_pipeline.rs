@@ -221,7 +221,7 @@ impl AudioPipeline {
 
     pub(super) fn set_mic_muted(&mut self, muted: bool, updates: &UnboundedSender<Update>) {
         self.mic_muted = muted;
-        if let Some(microphone) = self.microphone.as_ref() {
+        if let Some(microphone) = self.microphone.as_mut() {
             microphone.set_muted(muted);
         }
         super::notify_ui(

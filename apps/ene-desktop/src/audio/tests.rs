@@ -397,15 +397,14 @@ fn f07_ptt_mode_gates_capture_until_active_and_cancel_discards() {
     ptt.start();
     let active = ptt.process(&[0.25; 64]);
     assert!(active.open);
-    assert_eq!(active.chunks.len(), 1);
-    assert_ne!(active.chunks[0], [] as [u8; 0]);
+    assert_eq!(active.chunks, [] as [Vec<u8>; 0]);
     ptt.commit();
-    let committed = ptt.process(&[]);
+    let committed = ptt.process(&[0.9; 64]);
     assert!(!committed.open);
-    assert_eq!(committed.chunks, vec![Vec::<u8>::new()]);
+    assert_eq!(committed.chunks, vec![encode(&[0.25; 64]), Vec::new()]);
 
     ptt.start();
-    let _discarded = ptt.process(&[0.3; 64]);
+    assert_eq!(ptt.process(&[0.3; 64]).chunks, [] as [Vec<u8>; 0]);
     ptt.cancel();
     let cancelled = ptt.process(&[0.3; 64]);
     assert!(!cancelled.open && cancelled.chunks.is_empty());
