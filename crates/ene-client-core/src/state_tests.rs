@@ -1,8 +1,8 @@
 use crate::{
     domain::{
-        Activation, ApprovalRequest, ApprovalStatus, Companion, HostNotification, Message,
-        MessageDelta, MessageRole, NotificationEvent, PolicyText, Settings, Snapshot, TurnEvent,
-        TurnStatus, WorkStatus,
+        Activation, ApprovalRequest, ApprovalStatus, Companion, HostCursor, HostNotification,
+        Message, MessageDelta, MessageRole, NotificationEvent, PolicyText, Settings, Snapshot,
+        TurnEvent, TurnStatus, WorkStatus,
     },
     reducer::is_user_facing_message,
     state::{Link, Model, Sending},
@@ -21,7 +21,7 @@ fn snapshot() -> Snapshot {
 
 fn notification(event: NotificationEvent) -> HostNotification {
     HostNotification {
-        kind: "test".into(),
+        cursor: None,
         event: Some(event),
     }
 }
@@ -279,6 +279,73 @@ fn older_settings_are_ignored_so_a_replay_cannot_roll_the_window_back() {
     model.apply(update(4));
     model.apply(update(3));
     assert_eq!(model.settings().unwrap().revision, 4);
+}
+
+#[test]
+fn snapshots_reject_stale_state_without_skipping_buffered_chat() {
+    let mut model = with_chat();
+    let stamped = |epoch: &str, seq, event| {
+        Update::Notification(Box::new(HostNotification {
+            cursor: Some(HostCursor {
+                epoch: epoch.into(),
+                seq,
+            }),
+            event: Some(event),
+        }))
+    };
+    let snapshot = |revision| {
+        NotificationEvent::InitialState(Box::new(Snapshot {
+            settings: Some(Settings {
+                revision,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+    };
+    let work = NotificationEvent::WorkStatusChanged {
+        work_id: "task".into(),
+        companion_id: CompanionId::parse("ene").unwrap(),
+        status: WorkStatus::Active,
+    };
+    model.apply(stamped("boot-a", 1, snapshot(1)));
+    model.apply(Update::Link(Box::new(Link::Live {
+        version: "1".into(),
+    })));
+    model.apply(stamped("boot-a", 10, work.clone()));
+    model.apply(stamped("boot-a", 8, snapshot(8)));
+    assert!(model.has_active_work());
+    assert_eq!(model.settings().unwrap().revision, 1);
+
+    model.apply(stamped("boot-a", 20, snapshot(20)));
+    model.apply(stamped("boot-a", 11, work.clone()));
+    let delta = NotificationEvent::MessageDelta(MessageDelta {
+        companion_id: "ene".into(),
+        stream_id: "reply".into(),
+        delta: "まだ表示されていない".into(),
+    });
+    model.apply(stamped("boot-a", 12, delta.clone()));
+    model.apply(stamped("boot-a", 12, delta));
+    assert_eq!(
+        model
+            .companions
+            .streaming
+            .get(&("ene".into(), "reply".into()))
+            .unwrap(),
+        "まだ表示されていない"
+    );
+    assert!(!model.has_active_work());
+
+    model.apply(Update::Link(Box::new(Link::Lost {
+        reason: "closed".into(),
+        retry_in: Duration::from_secs(1),
+    })));
+    model.apply(stamped("boot-b", 1, snapshot(21)));
+    model.apply(Update::Link(Box::new(Link::Live {
+        version: "1".into(),
+    })));
+    model.apply(stamped("boot-a", 22, work));
+    assert!(!model.has_active_work());
+    assert_eq!(model.settings().unwrap().revision, 21);
 }
 
 #[test]

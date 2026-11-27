@@ -130,12 +130,28 @@ from_fields! {
 impl From<w::Notification> for domain::HostNotification {
     fn from(value: w::Notification) -> Self {
         Self {
-            kind: value.kind,
+            cursor: host_cursor(value.cursor.into_option()),
             event: value
                 .event
                 .map(|event| notification_event(event, value.companion_id.as_deref())),
         }
     }
+}
+
+impl From<w::Snapshot> for domain::HostNotification {
+    fn from(mut value: w::Snapshot) -> Self {
+        let cursor = host_cursor(std::mem::take(&mut value.cursor).into_option());
+        Self::initial_state(value.into(), cursor)
+    }
+}
+
+fn host_cursor(cursor: Option<w::Cursor>) -> Option<domain::HostCursor> {
+    cursor
+        .filter(|item| !item.epoch.is_empty())
+        .map(|item| domain::HostCursor {
+            epoch: item.epoch,
+            seq: item.seq,
+        })
 }
 
 /// Discards rules whose effect is outside the current contract.

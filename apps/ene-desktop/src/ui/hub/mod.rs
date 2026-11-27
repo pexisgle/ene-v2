@@ -126,7 +126,7 @@ impl Hub {
         let flags = self.pre_apply_hub_state(&update, cx);
         let had_companion = self.model.companion_id().is_some();
         let had_approvals = self.model.approvals().len();
-        let effects = self.model.apply(update);
+        let effects = self.model.apply_accepted(update);
         self.dispatch_apply_effects(&flags, effects, had_companion, had_approvals, cx);
     }
 

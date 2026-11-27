@@ -2,12 +2,12 @@
 
 use super::RpcDispatcher;
 use crate::update::Update;
-use ene_client_core::domain::{HostNotification, Message};
+use ene_client_core::domain::Message;
 use ene_rpc as w;
 
 load! {
     resnapshot: host.get_snapshot("ホスト状態の取得") =>
-        |snapshot| Update::Notification(Box::new(HostNotification::initial_state(snapshot.into())));
+        |snapshot| Update::Notification(Box::new(snapshot.into()));
 }
 
 pub(crate) fn load_history(rpc: &RpcDispatcher, epoch: u64, companion_id: String) -> bool {

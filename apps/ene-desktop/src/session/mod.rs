@@ -349,14 +349,7 @@ impl Session {
         let version = snapshot.server_version.clone();
         notify_ui(
             &self.updates,
-            Update::Notification(Box::new(
-                w::Notification {
-                    cursor: snapshot.cursor.clone(),
-                    event: Some(w::notification::Event::InitialState(Box::new(snapshot))),
-                    ..Default::default()
-                }
-                .into(),
-            )),
+            Update::Notification(Box::new(snapshot.into())),
         );
         self.report_phase(ConnectionPhase::Live { version }).await;
 

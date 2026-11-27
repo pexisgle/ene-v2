@@ -191,6 +191,7 @@ pub struct ConnectionViewState {
     pub link_epoch: u64,
     /// Latest replacement reply per view resource on this link.
     pub(crate) applied_seq: HashMap<ReplyTarget, u64>,
+    pub(crate) order: crate::notifications::HostOrder,
     /// The provider catalog, once fetched.
     pub providers: Option<Vec<LlmProvider>>,
     /// Models per connection id, once fetched.
@@ -213,6 +214,7 @@ impl ConnectionViewState {
             },
             link_epoch: 1,
             applied_seq: HashMap::new(),
+            order: Default::default(),
             providers: None,
             models: BTreeMap::new(),
             checks: BTreeMap::new(),

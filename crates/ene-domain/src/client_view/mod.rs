@@ -172,17 +172,26 @@ pub enum NotificationEvent {
 /// Host notification envelope handed from the session stream or RPC calls to the reducer.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HostNotification {
-    /// Notification kind, in the host's own spelling.
-    pub kind: String,
+    /// The host boot and sequence that produced this event or snapshot.
+    pub cursor: Option<HostCursor>,
     /// The translated event, when the kind maps to one.
     pub event: Option<NotificationEvent>,
 }
 
+/// A position in a single host boot's notification history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostCursor {
+    /// The boot that issued this position.
+    pub epoch: String,
+    /// Monotonic position within the boot.
+    pub seq: u64,
+}
+
 impl HostNotification {
     /// Builds an `initial_state` notification from a fetched snapshot.
-    pub fn initial_state(snapshot: Snapshot) -> Self {
+    pub fn initial_state(snapshot: Snapshot, cursor: Option<HostCursor>) -> Self {
         Self {
-            kind: "initial_state".into(),
+            cursor,
             event: Some(NotificationEvent::InitialState(Box::new(snapshot))),
         }
     }
@@ -190,7 +199,7 @@ impl HostNotification {
     /// Builds a `settings` notification from an updated settings payload.
     pub fn settings_updated(settings: Settings) -> Self {
         Self {
-            kind: "settings".into(),
+            cursor: None,
             event: Some(NotificationEvent::SettingsUpdated(Some(Box::new(settings)))),
         }
     }
@@ -198,7 +207,7 @@ impl HostNotification {
     /// Builds a `companion` notification from an updated companion record.
     pub fn companion(companion: Companion) -> Self {
         Self {
-            kind: "companion".into(),
+            cursor: None,
             event: Some(NotificationEvent::Companion(Box::new(companion))),
         }
     }

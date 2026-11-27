@@ -31,15 +31,25 @@ impl Model {
             }
             update = *inner;
         }
+        if let Update::Notification(event) = &update
+            && !self.connections.order.accept(event)
+        {
+            return None;
+        }
         Some(update)
     }
 
     /// Folds one update into the view and reports what must be refetched.
     pub fn apply(&mut self, update: Update) -> Effects {
-        let mut effects = Effects::default();
         let Some(update) = self.accept_update(update) else {
-            return effects;
+            return Effects::default();
         };
+        self.apply_accepted(update)
+    }
+
+    /// Applies an update already admitted by `accept_update` before UI side effects.
+    pub fn apply_accepted(&mut self, update: Update) -> Effects {
+        let mut effects = Effects::default();
         match update {
             Update::Link(link) => apply_link(self, *link, &mut effects),
             Update::Notification(notification) => {
@@ -91,6 +101,9 @@ fn apply_link(model: &mut Model, link: Link, effects: &mut Effects) {
     if was_live != is_live {
         model.connections.link_epoch = model.connections.link_epoch.saturating_add(1);
         model.connections.applied_seq.clear();
+    }
+    if was_live && !is_live {
+        model.connections.order = Default::default();
     }
     model.connections.link = link;
     if !model.connections.link.is_live() {

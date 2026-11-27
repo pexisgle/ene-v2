@@ -12,6 +12,58 @@ use crate::{
     state::{Chat, Effects, Model, NoticeKind},
 };
 
+/// The notification stream may lag behind an already received unary snapshot.
+#[derive(Debug, Default)]
+pub(crate) struct HostOrder {
+    epoch: Option<String>,
+    stream_seq: Option<u64>,
+    snapshot_seq: Option<u64>,
+}
+
+impl HostOrder {
+    pub(crate) fn accept(&mut self, notification: &HostNotification) -> bool {
+        let is_snapshot = matches!(notification.event, Some(NotificationEvent::InitialState(_)));
+        let Some(cursor) = &notification.cursor else {
+            return !is_snapshot || self.epoch.is_none();
+        };
+        let epoch = self.epoch.get_or_insert_with(|| cursor.epoch.clone());
+        if *epoch != cursor.epoch {
+            return false;
+        }
+        let seq = Some(cursor.seq);
+        if is_snapshot {
+            if seq < self.stream_seq.max(self.snapshot_seq) {
+                return false;
+            }
+            self.snapshot_seq = seq;
+            return true;
+        }
+        if seq <= self.stream_seq {
+            return false;
+        }
+        self.stream_seq = seq;
+        // A snapshot includes current host state but no chat or mind events.
+        seq > self.snapshot_seq || !is_snapshot_state(notification.event.as_ref())
+    }
+}
+
+fn is_snapshot_state(event: Option<&NotificationEvent>) -> bool {
+    matches!(
+        event,
+        Some(
+            NotificationEvent::Companion(_)
+                | NotificationEvent::CompanionRemoved(_)
+                | NotificationEvent::SettingsUpdated(_)
+                | NotificationEvent::ClientUpdated(_)
+                | NotificationEvent::ActivationUpdated(_)
+                | NotificationEvent::WorkStatusChanged { .. }
+                | NotificationEvent::ApprovalRequested(_)
+                | NotificationEvent::PolicyRulesUpdated(_)
+                | NotificationEvent::PolicyTextsUpdated(_)
+        )
+    )
+}
+
 pub(crate) fn merge_notification(
     model: &mut Model,
     notification: HostNotification,
