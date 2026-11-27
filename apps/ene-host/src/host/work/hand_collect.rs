@@ -6,10 +6,9 @@
 //! session's next turn. The hand state it reads is `hand`'s; this module only
 //! turns what arrived into host effects.
 
-use super::hand::{CallDespawner, Hands, Pending, dispatch_to_hand};
+use super::hand::{CallDespawner, Hand, Hands, Pending, Turn, dispatch};
 use super::{Run, RunState, WorkSession, WorkStatus};
 use crate::host::{
-    background,
     db::Store,
     permission::{self, ApprovalStatus},
     resources::HostRuntime,
@@ -19,16 +18,19 @@ use ene_plugin::{
     HarnessEvent, HarnessInput, PermissionOption, RequestPermissionOutcome, ToolCallUpdate,
 };
 use ene_store::util::now;
-use ene_work::harness::{arguments_of, select_permission_outcome, stop_outcome};
+use ene_work::harness::{arguments_of, prompt_of, select_permission_outcome, stop_outcome};
 use rig_core::message::{CallId, ToolCall as RequestedCall, ToolFunction, ToolName};
 use rig_ecs::prelude::*;
-use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 /// Applies what arrived since the last frame: the events of each in-flight
 /// invocation, the outcome of a finished driver, the reply to a resolved
 /// approval, and the input a finished run parked.
 pub(crate) fn collect(world: &mut World) {
     let mut hands = std::mem::take(&mut *world.resource_mut::<Hands>());
+    if hands.by_adapter.is_empty() {
+        return;
+    }
     let store = world.resource::<Store>().clone();
     let revoked: Vec<_> = hands
         .by_adapter
@@ -49,35 +51,12 @@ pub(crate) fn collect(world: &mut World) {
             Err(error) => crate::host::fail(world, &error.to_string()),
         }
     }
-    for (adapter, events) in take_events(&mut hands) {
-        for event in events {
-            apply(world, &mut hands, &store, &adapter, event);
-        }
-    }
-    let driver_failures = take_driver_failures(&mut hands, &store);
-    for (run, why) in driver_failures {
-        super::finish_run(
-            world,
-            run,
-            RunState::Failed,
-            Some(format!("作業を続けられませんでした: {why}")),
-        );
-    }
-    let approvals = take_resolved_approvals(&mut hands, &store);
-    if !approvals.is_empty() {
-        let runtime = world.resource::<HostRuntime>().0.clone();
-        let wake = world.get_resource::<rig_ecs::tasks::Wake>().cloned();
-        for (adapter, request, reply) in approvals {
-            dispatch_to_hand(
-                &mut hands,
-                &runtime,
-                wake.as_ref(),
-                &adapter,
-                HarnessInput::Respond {
-                    request_id: request,
-                    outcome: reply,
-                },
-            );
+    let runtime = world.resource::<HostRuntime>().0.clone();
+    let wake = world.get_resource::<rig_ecs::tasks::Wake>().cloned();
+    for hand in hands.by_adapter.values_mut() {
+        let next = collect_hand(world, &store, hand);
+        if let Some(input) = next {
+            dispatch(hand, &runtime, wake.clone(), input);
         }
     }
     let parked = take_parked_sessions(&mut hands, &store);
@@ -90,71 +69,112 @@ pub(crate) fn collect(world: &mut World) {
     }
 }
 
-fn take_events(hands: &mut Hands) -> Vec<(String, Vec<ene_plugin::Event>)> {
-    let adapters: Vec<String> = hands.by_adapter.keys().cloned().collect();
-    let mut batches = Vec::new();
-    for adapter in adapters {
-        let Some(hand) = hands.by_adapter.get_mut(&adapter) else {
-            continue;
-        };
-        let mut batch = Vec::new();
-        let mut index = 0;
-        while index < hand.events.len() {
-            match hand.events[index].try_recv() {
-                Ok(event) => batch.push(event),
-                Err(mpsc::error::TryRecvError::Empty) => index += 1,
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    // Drained and closed: the invocation that wrote it ended.
-                    hand.events.remove(index);
+fn collect_hand(world: &mut World, store: &Store, hand: &mut Hand) -> Option<HarnessInput> {
+    let mut active = match store.work_repo().active_run(&hand.work_id) {
+        Ok(run) => run,
+        Err(error) => {
+            crate::host::fail(world, &error.to_string());
+            return None;
+        }
+    };
+    if let Some(mut invocation) = hand.invocation.take() {
+        // The relay wakes the actor on each admission. Bound each frame even
+        // if the producer refills immediately.
+        for _ in 0..16 {
+            let Ok(event) = invocation.events.try_recv() else {
+                break;
+            };
+            if matches!(&hand.turn, Turn::Run(id) if active.as_ref().is_some_and(|run| run.run_id == *id))
+                && let ene_plugin::Event::Harness { event } = event
+            {
+                if matches!(event, HarnessEvent::Update { .. }) {
+                    apply(world, store, hand, &mut active, event);
+                } else {
+                    // A guest can emit its terminal event and then trap.
+                    // Commit the resulting hold or stop only on success.
+                    invocation.terminal = Some(event);
                 }
             }
         }
-        if !batch.is_empty() {
-            batches.push((adapter, batch));
+        let outcome = if invocation.events.is_closed() && invocation.events.is_empty() {
+            invocation.outcome.try_recv()
+        } else {
+            Err(oneshot::error::TryRecvError::Empty)
+        };
+        match outcome {
+            Err(oneshot::error::TryRecvError::Empty) => {
+                hand.invocation = Some(invocation);
+                return None;
+            }
+            Ok(Ok(())) => {
+                if let Some(event) = invocation.terminal.take() {
+                    apply(world, store, hand, &mut active, event);
+                }
+            }
+            failed => {
+                if matches!(&hand.turn, Turn::Run(id) if active.as_ref().is_some_and(|run| run.run_id == *id))
+                {
+                    let why = match failed {
+                        Ok(Err(error)) => error.to_string(),
+                        _ => "the harness call ended without a result".to_owned(),
+                    };
+                    if let Some(run) = active.take() {
+                        super::finish_run(world, run, RunState::Failed, Some(why));
+                    }
+                } else {
+                    hand.running.note_cancelled();
+                }
+                if let Some(pending) = hand.pending.take() {
+                    CallDespawner::new(world).despawn(pending.call);
+                }
+                hand.turn = Turn::New;
+            }
         }
     }
-    batches
+    next_input(hand, store, active)
+}
+
+fn next_input(hand: &mut Hand, store: &Store, active: Option<Run>) -> Option<HarnessInput> {
+    if matches!(hand.turn, Turn::Cancel) {
+        hand.turn = Turn::Ready;
+        return Some(HarnessInput::Cancel);
+    }
+    let run = active?;
+    if matches!(&hand.turn, Turn::Run(id) if *id == run.run_id) {
+        return reply_to_approval(hand, store);
+    }
+    let prompt = prompt_of(&run.instruction);
+    let input = if matches!(hand.turn, Turn::New) {
+        HarnessInput::Start {
+            prompt,
+            cwd: std::env::current_dir().map_or_default(|path| path.display().to_string()),
+        }
+    } else {
+        HarnessInput::Prompt { prompt }
+    };
+    hand.turn = Turn::Run(run.run_id);
+    Some(input)
 }
 
 fn apply(
     world: &mut World,
-    hands: &mut Hands,
     store: &Store,
-    adapter: &str,
-    event: ene_plugin::Event,
+    hand: &mut Hand,
+    active: &mut Option<Run>,
+    event: HarnessEvent,
 ) {
-    let ene_plugin::Event::Harness { event } = event else {
-        return;
-    };
-    let Some((work_id, companion_id)) = hands
-        .by_adapter
-        .get(adapter)
-        .map(|hand| (hand.work_id.clone(), hand.companion_id.clone()))
-    else {
-        return;
-    };
-    let Ok(active) = store.work_repo().active_run(&work_id) else {
+    let Some(run) = active.as_ref() else {
         return;
     };
     match event {
         HarnessEvent::Update { update } => {
-            // A non-chunk update ends whatever message was accumulating, so
-            // the head reads each report as one message, not fragments.
-            let effects = {
-                let Some(hand) = hands.by_adapter.get_mut(adapter) else {
-                    return;
-                };
-                hand.buffer.apply_update(&update)
-            };
-            let Some(run) = active else {
-                return;
-            };
+            let effects = hand.buffer.apply_update(&update);
             if let Some(text) = effects.flushed {
-                super::inform(world, &companion_id, &run, text, DeliveryMode::Inform);
+                super::inform(world, &hand.companion_id, run, text, DeliveryMode::Inform);
             }
             if let Some(text) = effects.report {
                 super::note_activity(&mut world.resource_mut(), &run.run_id);
-                super::inform(world, &companion_id, &run, text, DeliveryMode::Inform);
+                super::inform(world, &hand.companion_id, run, text, DeliveryMode::Inform);
             }
         }
         HarnessEvent::RequestPermission {
@@ -162,47 +182,16 @@ fn apply(
             tool_call,
             options,
         } => {
-            if let Some(run) = active {
-                request_permission(
-                    world,
-                    hands,
-                    store,
-                    &PermissionTarget {
-                        adapter,
-                        run: &run,
-                        companion: &companion_id,
-                        request: &request_id,
-                    },
-                    &tool_call,
-                    options,
-                );
-            }
+            request_permission(world, hand, store, run, (request_id, tool_call, options));
         }
         HarnessEvent::Stop { stop_reason } => {
-            let text = {
-                let Some(hand) = hands.by_adapter.get_mut(adapter) else {
-                    return;
-                };
-                hand.buffer.take_message()
-            };
-            let Some(run) = active else {
-                return;
-            };
-            if run.state.is_terminal() {
-                // A stop that raced the user's own stop settles nothing.
-                return;
+            let text = hand.buffer.take_message();
+            if let Some(run) = active.take() {
+                let (state, report) = stop_outcome(stop_reason, text);
+                super::finish_run(world, run, state, report);
             }
-            let (state, report) = stop_outcome(stop_reason, text);
-            super::finish_run(world, run, state, report);
         }
     }
-}
-
-struct PermissionTarget<'a> {
-    adapter: &'a str,
-    run: &'a Run,
-    companion: &'a str,
-    request: &'a str,
 }
 
 /// Parks the turn in an approval row and a held call, through the same
@@ -210,26 +199,18 @@ struct PermissionTarget<'a> {
 /// `SubmitApproval` call and the head's `resolve_approval` all resolve it.
 fn request_permission(
     world: &mut World,
-    hands: &mut Hands,
+    hand: &mut Hand,
     store: &Store,
-    target: &PermissionTarget<'_>,
-    tool_call: &ToolCallUpdate,
-    options: Vec<PermissionOption>,
+    run: &Run,
+    (request, tool_call, options): (String, ToolCallUpdate, Vec<PermissionOption>),
 ) {
-    let PermissionTarget {
-        adapter,
-        run,
-        companion,
-        request,
-    } = *target;
-    let (tool_name, arguments) = {
-        let Some(hand) = hands.by_adapter.get_mut(adapter) else {
-            return;
-        };
-        hand.buffer.clear_message();
-        let tool_name = hand.buffer.resolve_tool_name(tool_call);
-        (tool_name, arguments_of(tool_call))
-    };
+    if hand.pending.is_some() {
+        return;
+    }
+    let companion = &hand.companion_id;
+    hand.buffer.clear_message();
+    let tool_name = hand.buffer.resolve_tool_name(&tool_call);
+    let arguments = arguments_of(&tool_call);
     let Ok(name) = ToolName::new(&tool_name) else {
         tracing::warn!(work = %run.work_id, "the harness named an empty tool");
         return;
@@ -273,14 +254,12 @@ fn request_permission(
         crate::host::fail(world, &error.to_string());
         return;
     }
-    if let Some(hand) = hands.by_adapter.get_mut(adapter) {
-        hand.pending = Some(Pending {
-            approval: approval_id,
-            call,
-            request: request.to_owned(),
-            options,
-        });
-    }
+    hand.pending = Some(Pending {
+        approval: approval_id,
+        call,
+        request,
+        options,
+    });
     let target = format!(
         "{tool_name} {}",
         ene_store::util::truncate(&approval.normalized_arguments, 200)
@@ -293,74 +272,20 @@ fn request_permission(
     );
 }
 
-/// Collects finished drivers whose failure should settle the open run.
-fn take_driver_failures(hands: &mut Hands, store: &Store) -> Vec<(Run, String)> {
-    let adapters: Vec<String> = hands.by_adapter.keys().cloned().collect();
-    let mut failures = Vec::new();
-    for adapter in &adapters {
-        let Some(hand) = hands.by_adapter.get_mut(adapter) else {
-            continue;
-        };
-        if !hand
-            .driver
-            .as_ref()
-            .is_some_and(tokio_util::task::AbortOnDropHandle::is_finished)
-        {
-            continue;
-        }
-        let Some(driver) = hand.driver.take() else {
-            continue;
-        };
-        let failure = match background::take(driver) {
-            Some(Ok(_)) => None,
-            Some(Err(error)) => Some(error.to_string()),
-            None => Some("the harness call ended without a result".to_owned()),
-        };
-        let Some(why) = failure else {
-            continue;
-        };
-        let Ok(Some(run)) = store.work_repo().active_run(&hand.work_id) else {
-            continue;
-        };
-        if !run.state.is_terminal() {
-            failures.push((run, why));
-        }
-    }
-    failures
-}
-
-/// Answers permission requests whose approval row the user, head, or card resolved.
-fn take_resolved_approvals(
-    hands: &mut Hands,
-    store: &Store,
-) -> Vec<(String, String, RequestPermissionOutcome)> {
-    let resolved: Vec<(String, String, RequestPermissionOutcome)> = hands
-        .by_adapter
-        .iter()
-        .filter_map(|(adapter, hand)| {
-            let pending = hand.pending.as_ref()?;
-            store.work_repo().active_run(&hand.work_id).ok().flatten()?;
-            let Ok(Some(approval)) = store.approval_repo().approval(&pending.approval) else {
-                return None;
-            };
-            let outcome = match approval.status {
-                ApprovalStatus::Approved => select_permission_outcome(&pending.options, true),
-                ApprovalStatus::Denied => select_permission_outcome(&pending.options, false),
-                // The hold was released without a decision (a stop took
-                // its call): answer so the guest's turn state does not
-                // dangle.
-                ApprovalStatus::Expired => RequestPermissionOutcome::Cancelled,
-                ApprovalStatus::Evaluating | ApprovalStatus::Pending => return None,
-            };
-            Some((adapter.clone(), pending.request.clone(), outcome))
-        })
-        .collect();
-    for (adapter, _, _) in &resolved {
-        if let Some(hand) = hands.by_adapter.get_mut(adapter) {
-            hand.pending = None;
-        }
-    }
-    resolved
+fn reply_to_approval(hand: &mut Hand, store: &Store) -> Option<HarnessInput> {
+    let pending = hand.pending.as_ref()?;
+    let approval = store.approval_repo().approval(&pending.approval).ok()??;
+    let outcome = match approval.status {
+        ApprovalStatus::Approved => select_permission_outcome(&pending.options, true),
+        ApprovalStatus::Denied => select_permission_outcome(&pending.options, false),
+        ApprovalStatus::Expired => RequestPermissionOutcome::Cancelled,
+        ApprovalStatus::Evaluating | ApprovalStatus::Pending => return None,
+    };
+    let pending = hand.pending.take()?;
+    Some(HarnessInput::Respond {
+        request_id: pending.request,
+        outcome,
+    })
 }
 
 /// Drains parked inputs for idle open sessions so `collect` can start their next turn.
@@ -369,7 +294,7 @@ fn take_parked_sessions(hands: &mut Hands, store: &Store) -> Vec<(WorkSession, S
         .by_adapter
         .iter_mut()
         .filter_map(|(_, hand)| {
-            if hand.parked.is_empty() {
+            if hand.parked.is_empty() || hand.invocation.is_some() {
                 return None;
             }
             if store

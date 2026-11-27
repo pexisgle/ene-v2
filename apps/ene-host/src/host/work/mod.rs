@@ -161,26 +161,30 @@ pub(crate) fn start_run(
         RunState::Running,
     );
     store.work_repo().insert_run(&run, &executor, receipt)?;
-    // The backend pick: a task assignment onto an installed harness plugin
-    // runs the session on the plugin hand; anything else keeps the rig agent.
-    let failure = match harness {
-        Some(harness) => {
-            let mut hands = std::mem::take(&mut *world.resource_mut::<hand::Hands>());
-            let outcome = hand::start_run(
-                world,
+    let is_harness = harness.is_some();
+    let claimed = if is_harness
+        || world
+            .get_resource::<hand::Hands>()
+            .is_some_and(|hands| hand::owns(hands, &session.id))
+    {
+        world.resource_scope(|world, mut hands: Mut<hand::Hands>| {
+            hand::claim(
                 &mut hands,
-                &hand::RunStart {
-                    session,
-                    run: &run,
-                    instruction,
-                },
-                &harness.adapter,
-                harness.running,
-            );
-            *world.resource_mut::<hand::Hands>() = hands;
-            outcome.err()
+                &mut hand::CallDespawner::new(world),
+                session,
+                harness,
+            )
+        })
+    } else {
+        Ok(())
+    };
+    let failure = match claimed {
+        Err(error) => Some(error),
+        Ok(()) if is_harness => {
+            retire(world, &session.id);
+            None
         }
-        None => {
+        Ok(()) => {
             let agent = ensure(world, &companion, &session.id, &run.run_id, instruction);
             match agent::ensure_model(world, agent) {
                 Ok(()) => {
@@ -275,16 +279,8 @@ pub(crate) fn stop_with(world: &mut World, work_id: &str, reason: Option<&str>) 
         return Ok(());
     };
     if hand::owns(world.resource::<hand::Hands>(), work_id) {
-        let runtime = world
-            .resource::<crate::host::resources::HostRuntime>()
-            .0
-            .clone();
-        let wake = world.get_resource::<rig_ecs::tasks::Wake>().cloned();
         let mut hands = std::mem::take(&mut *world.resource_mut::<hand::Hands>());
-        {
-            let mut calls = hand::CallDespawner::new(world);
-            hand::stop(&mut hands, &mut calls, &runtime, wake.as_ref(), work_id);
-        }
+        hand::stop(&mut hands, &mut hand::CallDespawner::new(world), &run);
         *world.resource_mut::<hand::Hands>() = hands;
     } else if let Some(agent) = agent_of(world, work_id) {
         let stop = reason.map_or_else(

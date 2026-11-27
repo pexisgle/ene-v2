@@ -420,28 +420,46 @@ fn stop_work_cancels_a_parked_plugin_hand_run() {
         work::RunState::Cancelled
     );
 
-    // The guest answers its `Cancel` with `Stop{Cancelled}`; the settled run
-    // ignores it, and the approval the turn parked on expires.
+    // Send before another host frame runs. The old guest invocation must
+    // finish Cancel before Prompt can run, and its Stop belongs to the old run.
+    world.send_work(&session.id, "停止の直後に続けて");
+    let next = world
+        .harness
+        .store()
+        .work_repo()
+        .active_run(&session.id)
+        .unwrap()
+        .unwrap();
+    assert_ne!(next.run_id, run_id);
     world.harness.run_until(|frame| {
         frame
             .resource::<Store>()
+            .work_repo()
+            .run(&next.run_id)
+            .unwrap()
+            .is_some_and(|run| run.state.is_terminal())
+    });
+    let store = world.harness.store();
+    assert_eq!(
+        store.work_repo().run(&run_id).unwrap().unwrap().state,
+        work::RunState::Cancelled
+    );
+    assert_eq!(
+        store.work_repo().run(&next.run_id).unwrap().unwrap().state,
+        work::RunState::Completed
+    );
+    assert!(
+        store
             .approval_repo()
             .approvals(ApprovalStatus::Pending)
             .unwrap()
-            .is_empty()
-    });
-    assert_eq!(
-        world
-            .harness
-            .store()
-            .work_repo()
-            .run(&run_id)
-            .unwrap()
-            .unwrap()
-            .state,
-        work::RunState::Cancelled,
-        "the late guest stop does not touch the settled run"
+            .iter()
+            .all(|approval| approval.run_id != run_id && approval.run_id != next.run_id)
     );
+    let companion = world.companion.clone();
+    world
+        .harness
+        .run_until(move |frame| head_received(frame, &companion, "停止の直後に続けて"));
 
     // The claim ends with the session, so a fresh session can start again.
     work::close(world.harness.app.world_mut(), &session.id).unwrap();
