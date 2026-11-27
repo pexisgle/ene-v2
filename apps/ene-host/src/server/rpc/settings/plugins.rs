@@ -104,7 +104,7 @@ pub(super) async fn install_plugin(
             installed_at: entry.installed_at,
             ..Default::default()
         };
-        services.providers.replace(package);
+        services.providers.replace(package, entry.installation_id);
         Ok(view)
     })
     .await

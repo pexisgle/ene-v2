@@ -2,11 +2,11 @@
 
 use crate::row::FromRow;
 use crate::{Store, StoreError, error::Result, util::now};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 
 const ENTRY_COLUMNS: &str =
-    "plugin_id, name, version, path, enabled, installed_at, updated_at, revision";
+    "plugin_id, name, version, path, enabled, installed_at, updated_at, revision, installation_id";
 
 const MAX_KEY_CHARS: usize = 128;
 const MAX_VALUE_BYTES: usize = 64 * 1024;
@@ -23,6 +23,7 @@ pub struct PluginEntry {
     pub installed_at: String,
     pub updated_at: String,
     pub revision: Option<String>,
+    pub installation_id: String,
 }
 
 /// Repository managing `plugin_config`, `plugin_state`, and `plugin_entries`.
@@ -36,17 +37,11 @@ impl<'a> PluginRepo<'a> {
 
     /// Returns the saved JSON configuration for `plugin_id`, defaulting to `{}`.
     pub fn plugin_config(&self, plugin_id: &str) -> Result<Value> {
-        let raw: Option<String> = self
-            .0
-            .conn()
-            .prepare_cached("SELECT config FROM plugin_config WHERE plugin_id = ?1")?
-            .query_row([plugin_id], |row| row.get(0))
-            .optional()?;
-        match raw {
-            Some(text) => serde_json::from_str(&text)
-                .map_err(|error| StoreError::Storage(format!("corrupt plugin_config: {error}"))),
-            None => Ok(serde_json::json!({})),
+        PluginData {
+            conn: &self.0.conn(),
+            plugin_id,
         }
+        .config()
     }
 
     /// Persists the JSON configuration document for `plugin_id`.
@@ -71,52 +66,20 @@ impl<'a> PluginRepo<'a> {
 
     /// Reads one key from `plugin_id`'s isolated state namespace.
     pub fn plugin_state_read(&self, plugin_id: &str, key: &str) -> Result<Option<Value>> {
-        validate_state_key(key)?;
-        let raw: Option<String> = self
-            .0
-            .conn()
-            .prepare_cached("SELECT value FROM plugin_state WHERE plugin_id = ?1 AND key = ?2")?
-            .query_row(params![plugin_id, key], |row| row.get(0))
-            .optional()?;
-        raw.map(|text| {
-            serde_json::from_str(&text)
-                .map_err(|error| StoreError::Storage(format!("corrupt plugin_state: {error}")))
-        })
-        .transpose()
+        PluginData {
+            conn: &self.0.conn(),
+            plugin_id,
+        }
+        .read(key)
     }
 
     /// Writes one key into `plugin_id`'s isolated state namespace.
     pub fn plugin_state_write(&self, plugin_id: &str, key: &str, value: &Value) -> Result<()> {
-        validate_state_key(key)?;
-        let raw = serde_json::to_string(value)
-            .map_err(|error| StoreError::Invalid(format!("plugin state JSON: {error}")))?;
-        if raw.len() > MAX_VALUE_BYTES {
-            return Err(StoreError::Invalid(
-                "plugin state value exceeds 64 KiB limit".into(),
-            ));
+        PluginData {
+            conn: &self.0.conn(),
+            plugin_id,
         }
-        let conn = self.0.conn();
-        let exists: bool = conn
-            .prepare_cached("SELECT 1 FROM plugin_state WHERE plugin_id = ?1 AND key = ?2")?
-            .query_row(params![plugin_id, key], |_| Ok(()))
-            .optional()?
-            .is_some();
-        if !exists {
-            let count: i64 = conn
-                .prepare_cached("SELECT COUNT(*) FROM plugin_state WHERE plugin_id = ?1")?
-                .query_row([plugin_id], |row| row.get(0))?;
-            if count >= MAX_KEYS_PER_PLUGIN {
-                return Err(StoreError::Invalid("plugin state key limit reached".into()));
-            }
-        }
-        conn.prepare_cached(
-            "INSERT INTO plugin_state (plugin_id, key, value, updated_at) \
-             VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT(plugin_id, key) DO UPDATE SET value = excluded.value, \
-             updated_at = excluded.updated_at",
-        )?
-        .execute(params![plugin_id, key, raw, now()])?;
-        Ok(())
+        .write(key, value)
     }
 
     pub fn plugin_entries(&self) -> Result<Vec<PluginEntry>> {
@@ -127,14 +90,30 @@ impl<'a> PluginRepo<'a> {
         )
     }
 
-    /// Identifies the enabled installation that supplied an exact package.
-    pub fn installation_id(&self, plugin_id: &str, revision: &str) -> Result<Option<String>> {
-        self.0.fetch(
-            "SELECT installation_id FROM plugin_entries
-             WHERE plugin_id = ?1 AND revision = ?2 AND enabled = 1 AND installation_id <> ''",
-            params![plugin_id, revision],
-            |row| row.get(0),
-        )
+    /// Keeps the registry check and the plugin's state operation in one store lock.
+    pub fn with_installation<T>(
+        &self,
+        plugin_id: &str,
+        installation_id: &str,
+        still_admitted: impl FnOnce() -> bool,
+        access: impl FnOnce(PluginData<'_>) -> T,
+    ) -> Result<T> {
+        let conn = self.0.conn();
+        let enabled: bool = conn
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM plugin_entries
+             WHERE plugin_id = ?1 AND installation_id = ?2 AND enabled = 1)",
+            )?
+            .query_row(params![plugin_id, installation_id], |row| row.get(0))?;
+        if !enabled || !still_admitted() {
+            return Err(StoreError::Permission(
+                "the plugin installation is no longer active".into(),
+            ));
+        }
+        Ok(access(PluginData {
+            conn: &conn,
+            plugin_id,
+        }))
     }
 
     pub fn install_plugin_entry(
@@ -147,7 +126,7 @@ impl<'a> PluginRepo<'a> {
     ) -> Result<PluginEntry> {
         self.0.fetch(
             &format!(
-                "INSERT INTO plugin_entries ({ENTRY_COLUMNS}, installation_id)
+                "INSERT INTO plugin_entries ({ENTRY_COLUMNS})
                  VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?6, lower(hex(randomblob(16))))
                  ON CONFLICT(plugin_id) DO UPDATE SET name = excluded.name, version = excluded.version,
                  path = excluded.path, enabled = 1, updated_at = excluded.updated_at,
@@ -216,7 +195,78 @@ impl FromRow for PluginEntry {
             installed_at: row.get(5)?,
             updated_at: row.get(6)?,
             revision: row.get(7)?,
+            installation_id: row.get(8)?,
         })
+    }
+}
+
+/// Configuration and state for one plugin under the repository's lock.
+#[derive(Debug)]
+pub struct PluginData<'a> {
+    conn: &'a Connection,
+    plugin_id: &'a str,
+}
+
+impl PluginData<'_> {
+    pub fn config(&self) -> Result<Value> {
+        let raw: Option<String> = self
+            .conn
+            .prepare_cached("SELECT config FROM plugin_config WHERE plugin_id = ?1")?
+            .query_row([self.plugin_id], |row| row.get(0))
+            .optional()?;
+        match raw {
+            Some(text) => serde_json::from_str(&text)
+                .map_err(|error| StoreError::Storage(format!("corrupt plugin_config: {error}"))),
+            None => Ok(serde_json::json!({})),
+        }
+    }
+
+    pub fn read(&self, key: &str) -> Result<Option<Value>> {
+        validate_state_key(key)?;
+        let raw: Option<String> = self
+            .conn
+            .prepare_cached("SELECT value FROM plugin_state WHERE plugin_id = ?1 AND key = ?2")?
+            .query_row(params![self.plugin_id, key], |row| row.get(0))
+            .optional()?;
+        raw.map(|text| {
+            serde_json::from_str(&text)
+                .map_err(|error| StoreError::Storage(format!("corrupt plugin_state: {error}")))
+        })
+        .transpose()
+    }
+
+    pub fn write(&self, key: &str, value: &Value) -> Result<()> {
+        validate_state_key(key)?;
+        let raw = serde_json::to_string(value)
+            .map_err(|error| StoreError::Invalid(format!("plugin state JSON: {error}")))?;
+        if raw.len() > MAX_VALUE_BYTES {
+            return Err(StoreError::Invalid(
+                "plugin state value exceeds 64 KiB limit".into(),
+            ));
+        }
+        let conn = self.conn;
+        let plugin_id = self.plugin_id;
+        let exists: bool = conn
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM plugin_state WHERE plugin_id = ?1 AND key = ?2)",
+            )?
+            .query_row(params![plugin_id, key], |row| row.get(0))?;
+        if !exists {
+            let count: i64 = conn
+                .prepare_cached("SELECT COUNT(*) FROM plugin_state WHERE plugin_id = ?1")?
+                .query_row([plugin_id], |row| row.get(0))?;
+            if count >= MAX_KEYS_PER_PLUGIN {
+                return Err(StoreError::Invalid("plugin state key limit reached".into()));
+            }
+        }
+        conn.prepare_cached(
+            "INSERT INTO plugin_state (plugin_id, key, value, updated_at) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(plugin_id, key) DO UPDATE SET value = excluded.value, \
+             updated_at = excluded.updated_at",
+        )?
+        .execute(params![plugin_id, key, raw, now()])?;
+        Ok(())
     }
 }
 

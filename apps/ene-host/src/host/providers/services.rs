@@ -40,44 +40,69 @@ pub(crate) struct BrokerServices {
 
 /// Logging, configuration and isolated state for non-provider extensions.
 pub(crate) struct PluginServices {
-    plugin_id: String,
+    running: Arc<super::Running>,
     store: crate::host::db::Store,
 }
 
 impl PluginServices {
-    pub(crate) fn new(plugin_id: impl Into<String>, store: crate::host::db::Store) -> Arc<Self> {
-        Arc::new(Self {
-            plugin_id: plugin_id.into(),
-            store,
-        })
+    pub(crate) fn new(running: Arc<super::Running>, store: crate::host::db::Store) -> Arc<Self> {
+        Arc::new(Self { running, store })
     }
 }
 
 impl Services for PluginServices {
+    fn check(&self) -> BoxFuture<'_, Result<(), Failure>> {
+        Box::pin(async {
+            if self.running.revoked() || self.running.installation_id().is_none() {
+                return Err(Failure::new("provider_revoked"));
+            }
+            Ok(())
+        })
+    }
+
     fn handle(&self, request: ServiceRequest) -> BoxFuture<'_, Result<Value, Failure>> {
         Box::pin(async move {
-            let repo = self.store.plugin_repo();
-            match request {
-                ServiceRequest::Log { message } => {
-                    let clipped = ene_store::util::truncate(&message, 4_096);
-                    tracing::info!(plugin = %self.plugin_id, "{clipped}");
-                    Ok(Value::Null)
-                }
-                ServiceRequest::Configuration => repo
-                    .plugin_config(&self.plugin_id)
-                    .map_err(|_| Failure::new("service_failed")),
-                ServiceRequest::StateRead { key } => repo
-                    .plugin_state_read(&self.plugin_id, &key)
-                    .map(|value| value.unwrap_or(Value::Null))
-                    .map_err(|_| Failure::new("service_failed")),
-                ServiceRequest::StateWrite { key, value } => repo
-                    .plugin_state_write(&self.plugin_id, &key, &value)
-                    .map(|()| Value::Null)
-                    .map_err(|_| Failure::new("service_failed")),
-                ServiceRequest::Tool { .. } => Err(Failure::new("permission_required")),
-                _ => Err(Failure::new("undeclared_service")),
-            }
+            let running = &self.running;
+            let plugin_id = running.plugin_id();
+            let installation = running
+                .installation_id()
+                .ok_or_else(|| Failure::new("provider_revoked"))?;
+            self.store
+                .plugin_repo()
+                .with_installation(
+                    plugin_id,
+                    installation,
+                    || !running.revoked(),
+                    |data| match request {
+                        ServiceRequest::Log { message } => {
+                            let clipped = ene_store::util::truncate(&message, 4_096);
+                            tracing::info!(plugin = %plugin_id, "{clipped}");
+                            Ok(Value::Null)
+                        }
+                        ServiceRequest::Configuration => {
+                            data.config().map_err(|error| state_failure(&error))
+                        }
+                        ServiceRequest::StateRead { key } => data
+                            .read(&key)
+                            .map(Option::unwrap_or_default)
+                            .map_err(|error| state_failure(&error)),
+                        ServiceRequest::StateWrite { key, value } => data
+                            .write(&key, &value)
+                            .map(|()| Value::Null)
+                            .map_err(|error| state_failure(&error)),
+                        ServiceRequest::Tool { .. } => Err(Failure::new("permission_required")),
+                        _ => Err(Failure::new("undeclared_service")),
+                    },
+                )
+                .map_err(|error| state_failure(&error))?
         })
+    }
+}
+
+fn state_failure(error: &ene_store::StoreError) -> Failure {
+    match error {
+        ene_store::StoreError::Permission(_) => Failure::new("provider_revoked"),
+        _ => Failure::new("service_failed"),
     }
 }
 

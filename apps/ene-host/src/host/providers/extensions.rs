@@ -31,19 +31,6 @@ pub(crate) struct HookOutcome {
     pub(crate) injected_context: Vec<String>,
 }
 
-/// A discovered tool can only execute on the admission that supplied its schema.
-#[derive(Clone)]
-pub(crate) struct PluginToolOwner {
-    pub(crate) plugin_id: String,
-    pub(crate) running: Arc<Running>,
-}
-
-impl PluginToolOwner {
-    fn same_registration(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.running, &other.running)
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct PluginTools {
     revision: u64,
@@ -51,7 +38,7 @@ pub(crate) struct PluginTools {
 }
 
 struct DiscoveredTool {
-    owner: PluginToolOwner,
+    owner: Arc<Running>,
     definition: PluginToolDefinition,
 }
 
@@ -88,10 +75,9 @@ impl Serve for PluginToolHandler {
             }
         };
         let tool = &self.tool;
-        let services = PluginServices::new(tool.owner.plugin_id.clone(), self.store.clone());
+        let services = PluginServices::new(Arc::clone(&tool.owner), self.store.clone());
         let outcome = tool
             .owner
-            .running
             .invoke(
                 Operation::InvokeTool {
                     request: ToolInvokeRequest {
@@ -156,7 +142,7 @@ async fn discover_tools_from_plugin(
     let Ok(defs) = running
         .tools
         .get_or_try_init(|| async {
-            let services = PluginServices::new(plugin_id.to_owned(), store.clone());
+            let services = PluginServices::new(Arc::clone(&running), store.clone());
             let value = running.invoke(Operation::ListTools, services).await?;
             serde_json::from_value::<Vec<PluginToolDefinition>>(value)
                 .map_err(|error| HostError::Invalid(format!("invalid ListTools payload: {error}")))
@@ -165,10 +151,6 @@ async fn discover_tools_from_plugin(
         .map_err(|error| tracing::warn!(plugin = %plugin_id, %error, "tool discovery failed"))
     else {
         return Vec::new();
-    };
-    let owner = PluginToolOwner {
-        plugin_id: plugin_id.to_owned(),
-        running: Arc::clone(&running),
     };
     defs.iter()
         .filter(|def| {
@@ -186,7 +168,7 @@ async fn discover_tools_from_plugin(
         })
         .map(|definition| DiscoveredTool {
             definition: definition.clone(),
-            owner: owner.clone(),
+            owner: Arc::clone(&running),
         })
         .collect()
 }
@@ -214,7 +196,7 @@ pub(crate) fn register_plugin_tools(world: &mut World, tools: PluginTools) {
     let mut changed = false;
     for (entity, name, owner) in existing {
         if let Some(unchanged) = entries.iter().position(|entry| {
-            entry.definition.name == name.as_str() && entry.owner.same_registration(&owner)
+            entry.definition.name == name.as_str() && Arc::ptr_eq(&entry.owner, &owner)
         }) {
             entries.swap_remove(unchanged);
         } else {
@@ -223,7 +205,7 @@ pub(crate) fn register_plugin_tools(world: &mut World, tools: PluginTools) {
         }
     }
     for tool in entries {
-        if tool.owner.running.revoked() {
+        if tool.owner.revoked() {
             continue;
         }
         let def = &tool.definition;
@@ -302,7 +284,7 @@ mod tests {
         }
     }
 
-    fn install_reference_extensions(state_root: &Path) -> Providers {
+    fn install_reference_extensions(state_root: &Path, store: &Store) -> Providers {
         let plugin_dir = state_root.join(PLUGINS_DIR).join("reference-ext");
         let wasm = std::fs::read(reference_wasm()).unwrap();
         write_restricted(&plugin_dir.join("main.wasm"), &wasm);
@@ -323,14 +305,16 @@ mod tests {
             &plugin_dir.join("manifest.json"),
             manifest.to_string().as_bytes(),
         );
-        Providers::load(state_root)
+        let providers = Providers::load(state_root);
+        providers.restore_admissions(state_root, store).unwrap();
+        providers
     }
 
     #[tokio::test]
     async fn t12_plugin_services_config_state_and_character_extension() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
-        let providers = install_reference_extensions(temp.path());
+        let providers = install_reference_extensions(temp.path(), &store);
 
         let target = CharacterTarget {
             device_id: "dev-1".into(),
@@ -380,7 +364,11 @@ mod tests {
             None
         );
 
-        let services = PluginServices::new("reference-ext", store);
+        let running = providers
+            .start("reference-ext", Extension::Character)
+            .await
+            .unwrap();
+        let services = PluginServices::new(running, store);
         let failure = ene_plugin_runtime::instance::Services::handle(
             services.as_ref(),
             ene_plugin::ServiceRequest::Tool {
@@ -397,7 +385,7 @@ mod tests {
     async fn t13_hook_extension_injects_context_and_blocks_tool() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
-        let providers = install_reference_extensions(temp.path());
+        let providers = install_reference_extensions(temp.path(), &store);
 
         store
             .plugin_repo()
@@ -437,6 +425,84 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn state_follows_the_exact_published_installation() {
+        use ene_plugin::ServiceRequest;
+        use ene_plugin_runtime::instance::Services;
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        let providers = install_reference_extensions(temp.path(), &store);
+        let running = providers
+            .start("reference-ext", Extension::Character)
+            .await
+            .unwrap();
+        let initial = PluginServices::new(Arc::clone(&running), store.clone());
+        let write = |value| ServiceRequest::StateWrite {
+            key: "visits".into(),
+            value: serde_json::json!(value),
+        };
+        initial.handle(write(1)).await.unwrap();
+
+        let root = temp.path().join(PLUGINS_DIR).join("reference-ext");
+        let (entry, package) =
+            super::super::install_local_package(&store, temp.path(), &root).unwrap();
+        assert_eq!(Some(package.revision.as_str()), entry.revision.as_deref());
+        assert_ne!(
+            running.installation_id(),
+            Some(entry.installation_id.as_str())
+        );
+        assert!(!running.revoked());
+        assert_eq!(
+            initial.handle(write(2)).await.unwrap_err().code,
+            "provider_revoked"
+        );
+        assert_eq!(
+            initial
+                .handle(ServiceRequest::Configuration)
+                .await
+                .unwrap_err()
+                .code,
+            "provider_revoked"
+        );
+
+        providers.replace(package, entry.installation_id);
+        let active = providers
+            .start("reference-ext", Extension::Character)
+            .await
+            .unwrap();
+        let stale = PluginServices::new(active.clone(), store.clone());
+        stale.handle(write(3)).await.unwrap();
+        store
+            .plugin_repo()
+            .set_plugin_enabled("reference-ext", false)
+            .unwrap();
+        providers.set_enabled("reference-ext", false);
+        store
+            .plugin_repo()
+            .set_plugin_enabled("reference-ext", true)
+            .unwrap();
+        providers.set_enabled("reference-ext", true);
+        assert_eq!(
+            stale.handle(write(4)).await.unwrap_err().code,
+            "provider_revoked"
+        );
+        let next = providers
+            .start("reference-ext", Extension::Character)
+            .await
+            .unwrap();
+        assert_eq!(active.installation_id(), next.installation_id());
+        let latest = PluginServices::new(next, store);
+        assert_eq!(
+            latest
+                .handle(ServiceRequest::StateRead {
+                    key: "visits".into()
+                })
+                .await
+                .unwrap(),
+            serde_json::json!(3)
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn t14_tool_extension_discovers_gates_and_executes_through_permission_pipeline() {
         use crate::host::agent::WorkAgent;
@@ -462,7 +528,7 @@ mod tests {
                 MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
-        let providers = install_reference_extensions(harness.root.path());
+        let providers = install_reference_extensions(harness.root.path(), &harness.store());
         harness.app.insert_resource(providers.clone());
         harness
             .app

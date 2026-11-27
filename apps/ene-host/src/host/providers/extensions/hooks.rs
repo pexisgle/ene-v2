@@ -7,6 +7,7 @@ use crate::host::{
     providers::{PluginServices, Providers},
 };
 use ene_plugin::{Extension, HookDecision, HookEvent, Operation};
+use std::sync::Arc;
 
 /// Runs all installed `Extension::Hook` plugins in sorted plugin-ID order (`F18`).
 pub(crate) async fn run_hooks(
@@ -48,7 +49,7 @@ async fn invoke_hook_plugin(
         .await
         .map_err(|error| tracing::warn!(plugin = %plugin_id, %error, "hook plugin failed to start"))
         .ok()?;
-    let services = PluginServices::new(plugin_id.to_owned(), store.clone());
+    let services = PluginServices::new(Arc::clone(&running), store.clone());
     let raw = running
         .invoke(
             Operation::Hook {

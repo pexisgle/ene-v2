@@ -106,6 +106,7 @@ struct Registry {
 
 struct Registration {
     loaded: Option<Arc<Loaded>>,
+    installation_id: Option<Arc<str>>,
     active: Option<Admission>,
 }
 
@@ -145,7 +146,7 @@ impl Providers {
             }
             match load_one(&path) {
                 Ok((id, plugin)) if path.file_name().is_some_and(|name| name == id.as_str()) => {
-                    registry.install(id, Arc::new(plugin));
+                    registry.install(id, Arc::new(plugin), None, true);
                 }
                 Ok((id, _)) => tracing::warn!(plugin = %id, "plugin directory must match its ID"),
                 Err(error) => {
@@ -179,13 +180,14 @@ impl Providers {
         {
             if let Some(loaded) = self.get(&id) {
                 let package = &loaded.package;
-                repo.install_plugin_entry(
+                let entry = repo.install_plugin_entry(
                     &id,
                     &package.manifest.name,
                     &package.manifest.version,
                     &package.root.to_string_lossy(),
                     &package.revision,
                 )?;
+                self.install(id, loaded, Some(entry.installation_id.into()), true);
             }
         }
         Ok(())
@@ -216,14 +218,19 @@ impl Providers {
                 .as_ref()
                 .is_none_or(|revision| *revision == loaded.package.revision)
         {
-            self.install(id.clone(), loaded);
-            self.set_enabled(id, entry.enabled);
+            self.install(
+                id.clone(),
+                loaded,
+                Some(entry.installation_id.as_str().into()),
+                entry.enabled,
+            );
         } else {
             let mut installed = self.installed.write();
             installed.registrations.insert(
                 id.clone(),
                 Registration {
                     loaded: None,
+                    installation_id: None,
                     active: None,
                 },
             );
@@ -266,22 +273,29 @@ impl Providers {
             .into_iter()
     }
 
-    fn install(&self, id: String, loaded: Arc<Loaded>) {
+    fn install(
+        &self,
+        id: String,
+        loaded: Arc<Loaded>,
+        installation_id: Option<Arc<str>>,
+        enabled: bool,
+    ) {
         let mut registry = self.installed.write();
         registry.registrations.insert(
             id,
             Registration {
                 loaded: Some(loaded),
-                active: Some(Admission::default()),
+                installation_id,
+                active: enabled.then(Admission::default),
             },
         );
         registry.revision += 1;
     }
 
-    pub(crate) fn replace(&self, package: Package) {
+    pub(crate) fn replace(&self, package: Package, installation_id: String) {
         let id = package.manifest.id.clone();
         match load_package(package) {
-            Ok(plugin) => self.install(id, Arc::new(plugin)),
+            Ok(plugin) => self.install(id, Arc::new(plugin), Some(installation_id.into()), true),
             Err(_) => self.remove(&id),
         }
     }
@@ -326,7 +340,7 @@ impl Providers {
         extension: Extension,
     ) -> Result<Arc<Running>, HostError> {
         let unavailable = || HostError::Unavailable(format!("plugin `{adapter}` is not enabled"));
-        let (loaded, cell, lifetime) = {
+        let (loaded, installation_id, cell, lifetime) = {
             let mut installed = self.installed.write();
             let entry = installed
                 .registrations
@@ -335,13 +349,14 @@ impl Providers {
             let active = entry.active.as_mut().ok_or_else(unavailable)?;
             (
                 entry.loaded.clone().ok_or_else(unavailable)?,
+                entry.installation_id.clone(),
                 Arc::clone(active.started.entry(extension).or_default()),
                 active.lifetime.clone(),
             )
         };
         let running = cell
             .get_or_try_init(|| async {
-                Running::start(loaded, extension, lifetime.clone())
+                Running::start(loaded, installation_id, extension, lifetime.clone())
                     .await
                     .map(Arc::new)
             })

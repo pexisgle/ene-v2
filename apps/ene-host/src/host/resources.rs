@@ -255,7 +255,7 @@ pub(crate) enum HostExternalTool {
         server: String,
         key: rig_core::effect::Key<rig_core::effect::family::Tool>,
     },
-    Plugin(super::providers::extensions::PluginToolOwner),
+    Plugin(std::sync::Arc<super::providers::Running>),
 }
 
 /// Dispatches a character lifecycle event to installed `Extension::Character` plugins.

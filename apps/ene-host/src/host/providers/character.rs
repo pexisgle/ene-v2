@@ -9,6 +9,7 @@ use crate::host::{
 use bevy_ecs::prelude::*;
 use ene_plugin::{CharacterAction, CharacterEvent, CharacterTarget, Event, Extension, Operation};
 use rig_ecs::prelude::*;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Dispatches one `CharacterEvent` to all installed `Extension::Character`
@@ -42,7 +43,7 @@ async fn invoke_character_plugin(
             return Vec::new();
         }
     };
-    let services = PluginServices::new(plugin_id.to_owned(), store.clone());
+    let services = PluginServices::new(Arc::clone(&running), store.clone());
     let (tx, mut rx) = mpsc::channel(32);
     let expected_target = target.clone();
     let collector = tokio::spawn(async move {

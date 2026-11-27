@@ -7,7 +7,7 @@ use crate::host::{
     client::Client,
     db::Store,
     error::{HostError, Result},
-    providers::extensions::PluginToolOwner,
+    providers::Running,
     providers::extensions::run_hooks,
     resources::{CompanionAgent, HostExternalTool, WorkAgent, WorkTurn},
 };
@@ -197,13 +197,13 @@ pub(super) fn build_candidate_action(ctx: &GateContext, item: &GateCall) -> Cand
 
 #[derive(Component)]
 pub(super) struct PreparedPluginTool {
-    owner: PluginToolOwner,
+    owner: Arc<Running>,
     pub(super) action: Arc<PluginToolAction>,
 }
 
 impl PreparedPluginTool {
     pub(super) fn revoked(&self) -> bool {
-        self.owner.running.revoked()
+        self.owner.revoked()
     }
 
     pub(super) fn candidate(&self) -> CandidateAction {
@@ -213,31 +213,29 @@ impl PreparedPluginTool {
 
 fn prepare_plugin(
     ctx: &GateContext,
-    owner: &PluginToolOwner,
+    owner: &Arc<Running>,
     tool_name: String,
     input: Value,
 ) -> Result<PreparedPluginTool> {
-    if owner.running.revoked() {
+    if owner.revoked() {
         return Err(HostError::Conflict(
             "the tool plugin was replaced or disabled".into(),
         ));
     }
-    let revision = owner.running.package_revision();
+    let revision = owner.package_revision();
+    let plugin_id = owner.plugin_id();
     let scope = if let Some(key) = ctx
         .credentials
         .as_ref()
         .and_then(|creds| creds.approval_key.as_ref())
-        && let Some(installation) = ctx
-            .store
-            .plugin_repo()
-            .installation_id(&owner.plugin_id, revision)?
+        && let Some(installation) = owner.installation_id()
     {
         let canonical = canonical_json(&input);
         super::scope_tag(
             key,
             b"ene-host plugin tool v1\0",
             [
-                owner.plugin_id.as_bytes(),
+                plugin_id.as_bytes(),
                 revision.as_bytes(),
                 installation.as_bytes(),
                 tool_name.as_bytes(),
@@ -247,7 +245,7 @@ fn prepare_plugin(
         .map(|tag| {
             let label = format!(
                 "{} · {} · {}",
-                owner.plugin_id,
+                plugin_id,
                 tool_name,
                 revision.get(..12).unwrap_or(revision)
             );
@@ -259,7 +257,7 @@ fn prepare_plugin(
     Ok(PreparedPluginTool {
         owner: owner.clone(),
         action: Arc::new(PluginToolAction {
-            plugin_id: owner.plugin_id.clone(),
+            plugin_id: plugin_id.to_owned(),
             tool_name,
             input,
             scope,
