@@ -4129,6 +4129,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "hashlink",
+ "heck 0.5.0",
  "hmac 0.13.0",
  "http",
  "http-body-util",

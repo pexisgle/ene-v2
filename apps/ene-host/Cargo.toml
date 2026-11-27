@@ -33,6 +33,7 @@ ene-work.workspace = true
 futures-util.workspace = true
 getrandom = "0.4"
 hashlink.workspace = true
+heck = "0.5"
 hmac = "0.13"
 http.workspace = true
 http-body-util.workspace = true

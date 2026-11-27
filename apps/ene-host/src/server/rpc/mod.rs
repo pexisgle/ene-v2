@@ -18,8 +18,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tower_http::{
-    catch_panic::CatchPanicLayer, limit::RequestBodyLimitLayer, timeout::TimeoutLayer,
-    trace::TraceLayer,
+    catch_panic::CatchPanicLayer,
+    limit::RequestBodyLimitLayer,
+    timeout::TimeoutLayer,
+    trace::{DefaultMakeSpan, MakeSpan as _, TraceLayer},
 };
 
 /// Largest request body the Connect surface accepts.
@@ -194,7 +196,19 @@ pub(super) fn router(
             axum::http::StatusCode::GATEWAY_TIMEOUT,
             RPC_TIMEOUT,
         ))
-        // Emits one span per request, which the per-method `#[instrument]`
-        // spans then nest inside.
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(request_span))
+}
+
+fn request_span(request: &http::Request<axum::body::Body>) -> tracing::Span {
+    if let Some(method) = request
+        .uri()
+        .path()
+        .strip_prefix("/rpc/ene.host.v1.SettingsService/")
+        && !method.is_empty()
+        && method.len() <= 64
+        && method.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return settings::procedure_span(method);
+    }
+    DefaultMakeSpan::new().make_span(request)
 }

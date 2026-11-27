@@ -20,17 +20,19 @@ fn parse_connection_id(id: &str) -> Result<ene_domain::ConnectionId, connectrpc:
         .map_err(|error| connectrpc::ConnectError::invalid_argument(error.to_string()))
 }
 
+pub(super) fn procedure_span(method: &str) -> tracing::Span {
+    tracing::info_span!(
+        "rpc",
+        method = %heck::AsSnakeCase(method),
+        companion_id = tracing::field::Empty,
+        request_id = tracing::field::Empty,
+        connection_id = tracing::field::Empty,
+        plugin_id = tracing::field::Empty,
+    )
+}
+
 #[expect(refining_impl_trait, reason = "Connect boxes futures")]
 impl w::SettingsService for Services {
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "get_settings",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-        )
-    )]
     async fn get_settings(
         &self,
         arg1: RequestContext,
@@ -39,15 +41,6 @@ impl w::SettingsService for Services {
         general::get_settings(self, arg1, arg2).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "update_settings",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-        )
-    )]
     async fn update_settings(
         &self,
         arg1: RequestContext,
@@ -56,15 +49,6 @@ impl w::SettingsService for Services {
         general::update_settings(self, arg1, request).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "list_pending_approvals",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-        )
-    )]
     async fn list_pending_approvals(
         &self,
         arg1: RequestContext,
@@ -73,50 +57,24 @@ impl w::SettingsService for Services {
         connections::list_pending_approvals(self, arg1, arg2).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "delete_connection",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-            connection_id = %request.id,
-        )
-    )]
     async fn delete_connection(
         &self,
         arg1: RequestContext,
         request: ServiceRequest<'_, w::DeleteConnectionRequest>,
     ) -> ServiceResult<w::Settings> {
+        tracing::Span::current().record("connection_id", request.id);
         connections::delete_connection(self, arg1, request).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "submit_approval",
-            companion_id = tracing::field::Empty,
-            request_id = %request.request_id,
-        )
-    )]
     async fn submit_approval(
         &self,
         arg1: RequestContext,
         request: ServiceRequest<'_, w::SubmitApprovalRequest>,
     ) -> ServiceResult<w::SubmitApprovalResponse> {
+        tracing::Span::current().record("request_id", request.request_id);
         connections::submit_approval(self, arg1, request).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "list_policy_rules",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-        )
-    )]
     async fn list_policy_rules(
         &self,
         arg1: RequestContext,
@@ -125,15 +83,6 @@ impl w::SettingsService for Services {
         policy::list_policy_rules(self, arg1, arg2).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "update_policy_rules",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-        )
-    )]
     async fn update_policy_rules(
         &self,
         arg1: RequestContext,
@@ -142,15 +91,6 @@ impl w::SettingsService for Services {
         policy::update_policy_rules(self, arg1, request).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "list_policy_texts",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-        )
-    )]
     async fn list_policy_texts(
         &self,
         arg1: RequestContext,
@@ -159,15 +99,6 @@ impl w::SettingsService for Services {
         policy::list_policy_texts(self, arg1, arg2).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "update_policy_texts",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-        )
-    )]
     async fn update_policy_texts(
         &self,
         arg1: RequestContext,
@@ -176,15 +107,6 @@ impl w::SettingsService for Services {
         policy::update_policy_texts(self, arg1, request).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "list_providers",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-        )
-    )]
     async fn list_providers(
         &self,
         arg1: RequestContext,
@@ -193,87 +115,43 @@ impl w::SettingsService for Services {
         models::list_providers(self, arg1, arg2).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "list_models",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-            connection_id = %request.id,
-        )
-    )]
     async fn list_models(
         &self,
         arg1: RequestContext,
         request: ServiceRequest<'_, w::ModelsRequest>,
     ) -> ServiceResult<w::Models> {
+        tracing::Span::current().record("connection_id", request.id);
         models::list_models(self, arg1, request).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "register_credentials",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-            connection_id = %request.id,
-        )
-    )]
     async fn register_credentials(
         &self,
         arg1: RequestContext,
         request: ServiceRequest<'_, w::CredentialRequest>,
     ) -> ServiceResult<w::CredentialResult> {
+        tracing::Span::current().record("connection_id", request.id);
         models::register_credentials(self, arg1, request).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "revoke_credentials",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-            connection_id = %request.id,
-        )
-    )]
     async fn revoke_credentials(
         &self,
         arg1: RequestContext,
         request: ServiceRequest<'_, w::Id>,
     ) -> ServiceResult<w::Empty> {
+        tracing::Span::current().record("connection_id", request.id);
         models::revoke_credentials(self, arg1, request).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "check_connection",
-            companion_id = tracing::field::Empty,
-            request_id = %request.request_key,
-            connection_id = %request.id,
-        )
-    )]
     async fn check_connection(
         &self,
         arg1: RequestContext,
         request: ServiceRequest<'_, w::CheckRequest>,
     ) -> ServiceResult<w::CheckResult> {
+        tracing::Span::current().record("request_id", request.request_key);
+        tracing::Span::current().record("connection_id", request.id);
         connections::check_connection(self, arg1, request).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "list_plugins",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-        )
-    )]
     async fn list_plugins(
         &self,
         arg1: RequestContext,
@@ -282,15 +160,6 @@ impl w::SettingsService for Services {
         plugins::list_plugins(self, arg1, arg2).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "install_plugin",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-        )
-    )]
     async fn install_plugin(
         &self,
         arg1: RequestContext,
@@ -299,39 +168,21 @@ impl w::SettingsService for Services {
         plugins::install_plugin(self, arg1, request).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "set_plugin_enabled",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-            plugin_id = %request.plugin_id,
-        )
-    )]
     async fn set_plugin_enabled(
         &self,
         arg1: RequestContext,
         request: ServiceRequest<'_, w::SetPluginEnabledRequest>,
     ) -> ServiceResult<w::PluginInfo> {
+        tracing::Span::current().record("plugin_id", request.plugin_id);
         plugins::set_plugin_enabled(self, arg1, request).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "remove_plugin",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-            plugin_id = %request.plugin_id,
-        )
-    )]
     async fn remove_plugin(
         &self,
         arg1: RequestContext,
         request: ServiceRequest<'_, w::RemovePluginRequest>,
     ) -> ServiceResult<w::Empty> {
+        tracing::Span::current().record("plugin_id", request.plugin_id);
         plugins::remove_plugin(self, arg1, request).await
     }
 }
