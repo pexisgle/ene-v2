@@ -1,10 +1,9 @@
 use super::ConnectionsPane;
 use super::roles_voice::render_voice_roles;
-use crate::ui::ModelRoleSlot;
 use crate::ui::hub::companions as companion_actions;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{DropdownOption, DropdownSpec, dropdown_select};
-use ene_client_core::domain::{Companion, ModelAssignment, ModelAssignments};
+use ene_client_core::domain::{Companion, ModelAssignment, ModelAssignments, ModelRole};
 use gpui::{AnyElement, App, Context, FontWeight, Window, div, prelude::*, px};
 
 #[derive(Clone, Copy)]
@@ -25,18 +24,16 @@ pub(super) fn render_advanced_roles_panel(
     let Some(comp) = companion else {
         return render_no_companion_roles_hint(theme);
     };
-    let assignments = comp.assignments.clone().unwrap_or_default();
-
-    let mut rows: Vec<AnyElement> = ModelRoleSlot::ALL
+    let mut rows: Vec<AnyElement> = ModelRole::ALL
         .into_iter()
         .enumerate()
         .map(|(idx, slot)| {
-            let slot_models = if slot == ModelRoleSlot::Embedding {
+            let slot_models = if slot == ModelRole::Embedding {
                 choices.embedding_models
             } else {
                 choices.all_models
             };
-            let harnesses = if slot == ModelRoleSlot::Task {
+            let harnesses = if slot == ModelRole::Task {
                 choices.harnesses
             } else {
                 &[]
@@ -46,7 +43,7 @@ pub(super) fn render_advanced_roles_panel(
                 &ModelRoleRowCtx {
                     idx,
                     slot,
-                    assignments: &assignments,
+                    assignments: comp.assignments.as_ref(),
                     slot_models,
                     harnesses,
                     live,
@@ -75,8 +72,8 @@ pub(super) fn render_advanced_roles_panel(
 #[derive(Clone, Copy)]
 struct ModelRoleRowCtx<'a> {
     idx: usize,
-    slot: ModelRoleSlot,
-    assignments: &'a ModelAssignments,
+    slot: ModelRole,
+    assignments: Option<&'a ModelAssignments>,
     slot_models: &'a [(String, String, String)],
     harnesses: &'a [(String, String, String)],
     live: bool,
@@ -95,9 +92,10 @@ fn render_model_role_row(
         harnesses,
         live,
     } = *row;
-    let current = slot.current(assignments);
-    let current_text = current.as_ref().map_or_else(
-        || slot.fallback_hint().to_owned(),
+    let current = assignments.and_then(|assignments| assignments.configured(slot));
+    let fallback = fallback_hint(slot);
+    let current_text = current.map_or_else(
+        || fallback.to_owned(),
         |m| {
             slot_models
                 .iter()
@@ -111,14 +109,13 @@ fn render_model_role_row(
         },
     );
 
-    let clear = (!matches!(slot, ModelRoleSlot::Companion | ModelRoleSlot::Task))
-        .then_some(slot.fallback_hint());
+    let clear = (!matches!(slot, ModelRole::Companion | ModelRole::Task)).then_some(fallback);
     let options = role_options(slot_models.iter().chain(harnesses), clear);
-    let current_value = current.map(Some).or_else(|| clear.map(|_| None));
+    let current_value = current.cloned().map(Some).or_else(|| clear.map(|_| None));
     let hub_assign = pane.hub.clone();
 
     render_role_row(
-        slot.label(),
+        role_label(slot),
         idx > 0,
         DropdownSpec {
             id: format!("adv-role:{slot:?}"),
@@ -138,6 +135,36 @@ fn render_model_role_row(
             });
         },
     )
+}
+
+fn role_label(role: ModelRole) -> &'static str {
+    match role {
+        ModelRole::Companion => "会話モデル（主要）",
+        ModelRole::Task => "作業モデル（主要）",
+        ModelRole::Perception => "目（画面・活動の評価）",
+        ModelRole::Compaction => "会話履歴の圧縮",
+        ModelRole::Consolidation => "記憶の整理",
+        ModelRole::Decision => "権限判定",
+        ModelRole::Embedding => "埋め込み検索",
+    }
+}
+
+fn fallback_hint(role: ModelRole) -> &'static str {
+    match role.fallback() {
+        Some(ModelRole::Companion) => "自動（会話モデルを使用）",
+        Some(ModelRole::Task) => "自動（作業モデルを使用）",
+        _ if role == ModelRole::Embedding => "未設定（キーワード検索のみ）",
+        _ => "未設定",
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn every_role_has_a_label_and_fallback_hint() {
+    for role in ModelRole::ALL {
+        assert_ne!(role_label(role), "");
+        assert_ne!(fallback_hint(role), "");
+    }
 }
 
 fn render_no_companion_roles_hint(theme: &Theme) -> AnyElement {

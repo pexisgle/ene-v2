@@ -3,9 +3,7 @@
 use crate::connections::{
     active_stt_in_connections, active_tts_in_connections, tts_voice_of_connection,
 };
-use crate::domain::{
-    Connection, ConnectionConfig, ConnectionKind, ModelAssignment, ModelAssignments, ModelInfo,
-};
+use crate::domain::{Connection, ConnectionConfig, ConnectionKind, ModelInfo};
 use crate::state::Model;
 use ene_catalog::{
     GOOGLE_AGENT_PLATFORM, GOOGLE_AGENT_PLATFORM_VERIFIED_MODEL_LIST, OPENAI_TTS_VOICES,
@@ -13,75 +11,6 @@ use ene_catalog::{
     parse_voice_resource,
 };
 use indexmap::IndexMap;
-
-/// Internal host model role slots, exposed only inside progressive disclosure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ModelRoleSlot {
-    /// The model that speaks as the companion.
-    Companion,
-    /// The model that runs commissioned work.
-    Task,
-    /// The model that reads screens and other perception input.
-    Perception,
-    /// The model that condenses long history.
-    Compaction,
-    /// The model that folds history into memory.
-    Consolidation,
-    /// The model that rules on policy decisions.
-    Decision,
-    /// The model that produces embeddings.
-    Embedding,
-}
-
-impl ModelRoleSlot {
-    /// Every role slot, in the order the editor lists them.
-    pub const ALL: [ModelRoleSlot; 7] = [
-        ModelRoleSlot::Companion,
-        ModelRoleSlot::Task,
-        ModelRoleSlot::Perception,
-        ModelRoleSlot::Compaction,
-        ModelRoleSlot::Consolidation,
-        ModelRoleSlot::Decision,
-        ModelRoleSlot::Embedding,
-    ];
-
-    /// Japanese display label for this role slot.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Companion => "会話モデル（主要）",
-            Self::Task => "作業モデル（主要）",
-            Self::Perception => "目（画面・活動の評価）",
-            Self::Compaction => "会話履歴の圧縮",
-            Self::Consolidation => "記憶の整理",
-            Self::Decision => "権限判定",
-            Self::Embedding => "埋め込み検索",
-        }
-    }
-
-    /// What the slot falls back to when the operator sets nothing.
-    pub fn fallback_hint(self) -> &'static str {
-        match self {
-            Self::Companion | Self::Task => "未設定",
-            Self::Perception | Self::Compaction | Self::Consolidation => "自動（会話モデルを使用）",
-            Self::Decision => "自動（作業モデルを使用）",
-            Self::Embedding => "未設定（キーワード検索のみ）",
-        }
-    }
-
-    /// The assignment in force for this slot, when one is set.
-    pub fn current(self, assignments: &ModelAssignments) -> Option<ModelAssignment> {
-        let picked = match self {
-            Self::Companion => Some(&assignments.companion),
-            Self::Task => Some(&assignments.task),
-            Self::Perception => assignments.perception.as_ref(),
-            Self::Compaction => assignments.compaction.as_ref(),
-            Self::Consolidation => assignments.consolidation.as_ref(),
-            Self::Decision => assignments.decision.as_ref(),
-            Self::Embedding => assignments.embedding.as_ref(),
-        }?;
-        picked.is_set().then(|| picked.clone())
-    }
-}
 
 fn push_voice_unique(voices: &mut IndexMap<String, String>, raw: &str) {
     let (id, label) = parse_voice_resource(raw);

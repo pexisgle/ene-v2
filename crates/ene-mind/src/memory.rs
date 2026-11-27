@@ -278,18 +278,18 @@ pub struct StateUpdate {
 
 impl StateUpdate {
     /// Applies present state patches onto `state`.
-    pub fn apply(&self, state: &mut State) {
-        if let Some(emotion) = &self.emotion {
-            state.emotion = JsonDoc::new("ene.emotion.v1", emotion.clone());
+    pub fn apply(self, state: &mut State) {
+        if let Some(emotion) = self.emotion {
+            state.emotion = JsonDoc::new("ene.emotion.v1", emotion);
         }
-        if let Some(relationships) = &self.relationships {
-            state.relationships = JsonDoc::new("ene.relationships.v1", relationships.clone());
+        if let Some(relationships) = self.relationships {
+            state.relationships = JsonDoc::new("ene.relationships.v1", relationships);
         }
-        if let Some(tendencies) = &self.tendencies {
-            state.tendencies = JsonDoc::new("ene.tendencies.v1", tendencies.clone());
+        if let Some(tendencies) = self.tendencies {
+            state.tendencies = JsonDoc::new("ene.tendencies.v1", tendencies);
         }
-        if let Some(concerns) = &self.concerns {
-            state.concerns = JsonDoc::new("ene.concerns.v1", concerns.clone());
+        if let Some(concerns) = self.concerns {
+            state.concerns = JsonDoc::new("ene.concerns.v1", concerns);
         }
     }
 }

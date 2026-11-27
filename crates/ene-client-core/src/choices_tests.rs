@@ -1,10 +1,9 @@
 use crate::{
     GOOGLE_AGENT_PLATFORM,
-    choices::ModelRoleSlot,
     domain::{
         Connection, ConnectionCheck, ConnectionConfig, ConnectionEndpoint, ConnectionKind,
-        EmbeddingConnection, LlmConnection, ModelAssignments, ModelInfo, Settings, Snapshot,
-        SttConnection, TtsConnection,
+        EmbeddingConnection, LlmConnection, ModelAssignments, ModelInfo, ModelRole, Settings,
+        Snapshot, SttConnection, TtsConnection,
     },
     state::Model,
 };
@@ -256,9 +255,7 @@ fn enabled_and_all_choice_collectors_distinguish_enabled_connections() {
         Some(("tts-sakura".into(), "zundamon/normal".into()))
     );
 
-    for slot in ModelRoleSlot::ALL {
-        assert_ne!(slot.label().len(), 0);
-        assert_ne!(slot.fallback_hint().len(), 0);
-        assert!(slot.current(&ModelAssignments::default()).is_none());
+    for slot in ModelRole::ALL {
+        assert!(ModelAssignments::default().configured(slot).is_none());
     }
 }

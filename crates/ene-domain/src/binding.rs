@@ -53,8 +53,48 @@ impl ModelAssignment {
     }
 }
 
-/// The seven model roles from the contract. `companion` and `task` are
-/// required to run anything; the rest fall back as documented.
+/// One of the companion's model roles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelRole {
+    /// Speaks as the companion.
+    Companion,
+    /// Runs commissioned work.
+    Task,
+    /// Interprets screens and other perception input.
+    Perception,
+    /// Condenses conversation history.
+    Compaction,
+    /// Folds history into memory.
+    Consolidation,
+    /// Decides policy questions.
+    Decision,
+    /// Produces embeddings.
+    Embedding,
+}
+
+impl ModelRole {
+    /// Roles in the order presented in settings.
+    pub const ALL: [Self; 7] = [
+        Self::Companion,
+        Self::Task,
+        Self::Perception,
+        Self::Compaction,
+        Self::Consolidation,
+        Self::Decision,
+        Self::Embedding,
+    ];
+
+    /// Role to use when an optional assignment is absent.
+    pub const fn fallback(self) -> Option<Self> {
+        match self {
+            Self::Perception | Self::Compaction | Self::Consolidation => Some(Self::Companion),
+            Self::Decision => Some(Self::Task),
+            Self::Companion | Self::Task | Self::Embedding => None,
+        }
+    }
+}
+
+/// The serialized assignments for the companion's model roles.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModelAssignments {
     /// The model that speaks as the companion.
@@ -79,6 +119,31 @@ pub struct ModelAssignments {
 }
 
 impl ModelAssignments {
+    /// The explicit selection, if both its connection and model are set.
+    pub fn configured(&self, role: ModelRole) -> Option<&ModelAssignment> {
+        self.assignment(role)
+            .filter(|assignment| assignment.is_set())
+    }
+
+    /// The selection in use. A stored but incomplete assignment blocks fallback.
+    pub fn effective(&self, role: ModelRole) -> Option<&ModelAssignment> {
+        self.assignment(role)
+            .or_else(|| self.assignment(role.fallback()?))
+            .filter(|assignment| assignment.is_set())
+    }
+
+    fn assignment(&self, role: ModelRole) -> Option<&ModelAssignment> {
+        match role {
+            ModelRole::Companion => Some(&self.companion),
+            ModelRole::Task => Some(&self.task),
+            ModelRole::Perception => self.perception.as_ref(),
+            ModelRole::Compaction => self.compaction.as_ref(),
+            ModelRole::Consolidation => self.consolidation.as_ref(),
+            ModelRole::Decision => self.decision.as_ref(),
+            ModelRole::Embedding => self.embedding.as_ref(),
+        }
+    }
+
     /// Clears any role referencing `id` and returns whether any assignment changed.
     pub fn remove_connection(&mut self, id: &str) -> bool {
         let mut changed = false;

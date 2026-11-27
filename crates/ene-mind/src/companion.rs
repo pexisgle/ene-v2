@@ -1,6 +1,7 @@
 //! Companion identity, author profile, mind state, and model role assignments.
 use crate::{Result, json::JsonDoc};
 use ene_domain::DomainError;
+pub use ene_domain::ModelRole as Role;
 pub use ene_domain::validate_id;
 use ene_domain::{ModelAssignment, ModelAssignments};
 use serde::{Deserialize, Serialize};
@@ -164,37 +165,6 @@ impl Companion {
 
     /// The model assignment for one role, with the documented fallbacks.
     pub fn model(&self, role: Role) -> Option<&ModelAssignment> {
-        let assignments = &self.assignments;
-        let chosen = match role {
-            Role::Companion => Some(&assignments.companion),
-            Role::Task => Some(&assignments.task),
-            Role::Perception => assignments
-                .perception
-                .as_ref()
-                .or(Some(&assignments.companion)),
-            Role::Compaction => assignments
-                .compaction
-                .as_ref()
-                .or(Some(&assignments.companion)),
-            Role::Consolidation => assignments
-                .consolidation
-                .as_ref()
-                .or(Some(&assignments.companion)),
-            Role::Decision => assignments.decision.as_ref().or(Some(&assignments.task)),
-            Role::Embedding => assignments.embedding.as_ref(),
-        }?;
-        chosen.is_set().then_some(chosen)
+        self.assignments.effective(role)
     }
-}
-
-/// Model roles resolved for a companion.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Role {
-    Companion,
-    Task,
-    Perception,
-    Compaction,
-    Consolidation,
-    Decision,
-    Embedding,
 }

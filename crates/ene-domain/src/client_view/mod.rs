@@ -8,8 +8,9 @@ pub mod policy;
 
 pub use crate::{
     Activation, BodyBinding, COMPUTER_USE, Check as ConnectionCheck,
-    Endpoint as ConnectionEndpoint, Failure, ModelAssignment, ModelAssignments, PolicyEffect,
-    PolicyRule, PolicyText, RiskLevel, RunState, VoiceBinding, WorkSession, WorkStatus,
+    Endpoint as ConnectionEndpoint, Failure, ModelAssignment, ModelAssignments, ModelRole,
+    PolicyEffect, PolicyRule, PolicyText, RiskLevel, RunState, VoiceBinding, WorkSession,
+    WorkStatus,
 };
 
 pub use companion::{

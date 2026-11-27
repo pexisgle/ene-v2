@@ -3,9 +3,9 @@
 use super::Hub;
 use crate::{rpc, state::NoticeKind};
 use ene_client_core::{
-    ModelRoleSlot,
     domain::{
-        CompanionProfilePatch, CompanionTemplate, MindProfile, ModelAssignment, NewCompanionSpec,
+        CompanionProfilePatch, CompanionTemplate, MindProfile, ModelAssignment, ModelRole,
+        NewCompanionSpec,
     },
     templates::parse_template_json,
 };
@@ -90,7 +90,7 @@ pub(in crate::ui) fn preview_companion(
 
 pub(in crate::ui) fn assign_model(
     hub: &mut Hub,
-    slot: ModelRoleSlot,
+    slot: ModelRole,
     assignment: Option<ModelAssignment>,
     cx: &mut Context<Hub>,
 ) {

@@ -23,7 +23,7 @@ pub use studio::SettingsStudio;
 
 pub(crate) use ene_client_core::domain::{CompanionProfilePatch, NewCompanionSpec};
 pub(crate) use ene_client_core::{
-    GOOGLE_AGENT_PLATFORM, ModelRoleSlot, default_embedding_dimensions, search_adapter_requires_key,
+    GOOGLE_AGENT_PLATFORM, default_embedding_dimensions, search_adapter_requires_key,
 };
 
 use gpui::{AppContext as _, Entity, Pixels, Size, px, size};

@@ -53,6 +53,14 @@ mod tests {
             Some(&companion.assignments.task)
         );
         assert!(companion.model(Role::Embedding).is_none());
+
+        let legacy_partial = ModelAssignment {
+            connection_id: "conn-1".into(),
+            model_id: String::new(),
+        };
+        companion.assignments.perception = Some(legacy_partial);
+        assert!(companion.assignments.configured(Role::Perception).is_none());
+        assert!(companion.model(Role::Perception).is_none());
     }
 
     #[test]

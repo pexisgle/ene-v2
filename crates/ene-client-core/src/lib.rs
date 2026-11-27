@@ -18,7 +18,6 @@ mod choices_tests;
 mod state_tests;
 
 pub use attachments::is_attachment_image;
-pub use choices::ModelRoleSlot;
 pub use ene_catalog::{
     GOOGLE_AGENT_PLATFORM, SAKURA_AI_ENDPOINT, SearchAdapter, VOICEVOX_DEFAULT_ENDPOINT,
     default_embedding_dimensions, is_sakura_endpoint, parse_voice_resource,

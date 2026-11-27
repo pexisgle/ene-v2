@@ -3,10 +3,9 @@
 use super::{RpcDispatcher, companion_update, id_request};
 use crate::update::Update;
 use ene_client_core::{
-    ModelRoleSlot,
     domain::{
         Companion, CompanionProfilePatch, CompanionTemplate, MindProfile, ModelAssignment,
-        NewCompanionSpec,
+        ModelRole, NewCompanionSpec,
     },
     templates::export_template_json,
 };
@@ -102,7 +101,7 @@ pub(crate) fn assign_model(
     epoch: u64,
     companion_id: String,
     revision: u64,
-    slot: ModelRoleSlot,
+    slot: ModelRole,
     assignment: Option<ModelAssignment>,
 ) {
     let patch = w::AssignmentPatch::from(assignment);
@@ -112,13 +111,13 @@ pub(crate) fn assign_model(
         ..Default::default()
     };
     match slot {
-        ModelRoleSlot::Companion => request.companion_assignment = Some(patch).into(),
-        ModelRoleSlot::Task => request.task_assignment = Some(patch).into(),
-        ModelRoleSlot::Perception => request.perception_assignment = Some(patch).into(),
-        ModelRoleSlot::Compaction => request.compaction_assignment = Some(patch).into(),
-        ModelRoleSlot::Consolidation => request.consolidation_assignment = Some(patch).into(),
-        ModelRoleSlot::Decision => request.decision_assignment = Some(patch).into(),
-        ModelRoleSlot::Embedding => request.embedding_assignment = Some(patch).into(),
+        ModelRole::Companion => request.companion_assignment = Some(patch).into(),
+        ModelRole::Task => request.task_assignment = Some(patch).into(),
+        ModelRole::Perception => request.perception_assignment = Some(patch).into(),
+        ModelRole::Compaction => request.compaction_assignment = Some(patch).into(),
+        ModelRole::Consolidation => request.consolidation_assignment = Some(patch).into(),
+        ModelRole::Decision => request.decision_assignment = Some(patch).into(),
+        ModelRole::Embedding => request.embedding_assignment = Some(patch).into(),
     }
     update_companion(rpc, epoch, "モデル割当の変更", request);
 }

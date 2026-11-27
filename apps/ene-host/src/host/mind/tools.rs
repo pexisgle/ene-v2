@@ -258,13 +258,13 @@ fn update(
         "state": &args.state,
     });
     let hash = store.memory_repo().mind_hash(&request);
-    let state = match &args.state {
+    let state = match args.state {
         Some(patch) => {
             let current = store
                 .companion_repo()
                 .companion(companion)?
                 .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
-            let mut next = current.state.clone();
+            let mut next = current.state;
             patch.apply(&mut next);
             Some(MindStateChange {
                 expected_revision: current.state_revision,
