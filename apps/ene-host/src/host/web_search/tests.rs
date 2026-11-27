@@ -353,11 +353,66 @@ fn resolve_skips_unconfigured_enabled_search_when_another_is_ready() {
         .unwrap();
 
     let resolved = resolve(&store, Some(&creds), &providers).unwrap();
-    assert_eq!(resolved.adapter, SearchAdapter::Exa);
+    assert_eq!(resolved.binding.adapter, SearchAdapter::Exa);
     assert_eq!(
         resolved.binding.endpoint.as_str(),
         SearchAdapter::Exa.provider().default_endpoint.unwrap()
     );
+}
+
+#[test]
+fn held_search_pins_the_current_connection_and_effective_credential() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("host.sqlite3")).unwrap();
+    let repo = store.settings_repo();
+    let creds = Credentials::new(true);
+    let providers = Providers::none();
+    let exa = search_test_connection(
+        "exa",
+        "Exa",
+        "exa",
+        "https://exa.example/search".into(),
+        CredentialState::Registered,
+        5,
+    );
+    let mut other = search_test_connection(
+        "other",
+        "Mwmbl",
+        "mwmbl",
+        "https://other.example/".into(),
+        CredentialState::Absent,
+        5,
+    );
+    other.enabled = false;
+    creds.remember("exa", "original".into());
+    repo.update_settings(repo.settings_revision().unwrap(), &[(exa.clone(), 0)])
+        .unwrap();
+    let original = resolve(&store, Some(&creds), &providers).unwrap().binding;
+
+    repo.update_settings(repo.settings_revision().unwrap(), &[(other, 0)])
+        .unwrap();
+    creds.remember("unused", "unrelated key".into());
+    assert!(original.current(&store, Some(&creds), &providers).is_ok());
+
+    // A replacement key read outside the host's registration path can have
+    // the same counter value as the original. The request still must expire.
+    let rotated = Credentials::new(true);
+    rotated.remember("exa", "rotated".into());
+    rotated.remember("unused", "unrelated key".into());
+    assert_eq!(creds.generation(), rotated.generation());
+    assert!(matches!(
+        original.current(&store, Some(&rotated), &providers),
+        Err(SearchConfigError::ConnectionChanged)
+    ));
+
+    repo.delete_connection(&exa.id, 1, || Ok::<(), ene_store::StoreError>(()))
+        .unwrap();
+    repo.update_settings(repo.settings_revision().unwrap(), &[(exa, 0)])
+        .unwrap();
+    assert!(matches!(
+        original.current(&store, Some(&creds), &providers),
+        Err(SearchConfigError::ConnectionChanged)
+    ));
 }
 
 fn search_result_contains<A: bevy_ecs::prelude::Component>(

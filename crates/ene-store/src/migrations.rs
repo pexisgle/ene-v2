@@ -28,7 +28,7 @@ use rusqlite_migration::{HookResult, M, Migrations};
 pub const BASELINE_VERSION: i64 = 6;
 
 /// Latest database schema version managed by [`ladder_steps`].
-pub const VERSION: i64 = 12;
+pub const VERSION: i64 = 13;
 
 /// Every version this host applies above the baseline, in order. The position
 /// in this table is the version, so adding a row is the only way to add a
@@ -79,6 +79,10 @@ const STEPS_ABOVE_BASELINE: &[(&str, &str)] = &[
                 updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
             WHERE status = 'pending';
         CREATE INDEX idx_device_pending_run ON device_operations(run_id) WHERE status = 'pending';",
+    ),
+    (
+        "0013_connection_incarnation",
+        "ALTER TABLE connections ADD COLUMN created_revision INTEGER NOT NULL DEFAULT 0;",
     ),
 ];
 

@@ -101,8 +101,8 @@ pub(super) async fn send_search_request(
     limit: usize,
 ) -> Result<reqwest::Response, ToolExecutionError> {
     let mut url = resolved.binding.endpoint.clone();
-    let key = resolved.secret.as_deref().unwrap_or_default();
-    let request = match resolved.adapter {
+    let key = resolved.binding.secret.as_deref().unwrap_or_default();
+    let request = match resolved.binding.adapter {
         SearchAdapter::Mwmbl => {
             if url.host_str() == Some("api.mwmbl.org") {
                 take_mwmbl_slot(&MWMBL_NEXT_REQUEST).await;
@@ -146,7 +146,7 @@ pub(super) async fn send_search_request(
         .map_err(|error| {
             ToolExecutionError::other(format!(
                 "could not reach {}: {}",
-                resolved.adapter.provider().name,
+                resolved.binding.adapter.provider().name,
                 error.without_url()
             ))
         })
@@ -178,11 +178,11 @@ pub(super) async fn read_http_error(
     resolved: &ResolvedSearch,
     status: reqwest::StatusCode,
 ) -> ToolExecutionError {
-    let provider = resolved.adapter.provider().name;
+    let provider = resolved.binding.adapter.provider().name;
     let detail = net::read_response_body(response, MAX_ERROR_BODY_BYTES, provider)
         .await
         .ok()
-        .and_then(|bytes| extract_error_detail(&bytes, resolved.secret.as_deref()));
+        .and_then(|bytes| extract_error_detail(&bytes, resolved.binding.secret.as_deref()));
     let status = status.as_u16();
     let message = match detail {
         Some(detail) => format!("{provider} returned HTTP {status}: {detail}"),

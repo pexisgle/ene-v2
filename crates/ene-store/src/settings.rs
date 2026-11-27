@@ -101,6 +101,19 @@ impl<'a> SettingsRepo<'a> {
         )
     }
 
+    /// Enabled search connections in selection order, with their original settings revision.
+    /// The revision survives edits and differs when the same ID is deleted and created again.
+    pub fn enabled_search_connections(&self) -> Result<Vec<(Connection, u64)>> {
+        self.0.fetch_all(
+            &format!(
+                "SELECT {COLUMNS}, created_revision FROM connections \
+                WHERE kind = 'search' AND enabled ORDER BY id"
+            ),
+            [],
+            |row| Ok((Connection::from_row(row)?, row.get("created_revision")?)),
+        )
+    }
+
     /// Applies a settings batch. The expected settings revision must match,
     /// and every connection keeps its own revision for concurrent edits.
     pub fn update_settings(
@@ -154,8 +167,8 @@ impl<'a> SettingsRepo<'a> {
                 let changed = transaction
                 .prepare_cached(
                     "INSERT INTO connections (id, name, enabled, kind, config, credential_state, \
-                        last_check, revision, updated_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8) \
+                        last_check, revision, updated_at, created_revision) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?10) \
                      ON CONFLICT(id) DO UPDATE SET \
                         name = excluded.name, enabled = excluded.enabled, kind = excluded.kind, \
                         config = excluded.config, revision = excluded.revision, \
@@ -173,6 +186,7 @@ impl<'a> SettingsRepo<'a> {
                     revision,
                     stamp,
                     reset_check,
+                    next,
                 ])?;
                 if changed == 0 {
                     return Err(StoreError::Conflict(format!(

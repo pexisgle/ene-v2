@@ -15,7 +15,7 @@ use super::{
     model::{Credentials, connection_secret},
     net,
     providers::Providers,
-    settings::{Check, Connection, ConnectionConfig, ConnectionKind},
+    settings::{Check, Connection, ConnectionConfig},
 };
 use adapter::{contains_credential, parse_adapter_results, read_http_error, send_search_request};
 use bevy_ecs::prelude::Component;
@@ -25,12 +25,12 @@ use ene_policy::CandidateAction;
 use ene_store::util;
 use rig_core::tool::{ToolErrorKind, ToolExecutionError};
 use serde_json::Value;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use url::Url;
 
 // `tests.rs` reaches `json!` through `use super::*`, as it did before the split.
 #[cfg(test)]
-use serde_json::json;
+use {super::settings::ConnectionKind, serde_json::json};
 
 pub(crate) const NAME: &str = "web_search";
 const MAX_QUERY_CHARS: usize = 500;
@@ -81,14 +81,15 @@ fn search_endpoint(adapter: SearchAdapter, configured: &str) -> Result<Url, Sear
 
 /// The route the permission gate evaluated. A held call cannot switch to
 /// a replacement connection or to a different revision of the same one.
-#[derive(Clone, Component, PartialEq, Eq)]
+#[derive(Clone, Component)]
 pub(crate) struct SearchBinding {
     connection: ConnectionId,
+    created_revision: u64,
     revision: u64,
-    settings_revision: u64,
-    credential_generation: Option<u64>,
+    adapter: SearchAdapter,
     pub(crate) endpoint: Url,
     pub(crate) display_destination: String,
+    secret: Option<Arc<str>>,
 }
 
 impl SearchBinding {
@@ -111,7 +112,20 @@ impl SearchBinding {
         providers: &Providers,
     ) -> Result<ResolvedSearch, SearchConfigError> {
         let resolved = resolve(store, credentials, providers)?;
-        if self != &resolved.binding {
+        let current = &resolved.binding;
+        use subtle::ConstantTimeEq as _;
+        let same_secret = match (self.secret.as_deref(), current.secret.as_deref()) {
+            (None, None) => true,
+            (Some(before), Some(after)) => before.as_bytes().ct_eq(after.as_bytes()).into(),
+            _ => false,
+        };
+        if self.connection != current.connection
+            || self.created_revision != current.created_revision
+            || self.revision != current.revision
+            || self.adapter != current.adapter
+            || self.endpoint != current.endpoint
+            || !same_secret
+        {
             return Err(SearchConfigError::ConnectionChanged);
         }
         Ok(resolved)
@@ -119,11 +133,9 @@ impl SearchBinding {
 }
 
 pub(crate) struct ResolvedSearch {
-    pub(crate) adapter: SearchAdapter,
     pub(crate) provider_name: String,
     pub(crate) binding: SearchBinding,
     pub(crate) max_results: Option<usize>,
-    secret: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -160,14 +172,12 @@ pub(crate) fn resolve(
     credentials: Option<&Credentials>,
     providers: &Providers,
 ) -> Result<ResolvedSearch, SearchConfigError> {
-    let settings = store.settings_repo().settings()?;
-    let mut enabled = settings
-        .connections
-        .iter()
-        .filter(|connection| connection.enabled && connection.kind == ConnectionKind::Search);
+    let enabled = store.settings_repo().enabled_search_connections()?;
+    let mut enabled = enabled.iter();
     let first = enabled.next().ok_or(SearchConfigError::Unconfigured)?;
-    let resolve_one =
-        |connection| resolve_connection(connection, credentials, providers, settings.revision);
+    let resolve_one = |(connection, created_revision): &(Connection, u64)| {
+        resolve_connection(connection, credentials, providers, *created_revision)
+    };
     match resolve_one(first) {
         Ok(resolved) => Ok(resolved),
         Err(error) => enabled
@@ -180,7 +190,7 @@ pub(crate) fn resolve_connection(
     connection: &Connection,
     credentials: Option<&Credentials>,
     providers: &Providers,
-    settings_revision: u64,
+    created_revision: u64,
 ) -> Result<ResolvedSearch, SearchConfigError> {
     let ConnectionConfig::Search(cfg) = &connection.config else {
         return Err(SearchConfigError::WrongKind);
@@ -197,9 +207,10 @@ pub(crate) fn resolve_connection(
         configured
     };
     let endpoint = search_endpoint(adapter, endpoint)?;
-    let secret = connection_secret(connection, credentials, providers)?
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
+    let secret = connection_secret(connection, credentials, providers)?.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| Arc::from(trimmed))
+    });
     if provider.key_environment.is_some() && secret.is_none() {
         return Err(SearchConfigError::MissingCredential(provider.name));
     }
@@ -217,18 +228,17 @@ pub(crate) fn resolve_connection(
     let max_results =
         (cfg.max_results > 0).then_some((cfg.max_results as usize).clamp(1, MAX_RESULTS));
     Ok(ResolvedSearch {
-        adapter,
         provider_name,
         binding: SearchBinding {
             connection: connection.id.clone(),
+            created_revision,
             revision: connection.revision,
-            settings_revision,
-            credential_generation: credentials.map(Credentials::generation),
+            adapter,
             endpoint,
             display_destination,
+            secret,
         },
         max_results,
-        secret,
     })
 }
 
@@ -266,22 +276,25 @@ async fn execute(
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(ToolExecutionError::other(format!(
                 "{} quota or rate limit reached",
-                resolved.adapter.provider().name
+                resolved.binding.adapter.provider().name
             )));
         }
         if !status.is_success() {
             return Err(read_http_error(response, resolved, status).await);
         }
-        let body =
-            net::read_response_body(response, MAX_BODY_BYTES, resolved.adapter.provider().name)
-                .await
-                .map_err(|error| ToolExecutionError::other(error.to_string()))?;
+        let body = net::read_response_body(
+            response,
+            MAX_BODY_BYTES,
+            resolved.binding.adapter.provider().name,
+        )
+        .await
+        .map_err(|error| ToolExecutionError::other(error.to_string()))?;
         parse_adapter_results(
-            resolved.adapter,
+            resolved.binding.adapter,
             &resolved.provider_name,
             &body,
             limit,
-            resolved.secret.as_deref(),
+            resolved.binding.secret.as_deref(),
         )
     })
     .await
