@@ -175,6 +175,10 @@ impl Running {
         self.cancel.is_cancelled()
     }
 
+    pub(super) fn admission_lifetime(&self) -> CancellationToken {
+        self.cancel.child_token()
+    }
+
     pub(crate) fn package_revision(&self) -> &str {
         &self.loaded.package.revision
     }

@@ -27,7 +27,7 @@ pub(crate) use running::{ProviderRole, Running};
 #[cfg(test)]
 pub(crate) use services::construction_failure;
 #[cfg(test)]
-pub(crate) use services::{BrokerServices, http_broker};
+pub(crate) use services::http_broker;
 pub(crate) use services::{PluginServices, ProviderInvocationContext};
 
 use ene_plugin::{EntryPoint, Extension, ProviderConfiguration, Target};

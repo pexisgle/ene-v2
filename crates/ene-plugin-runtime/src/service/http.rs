@@ -8,8 +8,11 @@
 //! Every transport guard lives here rather than in each provider: redirects
 //! stay off, one exchange has a deadline, a reply body is capped, and a plugin
 //! cannot override the headers the host sets.
-use crate::limits::{HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_CHUNK, MAX_HTTP_HEADERS};
+mod headers;
+
+use crate::limits::{HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_CHUNK};
 use ene_plugin::{Failure, HttpChunk, HttpRequest};
+use headers::{copy_headers, is_host_owned};
 use parking_lot::Mutex;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::{
@@ -20,6 +23,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 /// What the host lets one provider do over HTTP.
@@ -77,6 +81,7 @@ pub struct HttpBroker {
     client: reqwest::Client,
     open: Mutex<HashMap<String, Open>>,
     next: AtomicU64,
+    lifetime: CancellationToken,
     /// How long one exchange may take, end to end.
     deadline: Duration,
 }
@@ -103,6 +108,15 @@ impl HttpBroker {
         grants: Arc<dyn HttpGrants>,
         deadline: Duration,
     ) -> Result<Self, reqwest::Error> {
+        Self::with_lifetime(grants, Some(deadline), CancellationToken::new())
+    }
+
+    /// Creates a broker whose exchanges end when its admission is revoked.
+    pub fn with_lifetime(
+        grants: Arc<dyn HttpGrants>,
+        deadline: Option<Duration>,
+        lifetime: CancellationToken,
+    ) -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
@@ -111,8 +125,31 @@ impl HttpBroker {
             client,
             open: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
-            deadline,
+            lifetime,
+            deadline: deadline.unwrap_or(HTTP_TIMEOUT),
         })
+    }
+
+    /// Rejects work and drops retained replies after the admission ends.
+    pub fn check(&self) -> Result<(), Failure> {
+        if self.lifetime.is_cancelled() {
+            self.open.lock().clear();
+            return Err(Failure::new("provider_revoked"));
+        }
+        Ok(())
+    }
+
+    async fn while_live<T>(
+        &self,
+        work: impl std::future::Future<Output = Result<T, Failure>>,
+    ) -> Result<T, Failure> {
+        let result = tokio::select! {
+            biased;
+            () = self.lifetime.cancelled() => Err(Failure::new("provider_revoked")),
+            result = work => result,
+        };
+        self.check()?;
+        result
     }
 
     /// Opens a bounded reply. A buffered request reads the whole body under
@@ -120,6 +157,10 @@ impl HttpBroker {
     /// soon as the headers arrive and hands out chunks as the network delivers
     /// them, under the same deadline and body cap.
     pub async fn open(&self, provider: &str, request: HttpRequest) -> Result<HttpChunk, Failure> {
+        self.while_live(self.open_reply(provider, request)).await
+    }
+
+    async fn open_reply(&self, provider: &str, request: HttpRequest) -> Result<HttpChunk, Failure> {
         let url = Url::parse(&request.url).map_err(|_| Failure::new("invalid_url"))?;
         if !self.grants.allows(provider, &url) {
             return Err(Failure::new("destination_denied"));
@@ -153,6 +194,7 @@ impl HttpBroker {
         if let Some(body) = body {
             call = call.body(body);
         }
+        self.check()?;
         let deadline = Instant::now() + self.deadline;
         let handle = format!("http-{}", self.next.fetch_add(1, Ordering::Relaxed));
         if request.stream {
@@ -223,6 +265,10 @@ impl HttpBroker {
     /// network chunk under the exchange deadline; dropping the read future
     /// drops the response and aborts the exchange.
     pub async fn read(&self, handle: &str) -> Result<HttpChunk, Failure> {
+        self.while_live(self.read_reply(handle)).await
+    }
+
+    async fn read_reply(&self, handle: &str) -> Result<HttpChunk, Failure> {
         let entry = self
             .open
             .lock()
@@ -416,35 +462,6 @@ impl HttpBroker {
 
 /// Headers the host owns. A plugin that sets one is refused rather than
 /// silently overridden, so a provider author sees the refusal.
-fn is_host_owned(name: &HeaderName) -> bool {
-    matches!(
-        name.as_str(),
-        "authorization" | "proxy-authorization" | "cookie" | "host" | "content-length"
-    )
-}
-
-/// The reply headers a plugin may see, bounded.
-fn copy_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
-    let mut copied = BTreeMap::new();
-    let mut total = 0usize;
-    for (name, value) in headers {
-        // The host's own credential and transport details stay out of the
-        // plugin's view.
-        if is_host_owned(name) || matches!(name.as_str(), "set-cookie" | "transfer-encoding") {
-            continue;
-        }
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
-        total += name.as_str().len() + value.len();
-        if total > MAX_HTTP_HEADERS {
-            break;
-        }
-        copied.insert(name.as_str().to_owned(), value.to_owned());
-    }
-    copied
-}
-
 /// Reads a reply body, refusing one larger than the cap.
 async fn bounded(response: reqwest::Response) -> Result<Vec<u8>, Failure> {
     use http_body_util::BodyExt;
@@ -709,6 +726,39 @@ mod tests {
 
     /// A caller that streams a long generation sets its own whole-exchange
     /// budget; the bound stays, only its length changes.
+    #[tokio::test]
+    async fn revocation_ends_a_stream_waiting_for_the_upstream() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let _read = connection.read(&mut [0; 1024]).await.unwrap();
+            connection
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let lifetime = CancellationToken::new();
+        let broker =
+            HttpBroker::with_lifetime(Arc::new(Allow(origin.clone())), None, lifetime.clone())
+                .unwrap();
+        let mut request = request(origin);
+        request.stream = true;
+        let reply = broker.open("provider", request).await.unwrap();
+        let read = broker.read(&reply.handle);
+        tokio::pin!(read);
+        assert!(futures_util::poll!(&mut read).is_pending());
+        lifetime.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), read)
+            .await
+            .unwrap();
+        assert_eq!(result.unwrap_err().code, "provider_revoked");
+        server.abort();
+    }
+
     #[tokio::test]
     async fn a_caller_can_set_the_exchange_budget() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

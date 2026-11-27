@@ -512,9 +512,8 @@ async fn p08_actual_grant_overwrites_guest_auth_and_refuses_invalid_auth() {
 }
 
 #[tokio::test]
-async fn p08_handles_remain_broker_scoped_after_calls_and_provider_cancellation() {
+async fn p08_providers_cannot_read_retained_replies_after_revocation() {
     use ene_plugin::{Operation, ServiceRequest};
-    use ene_plugin_runtime::instance::Services;
     let upstream = NativeEndpoint::start().await;
     let root = tempfile::tempdir().unwrap();
     let connection = connection(ConnectionKind::Llm, &upstream.base);
@@ -530,18 +529,17 @@ async fn p08_handles_remain_broker_scoped_after_calls_and_provider_cancellation(
     );
     let providers = providers(root.path(), Extension::Llm, &body, &upstream.base).await;
     let running = providers.running("openrouter", Extension::Llm).unwrap();
-    let role = running
-        .provider()
-        .expect("the fixture starts a provider extension");
-    let broker = http_broker(Arc::new(grant_for(
-        &role.configuration,
+    let context = crate::host::providers::ProviderInvocationContext::from_connection(
+        &running,
         &connection,
         None,
         &providers,
-    )))
+        None,
+    )
     .unwrap();
+    let broker = context.broker.clone();
     for _ in 0..2 {
-        let services = BrokerServices::new(Arc::clone(&broker), "owner".into());
+        let services = context.services();
         running
             .invoke(
                 Operation::ListModels {
@@ -555,35 +553,26 @@ async fn p08_handles_remain_broker_scoped_after_calls_and_provider_cancellation(
     }
     providers.set_enabled("openrouter", false);
     assert!(providers.running("openrouter", Extension::Llm).is_none());
-    let foreign = BrokerServices::new(Arc::clone(&broker), "foreign-provider".into());
-    assert!(
-        running
-            .invoke(
-                Operation::ListModels {
-                    endpoint: upstream.base.clone(),
-                    options: json!({})
-                },
-                foreign.clone()
-            )
-            .await
-            .is_err()
-    );
-    foreign.check().await.unwrap();
-    let old = foreign
-        .handle(ServiceRequest::HttpRead {
-            handle: "http-1".into(),
-        })
-        .await
-        .unwrap();
-    assert!(old["done"].as_bool().unwrap());
+    let revoked = context.services();
+    assert_eq!(revoked.check().await.unwrap_err().code, "provider_revoked");
     assert_eq!(
-        broker.read("http-1").await.unwrap_err().code,
-        "unknown_handle"
+        revoked
+            .handle(ServiceRequest::HttpRead {
+                handle: "http-1".into()
+            })
+            .await
+            .unwrap_err()
+            .code,
+        "provider_revoked"
     );
-    drop(foreign);
+    drop(revoked);
+    drop(context);
     drop(running);
     drop(providers);
-    assert!(broker.read("http-2").await.unwrap().done);
+    assert_eq!(
+        broker.read("http-2").await.unwrap_err().code,
+        "provider_revoked"
+    );
     let separate = http_broker(Arc::new(ene_plugin_runtime::service::DenyHttp)).unwrap();
     assert_eq!(
         separate.read("http-2").await.unwrap_err().code,

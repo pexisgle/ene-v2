@@ -12,44 +12,35 @@ use ene_plugin_runtime::{
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
 pub(crate) fn http_broker(grants: Arc<dyn HttpGrants>) -> Result<Arc<HttpBroker>, reqwest::Error> {
-    broker(grants, None)
-}
-
-/// A broker whose exchange may take `deadline`, for a path that legitimately
-/// streams longer than the transport default.
-pub(crate) fn http_broker_with_deadline(
-    grants: Arc<dyn HttpGrants>,
-    deadline: std::time::Duration,
-) -> Result<Arc<HttpBroker>, reqwest::Error> {
-    broker(grants, Some(deadline))
+    broker(grants, None, CancellationToken::new())
 }
 
 fn broker(
     grants: Arc<dyn HttpGrants>,
     deadline: Option<std::time::Duration>,
+    lifetime: CancellationToken,
 ) -> Result<Arc<HttpBroker>, reqwest::Error> {
     #[cfg(test)]
     if construction_failure::active() {
         // A real builder error without depending on TLS or process-wide state.
         reqwest::Client::builder().user_agent("\n").build()?;
     }
-    match deadline {
-        Some(deadline) => HttpBroker::with_deadline(grants, deadline).map(Arc::new),
-        None => HttpBroker::new(grants).map(Arc::new),
-    }
+    HttpBroker::with_lifetime(grants, deadline, lifetime).map(Arc::new)
 }
 
 /// The services a provider call declares: the broker, and nothing else.
-pub(crate) struct BrokerServices {
+struct BrokerServices {
     broker: Arc<HttpBroker>,
     provider: String,
 }
 
 impl BrokerServices {
     /// Serves `provider`'s exchanges through `broker`.
-    pub(crate) fn new(broker: Arc<HttpBroker>, provider: String) -> Arc<Self> {
+    fn new(broker: Arc<HttpBroker>, provider: String) -> Arc<Self> {
         Arc::new(Self { broker, provider })
     }
 }
@@ -123,13 +114,12 @@ impl ProviderInvocationContext {
             )
         })?;
         let grant = super::Grant::new(&role.configuration, secret);
-        let broker = match deadline {
-            Some(deadline) => http_broker_with_deadline(Arc::new(grant), deadline),
-            None => http_broker(Arc::new(grant)),
-        }
-        .map_err(|error| {
-            crate::host::error::HostError::Unavailable(format!("plugin HTTP transport: {error}"))
-        })?;
+        let broker =
+            broker(Arc::new(grant), deadline, running.admission_lifetime()).map_err(|error| {
+                crate::host::error::HostError::Unavailable(format!(
+                    "plugin HTTP transport: {error}"
+                ))
+            })?;
         Ok(Self::with_broker(role, connection, providers, broker))
     }
 
@@ -202,6 +192,9 @@ impl Services for BrokerServices {
                 _ => return Err(Failure::new("undeclared_service")),
             })
         })
+    }
+    fn check(&self) -> BoxFuture<'_, Result<(), Failure>> {
+        Box::pin(async { self.broker.check() })
     }
 }
 
