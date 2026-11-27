@@ -90,10 +90,21 @@ impl w::VoiceService for Services {
                             if chunk.pcm_data.is_empty() {
                                 (true, false)
                             } else {
-                                if let Some(started) = current.capture.append(chunk.pcm_data) {
-                                    yield Ok(started);
+                                let mut pcm = chunk.pcm_data;
+                                while !pcm.is_empty() {
+                                    let (prefix, rest) = pcm.split_at(pcm.len().min(current.capture.remaining()));
+                                    pcm = rest;
+                                    if let Some(started) = current.capture.append(prefix) {
+                                        yield Ok(started);
+                                    }
+                                    if current.capture.remaining() != 0 {
+                                        continue;
+                                    }
+                                    if let Some(event) = current.flush(&runtime, &engine).await? {
+                                        yield Ok(event);
+                                    }
                                 }
-                                (current.capture.len() >= voice::MAX_STT_BYTES, false)
+                                (false, false)
                             }
                         }
                     };
@@ -330,10 +341,10 @@ impl SpeechCapture {
         }
     }
 
-    fn len(&self) -> usize {
+    fn remaining(&self) -> usize {
         match self {
-            Self::Idle => 0,
-            Self::Speaking { pcm, .. } => pcm.len(),
+            Self::Idle => voice::MAX_STT_BYTES,
+            Self::Speaking { pcm, .. } => voice::MAX_STT_BYTES - pcm.len(),
         }
     }
 }
@@ -518,6 +529,15 @@ mod tests {
         }
     }
 
+    // Alternating amplitude reaches the recognizer without a DC offset.
+    fn alternation(amplitude: i16, samples: usize) -> Vec<i16> {
+        [amplitude, -amplitude]
+            .into_iter()
+            .cycle()
+            .take(samples)
+            .collect()
+    }
+
     #[tokio::test]
     async fn microphone_stream_keeps_binding_echo_and_rate_boundaries() {
         use connectrpc::StreamMessage;
@@ -544,21 +564,8 @@ mod tests {
             })
             .await
             .unwrap();
-        // Alternating ±amplitude: real energy, unlike a constant offset, so a
-        // fixture reaches `transcribe` only when it is voiced enough to. Each
-        // chunk is one whole `MIN_STT_BYTES` capture at 24 kHz.
         const SAMPLES: usize = voice::MIN_STT_BYTES / 2;
-        let wave = |amplitude: i16| -> Vec<i16> {
-            (0..SAMPLES)
-                .map(|index| {
-                    if index % 2 == 0 {
-                        amplitude
-                    } else {
-                        -amplitude
-                    }
-                })
-                .collect()
-        };
+        let wave = |amplitude| alternation(amplitude, SAMPLES);
         let chunk = |client: &str, rate, samples: Vec<i16>, speaking| {
             let pcm: Vec<u8> = samples
                 .iter()
@@ -574,7 +581,7 @@ mod tests {
         };
         let mut quiet = wave(150);
         quiet.resize(SAMPLES * 4, 0); // 600 ms of trailing silence
-        let messages = vec![
+        let mut messages = vec![
             chunk("c1", 24_000, wave(5_000), false),
             // A frame that names another client never joins this stream.
             chunk("other", 24_000, wave(5_500), false),
@@ -585,6 +592,19 @@ mod tests {
             chunk("", 24_000, quiet.clone(), false),
             StreamMessage::from_message(&w::AudioInputChunk::default()),
         ];
+        let max_samples = voice::MAX_STT_BYTES / 2;
+        let first = wave(6_000);
+        let tail = wave(7_000);
+        let mut longer = first.repeat(max_samples / SAMPLES);
+        longer.truncate(max_samples - SAMPLES / 2);
+        longer.extend(tail.iter().cycle().take(SAMPLES + SAMPLES / 2));
+        // With the first frame half-sized, regular frames straddle the limit.
+        messages.push(chunk("", 0, longer[..SAMPLES / 2].to_vec(), false));
+        messages.extend(
+            longer[SAMPLES / 2..]
+                .chunks(SAMPLES)
+                .map(|pcm| chunk("", 0, pcm.to_vec(), false)),
+        );
         let service = Services::new(runtime.clone(), tokio_util::sync::CancellationToken::new());
         let response = service
             .stream_audio_input(
@@ -609,7 +629,7 @@ mod tests {
             .filter(|event| event.is_final)
             .map(|event| event.text)
             .collect();
-        assert_eq!(finals, ["capture 1", "capture 2"]);
+        assert_eq!(finals, ["capture 1", "capture 2", "capture 3", "capture 4"]);
         {
             let captured = captured.lock();
             assert_eq!(
@@ -617,7 +637,12 @@ mod tests {
                     .iter()
                     .map(|(rate, samples)| (*rate, samples.len()))
                     .collect::<Vec<_>>(),
-                [(16_000, SAMPLES), (24_000, quiet.len())]
+                [
+                    (16_000, SAMPLES),
+                    (24_000, quiet.len()),
+                    (24_000, max_samples),
+                    (24_000, SAMPLES),
+                ]
             );
             // The alternation survives the trip, so the fixture is the signal the
             // client would have sent, not a constant the gate now rejects.
@@ -628,6 +653,8 @@ mod tests {
                     .all(|sample| *sample == -5_000 || *sample == 5_000)
             );
             assert_eq!(captured[1].1, quiet);
+            assert_eq!(captured[2].1, longer[..max_samples]);
+            assert_eq!(captured[3].1, longer[max_samples..]);
         }
         runtime.shutdown().await.unwrap();
     }
