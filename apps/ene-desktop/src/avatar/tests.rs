@@ -303,23 +303,16 @@ async fn a_terminal_state_event_is_observed_once() {
     drop(renderer);
 }
 
-/// The renderer is authoritative for placement, but an explicit
-/// `Companion.body` monitor or position must beat its older snapshot.
+/// Explicit body placement is sent atomically. Unrelated scale changes keep
+/// the renderer's current placement, independently of cached body settings.
 #[tokio::test]
-async fn an_explicit_body_placement_beats_the_renderer_snapshot() {
+async fn body_placement_and_scale_each_send_one_atomic_update() {
     let model = Path::new("/models/ene.vrm");
     let mut shown = CharacterConfig::for_model(model.to_string_lossy());
     shown.monitor = Some("DP-1".into());
     shown.position = Some([10., 20.]);
-    let renderer_state = serde_json::json!({
-        "characters": [{
-            "character": "ene",
-            "status": "ready",
-            "config": shown,
-        }],
-    });
     let (mut avatar, renderer) = Avatar::for_test(HashMap::from([("ene".to_owned(), shown)]));
-    let sent = fake_renderer(renderer, move |_| renderer_state.clone());
+    let sent = fake_renderer(renderer, |_| Value::Null);
 
     let body = ene_domain::BodyBinding {
         monitor: Some("HDMI-1".into()),
@@ -331,22 +324,18 @@ async fn an_explicit_body_placement_beats_the_renderer_snapshot() {
         .await
         .expect("the renderer accepts the update");
 
+    avatar.set_scale("ene", model, 120.).await.unwrap();
     let sent = sent.lock();
-    let config = sent
-        .iter()
-        .find_map(|command| match command {
-            Command::Set { config, .. } => Some(config),
-            _ => None,
-        })
-        .expect("a shown character is updated with `set`");
-    assert_eq!(
-        config.monitor.as_deref(),
-        Some("HDMI-1"),
-        "the requested monitor was overwritten by the snapshot: {sent:?}"
-    );
-    assert_eq!(
-        config.position,
-        Some([300., 400.]),
-        "the requested position was overwritten by the snapshot: {sent:?}"
-    );
+    let [
+        Command::Update { config: body, .. },
+        Command::Update { config: scaled, .. },
+    ] = sent.as_slice()
+    else {
+        panic!("expected two updates, got {sent:?}");
+    };
+    assert_eq!(body.monitor.as_deref(), Some("HDMI-1"));
+    assert_eq!(body.position, Some([300., 400.]));
+    assert_eq!(scaled.monitor, None);
+    assert_eq!(scaled.position, None);
+    assert!((scaled.size_percent - 120.).abs() < f32::EPSILON);
 }

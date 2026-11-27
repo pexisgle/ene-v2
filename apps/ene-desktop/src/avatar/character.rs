@@ -3,7 +3,7 @@
 
 use super::client::{Avatar, AvatarError, WriteItem, lip_sync_line};
 use super::presets::{idle_return_preset, is_looping_motion, is_persistent_idle, motion};
-use ene_avatar_ipc::{AvatarEvent, CharacterConfig, Command, RendererSnapshot};
+use ene_avatar_ipc::{AvatarEvent, CharacterConfig, Command};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
@@ -58,10 +58,7 @@ impl Avatar {
         let loads_model = existing
             .as_ref()
             .is_none_or(|shown| shown.model != next.model);
-        // The caller named the placement, so the renderer's old value must not
-        // overwrite it.
-        let preserve_placement = body.monitor.is_some() || body.position.is_some();
-        self.configure(character, next, preserve_placement).await?;
+        self.configure(character, next, Some(body)).await?;
         Ok(loads_model)
     }
 
@@ -86,7 +83,7 @@ impl Avatar {
         }
         let loads_model = existing.is_none_or(|shown| shown.model != next.model);
         if loads_model {
-            self.configure(character, next, false).await?;
+            self.configure(character, next, None).await?;
         } else {
             self.call(Command::Motion {
                 character: character.to_owned(),
@@ -145,30 +142,17 @@ impl Avatar {
     async fn configure(
         &mut self,
         character: &str,
-        mut next: CharacterConfig,
-        preserve_placement: bool,
+        next: CharacterConfig,
+        placement: Option<&ene_domain::BodyBinding>,
     ) -> Result<(), AvatarError> {
-        let existing = self.shown.contains_key(character);
-        // The renderer is authoritative for where a character already sits, so
-        // its snapshot is read back to avoid resetting the placement on every
-        // unrelated update. An explicit monitor/position from the caller must
-        // win, though, or `show_with_body` cannot move a shown character.
-        if existing && !preserve_placement {
-            let state = self.call(Command::Get {}).await?;
-            if let Ok(snapshot) = serde_json::from_value::<RendererSnapshot>(state)
-                && let Some(actor) = snapshot
-                    .characters
-                    .into_iter()
-                    .find(|actor| actor.character == character)
-            {
-                next.monitor = actor.config.monitor;
-                next.position = actor.config.position;
-            }
-        }
-        let command = if existing {
-            Command::Set {
+        let command = if self.shown.contains_key(character) {
+            Command::Update {
                 character: character.to_owned(),
-                config: next.clone(),
+                config: CharacterConfig {
+                    monitor: placement.and_then(|body| body.monitor.clone()),
+                    position: placement.and_then(|body| body.position),
+                    ..next.clone()
+                },
             }
         } else {
             Command::Add {
@@ -207,7 +191,7 @@ impl Avatar {
             Some(current) => current.with_scale(clamped),
             None => CharacterConfig::for_model(model.to_string_lossy()).with_scale(clamped),
         };
-        self.configure(character, next, false).await
+        self.configure(character, next, None).await
     }
 
     /// Centers the character on the primary monitor.

@@ -92,6 +92,12 @@ pub enum Command {
         character: String,
         config: CharacterConfig,
     },
+    /// Changes configuration while keeping any omitted monitor or position at
+    /// its current renderer value. `Set` replaces the entire configuration.
+    Update {
+        character: String,
+        config: CharacterConfig,
+    },
     Motion {
         character: String,
         motion: Option<String>,

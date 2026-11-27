@@ -175,6 +175,7 @@ fn find_target_entity(
     let target_name = match command {
         Command::Add { character, .. }
         | Command::Set { character, .. }
+        | Command::Update { character, .. }
         | Command::Motion { character, .. }
         | Command::Remove { character }
         | Command::Center { character, .. }
@@ -201,6 +202,17 @@ fn apply_command(
             apply_add_or_set(world, true, target, character, config)
         }
         Command::Set { character, config } => {
+            apply_add_or_set(world, false, target, character, config)
+        }
+        Command::Update {
+            character,
+            mut config,
+        } => {
+            let previous = target
+                .and_then(|entity| world.get::<Character>(entity))
+                .ok_or(ControlError::UnknownCharacter)?;
+            config.monitor = config.monitor.or_else(|| previous.config.monitor.clone());
+            config.position = config.position.or(previous.config.position);
             apply_add_or_set(world, false, target, character, config)
         }
         Command::Motion {
@@ -593,6 +605,24 @@ mod tests {
         assert_eq!(messages[2]["ok"], messages[4]["ok"]);
         assert_eq!(messages[6]["ok"]["characters"], json!([]));
         assert_eq!(messages[7]["status"], "loading");
+    }
+
+    #[test]
+    fn updating_size_keeps_the_last_renderer_placement() {
+        let replies = Harness::new().batch(&[
+            json!({"id":1,"op":"add","character":"a","config":{"model":"a.vrm"}}),
+            json!({"id":2,"op":"place","character":"a","monitor":"screen","position":[10.,20.]}),
+            json!({"id":3,"op":"update","character":"a","config":{"model":"a.vrm","size_percent":120.}}),
+            json!({"id":4,"op":"get"}),
+            json!({"id":5,"op":"update","character":"a","config":{"model":"a.vrm","position":[30.,40.]}}),
+            json!({"id":6,"op":"get"}),
+        ]);
+        let resized = &replies[3]["ok"]["characters"][0]["config"];
+        assert_eq!(resized["position"], json!([10., 20.]));
+        assert_eq!(resized["size_percent"], json!(120.));
+        let moved = &replies[5]["ok"]["characters"][0]["config"];
+        assert_eq!(moved["position"], json!([30., 40.]));
+        assert_eq!(moved["monitor"], "screen");
     }
 
     #[test]
