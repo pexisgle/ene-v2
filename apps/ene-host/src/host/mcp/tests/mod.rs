@@ -10,23 +10,19 @@ use rig_core::message::ToolName;
 use rig_core::tool::{DynamicTool, ToolContext, ToolOutput};
 use rig_ecs::prelude::ToolDef;
 use rig_rmcp::{McpClientHandler, McpConnection, rmcp::model::ClientConfig};
-use std::collections::BTreeMap;
+
+pub(super) const STAMP: ConnectionStamp = ConnectionStamp {
+    revision: 1,
+    created_revision: 2,
+    credential_generation: 0,
+};
 
 pub(super) fn want(name: &str) -> Desired {
     Desired {
-        revision: 1,
-        credential_generation: None,
+        stamp: STAMP,
         name: name.into(),
-        command: String::new(),
-        args: Vec::new(),
-        cwd: String::new(),
-        env: BTreeMap::new(),
-        headers: BTreeMap::new(),
-        auth_header: String::new(),
-        secret_env_var: String::new(),
-        endpoint: String::new(),
-        secret: None,
-        allowed: Vec::new(),
+        config: Default::default(),
+        secret: Ok(None),
     }
 }
 
@@ -159,7 +155,7 @@ async fn http_tools_use_the_shared_redirect_refusing_client() {
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let mut desired = want("http");
-    desired.endpoint = format!("http://{address}/mcp");
+    desired.config.endpoint.endpoint = format!("http://{address}/mcp");
     let registry = ToolServer::new().run();
     let connection = tokio::time::timeout(
         std::time::Duration::from_secs(3),
@@ -178,7 +174,7 @@ async fn http_tools_use_the_shared_redirect_refusing_client() {
     connection.close().await;
     assert!(connection.is_closed());
     let before = hits.load(Ordering::SeqCst);
-    desired.endpoint = format!("http://{address}/redirect");
+    desired.config.endpoint.endpoint = format!("http://{address}/redirect");
     assert!(
         tokio::time::timeout(
             std::time::Duration::from_secs(3),

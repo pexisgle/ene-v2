@@ -4,7 +4,7 @@ use super::super::Services;
 use super::probe::{failed, healthy, probe_embedding, probe_openai_speech, probe_voicevox_tts};
 use crate::host::{
     error::{HostError, Result},
-    mcp::CheckState,
+    mcp::{CheckState, ConnectionStamp},
     model,
     providers::Providers,
     settings::{Check, Connection, ConnectionConfig},
@@ -27,8 +27,11 @@ pub(super) async fn run_connection_probe(
                 services,
                 connection,
                 &config.command,
-                created_revision,
-                credential_generation,
+                ConnectionStamp {
+                    revision: connection.revision,
+                    created_revision,
+                    credential_generation,
+                },
             )
             .await;
         }
@@ -78,19 +81,17 @@ async fn probe_mcp_connection(
     services: &Services,
     connection: &Connection,
     command: &str,
-    created: u64,
-    generation: u64,
+    stamp: ConnectionStamp,
 ) -> Result<Check> {
     if !connection.enabled {
         return Ok(failed(now(), "MCP 接続が無効化されています。"));
     }
     let reconnect_id = connection.id.clone();
-    let revision = connection.revision;
     services
         .runtime
         .change(move |services| {
-            check_mcp_admission(services, &reconnect_id, revision, created, generation)?;
-            services.mcp.request_reconnect(reconnect_id.as_str());
+            check_mcp_admission(services, &reconnect_id, stamp)?;
+            services.mcp.request_reconnect(reconnect_id.as_str(), stamp);
             Ok(())
         })
         .await?;
@@ -112,10 +113,8 @@ async fn probe_mcp_connection(
             let state = services
                 .runtime
                 .inspect(move |services| {
-                    check_mcp_admission(services, &id, revision, created, generation)?;
-                    Ok(services
-                        .mcp
-                        .check_state(Some(&services.credentials), id.as_str(), revision))
+                    check_mcp_admission(services, &id, stamp)?;
+                    Ok(services.mcp.check_state(id.as_str(), stamp))
                 })
                 .await?;
             match state {
@@ -134,17 +133,17 @@ async fn probe_mcp_connection(
 fn check_mcp_admission(
     services: &crate::host::HostServices,
     id: &ene_domain::ConnectionId,
-    revision: u64,
-    created: u64,
-    generation: u64,
+    stamp: ConnectionStamp,
 ) -> Result<()> {
-    if services.credentials.generation_of(id.as_str()) != generation
+    if services.credentials.generation_of(id.as_str()) != stamp.credential_generation
         || !services
             .store
             .settings_repo()
             .connection_with_creation(id.as_str())?
             .is_some_and(|(current, incarnation)| {
-                current.enabled && current.revision == revision && incarnation == created
+                current.enabled
+                    && current.revision == stamp.revision
+                    && incarnation == stamp.created_revision
             })
     {
         return Err(HostError::Conflict(

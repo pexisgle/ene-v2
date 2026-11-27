@@ -89,7 +89,14 @@ impl Drop for PendingPeer {
 async fn pending_launch_invalidation_reaps_never_initialized_children() {
     use crate::host::resources::HostState;
 
-    for action in ["disable", "revision", "shutdown", "failure", "world drop"] {
+    for action in [
+        "disable",
+        "revision",
+        "recreate",
+        "shutdown",
+        "failure",
+        "world drop",
+    ] {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
         let mut peer = PendingPeer::new(root.path(), "initial.pid");
@@ -134,6 +141,17 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
                     .update_settings(2, &[(row.clone(), 1)])
                     .unwrap();
             }
+            "recreate" => {
+                let (settings, _) = store
+                    .settings_repo()
+                    .delete_connection::<crate::host::error::HostError>(&row.id, 1, || Ok(()))
+                    .unwrap();
+                row.config = ConnectionConfig::Mcp(replacement.config());
+                store
+                    .settings_repo()
+                    .update_settings(settings.revision, &[(row.clone(), 0)])
+                    .unwrap();
+            }
             "shutdown" => world.resource::<HostState>().close(),
             "failure" => {
                 assert!(world.resource::<HostState>().fail("test failure"));
@@ -146,38 +164,32 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
             _ => unreachable!(),
         }
         sync(&mut world);
-        if action == "revision" {
+        if matches!(action, "revision" | "recreate") {
             replacement.started().await;
         }
         peer.stopped(action).await;
         assert!(world.resource::<Mcp>().lock().servers.0.is_empty());
-        if action == "revision" {
+        if matches!(action, "revision" | "recreate") {
             let new_launch = world.resource::<Mcp>().lock().connecting.0[row.id.as_str()]
                 .launch
                 .clone();
             assert_ne!(old_launch, new_launch);
-            let mut supervisor = std::mem::take(&mut *world.resource::<Mcp>().lock());
-            accept_event(
-                &mut supervisor,
-                &[(
-                    row.id.as_str().to_owned(),
-                    Desired {
-                        revision: 2,
-                        ..want("pending")
-                    },
-                )],
-                Event::Failed {
-                    id: row.id.as_str().to_owned(),
-                    launch: old_launch,
-                    reason: "late failure".into(),
-                    config_error: false,
-                },
-                &tokio::runtime::Handle::current(),
-            );
-            *world.resource::<Mcp>().lock() = supervisor;
-            assert_eq!(
-                world.resource::<Mcp>().lock().connecting.0[row.id.as_str()].launch,
-                new_launch
+            if action == "recreate" {
+                assert_eq!(old_launch.stamp.revision, new_launch.stamp.revision);
+                assert_eq!(
+                    old_launch.stamp.credential_generation,
+                    new_launch.stamp.credential_generation
+                );
+                assert_ne!(
+                    old_launch.stamp.created_revision,
+                    new_launch.stamp.created_revision
+                );
+            }
+            assert_late_failure_ignored(
+                world.resource::<Mcp>(),
+                row.id.as_str(),
+                old_launch,
+                &new_launch,
             );
             assert!(
                 rustix::process::test_kill_process(replacement.process.as_ref().unwrap().0).is_ok()
@@ -188,4 +200,28 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
         }
         assert!(world.resource::<Mcp>().lock().connecting.0.is_empty());
     }
+}
+
+fn assert_late_failure_ignored(mcp: &Mcp, id: &str, old_launch: Launch, new_launch: &Launch) {
+    let mut supervisor = std::mem::take(&mut *mcp.lock());
+    accept_event(
+        &mut supervisor,
+        &[(
+            id.to_owned(),
+            Desired {
+                stamp: new_launch.stamp,
+                ..want("pending")
+            },
+        )]
+        .into(),
+        Event::Failed {
+            id: id.to_owned(),
+            launch: old_launch,
+            reason: "late failure".into(),
+            config_error: false,
+        },
+        &tokio::runtime::Handle::current(),
+    );
+    *mcp.lock() = supervisor;
+    assert_eq!(mcp.lock().connecting.0[id].launch, *new_launch);
 }

@@ -15,10 +15,11 @@ mod projection;
 mod settings;
 mod supervisor;
 
-pub(crate) use ene_work::mcp::{CheckState, is_npx_command};
+pub(crate) use ene_work::mcp::is_npx_command;
 #[cfg(test)]
 use projection::tool_names;
-pub(crate) use supervisor::Mcp;
+pub(crate) use settings::ConnectionStamp;
+pub(crate) use supervisor::{CheckState, Mcp};
 
 use bevy_ecs::prelude::*;
 use rig_ecs::prelude::*;

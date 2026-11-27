@@ -1,7 +1,10 @@
 use super::*;
 use crate::host::mcp::projection::*;
-use crate::host::mcp::supervisor::{Event, *};
 use crate::host::mcp::*;
+use crate::host::mcp::{
+    settings::DesiredServers,
+    supervisor::{Event, *},
+};
 use crate::host::{
     db::Store,
     model::Credentials,
@@ -40,7 +43,7 @@ fn attach_now(
             connection,
             registry,
             label: want.name.clone(),
-            allowed: want.allowed.clone(),
+            allowed: want.config.allowed_tools.clone(),
         },
     );
     assert!(previous.is_none());
@@ -81,8 +84,7 @@ async fn registry_refresh_replaces_handlers_and_keeps_pinned_calls() {
     let server = Server {
         connection: connection.clone(),
         launch: Launch {
-            revision: 1,
-            credential_generation: None,
+            stamp: STAMP,
             owner: registry.owner(),
         },
         registry: registry.clone(),
@@ -159,13 +161,12 @@ async fn projection_refuses_collisions_and_retires_only_owned_entities() {
         .spawn_tool(definition, handler, ToolOptions::default())
         .unwrap();
     let mut desired = want("notes");
-    desired.allowed = vec!["echo".into(), "bad.name".into()];
+    desired.config.allowed_tools = vec!["echo".into(), "bad.name".into()];
     attach_now(
         world,
         "c1",
         Launch {
-            revision: 1,
-            credential_generation: None,
+            stamp: STAMP,
             owner: registry.owner(),
         },
         first.clone(),
@@ -185,8 +186,7 @@ async fn projection_refuses_collisions_and_retires_only_owned_entities() {
         world,
         "c2",
         Launch {
-            revision: 1,
-            credential_generation: None,
+            stamp: STAMP,
             owner: other_registry.owner(),
         },
         second.clone(),
@@ -220,13 +220,11 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
     let (old, old_registry, old_peer, task1) = connect_echo(old_echo).await;
     let (new, new_registry, _, task2) = connect_echo(Echo::new()).await;
     let old_launch = Launch {
-        revision: 1,
-        credential_generation: None,
+        stamp: STAMP,
         owner: old_registry.owner(),
     };
     let new_launch = Launch {
-        revision: 1,
-        credential_generation: None,
+        stamp: STAMP,
         owner: new_registry.owner(),
     };
     assert_ne!(old_launch, new_launch);
@@ -244,7 +242,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
             _task: AbortOnDropHandle::new(runtime.spawn(std::future::pending())),
         },
     );
-    let wanted = vec![("c1".into(), want("notes"))];
+    let wanted = DesiredServers::from([("c1".into(), want("notes"))]);
     accept_event(
         &mut supervisor,
         &wanted,
@@ -258,7 +256,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
     );
     assert_pending_launch(&supervisor, &new_launch);
     let mut changed_revision = wanted.clone();
-    changed_revision[0].1.revision = 2;
+    changed_revision.get_mut("c1").unwrap().stamp.revision = 2;
     accept_event(
         &mut supervisor,
         &changed_revision,
@@ -355,8 +353,7 @@ fn setup_gate_mcp_harness(
         world,
         "c1",
         Launch {
-            revision: 1,
-            credential_generation: None,
+            stamp: STAMP,
             owner: registry.owner(),
         },
         connection,
@@ -611,15 +608,16 @@ async fn b17_mcp_backoff_prevents_tight_retry_and_recovers_on_reconnect_request(
 
     // Recovery via explicit reconnect request connects immediately once healthy.
     fail_requests.store(false, Ordering::SeqCst);
-    request_reconnect(
-        &mut harness.app.world_mut().resource::<Mcp>().lock(),
-        "mcp-backoff",
-    );
+    harness
+        .app
+        .world()
+        .resource::<Mcp>()
+        .request_reconnect("mcp-backoff", STAMP);
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             sync(harness.app.world_mut());
             if matches!(
-                harness.app.world().resource::<Mcp>().check_state( harness.app.world().get_resource::<Credentials>(), "mcp-backoff", 1),
+                harness.app.world().resource::<Mcp>().check_state("mcp-backoff", STAMP),
                 CheckState::Connected(ref names) if names == &["ping".to_owned()]
             ) {
                 break;
@@ -703,11 +701,11 @@ async fn f24_http_mcp_sends_auth_header_and_custom_headers_and_recovers_after_cr
         loop {
             sync(harness.app.world_mut());
             if matches!(
-                harness.app.world().resource::<Mcp>().check_state(
-                    harness.app.world().get_resource::<Credentials>(),
-                    "mcp-auth",
-                    1
-                ),
+                harness
+                    .app
+                    .world()
+                    .resource::<Mcp>()
+                    .check_state("mcp-auth", STAMP),
                 CheckState::Failed(_)
             ) {
                 break;
@@ -722,11 +720,15 @@ async fn f24_http_mcp_sends_auth_header_and_custom_headers_and_recovers_after_cr
     // automatically clearing ConfigHold and authenticating with Bearer + X-Tenant.
     let creds = harness.app.world().resource::<Credentials>().clone();
     crate::host::model::save_secret(&creds, "mcp-auth", "mcp-token").unwrap();
+    let stamp = ConnectionStamp {
+        credential_generation: creds.generation_of("mcp-auth"),
+        ..STAMP
+    };
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             sync(harness.app.world_mut());
             if matches!(
-                harness.app.world().resource::<Mcp>().check_state( harness.app.world().get_resource::<Credentials>(), "mcp-auth", 1),
+                harness.app.world().resource::<Mcp>().check_state("mcp-auth", stamp),
                 CheckState::Connected(ref names) if names == &["secret_tool".to_owned()]
             ) {
                 break;

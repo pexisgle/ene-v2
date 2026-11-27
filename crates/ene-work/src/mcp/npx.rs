@@ -1,7 +1,9 @@
 //! Windows-safe `npx` resolution for stdio MCP servers.
 
 #[cfg(windows)]
-use super::transport::{ConnectFailure, Desired};
+use super::transport::ConnectFailure;
+#[cfg(windows)]
+use ene_domain::settings::McpConnection;
 #[cfg(windows)]
 use std::{
     collections::BTreeMap,
@@ -45,7 +47,7 @@ enum NpxLaunch {
 /// without executing `npx.cmd` or `npx.ps1`.
 #[cfg(windows)]
 pub(crate) async fn build_command(
-    want: &Desired,
+    want: &McpConnection,
 ) -> Result<tokio::process::Command, ConnectFailure> {
     let path_var = effective_env(&want.env, "PATH");
     let appdata = effective_env(&want.env, "APPDATA");
@@ -54,10 +56,10 @@ pub(crate) async fn build_command(
         .map_or_else(Vec::new, |val| std::env::split_paths(val).collect());
 
     let launch = resolve_launch(
-        &want.command,
+        want.command.trim(),
         &path_dirs,
         appdata.as_deref().map(Path::new),
-        &want.cwd,
+        want.cwd.trim(),
         &want.env,
     )
     .await?;

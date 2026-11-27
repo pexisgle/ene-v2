@@ -224,10 +224,7 @@ mod windows_tests {
         env.insert("COMSPEC".into(), r"C:\ene-blocked-cmd\cmd.exe".into());
         env.insert("PATH".into(), node_dir.to_string_lossy().into_owned());
 
-        let want = Desired {
-            revision: 1,
-            credential_generation: None,
-            name: "fake-mcp".into(),
+        let want = McpConnection {
             command: "npx.cmd".into(),
             args: vec![
                 "--no-install".into(),
@@ -237,12 +234,7 @@ mod windows_tests {
             ],
             cwd: project.to_string_lossy().into_owned(),
             env: env.clone(),
-            headers: BTreeMap::new(),
-            auth_header: String::new(),
-            secret_env_var: String::new(),
-            endpoint: String::new(),
-            secret: None,
-            allowed: Vec::new(),
+            ..Default::default()
         };
 
         let mut cmd = build_command(&want).await.unwrap();
@@ -345,26 +337,18 @@ result = {
         env.insert("COMSPEC".into(), r"C:\ene-blocked-cmd\cmd.exe".into());
         env.insert("PATH".into(), node_dir.to_string_lossy().into_owned());
 
-        let want = Desired {
-            revision: 1,
-            credential_generation: None,
-            name: "mini".into(),
+        let want = McpConnection {
             command: "npx".into(),
             args: vec!["--no-install".into(), "mini-mcp".into()],
             cwd: project.to_string_lossy().into_owned(),
             env,
-            headers: BTreeMap::new(),
-            auth_header: String::new(),
-            secret_env_var: String::new(),
-            endpoint: String::new(),
-            secret: None,
-            allowed: vec!["ping".into()],
+            ..Default::default()
         };
 
         let registry = rig_agent::tool::server::ToolServer::new().run();
         let connection = tokio::time::timeout(
             Duration::from_secs(20),
-            crate::mcp::transport::open(&want, registry.clone(), reqwest::Client::new()),
+            crate::mcp::transport::open(&want, None, registry.clone(), reqwest::Client::new()),
         )
         .await
         .expect("MCP open should complete within timeout")

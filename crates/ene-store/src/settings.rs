@@ -40,6 +40,10 @@ impl FromRow for Connection {
     }
 }
 
+fn connection_with_creation(row: &Row<'_>) -> rusqlite::Result<(Connection, u64)> {
+    Ok((Connection::from_row(row)?, row.get("created_revision")?))
+}
+
 const COLUMNS: &str = "id, name, enabled, kind, config, credential_state, last_check, revision";
 
 /// Repository managing `settings_state` and `connections`.
@@ -106,7 +110,18 @@ impl<'a> SettingsRepo<'a> {
         self.0.fetch(
             &format!("SELECT {COLUMNS}, created_revision FROM connections WHERE id = ?1"),
             [id],
-            |row| Ok((Connection::from_row(row)?, row.get("created_revision")?)),
+            connection_with_creation,
+        )
+    }
+
+    pub fn enabled_mcp_connections(&self) -> Result<Vec<(Connection, u64)>> {
+        self.0.fetch_all(
+            &format!(
+                "SELECT {COLUMNS}, created_revision FROM connections \
+                WHERE kind = 'mcp' AND enabled ORDER BY id"
+            ),
+            [],
+            connection_with_creation,
         )
     }
 
@@ -119,7 +134,7 @@ impl<'a> SettingsRepo<'a> {
                 WHERE kind = 'search' AND enabled ORDER BY id LIMIT 2"
             ),
             [],
-            |row| Ok((Connection::from_row(row)?, row.get("created_revision")?)),
+            connection_with_creation,
         )
     }
 

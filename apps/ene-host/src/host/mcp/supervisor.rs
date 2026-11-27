@@ -1,27 +1,42 @@
 //! MCP connection supervisor: settings/credential diffing, backoff, auth
 //! injection, stdio environment/cwd application, and background connection
 //! lifecycle management.
+pub(super) use super::settings::Desired;
 use super::{
     failures::{FailureKind, FailureReport, McpFailures, prune_failures, record_failure},
     projection::{project_servers, snapshot_tools},
-    settings::{McpSettings, collect_retire_ids, prune_connecting, reload_desired_settings},
+    settings::{
+        ConnectionStamp, DesiredServers, McpSettings, collect_retire_ids, prune_connecting,
+        reload_desired_settings,
+    },
 };
 use crate::host::{db::Store, model::Credentials, resources::HostRuntime};
 use bevy_ecs::prelude::*;
-pub(super) use ene_work::mcp::{CheckState, ConnectFailure, Desired, Launch};
+use ene_work::mcp::ConnectFailure;
 use rig_agent::tool::server::{ToolServer, ToolServerHandle};
 use rig_ecs::prelude::*;
 use rig_rmcp::McpConnection;
-use std::{
-    collections::{HashMap, HashSet},
-    time::Instant,
-};
+use std::{collections::HashMap, time::Instant};
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 
 /// How many connect results may queue before a producer waits. A connect
 /// happens once per server, so this is a bound, not a throughput target.
 const QUEUE: usize = 32;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Launch {
+    pub(super) stamp: ConnectionStamp,
+    pub(super) owner: String,
+}
+
+/// Live state returned to connection probes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CheckState {
+    Connected(Vec<String>),
+    Failed(String),
+    Connecting,
+}
 
 /// One connected server and the tool entities it owns.
 pub(super) struct Server {
@@ -82,22 +97,20 @@ impl Mcp {
         self.0.lock()
     }
 
-    pub(crate) fn request_reconnect(&self, id: &str) {
-        request_reconnect(&mut self.lock(), id);
+    pub(crate) fn request_reconnect(&self, id: &str, stamp: ConnectionStamp) {
+        let mut supervisor = self.lock();
+        if supervisor
+            .failures
+            .0
+            .get(id)
+            .is_some_and(|failure| failure.stamp == stamp)
+        {
+            supervisor.failures.0.remove(id);
+        }
     }
 
-    pub(crate) fn check_state(
-        &self,
-        credentials: Option<&Credentials>,
-        id: &str,
-        revision: u64,
-    ) -> CheckState {
-        check_state(
-            &self.lock(),
-            id,
-            revision,
-            credentials.map(|keys| keys.generation_of(id)),
-        )
+    pub(crate) fn check_state(&self, id: &str, stamp: ConnectionStamp) -> CheckState {
+        check_state(&self.lock(), id, stamp)
     }
 }
 
@@ -214,17 +227,16 @@ fn plan_connect_targets(
     servers: &McpServers,
     connecting: &Connecting,
     failures: &McpFailures,
-    wanted: &[(String, Desired)],
+    wanted: &DesiredServers,
     now: Instant,
 ) -> Vec<(String, Desired)> {
-    let mut seen = HashSet::new();
     wanted
         .iter()
         .filter(|(id, _)| {
-            if !seen.insert(id) || servers.0.contains_key(id) || connecting.0.contains_key(id) {
+            if servers.0.contains_key(*id) || connecting.0.contains_key(*id) {
                 return false;
             }
-            if let Some(failure) = failures.0.get(id) {
+            if let Some(failure) = failures.0.get(*id) {
                 match &failure.kind {
                     FailureKind::ConfigHold => return false,
                     FailureKind::Transient { next_retry, .. } if now < *next_retry => return false,
@@ -233,7 +245,7 @@ fn plan_connect_targets(
             }
             true
         })
-        .cloned()
+        .map(|(id, want)| (id.clone(), want.clone()))
         .collect()
 }
 
@@ -248,8 +260,7 @@ fn spawn_connect_tasks(
         .map(|(id, want)| {
             let registry = ToolServer::new().run();
             let launch = Launch {
-                revision: want.revision,
-                credential_generation: want.credential_generation,
+                stamp: want.stamp,
                 owner: registry.owner(),
             };
             let event_id = id.clone();
@@ -297,24 +308,20 @@ fn spawn_connect_tasks(
 
 pub(super) fn accept_event(
     supervisor: &mut McpSupervisor,
-    wanted: &[(String, Desired)],
+    wanted: &DesiredServers,
     event: Event,
     runtime: &tokio::runtime::Handle,
 ) {
     let (id, launch) = match &event {
         Event::Connected { id, launch, .. } | Event::Failed { id, launch, .. } => (id, launch),
     };
-    let want = wanted.iter().find(|(wanted, want)| {
-        wanted == id
-            && want.revision == launch.revision
-            && want.credential_generation == launch.credential_generation
-    });
+    let want = wanted.get(id).filter(|want| want.stamp == launch.stamp);
     let current = supervisor
         .connecting
         .0
         .get(id)
         .is_some_and(|pending| &pending.launch == launch);
-    let Some((_, want)) = want.filter(|_| current) else {
+    let Some(want) = want.filter(|_| current) else {
         if let Event::Connected { connection, .. } = event {
             close_connection(connection, runtime);
         }
@@ -336,7 +343,7 @@ pub(super) fn accept_event(
                     launch,
                     registry,
                     label: want.name.clone(),
-                    allowed: want.allowed.clone(),
+                    allowed: want.config.allowed_tools.clone(),
                 },
             );
             if let Some(previous) = previous {
@@ -369,29 +376,18 @@ pub(super) async fn open(
     want: &Desired,
     registry: ToolServerHandle,
 ) -> Result<McpConnection, ConnectFailure> {
+    let secret = want.secret.as_ref().map_err(Clone::clone)?.as_deref();
     let client = crate::host::net::client().map_err(|error| ConnectFailure {
         reason: error.to_string(),
         config_error: true,
     })?;
-    ene_work::mcp::open(want, registry, client).await
-}
-
-/// Clears any backoff or configuration hold on `id` so the supervisor attempts
-/// a fresh connection on the next frame (used by `CheckConnection`).
-pub(super) fn request_reconnect(supervisor: &mut McpSupervisor, id: &str) {
-    supervisor.failures.0.remove(id);
+    ene_work::mcp::open(&want.config, secret, registry, client).await
 }
 
 /// Inspects the current MCP state for a specific configuration and credential generation.
-fn check_state(
-    supervisor: &McpSupervisor,
-    id: &str,
-    revision: u64,
-    credential_generation: Option<u64>,
-) -> CheckState {
+fn check_state(supervisor: &McpSupervisor, id: &str, stamp: ConnectionStamp) -> CheckState {
     if let Some(server) = supervisor.servers.0.get(id)
-        && server.launch.revision == revision
-        && server.launch.credential_generation == credential_generation
+        && server.launch.stamp == stamp
         && !server.connection.is_closed()
     {
         let mut names: Vec<_> = server
@@ -404,13 +400,12 @@ fn check_state(
         return CheckState::Connected(names);
     }
     if let Some(failure) = supervisor.failures.0.get(id)
-        && failure.revision == revision
-        && failure.credential_generation == credential_generation
+        && failure.stamp == stamp
         && !supervisor
             .connecting
             .0
             .get(id)
-            .is_some_and(|pending| pending.launch.revision == revision)
+            .is_some_and(|pending| pending.launch.stamp == stamp)
     {
         return CheckState::Failed(failure.reason.clone());
     }

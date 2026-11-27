@@ -1,20 +1,32 @@
-//! The settings snapshot the supervisor diffs against: which MCP connections
-//! the operator wants, and how they translate into `Desired` launches.
+//! The enabled MCP connection configurations the supervisor reconciles.
 use super::supervisor::{Connecting, McpServers};
-use crate::host::{
-    db::Store,
-    model::Credentials,
-    providers::Providers,
-    settings::{ConnectionConfig, ConnectionKind},
-};
-use ene_work::mcp::Desired;
-use std::sync::Arc;
+use crate::host::{db::Store, model::Credentials, providers::Providers};
+use ene_domain::settings::{ConnectionConfig, McpConnection};
+use ene_work::mcp::ConnectFailure;
+use std::{collections::BTreeMap, sync::Arc};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ConnectionStamp {
+    pub(crate) revision: u64,
+    pub(crate) created_revision: u64,
+    pub(crate) credential_generation: u64,
+}
+
+#[derive(Clone)]
+pub(super) struct Desired {
+    pub(super) stamp: ConnectionStamp,
+    pub(super) name: String,
+    pub(super) config: McpConnection,
+    pub(super) secret: Result<Option<String>, ConnectFailure>,
+}
+
+pub(super) type DesiredServers = BTreeMap<String, Desired>;
 
 #[derive(Default)]
 pub(super) struct McpSettings {
-    pub(super) revision: Option<u64>,
-    pub(super) credential_generation: Option<u64>,
-    pub(super) desired: Arc<[(String, Desired)]>,
+    revision: Option<u64>,
+    credential_generation: Option<u64>,
+    pub(super) desired: Arc<DesiredServers>,
 }
 
 pub(super) fn reload_desired_settings(
@@ -27,7 +39,7 @@ pub(super) fn reload_desired_settings(
     if settings.revision != Some(revision)
         || settings.credential_generation != credential_generation
     {
-        settings.desired = desired(store, credentials)?.into();
+        settings.desired = Arc::new(desired(store, credentials)?);
         settings.revision = Some(revision);
         settings.credential_generation = credential_generation;
     }
@@ -37,69 +49,57 @@ pub(super) fn reload_desired_settings(
 fn desired(
     store: &Store,
     credentials: Option<&Credentials>,
-) -> crate::host::db::Result<Vec<(String, Desired)>> {
-    let settings = store.settings_repo().settings()?;
+) -> crate::host::db::Result<DesiredServers> {
     let no_providers = Providers::none();
-    Ok(settings
-        .connections
-        .iter()
-        .filter(|connection| connection.enabled && connection.kind == ConnectionKind::Mcp)
-        .filter_map(|connection| {
-            let ConnectionConfig::Mcp(config) = &connection.config else {
+    Ok(store
+        .settings_repo()
+        .enabled_mcp_connections()?
+        .into_iter()
+        .filter_map(|(connection, created_revision)| {
+            let secret =
+                crate::host::model::connection_secret(&connection, credentials, &no_providers)
+                    .map_err(|error| ConnectFailure {
+                        reason: error.to_string(),
+                        config_error: true,
+                    });
+            let ConnectionConfig::Mcp(config) = connection.config else {
                 return None;
             };
-            let secret =
-                crate::host::model::connection_secret(connection, credentials, &no_providers)
-                    .ok()
-                    .flatten();
+            let id = connection.id.as_str();
             Some((
-                connection.id.as_str().to_owned(),
+                id.to_owned(),
                 Desired {
-                    revision: connection.revision,
-                    credential_generation: credentials
-                        .map(|keys| keys.generation_of(connection.id.as_str())),
-                    name: connection.name.clone(),
-                    command: config.command.trim().to_owned(),
-                    args: config.args.clone(),
-                    cwd: config.cwd.trim().to_owned(),
-                    env: config.env.clone(),
-                    headers: config.headers.clone(),
-                    auth_header: config.auth_header.trim().to_owned(),
-                    secret_env_var: config.secret_env_var.trim().to_owned(),
-                    endpoint: config.endpoint.endpoint.trim().to_owned(),
+                    stamp: ConnectionStamp {
+                        revision: connection.revision,
+                        created_revision,
+                        credential_generation: credentials.map_or(0, |keys| keys.generation_of(id)),
+                    },
+                    name: connection.name,
+                    config,
                     secret,
-                    allowed: config.allowed_tools.clone(),
                 },
             ))
         })
         .collect())
 }
 
-pub(super) fn prune_connecting(connecting: &mut Connecting, wanted: &[(String, Desired)]) {
-    // Cancel pending connect tasks whose revision or credentials changed.
+pub(super) fn prune_connecting(connecting: &mut Connecting, wanted: &DesiredServers) {
     connecting.0.retain(|id, pending| {
-        wanted.iter().any(|(wanted, want)| {
-            wanted == id
-                && want.revision == pending.launch.revision
-                && want.credential_generation == pending.launch.credential_generation
-        })
+        wanted
+            .get(id)
+            .is_some_and(|want| want.stamp == pending.launch.stamp)
     });
 }
 
-pub(super) fn collect_retire_ids(
-    servers: &McpServers,
-    wanted: &[(String, Desired)],
-) -> Vec<String> {
+pub(super) fn collect_retire_ids(servers: &McpServers, wanted: &DesiredServers) -> Vec<String> {
     servers
         .0
         .iter()
         .filter(|(id, server)| {
             server.connection.is_closed()
-                || !wanted.iter().any(|(wanted, want)| {
-                    wanted == *id
-                        && want.revision == server.launch.revision
-                        && want.credential_generation == server.launch.credential_generation
-                })
+                || !wanted
+                    .get(*id)
+                    .is_some_and(|want| want.stamp == server.launch.stamp)
         })
         .map(|(id, _)| id.clone())
         .collect()

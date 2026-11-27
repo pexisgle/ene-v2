@@ -1,6 +1,10 @@
 //! Backoff, jitter and configuration-hold bookkeeping for failing MCP
 //! connections.
-use ene_work::mcp::{Desired, Launch, backoff_delay, is_config_error_message};
+use super::{
+    settings::{ConnectionStamp, DesiredServers},
+    supervisor::Launch,
+};
+use ene_work::mcp::{backoff_delay, is_config_error_message};
 use rig_ecs::prelude::*;
 use std::{collections::HashMap, time::Instant};
 use tokio_util::task::AbortOnDropHandle;
@@ -15,8 +19,7 @@ pub(super) enum FailureKind {
 }
 
 pub(super) struct FailureState {
-    pub(super) revision: u64,
-    pub(super) credential_generation: Option<u64>,
+    pub(super) stamp: ConnectionStamp,
     pub(super) reason: String,
     pub(super) kind: FailureKind,
 }
@@ -25,14 +28,11 @@ pub(super) struct FailureState {
 #[derive(Default)]
 pub(super) struct McpFailures(pub(super) HashMap<String, FailureState>);
 
-pub(super) fn prune_failures(failures: &mut McpFailures, wanted: &[(String, Desired)]) {
-    // Clear failure holds/backoffs when connection config or credentials changed, or connection left wanted.
+pub(super) fn prune_failures(failures: &mut McpFailures, wanted: &DesiredServers) {
     failures.0.retain(|id, failure| {
-        wanted.iter().any(|(wanted, want)| {
-            wanted == id
-                && want.revision == failure.revision
-                && want.credential_generation == failure.credential_generation
-        })
+        wanted
+            .get(id)
+            .is_some_and(|want| want.stamp == failure.stamp)
     });
 }
 
@@ -59,15 +59,10 @@ pub(super) fn record_failure(
         FailureKind::ConfigHold
     } else {
         let prev_attempts = match failures.0.get(&id) {
-            Some(prev)
-                if prev.revision == launch.revision
-                    && prev.credential_generation == launch.credential_generation =>
-            {
-                match prev.kind {
-                    FailureKind::Transient { attempts, .. } => attempts,
-                    FailureKind::ConfigHold => 0,
-                }
-            }
+            Some(prev) if prev.stamp == launch.stamp => match prev.kind {
+                FailureKind::Transient { attempts, .. } => attempts,
+                FailureKind::ConfigHold => 0,
+            },
             _ => 0,
         };
         let attempts = prev_attempts.saturating_add(1);
@@ -88,8 +83,7 @@ pub(super) fn record_failure(
     failures.0.insert(
         id,
         FailureState {
-            revision: launch.revision,
-            credential_generation: launch.credential_generation,
+            stamp: launch.stamp,
             reason,
             kind,
         },

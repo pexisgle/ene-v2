@@ -1,6 +1,7 @@
 //! ECS-free MCP transport connection opening, backoff calculation, and tool naming helpers.
 
 use backon::{BackoffBuilder as _, ExponentialBuilder};
+use ene_domain::settings::McpConnection as McpConfig;
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use rig_agent::tool::server::ToolServerHandle;
 use rig_rmcp::{McpClientHandler, McpConnection};
@@ -13,46 +14,13 @@ use rmcp::{
         },
     },
 };
-use std::{collections::BTreeMap, time::Duration};
+use std::time::Duration;
 
 #[cfg(windows)]
 use super::npx::CREATE_NO_WINDOW;
 
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Launch {
-    pub revision: u64,
-    pub credential_generation: Option<u64>,
-    pub owner: String,
-}
-
-/// What one settings row asks the host to connect to.
-#[derive(Clone, Debug)]
-pub struct Desired {
-    pub revision: u64,
-    pub credential_generation: Option<u64>,
-    pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub cwd: String,
-    pub env: BTreeMap<String, String>,
-    pub headers: BTreeMap<String, String>,
-    pub auth_header: String,
-    pub secret_env_var: String,
-    pub endpoint: String,
-    pub secret: Option<String>,
-    pub allowed: Vec<String>,
-}
-
-/// Live inspection state returned to RPC connection probes.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CheckState {
-    Connected(Vec<String>),
-    Failed(String),
-    Connecting,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConnectFailure {
@@ -93,14 +61,15 @@ pub fn is_config_error_message(message: &str) -> bool {
 
 /// Opens either a stdio child-process MCP server or a streamable HTTP MCP server.
 pub async fn open(
-    want: &Desired,
+    want: &McpConfig,
+    secret: Option<&str>,
     registry: ToolServerHandle,
     http_client: reqwest::Client,
 ) -> Result<McpConnection, ConnectFailure> {
-    if !want.command.is_empty() {
-        Box::pin(open_stdio(want, registry)).await
-    } else if !want.endpoint.is_empty() {
-        Box::pin(open_http(want, registry, http_client)).await
+    if !want.command.trim().is_empty() {
+        Box::pin(open_stdio(want, secret, registry)).await
+    } else if !want.endpoint.endpoint.trim().is_empty() {
+        Box::pin(open_http(want, secret, registry, http_client)).await
     } else {
         Err(ConnectFailure {
             reason: "the MCP connection names neither a command nor an endpoint".to_owned(),
@@ -110,34 +79,35 @@ pub async fn open(
 }
 
 async fn open_stdio(
-    want: &Desired,
+    want: &McpConfig,
+    secret: Option<&str>,
     registry: ToolServerHandle,
 ) -> Result<McpConnection, ConnectFailure> {
     let handler = McpClientHandler::new(ClientConfig::default(), registry);
     #[cfg(windows)]
-    let mut command = if super::npx::is_npx_command(&want.command) {
+    let mut command = if super::npx::is_npx_command(want.command.trim()) {
         super::npx::build_command(want).await?
     } else {
-        let mut command = tokio::process::Command::new(&want.command);
+        let mut command = tokio::process::Command::new(want.command.trim());
         command.args(&want.args);
         command
     };
     #[cfg(not(windows))]
     let mut command = {
-        let mut command = tokio::process::Command::new(&want.command);
+        let mut command = tokio::process::Command::new(want.command.trim());
         command.args(&want.args);
         command
     };
-    if !want.cwd.is_empty() {
-        command.current_dir(&want.cwd);
+    if !want.cwd.trim().is_empty() {
+        command.current_dir(want.cwd.trim());
     }
     if !want.env.is_empty() {
         command.envs(&want.env);
     }
-    if let Some(secret) = want.secret.as_deref().filter(|s| !s.is_empty())
-        && !want.secret_env_var.is_empty()
+    if let Some(secret) = secret.filter(|s| !s.is_empty())
+        && !want.secret_env_var.trim().is_empty()
     {
-        command.env(&want.secret_env_var, secret);
+        command.env(want.secret_env_var.trim(), secret);
     }
     let mut wrap = process_wrap::tokio::CommandWrap::from(command);
     #[cfg(unix)]
@@ -168,12 +138,13 @@ async fn open_stdio(
 }
 
 async fn open_http(
-    want: &Desired,
+    want: &McpConfig,
+    secret: Option<&str>,
     registry: ToolServerHandle,
     client: reqwest::Client,
 ) -> Result<McpConnection, ConnectFailure> {
     let handler = McpClientHandler::new(ClientConfig::default(), registry);
-    let mut config = StreamableHttpClientTransportConfig::with_uri(want.endpoint.clone());
+    let mut config = StreamableHttpClientTransportConfig::with_uri(want.endpoint.endpoint.trim());
     for (name, value) in &want.headers {
         let header_name =
             HeaderName::from_bytes(name.trim().as_bytes()).map_err(|error| ConnectFailure {
@@ -186,7 +157,7 @@ async fn open_http(
         })?;
         config.custom_headers.insert(header_name, header_value);
     }
-    apply_http_auth_headers(&mut config, want)?;
+    apply_http_auth_headers(&mut config, &want.auth_header, secret)?;
     let transport = StreamableHttpClientTransport::with_client(client, config);
     Box::pin(handler.connect(transport)).await.map_err(|error| {
         let reason = error.to_string();
@@ -199,17 +170,13 @@ async fn open_http(
 
 fn apply_http_auth_headers(
     config: &mut StreamableHttpClientTransportConfig,
-    want: &Desired,
+    auth_header: &str,
+    secret: Option<&str>,
 ) -> Result<(), ConnectFailure> {
-    let Some(secret) = want
-        .secret
-        .as_deref()
-        .map(str::trim)
-        .filter(|secret| !secret.is_empty())
-    else {
+    let Some(secret) = secret.map(str::trim).filter(|secret| !secret.is_empty()) else {
         return Ok(());
     };
-    let auth_header = want.auth_header.trim();
+    let auth_header = auth_header.trim();
     if auth_header.is_empty() || auth_header.eq_ignore_ascii_case("authorization") {
         if let Some(bearer) = secret
             .strip_prefix("Bearer ")
@@ -273,24 +240,6 @@ fn push_allowed(out: &mut String, text: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn empty_desired() -> Desired {
-        Desired {
-            revision: 1,
-            credential_generation: None,
-            name: "srv".into(),
-            command: String::new(),
-            args: Vec::new(),
-            cwd: String::new(),
-            env: BTreeMap::new(),
-            headers: BTreeMap::new(),
-            auth_header: String::new(),
-            secret_env_var: String::new(),
-            endpoint: String::new(),
-            secret: None,
-            allowed: Vec::new(),
-        }
-    }
-
     #[test]
     fn retry_jitter_stays_inside_the_backoff_window() {
         for (attempt, upper) in [(1, 1), (2, 2), (6, 32), (7, 60), (10, 60), (u32::MAX, 60)] {
@@ -324,21 +273,16 @@ mod tests {
 
     #[test]
     fn http_auth_headers_apply_bearer_custom_scheme_and_named_header() {
-        let mut d = empty_desired();
-        d.secret = Some("Bearer tok-1".into());
         let mut cfg = StreamableHttpClientTransportConfig::with_uri("http://127.0.0.1");
-        apply_http_auth_headers(&mut cfg, &d).unwrap();
+        apply_http_auth_headers(&mut cfg, "", Some("Bearer tok-1")).unwrap();
         assert_eq!(cfg.auth_header.as_deref(), Some("tok-1"));
 
-        d.secret = Some("Token abc".into());
         let mut cfg = StreamableHttpClientTransportConfig::with_uri("http://127.0.0.1");
-        apply_http_auth_headers(&mut cfg, &d).unwrap();
+        apply_http_auth_headers(&mut cfg, "", Some("Token abc")).unwrap();
         assert_eq!(cfg.custom_headers[&AUTHORIZATION], "Token abc");
 
-        d.auth_header = "x-api-key".into();
-        d.secret = Some("k-1".into());
         let mut cfg = StreamableHttpClientTransportConfig::with_uri("http://127.0.0.1");
-        apply_http_auth_headers(&mut cfg, &d).unwrap();
+        apply_http_auth_headers(&mut cfg, "x-api-key", Some("k-1")).unwrap();
         assert_eq!(
             cfg.custom_headers[&HeaderName::from_static("x-api-key")],
             "k-1"
@@ -347,9 +291,9 @@ mod tests {
 
     #[tokio::test]
     async fn open_rejects_empty_command_and_endpoint_as_config_error() {
-        let d = empty_desired();
         let Err(err) = open(
-            &d,
+            &McpConfig::default(),
+            None,
             rig_agent::tool::server::ToolServer::new().run(),
             reqwest::Client::new(),
         )
