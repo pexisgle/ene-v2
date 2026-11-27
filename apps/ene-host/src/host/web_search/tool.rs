@@ -1,14 +1,15 @@
-use super::{
-    DEFAULT_RESULTS, MAX_QUERY_CHARS, MAX_RESULTS, NAME, SearchBinding, SearchConfigError, execute,
-};
+use super::{DEFAULT_RESULTS, MAX_QUERY_CHARS, MAX_RESULTS, NAME, ResolvedSearch, execute};
 use crate::host::{
-    background, db::Store, model::Credentials, providers::Providers, resources::HostRuntime,
+    background, db::Store, model::Credentials, permission::Approved, providers::Providers,
+    resources::HostRuntime,
 };
 use bevy_ecs::{prelude::*, system::SystemParam};
 use bevy_tasks::{AsyncComputeTaskPool, TaskPool};
+use ene_policy::{Verdict, decide_action};
 use rig_core::tool::{ToolErrorKind, ToolExecutionError, ToolOutput, ToolResult, Touches};
 use rig_ecs::prelude::*;
 use serde::Deserialize;
+use serde_json::Value;
 
 pub(crate) struct SearchPlugin;
 
@@ -24,7 +25,7 @@ impl Plugin for SearchPlugin {
                 footprint: Some(Touches::Independent),
             },
             |called: On<ToolCalled<SearchArgs>>,
-             bindings: Query<&SearchBinding>,
+             bindings: Query<BoundSearch>,
              decisions: Query<&mut Decision>,
              services: SearchServices<'_>,
              commands: Commands| {
@@ -92,9 +93,11 @@ struct SearchServices<'w> {
     wake: Res<'w, Wake>,
 }
 
+type BoundSearch<'a> = (&'a ResolvedSearch, &'a ToolRequest, Option<&'a Approved>);
+
 fn search(
     called: &ToolCalled<SearchArgs>,
-    bindings: Query<&SearchBinding>,
+    bindings: Query<BoundSearch>,
     mut decisions: Query<&mut Decision>,
     services: &SearchServices<'_>,
     mut commands: Commands,
@@ -120,24 +123,16 @@ enum SearchStartError {
     NotBound,
     #[error(transparent)]
     Input(#[from] SearchInputError),
-    #[error(transparent)]
-    Connection(#[from] SearchConfigError),
     #[error("the host HTTP runtime is unavailable")]
     Runtime,
 }
 
 fn start(
-    binding: Option<&SearchBinding>,
+    binding: Option<BoundSearch<'_>>,
     args: &SearchArgs,
     services: &SearchServices<'_>,
 ) -> Result<Running, SearchStartError> {
-    let binding = binding.ok_or(SearchStartError::NotBound)?;
-    let fallback = Providers::default();
-    let resolved = binding.current(
-        &services.store,
-        services.credentials.as_deref(),
-        services.providers.as_deref().unwrap_or(&fallback),
-    )?;
+    let (resolved, request, grant) = binding.ok_or(SearchStartError::NotBound)?;
     let runtime = services
         .runtime
         .as_ref()
@@ -146,8 +141,24 @@ fn start(
         .ok_or(SearchStartError::Runtime)?;
     let (query, limit) = args.effective(resolved.binding.max_results)?;
     let query = query.to_owned();
+    let resolved = resolved.clone();
+    let arguments = Value::Object(request.call.function.arguments.clone());
+    let store = services.store.as_ref().clone();
+    let credentials = services.credentials.as_deref().cloned();
+    let providers = services.providers.as_deref().cloned().unwrap_or_default();
+    let grant = grant.cloned();
     let task = background::spawn(&runtime, None, async move {
-        execute(&resolved, &query, limit).await
+        execute(&resolved, &query, limit, || {
+            authorize_send(
+                &resolved,
+                &arguments,
+                &store,
+                credentials.as_ref(),
+                &providers,
+                grant.as_ref(),
+            )
+        })
+        .await
     });
     Ok(Running::answering(
         AsyncComputeTaskPool::get_or_init(TaskPool::default),
@@ -163,4 +174,43 @@ fn start(
             }
         },
     ))
+}
+
+fn authorize_send(
+    resolved: &ResolvedSearch,
+    arguments: &Value,
+    store: &Store,
+    credentials: Option<&Credentials>,
+    providers: &Providers,
+    grant: Option<&Approved>,
+) -> Result<(), ToolExecutionError> {
+    let current = resolved
+        .binding
+        .current(store, credentials, providers)
+        .map_err(|error| ToolExecutionError::other(error.to_string()))?;
+    let action = current
+        .action(arguments, credentials)
+        .map_err(|error| ToolExecutionError::other(error.to_string()))?;
+    let policy = store.policy_repo();
+    let policy_failure = |_| ToolExecutionError::other("search policy is unavailable");
+    let rules = policy.policy_rules().map_err(policy_failure)?;
+    let allowed = match (grant, decide_action(&rules, &action)) {
+        (_, Verdict::Deny { .. }) => false,
+        (Some(Approved::Human), _) | (None, Verdict::Allow) => true,
+        (
+            Some(Approved::Decision {
+                texts,
+                rules: approved,
+            }),
+            Verdict::Allow | Verdict::NeedsDecision { .. },
+        ) => *approved == rules && *texts == policy.policy_texts().map_err(policy_failure)?,
+        _ => false,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(ToolExecutionError::other(
+            "the search permission changed before the query was sent",
+        ))
+    }
 }

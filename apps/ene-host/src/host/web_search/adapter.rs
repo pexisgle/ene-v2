@@ -99,6 +99,7 @@ pub(super) async fn send_search_request(
     resolved: &ResolvedSearch,
     query: &str,
     limit: usize,
+    authorize: impl FnOnce() -> Result<(), ToolExecutionError> + Send,
 ) -> Result<reqwest::Response, ToolExecutionError> {
     let mut url = resolved.binding.endpoint.clone();
     let key = resolved.binding.secret.as_deref().unwrap_or_default();
@@ -138,6 +139,7 @@ pub(super) async fn send_search_request(
                 "contents": {"highlights": {"maxCharacters": 500}},
             })),
     };
+    authorize()?;
     request
         .header(reqwest::header::USER_AGENT, SEARCH_USER_AGENT)
         .header(reqwest::header::ACCEPT, "application/json")
@@ -339,5 +341,59 @@ mod tests {
         );
         take_mwmbl_slot(&slot).await;
         assert_eq!(start.elapsed(), Duration::from_secs(1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_rate_queue_rechecks_admission_before_opening_a_connection() {
+        use super::super::{resolve_connection, tests::search_test_connection};
+        use crate::host::{providers::Providers, settings::CredentialState};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .resolve("api.mwmbl.org", address)
+            .build()
+            .unwrap();
+        let config = search_test_connection(
+            "queue",
+            "Mwmbl",
+            "mwmbl",
+            format!("http://api.mwmbl.org:{}/search/", address.port()),
+            CredentialState::Absent,
+            5,
+        );
+        let resolved = resolve_connection(&config, None, &Providers::none(), 0).unwrap();
+        take_mwmbl_slot(&MWMBL_NEXT_REQUEST).await;
+        let allowed = AtomicBool::new(true);
+        let checked = AtomicBool::new(false);
+        let request = send_search_request(&client, &resolved, "fixture query", 5, || {
+            checked.store(true, Ordering::SeqCst);
+            if allowed.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err(ToolExecutionError::other("authority changed while waiting"))
+            }
+        });
+        tokio::pin!(request);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), &mut request)
+                .await
+                .is_err()
+        );
+        assert!(!checked.load(Ordering::SeqCst));
+        allowed.store(false, Ordering::SeqCst);
+        let error = request.await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("authority changed while waiting")
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), listener.accept())
+                .await
+                .is_err()
+        );
     }
 }

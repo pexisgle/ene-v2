@@ -197,7 +197,9 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
     );
     let resolved_mwmbl = resolve_connection(&mwmbl_conn, Some(&creds), &providers, 0).unwrap();
     assert!(resolved_mwmbl.binding.endpoint.path().ends_with('/'));
-    let out = execute(&resolved_mwmbl, "rust", 5).await.unwrap();
+    let out = execute(&resolved_mwmbl, "rust", 5, || Ok(()))
+        .await
+        .unwrap();
     assert_eq!(out["results"][0]["title"], "Mwmbl Hit");
 
     let searx_conn = search_test_connection(
@@ -209,7 +211,9 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
         3,
     );
     let resolved_searx = resolve_connection(&searx_conn, Some(&creds), &providers, 0).unwrap();
-    let out = execute(&resolved_searx, "rust", 5).await.unwrap();
+    let out = execute(&resolved_searx, "rust", 5, || Ok(()))
+        .await
+        .unwrap();
     assert_eq!(out["results"][0]["title"], "SearX Hit");
 
     let brave_conn = search_test_connection(
@@ -221,7 +225,9 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
         5,
     );
     let resolved_brave = resolve_connection(&brave_conn, Some(&creds), &providers, 0).unwrap();
-    let out = execute(&resolved_brave, "rust", 5).await.unwrap();
+    let out = execute(&resolved_brave, "rust", 5, || Ok(()))
+        .await
+        .unwrap();
     assert_eq!(out["results"][0]["snippet"], "brave desc");
 
     let tavily_conn = search_test_connection(
@@ -233,7 +239,9 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
         5,
     );
     let resolved_tavily = resolve_connection(&tavily_conn, Some(&creds), &providers, 0).unwrap();
-    let out = execute(&resolved_tavily, "rust", 5).await.unwrap();
+    let out = execute(&resolved_tavily, "rust", 5, || Ok(()))
+        .await
+        .unwrap();
     assert_eq!(out["results"][0]["title"], "Tavily Hit");
 
     let exa_conn = search_test_connection(
@@ -253,7 +261,7 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
         Some("TAVILY_API_KEY")
     );
     let resolved_exa = resolve_connection(&exa_conn, Some(&creds), &providers, 0).unwrap();
-    let out = execute(&resolved_exa, "rust", 5).await.unwrap();
+    let out = execute(&resolved_exa, "rust", 5, || Ok(())).await.unwrap();
     assert_eq!(out["results"].as_array().unwrap().len(), 2);
     assert!(!out.to_string().contains("exa%2Dsecret"));
     assert_eq!(out["results"][0]["title"], "Exa Hit");
@@ -288,7 +296,9 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
         ..exa_conn
     };
     let resolved_bad = resolve_connection(&exa_bad, Some(&creds), &providers, 0).unwrap();
-    let err = execute(&resolved_bad, "rust", 5).await.unwrap_err();
+    let err = execute(&resolved_bad, "rust", 5, || Ok(()))
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("HTTP 401"));
     assert!(!err.to_string().contains("wrong-key"));
 

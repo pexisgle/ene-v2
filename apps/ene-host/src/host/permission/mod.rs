@@ -20,4 +20,6 @@ pub(crate) use ene_policy::{
 };
 #[cfg(test)]
 pub(crate) use gate::ResolveApprovalArgs;
-pub(crate) use gate::{Approvals, CallBinding, GatePlugin, issue_hold, notify_approval_card};
+pub(crate) use gate::{
+    Approvals, Approved, CallBinding, GatePlugin, issue_hold, notify_approval_card,
+};

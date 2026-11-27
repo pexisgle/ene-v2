@@ -100,7 +100,7 @@ fn is_loopback_ip(url: &Url) -> bool {
 
 /// The route the permission gate evaluated. A held call cannot switch to
 /// a replacement connection or to a different revision of the same one.
-#[derive(Clone, Component)]
+#[derive(Clone)]
 pub(crate) struct SearchBinding {
     connection: ConnectionId,
     created_revision: u64,
@@ -167,6 +167,7 @@ impl SearchBinding {
     }
 }
 
+#[derive(Clone, Component)]
 pub(crate) struct ResolvedSearch {
     pub(crate) provider_name: String,
     pub(crate) binding: SearchBinding,
@@ -334,7 +335,7 @@ pub(crate) async fn probe(
 ) -> Check {
     let checked_at = util::now();
     let failure = match resolve_connection(connection, Some(credentials), providers, 0) {
-        Ok(resolved) => execute(&resolved, "rust programming", 1)
+        Ok(resolved) => execute(&resolved, "rust programming", 1, || Ok(()))
             .await
             .err()
             .map(|error| Failure::new("connection_check", error.to_string())),
@@ -352,6 +353,7 @@ async fn execute(
     resolved: &ResolvedSearch,
     query: &str,
     limit: usize,
+    authorize: impl FnOnce() -> Result<(), ToolExecutionError> + Send,
 ) -> Result<Value, ToolExecutionError> {
     tokio::time::timeout(TIMEOUT, async {
         let endpoint = &resolved.binding.endpoint;
@@ -361,7 +363,7 @@ async fn execute(
             net::client()
         }
         .map_err(|error| ToolExecutionError::other(error.to_string()))?;
-        let response = send_search_request(&client, resolved, query, limit).await?;
+        let response = send_search_request(&client, resolved, query, limit, authorize).await?;
         let status = response.status();
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(ToolExecutionError::other(format!(

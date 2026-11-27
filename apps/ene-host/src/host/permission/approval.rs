@@ -8,7 +8,7 @@ use crate::host::{
     error::{HostError, Result},
     notify::Notifier,
     resources::CompanionAgent,
-    web_search::{self, SearchBinding, SearchConfigError},
+    web_search::{self, ResolvedSearch, SearchConfigError},
 };
 use bevy_ecs::prelude::*;
 use ene_policy::{
@@ -192,15 +192,16 @@ fn persist_always_allow_rule(
 }
 
 fn revalidate_search(
-    binding: Option<&SearchBinding>,
+    resolved: Option<&ResolvedSearch>,
     store: &Store,
     credentials: Option<&crate::host::model::Credentials>,
     providers: &crate::host::providers::Providers,
     arguments: &Value,
 ) -> Result<(Verdict, Option<PolicyRule>)> {
     let changed = || HostError::Conflict(SearchConfigError::ConnectionChanged.to_string());
-    let binding = binding.ok_or_else(changed)?;
-    let resolved = binding
+    let resolved = resolved
+        .ok_or_else(changed)?
+        .binding
         .current(store, credentials, providers)
         .map_err(|error| match error {
             SearchConfigError::Settings(error) => error.into(),
@@ -234,7 +235,7 @@ fn approve_call(
     let scoped_rule = if name == web_search::NAME {
         let fallback = crate::host::providers::Providers::default();
         match revalidate_search(
-            world.get::<SearchBinding>(call),
+            world.get::<ResolvedSearch>(call),
             store,
             world.get_resource(),
             world.get_resource().unwrap_or(&fallback),
@@ -280,6 +281,15 @@ fn approve_call(
                 ));
             }
         };
+    let grant = if automated {
+        let policy = store.policy_repo();
+        Approved::Decision {
+            texts: policy.policy_texts()?,
+            rules: policy.policy_rules()?,
+        }
+    } else {
+        Approved::Human
+    };
     let resolved = repo.resolve_approval_with_client(
         request_id,
         ApprovalStatus::Approved,
@@ -291,7 +301,7 @@ fn approve_call(
     {
         binding.client_id = target;
     }
-    world.entity_mut(call).insert(Approved);
+    world.entity_mut(call).insert(grant);
     Ok((resolved, scoped_rule))
 }
 

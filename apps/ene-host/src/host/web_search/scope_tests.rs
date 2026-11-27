@@ -135,6 +135,55 @@ fn persisted_search_rules_follow_effective_requests_and_accounts() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deny_saved_after_approval_prevents_the_pending_search_request() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let (address, server) = spawn_searx_test_server(Arc::clone(&hits)).await;
+    let mut harness = Harness::new([
+        vec![
+            MockStreamEvent::tool_call("search", NAME, json!({"query": "ene"})),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            MockStreamEvent::text("送信が中止されました"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+    ]);
+    configure_test_search(&harness, format!("http://{address}/searx"));
+    let store = harness.store();
+    let policies = store.policy_repo();
+    let policy = |effect| PolicyRule {
+        id: "search-permission".into(),
+        tool_name: NAME.into(),
+        pattern: "*".into(),
+        effect,
+        created_at: String::new(),
+    };
+    policies
+        .apply_policy_rules(&[policy(PolicyEffect::Confirm)], &[])
+        .unwrap();
+    harness.accept("search-request", "調べて").unwrap();
+    let pending = || {
+        store
+            .approval_repo()
+            .approvals(permission::ApprovalStatus::Pending)
+            .unwrap()
+    };
+    harness.run_until(|_| !pending().is_empty());
+    permission::submit_with_outcome(
+        harness.app.world_mut(),
+        permission::ApprovalRequest::Operator(&pending()[0].request_id),
+        permission::ApprovalDecision::Approve,
+    )
+    .unwrap();
+    policies
+        .apply_policy_rules(&[policy(PolicyEffect::Deny)], &[])
+        .unwrap();
+    harness.run_until(|world| companion_replied_with(world, "送信が中止されました"));
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn always_allow_saves_one_rule_while_confirm_still_controls_dispatch() {
     let hits = Arc::new(AtomicUsize::new(0));
     let (address, server) = spawn_searx_test_server(Arc::clone(&hits)).await;

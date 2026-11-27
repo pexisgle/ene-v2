@@ -17,7 +17,8 @@ use crate::host::{
 };
 use bevy_ecs::prelude::*;
 use ene_policy::{
-    Approval, ApprovalStatus, PolicyRule, Verdict, canonicalise, decide_action, is_host_tool,
+    Approval, ApprovalStatus, PolicyRule, PolicyText, Verdict, canonicalise, decide_action,
+    is_host_tool,
 };
 use ene_rpc as w;
 use ene_store::util::truncate;
@@ -52,8 +53,14 @@ pub(crate) struct ResolveApprovalArgs {
 }
 
 /// The marker the host inserts on a call whose approval was granted.
-#[derive(Component)]
-pub(crate) struct Approved;
+#[derive(Clone, Component)]
+pub(crate) enum Approved {
+    Human,
+    Decision {
+        texts: Vec<PolicyText>,
+        rules: Vec<PolicyRule>,
+    },
+}
 
 /// What the call was accepted against. The device executor dispatches to it.
 #[derive(Component, Clone, Debug)]
@@ -384,8 +391,8 @@ fn issue_gate_hold(
 ) -> std::ops::ControlFlow<(), (Approval, String)> {
     let (normalized, hash) = canonicalise(&binding.call.tool_name, &binding.call.arguments);
     let external_destination = world
-        .get::<crate::host::web_search::SearchBinding>(binding.call.entity)
-        .map(|search| search.display_destination.clone());
+        .get::<crate::host::web_search::ResolvedSearch>(binding.call.entity)
+        .map(|search| search.binding.display_destination.clone());
     let target = external_destination.clone().unwrap_or(target);
     let approval = Approval {
         request_id: uuid::Uuid::new_v4().to_string(),
