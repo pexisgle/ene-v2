@@ -7,7 +7,7 @@ use ene_client_core::{
     SearchAdapter,
     domain::{Connection, ConnectionCheck, ConnectionKind},
 };
-use ene_domain::CredentialState;
+use ene_domain::{CredentialState, SearchSelection};
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 use std::collections::BTreeMap;
 
@@ -39,12 +39,12 @@ pub(super) fn render_web_search_card(
         .iter()
         .filter(|c| c.kind == ConnectionKind::Search)
         .collect();
-    let active_conn = search_conns.iter().copied().find(|c| {
-        c.enabled
-            && (!c.search_adapter().is_some_and(search_adapter_requires_key)
-                || c.credential_state.is_configured())
-    });
-    let active_fallback = active_conn.or_else(|| search_conns.iter().copied().find(|c| c.enabled));
+    let selection = SearchSelection::from_enabled(
+        search_conns
+            .iter()
+            .copied()
+            .filter(|connection| connection.enabled),
+    );
 
     let provider_rows: Vec<AnyElement> = SEARCH_PROVIDERS
         .iter()
@@ -52,7 +52,7 @@ pub(super) fn render_web_search_card(
             render_search_provider_row(pane, spec, &search_conns, (checks, live), theme, cx)
         })
         .collect();
-    let switcher = render_search_switcher(&search_conns, active_fallback, live, &pane.hub, theme);
+    let switcher = render_search_switcher(&search_conns, selection, live, &pane.hub, theme);
 
     div()
         .w_full()
@@ -64,7 +64,7 @@ pub(super) fn render_web_search_card(
         .flex()
         .flex_col()
         .gap(px(10.))
-        .child(render_search_card_header(active_conn, active_fallback, theme))
+        .child(render_search_card_header(selection, theme))
         .child(
             div()
                 .text_xs()
@@ -91,7 +91,6 @@ fn render_search_provider_row(
     });
     let conn_id = existing.map(|c| c.id.clone());
     let has_cred = existing.is_some_and(|c| c.credential_state.is_configured());
-    let is_active = existing.is_some_and(|c| c.enabled);
     let is_checking = conn_id
         .as_ref()
         .is_some_and(|id| pane.hub.read(cx).setup.checking_connections.contains(id));
@@ -119,7 +118,6 @@ fn render_search_provider_row(
             existing,
             conn_id,
             has_cred,
-            is_active,
             is_checking,
             check,
             live,
@@ -192,38 +190,44 @@ struct ProviderRowMeta<'a> {
     existing: Option<&'a Connection>,
     conn_id: Option<String>,
     has_cred: bool,
-    is_active: bool,
     is_checking: bool,
     check: Option<&'a ConnectionCheck>,
     live: bool,
 }
 
-fn render_search_card_header(
-    active_conn: Option<&Connection>,
-    active_fallback: Option<&Connection>,
-    theme: &Theme,
-) -> gpui::Div {
-    let (summary_label, summary_dot, summary_bg, summary_fg) = match active_conn {
-        Some(conn) => (
-            format!("使用中: {}", conn.name),
-            theme.mint,
-            theme.mint_soft,
-            theme.mint_fg,
-        ),
-        None => match active_fallback {
-            Some(conn) => (
+fn render_search_card_header(selection: SearchSelection<&Connection>, theme: &Theme) -> gpui::Div {
+    let (summary_label, summary_dot, summary_bg, summary_fg) = match selection {
+        SearchSelection::Selected(conn)
+            if conn
+                .search_adapter()
+                .is_some_and(search_adapter_requires_key)
+                && !conn.credential_state.is_configured() =>
+        {
+            (
                 format!("{}（キー登録が必要）", conn.name),
                 theme.amber,
                 theme.amber_soft,
                 theme.amber_fg,
-            ),
-            None => (
-                "未設定（検索オフ）".into(),
-                theme.ink_placeholder,
-                theme.bg_blush,
-                theme.ink_muted,
-            ),
-        },
+            )
+        }
+        SearchSelection::Selected(conn) => (
+            format!("選択中 {}", conn.name),
+            theme.mint,
+            theme.mint_soft,
+            theme.mint_fg,
+        ),
+        SearchSelection::Ambiguous => (
+            "検索先を1件選択してください".into(),
+            theme.amber,
+            theme.amber_soft,
+            theme.amber_fg,
+        ),
+        SearchSelection::Off => (
+            "検索オフ".into(),
+            theme.ink_placeholder,
+            theme.bg_blush,
+            theme.ink_muted,
+        ),
     };
     div()
         .flex()
@@ -269,9 +273,7 @@ fn render_provider_header(
             None => None,
         }
     };
-    let hub_use = hub.clone();
     let hub_check = hub.clone();
-    let use_id = meta.conn_id.clone();
     let check_id = meta.conn_id;
 
     div()
@@ -297,14 +299,6 @@ fn render_provider_header(
                 .child(status_pill(cred_label, None, cred_bg, cred_fg))
                 .when_some(check_badge, |this, (label, bg, fg)| {
                     this.child(status_pill(label, None, bg, fg))
-                })
-                .when(meta.is_active && meta.has_cred, |this| {
-                    this.child(status_pill(
-                        "使用中",
-                        Some(theme.mint),
-                        theme.mint_soft,
-                        theme.mint_fg,
-                    ))
                 }),
         )
         .child(
@@ -313,25 +307,6 @@ fn render_provider_header(
                 .flex_row()
                 .items_center()
                 .gap(px(6.))
-                .when_some(
-                    use_id.filter(|_| meta.has_cred && !meta.is_active),
-                    |this, cid| {
-                        this.child(pill_button(
-                            SharedString::from(format!(
-                                "search-card-use-{}",
-                                spec.adapter.provider().adapter_id
-                            )),
-                            "この検索を使う",
-                            Tone::Soft.icon(Icon::Check).enabled(meta.live),
-                            theme,
-                            move |_, cx| {
-                                hub_use.update(cx, |hub, cx| {
-                                    hub.assign_search_connection(Some(&cid), cx);
-                                });
-                            },
-                        ))
-                    },
-                )
                 .when_some(check_id.filter(|_| meta.has_cred), |this, cid| {
                     this.child(pill_button(
                         SharedString::from(format!(
@@ -359,7 +334,7 @@ fn render_provider_header(
 
 fn render_search_switcher(
     search_conns: &[&Connection],
-    active_fallback: Option<&Connection>,
+    selection: SearchSelection<&Connection>,
     live: bool,
     hub: &Entity<Hub>,
     theme: &Theme,
@@ -371,7 +346,8 @@ fn render_search_switcher(
         .iter()
         .map(|conn| {
             let cid = conn.id.clone();
-            let selected = active_fallback.is_some_and(|a| a.id == conn.id);
+            let selected =
+                matches!(selection, SearchSelection::Selected(active) if active.id == conn.id);
             let hub_sw = hub.clone();
             pill_button(
                 SharedString::from(format!("search-switch-{}", conn.id)),
@@ -387,7 +363,7 @@ fn render_search_switcher(
         })
         .collect();
     let hub_off = hub.clone();
-    let is_off = active_fallback.is_none();
+    let is_off = matches!(selection, SearchSelection::Off);
     chips.push(pill_button(
         "search-switch-off",
         "オフ",

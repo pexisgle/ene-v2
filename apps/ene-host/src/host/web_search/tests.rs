@@ -296,62 +296,54 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
 }
 
 #[test]
-fn resolve_skips_unconfigured_enabled_search_when_another_is_ready() {
+fn search_requires_a_single_explicit_destination_even_if_another_is_ready() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("host.sqlite3")).unwrap();
     let creds = Credentials::new(true);
     creds.remember("search-exa", "exa-valid-key".into());
     let providers = Providers::none();
+    let repo = store.settings_repo();
+    let mut unconfigured = search_test_connection(
+        "search-tavily",
+        "Tavily",
+        "tavily",
+        String::new(),
+        CredentialState::Absent,
+        5,
+    );
+    let mut ready = search_test_connection(
+        "search-exa",
+        "Exa",
+        "exa",
+        String::new(),
+        CredentialState::Registered,
+        5,
+    );
+    repo.update_settings(
+        repo.settings_revision().unwrap(),
+        &[(unconfigured.clone(), 0), (ready.clone(), 0)],
+    )
+    .unwrap();
+    assert!(matches!(
+        resolve(&store, Some(&creds), &providers),
+        Err(SearchConfigError::AmbiguousSelection)
+    ));
 
-    let rev = store.settings_repo().settings_revision().unwrap();
-    // `a-unconfigured-tavily` sorts before `search-exa` by id, but has no key.
-    let unconfigured = Connection {
-        id: ene_domain::ConnectionId::parse("a-unconfigured-tavily").unwrap(),
-        name: "Tavily (no key)".into(),
-        enabled: true,
-        kind: ConnectionKind::Search,
-        credential_state: CredentialState::Absent,
-        revision: 0,
-        last_check: None,
-        config: ConnectionConfig::Search(SearchConnection {
-            endpoint: Endpoint {
-                adapter: "tavily".into(),
-                endpoint: SearchAdapter::Tavily
-                    .provider()
-                    .default_endpoint
-                    .unwrap()
-                    .into(),
-                ..Default::default()
-            },
-            max_results: 5,
-        }),
-    };
-    let ready_exa = Connection {
-        id: ene_domain::ConnectionId::parse("search-exa").unwrap(),
-        name: "Web検索 (Exa)".into(),
-        enabled: true,
-        kind: ConnectionKind::Search,
-        credential_state: CredentialState::Registered,
-        revision: 0,
-        last_check: None,
-        config: ConnectionConfig::Search(SearchConnection {
-            endpoint: Endpoint {
-                adapter: "exa".into(),
-                endpoint: SearchAdapter::Exa
-                    .provider()
-                    .default_endpoint
-                    .unwrap()
-                    .into(),
-                ..Default::default()
-            },
-            max_results: 5,
-        }),
-    };
-    store
-        .settings_repo()
-        .update_settings(rev, &[(unconfigured, 0), (ready_exa, 0)])
+    ready.enabled = false;
+    repo.update_settings(repo.settings_revision().unwrap(), &[(ready.clone(), 1)])
         .unwrap();
+    assert!(matches!(
+        resolve(&store, Some(&creds), &providers),
+        Err(SearchConfigError::MissingCredential("Tavily"))
+    ));
 
+    unconfigured.enabled = false;
+    ready.enabled = true;
+    repo.update_settings(
+        repo.settings_revision().unwrap(),
+        &[(unconfigured, 1), (ready, 2)],
+    )
+    .unwrap();
     let resolved = resolve(&store, Some(&creds), &providers).unwrap();
     assert_eq!(resolved.binding.adapter, SearchAdapter::Exa);
     assert_eq!(

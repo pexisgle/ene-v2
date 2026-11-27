@@ -13,6 +13,7 @@ pub mod failure;
 pub mod ids;
 pub mod json;
 pub mod schedule;
+mod search;
 pub mod settings;
 pub mod work;
 
@@ -23,6 +24,7 @@ pub use ene_policy::{COMPUTER_USE, PolicyEffect, PolicyRule, PolicyText, RiskLev
 pub use error::{DomainError, validate_id};
 pub use failure::Failure;
 pub use ids::{ClientId, CompanionId, ConnectionId, SubscriptionId};
+pub use search::SearchSelection;
 pub use settings::{
     AcpConnection, Check, Connection, ConnectionConfig, ConnectionKind, CredentialState,
     EmbeddingConnection, Endpoint, LlmConnection, McpConnection, SearchConnection, Settings,

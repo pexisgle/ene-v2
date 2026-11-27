@@ -20,7 +20,7 @@ use super::{
 use adapter::{contains_credential, parse_adapter_results, read_http_error, send_search_request};
 use bevy_ecs::prelude::Component;
 use ene_catalog::SearchAdapter;
-use ene_domain::ConnectionId;
+use ene_domain::{ConnectionId, SearchSelection};
 use ene_policy::CandidateAction;
 use ene_store::util;
 use rig_core::tool::{ToolErrorKind, ToolExecutionError};
@@ -146,6 +146,10 @@ pub(crate) enum SearchConfigError {
         "search_unconfigured: Web検索を使うには設定画面で有効な Search 接続（Exa / Tavily / Brave / Mwmbl / SearXNG）を登録してください"
     )]
     Unconfigured,
+    #[error(
+        "search_unconfigured: 有効な Web 検索接続が複数あります。設定画面で1件を選択してください"
+    )]
+    AmbiguousSelection,
     #[error("search_unconfigured: invalid Search connection configuration")]
     WrongKind,
     #[error("search_unconfigured: unsupported search adapter `{0}`")]
@@ -164,25 +168,19 @@ pub(crate) enum SearchConfigError {
     ConnectionChanged,
 }
 
-/// Resolves the active enabled `Search` connection from saved settings.
-/// Refuses cleanly when no enabled search connection exists — no hardcoded
-/// endpoint fallback runs behind the user's back.
+/// Resolves the selected connection before an outbound query can be authorized.
 pub(crate) fn resolve(
     store: &Store,
     credentials: Option<&Credentials>,
     providers: &Providers,
 ) -> Result<ResolvedSearch, SearchConfigError> {
     let enabled = store.settings_repo().enabled_search_connections()?;
-    let mut enabled = enabled.iter();
-    let first = enabled.next().ok_or(SearchConfigError::Unconfigured)?;
-    let resolve_one = |(connection, created_revision): &(Connection, u64)| {
-        resolve_connection(connection, credentials, providers, *created_revision)
-    };
-    match resolve_one(first) {
-        Ok(resolved) => Ok(resolved),
-        Err(error) => enabled
-            .find_map(|connection| resolve_one(connection).ok())
-            .ok_or(error),
+    match SearchSelection::from_enabled(enabled.iter()) {
+        SearchSelection::Off => Err(SearchConfigError::Unconfigured),
+        SearchSelection::Ambiguous => Err(SearchConfigError::AmbiguousSelection),
+        SearchSelection::Selected((connection, created_revision)) => {
+            resolve_connection(connection, credentials, providers, *created_revision)
+        }
     }
 }
 

@@ -7,7 +7,7 @@ pub(crate) mod mcp_add;
 mod mcp_editor;
 mod pickers;
 mod roles_panel;
-mod roles_voice_search;
+mod roles_voice;
 mod row_editor;
 mod schema_form;
 mod web_search;

@@ -1,6 +1,4 @@
-use super::roles_voice_search::{
-    collect_roles_context, render_search_role_row, render_voice_role_row, voice_role_specs,
-};
+use super::roles_voice::{collect_roles_context, render_voice_role_row, voice_role_specs};
 use super::{ConnectionsPane, close_pane_dropdown, toggle_pane_dropdown};
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
@@ -66,14 +64,6 @@ pub(super) fn render_advanced_roles_panel(
             cx,
         ));
     }
-    rows.push(render_search_role_row(
-        pane,
-        &roles_ctx.search_conns,
-        roles_ctx.active_search_id.as_ref(),
-        live,
-        theme,
-        cx,
-    ));
 
     div()
         .w_full()

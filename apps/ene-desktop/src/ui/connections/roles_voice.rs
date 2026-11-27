@@ -1,4 +1,4 @@
-//! Role rows backed by a connection rather than a model slot: STT, TTS and web search.
+//! Voice role rows backed by a connection.
 
 use super::roles_panel::render_role_row_header;
 use super::{ConnectionsPane, close_pane_dropdown, toggle_pane_dropdown};
@@ -7,13 +7,13 @@ use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{DropdownOption, DropdownSpec, Tone, dropdown_select, pill_button};
 use ene_client_core::connections::{decode_model_choice, encode_model_choice};
-use ene_client_core::domain::{ConnectionConfig, ConnectionKind};
+use ene_client_core::domain::ConnectionKind;
 use gpui::{AnyElement, Context, div, prelude::*, px};
 use std::collections::BTreeMap;
 
 type VoiceAssignFn = fn(&mut Hub, Option<(&str, &str)>, &mut Context<Hub>);
 
-/// Connection-derived inputs shared by the STT, TTS and web-search rows.
+/// Connection-derived inputs shared by STT and TTS.
 pub(super) struct RolesContext {
     pub(super) refresh_ids: Vec<String>,
     pub(super) checking_any: bool,
@@ -22,8 +22,6 @@ pub(super) struct RolesContext {
     tts_voices: Vec<(String, String, String)>,
     active_tts: Option<(String, String)>,
     pub(super) conn_names: BTreeMap<String, String>,
-    pub(super) search_conns: Vec<(String, String, String)>,
-    pub(super) active_search_id: Option<String>,
 }
 
 pub(super) fn collect_roles_context(hub: &Hub) -> RolesContext {
@@ -50,31 +48,6 @@ pub(super) fn collect_roles_context(hub: &Hub) -> RolesContext {
             .map(|c| (c.id.clone(), c.name.clone()))
             .collect()
     });
-    let search_conns = settings.map_or_default(|s| {
-        s.connections
-            .iter()
-            .filter(|c| c.kind == ConnectionKind::Search)
-            .map(|c| {
-                let adapter = c
-                    .config
-                    .as_ref()
-                    .and_then(|cfg| match cfg {
-                        ConnectionConfig::Search(sc) => {
-                            sc.endpoint.as_ref().map(|e| e.adapter.clone())
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| "search".into());
-                (c.id.clone(), c.name.clone(), adapter)
-            })
-            .collect()
-    });
-    let active_search_id = settings.and_then(|s| {
-        s.connections
-            .iter()
-            .find(|c| c.kind == ConnectionKind::Search && c.enabled)
-            .map(|c| c.id.clone())
-    });
     RolesContext {
         refresh_ids,
         checking_any: !hub.setup.checking_connections.is_empty(),
@@ -83,8 +56,6 @@ pub(super) fn collect_roles_context(hub: &Hub) -> RolesContext {
         tts_voices: hub.all_tts_voices(),
         active_tts: hub.active_tts_selection(),
         conn_names,
-        search_conns,
-        active_search_id,
     }
 }
 
@@ -172,87 +143,6 @@ pub(super) fn render_voice_role_row(
             this.child(render_missing_role_hint(
                 spec.empty_hint,
                 spec.add_btn_id,
-                theme,
-                cx,
-            ))
-        })
-        .into_any_element()
-}
-
-pub(super) fn render_search_role_row(
-    pane: &ConnectionsPane,
-    search_conns: &[(String, String, String)],
-    active_search_id: Option<&String>,
-    live: bool,
-    theme: &Theme,
-    cx: &Context<ConnectionsPane>,
-) -> AnyElement {
-    let dd_key = "adv-role:search";
-    let dd_open = pane.open_dropdown.as_deref() == Some(dd_key);
-    let mut options = Vec::with_capacity(search_conns.len() + 1);
-    options.push(DropdownOption {
-        value: "__off__".to_owned(),
-        label: "無効（Web 検索オフ）".to_owned(),
-        detail: None,
-    });
-    for (cid, name, adapter) in search_conns {
-        options.push(DropdownOption {
-            value: cid.clone(),
-            label: name.clone(),
-            detail: Some(adapter.clone()),
-        });
-    }
-    let current_value = active_search_id
-        .cloned()
-        .unwrap_or_else(|| "__off__".to_owned());
-    let current_text = active_search_id
-        .and_then(|aid| {
-            search_conns
-                .iter()
-                .find(|(cid, _, _)| cid == aid)
-                .map(|(_, name, adapter)| format!("{name} ({adapter})"))
-        })
-        .unwrap_or_else(|| "無効（Web 検索オフ）".to_owned());
-    let pane_toggle = cx.entity();
-    let pane_pick = cx.entity();
-    let hub_assign = pane.hub.clone();
-
-    div()
-        .border_t_1()
-        .border_color(theme.border)
-        .pt(px(12.))
-        .flex()
-        .flex_col()
-        .gap(px(6.))
-        .child(render_role_row_header("Web 検索", &current_text, theme))
-        .child(dropdown_select(
-            DropdownSpec {
-                id: dd_key.to_owned(),
-                selected_value: Some(current_value.as_str()),
-                selected_label: Some(current_text.as_str()),
-                placeholder: "検索プロバイダを選択…",
-                options: &options,
-                open: dd_open,
-                enabled: live,
-                max_list_height: 180.,
-                filter_draft: None,
-                filter_text: "",
-                empty_label: "Web 検索接続がありません（「接続を追加」から追加してください）",
-            },
-            theme,
-            move |_, cx| toggle_pane_dropdown(&pane_toggle, dd_key, cx),
-            move |picked, _, cx| {
-                let target = (picked != "__off__").then_some(picked);
-                hub_assign.update(cx, |hub, cx| {
-                    hub.assign_search_connection(target.as_deref(), cx)
-                });
-                close_pane_dropdown(&pane_pick, cx);
-            },
-        ))
-        .when(search_conns.is_empty(), |this| {
-            this.child(render_missing_role_hint(
-                "Web 検索接続がありません。未設定の間は外部検索を行いません。",
-                "adv-role-search-add",
                 theme,
                 cx,
             ))

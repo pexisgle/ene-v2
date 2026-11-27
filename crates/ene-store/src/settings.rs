@@ -107,7 +107,7 @@ impl<'a> SettingsRepo<'a> {
         self.0.fetch_all(
             &format!(
                 "SELECT {COLUMNS}, created_revision FROM connections \
-                WHERE kind = 'search' AND enabled ORDER BY id"
+                WHERE kind = 'search' AND enabled ORDER BY id LIMIT 2"
             ),
             [],
             |row| Ok((Connection::from_row(row)?, row.get("created_revision")?)),
