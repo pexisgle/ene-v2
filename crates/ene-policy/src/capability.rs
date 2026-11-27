@@ -10,6 +10,13 @@ pub const WORKSPACE_CAPABILITY_PREFIX: &str = "work.";
 /// Desktop capability executed by a work agent on its bound client.
 pub const COMPUTER_USE: &str = "computer.use";
 
+pub(crate) fn is_shell(name: &str) -> bool {
+    matches!(
+        name,
+        "work.bash" | "work.powershell" | "work.shell" | "device.shell"
+    )
+}
+
 /// Tools the host itself owns. A client capability may not shadow one, and a
 /// plugin may not register a tool with one of these names.
 pub const BUILTIN_TOOLS: &[&str] = &[

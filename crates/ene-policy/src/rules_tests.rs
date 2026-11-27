@@ -370,6 +370,18 @@ fn risk_levels_follow_the_hard_deny_and_mutation_rules() {
             RiskLevel::High,
         ),
         (
+            "work.bash",
+            "device_request",
+            r#"{"command":"printf ok"}"#,
+            RiskLevel::High,
+        ),
+        (
+            "work.powershell",
+            "device_request",
+            r#"{"command":"Write-Output ok"}"#,
+            RiskLevel::High,
+        ),
+        (
             "work.write",
             "work_write",
             r#"{"path":"a.txt"}"#,

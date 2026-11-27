@@ -1,5 +1,5 @@
 //! Typed action targets and the pattern matching a saved rule applies to them.
-use crate::capability::COMPUTER_USE;
+use crate::capability::{COMPUTER_USE, is_shell};
 use serde_json::Value;
 
 use crate::rules::CandidateAction;
@@ -139,10 +139,7 @@ pub fn extract_target(action: &CandidateAction) -> ActionTarget {
                 return first_string_field(input, &["path", "file", "file_path"])
                     .map_or(ActionTarget::None, |p| ActionTarget::from_path(&p));
             }
-            if matches!(
-                capability.as_str(),
-                "work.powershell" | "work.shell" | "device.shell"
-            ) {
+            if is_shell(capability) {
                 return first_string_field(input, &["command", "cmd"])
                     .map_or(ActionTarget::None, ActionTarget::Command);
             }

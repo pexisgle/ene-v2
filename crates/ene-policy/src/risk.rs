@@ -1,5 +1,8 @@
 //! Risk badge shown on an approval card, derived from the policy rules.
-use crate::hard_deny::hard_denied;
+use crate::{
+    capability::{COMPUTER_USE, is_shell},
+    hard_deny::hard_denied,
+};
 
 /// How much damage an approval's action could do, for the UI to show.
 ///
@@ -35,8 +38,8 @@ impl RiskLevel {
         // third does something the card cannot summarise.
         if subject.ends_with(".delete")
             || subject.ends_with(".shell")
-            || subject == "device.shell"
-            || subject == "computer.use"
+            || is_shell(subject)
+            || subject == COMPUTER_USE
             || lower_tool.contains("delete")
             || lower_tool.contains("remove")
             || lower_tool.contains("shell")
