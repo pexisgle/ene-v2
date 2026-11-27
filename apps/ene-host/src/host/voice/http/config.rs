@@ -1,8 +1,8 @@
 //! Resolution of the connection endpoint options into an engine's settings:
 //! the wire protocol, request paths, and the default model, voice, and language.
 
-use crate::error::SetupError;
 use ene_catalog::is_sakura_tts_model_id;
+use ene_voice::SetupError;
 
 use serde::Deserialize;
 

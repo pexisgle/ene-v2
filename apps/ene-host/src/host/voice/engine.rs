@@ -1,6 +1,7 @@
 //! Speech synthesis and recognition engine resolution (`HttpEngine` and plugin adapters).
 
-use super::{HttpEngine, SAMPLE_RATE, SetupError, SttEngine, TtsEngine, parse_binding, plugin};
+use super::http::HttpEngine;
+use super::{SAMPLE_RATE, SetupError, SttEngine, TtsEngine, parse_binding, plugin};
 use crate::host::{
     db::Store,
     error::{HostError, Result},

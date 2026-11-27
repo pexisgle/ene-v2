@@ -12,6 +12,8 @@ use std::{
 };
 use tokio::sync::Mutex;
 
+use crate::host::net;
+
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(25);
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 
@@ -200,15 +202,12 @@ fn spawn_engine(exe: &Path, host: &str, port: u16) -> Result<Box<dyn ChildWrappe
 }
 
 pub async fn is_reachable(base_url: &str, timeout: Duration) -> bool {
-    // One client for every poll, so the connection pool survives between them.
-    // The deadline is per request because each caller has its own budget.
-    static CLIENT: std::sync::LazyLock<Option<reqwest::Client>> = std::sync::LazyLock::new(|| {
-        reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .ok()
-    });
-    let Some(client) = CLIENT.as_ref() else {
+    let client = if is_local_voicevox_url(base_url).is_some() {
+        net::loopback_client()
+    } else {
+        net::client()
+    };
+    let Ok(client) = client else {
         return false;
     };
     let url = format!("{}/speakers", base_url.trim_end_matches('/'));

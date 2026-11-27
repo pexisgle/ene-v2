@@ -1,16 +1,18 @@
 //! Host-side ECS adapter over the `ene-voice` pipeline (`docs/design/client.md`).
 
 mod engine;
+mod http;
 mod plugin;
 mod session;
 #[cfg(test)]
 mod tests;
+pub(crate) mod voicevox;
 
 pub(crate) use ene_voice::{
-    AudioSubscription, BoxFuture, HttpEngine, HttpResult, MAX_PROBE_CHARS, MAX_STT_BYTES,
-    MIN_STT_BYTES, MIN_STT_RMS, SAMPLE_RATE, STT_SAMPLE_RATES, STT_SILENCE_WINDOW, STT_TIMEOUT,
-    SetupError, SttEngine, TtsEngine, VOICE_UNAVAILABLE, VoiceHttpError, parse_binding, speech,
-    synthesize_for_probe, voicevox,
+    AudioSubscription, BoxFuture, HttpResult, MAX_PROBE_CHARS, MAX_STT_BYTES, MIN_STT_BYTES,
+    MIN_STT_RMS, SAMPLE_RATE, STT_SAMPLE_RATES, STT_SILENCE_WINDOW, STT_TIMEOUT, SetupError,
+    SttEngine, TtsEngine, VOICE_UNAVAILABLE, VoiceHttpError, parse_binding, speech,
+    synthesize_for_probe,
 };
 #[cfg(test)]
 pub(crate) use engine::Engines;

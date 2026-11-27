@@ -48,6 +48,7 @@ jiff.workspace = true
 keyring-core = "1"
 once_cell = "1"
 private-fs = "0.2.1"
+process-wrap.workspace = true
 reqwest.workspace = true
 rig-core.workspace = true
 rig-agent.workspace = true
@@ -76,11 +77,11 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url.workspace = true
 uuid.workspace = true
+which.workspace = true
 
 [dev-dependencies]
 bevy_time.workspace = true
 ene-rpc = { workspace = true, features = ["client"] }
-process-wrap.workspace = true
 # `span-locations` lets the architecture test read the line span of a parsed
 # item; without it `Span::start`/`end` are unavailable outside a proc macro.
 proc-macro2 = { version = "1", features = ["span-locations"] }

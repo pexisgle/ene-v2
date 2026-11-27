@@ -1,6 +1,6 @@
 [package]
 name = "ene-voice"
-description = "Audio framing, speech text preparation, VOICEVOX engine lifecycle, and TTS/STT session orchestration"
+description = "Audio framing, spoken-text preparation, and TTS/STT session orchestration"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,28 +10,20 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-directories = "6"
 parking_lot.workspace = true
-ene-catalog.workspace = true
 ene-domain.workspace = true
 ene-mind.workspace = true
 futures-util.workspace = true
-process-wrap.workspace = true
 pulldown-cmark.workspace = true
 regex.workspace = true
-reqwest.workspace = true
 rubato.workspace = true
 wav-codec.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "process"] }
+tokio = { workspace = true, features = ["rt"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
-url.workspace = true
 uuid.workspace = true
-which.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

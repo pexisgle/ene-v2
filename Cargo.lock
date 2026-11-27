@@ -4179,6 +4179,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "which",
  "windows-native-keyring-store",
  "zbus-secret-service-keyring-store",
 ]
@@ -4337,28 +4338,20 @@ dependencies = [
 name = "ene-voice"
 version = "0.1.8"
 dependencies = [
- "directories",
- "ene-catalog",
  "ene-domain",
  "ene-mind",
  "futures-util",
  "parking_lot 0.13.0",
- "process-wrap",
  "pulldown-cmark",
  "regex",
- "reqwest",
  "rubato",
- "serde",
  "serde_json",
- "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tracing",
- "url",
  "uuid",
  "wav-codec",
- "which",
 ]
 
 [[package]]
