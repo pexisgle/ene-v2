@@ -1,7 +1,7 @@
 use super::{windows_input::input, windows_outputs::outputs};
 use crate::{
     control,
-    desktop::{self, HitMask, HitRegions, Output},
+    desktop::{self, HitRegions, Output},
 };
 use ::windows::Win32::{
     Foundation::{HWND, POINT},
@@ -83,21 +83,17 @@ fn read_monitors(
 
 fn hit_test(
     capture: Res<PointerCaptureMap>,
-    mut windows: Query<(&Output, &HitRegions, &HitMask, &mut CursorOptions)>,
+    mut windows: Query<(&Output, &HitRegions, &mut CursorOptions)>,
 ) {
     let Some(point) = cursor_position() else {
         return;
     };
     let captured = capture.into_inner().is_captured(&PointerId::Mouse);
-    for (output, regions, mask, mut cursor) in &mut windows {
+    for (output, regions, mut cursor) in &mut windows {
         let local = (point - output.origin) / output.units_per_logical_pixel;
         // shortcut: input switching follows rendering FPS; keep it here unless measured lag is unacceptable.
-        let hit = captured
-            || if !mask.is_empty() {
-                mask.contains_local(local)
-            } else {
-                regions.0.iter().any(|(_, r)| r.contains(local))
-            };
+        let hit =
+            captured || regions.contains_cell(output.size / output.units_per_logical_pixel, local);
         if cursor.hit_test != hit {
             cursor.hit_test = hit;
         }
