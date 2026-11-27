@@ -4,7 +4,7 @@
 
 #![cfg(windows)]
 
-use crate::observe_types::{Observation, Window};
+use crate::observe_types::{Observation, ObservedWindow, Window};
 use windows::Win32::{
     Foundation::{HWND, MAX_PATH},
     System::Threading::{
@@ -26,12 +26,12 @@ pub fn observe() -> Observation {
 
 /// The foreground window's title and process name. Either may be empty:
 /// a window the OS will not describe is reported as it is, not guessed.
-fn foreground() -> Option<Window> {
+fn foreground() -> ObservedWindow {
     // SAFETY: reads the foreground window handle; no pointer is involved and
     // an absent window is reported as such.
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd == HWND::default() {
-        return None;
+        return ObservedWindow::Empty;
     }
     let mut buffer = [0u16; MAX_PATH as usize];
     // SAFETY: `buffer` is a live, correctly sized UTF-16 buffer that the call
@@ -44,9 +44,9 @@ fn foreground() -> Option<Window> {
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     let app_id = process_name(pid).unwrap_or_default();
     if title.is_empty() && app_id.is_empty() {
-        return None;
+        return ObservedWindow::Unavailable;
     }
-    Some(Window { title, app_id })
+    ObservedWindow::Window(Window { title, app_id })
 }
 
 /// The executable's file name, which is the app id a rule matches on.

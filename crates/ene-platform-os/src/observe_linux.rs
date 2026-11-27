@@ -1,7 +1,7 @@
 mod protocol;
 
 use self::protocol::{parse_wm_class, wayland_state_is_activated};
-use crate::{Observation, Window};
+use crate::{Observation, ObservedWindow, Window};
 use parking_lot::Mutex;
 use std::{collections::HashMap, sync::LazyLock, time::Instant};
 use wayland_client::backend::{ObjectId, WaylandError};
@@ -87,8 +87,8 @@ struct WaylandState {
 }
 
 impl WaylandState {
-    fn active_window(&self) -> Option<Window> {
-        let entry = self
+    fn active_window(&self) -> ObservedWindow {
+        let Some(entry) = self
             .active_id
             .as_ref()
             .and_then(|id| self.toplevels.get(id))
@@ -97,11 +97,14 @@ impl WaylandState {
                 self.toplevels
                     .values()
                     .find(|entry| entry.committed.activated)
-            })?;
+            })
+        else {
+            return ObservedWindow::Empty;
+        };
         if entry.committed.title.is_empty() && entry.committed.app_id.is_empty() {
-            return None;
+            return ObservedWindow::Unavailable;
         }
-        Some(Window {
+        ObservedWindow::Window(Window {
             title: entry.committed.title.clone(),
             app_id: entry.committed.app_id.clone(),
         })
@@ -336,48 +339,32 @@ impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, ()> 
     }
 }
 
+x11rb::atom_manager! {
+    Atoms: AtomsCookie {
+        _NET_SUPPORTED,
+        _NET_ACTIVE_WINDOW,
+        _NET_WM_NAME,
+        UTF8_STRING,
+    }
+}
+
 struct X11Backend {
     conn: RustConnection,
     root: xproto::Window,
-    net_active_window: xproto::Atom,
-    net_wm_name: xproto::Atom,
-    utf8_string: xproto::Atom,
+    atoms: Atoms,
 }
 
 impl X11Backend {
     fn connect() -> Option<Self> {
         let (conn, screen_num) = RustConnection::connect(None).ok()?;
         let root = conn.setup().roots.get(screen_num)?.root;
-        let net_supported = conn
-            .intern_atom(false, b"_NET_SUPPORTED")
-            .ok()?
-            .reply()
-            .ok()?
-            .atom;
-        let net_active_window = conn
-            .intern_atom(false, b"_NET_ACTIVE_WINDOW")
-            .ok()?
-            .reply()
-            .ok()?
-            .atom;
-        let net_wm_name = conn
-            .intern_atom(false, b"_NET_WM_NAME")
-            .ok()?
-            .reply()
-            .ok()?
-            .atom;
-        let utf8_string = conn
-            .intern_atom(false, b"UTF8_STRING")
-            .ok()?
-            .reply()
-            .ok()?
-            .atom;
+        let atoms = Atoms::new(&conn).ok()?.reply().ok()?;
 
         let supported = conn
             .get_property(
                 false,
                 root,
-                net_supported,
+                atoms._NET_SUPPORTED,
                 xproto::AtomEnum::ATOM,
                 0,
                 u32::MAX,
@@ -387,21 +374,15 @@ impl X11Backend {
             .ok()?;
         let supports_active = supported
             .value32()
-            .is_some_and(|mut atoms| atoms.any(|atom| atom == net_active_window));
+            .is_some_and(|mut ids| ids.any(|id| id == atoms._NET_ACTIVE_WINDOW));
         if !supports_active {
             return None;
         }
-        Some(Self {
-            conn,
-            root,
-            net_active_window,
-            net_wm_name,
-            utf8_string,
-        })
+        Some(Self { conn, root, atoms })
     }
 
     fn observe(&self) -> Observation {
-        let window = self.foreground();
+        let window = self.foreground().unwrap_or_default();
         let idle_seconds = screensaver::query_info(&self.conn, self.root)
             .ok()
             .and_then(|cookie| cookie.reply().ok())
@@ -412,13 +393,13 @@ impl X11Backend {
         }
     }
 
-    fn foreground(&self) -> Option<Window> {
+    fn foreground(&self) -> Option<ObservedWindow> {
         let reply = self
             .conn
             .get_property(
                 false,
                 self.root,
-                self.net_active_window,
+                self.atoms._NET_ACTIVE_WINDOW,
                 xproto::AtomEnum::WINDOW,
                 0,
                 1,
@@ -426,43 +407,58 @@ impl X11Backend {
             .ok()?
             .reply()
             .ok()?;
-        let active = reply.value32().and_then(|mut it| it.next()).unwrap_or(0);
+        if reply.type_ == u32::from(xproto::AtomEnum::NONE) {
+            return Some(ObservedWindow::Empty);
+        }
+        let active = reply.value32()?.next()?;
         if active == 0 {
-            return None;
+            return Some(ObservedWindow::Empty);
         }
         let title = self.window_title(active);
         let app_id = self.window_class(active);
         if title.is_empty() && app_id.is_empty() {
             return None;
         }
-        Some(Window { title, app_id })
+        Some(ObservedWindow::Window(Window { title, app_id }))
     }
 
     fn window_title(&self, window: xproto::Window) -> String {
-        if let Ok(cookie) =
-            self.conn
-                .get_property(false, window, self.net_wm_name, self.utf8_string, 0, 1024)
-            && let Ok(reply) = cookie.reply()
+        if let Ok(cookie) = self.conn.get_property(
+            false,
+            window,
+            self.atoms._NET_WM_NAME,
+            self.atoms.UTF8_STRING,
+            0,
+            1024,
+        ) && let Ok(reply) = cookie.reply()
             && !reply.value.is_empty()
             && let Ok(text) = std::str::from_utf8(&reply.value)
         {
             return text.trim_end_matches('\0').to_owned();
         }
-        if let Ok(cookie) = self.conn.get_property(
-            false,
-            window,
-            xproto::AtomEnum::WM_NAME,
-            xproto::AtomEnum::ANY,
-            0,
-            1024,
-        ) && let Ok(reply) = cookie.reply()
-            && !reply.value.is_empty()
-        {
-            return String::from_utf8_lossy(&reply.value)
-                .trim_end_matches('\0')
-                .to_owned();
-        }
-        String::new()
+        self.conn
+            .get_property(
+                false,
+                window,
+                xproto::AtomEnum::WM_NAME,
+                xproto::AtomEnum::ANY,
+                0,
+                1024,
+            )
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .map_or_else(String::new, |reply| match reply.type_ {
+                kind if kind == u32::from(xproto::AtomEnum::STRING) => {
+                    let mut title: String = reply.value.into_iter().map(char::from).collect();
+                    title.truncate(title.trim_end_matches('\0').len());
+                    title
+                }
+                kind if kind == self.atoms.UTF8_STRING => std::str::from_utf8(&reply.value)
+                    .unwrap_or_default()
+                    .trim_end_matches('\0')
+                    .to_owned(),
+                _ => String::new(),
+            })
     }
 
     fn window_class(&self, window: xproto::Window) -> String {

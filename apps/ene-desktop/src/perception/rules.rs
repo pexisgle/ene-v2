@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
-use ene_platform_os::Observation;
 pub use ene_platform_os::Window;
+use ene_platform_os::{Observation, ObservedWindow};
 
 /// A parsed `eye.watch` rule.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -97,12 +97,20 @@ impl Sensor {
     /// woken without waiting for the next periodic sample.
     pub fn observe(&mut self, observation: Observation, refresh: bool) -> Vec<Report> {
         let mut reports = Vec::new();
-        let window = observation.window.as_ref();
-        if refresh || self.last.as_ref() != window {
-            reports.push(Report::Window(observation.window.clone()));
+        let (available, window) = match observation.window {
+            ObservedWindow::Window(window) => (true, Some(window)),
+            ObservedWindow::Empty => (true, None),
+            ObservedWindow::Unavailable => (false, None),
+        };
+        if refresh || self.last != window {
+            reports.push(Report::Window(window.clone()));
         }
-        if let Some(watch) = self.watch.as_ref().filter(|watch| watch.enabled) {
-            let matched = window.filter(|window| watch.matches(window));
+        if let Some(watch) = self
+            .watch
+            .as_ref()
+            .filter(|watch| available && watch.enabled)
+        {
+            let matched = window.as_ref().filter(|window| watch.matches(window));
             let target = match watch.notify_on {
                 NotifyOn::Focus => matched.filter(|_| !self.matched),
                 NotifyOn::Blur => self
@@ -119,8 +127,10 @@ impl Sensor {
                 reports.push(Report::Interrupt(target.clone(), watch.notify_on));
             }
             self.matched = matched.is_some();
+        } else {
+            self.matched = false;
         }
-        self.last = observation.window;
+        self.last = window;
         let idle = observation
             .idle_seconds
             .map(|seconds| seconds >= IDLE_THRESHOLD);

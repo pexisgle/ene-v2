@@ -1,5 +1,6 @@
 use super::rules::MatchKind;
 use super::*;
+use ene_platform_os::ObservedWindow;
 
 fn window(title: &str, app_id: &str) -> Window {
     Window {
@@ -79,11 +80,11 @@ fn a_focus_rule_fires_once_per_entry() {
     let mut sensor = Sensor::default();
     sensor.apply(Some(rule(MatchKind::Title, NotifyOn::Focus)));
     let github = Observation {
-        window: Some(window("GitHub", "chrome.exe")),
+        window: ObservedWindow::Window(window("GitHub", "chrome.exe")),
         idle_seconds: Some(0),
     };
     let other = Observation {
-        window: Some(window("editor", "code.exe")),
+        window: ObservedWindow::Window(window("editor", "code.exe")),
         idle_seconds: Some(0),
     };
     assert!(matches!(
@@ -111,11 +112,11 @@ fn a_blur_rule_fires_when_the_match_is_left() {
     let mut sensor = Sensor::default();
     sensor.apply(Some(rule(MatchKind::Title, NotifyOn::Blur)));
     let github = Observation {
-        window: Some(window("GitHub", "chrome.exe")),
+        window: ObservedWindow::Window(window("GitHub", "chrome.exe")),
         idle_seconds: Some(0),
     };
     let other = Observation {
-        window: Some(window("editor", "code.exe")),
+        window: ObservedWindow::Window(window("editor", "code.exe")),
         idle_seconds: Some(0),
     };
     sensor.observe(github, false);
@@ -131,14 +132,18 @@ fn a_blur_rule_fires_when_the_match_is_left() {
 fn disappearance_clears_the_window_and_fires_blur_once() {
     let mut sensor = Sensor::default();
     sensor.apply(Some(rule(MatchKind::Title, NotifyOn::Blur)));
-    sensor.observe(
+    let github = Observation {
+        window: ObservedWindow::Window(window("GitHub", "chrome.exe")),
+        idle_seconds: Some(0),
+    };
+    sensor.observe(github.clone(), false);
+    let reports = sensor.observe(
         Observation {
-            window: Some(window("GitHub", "chrome.exe")),
-            idle_seconds: Some(0),
+            window: ObservedWindow::Empty,
+            idle_seconds: None,
         },
         false,
     );
-    let reports = sensor.observe(Observation::default(), false);
     assert!(matches!(reports.as_slice(), [
         Report::Window(None),
         Report::Interrupt(window, NotifyOn::Blur),
@@ -147,6 +152,11 @@ fn disappearance_clears_the_window_and_fires_blur_once() {
     assert!(sensor.observe(Observation::default(), false).is_empty());
     assert!(matches!(
         sensor.observe(Observation::default(), true).as_slice(),
+        [Report::Window(None), Report::Activity(None)]
+    ));
+    sensor.observe(github, false);
+    assert!(matches!(
+        sensor.observe(Observation::default(), false).as_slice(),
         [Report::Window(None), Report::Activity(None)]
     ));
 }
@@ -159,7 +169,7 @@ fn a_disabled_rule_never_interrupts() {
     sensor.apply(Some(disabled));
     let reports = sensor.observe(
         Observation {
-            window: Some(window("GitHub", "chrome.exe")),
+            window: ObservedWindow::Window(window("GitHub", "chrome.exe")),
             idle_seconds: Some(0),
         },
         false,
@@ -176,7 +186,7 @@ fn an_idle_observation_reports_the_activity_state() {
     let mut sensor = Sensor::default();
     let reports = sensor.observe(
         Observation {
-            window: None,
+            window: ObservedWindow::Empty,
             idle_seconds: Some(IDLE_THRESHOLD),
         },
         false,
@@ -189,7 +199,7 @@ fn an_idle_observation_reports_the_activity_state() {
         sensor
             .observe(
                 Observation {
-                    window: None,
+                    window: ObservedWindow::Empty,
                     idle_seconds: Some(0),
                 },
                 false

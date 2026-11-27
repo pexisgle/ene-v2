@@ -32,7 +32,7 @@ pub use input::{Desktop, Point, Rect};
 pub use observe::observe;
 #[cfg(target_os = "linux")]
 pub use observe_linux::{observe, supported as observation_supported};
-pub use observe_types::{Observation, Window};
+pub use observe_types::{Observation, ObservedWindow, Window};
 pub use tray::{Tray, TrayAction, TrayHandle, TrayMode, TraySection, TrayState};
 #[cfg(windows)]
 pub use window::PodWindow;
