@@ -244,7 +244,12 @@ fn apply_consolidated_fact(
             occurred_at: None,
             source_context: value!({
                 "source": "consolidation",
-                "turn_id": batch.checkpoint.summary.through_message_id.to_string(),
+                "conversation": {
+                    "companion_id": batch.companion_id,
+                    "lineage": batch.checkpoint.lineage,
+                    "after_message_id": batch.after.map(|id| id.to_string()),
+                    "through_message_id": batch.checkpoint.summary.through_message_id.to_string(),
+                },
             }),
         },
         stamp,

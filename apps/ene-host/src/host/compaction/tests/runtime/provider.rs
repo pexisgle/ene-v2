@@ -203,9 +203,16 @@ fn one_job_covers_the_same_range_for_the_summary_and_the_memories() {
     assert_eq!(memories.len(), 1, "the job committed its one fact");
     assert_eq!(memories[0].content, "A keeps the tea in the cupboard");
     assert_eq!(
-        memories[0].source_context["turn_id"],
-        serde_json::json!(summary.through_message_id.to_string()),
-        "the memory is stamped with the same end of the window"
+        memories[0].source_context,
+        serde_json::json!({
+            "source": "consolidation",
+            "conversation": {
+                "companion_id": "ene",
+                "lineage": log_lineage(&conversation.0).unwrap(),
+                "after_message_id": null,
+                "through_message_id": summary.through_message_id.to_string(),
+            },
+        })
     );
     provider.task.abort();
 }
