@@ -42,7 +42,7 @@ pub fn system_prompt(companion: &Companion) -> String {
         "\n振る舞いの原則:\n\
          - 比較は各候補と値を対応させた文章で伝え、動作や表情は対応するツールで指定してください。\n\
          - 短い事実確認には web_search を使い、その会話ターンで結果を伝えてください。該当結果がなければその旨を伝え、テキストでは出典URLを本文に添えてください。\n\
-         - 複数資料の比較、長い調査、ファイル・画面・外部ツール（MCP）の操作は start_work に委ねてください。\n\
+         - 複数資料の比較、長い調査、ファイル・画面・外部ツール（MCP）の操作は start_work に委ねてください。記憶からは、その仕事に必要な事実だけを作業指示に添えてください。\n\
          - 作業への追加指示や [作業質問] への回答は send_work で渡してください（work_id を指定。必要なら start_work に work_id を指定）。\n\
          - [作業質問] は自分の質問として伝え、[作業完了] は自分の結果として要点を伝えてください。タグは発言に含めません。\n\
          - ユーザーの依頼や話題を優先し、返答を変える事実だけを「目」の報告から選んでください。アプリの切り替え、操作の順番、観測や通知が届いた経緯は、ユーザーがそれを尋ねたときや答えに必要なときだけ伝えてください。それらだけの報告なら静観します。\n\
@@ -57,7 +57,7 @@ pub fn system_prompt(companion: &Companion) -> String {
     prompt
 }
 
-pub fn work_prompt(companion: &Companion, instruction: &str) -> String {
+pub fn work_prompt(companion: &Companion) -> String {
     format!(
         "あなたはデスクトップ常駐AIコンパニオン「{}」です。ユーザーが頼んだ実務を自分で行います。\n\
          {SPOKEN_RESPONSE}\n\
@@ -67,8 +67,7 @@ pub fn work_prompt(companion: &Companion, instruction: &str) -> String {
          - kind=\"message\": 重要な中間連絡\n\
          - kind=\"question\": ユーザーへの確認・選択肢の提示が必要なとき（この呼び出し後に一度ターンを終えて返答を待ちます）\n\
          - kind=\"completed\": 作業完了の最終報告。調査やWeb検索を含む場合は、確認できた出典の名称も content に含めてください。\n\
-         - kind=\"failed\": 実行できなかった場合の失敗報告と確認できた原因\n\
-         現在の指示:\n{instruction}\n",
+         - kind=\"failed\": 実行できなかった場合の失敗報告と確認できた原因\n",
         companion.name
     )
 }
@@ -80,10 +79,7 @@ mod tests {
     #[test]
     fn both_roles_follow_the_same_spoken_response_rules() {
         let companion = crate::default_ene_companion("");
-        for prompt in [
-            system_prompt(&companion),
-            work_prompt(&companion, "資料をまとめる"),
-        ] {
+        for prompt in [system_prompt(&companion), work_prompt(&companion)] {
             assert!(prompt.contains(SPOKEN_RESPONSE));
             assert!(!prompt.contains("参考URLも"));
             assert!(!prompt.contains("URLをそのまま添えます"));

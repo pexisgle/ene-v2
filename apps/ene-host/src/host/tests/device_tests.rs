@@ -168,13 +168,7 @@ fn assert_hand_never_sees_capability_tools(harness: &mut Harness) {
         .companion(&harness.companion)
         .unwrap()
         .unwrap();
-    let hand = agent::spawn_work_agent(
-        harness.app.world_mut(),
-        &companion,
-        "work-1",
-        "run-1",
-        "do the task",
-    );
+    let hand = agent::spawn_work_agent(harness.app.world_mut(), &companion, "work-1", "run-1");
     client::dynamic::sync_tools(
         harness.app.world_mut(),
         client::dynamic::PublicationChange::Refresh,

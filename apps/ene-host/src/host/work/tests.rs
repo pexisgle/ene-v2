@@ -150,13 +150,17 @@ fn a_rig_work_session_adopts_its_saved_conversation_before_the_next_run() {
     )
     .unwrap();
     harness.run_until(|frame| {
-        frame
-            .get::<SystemPrompt>(worker)
-            .is_some_and(|prompt| prompt.0.contains("second instruction"))
+        frame.get::<Conversation>(worker).is_some_and(|history| {
+            history.entries().any(|entry| {
+                matches!(&entry.message, Message::User { .. })
+                    && entry.author.is_some_and(|author| author.request.is_some())
+                    && agent::entry_text(&entry).as_deref() == Some("second instruction")
+            })
+        })
     });
     assert_eq!(agent_of(harness.app.world_mut(), &session.id), Some(worker));
     let prompt = harness.app.world().get::<SystemPrompt>(worker).unwrap();
-    assert!(prompt.0.contains("second instruction"));
+    assert!(!prompt.0.contains("second instruction"));
     harness.run_until(|_| idle());
     assert!(
         harness

@@ -176,7 +176,7 @@ async fn a_slow_embedding_holds_the_model_call_without_blocking_the_host() {
 }
 
 #[tokio::test]
-async fn work_agent_recall_keeps_the_tail_without_polluting_companion_injections() {
+async fn work_uses_the_brief_without_the_companions_automatic_recall() {
     use crate::host::db::memories::MemoryRecord;
     use crate::host::tests::{Harness, bound, text_turn};
 
@@ -214,7 +214,7 @@ async fn work_agent_recall_keeps_the_tail_without_polluting_companion_injections
             .insert_memory(&MemoryRecord {
                 id: "m-work".into(),
                 scope: harness.companion.clone(),
-                content: "作業エージェント用のフォルダ整理手順".into(),
+                content: "フォルダ整理手順 と関係のない保管先を開かないこと".into(),
                 importance: 7,
                 occurred_at: None,
                 source_context: serde_json::json!({}),
@@ -255,18 +255,14 @@ async fn work_agent_recall_keeps_the_tail_without_polluting_companion_injections
             .companion(&harness.companion)
             .unwrap()
             .unwrap();
-        let work_entity = agent::spawn_work_agent(
-            harness.app.world_mut(),
-            &companion,
-            "work-1",
-            "run-1",
-            "task",
-        );
+        let work_entity =
+            agent::spawn_work_agent(harness.app.world_mut(), &companion, "work-1", "run-1");
+        let brief = "フォルダ整理手順 の必要事項: PDF を月別に整理する";
         assert!(agent::deliver(
             harness.app.world_mut(),
             work_entity,
             &harness.companion,
-            "フォルダ整理手順 に従って進めて".into(),
+            brief.into(),
             DeliveryMode::Queue,
             Author::user(),
         ));
@@ -287,9 +283,11 @@ async fn work_agent_recall_keeps_the_tail_without_polluting_companion_injections
         .expect("the work turn finishes");
 
         let work_request = format!("{:?}", probe.requests()[1]);
+        assert_eq!(work_request.matches(brief).count(), 1, "{work_request}");
+        assert!(!work_request.contains("関係のない保管先"), "{work_request}");
         assert!(
-            work_request.contains("作業エージェント用のフォルダ整理手順"),
-            "work agent still receives recalled memories in its dynamic tail: {work_request}"
+            !work_request.contains(&head_memory.content),
+            "{work_request}"
         );
         assert_eq!(
             receipts(&harness.companion),

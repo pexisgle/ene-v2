@@ -215,13 +215,7 @@ fn dispatch_run(
     if is_harness {
         retire(world, &session.id);
     } else {
-        let agent = ensure(
-            world,
-            &companion,
-            &session.id,
-            &run.run_id,
-            &run.instruction,
-        );
+        let agent = ensure(world, &companion, &session.id, &run.run_id);
         agent::ensure_model(world, agent)?;
         let author = Author {
             request: Some(RequestId(run.run_id.clone())),

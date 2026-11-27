@@ -18,7 +18,7 @@ use super::embedding::Embeddings;
 #[cfg(test)]
 use crate::host::agent;
 use crate::host::{
-    agent::{CompanionAgent, WorkAgent},
+    agent::CompanionAgent,
     background::{self, Job},
     compaction,
     db::Store,
@@ -132,7 +132,7 @@ fn inject_tail(
     mut calls: Query<TurnRequest<'static>, NeedsTail>,
     mut commands: Commands,
     turns: Query<(&Turn, Option<&DynamicTail>)>,
-    agents: Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
+    agents: Query<&CompanionAgent>,
     conversations: Query<&Conversation>,
     env: &TailEnv<'_>,
 ) {
@@ -144,13 +144,10 @@ fn inject_tail(
             continue;
         };
         let conversation = conversations.get(agent).ok();
-        let (companion, work) = agents.get(agent).unwrap_or_default();
-        let Some(subject) = companion
-            .map(|agent| &agent.companion_id)
-            .or_else(|| work.map(|agent| &agent.companion_id))
-        else {
+        let Ok(companion) = agents.get(agent) else {
             continue;
         };
+        let subject = &companion.companion_id;
         let eye_report = find_turn_eye_report(
             conversation,
             companion,
@@ -196,7 +193,7 @@ fn inject_tail(
                 turn_start: turn.start,
                 tail,
                 eye_report,
-                companion: companion.map(|agent| agent.companion_id.as_str()),
+                companion: subject,
             },
         );
     }
@@ -204,12 +201,11 @@ fn inject_tail(
 
 fn find_turn_eye_report<'a>(
     conversation: Option<&Conversation>,
-    companion: Option<&CompanionAgent>,
+    companion: &CompanionAgent,
     turn_start: MessageId,
     eyes: Option<&'a Eyes>,
     hub: Option<&DeviceHub>,
 ) -> Option<(MessageId, &'a crate::host::eyes::Delivered)> {
-    let companion = companion?;
     let (eyes, hub) = (eyes?, hub?);
     conversation?.asked(turn_start).find_map(|entry| {
         eyes.context(&companion.companion_id, entry.author, hub)
@@ -280,7 +276,7 @@ struct TailHistoryTarget<'a> {
     turn_start: MessageId,
     tail: TailPayload,
     eye_report: Option<(MessageId, &'a crate::host::eyes::Delivered)>,
-    companion: Option<&'a str>,
+    companion: &'a str,
 }
 
 fn apply_tail_to_history(
@@ -336,10 +332,7 @@ fn apply_tail_to_history(
         content.push(UserContent::text(tail.take()?));
         Some(Message::User { content })
     });
-    if tail.is_none()
-        && !memories.is_empty()
-        && let Some(companion) = companion
-    {
+    if tail.is_none() && !memories.is_empty() {
         commands.entity(call_entity).insert(PendingInjections {
             companion: companion.to_owned(),
             turn: turn_start,
@@ -451,7 +444,7 @@ impl Plugin for RecallPlugin {
                 (|calls: Query<TurnRequest<'static>, NeedsTail>,
                   commands: Commands,
                   turns: Query<(&Turn, Option<&DynamicTail>)>,
-                  agents: Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
+                  agents: Query<&CompanionAgent>,
                   conversations: Query<&Conversation>,
                   env: TailEnv| {
                     inject_tail(calls, commands, turns, agents, conversations, &env);

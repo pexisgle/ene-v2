@@ -120,7 +120,6 @@ pub(crate) fn spawn_work_agent(
     companion: &Companion,
     work_id: &str,
     run_id: &str,
-    instruction: &str,
 ) -> Entity {
     let entity = spawn_root(
         world,
@@ -130,7 +129,7 @@ pub(crate) fn spawn_work_agent(
         ),
     )
     .id();
-    attach_work_agent(world, entity, companion, work_id, run_id, instruction);
+    attach_work_agent(world, entity, companion, work_id, run_id);
     entity
 }
 
@@ -140,7 +139,6 @@ pub(crate) fn attach_work_agent(
     companion: &Companion,
     work_id: &str,
     run_id: &str,
-    instruction: &str,
 ) {
     let published = published_through(world.get::<Conversation>(entity));
     let access = crate::host::tools::sync::hand_tool_access(world);
@@ -150,7 +148,7 @@ pub(crate) fn attach_work_agent(
             run_id: run_id.to_owned(),
             companion_id: companion.id.clone(),
         },
-        SystemPrompt(work_prompt(companion, instruction)),
+        SystemPrompt(work_prompt(companion)),
         access,
     ));
     world.entity_mut(entity).insert(published);

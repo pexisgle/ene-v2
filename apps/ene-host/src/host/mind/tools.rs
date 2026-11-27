@@ -1,6 +1,6 @@
 //! The parent's explicit memory tools.
 use crate::host::{
-    agent::{CompanionAgent, WorkAgent},
+    agent::CompanionAgent,
     background::{self, Job},
     db::{
         Result, Store,
@@ -57,7 +57,7 @@ pub(crate) fn register(app: &mut App) {
         |called: On<ToolCalled<RecallArgs>>, mut commands: Commands| {
             let (call, agent, args) = (called.call, called.agent, called.args.clone());
             commands.queue(move |world: &mut World| {
-                let result = companion_of_any(world, agent).and_then(|companion| {
+                let result = companion(world, agent).and_then(|companion| {
                     recall(
                         &RecallServices {
                             store: world.resource(),
@@ -94,7 +94,7 @@ pub(crate) fn register(app: &mut App) {
             let citation = format!("{}:{}", agent_id.0, turn.start.get());
             read(
                 world.resource(),
-                &companion_of_any(world, agent)?,
+                &companion(world, agent)?,
                 &args,
                 &citation,
             )
@@ -122,20 +122,6 @@ fn companion(world: &World, agent: Entity) -> Result<String> {
         .get::<CompanionAgent>(agent)
         .map(|agent| agent.companion_id.clone())
         .ok_or_else(|| HostError::Internal(("this tool belongs to a companion").into()))
-}
-
-/// Companion owner for tools available to both the companion head and its work hands
-/// (`mind_recall` and `mind_read`, `F06`).
-fn companion_of_any(world: &World, agent: Entity) -> Result<String> {
-    if let Some(agent) = world.get::<CompanionAgent>(agent) {
-        return Ok(agent.companion_id.clone());
-    }
-    if let Some(work) = world.get::<WorkAgent>(agent) {
-        return Ok(work.companion_id.clone());
-    }
-    Err(HostError::Internal(
-        ("this tool belongs to a companion or work agent").into(),
-    ))
 }
 
 #[derive(Component)]

@@ -17,6 +17,7 @@ use serde_json::json;
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StartArgs {
+    /// Brief for the task, with only the facts needed to carry it out.
     pub(crate) instruction: String,
     /// Continue this session instead of starting a new one.
     #[serde(default)]

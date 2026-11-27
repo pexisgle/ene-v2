@@ -300,7 +300,6 @@ fn all_builtin_providers_bind_through_ensure_model_for_companion_and_task() {
             &companion,
             &format!("work-{index}"),
             &format!("run-{index}"),
-            "do work",
         );
         agent::ensure_model(&mut world, work_entity).unwrap_or_else(|error| {
             panic!("task ensure_model failed for {adapter}/{model_id}: {error}")

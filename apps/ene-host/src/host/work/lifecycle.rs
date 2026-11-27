@@ -35,20 +35,16 @@ pub(super) fn ensure(
     companion: &Companion,
     work_id: &str,
     run_id: &str,
-    instruction: &str,
 ) -> Entity {
     match agent_of(world, work_id) {
         Some(entity) => {
             bind_work_agent(world.get_mut::<WorkAgent>(entity), run_id);
             world
                 .entity_mut(entity)
-                .insert(SystemPrompt(ene_mind::prompt::work_prompt(
-                    companion,
-                    instruction,
-                )));
+                .insert(SystemPrompt(ene_mind::prompt::work_prompt(companion)));
             entity
         }
-        None => agent::spawn_work_agent(world, companion, work_id, run_id, instruction),
+        None => agent::spawn_work_agent(world, companion, work_id, run_id),
     }
 }
 
@@ -177,14 +173,7 @@ pub(crate) fn restore(world: &mut World) -> Result<()> {
                         "the work run is not active",
                     ));
                 }
-                agent::attach_work_agent(
-                    world,
-                    entity,
-                    companion,
-                    &session.id,
-                    &run.run_id,
-                    &run.instruction,
-                );
+                agent::attach_work_agent(world, entity, companion, &session.id, &run.run_id);
                 retained.insert(entity);
             } else if let Some(entity) = already_attached {
                 retained.insert(entity);

@@ -11,8 +11,6 @@ use std::borrow::Cow;
 
 const WORK_AGENT_TOOLS: &[&str] = &[
     "device_request",
-    "mind_read",
-    "mind_recall",
     "report",
     "skill_list",
     "skill_read",

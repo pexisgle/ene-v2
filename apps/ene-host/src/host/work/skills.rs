@@ -123,7 +123,7 @@ mod tests {
     use rig_core::test_utils::MockStreamEvent;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn t15_skills_save_list_read_and_work_agent_mind_recall() {
+    async fn t15_work_can_save_and_read_skills_without_searching_episodic_memory() {
         let mut harness = Harness::new([
             vec![
                 MockStreamEvent::tool_call(
@@ -179,9 +179,11 @@ mod tests {
 
         harness.run_until(|world| {
             world
-                .query_filtered::<&Conversation, With<WorkAgent>>()
+                .query_filtered::<(&Conversation, &ToolAccess), With<WorkAgent>>()
                 .iter(world)
-                .any(|conv| {
+                .any(|(conv, access)| {
+                    assert!(access.allows("skill_list"));
+                    assert!(!access.allows("mind_recall") && !access.allows("mind_read"));
                     let saw_skill_read = conv.entries().any(|e| match &e.message {
                         Message::User { content } => content.iter().any(|item| {
                             matches!(item, UserContent::ToolResult(r)
@@ -191,16 +193,16 @@ mod tests {
                         }),
                         _ => false,
                     });
-                    let saw_mind_recall = conv.entries().any(|e| match &e.message {
+                    let refused_mind_recall = conv.entries().any(|e| match &e.message {
                         Message::User { content } => content.iter().any(|item| {
                             matches!(item, UserContent::ToolResult(r)
                                 if r.name.as_str() == "mind_recall"
-                                    && !r.is_error
-                                    && r.content.iter().any(|b| matches!(b, ToolResultContent::Text(t) if t.text.contains("m-release"))))
+                                    && r.is_error
+                                    && !r.content.iter().any(|b| matches!(b, ToolResultContent::Text(t) if t.text.contains("m-release"))))
                         }),
                         _ => false,
                     });
-                    saw_skill_read && saw_mind_recall
+                    saw_skill_read && refused_mind_recall
                 })
         });
 

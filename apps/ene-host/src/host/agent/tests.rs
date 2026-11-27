@@ -228,13 +228,7 @@ fn turn_events_publish_for_companion_turns_only() {
         .companion(&harness.companion)
         .unwrap()
         .unwrap();
-    let work_entity = spawn_work_agent(
-        harness.app.world_mut(),
-        &companion,
-        "work-1",
-        "run-1",
-        "do task",
-    );
+    let work_entity = spawn_work_agent(harness.app.world_mut(), &companion, "work-1", "run-1");
     let before_work = harness.app.world().resource::<Notifier>().cursor();
     assert!(deliver(
         harness.app.world_mut(),
