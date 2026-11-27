@@ -16,7 +16,10 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
-use tokio_util::task::AbortOnDropHandle;
+use tokio_util::{
+    sync::{CancellationToken, DropGuard},
+    task::AbortOnDropHandle,
+};
 
 /// Bound completed handshakes waiting for adoption by the host actor.
 const QUEUE: usize = 32;
@@ -39,6 +42,7 @@ pub(crate) enum CheckState {
 pub(super) struct Slot {
     pub(super) launch: Launch,
     pub(super) attempts: u32,
+    pub(super) stop: DropGuard,
     pub(super) phase: Phase,
 }
 
@@ -181,7 +185,7 @@ impl Mcp {
 
     pub(crate) fn tool_is_current(&self, tool: &McpRegistration) -> bool {
         self.lock().slots.get(&tool.server).is_some_and(|slot| {
-            slot.launch == tool.launch
+            slot.launch == tool.launch && !slot.stop.token().is_cancelled()
                 && matches!(&slot.phase, Phase::Running(server)
                     if !server.connection.is_closed() && server.registry.snapshot()
                         .get(tool.definition.name.as_str())
@@ -251,6 +255,7 @@ impl McpSupervisor {
             if let Phase::Running(server) = &slot.phase
                 && (!current || server.connection.is_closed())
             {
+                slot.stop.token().cancel();
                 close_connection(server.connection.clone(), runtime);
                 if current {
                     if server.connected_at.elapsed() >= STABLE_CONNECTION {
@@ -303,6 +308,8 @@ impl McpSupervisor {
             let credentials = credentials.cloned();
             let store = store.clone();
             let wake = wake.cloned();
+            let stop = CancellationToken::new();
+            let lifetime = stop.clone().drop_guard();
             let task = runtime.spawn(Box::pin(async move {
                 let opened = startup::start(
                     &store,
@@ -310,6 +317,7 @@ impl McpSupervisor {
                     &want,
                     credentials.as_ref(),
                     registry.clone(),
+                    &stop,
                 )
                 .await;
                 let event = match opened {
@@ -344,6 +352,7 @@ impl McpSupervisor {
                 Slot {
                     launch,
                     attempts,
+                    stop: lifetime,
                     phase: Phase::Opening {
                         _task: AbortOnDropHandle::new(task),
                     },
@@ -400,6 +409,7 @@ impl McpSupervisor {
 
     fn close(&mut self, runtime: Option<&tokio::runtime::Handle>) {
         for (_, slot) in self.slots.drain() {
+            slot.stop.token().cancel();
             if let (Some(runtime), Phase::Running(server)) = (runtime, slot.phase) {
                 close_connection(server.connection, runtime);
             }

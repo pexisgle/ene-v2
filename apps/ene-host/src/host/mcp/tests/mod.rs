@@ -10,6 +10,7 @@ use rig_core::message::ToolName;
 use rig_core::tool::{DynamicTool, ToolContext, ToolOutput};
 use rig_ecs::prelude::ToolDef;
 use rig_rmcp::{McpClientHandler, McpConnection, rmcp::model::ClientConfig};
+use tokio_util::sync::CancellationToken;
 
 pub(super) const STAMP: ConnectionStamp = ConnectionStamp {
     revision: 2,
@@ -157,9 +158,10 @@ async fn http_tools_use_the_shared_redirect_refusing_client() {
     let mut desired = want("http");
     desired.config.endpoint.endpoint = format!("http://{address}/mcp");
     let registry = ToolServer::new().run();
+    let stop = CancellationToken::new();
     let connection = tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        open(&desired.config, None, registry.clone()),
+        open(&desired.config, None, registry.clone(), &stop),
     )
     .await
     .unwrap()
@@ -178,7 +180,7 @@ async fn http_tools_use_the_shared_redirect_refusing_client() {
     assert!(
         tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            open(&desired.config, None, ToolServer::new().run())
+            open(&desired.config, None, ToolServer::new().run(), &stop)
         )
         .await
         .unwrap()

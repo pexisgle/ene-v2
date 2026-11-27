@@ -39,6 +39,7 @@ fn attach_now(
         Slot {
             launch,
             attempts: 0,
+            stop: CancellationToken::new().drop_guard(),
             phase: Phase::Running(Server {
                 receiver: Default::default(),
                 connection,
@@ -262,6 +263,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
             Slot {
                 launch: new_launch.clone(),
                 attempts: 0,
+                stop: CancellationToken::new().drop_guard(),
                 phase: Phase::Opening {
                     _task: AbortOnDropHandle::new(runtime.spawn(std::future::pending())),
                 },

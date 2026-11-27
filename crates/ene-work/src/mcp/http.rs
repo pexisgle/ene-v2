@@ -1,4 +1,5 @@
-//! Cancel HTTP I/O when the owner drops an in-progress MCP handshake.
+//! Bind MCP HTTP I/O to the lifetime of its connection.
+use super::until_cancelled;
 use futures_util::StreamExt as _;
 use reqwest::{
     Client,
@@ -19,15 +20,15 @@ use tokio_util::sync::CancellationToken;
 
 type Response<T> = Result<T, StreamableHttpError<reqwest::Error>>;
 
-/// Some rmcp startup awaits precede its cancellation loop. Keep its reqwest
-/// implementation and size limits, while tying these awaits to ene's budget.
+/// Keep rmcp's Reqwest client and size limits. Cancel work inside its HTTP
+/// worker as well as waits made through the outer transport.
 #[derive(Clone)]
-pub(super) struct StartupHttp {
+pub(super) struct CancellableHttp {
     pub(super) client: Client,
     pub(super) stop: CancellationToken,
 }
 
-impl StreamableHttpClient for StartupHttp {
+impl StreamableHttpClient for CancellableHttp {
     type Error = reqwest::Error;
 
     async fn post_message(
@@ -58,13 +59,13 @@ impl StreamableHttpClient for StartupHttp {
         headers: HashMap<HeaderName, HeaderValue>,
         limits: StreamableHttpResponseLimits,
     ) -> Response<StreamableHttpPostResponse> {
-        let response =
-            self.stop
-                .run_until_cancelled(self.client.post_message_with_response_limits(
-                    uri, message, session_id, auth, headers, limits,
-                ))
-                .await
-                .ok_or(StreamableHttpError::TransportChannelClosed)??;
+        let response = until_cancelled(
+            &self.stop,
+            self.client
+                .post_message_with_response_limits(uri, message, session_id, auth, headers, limits),
+        )
+        .await
+        .ok_or(StreamableHttpError::TransportChannelClosed)??;
         Ok(match response {
             StreamableHttpPostResponse::Sse(stream, session) => StreamableHttpPostResponse::Sse(
                 stream
@@ -83,6 +84,7 @@ impl StreamableHttpClient for StartupHttp {
         auth: Option<String>,
         headers: HashMap<HeaderName, HeaderValue>,
     ) -> Response<()> {
+        // The rmcp worker bounds this protocol cleanup for an existing session.
         self.client
             .delete_session(uri, session_id, auth, headers)
             .await
@@ -116,18 +118,19 @@ impl StreamableHttpClient for StartupHttp {
         headers: HashMap<HeaderName, HeaderValue>,
         max_sse_event_size: usize,
     ) -> Response<BoxedSseResponse> {
-        let stream = self
-            .stop
-            .run_until_cancelled(self.client.get_stream_with_max_sse_event_size(
+        let stream = until_cancelled(
+            &self.stop,
+            self.client.get_stream_with_max_sse_event_size(
                 uri,
                 session_id,
                 last_event_id,
                 auth,
                 headers,
                 max_sse_event_size,
-            ))
-            .await
-            .ok_or(StreamableHttpError::TransportChannelClosed)??;
+            ),
+        )
+        .await
+        .ok_or(StreamableHttpError::TransportChannelClosed)??;
         Ok(stream
             .take_until(self.stop.clone().cancelled_owned())
             .boxed())

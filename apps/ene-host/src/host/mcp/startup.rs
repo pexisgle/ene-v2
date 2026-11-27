@@ -6,6 +6,7 @@ use ene_work::mcp::{ConnectFailure, is_npx_command};
 use rig_agent::tool::server::ToolServerHandle;
 use rig_rmcp::McpConnection;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 pub(super) async fn start(
     store: &Store,
@@ -13,13 +14,17 @@ pub(super) async fn start(
     want: &Desired,
     keys: Option<&Credentials>,
     registry: ToolServerHandle,
+    stop: &CancellationToken,
 ) -> Result<(McpConnection, Receiver), ConnectFailure> {
     let seconds = if is_npx_command(&want.config.command) {
         55
     } else {
         15
     };
-    tokio::time::timeout(Duration::from_secs(seconds), async {
+    // A failed or abandoned handshake must close the worker even before its
+    // result reaches the actor. The slot owns cancellation after adoption.
+    let startup = stop.clone().drop_guard();
+    let result = tokio::time::timeout(Duration::from_secs(seconds), async {
         let secret = read_secret(want.credential_state, keys, id).await?;
         let current = want
             .stamp
@@ -32,7 +37,7 @@ pub(super) async fn start(
         }
         let key = keys.and_then(|keys| keys.approval_key.as_ref());
         let receiver = Receiver::new(id, want, secret.as_deref(), key);
-        let connection = open(&want.config, secret.as_deref(), registry).await?;
+        let connection = open(&want.config, secret.as_deref(), registry, stop).await?;
         Ok((connection, receiver))
     })
     .await
@@ -40,7 +45,11 @@ pub(super) async fn start(
         Err(ConnectFailure::Transient(
             "MCP initialization timed out".into(),
         ))
-    })
+    });
+    if result.is_ok() {
+        let _stop = startup.disarm();
+    }
+    result
 }
 
 async fn read_secret(
@@ -68,8 +77,9 @@ pub(super) async fn open(
     config: &McpConfig,
     secret: Option<&str>,
     registry: ToolServerHandle,
+    stop: &CancellationToken,
 ) -> Result<McpConnection, ConnectFailure> {
     let client = crate::host::net::client()
         .map_err(|error| ConnectFailure::Configuration(error.to_string()))?;
-    ene_work::mcp::open(config, secret, registry, client).await
+    ene_work::mcp::open(config, secret, registry, client, stop).await
 }

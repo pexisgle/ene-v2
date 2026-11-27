@@ -146,11 +146,12 @@ impl Intercept for ServeRegisteredTool {
     ) -> AfterServe {
         match self.0.validate() {
             Ok(()) => AfterServe::Keep,
-            Err(error) => {
-                AfterServe::Replace(Err(
-                    ErrorReport::new(ErrorKind::Denied, error.to_string()).refused()
-                ))
-            }
+            Err(_) => AfterServe::Replace(Err(ErrorReport::new(
+                ErrorKind::Cancelled,
+                "the MCP connection or tool changed after dispatch; the operation may already have taken effect",
+            )
+            .with_code("mcp_outcome_uncertain")
+            .with_retryable(false))),
         }
     }
 }

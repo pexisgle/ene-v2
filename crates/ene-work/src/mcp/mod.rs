@@ -6,3 +6,14 @@ pub mod transport;
 
 pub use npx::is_npx_command;
 pub use transport::{ConnectFailure, backoff_delay, exposed_name, open};
+
+async fn until_cancelled<T>(
+    stop: &tokio_util::sync::CancellationToken,
+    operation: impl Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        () = stop.cancelled() => None,
+        result = operation => Some(result),
+    }
+}

@@ -1,23 +1,25 @@
 //! ECS-free MCP transport connection opening, backoff calculation, and tool naming helpers.
 
+use super::until_cancelled;
 use backon::{BackoffBuilder as _, ExponentialBuilder};
 use ene_domain::settings::McpConnection as McpConfig;
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use rig_agent::tool::server::ToolServerHandle;
 use rig_rmcp::{McpClientError, McpClientHandler, McpConnection};
 use rmcp::{
-    ServiceError,
+    RoleClient, ServiceError,
     model::ClientConfig,
-    service::ClientInitializeError,
+    service::{ClientInitializeError, RxJsonRpcMessage, TxJsonRpcMessage},
     transport::{
-        DynamicTransportError,
+        DynamicTransportError, Transport,
         child_process::TokioChildProcess,
         streamable_http_client::{
             StreamableHttpClientTransport, StreamableHttpClientTransportConfig, StreamableHttpError,
         },
     },
 };
-use std::time::Duration;
+use std::{io, time::Duration};
+use tokio_util::sync::CancellationToken;
 
 #[cfg(windows)]
 use super::npx::CREATE_NO_WINDOW;
@@ -118,11 +120,12 @@ pub async fn open(
     secret: Option<&str>,
     registry: ToolServerHandle,
     http_client: reqwest::Client,
+    stop: &CancellationToken,
 ) -> Result<McpConnection, ConnectFailure> {
     if !want.command.trim().is_empty() {
-        Box::pin(open_stdio(want, secret, registry)).await
+        Box::pin(open_stdio(want, secret, registry, stop)).await
     } else if !want.endpoint.endpoint.trim().is_empty() {
-        Box::pin(open_http(want, secret, registry, http_client)).await
+        Box::pin(open_http(want, secret, registry, http_client, stop)).await
     } else {
         Err(ConnectFailure::Configuration(
             "the MCP connection names neither a command nor an endpoint".into(),
@@ -134,6 +137,7 @@ async fn open_stdio(
     want: &McpConfig,
     secret: Option<&str>,
     registry: ToolServerHandle,
+    stop: &CancellationToken,
 ) -> Result<McpConnection, ConnectFailure> {
     let handler = McpClientHandler::new(ClientConfig::default(), registry);
     #[cfg(windows)]
@@ -176,7 +180,12 @@ async fn open_stdio(
         wrap.wrap(process_wrap::tokio::JobObject);
     }
     wrap.wrap(process_wrap::tokio::KillOnDrop);
-    let transport = TokioChildProcess::new(wrap).map_err(|error| match error.kind() {
+    if stop.is_cancelled() {
+        return Err(ConnectFailure::Transient(
+            "MCP startup was cancelled".into(),
+        ));
+    }
+    let child = TokioChildProcess::new(wrap).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound
         | std::io::ErrorKind::PermissionDenied
         | std::io::ErrorKind::InvalidInput => {
@@ -184,9 +193,45 @@ async fn open_stdio(
         }
         _ => ConnectFailure::Transient(format!("MCP process could not start: {error}")),
     })?;
+    let transport = CancellableStdio {
+        child,
+        stop: stop.clone(),
+    };
     Box::pin(handler.connect(transport))
         .await
         .map_err(connect_failure)
+}
+
+struct CancellableStdio {
+    child: TokioChildProcess,
+    stop: CancellationToken,
+}
+
+impl Transport<RoleClient> for CancellableStdio {
+    type Error = io::Error;
+
+    fn send(
+        &mut self,
+        item: TxJsonRpcMessage<RoleClient>,
+    ) -> impl Future<Output = io::Result<()>> + Send + 'static {
+        let stop = self.stop.clone();
+        let send = self.child.send(item);
+        async move {
+            until_cancelled(&stop, send)
+                .await
+                .ok_or(io::ErrorKind::Interrupted)?
+        }
+    }
+
+    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
+        until_cancelled(&self.stop, self.child.receive())
+            .await
+            .flatten()
+    }
+
+    async fn close(&mut self) -> io::Result<()> {
+        self.child.close().await
+    }
 }
 
 async fn open_http(
@@ -194,6 +239,7 @@ async fn open_http(
     secret: Option<&str>,
     registry: ToolServerHandle,
     client: reqwest::Client,
+    stop: &CancellationToken,
 ) -> Result<McpConnection, ConnectFailure> {
     let handler = McpClientHandler::new(ClientConfig::default(), registry);
     let mut config = StreamableHttpClientTransportConfig::with_uri(want.endpoint.endpoint.trim());
@@ -205,15 +251,14 @@ async fn open_http(
         config.custom_headers.insert(header_name, header_value);
     }
     apply_http_auth_headers(&mut config, &want.auth_header, secret)?;
-    let stop = tokio_util::sync::CancellationToken::new();
-    let startup = stop.clone().drop_guard();
-    let client = super::http::StartupHttp { client, stop };
+    let client = super::http::CancellableHttp {
+        client,
+        stop: stop.clone(),
+    };
     let transport = StreamableHttpClientTransport::with_client(client, config);
-    let connection = Box::pin(handler.connect(transport))
+    Box::pin(handler.connect(transport))
         .await
-        .map_err(connect_failure)?;
-    let _stop = startup.disarm();
-    Ok(connection)
+        .map_err(connect_failure)
 }
 
 fn apply_http_auth_headers(
@@ -346,6 +391,7 @@ mod tests {
             None,
             rig_agent::tool::server::ToolServer::new().run(),
             reqwest::Client::new(),
+            &CancellationToken::new(),
         )
         .await
         else {
