@@ -51,6 +51,15 @@ fn search_endpoint(adapter: SearchAdapter, configured: &str) -> Result<Url, Sear
     {
         return Err(invalid());
     }
+    if ene_policy::hard_denied_search_destination(url.as_str(), url.host_str()) {
+        return Err(SearchConfigError::BlockedDestination);
+    }
+    if adapter.provider().key_environment.is_some()
+        && url.scheme() == "http"
+        && !is_loopback_ip(&url)
+    {
+        return Err(SearchConfigError::InsecureCredentialRoute);
+    }
 
     // Resolve provider-specific request paths before policy sees the destination.
     match adapter {
@@ -79,6 +88,14 @@ fn search_endpoint(adapter: SearchAdapter, configured: &str) -> Result<Url, Sear
     }
     url.set_fragment(None);
     Ok(url)
+}
+
+fn is_loopback_ip(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
+    }
 }
 
 /// The route the permission gate evaluated. A held call cannot switch to
@@ -206,6 +223,10 @@ pub(crate) enum SearchConfigError {
     MissingEndpoint(&'static str),
     #[error("search_unconfigured: invalid {0} HTTP(S) endpoint")]
     InvalidEndpoint(&'static str),
+    #[error("the web search destination is hard-blocked")]
+    BlockedDestination,
+    #[error("HTTPS is required for search providers with credentials outside a loopback IP")]
+    InsecureCredentialRoute,
     #[error("search_unconfigured: {0} endpoint supplies parameters owned by the search tool")]
     ReservedParameters(&'static str),
     #[error("search_unconfigured: `{0}` search connection requires an API key credential")]
@@ -253,13 +274,14 @@ pub(crate) fn resolve_connection(
         configured
     };
     let endpoint = search_endpoint(adapter, endpoint)?;
-    let secret = connection_secret(connection, credentials, providers)?.and_then(|value| {
-        let trimmed = value.trim();
-        (!trimmed.is_empty()).then(|| Arc::from(trimmed))
-    });
-    if provider.key_environment.is_some() && secret.is_none() {
-        return Err(SearchConfigError::MissingCredential(provider.name));
-    }
+    let secret = if provider.key_environment.is_some() {
+        let secret = connection_secret(connection, credentials, providers)?
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(SearchConfigError::MissingCredential(provider.name))?;
+        Some(Arc::from(secret.trim()))
+    } else {
+        None
+    };
     let display_path = &endpoint[..url::Position::AfterPath];
     let display_destination = if contains_credential(display_path, secret.as_deref()) {
         provider.name.to_owned()
@@ -316,7 +338,13 @@ async fn execute(
     limit: usize,
 ) -> Result<Value, ToolExecutionError> {
     tokio::time::timeout(TIMEOUT, async {
-        let client = net::client().map_err(|error| ToolExecutionError::other(error.to_string()))?;
+        let endpoint = &resolved.binding.endpoint;
+        let client = if endpoint.scheme() == "http" && is_loopback_ip(endpoint) {
+            net::loopback_client()
+        } else {
+            net::client()
+        }
+        .map_err(|error| ToolExecutionError::other(error.to_string()))?;
         let response = send_search_request(&client, resolved, query, limit).await?;
         let status = response.status();
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {

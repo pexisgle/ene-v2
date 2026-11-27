@@ -20,7 +20,9 @@ pub use capability::{
     approval_target, validate_declarations,
 };
 pub use grants::CapabilityGrants;
-pub use hard_deny::{hard_denied, hard_denied_action, is_host_tool};
+pub use hard_deny::{
+    hard_denied, hard_denied_action, hard_denied_search_destination, is_host_tool,
+};
 
 /// Error raised when a pure domain value violates structural or format constraints.
 #[non_exhaustive]

@@ -21,8 +21,11 @@ pub(crate) enum NetError {
     ResponseTooLarge(String),
 }
 
-fn build(timeout: Option<Duration>) -> Result<reqwest::Client, NetError> {
+fn build(timeout: Option<Duration>, no_proxy: bool) -> Result<reqwest::Client, NetError> {
     let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    if no_proxy {
+        builder = builder.no_proxy();
+    }
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
     }
@@ -36,7 +39,15 @@ fn build(timeout: Option<Duration>) -> Result<reqwest::Client, NetError> {
 /// bounce the request elsewhere. It sets no timeout of its own: callers that
 /// know their budget bound the request, and an MCP stream is not bounded.
 pub(crate) fn client() -> Result<reqwest::Client, NetError> {
-    static CLIENT: LazyLock<Result<reqwest::Client, NetError>> = LazyLock::new(|| build(None));
+    static CLIENT: LazyLock<Result<reqwest::Client, NetError>> =
+        LazyLock::new(|| build(None, false));
+    CLIENT.clone()
+}
+
+/// A literal loopback HTTP destination must never be sent through a proxy.
+pub(crate) fn loopback_client() -> Result<reqwest::Client, NetError> {
+    static CLIENT: LazyLock<Result<reqwest::Client, NetError>> =
+        LazyLock::new(|| build(None, true));
     CLIENT.clone()
 }
 
@@ -45,7 +56,7 @@ pub(crate) fn client() -> Result<reqwest::Client, NetError> {
 /// [`client`]'s long-lived MCP stream unbounded.
 pub(crate) fn model_client() -> Result<reqwest::Client, NetError> {
     static CLIENT: LazyLock<Result<reqwest::Client, NetError>> =
-        LazyLock::new(|| build(Some(MODEL_TIMEOUT)));
+        LazyLock::new(|| build(Some(MODEL_TIMEOUT), false));
     CLIENT.clone()
 }
 

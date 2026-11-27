@@ -15,6 +15,53 @@ fn test_credentials(secret: &str) -> Credentials {
 }
 
 #[test]
+fn only_keyed_searches_consult_the_credential_store() {
+    let credentials = Credentials::new(false);
+    credentials.make_unreadable();
+    let providers = Providers::none();
+    let mut connection = search_test_connection(
+        "search",
+        "Private SearXNG",
+        "searxng",
+        "http://127.0.0.1:8080/search".into(),
+        CredentialState::Absent,
+        5,
+    );
+    let result = resolve_connection(&connection, Some(&credentials), &providers, 0).unwrap();
+    assert!(result.binding.secret.is_none());
+    connection = search_test_connection(
+        "search",
+        "Exa",
+        "exa",
+        "https://search.example/".into(),
+        CredentialState::Registered,
+        5,
+    );
+    assert!(matches!(
+        resolve_connection(&connection, Some(&credentials), &providers, 0),
+        Err(SearchConfigError::Credential(_))
+    ));
+}
+
+#[test]
+fn search_rejects_unsafe_routes_before_an_explicit_probe_or_model_call() {
+    for url in [
+        "http://169.254.169.254/?option=private",
+        "http://[::ffff:169.254.169.254]/?option=private",
+        "https://metadata.google.internal./?option=private",
+    ] {
+        let error = search_endpoint(SearchAdapter::Searxng, url).unwrap_err();
+        assert!(matches!(error, SearchConfigError::BlockedDestination));
+        assert!(!error.to_string().contains("option=private"));
+    }
+    assert!(matches!(
+        search_endpoint(SearchAdapter::Exa, "http://search.example/lookup"),
+        Err(SearchConfigError::InsecureCredentialRoute)
+    ));
+    assert!(search_endpoint(SearchAdapter::Exa, "http://[::1]:8000/lookup").is_ok());
+}
+
+#[test]
 fn persisted_search_rules_follow_effective_requests_and_accounts() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("host.sqlite3");

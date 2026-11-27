@@ -75,13 +75,27 @@ pub fn hard_denied_action(action: &CandidateAction, target: &ActionTarget) -> Op
     }
     if matches!(action, CandidateAction::WebSearch { .. })
         && let ActionTarget::Url { url, host } = target
-        && (url.to_ascii_lowercase().starts_with("file://")
-            || host.as_deref() == Some("169.254.169.254")
-            || host.as_deref() == Some("metadata.google.internal"))
+        && hard_denied_search_destination(url, host.as_deref())
     {
-        return Some(format!("web_search destination `{url}` is hard-blocked"));
+        return Some("the web search destination is hard-blocked".into());
     }
     None
+}
+
+/// Route restrictions shared by ordinary searches and explicit connection checks.
+pub fn hard_denied_search_destination(url: &str, host: Option<&str>) -> bool {
+    url.get(..7)
+        .is_some_and(|start| start.eq_ignore_ascii_case("file://"))
+        || host.is_some_and(|host| {
+            host.trim_end_matches('.')
+                .eq_ignore_ascii_case("metadata.google.internal")
+                || host
+                    .trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| {
+                        ip.to_canonical() == std::net::Ipv4Addr::new(169, 254, 169, 254)
+                    })
+        })
 }
 
 fn is_file_mutation_action(action: &CandidateAction) -> bool {
