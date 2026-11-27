@@ -18,7 +18,7 @@ pub use companion::{
 pub use connection::{
     AcpConnection, Connection, ConnectionConfig, ConnectionInput, ConnectionKind,
     EmbeddingConnection, LlmConnection, LlmProvider, McpConnection, ModelInfo, PluginInfo,
-    SearchConnection, SettingField, SttConnection, TtsConnection,
+    SearchConnection, SttConnection, TtsConnection,
 };
 pub use ene_policy::{ApprovalDecision, ApprovalStatus};
 pub use policy::{

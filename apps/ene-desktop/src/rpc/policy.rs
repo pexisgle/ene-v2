@@ -13,8 +13,15 @@ load! {
         |rules| Update::PolicyRules(ene_rpc::client_model::policy_rules(rules.items));
     load_policy_texts: settings.list_policy_texts("自由文ポリシーの取得") =>
         |texts| Update::PolicyTexts(texts.items.into_iter().map(Into::into).collect());
-    load_plugins: settings.list_plugins("プラグイン一覧の取得") =>
-        plugins_update;
+}
+
+pub(crate) fn load_plugins(rpc: &RpcDispatcher, epoch: u64) {
+    rpc.call(
+        epoch,
+        "プラグイン一覧の取得",
+        request!(settings.list_plugins(w::Empty::default())),
+        |response| plugins_update(response.view()),
+    );
 }
 
 pub(crate) fn resolve_approval(
@@ -135,7 +142,7 @@ fn change_plugins<T, F>(
 ) where
     F: Future<Output = Result<T, connectrpc::ConnectError>> + Send + 'static,
 {
-    rpc.call_owned(
+    rpc.call(
         epoch,
         context,
         |host| {
@@ -145,10 +152,10 @@ fn change_plugins<T, F>(
                 host.settings.list_plugins(w::Empty::default()).await
             }
         },
-        plugins_update,
+        |response| plugins_update(response.view()),
     );
 }
 
-fn plugins_update(list: w::PluginList) -> Update {
-    Update::Plugins(list.plugins.into_iter().map(Into::into).collect())
+fn plugins_update(list: &w::PluginListView<'_>) -> Update {
+    Update::Plugins(list.plugins.iter().map(Into::into).collect())
 }

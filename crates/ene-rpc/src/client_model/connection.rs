@@ -168,16 +168,9 @@ impl From<domain::ConnectionInput> for w::ConnectionInput {
 }
 
 from_fields! {
-    w::SettingField => domain::SettingField {
-        key, label, kind, required, choices,
-    }
-}
-
-from_fields! {
-    w::LlmProvider => domain::LlmProvider {
-        id, name, adapter, endpoint,
-        settings.into_iter().map(Into::into).collect(),
-        requires_credentials, environment_variable,
+    &w::LlmProviderView<'_> => domain::LlmProvider {
+        id.to_owned(), name.to_owned(), adapter.to_owned(), endpoint.to_owned(),
+        requires_credentials,
     }
 }
 
@@ -191,7 +184,8 @@ impl From<&w::ModelView<'_>> for domain::ModelInfo {
 }
 
 from_fields! {
-    w::PluginInfo => domain::PluginInfo {
-        id, name, version, description, enabled, extensions, path, installed_at,
+    &w::PluginInfoView<'_> => domain::PluginInfo {
+        id.to_owned(), name.to_owned(), version.to_owned(), enabled,
+        extensions.iter().copied().map(str::to_owned).collect(),
     }
 }

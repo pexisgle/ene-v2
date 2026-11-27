@@ -212,21 +212,6 @@ pub struct ConnectionInput {
     pub config: Option<ConnectionConfig>,
 }
 
-/// Provider setting schema field descriptor.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SettingField {
-    /// Key the field's value is stored under.
-    pub key: String,
-    /// Label the host shows for the field.
-    pub label: String,
-    /// Input kind the host renders, such as `text` or `select`.
-    pub kind: String,
-    /// Whether the field must be filled in.
-    pub required: bool,
-    /// Allowed values, for a `select` field.
-    pub choices: Vec<String>,
-}
-
 /// Host-advertised LLM provider catalog item.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LlmProvider {
@@ -238,12 +223,8 @@ pub struct LlmProvider {
     pub adapter: String,
     /// Default base URL for the provider.
     pub endpoint: String,
-    /// Configuration fields the host renders for this provider.
-    pub settings: Vec<SettingField>,
     /// Whether the provider needs a credential before it can be used.
     pub requires_credentials: bool,
-    /// Environment variable the credential may be read from instead.
-    pub environment_variable: Option<String>,
 }
 
 /// Model metadata entry returned by a connection's model listing.
@@ -264,16 +245,10 @@ pub struct PluginInfo {
     pub name: String,
     /// Release version of the plugin.
     pub version: String,
-    /// Operator-facing summary.
-    pub description: String,
     /// Whether the host may run the plugin.
     pub enabled: bool,
     /// Extensions the plugin provides, in the host's own spelling.
     pub extensions: Vec<String>,
-    /// Where the verified plugin snapshot lives on disk.
-    pub path: String,
-    /// When the plugin was installed, as the host stamped it.
-    pub installed_at: String,
 }
 
 impl PluginInfo {

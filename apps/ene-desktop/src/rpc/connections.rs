@@ -83,9 +83,13 @@ where
     .then_some(ticket)
 }
 
-load! {
-    load_providers: settings.list_providers("プロバイダ一覧の取得") =>
-        |providers| Update::Providers(providers.items.into_iter().map(Into::into).collect());
+pub(crate) fn load_providers(rpc: &RpcDispatcher, epoch: u64) {
+    rpc.call(
+        epoch,
+        "プロバイダ一覧の取得",
+        request!(settings.list_providers(w::Empty::default())),
+        |providers| Update::Providers(providers.view().items.iter().map(Into::into).collect()),
+    );
 }
 
 pub(crate) fn load_models(rpc: &RpcDispatcher, epoch: u64, connection_ids: Vec<String>) {
