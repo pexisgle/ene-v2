@@ -1,6 +1,9 @@
 //! One compaction job: the summary request, then the memory pass over the same
 //! window (docs/design/compaction.md).
-use super::{Summary, budget::cut};
+use super::{
+    Summary,
+    budget::{cut, last_turn},
+};
 use crate::host::mind::consolidate::{self, Services};
 use ene_mind::Commit;
 use rig_core::catalog::ModelSpec;
@@ -74,7 +77,7 @@ async fn summarize(
     let keep = spec
         .input_limit()
         .map_or(20_000, |limit| 20_000.min(u64::from(limit) / 4));
-    let end = cut(history, keep, 0)
+    let end = cut(history, keep, 0, last_turn(history))
         .and_then(|id| history.index_of(id))
         .ok_or(CompactionError::TooShort)?;
     let through = history

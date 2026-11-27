@@ -77,8 +77,9 @@ fn every_cut_budget_keeps_a_complete_newest_request() {
         .find(rig_core::conversation::EntryRef::is_request)
         .unwrap()
         .id;
+    let limit = history.start_of(latest);
     for budget in 0..=message_tokens(history.messages().iter().map(Arc::as_ref)) {
-        if let Some(id) = cut(&history, budget, 0) {
+        if let Some(id) = cut(&history, budget, 0, limit) {
             let at = history.index_of(id).unwrap();
             assert!(history.entries().nth(at).unwrap().is_request());
             assert!(at <= history.index_of(latest).unwrap());
@@ -87,7 +88,73 @@ fn every_cut_budget_keeps_a_complete_newest_request() {
                 .expect("every kept result still has its call");
         }
     }
-    assert_eq!(cut(&history, 0, 0), Some(latest));
+    assert_eq!(cut(&history, 0, 0, limit), Some(latest));
+}
+
+#[test]
+fn fitting_cannot_split_the_latest_turn_between_its_inputs() {
+    let mut history = History::new();
+    let first = history.push(Message::user("first input ".repeat(100)));
+    let second = history.push(Message::user("second input"));
+    history.open_turn();
+    assert_eq!(history.turn_start(), first);
+    let mut view = history.request_view();
+    let request = FitRequest {
+        model: "",
+        prefix: &empty_request(),
+        anchor: None,
+        sent: None,
+        budget: 95,
+        turn_start: Some(first),
+    };
+    assert!(!fit(&mut view, &request));
+    assert_eq!(view.id(0), Some(first));
+    assert_eq!(view.id(1), Some(second));
+}
+
+#[test]
+fn a_large_old_summary_cannot_crowd_out_a_fitting_current_turn() {
+    let mut saved = History::new();
+    let earlier = saved.push(Message::user("earlier question"));
+    let through = saved.push(Message::assistant("earlier answer"));
+    let current = saved.push(Message::user("latest question"));
+    let mut view = saved.request_view();
+    inject_summary(
+        &mut view,
+        &Summary {
+            text: "older material ".repeat(800),
+            through_message_id: through.get(),
+        },
+    );
+    assert!(is_summary_entry(view.entries().next()));
+    let request = FitRequest {
+        model: "",
+        prefix: &empty_request(),
+        anchor: None,
+        sent: None,
+        budget: 260,
+        turn_start: Some(current),
+    };
+    assert!(fit(&mut view, &request));
+    assert!(noticed(&view));
+    assert_eq!(view.id(1), Some(current));
+    assert_eq!(saved.id(0), Some(earlier));
+    assert_eq!(saved.messages().len(), 3);
+}
+
+#[test]
+fn a_model_input_cap_and_total_window_are_separate_constraints() {
+    let mut spec = Catalog::builtin()
+        .resolve("deepseek/deepseek-flash")
+        .unwrap()
+        .spec
+        .clone();
+    spec.context_window = Some(120_000);
+    spec.max_output_tokens = Some(32_000);
+    spec.max_input_tokens = Some(16_000);
+    assert_eq!(input_budget(&spec), 14_400);
+    spec.max_input_tokens = Some(90_000);
+    assert_eq!(input_budget(&spec), 79_000);
 }
 
 #[test]
@@ -103,6 +170,7 @@ fn a_fit_keeps_tool_pairs_and_drops_whole_turns() {
             anchor: None,
             sent: None,
             budget: 550,
+            turn_start: None,
         },
     ));
     assert!(message_tokens(history.messages().iter().map(Arc::as_ref)) <= 550);
@@ -130,6 +198,7 @@ fn fitting_clears_large_tool_outputs_only_in_the_request_view() {
             anchor: None,
             sent: None,
             budget: 500,
+            turn_start: None,
         },
     ));
     assert!(message_tokens(request.messages().iter().map(Arc::as_ref)) <= 500);
@@ -156,6 +225,7 @@ fn a_fit_refuses_a_single_oversized_message() {
             anchor: None,
             sent: None,
             budget: 900,
+            turn_start: None,
         },
     ));
     assert!(message_tokens(history.messages().iter().map(Arc::as_ref)) > 900);
@@ -176,6 +246,7 @@ fn measured_usage_applies_only_to_the_same_request_prefix() {
         anchor: Some(&anchor),
         sent: None,
         budget: 500,
+        turn_start: None,
     };
     request.sent = Some(request.start(&history));
     assert!(!fit(&mut history, &request));
@@ -200,6 +271,7 @@ fn the_fixed_request_weight_counts_against_the_window() {
             anchor: None,
             sent: None,
             budget: 1_100,
+            turn_start: None,
         },
     ));
     assert!(noticed(&history), "the fixed parts can still refuse");
@@ -212,6 +284,7 @@ fn the_fixed_request_weight_counts_against_the_window() {
             anchor: None,
             sent: None,
             budget: 1_900,
+            turn_start: None,
         },
     ));
     assert!(
@@ -330,6 +403,7 @@ fn injected_blocks_are_system_and_never_two_user_messages() {
             anchor: None,
             sent: None,
             budget: 650,
+            turn_start: None,
         },
     ));
     history.validate().expect("the notice keeps tool pairs");

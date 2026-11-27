@@ -1,5 +1,6 @@
 //! Estimate and edit the model's outgoing request view.
 use super::{History, NOTICE, is_summary_entry};
+use rig_core::catalog::ModelSpec;
 use rig_core::completion::{CompletionRequest, Message};
 use rig_core::conversation::{Author, Entry, MessageId};
 use rig_core::message::{ToolResultContent, UserContent};
@@ -50,15 +51,13 @@ impl FitRequest<'_> {
     }
 }
 
-/// The tokens a cut injects in front of the kept messages: the summary block
-/// when the head holds one, plus the system notice.
-fn injected_tokens(history: &History) -> u64 {
-    let head = history
-        .entries()
-        .next()
-        .filter(|entry| is_summary_entry(Some(*entry)))
-        .map_or(0, |entry| message_tokens([entry.message]));
-    head.saturating_add(message_tokens([&Message::system(NOTICE)]))
+pub(crate) fn input_budget(spec: &ModelSpec) -> u64 {
+    let input = spec.input_limit().map_or(128_000, u64::from);
+    let context = spec.context_window.map_or(128_000, u64::from);
+    let output = spec.output_limit().map_or(4_096, u64::from);
+    input
+        .min(context.saturating_sub(output))
+        .saturating_sub(input / 10)
 }
 
 pub(crate) struct FitRequest<'a> {
@@ -68,6 +67,7 @@ pub(crate) struct FitRequest<'a> {
     pub(crate) anchor: Option<&'a Anchor>,
     pub(crate) sent: Option<RequestStart>,
     pub(crate) budget: u64,
+    pub(crate) turn_start: Option<MessageId>,
 }
 
 pub(crate) fn fit(history: &mut History, request: &FitRequest<'_>) -> bool {
@@ -77,6 +77,7 @@ pub(crate) fn fit(history: &mut History, request: &FitRequest<'_>) -> bool {
         anchor,
         sent,
         budget,
+        turn_start,
     } = *request;
     let fixed = request_estimate(prefix);
     let tokens = |history: &History| {
@@ -96,16 +97,35 @@ pub(crate) fn fit(history: &mut History, request: &FitRequest<'_>) -> bool {
     if tokens(history) <= budget {
         return true;
     }
-    if clear_tool_outputs(history) && tokens(history) <= budget {
+    let active = turn_start.map(|start| history.start_of(start));
+    let older_than = active.unwrap_or_else(|| history.messages().len().saturating_sub(1));
+    if clear_tool_outputs(history, older_than) && tokens(history) <= budget {
         return true;
     }
-    let head = usize::from(is_summary_entry(history.entries().next()));
+    let limit = active.unwrap_or_else(|| last_turn(history));
+    let notice = Message::system(NOTICE);
     let keep = budget
         .saturating_sub(fixed)
-        .saturating_sub(injected_tokens(history));
-    if let Some(at) = cut(history, keep, head).and_then(|id| history.index_of(id)) {
+        .saturating_sub(message_tokens([&notice]));
+    let current_tokens = message_tokens(history.messages()[limit..].iter().map(Arc::as_ref));
+    let summary = history
+        .entries()
+        .next()
+        .filter(|entry| is_summary_entry(Some(*entry)));
+    let summary_tokens = summary.map_or(0, |entry| message_tokens([entry.message]));
+    let retain_summary = summary.is_some() && summary_tokens.saturating_add(current_tokens) <= keep;
+    let head = usize::from(retain_summary);
+    let keep = if retain_summary {
+        keep.saturating_sub(summary_tokens)
+    } else {
+        keep
+    };
+    let at = cut(history, keep, head, limit)
+        .and_then(|id| history.index_of(id))
+        .unwrap_or(usize::from(summary.is_some()));
+    if at > head {
         let by = Author::plugin("ene-host");
-        let notice = Entry::new(Message::system(NOTICE)).by(by.clone());
+        let notice = Entry::new(notice).by(by.clone());
         history.splice(head..at, [notice], by);
     }
     tokens(history) <= budget
@@ -114,7 +134,7 @@ pub(crate) fn fit(history: &mut History, request: &FitRequest<'_>) -> bool {
 /// The id of the first message of the newest window whose messages fit
 /// `budget`: a request boundary, never before `head`, never after the newest
 /// request.
-pub(super) fn cut(history: &History, budget: u64, head: usize) -> Option<MessageId> {
+pub(super) fn cut(history: &History, budget: u64, head: usize, limit: usize) -> Option<MessageId> {
     let messages = history.messages();
     let kept = view(
         messages,
@@ -127,14 +147,14 @@ pub(super) fn cut(history: &History, budget: u64, head: usize) -> Option<Message
         .skip(start)
         .find(rig_core::conversation::EntryRef::is_request)
         .map_or(start, |entry| entry.index)
-        .min(last_turn(history))
+        .min(limit)
         .max(head);
     if at > head { history.id(at) } else { None }
 }
 
 /// The index of the newest message that asks something: the turn the model is
 /// answering, which a window may never cut.
-fn last_turn(history: &History) -> usize {
+pub(super) fn last_turn(history: &History) -> usize {
     let newest = history
         .entries()
         .rev()
@@ -148,14 +168,13 @@ const TOOL_OUTPUT_NOTICE: &str =
     "[output cleared to fit the context window; run the tool again if needed]";
 
 /// Keep tool-result identity and errors intact, including the latest message.
-fn clear_tool_outputs(history: &mut History) -> bool {
-    let latest = history.messages().len().saturating_sub(1);
+fn clear_tool_outputs(history: &mut History, older_than: usize) -> bool {
     let mut changed = false;
     history.edit_each(Author::plugin("ene-host"), |entry| {
         let Message::User { content } = entry.message else {
             return None;
         };
-        if entry.index == latest {
+        if entry.index >= older_than {
             return None;
         }
         let mut edited = None;

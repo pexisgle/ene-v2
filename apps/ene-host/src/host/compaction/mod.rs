@@ -30,7 +30,7 @@ mod budget;
 mod job;
 
 use budget::message_tokens;
-pub(crate) use budget::{FitRequest, RequestStart, fit};
+pub(crate) use budget::{FitRequest, RequestStart, fit, input_budget};
 
 /// The share of its model's input limit a conversation may reach before a turn
 /// boundary starts a rolling summary (doc §3.1). It is the only trigger: no

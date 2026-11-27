@@ -48,6 +48,7 @@ type AdaptedRequest<'a> = (
     &'a Adapted,
     &'a mut Decision,
     Option<&'a ForAgent>,
+    &'a CallOf,
 );
 
 type NeedsTail = (
@@ -375,15 +376,17 @@ fn agent_view<'a>(
 /// refused instead of sent.
 fn fit(
     mut calls: Query<AdaptedRequest<'static>, NeedsFit>,
+    turns: Query<&Turn>,
     usages: Query<(&LastUsage, Option<&SentRequest>)>,
     mut commands: Commands,
 ) {
-    for (mut call, adapted, mut decision, of) in &mut calls {
-        let limit = adapted.0.spec.input_limit().map_or(128_000, u64::from);
-        let reserve = u64::from(adapted.0.spec.max_output_tokens.unwrap_or(4_096)) + limit / 10;
+    for (mut call, adapted, mut decision, agent, root) in &mut calls {
         if call.history.is_none() {
             continue;
         }
+        let Ok(turn) = turns.get(root.0) else {
+            continue;
+        };
         let prefix = adapted.sent(&ModelRequest {
             request: call.request.clone(),
             connection: None,
@@ -391,7 +394,7 @@ fn fit(
             history: Some(Default::default()),
         });
         let model = adapted.0.spec.reference();
-        let agent = of.map(|of| of.0);
+        let agent = agent.map(|agent| agent.0);
         let anchor = agent
             .and_then(|agent| usages.get(agent).ok())
             .and_then(|(usage, _)| usage.0);
@@ -406,7 +409,8 @@ fn fit(
             prefix: &prefix,
             anchor: anchor.as_ref(),
             sent,
-            budget: limit.saturating_sub(reserve),
+            budget: compaction::input_budget(&adapted.0.spec),
+            turn_start: Some(turn.start),
         };
         let fits = compaction::fit(view, &request);
         if let Some(agent) = agent.filter(|_| fits) {
