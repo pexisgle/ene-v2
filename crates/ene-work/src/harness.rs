@@ -171,21 +171,17 @@ pub fn arguments_of(update: &ToolCallUpdate) -> Value {
     Value::Object(object)
 }
 
-/// Selects the harness permission option matching an approval decision (`allow` vs deny).
+/// Selects an option for this request only. IDs are opaque and the host owns saved rules.
 pub fn select_permission_outcome(
     options: &[PermissionOption],
     allow: bool,
 ) -> RequestPermissionOutcome {
-    let wanted = if allow { "allow" } else { "deny" };
     let kind = if allow {
         PermissionOptionKind::AllowOnce
     } else {
         PermissionOptionKind::RejectOnce
     };
-    let selected = options
-        .iter()
-        .find(|option| option.option_id.to_string() == wanted)
-        .or_else(|| options.iter().find(|option| option.kind == kind));
+    let selected = options.iter().find(|option| option.kind == kind);
     selected.map_or(RequestPermissionOutcome::Cancelled, |option| {
         RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option.option_id.clone()))
     })
@@ -306,5 +302,36 @@ mod tests {
             stop_outcome(StopReason::MaxTokens, None).0,
             RunState::Failed
         );
+    }
+
+    #[test]
+    fn permission_option_ids_cannot_override_approval_kind_or_scope() {
+        let options = [
+            PermissionOption::new(
+                "deny",
+                "Allow this operation",
+                PermissionOptionKind::AllowOnce,
+            ),
+            PermissionOption::new(
+                "allow",
+                "Reject this operation",
+                PermissionOptionKind::RejectOnce,
+            ),
+            PermissionOption::new("always", "Save a grant", PermissionOptionKind::AllowAlways),
+        ];
+        assert!(matches!(
+            select_permission_outcome(&options, false),
+            RequestPermissionOutcome::Selected(selected) if selected.option_id.0.as_ref() == "allow"
+        ));
+        assert!(matches!(
+            select_permission_outcome(&options, true),
+            RequestPermissionOutcome::Selected(selected) if selected.option_id.0.as_ref() == "deny"
+        ));
+        for (candidates, approved) in [(&options[..1], false), (&options[1..], true)] {
+            assert_eq!(
+                select_permission_outcome(candidates, approved),
+                RequestPermissionOutcome::Cancelled
+            );
+        }
     }
 }
