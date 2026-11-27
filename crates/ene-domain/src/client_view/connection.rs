@@ -44,13 +44,12 @@ pub enum ConnectionKind {
 
 impl ConnectionKind {
     /// Selectable connection kinds shown in the custom connection creation form.
-    pub const ALL_CUSTOM: [Self; 7] = [
+    pub const ALL_CUSTOM: [Self; 6] = [
         Self::Llm,
         Self::Tts,
         Self::Stt,
         Self::Embedding,
         Self::Mcp,
-        Self::Acp,
         Self::Search,
     ];
 
@@ -62,7 +61,7 @@ impl ConnectionKind {
             Self::Stt => "音声認識",
             Self::Embedding => "埋め込み",
             Self::Mcp => "MCP",
-            Self::Acp => "ACP",
+            Self::Acp => "ハーネス",
             Self::Search => "Web検索",
             Self::Unspecified => "その他",
         }
@@ -275,4 +274,15 @@ pub struct PluginInfo {
     pub path: String,
     /// When the plugin was installed, as the host stamped it.
     pub installed_at: String,
+}
+
+impl PluginInfo {
+    /// Whether the installed package declares an enabled task harness.
+    pub fn offers_harness(&self) -> bool {
+        self.enabled
+            && self
+                .extensions
+                .iter()
+                .any(|name| name == super::super::settings::TASK_HARNESS_CAPABILITY)
+    }
 }

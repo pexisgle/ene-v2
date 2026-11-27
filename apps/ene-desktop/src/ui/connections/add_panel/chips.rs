@@ -7,6 +7,7 @@ use crate::ui::Hub;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button};
+use ene_client_core::connections::build_custom_connection_input;
 use ene_client_core::{SearchAdapter, domain::ConnectionKind};
 use gpui::{AnyElement, Context, Entity, SharedString};
 
@@ -194,6 +195,58 @@ pub(super) fn build_custom_kind_chips(
                         } else {
                             AddFlow::Custom(kind)
                         };
+                        cx.notify();
+                    });
+                },
+            )
+        })
+        .collect()
+}
+
+pub(super) fn build_harness_chips(
+    live: bool,
+    hub: &Entity<Hub>,
+    theme: &Theme,
+    cx: &Context<ConnectionsPane>,
+) -> Vec<AnyElement> {
+    let model = &hub.read(cx).model;
+    model
+        .connections
+        .plugins
+        .iter()
+        .filter(|plugin| {
+            plugin.offers_harness()
+                && !model.settings().is_some_and(|settings| {
+                    settings.connections.iter().any(|connection| {
+                        connection.kind == ConnectionKind::Acp
+                            && connection
+                                .endpoint()
+                                .is_some_and(|endpoint| endpoint.adapter == plugin.id)
+                    })
+                })
+        })
+        .map(|plugin| {
+            let (id, name) = (plugin.id.clone(), plugin.name.clone());
+            let hub = hub.clone();
+            let pane = cx.entity();
+            pill_button(
+                SharedString::from(format!("add-harness-{id}")),
+                name.clone(),
+                Tone::Soft.icon(Icon::Plus).enabled(live),
+                theme,
+                move |_, cx| {
+                    let Some(input) =
+                        build_custom_connection_input(ConnectionKind::Acp, &name, &id, "")
+                    else {
+                        return;
+                    };
+                    let connection_id = input.id.clone();
+                    hub.update(cx, |hub, cx| {
+                        hub.upsert_connection("ハーネスの追加", input, cx)
+                    });
+                    pane.update(cx, |pane, cx| {
+                        pane.form.add = AddFlow::Closed;
+                        pane.form.open_editor(connection_id);
                         cx.notify();
                     });
                 },

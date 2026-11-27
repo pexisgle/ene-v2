@@ -91,7 +91,9 @@ pub(super) async fn check_connection(
     let notify = connection.endpoint().adapter == model::agent_platform::ADAPTER
         || matches!(
             connection.kind,
-            settings::ConnectionKind::Mcp | settings::ConnectionKind::Search
+            settings::ConnectionKind::Mcp
+                | settings::ConnectionKind::Search
+                | settings::ConnectionKind::Acp
         );
     let revision = connection.revision;
     let check =

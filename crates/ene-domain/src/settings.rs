@@ -389,6 +389,9 @@ pub struct Check {
     pub resources: Vec<String>,
 }
 
+/// Readiness check capability for a host-loaded task harness.
+pub const TASK_HARNESS_CAPABILITY: &str = "harness";
+
 /// Whether a secret is stored. `registered` secrets live in the host's
 /// credential store and are not part of any connection read.
 #[derive(

@@ -13,7 +13,7 @@ use ene_client_core::{
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 
 pub(super) use chips::build_search_preset_chips;
-use chips::{build_custom_kind_chips, build_voice_embedding_chips};
+use chips::{build_custom_kind_chips, build_harness_chips, build_voice_embedding_chips};
 
 pub(super) fn render_add_connection_panel(
     pane: &mut ConnectionsPane,
@@ -23,6 +23,7 @@ pub(super) fn render_add_connection_panel(
     cx: &mut Context<ConnectionsPane>,
 ) -> AnyElement {
     let llm_chips = build_llm_provider_chips(providers, live, &pane.hub, theme, cx);
+    let harness_chips = build_harness_chips(live, &pane.hub, theme, cx);
     let custom_section = match pane.form.add {
         AddFlow::Custom(kind) => Some(render_custom_connection_section(
             pane, kind, live, theme, cx,
@@ -44,6 +45,13 @@ pub(super) fn render_add_connection_panel(
         .gap(px(12.))
         .when(!llm_chips.is_empty(), |this| {
             this.child(render_chip_section("AIプロバイダを追加", llm_chips, theme))
+        })
+        .when(!harness_chips.is_empty(), |this| {
+            this.child(render_chip_section(
+                "作業ハーネスを追加",
+                harness_chips,
+                theme,
+            ))
         })
         .child(render_chip_section(
             "音声・埋め込み機能を追加",
@@ -221,12 +229,6 @@ fn custom_kind_placeholders(
             "例: exa / tavily / brave / mwmbl / searxng",
             "検索 API URL",
             "例: https://api.exa.ai/search",
-        ),
-        ConnectionKind::Acp | ConnectionKind::Mcp => (
-            "実行コマンド",
-            "例: npx / python / my-agent",
-            "引数（スペース区切り）",
-            "例: --stdio --workspace .",
         ),
         _ => (
             "アダプタ名",

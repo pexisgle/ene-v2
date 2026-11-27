@@ -31,6 +31,7 @@ pub(super) fn render_connection_editor(
 ) -> AnyElement {
     let id = conn.id.clone();
     let endpoint = conn.endpoint();
+    let harness = conn.kind == ConnectionKind::Acp;
     let agent_platform = conn.kind == ConnectionKind::Llm
         && endpoint.is_some_and(|ep| ep.adapter == GOOGLE_AGENT_PLATFORM);
 
@@ -52,7 +53,9 @@ pub(super) fn render_connection_editor(
             cx,
         )
     });
-    let (schema_controls, next_options_json) = if agent_platform {
+    let (schema_controls, next_options_json) = if harness {
+        (Vec::new(), None)
+    } else if agent_platform {
         render_agent_platform_options(pane, &id, conn.revision, endpoint, theme, cx)
     } else {
         render_options_schema(pane, &id, conn.revision, endpoint, theme, cx)
@@ -79,7 +82,7 @@ pub(super) fn render_connection_editor(
             None | Some(ConnectionResource::TranscriptionModel)
         );
 
-    let cred_strip = render_credentials_strip(pane, conn, live, theme, cx);
+    let cred_strip = (!harness).then(|| render_credentials_strip(pane, conn, live, theme, cx));
     let actions = render_editor_actions(conn, payload, &pane.hub, theme);
 
     div()
@@ -94,8 +97,17 @@ pub(super) fn render_connection_editor(
             this.child(render_enable_row(conn, live, &pane.hub, theme))
         })
         .when_some(error_banner(check, theme), gpui::ParentElement::child)
-        .child(cred_strip)
+        .when_some(cred_strip, gpui::ParentElement::child)
         .child(labeled_field("表示名", drafts.name_d, theme))
+        .when(harness, |this| {
+            let target = endpoint.map_or("未指定", |ep| ep.adapter.as_str());
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.ink_muted)
+                    .child(format!("ハーネス ID　{target}")),
+            )
+        })
         .when_some(drafts.cmd_d, |this, cd| {
             this.child(labeled_field("コマンド", cd, theme))
         })
@@ -105,14 +117,14 @@ pub(super) fn render_connection_editor(
         .when_some(drafts.mcp_extra_d, |this, group| {
             append_mcp_extra_fields(this, &id, group, mcp_kv_error, theme)
         })
-        .when(!agent_platform, |this| {
+        .when(!agent_platform && !harness, |this| {
             this.child(labeled_field("エンドポイント URL", drafts.ep_d, theme))
         })
         .when_some(dropdown_picker, gpui::ParentElement::child)
         .when_some(drafts.dim_d, |this, dd| {
             this.child(labeled_field("次元数 (dimensions)", dd, theme))
         })
-        .when(show_list_field, |this| {
+        .when(show_list_field && !harness, |this| {
             this.child(labeled_field(
                 if conn.kind == ConnectionKind::Search {
                     "最大検索結果数（1–20、空欄で接続上限なし）"

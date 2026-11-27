@@ -192,6 +192,40 @@ fn auto_assign_default_model_fills_missing_companion_and_task_slots_once() {
     assert_eq!(patch.assignment.connection_id, "c1");
     assert_eq!(patch.assignment.model_id, "gpt-5.4-mini");
 
+    let snapshot = model.snapshot.as_mut().unwrap();
+    let input = crate::connections::build_custom_connection_input(
+        ConnectionKind::Acp,
+        "Reference",
+        "reference",
+        "",
+    )
+    .unwrap();
+    let hand_id = input.id;
+    snapshot
+        .settings
+        .as_mut()
+        .unwrap()
+        .connections
+        .push(Connection {
+            id: hand_id.clone(),
+            config: input.config,
+            kind: input.kind,
+            ..Default::default()
+        });
+    snapshot.companions[0].assignments = Some(ModelAssignments {
+        task: crate::domain::ModelAssignment {
+            connection_id: hand_id,
+            model_id: "legacy-harness-marker".into(),
+        },
+        ..Default::default()
+    });
+    let patch = model.auto_assign_default_model_request(&seen).unwrap();
+    assert!(patch.assign_companion);
+    assert!(
+        !patch.assign_task,
+        "an explicitly assigned hand remains bound while unavailable"
+    );
+
     seen.insert("ene".into(), 3);
     assert!(model.auto_assign_default_model_request(&seen).is_none());
     assert_eq!(ModelRoleSlot::ALL.len(), 7);

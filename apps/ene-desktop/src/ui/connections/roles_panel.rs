@@ -14,6 +14,7 @@ use gpui::{AnyElement, Context, Entity, FontWeight, div, prelude::*, px};
 pub(super) struct ModelRoleChoices<'a> {
     pub(super) all_models: &'a [(String, String, String)],
     pub(super) embedding_models: &'a [(String, String, String)],
+    pub(super) harnesses: &'a [(String, String, String)],
 }
 
 pub(super) fn render_advanced_roles_panel(
@@ -39,6 +40,11 @@ pub(super) fn render_advanced_roles_panel(
             } else {
                 choices.all_models
             };
+            let harnesses = if slot == ModelRoleSlot::Task {
+                choices.harnesses
+            } else {
+                &[]
+            };
             render_model_role_row(
                 pane,
                 &ModelRoleRowCtx {
@@ -46,6 +52,7 @@ pub(super) fn render_advanced_roles_panel(
                     slot,
                     assignments: &assignments,
                     slot_models,
+                    harnesses,
                     live,
                 },
                 theme,
@@ -92,6 +99,7 @@ struct ModelRoleRowCtx<'a> {
     slot: ModelRoleSlot,
     assignments: &'a ModelAssignments,
     slot_models: &'a [(String, String, String)],
+    harnesses: &'a [(String, String, String)],
     live: bool,
 }
 
@@ -106,6 +114,7 @@ fn render_model_role_row(
         slot,
         assignments,
         slot_models,
+        harnesses,
         live,
     } = *row;
     let current = slot.current(assignments);
@@ -114,7 +123,9 @@ fn render_model_role_row(
         |m| {
             slot_models
                 .iter()
+                .chain(harnesses)
                 .find(|(cid, mid, _)| cid == &m.connection_id && mid == &m.model_id)
+                .or_else(|| harnesses.iter().find(|(cid, _, _)| cid == &m.connection_id))
                 .map_or_else(
                     || format!("{} / {}", m.connection_id, m.model_id),
                     |(_, _, label)| label.clone(),
@@ -132,7 +143,7 @@ fn render_model_role_row(
         theme,
     );
     let filter_txt = filter_d.read(cx).text().to_owned();
-    let options = build_slot_model_options(slot, slot_models);
+    let options = build_slot_model_options(slot, slot_models.iter().chain(harnesses));
     let current_value = current
         .as_ref()
         .map(|m| encode_model_choice(&m.connection_id, &m.model_id))
@@ -239,9 +250,9 @@ fn render_roles_refresh_bar(
         })
 }
 
-fn build_slot_model_options(
+fn build_slot_model_options<'a>(
     slot: ModelRoleSlot,
-    slot_models: &[(String, String, String)],
+    slot_models: impl Iterator<Item = &'a (String, String, String)>,
 ) -> Vec<DropdownOption> {
     let mut options = Vec::new();
     if !matches!(slot, ModelRoleSlot::Companion | ModelRoleSlot::Task) {

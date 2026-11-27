@@ -33,19 +33,14 @@ pub(super) fn process_command_draft(
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
 ) -> Option<Entity<Draft>> {
-    if !matches!(conn.kind, ConnectionKind::Mcp | ConnectionKind::Acp) {
+    let Some(ConnectionConfig::Mcp(mcp)) = cfg else {
         return None;
-    }
-    let cmd_init = match cfg {
-        Some(ConnectionConfig::Mcp(m)) => m.command.as_str(),
-        Some(ConnectionConfig::Acp(a)) => a.command.as_str(),
-        _ => "",
     };
     Some(pane.drafts.draft(
         cx,
         format!("conn:{}:r{}:cmd", conn.id, conn.revision),
         "実行コマンド",
-        Some(cmd_init),
+        Some(mcp.command.as_str()),
         theme,
     ))
 }

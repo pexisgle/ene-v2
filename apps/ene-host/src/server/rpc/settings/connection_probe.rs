@@ -59,7 +59,7 @@ async fn probe_harness(connection: &Connection, providers: &Providers) -> Check 
     let start = providers.start(adapter, ene_plugin::Extension::Harness);
     match tokio::time::timeout(Duration::from_secs(10), start).await {
         Ok(Ok(_)) => Check {
-            capabilities: vec!["harness".into()],
+            capabilities: vec![ene_domain::settings::TASK_HARNESS_CAPABILITY.into()],
             ..healthy(checked_at, Vec::new())
         },
         Ok(Err(error)) => failed(checked_at, error.to_string()),

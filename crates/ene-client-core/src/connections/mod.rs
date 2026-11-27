@@ -2,6 +2,7 @@
 
 pub mod edits;
 pub mod form;
+mod harness;
 pub mod mcp;
 mod options;
 
@@ -11,6 +12,7 @@ pub use edits::{
     extract_kind_list_init, format_kv_lines, parse_kv_lines, parse_search_cap, split_comma,
     toggle_comma_item,
 };
+pub use harness::task_harness_choices;
 pub use mcp::{
     McpExtraConfig, McpTargetResult, build_mcp_connection_input, mcp_http_target, mcp_local_target,
     mcp_npx_target, mcp_process_target, parse_mcp_kv, parse_process_args,

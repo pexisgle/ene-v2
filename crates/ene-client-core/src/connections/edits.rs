@@ -258,23 +258,8 @@ pub fn apply_connection_edits(conn: &Connection, spec: &ConnectionEditSpec<'_>) 
         Some(ConnectionConfig::Stt(stt)) => apply_stt_edits(stt, spec),
         Some(ConnectionConfig::Embedding(emb)) => apply_embedding_edits(emb, spec),
         Some(ConnectionConfig::Mcp(mcp)) => apply_mcp_edits(mcp, spec),
-        Some(ConnectionConfig::Acp(acp)) => {
-            acp.endpoint = Some(updated_endpoint(
-                acp.endpoint.as_ref(),
-                spec.endpoint_url,
-                spec.options_json,
-            ));
-            if let Some((cmd, _)) = spec.process {
-                acp.command = cmd.to_owned();
-            }
-            acp.args = spec
-                .list_raw
-                .split_whitespace()
-                .map(str::to_owned)
-                .collect();
-        }
         Some(ConnectionConfig::Search(search)) => apply_search_edits(search, spec),
-        None => {}
+        Some(ConnectionConfig::Acp(_)) | None => {}
     }
 
     ConnectionInput {
@@ -291,12 +276,12 @@ pub fn apply_connection_edits(conn: &Connection, spec: &ConnectionEditSpec<'_>) 
 pub fn build_custom_connection_input(
     kind: ConnectionKind,
     name: &str,
-    adapter_or_cmd: &str,
-    url_or_args: &str,
+    adapter: &str,
+    endpoint: &str,
 ) -> Option<ConnectionInput> {
     let ep = ConnectionEndpoint {
-        adapter: adapter_or_cmd.to_owned(),
-        endpoint: url_or_args.to_owned(),
+        adapter: adapter.to_owned(),
+        endpoint: endpoint.to_owned(),
         options_schema: String::new(),
         options: "{}".into(),
     };
@@ -343,9 +328,11 @@ pub fn build_custom_connection_input(
             })
         }
         ConnectionKind::Acp => ConnectionConfig::Acp(AcpConnection {
-            command: adapter_or_cmd.to_owned(),
-            args: url_or_args.split_whitespace().map(str::to_owned).collect(),
-            endpoint: Some(ep),
+            endpoint: Some(ConnectionEndpoint {
+                endpoint: String::new(),
+                ..ep
+            }),
+            ..Default::default()
         }),
     };
     Some(ConnectionInput {

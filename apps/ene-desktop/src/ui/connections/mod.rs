@@ -20,7 +20,10 @@ use crate::ui::widgets::{
     CircleButtonStyle, Tone, circle_icon_button, disclosure_row, pill_button,
 };
 use crate::ui::{DraftStore, GOOGLE_AGENT_PLATFORM, Hub};
-use ene_client_core::domain::{Connection, ConnectionCheck, ConnectionKind};
+use ene_client_core::{
+    connections::task_harness_choices,
+    domain::{Connection, ConnectionCheck, ConnectionKind},
+};
 use gpui::{AnyElement, Context, Entity, FontWeight, Subscription, Window, div, prelude::*, px};
 use std::collections::{BTreeMap, HashSet};
 
@@ -218,7 +221,7 @@ impl ConnectionsPane {
 
 impl gpui::Render for ConnectionsPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (theme, live, connections, providers, checks, companion, all_models, embedding_models) = {
+        let (theme, live, connections, providers, checks, companion) = {
             let hub = self.hub.read(cx);
             (
                 hub.theme(),
@@ -229,8 +232,6 @@ impl gpui::Render for ConnectionsPane {
                 hub.model.connections.providers.clone().unwrap_or_default(),
                 hub.model.connections.checks.clone(),
                 hub.model.companion().cloned(),
-                hub.model.all_llm_models(),
-                hub.model.all_embedding_models(),
             )
         };
 
@@ -247,12 +248,17 @@ impl gpui::Render for ConnectionsPane {
         let rows = self.build_connection_rows(&connections, (&checks, live, adding), &theme, cx);
         let adv_open = self.form.advanced_roles_open;
         let adv_panel = adv_open.then(|| {
+            let model = &self.hub.read(cx).model;
+            let all_models = model.all_llm_models();
+            let embedding_models = model.all_embedding_models();
+            let harnesses = task_harness_choices(&connections, &model.connections.plugins);
             roles_panel::render_advanced_roles_panel(
                 self,
                 companion.as_ref(),
                 &roles_panel::ModelRoleChoices {
                     all_models: &all_models,
                     embedding_models: &embedding_models,
+                    harnesses: &harnesses,
                 },
                 live,
                 &theme,

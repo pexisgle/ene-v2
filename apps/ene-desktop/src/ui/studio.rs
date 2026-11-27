@@ -146,6 +146,7 @@ impl SettingsStudio {
                             } else if section == SettingsSection::Connections {
                                 hub.load_providers(cx);
                                 hub.load_models(cx);
+                                hub.load_plugins(cx);
                             } else if section == SettingsSection::Voice {
                                 hub.load_providers(cx);
                             } else if section == SettingsSection::Device {

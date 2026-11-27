@@ -12,7 +12,7 @@ use ene_catalog::{
     GOOGLE_AGENT_PLATFORM, OPENAI_TTS_VOICES, SAKURA_EMBEDDING_MODELS, SAKURA_STT_MODELS,
     SAKURA_TTS_VOICES, default_models_for_adapter, parse_voice_resource,
 };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 /// Internal host model role slots, exposed only inside progressive disclosure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -453,16 +453,6 @@ impl Model {
             return None;
         }
         let settings = self.settings()?;
-        let enabled_llm_ids: HashSet<&str> = settings
-            .connections
-            .iter()
-            .filter(|c| c.can_start_chat(providers))
-            .map(|c| c.id.as_str())
-            .collect();
-        let (conn_id, model_id, _) = self
-            .model_choices()
-            .into_iter()
-            .find(|(id, _, _)| enabled_llm_ids.contains(id.as_str()))?;
         let assignments = companion.assignments.as_ref();
         let is_valid = |slot: ModelRoleSlot| -> bool {
             assignments
@@ -470,9 +460,10 @@ impl Model {
                 .is_some_and(|assigned| {
                     settings.connections.iter().any(|c| {
                         c.id == assigned.connection_id
-                            && c.enabled
-                            && c.kind == ConnectionKind::Llm
-                            && !c.needs_key(providers)
+                            && ((slot == ModelRoleSlot::Task && c.kind == ConnectionKind::Acp)
+                                || (c.enabled
+                                    && c.kind == ConnectionKind::Llm
+                                    && !c.needs_key(providers)))
                     })
                 })
         };
@@ -481,15 +472,26 @@ impl Model {
         if !assign_companion && !assign_task {
             return None;
         }
+        let assignment = settings
+            .connections
+            .iter()
+            .filter(|c| c.can_start_chat(providers))
+            .find_map(|connection| {
+                let (model_id, _) = self
+                    .available_models_for_connection(&connection.id)
+                    .into_iter()
+                    .next()?;
+                Some(ModelAssignment {
+                    connection_id: connection.id.clone(),
+                    model_id,
+                })
+            })?;
         Some(AutoAssignModelPatch {
             companion_id: companion.id.clone(),
             revision: companion.revision,
             assign_companion,
             assign_task,
-            assignment: ModelAssignment {
-                connection_id: conn_id,
-                model_id,
-            },
+            assignment,
         })
     }
 }
