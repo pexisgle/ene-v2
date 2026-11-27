@@ -433,7 +433,7 @@ fn fit(
             prefix: &prefix,
             anchor: anchor.as_ref(),
             sent,
-            budget: compaction::input_budget(&adapted.0.spec),
+            budget: compaction::input_budget(&adapted.0.spec, None),
             turn_start: Some(turn.start),
         };
         let fits = compaction::fit(view, &request);

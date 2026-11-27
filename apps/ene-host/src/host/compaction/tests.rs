@@ -152,9 +152,44 @@ fn a_model_input_cap_and_total_window_are_separate_constraints() {
     spec.context_window = Some(120_000);
     spec.max_output_tokens = Some(32_000);
     spec.max_input_tokens = Some(16_000);
-    assert_eq!(input_budget(&spec), 14_400);
+    assert_eq!(input_budget(&spec, None), 14_400);
     spec.max_input_tokens = Some(90_000);
-    assert_eq!(input_budget(&spec), 79_000);
+    assert_eq!(input_budget(&spec, None), 79_000);
+}
+
+#[test]
+fn the_summary_cursor_covers_only_the_complete_turns_in_its_actual_request() {
+    let mut history = History::new();
+    history.push(Message::user("the first essential fact"));
+    history.open_turn();
+    let first_end = history.push(Message::assistant("first answer"));
+    history.end_turn(TurnEnd::Answered { answer: None });
+    history.push(Message::user("oversized second fact ".repeat(200)));
+    history.open_turn();
+    history.push(Message::assistant("second answer"));
+    history.end_turn(TurnEnd::Answered { answer: None });
+    history.push(Message::user("newest question"));
+    history.open_turn();
+    history.push(Message::assistant("newest answer"));
+    history.end_turn(TurnEnd::Answered { answer: None });
+
+    let spec = ModelSpec::new(ProviderId::catalog("openai").unwrap(), "summary-test")
+        .with_context_window(1_200);
+    let (through, request) = job::plan_summary(&history, None, &spec).unwrap();
+    let serialized = serde_json::to_string(&request).unwrap();
+    assert_eq!(through, first_end.get());
+    assert!(serialized.contains("the first essential fact"));
+    assert!(!serialized.contains("oversized second fact"));
+    assert!(!serialized.contains("newest question"));
+
+    let existing = Summary {
+        text: "first summary".into(),
+        through_message_id: through,
+    };
+    assert!(matches!(
+        job::plan_summary(&history, Some(&existing), &spec),
+        Err(job::CompactionError::TurnTooLarge)
+    ));
 }
 
 #[test]

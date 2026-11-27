@@ -51,10 +51,10 @@ impl FitRequest<'_> {
     }
 }
 
-pub(crate) fn input_budget(spec: &ModelSpec) -> u64 {
+pub(crate) fn input_budget(spec: &ModelSpec, reserved_output: Option<u64>) -> u64 {
     let input = spec.input_limit().map_or(128_000, u64::from);
     let context = spec.context_window.map_or(128_000, u64::from);
-    let output = spec.output_limit().map_or(4_096, u64::from);
+    let output = reserved_output.unwrap_or_else(|| spec.output_limit().map_or(4_096, u64::from));
     input
         .min(context.saturating_sub(output))
         .saturating_sub(input / 10)
@@ -154,7 +154,7 @@ pub(super) fn cut(history: &History, budget: u64, head: usize, limit: usize) -> 
 
 /// The index of the newest message that asks something: the turn the model is
 /// answering, which a window may never cut.
-pub(super) fn last_turn(history: &History) -> usize {
+fn last_turn(history: &History) -> usize {
     let newest = history
         .entries()
         .rev()

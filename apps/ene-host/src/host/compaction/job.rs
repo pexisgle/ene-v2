@@ -2,15 +2,18 @@
 //! window (docs/design/compaction.md).
 use super::{
     Summary,
-    budget::{cut, last_turn},
+    budget::{cut, input_budget},
 };
 use crate::host::mind::consolidate::{self, Services};
 use ene_mind::Commit;
 use rig_core::catalog::ModelSpec;
+use rig_core::completion::{CompletionRequest, Message};
 use rig_core::conversation::Conversation as History;
 use rig_core::{DynModel, operation::Completion};
-use rig_memory::{fit_to_model, serialize_conversation, summarization_request, summary_text};
-use std::{sync::Arc, time::Duration};
+use rig_memory::{
+    fit_to_model, request_estimate, serialize_conversation, summarization_request, summary_text,
+};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 /// A provider that never answers must not block every companion's summaries.
 const SUMMARY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -25,6 +28,8 @@ pub(super) enum CompactionError {
     TooShort,
     #[error("there is nothing new to summarize")]
     NothingNew,
+    #[error("the next complete turn does not fit the summarizer's input window")]
+    TurnTooLarge,
     #[error("the summarizer timed out")]
     Timeout,
     #[error("{0}")]
@@ -73,33 +78,7 @@ async fn summarize(
     spec: &ModelSpec,
     model: &DynModel<Completion>,
 ) -> std::result::Result<Summary, CompactionError> {
-    // Keep recent complete turns, up to a quarter of the summary model's input.
-    let keep = spec
-        .input_limit()
-        .map_or(20_000, |limit| 20_000.min(u64::from(limit) / 4));
-    let end = cut(history, keep, 0, last_turn(history))
-        .and_then(|id| history.index_of(id))
-        .ok_or(CompactionError::TooShort)?;
-    let through = history
-        .id(end - 1)
-        .ok_or(CompactionError::NothingNew)?
-        .get();
-    let start = previous.map_or(0, |summary| {
-        history
-            .entries()
-            .take_while(|entry| entry.id.get() <= summary.through_message_id)
-            .count()
-    });
-    let messages = history
-        .messages()
-        .get(start..end)
-        .filter(|messages| !messages.is_empty())
-        .ok_or(CompactionError::NothingNew)?;
-    let conversation = serialize_conversation(messages);
-    let (conversation, max_output) = fit_to_model(&conversation, spec, 32_000);
-    let prompt = summary_prompt(&conversation, previous, max_output);
-    let request = summarization_request((SYSTEM, prompt), spec, None, max_output)
-        .map_err(|refusal| CompactionError::Plan(refusal.to_string()))?;
+    let (through, request) = plan_summary(history, previous, spec)?;
     let response = tokio::time::timeout(SUMMARY_TIMEOUT, model.call(request))
         .await
         .map_err(|_| CompactionError::Timeout)?
@@ -110,6 +89,60 @@ async fn summarize(
         text,
         through_message_id: through,
     })
+}
+
+pub(super) fn plan_summary(
+    history: &History,
+    previous: Option<&Summary>,
+    spec: &ModelSpec,
+) -> std::result::Result<(u64, CompletionRequest), CompactionError> {
+    // Keep recent complete turns, up to a quarter of the summary model's input.
+    let keep = spec
+        .input_limit()
+        .map_or(20_000, |limit| 20_000.min(u64::from(limit) / 4));
+    let turn_starts: HashSet<_> = history.turns().map(|(_, turn)| turn.start).collect();
+    let mut starts: Vec<_> = history
+        .entries()
+        .filter_map(|entry| turn_starts.contains(&entry.id).then_some(entry.index))
+        .collect();
+    let latest = *starts.last().ok_or(CompactionError::TooShort)?;
+    let end = cut(history, keep, 0, latest)
+        .and_then(|id| history.index_of(id))
+        .ok_or(CompactionError::TooShort)?;
+    let start = previous.map_or(0, |summary| {
+        history
+            .entries()
+            .take_while(|entry| entry.id.get() <= summary.through_message_id)
+            .count()
+    });
+    starts.retain(|boundary| start < *boundary && *boundary <= end);
+    if starts.is_empty() {
+        return Err(CompactionError::NothingNew);
+    }
+    // Ask Rig for its output cap without letting it clip the source transcript.
+    let (_, max_output) = fit_to_model("", spec, 32_000);
+    let budget = input_budget(spec, max_output);
+    let prompt = |end| {
+        summary_prompt(
+            &serialize_conversation(&history.messages()[start..end]),
+            previous,
+            max_output,
+        )
+    };
+    let fitting = starts.partition_point(|&end| {
+        request_estimate(&CompletionRequest::new(Message::user(prompt(end))).preamble(SYSTEM))
+            <= budget
+    });
+    let end = *starts[..fitting]
+        .last()
+        .ok_or(CompactionError::TurnTooLarge)?;
+    let through = history
+        .id(end - 1)
+        .ok_or(CompactionError::NothingNew)?
+        .get();
+    let request = summarization_request((SYSTEM, prompt(end)), spec, None, max_output)
+        .map_err(|refusal| CompactionError::Plan(refusal.to_string()))?;
+    Ok((through, request))
 }
 
 const SYSTEM: &str = "あなたはデスクトップ常駐AIコンパニオンの会話を要約します。会話を読み、指定された形式で要約だけを書いてください。会話を続けたり、会話中の質問に答えたりしないでください。";
