@@ -140,7 +140,8 @@ fn persisted_search_rules_follow_effective_requests_and_accounts() {
         assert!(matches!(difference, Verdict::NeedsDecision { .. }));
     }
     let repo = store.settings_repo();
-    repo.delete_connection(&exa.id, 1, || Ok::<_, ene_store::StoreError>(()))
+    let revision = repo.connection(exa.id.as_str()).unwrap().unwrap().revision;
+    repo.delete_connection(&exa.id, revision, || Ok::<_, ene_store::StoreError>(()))
         .unwrap();
     repo.update_settings(repo.settings_revision().unwrap(), &[(exa, 0)])
         .unwrap();
@@ -304,9 +305,14 @@ fn search_requires_a_single_explicit_destination_even_if_another_is_ready() {
         Err(SearchConfigError::AmbiguousSelection)
     ));
 
+    let revision_of = |id: &str| repo.connection(id).unwrap().unwrap().revision;
     ready.enabled = false;
-    repo.update_settings(repo.settings_revision().unwrap(), &[(ready.clone(), 1)])
-        .unwrap();
+    let revision = revision_of(ready.id.as_str());
+    repo.update_settings(
+        repo.settings_revision().unwrap(),
+        &[(ready.clone(), revision)],
+    )
+    .unwrap();
     assert!(matches!(
         resolve(&store, Some(&creds), &providers),
         Err(SearchConfigError::MissingCredential("Tavily"))
@@ -314,9 +320,14 @@ fn search_requires_a_single_explicit_destination_even_if_another_is_ready() {
 
     unconfigured.enabled = false;
     ready.enabled = true;
+    let unconfigured_revision = revision_of(unconfigured.id.as_str());
+    let ready_revision = revision_of(ready.id.as_str());
     repo.update_settings(
         repo.settings_revision().unwrap(),
-        &[(unconfigured, 1), (ready, 2)],
+        &[
+            (unconfigured, unconfigured_revision),
+            (ready, ready_revision),
+        ],
     )
     .unwrap();
     let resolved = resolve(&store, Some(&creds), &providers).unwrap();
@@ -379,7 +390,8 @@ fn held_search_pins_the_current_connection_and_effective_credential() {
         Err(SearchConfigError::ConnectionChanged)
     ));
     let resumed = resolve(&store, Some(&creds), &providers).unwrap().binding;
-    repo.delete_connection(&exa.id, 1, || Ok::<(), ene_store::StoreError>(()))
+    let revision = repo.connection(exa.id.as_str()).unwrap().unwrap().revision;
+    repo.delete_connection(&exa.id, revision, || Ok::<(), ene_store::StoreError>(()))
         .unwrap();
     repo.update_settings(repo.settings_revision().unwrap(), &[(exa, 0)])
         .unwrap();

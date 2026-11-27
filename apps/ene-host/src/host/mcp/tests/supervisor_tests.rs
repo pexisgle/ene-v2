@@ -269,7 +269,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
     );
     assert_pending_launch(&supervisor, &new_launch);
     let mut changed_revision = wanted.clone();
-    changed_revision.get_mut("c1").unwrap().stamp.revision = 2;
+    changed_revision.get_mut("c1").unwrap().stamp.revision += 1;
     accept_event(
         &mut supervisor,
         &changed_revision,

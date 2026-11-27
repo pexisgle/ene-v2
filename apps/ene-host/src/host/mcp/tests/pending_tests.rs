@@ -99,6 +99,7 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
     ] {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
+        let repo = store.settings_repo();
         let mut peer = PendingPeer::new(root.path(), "initial.pid");
         let mut row = Connection {
             id: ene_domain::ConnectionId::parse("pending-mcp").unwrap(),
@@ -110,10 +111,7 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
             revision: 0,
             last_check: None,
         };
-        store
-            .settings_repo()
-            .update_settings(1, &[(row.clone(), 0)])
-            .unwrap();
+        let settings = repo.update_settings(1, &[(row.clone(), 0)]).unwrap();
         let mut world = World::new();
         world.insert_resource(store.clone());
         world.insert_resource(HostRuntime(tokio::runtime::Handle::current()));
@@ -129,27 +127,30 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
         match action {
             "disable" => {
                 row.enabled = false;
-                store
-                    .settings_repo()
-                    .update_settings(2, &[(row.clone(), 1)])
-                    .unwrap();
+                repo.update_settings(
+                    settings.revision,
+                    &[(row.clone(), old_launch.stamp.revision)],
+                )
+                .unwrap();
             }
             "revision" => {
                 row.config = ConnectionConfig::Mcp(replacement.config());
-                store
-                    .settings_repo()
-                    .update_settings(2, &[(row.clone(), 1)])
-                    .unwrap();
+                repo.update_settings(
+                    settings.revision,
+                    &[(row.clone(), old_launch.stamp.revision)],
+                )
+                .unwrap();
             }
             "recreate" => {
-                let (settings, _) = store
-                    .settings_repo()
-                    .delete_connection::<crate::host::error::HostError>(&row.id, 1, || Ok(()))
+                let (settings, _) = repo
+                    .delete_connection::<crate::host::error::HostError>(
+                        &row.id,
+                        old_launch.stamp.revision,
+                        || Ok(()),
+                    )
                     .unwrap();
                 row.config = ConnectionConfig::Mcp(replacement.config());
-                store
-                    .settings_repo()
-                    .update_settings(settings.revision, &[(row.clone(), 0)])
+                repo.update_settings(settings.revision, &[(row.clone(), 0)])
                     .unwrap();
             }
             "shutdown" => world.resource::<HostState>().close(),
@@ -175,7 +176,7 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
                 .clone();
             assert_ne!(old_launch, new_launch);
             if action == "recreate" {
-                assert_eq!(old_launch.stamp.revision, new_launch.stamp.revision);
+                assert!(old_launch.stamp.revision < new_launch.stamp.revision);
                 assert_eq!(
                     old_launch.stamp.credential_generation,
                     new_launch.stamp.credential_generation

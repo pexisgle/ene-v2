@@ -12,7 +12,7 @@ use rig_ecs::prelude::ToolDef;
 use rig_rmcp::{McpClientHandler, McpConnection, rmcp::model::ClientConfig};
 
 pub(super) const STAMP: ConnectionStamp = ConnectionStamp {
-    revision: 1,
+    revision: 2,
     created_revision: 2,
     credential_generation: 0,
 };

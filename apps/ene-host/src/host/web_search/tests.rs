@@ -673,20 +673,7 @@ async fn exa_and_tavily_work_end_to_end_and_switch_cleanly_in_work_agent() {
     });
 
     // 2. Switch active search to Tavily and verify WorkAgent uses Tavily.
-    let settings = harness.store().settings_repo().settings().unwrap();
-    let exa_off = Connection {
-        enabled: false,
-        ..exa_conn
-    };
-    let tavily_on = Connection {
-        enabled: true,
-        ..tavily_conn
-    };
-    harness
-        .store()
-        .settings_repo()
-        .update_settings(settings.revision, &[(exa_off, 1), (tavily_on, 1)])
-        .unwrap();
+    switch_active_search(&harness, exa_conn, tavily_conn);
     crate::host::work::start(
         harness.app.world_mut(),
         &ene_rpc::StartWorkRequest {
@@ -767,6 +754,40 @@ pub(super) fn configure_test_search(harness: &crate::host::tests::Harness, endpo
         5,
     );
     repo.update_settings(settings.revision, &[(connection, revision)])
+        .unwrap();
+}
+
+fn switch_active_search(
+    harness: &crate::host::tests::Harness,
+    exa_conn: Connection,
+    tavily_conn: Connection,
+) {
+    let settings = harness.store().settings_repo().settings().unwrap();
+    let revision = |id| {
+        settings
+            .connections
+            .iter()
+            .find(|row| &row.id == id)
+            .unwrap()
+            .revision
+    };
+    let exa_revision = revision(&exa_conn.id);
+    let tavily_revision = revision(&tavily_conn.id);
+    let exa_off = Connection {
+        enabled: false,
+        ..exa_conn
+    };
+    let tavily_on = Connection {
+        enabled: true,
+        ..tavily_conn
+    };
+    harness
+        .store()
+        .settings_repo()
+        .update_settings(
+            settings.revision,
+            &[(exa_off, exa_revision), (tavily_on, tavily_revision)],
+        )
         .unwrap();
 }
 

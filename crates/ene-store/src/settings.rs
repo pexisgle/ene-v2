@@ -174,7 +174,9 @@ impl<'a> SettingsRepo<'a> {
                             input.id
                         )));
                     }
-                    None if *expected == 0 => 1,
+                    // The settings epoch is above every previous row version,
+                    // including versions of a connection with this same ID.
+                    None if *expected == 0 => next,
                     None => {
                         return Err(StoreError::Conflict(format!(
                             "connection `{}` does not exist",
@@ -183,7 +185,11 @@ impl<'a> SettingsRepo<'a> {
                     }
                 };
                 let reset_check = existing.is_some_and(|previous| {
-                    (input.kind == ConnectionKind::Search && input.config != previous.config)
+                    input.kind != previous.kind
+                        || (input.kind == ConnectionKind::Mcp
+                            && (input.config != previous.config
+                                || input.enabled != previous.enabled))
+                        || (input.kind == ConnectionKind::Search && input.config != previous.config)
                         || (input.kind == ConnectionKind::Acp
                             && (input.config != previous.config
                                 || input.enabled != previous.enabled))
@@ -201,7 +207,7 @@ impl<'a> SettingsRepo<'a> {
                         config = excluded.config, revision = excluded.revision, \
                         updated_at = excluded.updated_at, \
                         last_check = CASE WHEN ?9 THEN NULL ELSE connections.last_check END \
-                     WHERE connections.revision = excluded.revision - 1",
+                     WHERE connections.revision = ?11",
                 )?
                 .execute(params![
                     input.id.as_str(),
@@ -214,6 +220,7 @@ impl<'a> SettingsRepo<'a> {
                     stamp,
                     reset_check,
                     next,
+                    expected,
                 ])?;
                 if changed == 0 {
                     return Err(StoreError::Conflict(format!(
@@ -487,6 +494,14 @@ mod tests {
             .unwrap();
         let (replacement, created) = repo.connection_with_creation("c1").unwrap().unwrap();
         assert_ne!(created, 2);
+        assert!(replacement.revision > current.revision);
+        assert!(matches!(
+            repo.delete_connection::<StoreError>(&current.id, current.revision, || {
+                panic!("stale deletion cannot reach credential erasure")
+            }),
+            Err(StoreError::Conflict(_))
+        ));
+        assert_eq!(repo.connection("c1").unwrap().as_ref(), Some(&replacement));
         assert!(matches!(
             repo.set_check(&replacement.id, replacement.revision, 2, &Check::default()),
             Err(StoreError::Conflict(_))
@@ -505,6 +520,7 @@ mod tests {
         let settings = repo
             .update_settings(1, &[(connection("drop"), 0), (connection("keep"), 0)])
             .unwrap();
+        let revision = repo.connection("drop").unwrap().unwrap().revision;
         let mut secrets = HashMap::from([
             ("drop".to_owned(), "discarded".to_owned()),
             ("keep".to_owned(), "preserved".to_owned()),
@@ -522,7 +538,7 @@ mod tests {
         assert!(matches!(
             repo.delete_connection(
                 &ConnectionId::parse("drop").unwrap(),
-                2,
+                revision - 1,
                 || -> Result<()> {
                     secrets.remove("drop");
                     Ok(())
@@ -540,7 +556,7 @@ mod tests {
         assert!(matches!(
             repo.delete_connection(
                 &ConnectionId::parse("drop").unwrap(),
-                1,
+                revision,
                 || -> Result<()> { Err(StoreError::Storage("keyring unavailable".into())) }
             ),
             Err(StoreError::Storage(_))
@@ -554,7 +570,7 @@ mod tests {
         let (next, changed) = repo
             .delete_connection(
                 &ConnectionId::parse("drop").unwrap(),
-                1,
+                revision,
                 || -> Result<()> {
                     secrets.remove("drop");
                     Ok(())
@@ -591,7 +607,13 @@ mod tests {
         let mut changed = connection("c1");
         changed.name = "updated".into();
         assert!(matches!(
-            repo.update_settings(before.revision, &[(changed, 1), (connection("c2"), 0)]),
+            repo.update_settings(
+                before.revision,
+                &[
+                    (changed, before.connections[0].revision),
+                    (connection("c2"), 0)
+                ]
+            ),
             Err(StoreError::Conflict(_))
         ));
         assert_eq!(repo.settings().unwrap(), before);
