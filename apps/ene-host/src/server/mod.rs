@@ -5,7 +5,10 @@ mod history;
 pub(crate) mod rpc;
 
 use self::rpc::router;
-use crate::{config::HostArgs, host::Runtime};
+use crate::{
+    config::HostArgs,
+    host::{Runtime, resources::Options},
+};
 use std::error::Error;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -39,7 +42,18 @@ pub async fn run(config: &HostArgs) -> Result<(), Box<dyn Error + Send + Sync>> 
         ))
     })?;
     history::reset(&state, false)?;
-    let runtime = Runtime::start(&state).await?;
+    let approval_key = access
+        .approval_key()
+        .inspect_err(|error| tracing::warn!(%error, "cannot use saved search approvals"))
+        .ok();
+    let runtime = Runtime::start_with(
+        &state,
+        Options {
+            approval_key,
+            ..Options::default()
+        },
+    )
+    .await?;
     // Access control is delegated to the OS or a fronting service
     // (docs/design/host-access.md): the bind address is explicit, and the
     // Owner Bearer stays mandatory even on a non-loopback listener.

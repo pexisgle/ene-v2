@@ -1,0 +1,271 @@
+use super::tests::{
+    companion_replied_with, configure_test_search, search_test_connection, spawn_searx_test_server,
+};
+use super::*;
+use crate::host::{permission, settings::CredentialState, tests::Harness};
+use ene_policy::{PolicyEffect, PolicyRule, Verdict, decide_action};
+use rig_core::test_utils::MockStreamEvent;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+fn test_credentials(secret: &str) -> Credentials {
+    let mut credentials = Credentials::new(true);
+    credentials.approval_key = Some([17; 32]);
+    credentials.remember("exa", secret.into());
+    credentials
+}
+
+#[test]
+fn persisted_search_rules_follow_effective_requests_and_accounts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("host.sqlite3");
+    let store = Store::open(&path).unwrap();
+    let exa = search_test_connection(
+        "exa",
+        "Research account",
+        "exa",
+        "https://search.example/lookup?private=tenant-a".into(),
+        CredentialState::Registered,
+        3,
+    );
+    let providers = Providers::none();
+    let credentials = test_credentials("original-credential");
+    let repo = store.settings_repo();
+    repo.update_settings(repo.settings_revision().unwrap(), &[(exa.clone(), 0)])
+        .unwrap();
+    let request = json!({"query": " ene ", "limit": 7});
+    let action = |store: &Store, credentials: &Credentials, request: &Value| {
+        resolve(store, Some(credentials), &providers)
+            .unwrap()
+            .action(request, Some(credentials))
+            .unwrap()
+    };
+    let CandidateAction::WebSearch {
+        scope: Some(scope), ..
+    } = action(&store, &credentials, &request)
+    else {
+        panic!("expected a persistent scope");
+    };
+    let saved = scope.allow_rule();
+    assert_eq!(
+        saved.search_label(),
+        Some("Research account · https://search.example/lookup · ene · 3")
+    );
+    assert!(!saved.pattern.contains("tenant-a"));
+    assert!(!saved.pattern.contains("original-credential"));
+    store
+        .policy_repo()
+        .apply_policy_rules(&[saved], &[])
+        .unwrap();
+    drop(store);
+
+    let store = Store::open(&path).unwrap();
+    let rules = store.policy_repo().policy_rules().unwrap();
+    let credentials = test_credentials("original-credential");
+    credentials.remember("unrelated", "different key".into());
+    let applies = |credentials: &Credentials, request: &Value| {
+        decide_action(&rules, &action(&store, credentials, request))
+    };
+    assert_eq!(
+        applies(&credentials, &json!({"query": "ene"})),
+        Verdict::Allow
+    );
+    for difference in [
+        applies(&credentials, &json!({"query": "ene", "limit": 2})),
+        applies(&credentials, &json!({"query": "different"})),
+        applies(&test_credentials("replacement-credential"), &request),
+    ] {
+        assert!(matches!(difference, Verdict::NeedsDecision { .. }));
+    }
+    let repo = store.settings_repo();
+    repo.delete_connection(&exa.id, 1, || Ok::<_, ene_store::StoreError>(()))
+        .unwrap();
+    repo.update_settings(repo.settings_revision().unwrap(), &[(exa, 0)])
+        .unwrap();
+    assert!(matches!(
+        applies(&credentials, &request),
+        Verdict::NeedsDecision { .. }
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn always_allow_saves_one_rule_while_confirm_still_controls_dispatch() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let (address, server) = spawn_searx_test_server(Arc::clone(&hits)).await;
+    let mut harness = Harness::new((0..3).flat_map(|index| {
+        [
+            vec![
+                MockStreamEvent::tool_call(format!("call-{index}"), NAME, json!({"query": "ene"})),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                MockStreamEvent::text(format!("検索完了 {index}")),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]
+    }));
+    harness
+        .app
+        .world_mut()
+        .resource_mut::<Credentials>()
+        .approval_key = Some([17; 32]);
+    configure_test_search(&harness, format!("http://{address}/searx"));
+    let store = harness.store();
+    let confirm = PolicyRule {
+        id: "confirm-search".into(),
+        tool_name: NAME.into(),
+        pattern: "*".into(),
+        effect: PolicyEffect::Confirm,
+        created_at: String::new(),
+    };
+    let repo = store.policy_repo();
+    repo.apply_policy_rules(std::slice::from_ref(&confirm), &[])
+        .unwrap();
+    let pending = || {
+        store
+            .approval_repo()
+            .approvals(permission::ApprovalStatus::Pending)
+            .unwrap()
+    };
+    for index in 0..3 {
+        if index == 2 {
+            repo.apply_policy_rules(&[], std::slice::from_ref(&confirm.id))
+                .unwrap();
+        }
+        harness.accept(&format!("input-{index}"), "調べて").unwrap();
+        if index < 2 {
+            harness.run_until(|_| !pending().is_empty());
+            assert_eq!(hits.load(Ordering::SeqCst), index);
+            let outcome = permission::submit_with_outcome(
+                harness.app.world_mut(),
+                permission::ApprovalRequest::Operator(&pending()[0].request_id),
+                permission::ApprovalDecision::AlwaysApprove,
+            )
+            .unwrap();
+            assert!(matches!(outcome.rule, permission::RuleSave::Saved));
+            let rules = repo.policy_rules().unwrap();
+            assert_eq!(
+                rules
+                    .iter()
+                    .filter(|rule| rule.search_label().is_some())
+                    .count(),
+                1
+            );
+        }
+        harness.run_until(|world| companion_replied_with(world, &format!("検索完了 {index}")));
+        assert_eq!(hits.load(Ordering::SeqCst), index + 1);
+        assert_eq!(pending(), [] as [ene_policy::Approval; 0]);
+    }
+    server.abort();
+}
+
+#[test]
+fn search_requires_a_single_explicit_destination_even_if_another_is_ready() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("host.sqlite3")).unwrap();
+    let creds = Credentials::new(true);
+    creds.remember("search-exa", "exa-valid-key".into());
+    let providers = Providers::none();
+    let repo = store.settings_repo();
+    let mut unconfigured = search_test_connection(
+        "search-tavily",
+        "Tavily",
+        "tavily",
+        String::new(),
+        CredentialState::Absent,
+        5,
+    );
+    let mut ready = search_test_connection(
+        "search-exa",
+        "Exa",
+        "exa",
+        String::new(),
+        CredentialState::Registered,
+        5,
+    );
+    repo.update_settings(
+        repo.settings_revision().unwrap(),
+        &[(unconfigured.clone(), 0), (ready.clone(), 0)],
+    )
+    .unwrap();
+    assert!(matches!(
+        resolve(&store, Some(&creds), &providers),
+        Err(SearchConfigError::AmbiguousSelection)
+    ));
+
+    ready.enabled = false;
+    repo.update_settings(repo.settings_revision().unwrap(), &[(ready.clone(), 1)])
+        .unwrap();
+    assert!(matches!(
+        resolve(&store, Some(&creds), &providers),
+        Err(SearchConfigError::MissingCredential("Tavily"))
+    ));
+
+    unconfigured.enabled = false;
+    ready.enabled = true;
+    repo.update_settings(
+        repo.settings_revision().unwrap(),
+        &[(unconfigured, 1), (ready, 2)],
+    )
+    .unwrap();
+    let resolved = resolve(&store, Some(&creds), &providers).unwrap();
+    assert_eq!(resolved.binding.adapter, SearchAdapter::Exa);
+    assert_eq!(
+        resolved.binding.endpoint.as_str(),
+        SearchAdapter::Exa.provider().default_endpoint.unwrap()
+    );
+}
+
+#[test]
+fn held_search_pins_the_current_connection_and_effective_credential() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("host.sqlite3")).unwrap();
+    let repo = store.settings_repo();
+    let creds = Credentials::new(true);
+    let providers = Providers::none();
+    let exa = search_test_connection(
+        "exa",
+        "Exa",
+        "exa",
+        "https://exa.example/search".into(),
+        CredentialState::Registered,
+        5,
+    );
+    let mut other = search_test_connection(
+        "other",
+        "Mwmbl",
+        "mwmbl",
+        "https://other.example/".into(),
+        CredentialState::Absent,
+        5,
+    );
+    other.enabled = false;
+    creds.remember("exa", "original".into());
+    repo.update_settings(repo.settings_revision().unwrap(), &[(exa.clone(), 0)])
+        .unwrap();
+    let original = resolve(&store, Some(&creds), &providers).unwrap().binding;
+
+    repo.update_settings(repo.settings_revision().unwrap(), &[(other, 0)])
+        .unwrap();
+    creds.remember("unused", "unrelated key".into());
+    assert!(original.current(&store, Some(&creds), &providers).is_ok());
+
+    // A replacement key read outside the host's registration path can have
+    // the same counter value as the original. The request still must expire.
+    let rotated = Credentials::new(true);
+    rotated.remember("exa", "rotated".into());
+    rotated.remember("unused", "unrelated key".into());
+    assert_eq!(creds.generation(), rotated.generation());
+    assert!(matches!(
+        original.current(&store, Some(&rotated), &providers),
+        Err(SearchConfigError::ConnectionChanged)
+    ));
+
+    repo.delete_connection(&exa.id, 1, || Ok::<(), ene_store::StoreError>(()))
+        .unwrap();
+    repo.update_settings(repo.settings_revision().unwrap(), &[(exa, 0)])
+        .unwrap();
+    assert!(matches!(
+        original.current(&store, Some(&creds), &providers),
+        Err(SearchConfigError::ConnectionChanged)
+    ));
+}

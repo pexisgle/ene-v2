@@ -147,7 +147,12 @@ pub(super) fn decision_prompt(inputs: &DecisionInputs) -> String {
         }
     }
     prompt.push_str("\n\n[保存済みルール（参考）]");
-    let rules: Vec<_> = inputs.rules.iter().take(DECISION_LIST).collect();
+    let rules: Vec<_> = inputs
+        .rules
+        .iter()
+        .filter(|rule| rule.search_label().is_none())
+        .take(DECISION_LIST)
+        .collect();
     if rules.is_empty() {
         prompt.push_str("\n(なし)");
     } else {

@@ -23,6 +23,7 @@ pub(crate) struct Credentials {
     session_secrets: Arc<Mutex<HashMap<String, String>>>,
     generation: Arc<AtomicU64>,
     session_only: bool,
+    pub(crate) approval_key: Option<[u8; 32]>,
     /// Test-only: makes the credential store unreadable, so a test can check
     /// that the failure is reported instead of becoming "no credential".
     #[cfg(test)]

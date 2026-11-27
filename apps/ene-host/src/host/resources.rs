@@ -186,12 +186,14 @@ pub(crate) struct DeviceTimeout(pub(crate) Duration);
 #[derive(Resource, Clone)]
 pub(crate) struct Options {
     pub(crate) device_timeout: Duration,
+    pub(crate) approval_key: Option<[u8; 32]>,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
             device_timeout: Duration::from_secs(120),
+            approval_key: None,
         }
     }
 }

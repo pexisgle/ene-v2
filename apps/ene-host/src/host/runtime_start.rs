@@ -5,6 +5,7 @@ use super::kernel::{KernelLaunch, KernelResources, spawn_kernel_thread};
 use super::*;
 
 impl Runtime {
+    #[cfg(test)]
     pub(crate) async fn start(state: &Path) -> std::result::Result<Self, StartError> {
         Self::start_with(state, Options::default()).await
     }
@@ -24,7 +25,8 @@ impl Runtime {
         // tests independent of the platform backend; the binary still reads
         // the environment.
         let session_only = cfg!(test) || std::env::var_os("ENE_HOST_SESSION_CREDENTIALS").is_some();
-        let credentials = Credentials::new(session_only);
+        let mut credentials = Credentials::new(session_only);
+        credentials.approval_key = options.approval_key;
         let log_path = state.join("rig");
         let logs = DirStore::open(&log_path).map_err(|source| StartError::SessionLog {
             path: log_path,

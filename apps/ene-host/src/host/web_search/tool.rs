@@ -36,11 +36,46 @@ impl Plugin for SearchPlugin {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct SearchArgs {
+pub(super) struct SearchArgs {
     #[schemars(length(min = 1, max = MAX_QUERY_CHARS))]
     query: String,
     #[schemars(range(min = 1, max = MAX_RESULTS))]
     limit: Option<usize>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SearchInputError {
+    #[error("search arguments must contain a query and an optional limit")]
+    Shape,
+    #[error("query must be 1–{MAX_QUERY_CHARS} characters")]
+    QueryLength,
+    #[error("limit must be 1–{MAX_RESULTS}")]
+    Limit,
+}
+
+impl TryFrom<&serde_json::Value> for SearchArgs {
+    type Error = SearchInputError;
+
+    fn try_from(value: &serde_json::Value) -> Result<Self, Self::Error> {
+        Self::deserialize(value).map_err(|_| SearchInputError::Shape)
+    }
+}
+
+impl SearchArgs {
+    pub(super) fn effective(
+        &self,
+        maximum: Option<usize>,
+    ) -> Result<(&str, usize), SearchInputError> {
+        let query = self.query.trim();
+        if query.is_empty() || query.chars().count() > MAX_QUERY_CHARS {
+            return Err(SearchInputError::QueryLength);
+        }
+        let limit = self.limit.unwrap_or(DEFAULT_RESULTS);
+        if !(1..=MAX_RESULTS).contains(&limit) {
+            return Err(SearchInputError::Limit);
+        }
+        Ok((query, maximum.map_or(limit, |cap| cap.min(limit))))
+    }
 }
 
 #[cfg(test)]
@@ -83,10 +118,8 @@ fn search(
 enum SearchStartError {
     #[error("the permission gate did not bind a search connection")]
     NotBound,
-    #[error("query must be 1–{MAX_QUERY_CHARS} characters")]
-    QueryLength,
-    #[error("limit must be 1–{MAX_RESULTS}")]
-    Limit,
+    #[error(transparent)]
+    Input(#[from] SearchInputError),
     #[error(transparent)]
     Connection(#[from] SearchConfigError),
     #[error("the host HTTP runtime is unavailable")]
@@ -99,14 +132,6 @@ fn start(
     services: &SearchServices<'_>,
 ) -> Result<Running, SearchStartError> {
     let binding = binding.ok_or(SearchStartError::NotBound)?;
-    let query = args.query.trim();
-    if query.is_empty() || query.chars().count() > MAX_QUERY_CHARS {
-        return Err(SearchStartError::QueryLength);
-    }
-    let limit = args.limit.unwrap_or(DEFAULT_RESULTS);
-    if !(1..=MAX_RESULTS).contains(&limit) {
-        return Err(SearchStartError::Limit);
-    }
     let fallback = Providers::default();
     let resolved = binding.current(
         &services.store,
@@ -119,10 +144,8 @@ fn start(
         .map(|runtime| runtime.0.clone())
         .or_else(|| tokio::runtime::Handle::try_current().ok())
         .ok_or(SearchStartError::Runtime)?;
+    let (query, limit) = args.effective(resolved.binding.max_results)?;
     let query = query.to_owned();
-    let limit = resolved
-        .max_results
-        .map_or(limit, |maximum| maximum.min(limit));
     let task = background::spawn(&runtime, None, async move {
         execute(&resolved, &query, limit).await
     });

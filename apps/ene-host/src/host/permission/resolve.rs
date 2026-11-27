@@ -132,10 +132,10 @@ pub(super) fn build_candidate_action(ctx: &GateContext, item: &GateCall) -> Cand
             Ok(resolved) => resolved,
             Err(reason) => return CandidateOutcome::Refuse(reason.to_string()),
         };
-        return CandidateOutcome::Search(Box::new((
-            resolved.binding.action(&item.arguments),
-            resolved.binding,
-        )));
+        return match resolved.action(&item.arguments, ctx.credentials.as_ref()) {
+            Ok(action) => CandidateOutcome::Search(Box::new((action, resolved.binding))),
+            Err(reason) => CandidateOutcome::Refuse(reason.to_string()),
+        };
     }
     CandidateOutcome::NeedsDeviceClient
 }

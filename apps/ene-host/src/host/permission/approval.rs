@@ -12,8 +12,8 @@ use crate::host::{
 };
 use bevy_ecs::prelude::*;
 use ene_policy::{
-    Approval, ApprovalDecision, ApprovalStatus, PolicyEffect, PolicyRule, Verdict,
-    approved_search_pattern, canonicalise, decide_action, decide_capability, hex_digest,
+    Approval, ApprovalDecision, ApprovalStatus, CandidateAction, PolicyEffect, PolicyRule, Verdict,
+    canonicalise, decide_action, decide_capability, hex_digest,
 };
 use ene_rpc as w;
 use rig_ecs::prelude::*;
@@ -156,23 +156,28 @@ fn persist_always_allow_rule(
     store: &Store,
     notifier: &mut Notifier,
     approval: &Approval,
-    pattern: Option<String>,
+    scoped: Option<PolicyRule>,
 ) -> Result<()> {
-    let pattern = pattern.unwrap_or_else(|| {
-        if approval.normalized_arguments.trim().is_empty() {
-            "*".to_owned()
-        } else if approval.normalized_arguments.chars().count() <= 4_000 {
-            approval.normalized_arguments.clone()
-        } else {
-            format!("exact_sha256:{}", hex_digest(&approval.action_payload_hash))
+    let rule = match scoped {
+        Some(rule) => rule,
+        None if approval.tool_name == web_search::NAME => {
+            return Err(HostError::Unavailable(
+                "search approval key is unavailable".into(),
+            ));
         }
-    });
-    let rule = PolicyRule {
-        id: uuid::Uuid::new_v4().to_string(),
-        tool_name: approval.tool_name.clone(),
-        pattern,
-        effect: PolicyEffect::Allow,
-        created_at: String::new(),
+        None => PolicyRule {
+            id: uuid::Uuid::new_v4().to_string(),
+            tool_name: approval.tool_name.clone(),
+            pattern: if approval.normalized_arguments.trim().is_empty() {
+                "*".to_owned()
+            } else if approval.normalized_arguments.chars().count() <= 4_000 {
+                approval.normalized_arguments.clone()
+            } else {
+                format!("exact_sha256:{}", hex_digest(&approval.action_payload_hash))
+            },
+            effect: PolicyEffect::Allow,
+            created_at: String::new(),
+        },
     };
     let rules = store.policy_repo().apply_policy_rules(&[rule], &[])?;
     notifier.push(
@@ -186,31 +191,33 @@ fn persist_always_allow_rule(
     Ok(())
 }
 
-fn search_approval_pattern(
+fn revalidate_search(
     binding: Option<&SearchBinding>,
     store: &Store,
     credentials: Option<&crate::host::model::Credentials>,
     providers: &crate::host::providers::Providers,
     arguments: &Value,
-    automated: bool,
-) -> Result<Option<String>> {
+) -> Result<(Verdict, Option<PolicyRule>)> {
     let changed = || HostError::Conflict(SearchConfigError::ConnectionChanged.to_string());
     let binding = binding.ok_or_else(changed)?;
-    binding
+    let resolved = binding
         .current(store, credentials, providers)
         .map_err(|error| match error {
             SearchConfigError::Settings(error) => error.into(),
             _ => changed(),
         })?;
-    let rules = store.policy_repo().policy_rules()?;
-    match decide_action(&rules, &binding.action(arguments)) {
-        Verdict::Deny { reason } => Err(HostError::Permission(reason)),
-        Verdict::HumanRequired { .. } if automated => Ok(None),
-        _ => Ok(Some(approved_search_pattern(
-            binding.endpoint.as_str(),
-            arguments,
-        ))),
+    let action = resolved
+        .action(arguments, credentials)
+        .map_err(|_| changed())?;
+    let verdict = decide_action(&store.policy_repo().policy_rules()?, &action);
+    if let Verdict::Deny { reason } = verdict {
+        return Err(HostError::Permission(reason));
     }
+    let saved = match action {
+        CandidateAction::WebSearch { scope, .. } => scope.map(|scope| scope.allow_rule()),
+        _ => None,
+    };
+    Ok((verdict, saved))
 }
 
 fn approve_call(
@@ -220,26 +227,25 @@ fn approve_call(
     call: Entity,
     arguments: &Value,
     automated: bool,
-) -> Result<(Approval, Option<String>)> {
+) -> Result<(Approval, Option<PolicyRule>)> {
     let name = approval.tool_name.as_str();
     let repo = store.approval_repo();
     let request_id = &approval.request_id;
-    let pattern = if name == web_search::NAME {
+    let scoped_rule = if name == web_search::NAME {
         let fallback = crate::host::providers::Providers::default();
-        match search_approval_pattern(
+        match revalidate_search(
             world.get::<SearchBinding>(call),
             store,
             world.get_resource(),
             world.get_resource().unwrap_or(&fallback),
             arguments,
-            automated,
         ) {
-            Ok(Some(pattern)) => Some(pattern),
-            Ok(None) => {
+            Ok((Verdict::HumanRequired { .. }, _)) if automated => {
                 return Err(HostError::Permission(
                     "this search now requires user confirmation".into(),
                 ));
             }
+            Ok((_, rule)) => rule,
             Err(error) => {
                 let status = match error {
                     HostError::Conflict(_) => ApprovalStatus::Expired,
@@ -286,7 +292,7 @@ fn approve_call(
         binding.client_id = target;
     }
     world.entity_mut(call).insert(Approved);
-    Ok((resolved, pattern))
+    Ok((resolved, scoped_rule))
 }
 
 /// Checks the approval scope, live call hash and current grants before committing the decision.
@@ -347,7 +353,7 @@ pub(crate) fn submit_with_outcome(
         ));
     };
 
-    let (approval, saved_pattern) = match decision {
+    let (approval, scoped_rule) = match decision {
         ApprovalDecision::Approve | ApprovalDecision::AlwaysApprove => {
             approve_call(world, &store, &approval, hold.call, &args, automated)?
         }
@@ -368,7 +374,7 @@ pub(crate) fn submit_with_outcome(
             &store,
             &mut world.resource_mut::<Notifier>(),
             &approval,
-            saved_pattern,
+            scoped_rule,
         ) {
             Ok(()) => RuleSave::Saved,
             Err(error) => {

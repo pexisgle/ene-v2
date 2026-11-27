@@ -186,6 +186,8 @@ pub enum CandidateAction {
         query: String,
         /// The full arguments sent to the search adapter.
         input: Value,
+        /// The host-authenticated identity of the effective invocation.
+        scope: Option<crate::SearchScope>,
     },
 }
 
@@ -207,7 +209,7 @@ pub fn hex_digest(bytes: &[u8]) -> String {
 }
 
 /// An exact Web search rule, scoped to the destination and the arguments the user approved.
-pub fn approved_search_pattern(endpoint: &str, arguments: &Value) -> String {
+fn legacy_search_pattern(endpoint: &str, arguments: &Value) -> String {
     let scoped = serde_json::json!({ "endpoint": endpoint, "arguments": arguments });
     format!(
         "search_sha256:{}",
@@ -290,6 +292,7 @@ fn resolve_action<'a>(
             endpoint,
             query,
             input,
+            ..
         } => {
             let host = match typed_target {
                 ActionTarget::Url { host: Some(h), .. } => h.as_str(),
@@ -324,6 +327,10 @@ pub fn decide_action(rules: &[PolicyRule], action: &CandidateAction) -> Verdict 
         raw_arguments: resolved.raw_args,
         raw_hash_hex: &raw_hash_hex,
         typed_target: &typed_target,
+        search_scope: match action {
+            CandidateAction::WebSearch { scope, .. } => scope.as_ref(),
+            _ => None,
+        },
     };
     let mut confirm = false;
     let mut ask_llm = false;
@@ -396,6 +403,7 @@ struct ActionMatch<'a> {
     raw_arguments: &'a Value,
     raw_hash_hex: &'a str,
     typed_target: &'a ActionTarget,
+    search_scope: Option<&'a crate::SearchScope>,
 }
 
 fn matches_action(rule: &PolicyRule, action: &ActionMatch<'_>) -> bool {
@@ -416,17 +424,21 @@ fn matches_action(rule: &PolicyRule, action: &ActionMatch<'_>) -> bool {
     if rule.pattern == "*" {
         return true;
     }
-    // Legacy argument-only search allows do not establish consent to a
-    // destination. A newly approved search stores a destination-scoped rule.
+    if let Some((tag, _label)) = crate::search_scope::pattern_parts(&rule.pattern) {
+        return action.tool_name == WEB_SEARCH_TOOL
+            && action.search_scope.is_some_and(|scope| scope.matches(tag));
+    }
+    // Legacy exact search allows did not bind the effective route and account.
     let argument_allow_is_unscoped =
         action.tool_name == WEB_SEARCH_TOOL && rule.effect == PolicyEffect::Allow;
     if let Some(expected_hex) = rule.pattern.strip_prefix("exact_sha256:") {
         return !argument_allow_is_unscoped && expected_hex == action.raw_hash_hex;
     }
     if rule.pattern.starts_with("search_sha256:") {
-        return action.tool_name == WEB_SEARCH_TOOL
+        return !argument_allow_is_unscoped
+            && action.tool_name == WEB_SEARCH_TOOL
             && matches!(action.typed_target, ActionTarget::Url { url, .. }
-                if rule.pattern == approved_search_pattern(url, action.raw_arguments));
+                if rule.pattern == legacy_search_pattern(url, action.raw_arguments));
     }
     if rule.pattern.starts_with('{') {
         return !argument_allow_is_unscoped

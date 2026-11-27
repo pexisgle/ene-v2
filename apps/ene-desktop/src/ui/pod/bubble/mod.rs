@@ -216,7 +216,7 @@ impl CompanionPod {
                 div()
                     .text_xs()
                     .child(if approval.external_destination.is_some() {
-                        "常に許可すると、次回から同じ送信先への同じ操作を許可します。"
+                        "同じ接続と検索内容の許可を保存します。個別の確認ルールは引き続き適用されます。"
                     } else if args.is_empty() {
                         "常に許可すると、次回からこの操作を引数にかかわらず許可します。"
                     } else {

@@ -9,7 +9,7 @@ use private_fs::{Durability, FileAccess, FileCreation, OpenOptions, PrivateDir, 
 use std::path::PathBuf;
 use std::{
     fs::{self, File},
-    io,
+    io::{self, Read},
     path::Path,
 };
 
@@ -18,6 +18,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 pub(super) struct Access {
     _locks: [PrivateFile; 2],
     directory: PrivateDir,
+    state: PrivateDir,
     pub token: String,
     /// The discovery file the tests read back; production code reaches the
     /// same path through `directory` and `publish`.
@@ -53,10 +54,30 @@ impl Access {
         Ok(Self {
             _locks: locks,
             directory,
+            state,
             token: URL_SAFE_NO_PAD.encode(token),
             #[cfg(test)]
             connection: runtime.join("connection.json"),
         })
+    }
+
+    pub(super) fn approval_key(&self) -> Result<[u8; 32]> {
+        const NAME: &str = "approval.key";
+        let mut key = [0; 32];
+        match self.state.open_file(NAME) {
+            Ok(mut file) => {
+                file.read_exact(&mut key)?;
+                if file.read(&mut [0; 1])? != 0 {
+                    return Err(io::Error::other("invalid approval key length").into());
+                }
+            }
+            Err(private_fs::Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                getrandom::fill(&mut key)?;
+                self.state.write_atomic_durable(NAME, &key)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(key)
     }
 
     pub(super) fn publish(&self, endpoint: &str) -> Result<()> {
@@ -99,10 +120,16 @@ mod tests {
         assert!(Access::acquire(&state, &root.join("other-runtime")).is_err());
         assert!(Access::acquire(&root.join("other-state"), &runtime).is_err());
         let token = first.token.clone();
+        let approval_key = first.approval_key().unwrap();
+        private_fs::verify(&File::open(state.join("approval.key")).unwrap()).unwrap();
         let connection = first.connection.clone();
         drop(first);
         assert!(!connection.exists());
         let second = Access::acquire(&state, &runtime).unwrap();
         assert_ne!(token, second.token);
+        assert_eq!(approval_key, second.approval_key().unwrap());
+        fs::write(state.join("approval.key"), [0; 33]).unwrap();
+        assert!(second.approval_key().is_err());
+        assert_eq!(fs::metadata(state.join("approval.key")).unwrap().len(), 33);
     }
 }

@@ -65,7 +65,7 @@ fn search_keeps_citable_results_and_reports_invalid_responses() {
     );
 }
 
-fn search_test_connection(
+pub(super) fn search_test_connection(
     id: &str,
     name: &str,
     adapter: &str,
@@ -295,118 +295,6 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
     server.abort();
 }
 
-#[test]
-fn search_requires_a_single_explicit_destination_even_if_another_is_ready() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("host.sqlite3")).unwrap();
-    let creds = Credentials::new(true);
-    creds.remember("search-exa", "exa-valid-key".into());
-    let providers = Providers::none();
-    let repo = store.settings_repo();
-    let mut unconfigured = search_test_connection(
-        "search-tavily",
-        "Tavily",
-        "tavily",
-        String::new(),
-        CredentialState::Absent,
-        5,
-    );
-    let mut ready = search_test_connection(
-        "search-exa",
-        "Exa",
-        "exa",
-        String::new(),
-        CredentialState::Registered,
-        5,
-    );
-    repo.update_settings(
-        repo.settings_revision().unwrap(),
-        &[(unconfigured.clone(), 0), (ready.clone(), 0)],
-    )
-    .unwrap();
-    assert!(matches!(
-        resolve(&store, Some(&creds), &providers),
-        Err(SearchConfigError::AmbiguousSelection)
-    ));
-
-    ready.enabled = false;
-    repo.update_settings(repo.settings_revision().unwrap(), &[(ready.clone(), 1)])
-        .unwrap();
-    assert!(matches!(
-        resolve(&store, Some(&creds), &providers),
-        Err(SearchConfigError::MissingCredential("Tavily"))
-    ));
-
-    unconfigured.enabled = false;
-    ready.enabled = true;
-    repo.update_settings(
-        repo.settings_revision().unwrap(),
-        &[(unconfigured, 1), (ready, 2)],
-    )
-    .unwrap();
-    let resolved = resolve(&store, Some(&creds), &providers).unwrap();
-    assert_eq!(resolved.binding.adapter, SearchAdapter::Exa);
-    assert_eq!(
-        resolved.binding.endpoint.as_str(),
-        SearchAdapter::Exa.provider().default_endpoint.unwrap()
-    );
-}
-
-#[test]
-fn held_search_pins_the_current_connection_and_effective_credential() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("host.sqlite3")).unwrap();
-    let repo = store.settings_repo();
-    let creds = Credentials::new(true);
-    let providers = Providers::none();
-    let exa = search_test_connection(
-        "exa",
-        "Exa",
-        "exa",
-        "https://exa.example/search".into(),
-        CredentialState::Registered,
-        5,
-    );
-    let mut other = search_test_connection(
-        "other",
-        "Mwmbl",
-        "mwmbl",
-        "https://other.example/".into(),
-        CredentialState::Absent,
-        5,
-    );
-    other.enabled = false;
-    creds.remember("exa", "original".into());
-    repo.update_settings(repo.settings_revision().unwrap(), &[(exa.clone(), 0)])
-        .unwrap();
-    let original = resolve(&store, Some(&creds), &providers).unwrap().binding;
-
-    repo.update_settings(repo.settings_revision().unwrap(), &[(other, 0)])
-        .unwrap();
-    creds.remember("unused", "unrelated key".into());
-    assert!(original.current(&store, Some(&creds), &providers).is_ok());
-
-    // A replacement key read outside the host's registration path can have
-    // the same counter value as the original. The request still must expire.
-    let rotated = Credentials::new(true);
-    rotated.remember("exa", "rotated".into());
-    rotated.remember("unused", "unrelated key".into());
-    assert_eq!(creds.generation(), rotated.generation());
-    assert!(matches!(
-        original.current(&store, Some(&rotated), &providers),
-        Err(SearchConfigError::ConnectionChanged)
-    ));
-
-    repo.delete_connection(&exa.id, 1, || Ok::<(), ene_store::StoreError>(()))
-        .unwrap();
-    repo.update_settings(repo.settings_revision().unwrap(), &[(exa, 0)])
-        .unwrap();
-    assert!(matches!(
-        original.current(&store, Some(&creds), &providers),
-        Err(SearchConfigError::ConnectionChanged)
-    ));
-}
-
 fn search_result_contains<A: bevy_ecs::prelude::Component>(
     world: &mut bevy_ecs::prelude::World,
     expected: &str,
@@ -436,7 +324,7 @@ fn search_result_contains<A: bevy_ecs::prelude::Component>(
         })
 }
 
-fn companion_replied_with(world: &mut bevy_ecs::prelude::World, expected: &str) -> bool {
+pub(super) fn companion_replied_with(world: &mut bevy_ecs::prelude::World, expected: &str) -> bool {
     use bevy_ecs::prelude::With;
     use rig_core::completion::Message;
     use rig_ecs::prelude::Conversation;
@@ -451,7 +339,7 @@ fn companion_replied_with(world: &mut bevy_ecs::prelude::World, expected: &str) 
         })
 }
 
-async fn spawn_searx_test_server(
+pub(super) async fn spawn_searx_test_server(
     hits: Arc<std::sync::atomic::AtomicUsize>,
 ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     use axum::{Json, Router, routing::get};
@@ -826,7 +714,7 @@ fn the_tool_arguments_schema_is_derived_without_drift() {
     );
 }
 
-fn configure_test_search(harness: &crate::host::tests::Harness, endpoint: String) {
+pub(super) fn configure_test_search(harness: &crate::host::tests::Harness, endpoint: String) {
     let store = harness.store();
     let repo = store.settings_repo();
     let settings = repo.settings().unwrap();

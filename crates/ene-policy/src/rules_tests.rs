@@ -233,6 +233,7 @@ fn b03_b04_mcp_and_web_search_require_gate_and_respect_rules() {
         endpoint: "https://api.mwmbl.org/api/v2/search/".into(),
         query: "rust".into(),
         input: json!({"query": "rust"}),
+        scope: None,
     };
     assert!(matches!(
         decide_action(&[], &search_action),
@@ -248,39 +249,55 @@ fn b03_b04_mcp_and_web_search_require_gate_and_respect_rules() {
 }
 
 #[test]
-fn a_saved_search_approval_is_exact_to_destination_and_arguments() {
+fn a_saved_search_approval_requires_the_host_authenticated_scope() {
     let endpoint = "https://search.example:8443/query";
     let arguments = json!({"query": "test"});
-    let allow = rule(
-        PolicyEffect::Allow,
-        "web_search",
-        &approved_search_pattern(endpoint, &arguments),
-    );
-    let search = |endpoint: &str, input: serde_json::Value| CandidateAction::WebSearch {
+    let original = SearchScope::new([3; 32], "Search example · test".into());
+    let allow = original.allow_rule();
+    assert_eq!(allow.search_label(), Some("Search example · test"));
+    let search = |scope| CandidateAction::WebSearch {
         endpoint: endpoint.into(),
-        query: input["query"].as_str().unwrap().into(),
-        input,
+        query: "test".into(),
+        input: arguments.clone(),
+        scope,
     };
+    let valid = search(Some(original));
     assert_eq!(
-        decide_action(
-            std::slice::from_ref(&allow),
-            &search(endpoint, arguments.clone())
-        ),
+        decide_action(std::slice::from_ref(&allow), &valid),
         Verdict::Allow
     );
     let (canonical, digest) = canonicalise("web_search", &arguments);
-    for legacy in [canonical, format!("exact_sha256:{}", hex_digest(&digest))] {
+    let legacy_scope = serde_json::json!({ "endpoint": endpoint, "arguments": arguments });
+    let legacy_hash = format!(
+        "search_sha256:{}",
+        hex_digest(&canonicalise("web_search", &legacy_scope).1)
+    );
+    for legacy in [
+        canonical,
+        format!("exact_sha256:{}", hex_digest(&digest)),
+        legacy_hash.clone(),
+    ] {
         assert!(matches!(
-            decide_action(
-                &[rule(PolicyEffect::Allow, "web_search", &legacy)],
-                &search(endpoint, arguments.clone()),
-            ),
+            decide_action(&[rule(PolicyEffect::Allow, "web_search", &legacy)], &valid),
             Verdict::NeedsDecision { .. }
         ));
     }
+    assert!(matches!(
+        decide_action(
+            &[
+                allow.clone(),
+                rule(PolicyEffect::Deny, "web_search", &legacy_hash)
+            ],
+            &valid
+        ),
+        Verdict::Deny { .. }
+    ));
     for changed in [
-        search("https://search.example:9443/query", arguments),
-        search(endpoint, json!({"query": "different"})),
+        search(None),
+        search(Some(SearchScope::new(
+            [4; 32],
+            "Search example · test".into(),
+        ))),
     ] {
         assert!(matches!(
             decide_action(std::slice::from_ref(&allow), &changed),

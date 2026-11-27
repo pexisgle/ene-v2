@@ -21,11 +21,13 @@ use adapter::{contains_credential, parse_adapter_results, read_http_error, send_
 use bevy_ecs::prelude::Component;
 use ene_catalog::SearchAdapter;
 use ene_domain::{ConnectionId, SearchSelection};
-use ene_policy::CandidateAction;
+use ene_policy::{CandidateAction, SearchScope};
 use ene_store::util;
+use hmac::{Hmac, KeyInit, Mac};
 use rig_core::tool::{ToolErrorKind, ToolExecutionError};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
+use tool::{SearchArgs, SearchInputError};
 use url::Url;
 
 // `tests.rs` reaches `json!` through `use super::*`, as it did before the split.
@@ -90,19 +92,33 @@ pub(crate) struct SearchBinding {
     pub(crate) endpoint: Url,
     pub(crate) display_destination: String,
     secret: Option<Arc<str>>,
+    max_results: Option<usize>,
 }
 
 impl SearchBinding {
-    pub(crate) fn action(&self, arguments: &Value) -> CandidateAction {
-        CandidateAction::WebSearch {
-            endpoint: self.endpoint.to_string(),
-            query: arguments
-                .get("query")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            input: arguments.clone(),
+    fn approval_scope(
+        &self,
+        key: &[u8; 32],
+        label: String,
+        query: &str,
+        limit: usize,
+    ) -> Option<SearchScope> {
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key).ok()?;
+        mac.update(b"ene-host web_search v1\0");
+        let provider = self.adapter.provider();
+        for field in [
+            self.connection.as_str().as_bytes(),
+            &self.created_revision.to_be_bytes(),
+            provider.adapter_id.as_bytes(),
+            self.endpoint.as_str().as_bytes(),
+            self.secret.as_deref().unwrap_or_default().as_bytes(),
+            query.as_bytes(),
+            &(limit as u64).to_be_bytes(),
+        ] {
+            mac.update(&(field.len() as u64).to_be_bytes());
+            mac.update(field);
         }
+        Some(SearchScope::new(mac.finalize().into_bytes().into(), label))
     }
 
     pub(crate) fn current(
@@ -135,7 +151,39 @@ impl SearchBinding {
 pub(crate) struct ResolvedSearch {
     pub(crate) provider_name: String,
     pub(crate) binding: SearchBinding,
-    pub(crate) max_results: Option<usize>,
+}
+
+impl ResolvedSearch {
+    pub(crate) fn action(
+        &self,
+        arguments: &Value,
+        credentials: Option<&Credentials>,
+    ) -> Result<CandidateAction, SearchInputError> {
+        let args = SearchArgs::try_from(arguments)?;
+        let binding = &self.binding;
+        let (query, limit) = args.effective(binding.max_results)?;
+        let scope = credentials
+            .and_then(|credentials| credentials.approval_key.as_ref())
+            .and_then(|key| {
+                let label = format!(
+                    "{} · {} · {} · {limit}",
+                    self.provider_name, binding.display_destination, query
+                );
+                let label = if contains_credential(&label, binding.secret.as_deref()) {
+                    binding.adapter.provider().name.into()
+                } else {
+                    let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+                    util::truncate(&label, 600)
+                };
+                binding.approval_scope(key, label, query, limit)
+            });
+        Ok(CandidateAction::WebSearch {
+            endpoint: binding.endpoint.to_string(),
+            query: query.to_owned(),
+            input: arguments.clone(),
+            scope,
+        })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -235,8 +283,8 @@ pub(crate) fn resolve_connection(
             endpoint,
             display_destination,
             secret,
+            max_results,
         },
-        max_results,
     })
 }
 
@@ -299,5 +347,7 @@ async fn execute(
     .map_err(|_| ToolExecutionError::new(ToolErrorKind::Timeout, "Web search timed out"))?
 }
 
+#[cfg(test)]
+mod scope_tests;
 #[cfg(test)]
 mod tests;

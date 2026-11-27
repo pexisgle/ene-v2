@@ -113,7 +113,7 @@ pub(super) fn render_policy_rule_row(
                         .text_xs()
                         .text_color(theme.ink_muted)
                         .truncate()
-                        .child(rule.pattern.clone()),
+                        .child(rule.search_label().unwrap_or(&rule.pattern).to_owned()),
                 ),
         )
         .child(trailing)
