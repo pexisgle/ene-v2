@@ -229,12 +229,13 @@ fn b03_b04_mcp_and_web_search_require_gate_and_respect_rules() {
         Verdict::HumanRequired { .. }
     ));
 
-    let search_action = CandidateAction::WebSearch {
-        endpoint: "https://api.mwmbl.org/api/v2/search/".into(),
+    let search_action = CandidateAction::WebSearch(std::sync::Arc::new(WebSearchAction {
+        endpoint: "https://api.mwmbl.org/api/v2/search/".parse().unwrap(),
         query: "rust".into(),
-        input: json!({"query": "rust"}),
+        limit: 5,
+        raw_arguments: json!({"query": "rust"}),
         scope: None,
-    };
+    }));
     assert!(matches!(
         decide_action(&[], &search_action),
         Verdict::NeedsDecision { .. }
@@ -255,13 +256,23 @@ fn a_saved_search_approval_requires_the_host_authenticated_scope() {
     let original = SearchScope::new([3; 32], "Search example · test".into());
     let allow = original.allow_rule();
     assert_eq!(allow.search_label(), Some("Search example · test"));
-    let search = |scope| CandidateAction::WebSearch {
-        endpoint: endpoint.into(),
-        query: "test".into(),
-        input: arguments.clone(),
-        scope,
+    let search = |scope| {
+        CandidateAction::WebSearch(std::sync::Arc::new(WebSearchAction {
+            endpoint: endpoint.parse().unwrap(),
+            query: "test".into(),
+            limit: 5,
+            raw_arguments: arguments.clone(),
+            scope,
+        }))
     };
     let valid = search(Some(original));
+    let tag = allow.search_reference().unwrap();
+    assert!(!allow.pattern.contains(tag));
+    let v1 = PolicyRule {
+        pattern: format!("search_hmac_v1:{tag}\nSearch example · test"),
+        ..allow.clone()
+    };
+    assert_eq!(decide_action(&[v1], &valid), Verdict::Allow);
     assert_eq!(
         decide_action(std::slice::from_ref(&allow), &valid),
         Verdict::Allow
@@ -277,8 +288,10 @@ fn a_saved_search_approval_requires_the_host_authenticated_scope() {
         format!("exact_sha256:{}", hex_digest(&digest)),
         legacy_hash.clone(),
     ] {
+        let old = rule(PolicyEffect::Allow, "web_search", &legacy);
+        assert!(old.is_inactive_search_allow());
         assert!(matches!(
-            decide_action(&[rule(PolicyEffect::Allow, "web_search", &legacy)], &valid),
+            decide_action(&[old], &valid),
             Verdict::NeedsDecision { .. }
         ));
     }

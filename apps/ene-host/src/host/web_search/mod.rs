@@ -21,7 +21,7 @@ use adapter::{contains_credential, parse_adapter_results, read_http_error, send_
 use bevy_ecs::prelude::Component;
 use ene_catalog::SearchAdapter;
 use ene_domain::{ConnectionId, SearchSelection};
-use ene_policy::{CandidateAction, SearchScope};
+use ene_policy::{CandidateAction, SearchApprovalSummary, SearchScope, WebSearchAction};
 use ene_store::util;
 use hmac::{Hmac, KeyInit, Mac};
 use rig_core::tool::{ToolErrorKind, ToolExecutionError};
@@ -144,7 +144,7 @@ impl SearchBinding {
         store: &Store,
         credentials: Option<&Credentials>,
         providers: &Providers,
-    ) -> Result<ResolvedSearch, SearchConfigError> {
+    ) -> Result<(), SearchConfigError> {
         let resolved = resolve(store, credentials, providers)?;
         let current = &resolved.binding;
         use subtle::ConstantTimeEq as _;
@@ -163,45 +163,82 @@ impl SearchBinding {
         {
             return Err(SearchConfigError::ConnectionChanged);
         }
-        Ok(resolved)
+        Ok(())
     }
 }
 
-#[derive(Clone, Component)]
+#[derive(Clone)]
 pub(crate) struct ResolvedSearch {
     pub(crate) provider_name: String,
     pub(crate) binding: SearchBinding,
 }
 
+#[derive(Clone, Component)]
+pub(crate) struct PreparedSearch {
+    pub(crate) route: ResolvedSearch,
+    pub(crate) action: Arc<WebSearchAction>,
+}
+
+impl PreparedSearch {
+    pub(crate) fn candidate(&self) -> CandidateAction {
+        CandidateAction::WebSearch(Arc::clone(&self.action))
+    }
+
+    pub(crate) fn summary(&self) -> SearchApprovalSummary {
+        let binding = &self.route.binding;
+        let id = binding.connection.as_str();
+        SearchApprovalSummary {
+            provider: binding.adapter.provider().name.to_owned(),
+            connection_name: self.route.provider_name.clone(),
+            connection_id: if contains_credential(id, binding.secret.as_deref()) {
+                "非表示".to_owned()
+            } else {
+                id.to_owned()
+            },
+            query: self.action.query.clone(),
+            limit: self.action.limit as u32,
+        }
+    }
+}
+
 impl ResolvedSearch {
-    pub(crate) fn action(
-        &self,
+    pub(crate) fn prepare(
+        self,
         arguments: &Value,
         credentials: Option<&Credentials>,
-    ) -> Result<CandidateAction, SearchInputError> {
+    ) -> Result<PreparedSearch, SearchInputError> {
         let args = SearchArgs::try_from(arguments)?;
         let binding = &self.binding;
         let (query, limit) = args.effective(binding.max_results)?;
+        if contains_credential(query, binding.secret.as_deref()) {
+            return Err(SearchInputError::CredentialInQuery);
+        }
         let scope = credentials
             .and_then(|credentials| credentials.approval_key.as_ref())
             .and_then(|key| {
                 let label = format!(
-                    "{} · {} · {} · {limit}",
-                    self.provider_name, binding.display_destination, query
+                    "{} · {} · {query:?} · {limit} · {}",
+                    binding.adapter.provider().name,
+                    self.provider_name,
+                    binding.display_destination,
                 );
                 let label = if contains_credential(&label, binding.secret.as_deref()) {
                     binding.adapter.provider().name.into()
                 } else {
-                    let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
                     util::truncate(&label, 600)
                 };
                 binding.approval_scope(key, label, query, limit)
             });
-        Ok(CandidateAction::WebSearch {
-            endpoint: binding.endpoint.to_string(),
+        let action = Arc::new(WebSearchAction {
+            endpoint: binding.endpoint.clone(),
             query: query.to_owned(),
-            input: arguments.clone(),
+            limit,
+            raw_arguments: arguments.clone(),
             scope,
+        });
+        Ok(PreparedSearch {
+            route: self,
+            action,
         })
     }
 }
@@ -304,7 +341,9 @@ pub(crate) fn resolve_connection(
     } else {
         display_path.to_owned()
     };
-    let provider_name = if connection.name.trim().is_empty() {
+    let provider_name = if connection.name.trim().is_empty()
+        || contains_credential(&connection.name, secret.as_deref())
+    {
         provider.name.to_owned()
     } else {
         connection.name.clone()

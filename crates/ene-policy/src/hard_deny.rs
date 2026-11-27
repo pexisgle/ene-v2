@@ -73,7 +73,7 @@ pub fn hard_denied_action(action: &CandidateAction, target: &ActionTarget) -> Op
     {
         return Some(reason);
     }
-    if matches!(action, CandidateAction::WebSearch { .. })
+    if matches!(action, CandidateAction::WebSearch(_))
         && let ActionTarget::Url { url, host } = target
         && hard_denied_search_destination(url, host.as_deref())
     {
@@ -112,7 +112,7 @@ fn is_file_mutation_action(action: &CandidateAction) -> bool {
                 || lower.contains("delete")
                 || lower.contains("remove")
         }
-        CandidateAction::WebSearch { .. } => false,
+        CandidateAction::WebSearch(_) => false,
     }
 }
 

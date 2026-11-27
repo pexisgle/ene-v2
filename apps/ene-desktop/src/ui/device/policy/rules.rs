@@ -20,6 +20,12 @@ pub(super) fn render_policy_rule_row(
     cx: &mut Context<DevicePane>,
 ) -> AnyElement {
     let (eff_text, dot, bg, fg) = match rule.effect {
+        PolicyEffect::Allow if rule.is_inactive_search_allow() => (
+            "再承認が必要",
+            theme.amber,
+            theme.amber_soft,
+            theme.amber_fg,
+        ),
         PolicyEffect::Allow => ("許可", theme.mint, theme.mint_soft, theme.mint_fg),
         PolicyEffect::Deny => ("拒否", theme.danger, theme.danger_soft, theme.danger_fg),
         PolicyEffect::AskLlm => (
@@ -31,6 +37,14 @@ pub(super) fn render_policy_rule_row(
         PolicyEffect::Confirm => ("確認", theme.amber, theme.amber_soft, theme.amber_fg),
     };
     let armed = pane.form.delete_armed_policy.as_deref() == Some(rule.id.as_str());
+    let label = rule.search_label().unwrap_or(&rule.pattern);
+    let reference = rule.search_reference().map(|tag| {
+        if armed {
+            tag
+        } else {
+            tag.get(..12).unwrap_or(tag)
+        }
+    });
     let pane_arm = cx.entity();
     let pane_cancel = cx.entity();
     let hub_remove = pane.hub.clone();
@@ -110,10 +124,18 @@ pub(super) fn render_policy_rule_row(
                     div()
                         .flex_1()
                         .min_w_0()
+                        .flex()
+                        .flex_col()
                         .text_xs()
                         .text_color(theme.ink_muted)
-                        .truncate()
-                        .child(rule.search_label().unwrap_or(&rule.pattern).to_owned()),
+                        .child(
+                            div()
+                                .when(!armed, gpui::Styled::truncate)
+                                .child(label.to_owned()),
+                        )
+                        .when_some(reference, |el, tag| {
+                            el.child(div().child(format!("照合 ID {tag}")))
+                        }),
                 ),
         )
         .child(trailing)

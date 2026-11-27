@@ -810,7 +810,7 @@ async fn a_held_search_cannot_send_the_query_after_its_connection_changes() {
         spawn_searx_test_server(Arc::clone(&replacement_hits)).await;
     let mut harness = Harness::new([
         vec![
-            MockStreamEvent::tool_call("call", NAME, json!({"query": "ene"})),
+            MockStreamEvent::tool_call("call", NAME, json!({"query": " ene ", "limit": 9})),
             MockStreamEvent::final_response_with_default_usage(),
         ],
         vec![
@@ -857,6 +857,12 @@ async fn a_held_search_cannot_send_the_query_after_its_connection_changes() {
         card.external_destination.as_deref(),
         Some(destination.as_str())
     );
+    assert_eq!(card.normalized_arguments, r#"{"limit":9,"query":" ene "}"#);
+    let effective = card.search_summary.into_option().unwrap();
+    assert_eq!(effective.connection_id, "search-1");
+    assert_eq!(effective.connection_name, "Local Search");
+    assert_eq!(effective.query, "ene");
+    assert_eq!(effective.limit, 5);
     let request_id = pending.request_id;
     let companion = harness.companion.clone();
     assert!(

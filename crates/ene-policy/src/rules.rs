@@ -5,6 +5,7 @@ use crate::capability::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use strum::{EnumString, IntoStaticStr};
 
 use crate::hard_deny::hard_denied_action;
@@ -120,6 +121,34 @@ pub struct Approval {
     /// Display-safe route for an action that sends data to an external service.
     #[serde(default)]
     pub external_destination: Option<String>,
+    /// Effective Web search request for review.
+    #[serde(default)]
+    pub search_summary: Option<SearchApprovalSummary>,
+}
+
+/// The display-safe data of a prepared Web search.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchApprovalSummary {
+    /// The provider that receives the request.
+    pub provider: String,
+    /// The connection label in Settings.
+    pub connection_name: String,
+    /// The identifier that distinguishes equally named connections.
+    pub connection_id: String,
+    /// The query that the provider receives.
+    pub query: String,
+    /// The result limit that the provider receives.
+    pub limit: u32,
+}
+
+impl Approval {
+    /// Arguments intended for display and review.
+    pub fn review_arguments(&self) -> std::borrow::Cow<'_, str> {
+        match &self.search_summary {
+            Some(search) => serde_json::to_string(search).unwrap_or_default().into(),
+            None => self.normalized_arguments.as_str().into(),
+        }
+    }
 }
 
 /// What the Gate should do with a tool call.
@@ -179,16 +208,22 @@ pub enum CandidateAction {
         input: Value,
     },
     /// An outbound web search.
-    WebSearch {
-        /// The search endpoint the request goes to.
-        endpoint: String,
-        /// The query text.
-        query: String,
-        /// The full arguments sent to the search adapter.
-        input: Value,
-        /// The host-authenticated identity of the effective invocation.
-        scope: Option<crate::SearchScope>,
-    },
+    WebSearch(Arc<WebSearchAction>),
+}
+
+/// The effective query and destination, with literal arguments for older rules.
+#[derive(Clone, Debug)]
+pub struct WebSearchAction {
+    /// The validated endpoint.
+    pub endpoint: url::Url,
+    /// The query as sent.
+    pub query: String,
+    /// The number of results requested after applying the connection cap.
+    pub limit: usize,
+    /// Original invocation for legacy exact rules and the approval hash.
+    pub raw_arguments: Value,
+    /// The host-authenticated identity of the effective invocation.
+    pub scope: Option<crate::SearchScope>,
 }
 
 /// RFC 8785 (JCS) canonical JSON.
@@ -233,10 +268,7 @@ struct ResolvedAction<'a> {
     default_approval: DefaultActionApproval,
 }
 
-fn resolve_action<'a>(
-    action: &'a CandidateAction,
-    typed_target: &'a ActionTarget,
-) -> ResolvedAction<'a> {
+fn resolve_action(action: &CandidateAction) -> ResolvedAction<'_> {
     match action {
         CandidateAction::DeviceCapability {
             capability,
@@ -288,25 +320,18 @@ fn resolve_action<'a>(
             ),
             default_approval: DefaultActionApproval::NeedsDecision,
         },
-        CandidateAction::WebSearch {
-            endpoint,
-            query,
-            input,
-            ..
-        } => {
-            let host = match typed_target {
-                ActionTarget::Url { host: Some(h), .. } => h.as_str(),
-                _ => endpoint.as_str(),
-            };
-            ResolvedAction {
-                tool_name: WEB_SEARCH_TOOL,
-                capability: None,
-                server_id: None,
-                raw_args: input,
-                target_summary: format!("web_search {host} ({})", truncate(query, 80)),
-                default_approval: DefaultActionApproval::NeedsDecision,
-            }
-        }
+        CandidateAction::WebSearch(search) => ResolvedAction {
+            tool_name: WEB_SEARCH_TOOL,
+            capability: None,
+            server_id: None,
+            raw_args: &search.raw_arguments,
+            target_summary: format!(
+                "web_search {} ({})",
+                search.endpoint.host_str().unwrap_or_default(),
+                truncate(&search.query, 80)
+            ),
+            default_approval: DefaultActionApproval::NeedsDecision,
+        },
     }
 }
 
@@ -317,7 +342,7 @@ pub fn decide_action(rules: &[PolicyRule], action: &CandidateAction) -> Verdict 
     if let Some(reason) = hard_denied_action(action, &typed_target) {
         return Verdict::Deny { reason };
     }
-    let resolved = resolve_action(action, &typed_target);
+    let resolved = resolve_action(action);
     let (_, raw_hash) = canonicalise(resolved.tool_name, resolved.raw_args);
     let raw_hash_hex = hex_digest(&raw_hash);
     let criteria = ActionMatch {
@@ -328,7 +353,7 @@ pub fn decide_action(rules: &[PolicyRule], action: &CandidateAction) -> Verdict 
         raw_hash_hex: &raw_hash_hex,
         typed_target: &typed_target,
         search_scope: match action {
-            CandidateAction::WebSearch { scope, .. } => scope.as_ref(),
+            CandidateAction::WebSearch(search) => search.scope.as_ref(),
             _ => None,
         },
     };
@@ -424,7 +449,7 @@ fn matches_action(rule: &PolicyRule, action: &ActionMatch<'_>) -> bool {
     if rule.pattern == "*" {
         return true;
     }
-    if let Some((tag, _label)) = crate::search_scope::pattern_parts(&rule.pattern) {
+    if let Some((tag, _)) = rule.search_scope() {
         return action.tool_name == WEB_SEARCH_TOOL
             && action.search_scope.is_some_and(|scope| scope.matches(tag));
     }

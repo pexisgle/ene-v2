@@ -83,20 +83,27 @@ fn persisted_search_rules_follow_effective_requests_and_accounts() {
     let action = |store: &Store, credentials: &Credentials, request: &Value| {
         resolve(store, Some(credentials), &providers)
             .unwrap()
-            .action(request, Some(credentials))
+            .prepare(request, Some(credentials))
             .unwrap()
+            .candidate()
     };
-    let CandidateAction::WebSearch {
-        scope: Some(scope), ..
-    } = action(&store, &credentials, &request)
-    else {
-        panic!("expected a persistent scope");
+    let CandidateAction::WebSearch(prepared) = action(&store, &credentials, &request) else {
+        panic!("expected a search action");
     };
-    let saved = scope.allow_rule();
+    let saved = prepared.scope.as_ref().unwrap().allow_rule();
     assert_eq!(
         saved.search_label(),
-        Some("Research account · https://search.example/lookup · ene · 3")
+        Some("Exa · Research account · \"ene\" · 3 · https://search.example/lookup")
     );
+    assert!(matches!(
+        resolve(&store, Some(&credentials), &providers)
+            .unwrap()
+            .prepare(
+                &json!({"query": "send original-credential"}),
+                Some(&credentials)
+            ),
+        Err(SearchInputError::CredentialInQuery)
+    ));
     assert!(!saved.pattern.contains("tenant-a"));
     assert!(!saved.pattern.contains("original-credential"));
     store
@@ -116,6 +123,15 @@ fn persisted_search_rules_follow_effective_requests_and_accounts() {
         applies(&credentials, &json!({"query": "ene"})),
         Verdict::Allow
     );
+    let mut confirmation = rules[0].clone();
+    confirmation.effect = ene_policy::PolicyEffect::Confirm;
+    assert!(matches!(
+        decide_action(
+            &[confirmation],
+            &action(&store, &credentials, &json!({"query": "ene"}))
+        ),
+        Verdict::HumanRequired { .. }
+    ));
     for difference in [
         applies(&credentials, &json!({"query": "ene", "limit": 2})),
         applies(&credentials, &json!({"query": "different"})),

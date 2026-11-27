@@ -1,7 +1,7 @@
 //! Pure permission approval, policy rule, and policy text domain types.
 
 use crate::{PolicyEffect, PolicyRule, PolicyText};
-use ene_policy::ApprovalStatus;
+use ene_policy::{ApprovalStatus, SearchApprovalSummary};
 
 /// Prefix used for per-capability workspace file confirmation policy rules.
 pub const SKIP_FILE_CONFIRMATION_PREFIX: &str = "desktop.skip-file-confirmation:";
@@ -34,6 +34,8 @@ pub struct ApprovalRequest {
     pub capability: Option<String>,
     /// Display-safe route for an external transfer, when supplied by the host.
     pub external_destination: Option<String>,
+    /// The effective Web search request, when supplied by the host.
+    pub search_summary: Option<SearchApprovalSummary>,
 }
 
 /// Batch update payload for structured policy rules.

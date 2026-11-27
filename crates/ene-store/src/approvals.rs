@@ -1,7 +1,7 @@
 //! Approval requests: persistence, resolution and startup expiry.
 
 use crate::row::{FromRow, row_fields};
-use crate::{Store, StoreError, error::Result, util::now};
+use crate::{Store, StoreError, error::Result, to_json, util::now};
 use ene_policy::{Approval, ApprovalStatus};
 use rusqlite::params;
 
@@ -19,6 +19,7 @@ row_fields!(Approval, COLUMNS {
     client_id,
     capability,
     external_destination,
+    search_summary => optional_json_column("stored search approval summary is corrupt"),
 });
 
 /// Repository managing `approval_requests`.
@@ -31,10 +32,11 @@ impl<'a> ApprovalRepo<'a> {
     }
 
     pub fn insert_approval(&self, approval: &Approval) -> Result<()> {
+        let search_summary = approval.search_summary.as_ref().map(to_json).transpose()?;
         self.0
             .conn()
             .prepare_cached(&format!(
-                "INSERT INTO approval_requests ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+                "INSERT INTO approval_requests ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
             ))?
             .execute(params![
                 approval.request_id,
@@ -50,6 +52,7 @@ impl<'a> ApprovalRepo<'a> {
                 approval.client_id,
                 approval.capability,
                 approval.external_destination,
+                search_summary,
             ])?;
         Ok(())
     }
@@ -144,6 +147,7 @@ mod tests {
             client_id: Some("c1".into()),
             capability: Some("device.x".into()),
             external_destination: None,
+            search_summary: None,
         }
     }
 

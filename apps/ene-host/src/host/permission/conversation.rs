@@ -199,7 +199,7 @@ pub(crate) fn consider_user_reply(world: &mut World, agent: Entity, input: &str,
         "request_id": request,
         "operation": approval.tool_name,
         "target": approval.external_destination,
-        "arguments": ene_store::util::truncate(&approval.normalized_arguments, 2_000),
+        "arguments": ene_store::util::truncate(&approval.review_arguments(), 2_000),
         "user_reply": text,
     });
     let (publish, answer) = oneshot::channel();

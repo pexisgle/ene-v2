@@ -176,7 +176,14 @@ impl CompanionPod {
                     this.child(div().text_xs().child(format!("送信先 {destination}")))
                 },
             )
-            .when(!args.is_empty(), |this| {
+            .when_some(approval.search_summary.as_ref(), |this, search| {
+                this.child(div().text_xs().child(format!(
+                    "{} · {} ({}) · 最大{}件",
+                    search.provider, search.connection_name, search.connection_id, search.limit
+                )))
+                .child(render_approval_args(&search.query, theme))
+            })
+            .when(!args.is_empty() && approval.search_summary.is_none(), |this| {
                 // Collapsed by default: the raw JSON is escaped and long, and
                 // the decision should not be buried under it.
                 this.child(

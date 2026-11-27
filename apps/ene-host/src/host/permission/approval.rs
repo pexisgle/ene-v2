@@ -7,12 +7,12 @@ use crate::host::{
     db::Store,
     error::{HostError, Result},
     notify::Notifier,
-    web_search::{self, ResolvedSearch, SearchConfigError},
+    web_search::{self, PreparedSearch, SearchConfigError},
 };
 use bevy_ecs::prelude::*;
 use ene_policy::{
-    Approval, ApprovalDecision, ApprovalStatus, CandidateAction, PolicyEffect, PolicyRule, Verdict,
-    canonicalise, decide_action, decide_capability, hex_digest,
+    Approval, ApprovalDecision, ApprovalStatus, PolicyEffect, PolicyRule, Verdict, canonicalise,
+    decide_action, decide_capability, hex_digest,
 };
 use ene_rpc as w;
 use rig_ecs::prelude::*;
@@ -191,32 +191,30 @@ fn persist_always_allow_rule(
 }
 
 fn revalidate_search(
-    resolved: Option<&ResolvedSearch>,
+    search: Option<&PreparedSearch>,
     store: &Store,
     credentials: Option<&crate::host::model::Credentials>,
     providers: &crate::host::providers::Providers,
-    arguments: &Value,
 ) -> Result<(Verdict, Option<PolicyRule>)> {
     let changed = || HostError::Conflict(SearchConfigError::ConnectionChanged.to_string());
-    let resolved = resolved
-        .ok_or_else(changed)?
+    let search = search.ok_or_else(changed)?;
+    search
+        .route
         .binding
         .current(store, credentials, providers)
         .map_err(|error| match error {
             SearchConfigError::Settings(error) => error.into(),
             _ => changed(),
         })?;
-    let action = resolved
-        .action(arguments, credentials)
-        .map_err(|_| changed())?;
-    let verdict = decide_action(&store.policy_repo().policy_rules()?, &action);
+    let verdict = decide_action(&store.policy_repo().policy_rules()?, &search.candidate());
     if let Verdict::Deny { reason } = verdict {
         return Err(HostError::Permission(reason));
     }
-    let saved = match action {
-        CandidateAction::WebSearch { scope, .. } => scope.map(|scope| scope.allow_rule()),
-        _ => None,
-    };
+    let saved = search
+        .action
+        .scope
+        .as_ref()
+        .map(ene_policy::SearchScope::allow_rule);
     Ok((verdict, saved))
 }
 
@@ -234,11 +232,10 @@ fn approve_call(
     let scoped_rule = if name == web_search::NAME {
         let fallback = crate::host::providers::Providers::default();
         match revalidate_search(
-            world.get::<ResolvedSearch>(call),
+            world.get::<PreparedSearch>(call),
             store,
             world.get_resource(),
             world.get_resource().unwrap_or(&fallback),
-            arguments,
         ) {
             Ok((Verdict::HumanRequired { .. }, _)) if automated => {
                 return Err(HostError::Permission(

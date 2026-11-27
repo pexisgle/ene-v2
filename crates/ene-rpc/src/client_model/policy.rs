@@ -15,6 +15,20 @@ from_fields! {
         normalized_arguments,
         status.as_known().and_then(|status| status.try_into().ok()),
         created_at, client_id, capability, external_destination,
+        search_summary.into_option().map(Into::into),
+    }
+}
+
+from_fields! {
+    w::SearchApprovalSummary => ene_policy::SearchApprovalSummary {
+        provider, connection_name, connection_id, query, limit,
+    }
+}
+
+from_fields! {
+    &ene_policy::SearchApprovalSummary => w::SearchApprovalSummary {
+        provider.clone(), connection_name.clone(), connection_id.clone(), query.clone(), limit,
+        ..Default::default()
     }
 }
 

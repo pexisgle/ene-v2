@@ -1,4 +1,4 @@
-use super::{DEFAULT_RESULTS, MAX_QUERY_CHARS, MAX_RESULTS, NAME, ResolvedSearch, execute};
+use super::{DEFAULT_RESULTS, MAX_QUERY_CHARS, MAX_RESULTS, NAME, PreparedSearch, execute};
 use crate::host::{
     background, db::Store, model::Credentials, permission::Approved, providers::Providers,
     resources::HostRuntime,
@@ -9,7 +9,6 @@ use ene_policy::{Verdict, decide_action};
 use rig_core::tool::{ToolErrorKind, ToolExecutionError, ToolOutput, ToolResult, Touches};
 use rig_ecs::prelude::*;
 use serde::Deserialize;
-use serde_json::Value;
 
 pub(crate) struct SearchPlugin;
 
@@ -52,6 +51,8 @@ pub(crate) enum SearchInputError {
     QueryLength,
     #[error("limit must be 1–{MAX_RESULTS}")]
     Limit,
+    #[error("a search query cannot include the connection credential")]
+    CredentialInQuery,
 }
 
 impl TryFrom<&serde_json::Value> for SearchArgs {
@@ -93,7 +94,7 @@ struct SearchServices<'w> {
     wake: Res<'w, Wake>,
 }
 
-type BoundSearch<'a> = (&'a ResolvedSearch, &'a ToolRequest, Option<&'a Approved>);
+type BoundSearch<'a> = (&'a PreparedSearch, Option<&'a Approved>);
 
 fn search(
     called: &ToolCalled<SearchArgs>,
@@ -102,7 +103,7 @@ fn search(
     services: &SearchServices<'_>,
     mut commands: Commands,
 ) {
-    match start(bindings.get(called.call).ok(), &called.args, services) {
+    match start(bindings.get(called.call).ok(), services) {
         Ok(running) => {
             commands.entity(called.call).insert(running);
         }
@@ -121,43 +122,41 @@ fn search(
 enum SearchStartError {
     #[error("the permission gate did not bind a search connection")]
     NotBound,
-    #[error(transparent)]
-    Input(#[from] SearchInputError),
     #[error("the host HTTP runtime is unavailable")]
     Runtime,
 }
 
 fn start(
     binding: Option<BoundSearch<'_>>,
-    args: &SearchArgs,
     services: &SearchServices<'_>,
 ) -> Result<Running, SearchStartError> {
-    let (resolved, request, grant) = binding.ok_or(SearchStartError::NotBound)?;
+    let (search, grant) = binding.ok_or(SearchStartError::NotBound)?;
     let runtime = services
         .runtime
         .as_ref()
         .map(|runtime| runtime.0.clone())
         .or_else(|| tokio::runtime::Handle::try_current().ok())
         .ok_or(SearchStartError::Runtime)?;
-    let (query, limit) = args.effective(resolved.binding.max_results)?;
-    let query = query.to_owned();
-    let resolved = resolved.clone();
-    let arguments = Value::Object(request.call.function.arguments.clone());
+    let search = search.clone();
     let store = services.store.as_ref().clone();
     let credentials = services.credentials.as_deref().cloned();
     let providers = services.providers.as_deref().cloned().unwrap_or_default();
     let grant = grant.cloned();
     let task = background::spawn(&runtime, None, async move {
-        execute(&resolved, &query, limit, || {
-            authorize_send(
-                &resolved,
-                &arguments,
-                &store,
-                credentials.as_ref(),
-                &providers,
-                grant.as_ref(),
-            )
-        })
+        execute(
+            &search.route,
+            &search.action.query,
+            search.action.limit,
+            || {
+                authorize_send(
+                    &search,
+                    &store,
+                    credentials.as_ref(),
+                    &providers,
+                    grant.as_ref(),
+                )
+            },
+        )
         .await
     });
     Ok(Running::answering(
@@ -177,24 +176,21 @@ fn start(
 }
 
 fn authorize_send(
-    resolved: &ResolvedSearch,
-    arguments: &Value,
+    search: &PreparedSearch,
     store: &Store,
     credentials: Option<&Credentials>,
     providers: &Providers,
     grant: Option<&Approved>,
 ) -> Result<(), ToolExecutionError> {
-    let current = resolved
+    search
+        .route
         .binding
         .current(store, credentials, providers)
-        .map_err(|error| ToolExecutionError::other(error.to_string()))?;
-    let action = current
-        .action(arguments, credentials)
         .map_err(|error| ToolExecutionError::other(error.to_string()))?;
     let policy = store.policy_repo();
     let policy_failure = |_| ToolExecutionError::other("search policy is unavailable");
     let rules = policy.policy_rules().map_err(policy_failure)?;
-    let allowed = match (grant, decide_action(&rules, &action)) {
+    let allowed = match (grant, decide_action(&rules, &search.candidate())) {
         (_, Verdict::Deny { .. }) => false,
         (Some(Approved::Human), _) | (None, Verdict::Allow) => true,
         (

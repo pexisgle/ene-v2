@@ -240,6 +240,7 @@ fn request_permission(
         client_id,
         capability: Some(tool_name.clone()),
         external_destination: None,
+        search_summary: None,
     };
     let call = world
         .spawn(rig_ecs::tools::ToolRequest {

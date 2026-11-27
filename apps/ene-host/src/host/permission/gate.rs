@@ -257,9 +257,9 @@ fn process_gate_call(
     }
     let candidate = match build_candidate_action(ctx, &item) {
         CandidateOutcome::Resolved(candidate) => Some(*candidate),
-        CandidateOutcome::Search(resolved) => {
-            let (action, binding) = *resolved;
-            world.entity_mut(item.entity).insert(binding);
+        CandidateOutcome::Search(search) => {
+            let action = search.candidate();
+            world.entity_mut(item.entity).insert(*search);
             Some((action, None, None))
         }
         CandidateOutcome::NeedsDeviceClient => {
@@ -329,6 +329,7 @@ fn apply_gate_verdict(
         Verdict::NeedsDecision { target } => {
             let (approval, target) =
                 issue_gate_hold(world, store, binding, target, ApprovalStatus::Evaluating)?;
+            let arguments = truncate(&approval.review_arguments(), DECISION_ARGUMENT_CHARS);
             let pending = Pending {
                 request: approval.request_id,
                 companion: approval.session_id,
@@ -353,7 +354,7 @@ fn apply_gate_verdict(
             let inputs = DecisionInputs {
                 tool_name: approval.tool_name,
                 target: pending.target.clone(),
-                arguments: truncate(&approval.normalized_arguments, DECISION_ARGUMENT_CHARS),
+                arguments,
                 request: request_context(
                     store,
                     world.get::<Conversation>(binding.call.agent),
@@ -376,9 +377,9 @@ fn issue_gate_hold(
     status: ApprovalStatus,
 ) -> std::ops::ControlFlow<(), (Approval, String)> {
     let (normalized, hash) = canonicalise(&binding.call.tool_name, &binding.call.arguments);
-    let external_destination = world
-        .get::<crate::host::web_search::ResolvedSearch>(binding.call.entity)
-        .map(|search| search.binding.display_destination.clone());
+    let search = world.get::<crate::host::web_search::PreparedSearch>(binding.call.entity);
+    let external_destination =
+        search.map(|search| search.route.binding.display_destination.clone());
     let target = external_destination.clone().unwrap_or(target);
     let approval = Approval {
         request_id: uuid::Uuid::new_v4().to_string(),
@@ -394,6 +395,7 @@ fn issue_gate_hold(
         client_id: binding.bound_client_id.clone(),
         capability: binding.bound_capability.clone(),
         external_destination,
+        search_summary: search.map(crate::host::web_search::PreparedSearch::summary),
     };
     if let Err(error) = issue_hold(world, store, &approval, binding.call.entity) {
         if error.is_storage() {
