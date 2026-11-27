@@ -1,14 +1,108 @@
 //! Host connection, registration, companion activation bindings, and capability specs.
 
 use super::{Connection, DeviceBridge, Options, Outcome};
-use crate::{avatar, capabilities, host::Host};
+use crate::{
+    avatar, capabilities,
+    host::{Host, unary_options},
+};
 use buffa::view::MessageView;
+use connectrpc::ConnectError;
 use ene_domain::BodyBinding;
 use ene_rpc as w;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
 };
+use tokio::task::JoinSet;
+
+#[derive(Default)]
+pub(super) struct DevicePublication {
+    refresh_requested: bool,
+    pending: JoinSet<Result<BTreeSet<String>, ConnectError>>,
+}
+
+impl DevicePublication {
+    pub(super) fn refresh(
+        &mut self,
+        transport: &mut SessionTransport,
+        host: &Host,
+        devices: &DeviceBridge,
+    ) {
+        self.refresh_requested = true;
+        self.enqueue(transport, host, devices);
+    }
+
+    pub(super) fn enqueue(
+        &mut self,
+        transport: &mut SessionTransport,
+        host: &Host,
+        devices: &DeviceBridge,
+    ) {
+        match self.pending.try_join_next() {
+            Some(Ok(Ok(ready))) => transport.published_body = ready,
+            Some(Ok(Err(error))) => tracing::warn!(%error, "failed to sync device state"),
+            Some(Err(error)) => tracing::warn!(%error, "device state publication stopped"),
+            None => {}
+        }
+        if !self.pending.is_empty() {
+            return;
+        }
+        let ready = if transport.subscription.is_empty() {
+            transport.published_body.clone()
+        } else {
+            devices.ready_bodies(transport)
+        };
+        let changed = ready != transport.published_body;
+        if !changed && !self.refresh_requested {
+            return;
+        }
+        let body = changed.then(|| w::BodyAvailability {
+            client_id: transport.options.id.clone(),
+            subscription_id: transport.subscription.clone(),
+            ready_companion_ids: ready.iter().cloned().collect(),
+            ..Default::default()
+        });
+        let declare = std::mem::take(&mut self.refresh_requested)
+            || ready.is_empty() != transport.published_body.is_empty();
+        let registration = declare.then(|| transport.registration(devices, !ready.is_empty()));
+        let host = host.clone();
+        self.pending.spawn(async move {
+            if let Some(body) = body
+                && let Err(error) = host
+                    .client
+                    .report_body_availability_with_options(body, unary_options())
+                    .await
+                && error.code != connectrpc::ErrorCode::Unimplemented
+            {
+                return Err(error);
+            }
+            if let Some(registration) = registration {
+                register_client(&host, registration).await?;
+            }
+            Ok(ready)
+        });
+    }
+}
+
+async fn register_client(
+    host: &Host,
+    mut request: w::RegisterClientRequest,
+) -> Result<(), ConnectError> {
+    let clients = host
+        .client
+        .list_with_options(w::Empty::default(), unary_options())
+        .await?;
+    request.expected_revision = clients
+        .view()
+        .items
+        .iter()
+        .find(|client| client.id == request.id)
+        .map_or(0, |client| client.revision);
+    host.client
+        .register_client_with_options(request, unary_options())
+        .await?;
+    Ok(())
+}
 
 pub(super) struct SessionTransport {
     pub(super) path: PathBuf,
@@ -87,64 +181,17 @@ impl SessionTransport {
         self.connection.read().clone()
     }
 
-    pub(super) async fn sync_capabilities(&self, host: &Host, devices: &DeviceBridge) {
-        let body = !self.published_body.is_empty();
-        if let Err(error) = self.register(host, devices, body).await {
-            tracing::warn!("failed to sync client capabilities in place: {error}");
-        }
-    }
-
-    pub(super) async fn sync_body(&mut self, host: &Host, devices: &DeviceBridge) {
-        if self.subscription.is_empty() {
-            return;
-        }
-        let ready = devices.ready_bodies(self);
-        if self.published_body == ready {
-            return;
-        }
-        let report = host
-            .client
-            .report_body_availability(w::BodyAvailability {
-                client_id: self.options.id.clone(),
-                subscription_id: self.subscription.clone(),
-                ready_companion_ids: ready.iter().cloned().collect(),
-                ..Default::default()
-            })
-            .await;
-        // An older host still accepts the device-wide declaration.
-        if let Err(error) = report
-            && error.code != connectrpc::ErrorCode::Unimplemented
-        {
-            tracing::warn!(%error, "failed to sync avatar readiness");
-            return;
-        }
-        let previous = !self.published_body.is_empty();
-        let available = !ready.is_empty();
-        if previous != available
-            && let Err(error) = self.register(host, devices, available).await
-        {
-            tracing::warn!(%error, "failed to sync avatar capabilities");
-            return;
-        }
-        self.published_body = ready;
-    }
-
     /// Registers this client, keeping the host's grants across restarts.
     pub(super) async fn register(
         &self,
         host: &Host,
         devices: &DeviceBridge,
         body: bool,
-    ) -> Result<(), connectrpc::ConnectError> {
-        // A declaration is an optimistic update, so a restart must send the
-        // revision the host already stored or it conflicts with itself.
-        let clients = host.client.list(w::Empty::default()).await?;
-        let expected_revision = clients
-            .view()
-            .items
-            .iter()
-            .find(|client| client.id == self.options.id)
-            .map_or(0, |client| client.revision);
+    ) -> Result<(), ConnectError> {
+        register_client(host, self.registration(devices, body)).await
+    }
+
+    fn registration(&self, devices: &DeviceBridge, body: bool) -> w::RegisterClientRequest {
         let computer_spec = {
             #[cfg(windows)]
             {
@@ -165,18 +212,14 @@ impl SessionTransport {
         }
         specs.extend(devices.client_plugins.specs().iter().cloned());
         specs.extend(computer_spec);
-        host.client
-            .register_client(w::RegisterClientRequest {
-                id: self.options.id.clone(),
-                name: self.options.name.clone(),
-                platform: self.options.platform.clone(),
-                capabilities: capabilities::names(&specs),
-                capability_specs: specs,
-                expected_revision,
-                ..Default::default()
-            })
-            .await?;
-        Ok(())
+        w::RegisterClientRequest {
+            id: self.options.id.clone(),
+            name: self.options.name.clone(),
+            platform: self.options.platform.clone(),
+            capabilities: capabilities::names(&specs),
+            capability_specs: specs,
+            ..Default::default()
+        }
     }
 
     /// Installs the host snapshot and the cursor at which it was taken.
@@ -283,12 +326,15 @@ impl SessionTransport {
     ) -> Result<(), connectrpc::ConnectError> {
         let activation = host
             .client
-            .activate(w::ActivationRequest {
-                companion_id: companion_id.to_owned(),
-                client_id: self.options.id.clone(),
-                release: false,
-                ..Default::default()
-            })
+            .activate_with_options(
+                w::ActivationRequest {
+                    companion_id: companion_id.to_owned(),
+                    client_id: self.options.id.clone(),
+                    release: false,
+                    ..Default::default()
+                },
+                unary_options(),
+            )
             .await?
             .view()
             .to_owned_message()
@@ -307,12 +353,15 @@ impl SessionTransport {
         companion_id: &str,
     ) -> Result<(), connectrpc::ConnectError> {
         host.client
-            .activate(w::ActivationRequest {
-                companion_id: companion_id.to_owned(),
-                client_id: String::new(),
-                release: true,
-                ..Default::default()
-            })
+            .activate_with_options(
+                w::ActivationRequest {
+                    companion_id: companion_id.to_owned(),
+                    client_id: String::new(),
+                    release: true,
+                    ..Default::default()
+                },
+                unary_options(),
+            )
             .await?;
         Ok(())
     }

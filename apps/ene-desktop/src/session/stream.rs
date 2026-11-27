@@ -42,6 +42,7 @@ struct PeriodicTimers {
 pub(super) struct StreamLoopState {
     device: DeviceStream,
     work: WorkspaceCalls,
+    pub(super) publication: super::transport::DevicePublication,
     subscription: NotificationStream,
     pub(super) output: Option<AudioOutStream>,
     pub(super) mic_send: Option<MicSendHalf>,
@@ -145,7 +146,9 @@ impl Session {
                     .pump_lip(&self.transport, self.devices.avatar.as_mut(), &self.updates);
             }
             PeriodicTick::Sample => {
-                self.transport.sync_body(host, &self.devices).await;
+                state
+                    .publication
+                    .enqueue(&mut self.transport, host, &self.devices);
                 self.open_avatar().await;
                 // Fire-and-forget reports are only reaped here; without this
                 // the set grew for the life of the session.
@@ -173,6 +176,7 @@ impl Session {
         StreamLoopState {
             device,
             work: WorkspaceCalls::new(),
+            publication: super::transport::DevicePublication::default(),
             subscription,
             output,
             mic_send,

@@ -327,7 +327,11 @@ impl Session {
         }
         self.report_devices().await;
 
-        let snapshot = match host.host.get_snapshot(w::Empty::default()).await {
+        let snapshot = match host
+            .host
+            .get_snapshot_with_options(w::Empty::default(), crate::host::unary_options())
+            .await
+        {
             Ok(response) => match response.view().to_owned_message() {
                 Ok(snapshot) => snapshot,
                 Err(error) => return Outcome::Dropped(error.to_string()),

@@ -7,9 +7,20 @@
 //! `https://<host>/rpc` ingress and Bearer token validated by
 //! [`ene_rpc::connect_remote`]; plaintext remote URLs are always rejected.
 
+use connectrpc::client::CallOptions;
 use ene_rpc as w;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+/// Default deadline for desktop requests with one response.
+pub(crate) const RPC_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(crate) fn unary_options() -> CallOptions {
+    CallOptions::default().with_timeout(RPC_TIMEOUT)
+}
 
 /// What the host publishes for a client to connect with.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

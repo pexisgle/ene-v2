@@ -29,10 +29,9 @@ pub(super) async fn command(
             Step::Continue
         }
         Command::Refresh => {
-            session
-                .transport
-                .sync_capabilities(host, &session.devices)
-                .await;
+            stream
+                .publication
+                .refresh(&mut session.transport, host, &session.devices);
             Step::Continue
         }
         Command::SetEyesEnabled(enabled) => {
@@ -48,10 +47,9 @@ pub(super) async fn command(
                 )
                 .await;
             }
-            session
-                .transport
-                .sync_capabilities(host, &session.devices)
-                .await;
+            stream
+                .publication
+                .refresh(&mut session.transport, host, &session.devices);
             Step::Continue
         }
         #[cfg(windows)]
@@ -59,10 +57,9 @@ pub(super) async fn command(
             session
                 .devices
                 .set_computer_use_enabled(enabled, &session.updates);
-            session
-                .transport
-                .sync_capabilities(host, &session.devices)
-                .await;
+            stream
+                .publication
+                .refresh(&mut session.transport, host, &session.devices);
             Step::Continue
         }
         Command::SetMicMuted(muted) => {

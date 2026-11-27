@@ -21,7 +21,11 @@ pub mod companions;
 pub mod connections;
 pub mod policy;
 
-use crate::{host::Host, session::Connection, update::Update};
+use crate::{
+    host::{Host, RPC_TIMEOUT},
+    session::Connection,
+    update::Update,
+};
 use buffa::view::{MessageView, OwnedView};
 use connectrpc::{
     ConnectError,
@@ -34,14 +38,7 @@ use ene_client_core::{
 use ene_rpc as w;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 use tokio::{sync::mpsc::UnboundedSender, time::Instant};
-
-/// How long one RPC may take before the UI gives up on it.
-///
-/// Generous next to a loopback round trip: this exists to stop a wedged host
-/// from hanging the window, not to police normal latency.
-const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn remaining_options(deadline: Instant) -> Result<CallOptions, ConnectError> {
     let remaining = deadline.saturating_duration_since(Instant::now());
