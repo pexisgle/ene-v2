@@ -20,9 +20,9 @@ pub use embedding::{PREP_VERSION, PendingEmbedding, dimensions_of_space, space_i
 pub use ene_domain::{ModelAssignment, ModelAssignments};
 pub use json::JsonDoc;
 pub use memory::{
-    MAX_IMPORTANCE, Memory, MemoryActionKind, MemoryRecord, MindStateChange, MindUpdate, NewMemory,
-    PINNED_BUDGET_CHARS, RecallCandidate, RecallMode, RecallOutcome, SHARED_SCOPE, Scored,
-    StateUpdate, in_scope, rank_recall, recall_terms, score,
+    MAX_IMPORTANCE, Memory, MemoryActionKind, MemoryRecord, MemoryVersion, MindStateChange,
+    MindUpdate, NewMemory, PINNED_BUDGET_CHARS, RecallCandidate, RecallMode, RecallOutcome,
+    SHARED_SCOPE, Scored, StateUpdate, in_scope, rank_recall, recall_terms, score,
 };
 
 pub type Result<T> = std::result::Result<T, ene_domain::DomainError>;
@@ -65,9 +65,13 @@ mod tests {
             recall_terms("hi rust, メモリ管理!").collect::<Vec<_>>(),
             ["hi", "rust", "メモリ管理"]
         );
+        let injected = [MemoryVersion {
+            id: "m1".into(),
+            revision: 2,
+        }];
         assert_eq!(
-            validate_citations(&["m1".into(), "m2".into(), "m1".into()], &["m1".into()]),
-            vec!["m1".to_owned()]
+            validate_citations(["m1", "m2", "m1"], &injected),
+            [&injected[0]]
         );
 
         let space = space_id(

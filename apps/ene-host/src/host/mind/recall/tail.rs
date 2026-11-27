@@ -9,22 +9,73 @@ use crate::host::{
     model::Credentials,
     resources::Perception,
 };
-use ene_mind::{RecallCandidate, RecallMode, Scored};
+use ene_mind::{Memory, MemoryVersion, RecallCandidate, RecallMode};
 use ene_store::util::now;
 use rig_ecs::prelude::{Conversation, MessageId};
+use std::fmt::Write as _;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(super) struct RenderedTail {
-    pub(super) text: String,
-    pub(super) memory_ids: Vec<String>,
+    context: String,
+    pinned: Vec<SelectedMemory>,
+    recalled: Vec<SelectedMemory>,
 }
+
+#[derive(Debug)]
+struct SelectedMemory {
+    version: MemoryVersion,
+    content: String,
+}
+
+pub(super) struct TailPayload {
+    pub(super) text: String,
+    pub(super) memories: Vec<MemoryVersion>,
+}
+
+const PINNED_HEADER: &str = "常に覚えていること:\n";
+const RECALL_HEADER: &str = "今の話に関係する記憶:\n";
 
 impl RenderedTail {
     pub(super) fn fallback() -> Self {
         Self {
-            text: opening(),
-            memory_ids: Vec::new(),
+            context: opening(),
+            pinned: Vec::new(),
+            recalled: Vec::new(),
         }
+    }
+
+    pub(super) fn payload(
+        &self,
+        store: &Store,
+        companion: &str,
+    ) -> crate::host::db::Result<TailPayload> {
+        let current = store.memory_repo().current_revisions(
+            companion,
+            self.pinned
+                .iter()
+                .chain(&self.recalled)
+                .map(|item| &item.version),
+        )?;
+        let mut current = current.into_iter();
+        let mut text = self.context.clone();
+        let mut memories = Vec::new();
+        for (header, items) in [
+            (PINNED_HEADER, &self.pinned),
+            (RECALL_HEADER, &self.recalled),
+        ] {
+            let mut heading = Some(header);
+            for (item, available) in items.iter().zip(current.by_ref().take(items.len())) {
+                if available {
+                    if let Some(header) = heading.take() {
+                        text.push_str(header);
+                    }
+                    let _written = writeln!(text, "- {}", item.content);
+                    memories.push(item.version.clone());
+                }
+            }
+        }
+        text.push_str(TAIL_CLOSING);
+        Ok(TailPayload { text, memories })
     }
 }
 
@@ -56,13 +107,11 @@ pub(super) fn recall_query(
 pub(super) const TAIL_BUDGET_CHARS: usize = 6_000;
 const TAIL_CLOSING: &str = "---";
 
-/// Assembles the dynamic context tail within a fixed character budget and tracks
-/// exactly which recalled memory IDs survived budget fitting (`B14`, `R09`).
+/// Reserves context space before selecting complete memory lines.
 struct ContextBuilder {
     budget_chars: usize,
     used_chars: usize,
     buf: String,
-    included: Vec<String>,
 }
 
 impl ContextBuilder {
@@ -72,7 +121,6 @@ impl ContextBuilder {
             budget_chars: total_budget_chars.saturating_sub(closing_chars),
             used_chars: 0,
             buf: String::new(),
-            included: Vec::new(),
         }
     }
 
@@ -82,61 +130,48 @@ impl ContextBuilder {
 
     /// Appends priority context (clock, profile, perception, state, pinned),
     /// clipping cleanly to the remaining budget if needed.
-    fn push_priority(&mut self, text: &str) -> bool {
+    fn push_priority(&mut self, text: &str) {
         let rem = self.remaining_chars();
         if rem == 0 {
-            return false;
+            return;
         }
         let count = text.chars().count();
         if count <= rem {
             self.buf.push_str(text);
             self.used_chars += count;
-            true
         } else {
             let clipped: String = text.chars().take(rem).collect();
             self.buf.push_str(&clipped);
             self.used_chars = self.budget_chars;
-            false
         }
     }
 
-    /// Appends recalled memories one full line at a time, recording only IDs
-    /// whose entire bullet fit within the remaining budget.
-    fn push_recalled(&mut self, items: &[Scored]) {
-        const HEADER: &str = "今の話に関係する記憶:\n";
-        if items.is_empty() {
-            return;
-        }
-        let header_chars = HEADER.chars().count();
-        let mut header_written = false;
-        for item in items {
-            let line = format!("- {}\n", item.memory.content);
-            let line_chars = line.chars().count();
-            let needed = if header_written {
-                line_chars
-            } else {
-                header_chars + line_chars
-            };
+    fn select(
+        &mut self,
+        header: &str,
+        source: impl IntoIterator<Item = Memory>,
+        skip_oversized: bool,
+    ) -> Vec<SelectedMemory> {
+        let mut selected = Vec::new();
+        let header_chars = header.chars().count();
+        for memory in source {
+            let mut needed = memory.content.chars().count() + 3; // "- " and newline
+            if selected.is_empty() {
+                needed += header_chars;
+            }
             if needed > self.remaining_chars() {
+                if skip_oversized {
+                    continue;
+                }
                 break;
             }
-            if !header_written {
-                self.buf.push_str(HEADER);
-                self.used_chars += header_chars;
-                header_written = true;
-            }
-            self.buf.push_str(&line);
-            self.used_chars += line_chars;
-            self.included.push(item.memory.id.clone());
+            self.used_chars += needed;
+            selected.push(SelectedMemory {
+                version: MemoryVersion::from(&memory),
+                content: memory.content,
+            });
         }
-    }
-
-    fn finish(mut self) -> RenderedTail {
-        self.buf.push_str(TAIL_CLOSING);
-        RenderedTail {
-            text: self.buf,
-            memory_ids: self.included,
-        }
+        selected
     }
 }
 
@@ -229,7 +264,7 @@ pub(super) fn render_tail_full(
             builder.push_priority(&format!("- {note}\n"));
         }
     }
-    if let Some(state) = store.companion_repo().companion(companion)? {
+    let (pinned, recalled) = if let Some(state) = store.companion_repo().companion(companion)? {
         builder.push_priority(&format!(
             "現在の心: 感情={} 関係={} 傾向={} 懸念={}\n",
             state.state.emotion.json,
@@ -237,25 +272,25 @@ pub(super) fn render_tail_full(
             state.state.tendencies.json,
             state.state.concerns.json
         ));
-        let pinned = store.memory_repo().pinned(companion)?;
-        if !pinned.is_empty() {
-            builder.push_priority("常に覚えていること:\n");
-            for memory in pinned {
-                if builder.push_priority(&format!("- {}\n", memory.content)) {
-                    builder.included.push(memory.id);
-                }
-            }
-        }
-        if let Some(query) = query {
-            let recalled = store.memory_repo().recall_hybrid(
-                companion,
-                query,
-                RecallMode::Auto,
-                semantic,
-                6,
-            )?;
-            builder.push_recalled(&recalled.items);
-        }
-    }
-    Ok(builder.finish())
+        let repo = store.memory_repo();
+        let pinned = builder.select(PINNED_HEADER, repo.pinned(companion)?, true);
+        let recalled = if let Some(query) = query {
+            let recalled = repo.recall_hybrid(companion, query, RecallMode::Auto, semantic, 6)?;
+            builder.select(
+                RECALL_HEADER,
+                recalled.items.into_iter().map(|item| item.memory),
+                false,
+            )
+        } else {
+            Vec::new()
+        };
+        (pinned, recalled)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    Ok(RenderedTail {
+        context: builder.buf,
+        pinned,
+        recalled,
+    })
 }

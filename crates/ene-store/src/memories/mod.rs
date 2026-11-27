@@ -17,6 +17,7 @@ use crate::{
     json, to_json,
     util::{digest, epoch, now, truncate},
 };
+use ene_mind::MemoryVersion;
 pub use ene_mind::{
     Batch, Commit, Fact, MAX_IMPORTANCE, Memory, MemoryActionKind, MemoryContext, MemoryRecord,
     MindStateChange, MindUpdate, NewMemory, PINNED_BUDGET_CHARS, PendingEmbedding, RecallCandidate,
@@ -28,6 +29,7 @@ use std::collections::HashSet;
 
 const MAX_INJECTED: usize = 64;
 const KEEP_INJECTED_TURNS: usize = 64;
+const AUTO_VISIBLE: &str = "(m.scope = ?1 OR m.scope = 'shared') AND m.importance >= 2";
 
 const FIELDS: &str = "id, scope, content, importance, occurred_at, recorded_at, \
      last_accessed_at, memory_revision, content_revision, emotion, source_context";
@@ -377,17 +379,54 @@ impl<'a> MemoryRepo<'a> {
         )
     }
 
-    pub fn record_injections(&self, companion: &str, turn_id: &str, ids: &[String]) -> Result<()> {
+    pub fn current_revisions<'b>(
+        &self,
+        companion: &str,
+        expected: impl IntoIterator<Item = &'b MemoryVersion>,
+    ) -> Result<Vec<bool>> {
+        let mut expected = expected.into_iter().peekable();
+        if expected.peek().is_none() {
+            return Ok(Vec::new());
+        }
+        let connection = self.0.conn();
+        let snapshot = connection.unchecked_transaction()?;
+        let mut query = snapshot.prepare_cached(&format!(
+            "SELECT 1 FROM memories m WHERE {AUTO_VISIBLE} AND m.id = ?2 AND m.memory_revision = ?3"
+        ))?;
+        expected
+            .map(|version| Ok(query.exists(params![companion, version.id, version.revision])?))
+            .collect()
+    }
+
+    pub fn record_injections(
+        &self,
+        companion: &str,
+        turn_id: &str,
+        memories: &[MemoryVersion],
+    ) -> Result<()> {
         let mut connection = self.0.conn();
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        for id in ids.iter().filter(|id| !id.is_empty()).take(MAX_INJECTED) {
+        let stamp = now();
+        for version in memories
+            .iter()
+            .filter(|version| !version.id.is_empty())
+            .take(MAX_INJECTED)
+        {
             transaction
-                .prepare_cached(
+                .prepare_cached(&format!(
                     "INSERT OR REPLACE INTO memory_injections \
-                     (companion_id, turn_id, memory_id, created_at) VALUES (?1, ?2, ?3, ?4)",
-                )?
-                .execute(params![companion, turn_id, id, now()])?;
+                     (companion_id, turn_id, memory_id, created_at, memory_revision) \
+                     SELECT ?1, ?2, m.id, ?4, m.memory_revision FROM memories m \
+                     WHERE {AUTO_VISIBLE} AND m.id = ?3 AND m.memory_revision = ?5"
+                ))?
+                .execute(params![
+                    companion,
+                    turn_id,
+                    version.id,
+                    stamp,
+                    version.revision
+                ])?;
         }
         transaction
             .prepare_cached(
@@ -405,28 +444,35 @@ impl<'a> MemoryRepo<'a> {
         companion: &str,
         after: Option<u64>,
         through: u64,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<MemoryVersion>> {
         let connection = self.0.conn();
         let mut statement = connection.prepare_cached(&format!(
-            "SELECT i.turn_id, i.memory_id FROM memory_injections i \
+            "SELECT i.turn_id, i.memory_id, i.memory_revision FROM memory_injections i \
              JOIN memories m ON m.id = i.memory_id \
-             WHERE i.companion_id = ?1 AND {VISIBLE} ORDER BY i.rowid"
+             WHERE i.companion_id = ?1 AND i.memory_revision = m.memory_revision AND {AUTO_VISIBLE} \
+             ORDER BY i.rowid"
         ))?;
         let rows = statement.query_map([companion], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                MemoryVersion {
+                    id: row.get(1)?,
+                    revision: row.get(2)?,
+                },
+            ))
         })?;
         let mut seen = HashSet::new();
         let mut ids = Vec::new();
         for row in rows {
-            let (turn, id) = row?;
+            let (turn, version) = row?;
             let Ok(turn) = turn.parse::<u64>() else {
                 continue;
             };
             if turn > through || after.is_some_and(|after| turn <= after) {
                 continue;
             }
-            if seen.insert(id.clone()) {
-                ids.push(id);
+            if seen.insert(version.id.clone()) {
+                ids.push(version);
             }
         }
         Ok(ids)

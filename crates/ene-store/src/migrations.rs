@@ -28,7 +28,7 @@ use rusqlite_migration::{HookResult, M, Migrations};
 pub const BASELINE_VERSION: i64 = 6;
 
 /// Latest database schema version managed by [`ladder_steps`].
-pub const VERSION: i64 = 25;
+pub const VERSION: i64 = 26;
 
 /// Every version this host applies above the baseline, in order. The position
 /// in this table is the version, so adding a row is the only way to add a
@@ -186,6 +186,10 @@ const STEPS_ABOVE_BASELINE: &[(&str, &str)] = &[
          WHEN new.content_revision <> old.content_revision BEGIN
             DELETE FROM memory_embeddings WHERE memory_id = old.id;
          END;",
+    ),
+    (
+        "0026_memory_injection_version",
+        "ALTER TABLE memory_injections ADD COLUMN memory_revision INTEGER;",
     ),
 ];
 

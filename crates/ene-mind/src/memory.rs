@@ -60,6 +60,22 @@ impl Memory {
     }
 }
 
+/// A memory at the exact revision used to render its content and visibility.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryVersion {
+    pub id: String,
+    pub revision: u64,
+}
+
+impl From<&Memory> for MemoryVersion {
+    fn from(memory: &Memory) -> Self {
+        Self {
+            id: memory.id.clone(),
+            revision: memory.memory_revision,
+        }
+    }
+}
+
 /// A semantic match to the exact text revision that was embedded.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct RecallCandidate {

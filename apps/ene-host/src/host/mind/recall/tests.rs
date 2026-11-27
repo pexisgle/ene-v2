@@ -198,7 +198,7 @@ async fn work_agent_recall_keeps_the_tail_without_polluting_companion_injections
                 .insert_resource(HostRuntime(tokio::runtime::Handle::current()));
         }
         let store = harness.store();
-        store
+        let head_memory = store
             .memory_repo()
             .insert_memory(&MemoryRecord {
                 id: "m-head".into(),
@@ -241,13 +241,14 @@ async fn work_agent_recall_keeps_the_tail_without_polluting_companion_injections
         .await
         .expect("the companion turn finishes");
 
-        assert_eq!(
+        let receipts = |companion_id: &str| {
             store
                 .memory_repo()
-                .injected_between(&harness.companion, None, u64::MAX)
-                .unwrap(),
-            vec!["m-head".to_owned()],
-        );
+                .injected_between(companion_id, None, u64::MAX)
+                .unwrap()
+        };
+        let expected = [ene_mind::MemoryVersion::from(&head_memory)];
+        assert_eq!(receipts(&harness.companion), expected);
 
         let companion = store
             .companion_repo()
@@ -291,11 +292,8 @@ async fn work_agent_recall_keeps_the_tail_without_polluting_companion_injections
             "work agent still receives recalled memories in its dynamic tail: {work_request}"
         );
         assert_eq!(
-            store
-                .memory_repo()
-                .injected_between(&harness.companion, None, u64::MAX)
-                .unwrap(),
-            vec!["m-head".to_owned()],
+            receipts(&harness.companion),
+            expected,
             "work agent turns must not pollute companion memory_injections"
         );
     }
@@ -444,6 +442,7 @@ fn b14_context_builder_marks_only_complete_memories_that_fit_budget() {
         budget_chars: TAIL_BUDGET_CHARS,
     })
     .unwrap();
+    let base = base.payload(&store, &harness.companion).unwrap();
     let budget = base.text.chars().count()
         + "今の話に関係する記憶:\n".chars().count()
         + first_content.chars().count()
@@ -459,6 +458,7 @@ fn b14_context_builder_marks_only_complete_memories_that_fit_budget() {
         budget_chars: budget,
     })
     .unwrap();
+    let tail = tail.payload(&store, &harness.companion).unwrap();
     assert!(tail.text.chars().count() <= budget);
     assert!(
         tail.text.contains(&first_content),
@@ -473,11 +473,70 @@ fn b14_context_builder_marks_only_complete_memories_that_fit_budget() {
         .injected_between(&harness.companion, None, u64::MAX)
         .unwrap();
     assert_eq!(
-        tail.memory_ids,
+        tail.memories
+            .iter()
+            .map(|memory| memory.id.as_str())
+            .collect::<Vec<_>>(),
         ["m-fit"],
         "rendering witnesses only memories that survived the tail budget"
     );
     assert_eq!(recorded.len(), 0, "rendering alone never writes a receipt");
+}
+
+#[test]
+fn a_cached_tail_omits_revoked_and_partial_pinned_memories() {
+    use crate::host::tests::Harness;
+
+    let harness = Harness::new([]);
+    let store = harness.store();
+    let repo = store.memory_repo();
+    let perception = Perception::default();
+    let mut req = TailRenderRequest {
+        store: &store,
+        perception: &perception,
+        companion: &harness.companion,
+        query: None,
+        semantic: &[],
+        hook_notes: &[],
+        budget_chars: TAIL_BUDGET_CHARS,
+    };
+    let base = render_tail_full(&req)
+        .unwrap()
+        .payload(&store, &harness.companion)
+        .unwrap();
+    req.budget_chars = base.text.chars().count() + 104;
+    let insert = |id: &str, scope: &str, content: String| {
+        repo.insert_memory(&ene_mind::MemoryRecord {
+            id: id.into(),
+            scope: scope.into(),
+            content,
+            importance: 10,
+            occurred_at: None,
+            source_context: serde_json::Value::Null,
+        })
+        .unwrap()
+    };
+    let _oversized = insert("too-long", &harness.companion, "secret-partial ".repeat(25));
+    let revoked = insert("revoked", "shared", "private-on-revoke".into());
+    let _remaining = insert("safe", &harness.companion, "still-authorized".into());
+    let cached = render_tail_full(&req).unwrap();
+    let initial = cached.payload(&store, &harness.companion).unwrap();
+    assert!(
+        initial.text.contains("private-on-revoke") && initial.text.contains("still-authorized")
+    );
+    assert!(!initial.text.contains("secret-partial"));
+    repo.control_memory(&revoked.id, ene_mind::MemoryActionKind::Unshare, "other")
+        .unwrap();
+    let next = cached.payload(&store, &harness.companion).unwrap();
+    assert!(!next.text.contains("private-on-revoke"));
+    assert!(next.text.contains("still-authorized"));
+    assert_eq!(
+        next.memories
+            .iter()
+            .map(|memory| memory.id.as_str())
+            .collect::<Vec<_>>(),
+        ["safe"]
+    );
 }
 
 #[tokio::test]
@@ -541,7 +600,13 @@ async fn only_a_confirmed_model_request_records_injected_memories() {
             .injected_between(&harness.companion, None, u64::MAX)
             .unwrap();
         if fits {
-            assert_eq!(receipts, ["pinned", "matching"]);
+            assert_eq!(
+                receipts
+                    .into_iter()
+                    .map(|memory| memory.id)
+                    .collect::<Vec<_>>(),
+                ["pinned", "matching"]
+            );
         } else {
             assert_eq!(receipts.len(), 0);
         }

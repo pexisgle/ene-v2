@@ -469,6 +469,27 @@ fn refuses_pre_baseline_versions_without_modifying_database() {
 }
 
 #[test]
+fn v26_retains_legacy_receipts_without_inventing_a_memory_revision() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    let mut old = ladder_steps();
+    old.truncate(25);
+    apply_ladder(&mut connection, old).unwrap();
+    connection
+        .execute(
+            "INSERT INTO memory_injections VALUES ('ene', '5', 'old-id', 'old-stamp')",
+            [],
+        )
+        .unwrap();
+    apply_migrations(&mut connection).unwrap();
+    assert_eq!(user_version(&connection), 26);
+    let receipt: (String, Option<u64>) = connection.query_row(
+        "SELECT created_at, memory_revision FROM memory_injections WHERE companion_id = 'ene' AND turn_id = '5' AND memory_id = 'old-id'",
+        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(receipt, ("old-stamp".into(), None));
+}
+
+#[test]
 fn failed_migration_rolls_back_ddl_and_user_version() {
     let mut conn = Connection::open_in_memory().unwrap();
     // A ladder that is well formed up to version 7 and broken at 8.

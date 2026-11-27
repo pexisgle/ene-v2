@@ -8,7 +8,7 @@ use super::{
 };
 use crate::StoreError;
 use crate::row::FromRow;
-use ene_mind::{RecallCandidate, RecallMode};
+use ene_mind::{MemoryVersion, RecallCandidate, RecallMode};
 use rusqlite::params;
 use serde_json::json as value;
 use std::collections::{HashMap, HashSet};
@@ -78,7 +78,12 @@ impl<'a> MemoryRepo<'a> {
             .iter()
             .map(|memory| (memory.id.as_str(), memory.revision))
             .collect();
-        let accepted = collect_accepted_citations(batch, facts);
+        let accepted = validate_citations(
+            facts
+                .iter()
+                .flat_map(|fact| fact.cited_memory_ids.iter().map(String::as_str)),
+            &batch.injected,
+        );
         let stamp = now();
         let mut commit = Commit {
             inserted: 0,
@@ -91,7 +96,15 @@ impl<'a> MemoryRepo<'a> {
             "SELECT EXISTS (SELECT 1 FROM memories m WHERE {VISIBLE} \
              AND m.id = ?2 AND m.memory_revision = ?3)"
         ))?;
-        for (&id, &revision) in &expected {
+        for (id, revision) in expected
+            .iter()
+            .map(|(&id, &revision)| (id, revision))
+            .chain(
+                accepted
+                    .iter()
+                    .map(|memory| (memory.id.as_str(), memory.revision)),
+            )
+        {
             if !current.query_row(params![batch.companion_id, id, revision], |row| {
                 row.get::<_, bool>(0)
             })? {
@@ -101,26 +114,13 @@ impl<'a> MemoryRepo<'a> {
             }
         }
         drop(current);
+        record_consolidation_citations(&transaction, batch, &accepted, &stamp)?;
         for fact in facts {
             apply_consolidated_fact(&transaction, batch, fact, &expected, &stamp, &mut commit)?;
         }
-        record_consolidation_citations(&transaction, batch, &accepted, &stamp)?;
         transaction.commit()?;
         Ok(commit)
     }
-}
-
-fn collect_accepted_citations(batch: &Batch, facts: &[Fact]) -> Vec<String> {
-    let mut cited = Vec::new();
-    let mut unique = HashSet::new();
-    for fact in facts {
-        for id in &fact.cited_memory_ids {
-            if unique.insert(id.as_str()) {
-                cited.push(id.clone());
-            }
-        }
-    }
-    validate_citations(&cited, &batch.injected)
 }
 
 fn apply_consolidated_fact(
@@ -208,15 +208,15 @@ fn apply_consolidated_fact(
 fn record_consolidation_citations(
     transaction: &rusqlite::Transaction<'_>,
     batch: &Batch,
-    accepted: &[String],
+    accepted: &[&MemoryVersion],
     stamp: &str,
 ) -> Result<()> {
     let turn = batch.through.to_string();
-    for id in accepted {
+    for memory in accepted {
         if !cite_visible_memory(
             transaction,
             &batch.companion_id,
-            id,
+            &memory.id,
             "estimated_cited_in",
             &turn,
             stamp,

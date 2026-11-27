@@ -10,7 +10,7 @@
 //! to the model's window.
 mod tail;
 
-use tail::{DynamicTailQuery, RenderedTail, dynamic_tail, recall_query};
+use tail::{DynamicTailQuery, RenderedTail, TailPayload, dynamic_tail, recall_query};
 #[cfg(test)]
 use tail::{TAIL_BUDGET_CHARS, TailRenderRequest, render_tail_full};
 
@@ -28,6 +28,7 @@ use crate::host::{
 };
 use bevy_ecs::{prelude::*, system::SystemParam};
 use compaction::RequestStart;
+use ene_mind::MemoryVersion;
 use rig_core::completion::Message;
 use rig_ecs::prelude::*;
 use std::sync::Arc;
@@ -88,7 +89,7 @@ struct PendingInjections {
     companion: String,
     turn: MessageId,
     message: Arc<Message>,
-    memory_ids: Vec<String>,
+    memories: Vec<MemoryVersion>,
 }
 
 fn collect_tails(mut commands: Commands, mut pending: Query<(Entity, &HoldOf, &mut PendingTail)>) {
@@ -143,7 +144,13 @@ fn inject_tail(
             continue;
         };
         let conversation = conversations.get(agent).ok();
-        let companion = agents.get(agent).ok().and_then(|(companion, _)| companion);
+        let (companion, work) = agents.get(agent).unwrap_or_default();
+        let Some(subject) = companion
+            .map(|agent| &agent.companion_id)
+            .or_else(|| work.map(|agent| &agent.companion_id))
+        else {
+            continue;
+        };
         let eye_report = find_turn_eye_report(
             conversation,
             companion,
@@ -152,18 +159,24 @@ fn inject_tail(
             env.hub.as_deref(),
         );
         let tail = match cached {
-            Some(tail) => tail.0.clone(),
+            Some(tail) => match tail.0.payload(&env.store, subject) {
+                Ok(tail) => tail,
+                Err(error) => {
+                    commands
+                        .run_system_cached_with(crate::host::stop_on_failure, error.to_string());
+                    continue;
+                }
+            },
             None => {
                 spawn_tail(
                     &mut commands,
-                    &agents,
                     conversation,
                     env,
                     &SpawnTailTarget {
                         call_entity,
                         turn_entity: of.0,
                         turn_start: turn.start,
-                        agent,
+                        companion: subject,
                         has_eye_report: eye_report.is_some(),
                     },
                 );
@@ -204,38 +217,28 @@ fn find_turn_eye_report<'a>(
     })
 }
 
-struct SpawnTailTarget {
+struct SpawnTailTarget<'a> {
     call_entity: Entity,
     turn_entity: Entity,
     turn_start: MessageId,
-    agent: Entity,
+    companion: &'a str,
     has_eye_report: bool,
 }
 
 fn spawn_tail(
     commands: &mut Commands,
-    agents: &Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
     conversation: Option<&Conversation>,
     env: &TailEnv<'_>,
-    target: &SpawnTailTarget,
+    target: &SpawnTailTarget<'_>,
 ) {
     let SpawnTailTarget {
         call_entity,
         turn_entity,
         turn_start,
-        agent,
+        companion,
         has_eye_report,
     } = *target;
-    let Ok((companion, work)) = agents.get(agent) else {
-        return;
-    };
-    let Some(companion) = companion
-        .map(|agent| &agent.companion_id)
-        .or_else(|| work.map(|agent| &agent.companion_id))
-        .cloned()
-    else {
-        return;
-    };
+    let companion = companion.to_owned();
     let query = recall_query(conversation, turn_start, has_eye_report);
     let empty_perception = Perception::default();
     let perception = if has_eye_report {
@@ -275,7 +278,7 @@ struct TailHistoryTarget<'a> {
     turn_entity: Entity,
     call_entity: Entity,
     turn_start: MessageId,
-    tail: RenderedTail,
+    tail: TailPayload,
     eye_report: Option<(MessageId, &'a crate::host::eyes::Delivered)>,
     companion: Option<&'a str>,
 }
@@ -290,9 +293,9 @@ fn apply_tail_to_history(
         turn_entity,
         call_entity,
         turn_start,
-        tail: RenderedTail {
+        tail: TailPayload {
             text: mut tail,
-            memory_ids,
+            memories,
         },
         eye_report,
         companion,
@@ -334,14 +337,14 @@ fn apply_tail_to_history(
         Some(Message::User { content })
     });
     if tail.is_none()
-        && !memory_ids.is_empty()
+        && !memories.is_empty()
         && let Some(companion) = companion
     {
         commands.entity(call_entity).insert(PendingInjections {
             companion: companion.to_owned(),
             turn: turn_start,
             message: Arc::clone(&history.messages()[at]),
-            memory_ids,
+            memories,
         });
     }
     commands.entity(call_entity).insert(TailInjected);
@@ -368,7 +371,7 @@ fn record_injections(
         if let Err(error) = memories.record_injections(
             &pending.companion,
             &pending.turn.get().to_string(),
-            &pending.memory_ids,
+            &pending.memories,
         ) {
             if error.is_storage() {
                 commands.run_system_cached_with(crate::host::stop_on_failure, error.to_string());

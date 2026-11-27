@@ -1,5 +1,5 @@
 //! Consolidation domain types and citation guard.
-use crate::{State, StateUpdate};
+use crate::{MemoryVersion, State, StateUpdate};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -30,8 +30,8 @@ pub struct Batch {
     /// every memory and edge of the window is stamped with.
     pub through: u64,
     pub context: Vec<MemoryContext>,
-    /// Memory ids the host actually injected into those turns.
-    pub injected: Vec<String>,
+    /// Memory versions the host actually injected into those turns.
+    pub injected: Vec<MemoryVersion>,
 }
 
 /// The result of one committed pass.
@@ -90,7 +90,7 @@ cited_memory_ids には、提示された「注入済み記憶ID」に含まれ�
 pub fn extraction_prompt(
     turns: &[Turn],
     context: &[MemoryContext],
-    injected: &[String],
+    injected: &[MemoryVersion],
     mind: &State,
 ) -> String {
     let mut prompt = String::from("以下から長期記憶にする事実を抽出してください。\n\n");
@@ -108,8 +108,8 @@ pub fn extraction_prompt(
     if injected.is_empty() {
         prompt.push_str("- なし\n");
     }
-    for id in injected {
-        prompt.push_str(&format!("- {id}\n"));
+    for memory in injected {
+        prompt.push_str(&format!("- {}\n", memory.id));
     }
     prompt.push_str(&format!(
         "\n現在の心（state を書くときはこの形に合わせる）: 感情={} 関係={} 傾向={} 懸念={}\n",
@@ -128,13 +128,14 @@ pub fn extraction_prompt(
 
 /// Host-side citation guard: a cited id counts only when the host really
 /// injected it into the turn being consolidated.
-pub fn validate_citations(cited: &[String], injected: &[String]) -> Vec<String> {
-    let injected: HashSet<&str> = injected.iter().map(String::as_str).collect();
-    let mut seen = HashSet::new();
-    cited
+pub fn validate_citations<'a>(
+    cited: impl IntoIterator<Item = &'a str>,
+    injected: &[MemoryVersion],
+) -> Vec<&MemoryVersion> {
+    let cited: HashSet<_> = cited.into_iter().collect();
+    injected
         .iter()
-        .filter(|id| injected.contains(id.as_str()) && seen.insert(id.as_str()))
-        .cloned()
+        .filter(|memory| cited.contains(memory.id.as_str()))
         .collect()
 }
 

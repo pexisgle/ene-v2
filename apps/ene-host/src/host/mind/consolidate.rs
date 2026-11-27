@@ -268,7 +268,7 @@ fn turn_query(turns: &[Turn]) -> String {
 mod tests {
     use super::*;
     use ene_mind::{Fact, MemoryContext};
-    use ene_mind::{MemoryRecord, validate_citations};
+    use ene_mind::{MemoryRecord, MemoryVersion, validate_citations};
     use rig_core::conversation::MessageId;
 
     fn answer(conversation: &mut CoreConversation, user: &str, reply: &str) -> MessageId {
@@ -417,7 +417,7 @@ mod tests {
             .insert_memory(&new_memory("m2", "coffee"))
             .unwrap();
         let mut batch = batch(8, vec![context(&memory)]);
-        batch.injected = vec!["m2".into()];
+        batch.injected = vec![MemoryVersion::from(&memory)];
         let facts = vec![Fact {
             content: "A prefers coffee".into(),
             importance: Some(7),
@@ -850,9 +850,16 @@ mod tests {
         let facts = extraction.facts;
         assert_eq!(facts[0].content, "prefers tea");
         assert_eq!(facts[0].importance, Some(7));
+        let injected = [MemoryVersion {
+            id: "injected".into(),
+            revision: 3,
+        }];
         assert_eq!(
-            validate_citations(&facts[0].cited_memory_ids, &["injected".into()]),
-            ["injected"]
+            validate_citations(
+                facts[0].cited_memory_ids.iter().map(String::as_str),
+                &injected
+            ),
+            [&injected[0]]
         );
         assert!(extraction.state.is_none(), "nothing moved the mind");
         assert!(extract(&model, "No facts.".into()).await.is_err());

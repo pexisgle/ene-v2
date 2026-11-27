@@ -697,21 +697,23 @@ fn injected_memory_ids_survive_a_restart() {
             memory.scope = scope.into();
             repo.insert_memory(&memory).unwrap();
         }
-        repo.record_injections("ene", "5", &["m1".into(), "m2".into()])
+        let stamp = |id| MemoryVersion::from(&repo.memory(id).unwrap().unwrap());
+        repo.record_injections("ene", "5", &[stamp("m1"), stamp("m2")])
             .unwrap();
-        repo.record_injections("ene", "7", &["m3".into()]).unwrap();
-        repo.record_injections("other", "5", &["m9".into()])
+        repo.record_injections("ene", "7", &[stamp("m3")]).unwrap();
+        repo.record_injections("other", "5", &[stamp("m9")])
             .unwrap();
     }
     let store = Store::open(&path).unwrap();
     let repo = store.memory_repo();
+    let stamp = |id| MemoryVersion::from(&repo.memory(id).unwrap().unwrap());
     assert_eq!(
         repo.injected_between("ene", Some(5), 7).unwrap(),
-        vec!["m3".to_owned()]
+        [stamp("m3")]
     );
     assert_eq!(
         repo.injected_between("ene", None, 7).unwrap(),
-        vec!["m1".to_owned(), "m2".to_owned(), "m3".to_owned()]
+        [stamp("m1"), stamp("m2"), stamp("m3")]
     );
     assert!(
         repo.injected_between("ene", Some(5), 5).unwrap().is_empty(),
@@ -719,7 +721,7 @@ fn injected_memory_ids_survive_a_restart() {
     );
     assert_eq!(
         repo.injected_between("other", None, 5).unwrap(),
-        vec!["m9".to_owned()]
+        [stamp("m9")]
     );
 }
 
@@ -761,16 +763,17 @@ fn a_memory_unshared_after_injection_cannot_be_cited_by_consolidation() {
     let mut input = new_memory("shared note", 5);
     input.scope = SHARED_SCOPE.into();
     let memory = repo.insert_memory(&input).unwrap();
-    repo.record_injections("ene", "5", std::slice::from_ref(&memory.id))
+    let version = MemoryVersion::from(&memory);
+    repo.record_injections("ene", "5", std::slice::from_ref(&version))
         .unwrap();
     let mut consolidation = batch(7, Vec::new());
     consolidation.injected = repo.injected_between("ene", None, 7).unwrap();
-    assert_eq!(consolidation.injected, std::slice::from_ref(&memory.id));
+    assert_eq!(consolidation.injected, std::slice::from_ref(&version));
     repo.control_memory(&memory.id, MemoryActionKind::Unshare, "owner")
         .unwrap();
     assert_eq!(
         repo.injected_between("ene", None, 7).unwrap(),
-        [] as [String; 0]
+        [] as [MemoryVersion; 0]
     );
     let fact = Fact {
         content: "a fact derived from the old note".into(),
@@ -778,7 +781,7 @@ fn a_memory_unshared_after_injection_cannot_be_cited_by_consolidation() {
         ..Fact::default()
     };
     assert!(matches!(
-        repo.consolidate(&consolidation, &[fact]),
+        repo.consolidate(&consolidation, std::slice::from_ref(&fact)),
         Err(StoreError::Conflict(_))
     ));
     assert_eq!(
@@ -792,5 +795,30 @@ fn a_memory_unshared_after_injection_cannot_be_cited_by_consolidation() {
     assert_eq!(
         repo.memory_edges(&memory.id).unwrap(),
         [] as [(String, String); 0]
+    );
+    let shared = repo
+        .control_memory(&memory.id, MemoryActionKind::Share, "owner")
+        .unwrap();
+    repo.record_injections("ene", "6", &[version]).unwrap();
+    assert_eq!(
+        repo.injected_between("ene", None, 7).unwrap(),
+        [] as [MemoryVersion; 0]
+    );
+    assert!(matches!(
+        repo.consolidate(&consolidation, std::slice::from_ref(&fact)),
+        Err(StoreError::Conflict(_))
+    ));
+    let shared = MemoryVersion::from(&shared);
+    repo.record_injections("ene", "7", std::slice::from_ref(&shared))
+        .unwrap();
+    consolidation.injected = repo.injected_between("ene", None, 7).unwrap();
+    assert_eq!(consolidation.injected, [shared]);
+    assert_eq!(
+        repo.consolidate(&consolidation, &[fact]).unwrap().inserted,
+        1
+    );
+    assert_eq!(
+        repo.memory_edges(&memory.id).unwrap(),
+        [("estimated_cited_in".into(), "7".into())]
     );
 }
