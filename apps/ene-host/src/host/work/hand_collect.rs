@@ -2,12 +2,12 @@
 //!
 //! `collect` runs in `Update` after the agent loop. It applies the events of
 //! each in-flight invocation, settles a run whose driver failed, answers the
-//! approvals the user, head or card resolved, and turns parked input into the
-//! session's next turn. The hand state it reads is `hand`'s; this module only
+//! approvals the user, head or card resolved. The hand state it reads is
+//! `hand`'s; this module only
 //! turns what arrived into host effects.
 
 use super::hand::{Hand, Hands, Pending, Turn, dispatch};
-use super::{Run, RunState, WorkSession, WorkStatus};
+use super::{Run, RunState};
 use crate::host::{
     db::Store,
     permission::{self, ApprovalStatus},
@@ -25,7 +25,7 @@ use tokio::sync::oneshot;
 
 /// Applies what arrived since the last frame: the events of each in-flight
 /// invocation, the outcome of a finished driver, the reply to a resolved
-/// approval, and the input a finished run parked.
+/// approval.
 pub(crate) fn collect(world: &mut World) {
     let mut hands = std::mem::take(&mut *world.resource_mut::<Hands>());
     if hands.by_adapter.is_empty() {
@@ -61,14 +61,7 @@ pub(crate) fn collect(world: &mut World) {
             dispatch(hand, &runtime, wake.clone(), input);
         }
     }
-    let parked = take_parked_sessions(&mut hands, &store);
     *world.resource_mut::<Hands>() = hands;
-    for (session, text) in parked {
-        let work_id = session.id.clone();
-        if let Err(error) = super::start_run(world, &session, &text, None) {
-            tracing::warn!(work = %work_id, "parked input could not start a run: {error}");
-        }
-    }
 }
 
 fn collect_hand(world: &mut World, store: &Store, hand: &mut Hand) -> Option<HarnessInput> {
@@ -288,34 +281,4 @@ fn reply_to_approval(hand: &mut Hand, store: &Store) -> Option<HarnessInput> {
         request_id: pending.request,
         outcome,
     })
-}
-
-/// Drains parked inputs for idle open sessions so `collect` can start their next turn.
-fn take_parked_sessions(hands: &mut Hands, store: &Store) -> Vec<(WorkSession, String)> {
-    hands
-        .by_adapter
-        .iter_mut()
-        .filter_map(|(_, hand)| {
-            if hand.parked.is_empty() || hand.invocation.is_some() {
-                return None;
-            }
-            if store
-                .work_repo()
-                .active_run(&hand.work_id)
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                return None;
-            }
-            let Ok(Some(session)) = store.work_repo().work_session(&hand.work_id) else {
-                return None;
-            };
-            if session.status == WorkStatus::Closed {
-                return None;
-            }
-            let text = hand.parked.drain(..).collect::<Vec<_>>().join("\n\n");
-            Some((session, text))
-        })
-        .collect()
 }

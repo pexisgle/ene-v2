@@ -28,7 +28,7 @@ use rusqlite_migration::{HookResult, M, Migrations};
 pub const BASELINE_VERSION: i64 = 6;
 
 /// Latest database schema version managed by [`ladder_steps`].
-pub const VERSION: i64 = 19;
+pub const VERSION: i64 = 20;
 
 /// Every version this host applies above the baseline, in order. The position
 /// in this table is the version, so adding a row is the only way to add a
@@ -136,6 +136,10 @@ const STEPS_ABOVE_BASELINE: &[(&str, &str)] = &[
     (
         "0019_effective_search_approval_summary",
         "ALTER TABLE approval_requests ADD COLUMN search_summary TEXT;",
+    ),
+    (
+        "0020_link_work_input_to_run",
+        "ALTER TABLE work_input_receipts ADD COLUMN run_id TEXT;",
     ),
 ];
 

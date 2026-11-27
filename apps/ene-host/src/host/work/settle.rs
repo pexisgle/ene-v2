@@ -105,6 +105,8 @@ pub(super) fn finish_run(world: &mut World, mut run: Run, state: RunState, text:
         }
         if session.status == WorkStatus::Closed {
             retire(world, &run.work_id);
+        } else if let Some(mut ready) = world.get_resource_mut::<super::ReadyWork>() {
+            ready.0.insert(run.work_id.clone());
         }
     }
     world.resource_mut::<Runs>().forget(&run.run_id);

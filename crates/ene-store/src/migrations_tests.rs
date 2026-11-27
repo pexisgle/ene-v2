@@ -338,9 +338,19 @@ fn work_wait_state_is_recovered_from_current_approvals() {
                          ('auto', 'ene', 'run', 'work', X'01', 'device_request', '{}', 'evaluating', '2026-01-01'),
                          ('different', 'ene', 'run', 'other', X'01', 'device_request', '{}', 'pending', '2026-01-01');",
         ).unwrap();
+        apply_ladder(&mut conn, ladder_steps().into_iter().take(17).collect()).unwrap();
+        conn.execute(
+            "INSERT INTO work_input_receipts (work_id, request_key, payload_hash, request_id)
+             VALUES ('work', 'legacy', zeroblob(32), 'original-receipt')",
+            [],
+        )
+        .unwrap();
     }
     let store = Store::open(&path).unwrap();
     let work = store.work_repo();
+    let receipt = work.input_receipt("work", "legacy").unwrap().unwrap();
+    assert_eq!(receipt.request_id, "original-receipt");
+    assert_eq!(receipt.run_id, None);
     let state = |id| work.work_session(id).unwrap().unwrap().status;
     assert_eq!(state("old-active"), WorkStatus::Idle);
     assert_eq!(state("closed"), WorkStatus::Closed);

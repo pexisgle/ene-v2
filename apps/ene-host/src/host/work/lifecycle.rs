@@ -1,10 +1,13 @@
 //! The one agent a work session keeps: spawning it, rebinding it to the run it
 //! serves, retiring it, and reconciling it with the store after a restart.
-use super::{RunExecutor, RunState, Runs, STALL_TIMEOUT, WorkStatus, finish_run};
+use super::{
+    ReadyWork, RunExecutor, RunState, Runs, STALL_TIMEOUT, WorkStatus, dispatch_run, executor_of,
+    finish_run, require_session,
+};
 use crate::host::{
     agent::{self, WorkAgent},
     db::{Result, Store},
-    error::HostError,
+    error::{Failure, HostError},
     mind::Companion,
 };
 use bevy_ecs::prelude::*;
@@ -76,6 +79,7 @@ pub(super) fn retire(world: &mut World, work_id: &str) {
 pub(crate) fn restore(world: &mut World) -> Result<()> {
     let store = world.resource::<Store>().clone();
     let work = store.work_repo();
+    interrupt_accepted_inputs(&work)?;
     let companions: HashMap<_, _> = store
         .companion_repo()
         .companions()?
@@ -195,6 +199,13 @@ pub(crate) fn restore(world: &mut World) -> Result<()> {
     Ok(())
 }
 
+fn interrupt_accepted_inputs(work: &ene_store::work::WorkRepo<'_>) -> Result<()> {
+    Ok(work.interrupt_starting(&Failure::new(
+        "work_input_interrupted",
+        "ホストの再起動により、受け付けた追加入力を実行できませんでした。",
+    ))?)
+}
+
 fn is_live_run(
     agent: &EntityRef<'_>,
     turn: &EntityRef<'_>,
@@ -222,12 +233,42 @@ fn is_live_run(
                 })
 }
 
-pub(super) fn detect_stalls(world: &mut World) {
+pub(super) fn maintain(world: &mut World) {
+    let ready = world
+        .get_resource_mut::<ReadyWork>()
+        .map_or_default(|mut ready| std::mem::take(&mut ready.0));
+    let store = world.resource::<Store>().clone();
+    for work_id in ready {
+        let result: Result<()> = (|| {
+            let repo = store.work_repo();
+            let Some(run) = repo.promote_starting(&work_id)? else {
+                return Ok(());
+            };
+            let session = require_session(&store, &work_id)?;
+            let expected = repo.run_executor(&run.run_id)?;
+            let result = executor_of(&store, &session, world.get_resource()).and_then(|executor| {
+                if expected.as_ref() != Some(&executor.recorded()) {
+                    return Err(HostError::Conflict(
+                        "the work executor changed after input acceptance".into(),
+                    ));
+                }
+                dispatch_run(world, &session, &run, executor)
+            });
+            if let Err(error) = result {
+                finish_run(world, run, RunState::Failed, Some(error.to_string()));
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            crate::host::fail(world, &error.to_string());
+            return;
+        }
+    }
+
     let due = world
         .resource_mut::<Runs>()
         .stalled(Instant::now(), STALL_TIMEOUT);
     for run_id in due {
-        let store = world.resource::<Store>().clone();
         let Ok(Some(run)) = store.work_repo().run(&run_id) else {
             continue;
         };

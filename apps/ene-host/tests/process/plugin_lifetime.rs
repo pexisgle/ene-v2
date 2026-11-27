@@ -213,13 +213,8 @@ async fn unavailable_executor_is_not_recovered_as_rig(
         text: "Use the alternate sample".into(),
         ..Default::default()
     };
-    let accepted = work
-        .send_work(input.clone())
-        .await
-        .unwrap()
-        .view()
-        .request_id
-        .to_owned();
+    let accepted = work.send_work(input.clone()).await.unwrap().into_owned();
+    let accepted_run = accepted.run_id.as_deref().unwrap();
     child.signal(9).unwrap();
     let exit = tokio::time::timeout(Duration::from_secs(5), child.wait())
         .await
@@ -238,7 +233,8 @@ async fn unavailable_executor_is_not_recovered_as_rig(
     let (transport, config) = w::connect(&endpoint, &token).unwrap();
     let work = w::WorkServiceClient::new(transport, config);
     let retry = work.send_work(input.clone()).await.unwrap();
-    assert_eq!(retry.view().request_id, accepted);
+    assert_eq!(retry.view().request_id, accepted.request_id);
+    assert_eq!(retry.view().run_id, Some(accepted_run));
     let conflict = work
         .send_work(w::SendWorkRequest {
             text: "Different input".into(),
@@ -254,9 +250,20 @@ async fn unavailable_executor_is_not_recovered_as_rig(
         })
         .await
         .unwrap();
-    assert_eq!(detail.view().runs.iter().count(), 1);
-    let run = detail.view().runs.iter().next().unwrap();
-    assert_eq!(run.state.as_known(), Some(w::RunStatus::RUN_STATUS_FAILED));
-    assert!(run.pending_request_id.is_none());
+    assert_interrupted_work(detail.view(), accepted_run);
     stop(&mut child).await;
+}
+
+fn assert_interrupted_work(detail: &w::WorkViewView<'_>, accepted_run: &str) {
+    assert_eq!(detail.runs.iter().count(), 2);
+    assert!(detail.runs.iter().all(|run| {
+        run.state.as_known() == Some(w::RunStatus::RUN_STATUS_FAILED)
+            && run.pending_request_id.is_none()
+    }));
+    let queued = detail
+        .runs
+        .iter()
+        .find(|run| run.run_id == accepted_run)
+        .unwrap();
+    assert_eq!(queued.failure.code, "work_input_interrupted");
 }

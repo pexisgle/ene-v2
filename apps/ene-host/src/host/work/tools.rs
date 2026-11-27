@@ -138,7 +138,7 @@ fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
                 ("the work session is already running").into(),
             ));
         }
-        let run = super::start_run(world, &session, &args.instruction, None)?;
+        let run = super::start_run(world, &session, &args.instruction)?;
         return Ok(json!({"work_id": resolved_id, "run_id": run.run_id}).to_string());
     }
     let session = super::start(
@@ -180,7 +180,7 @@ fn send(world: &mut World, agent: Entity, args: SendArgs) -> Result<String> {
             ..Default::default()
         },
     )?;
-    Ok(json!({"request_id": acceptance.request_id}).to_string())
+    Ok(json!({"request_id": acceptance.request_id, "run_id": acceptance.run_id}).to_string())
 }
 
 fn stop(world: &mut World, agent: Entity, args: &StopArgs) -> Result<String> {
@@ -189,7 +189,7 @@ fn stop(world: &mut World, agent: Entity, args: &StopArgs) -> Result<String> {
     if session.status == WorkStatus::Closed {
         return Ok(json!({"work_id": session.id, "status": "closed"}).to_string());
     }
-    super::stop_with(world, &session.id, args.reason.as_deref())?;
+    super::stop(world, &session.id, args.reason.as_deref())?;
     Ok(json!({"work_id": session.id, "stopping": true}).to_string())
 }
 

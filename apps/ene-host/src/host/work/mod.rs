@@ -18,7 +18,7 @@ mod skills;
 mod tools;
 
 use super::{
-    agent::{self, WorkAgent},
+    agent,
     db::{Result, Store},
     error::{Failure, HostError},
     mind::Companion,
@@ -27,11 +27,10 @@ use super::{
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
-use ene_store::work::WorkInputReceipt;
 use rig_ecs::prelude::*;
 
 #[cfg(test)]
-use crate::host::agent::WorkReports;
+use crate::host::agent::{WorkAgent, WorkReports};
 #[cfg(test)]
 use rig_core::completion::Message;
 #[cfg(test)]
@@ -42,7 +41,7 @@ pub(crate) use ene_domain::{Run, RunState, WorkSession, WorkStatus};
 pub(crate) use ene_work::{STALL_TIMEOUT, new_run};
 pub(crate) use input::send;
 pub(crate) use lifecycle::restore;
-use lifecycle::{agent_of, bind_work_agent, detect_stalls, ensure, retire};
+use lifecycle::{agent_of, ensure, maintain, retire};
 use notify::{inform, notify_finished, notify_run, notify_status};
 pub(crate) use reads::{get, list};
 pub(crate) use settle::settle_run;
@@ -65,6 +64,9 @@ impl std::ops::DerefMut for Runs {
     }
 }
 
+#[derive(Resource, Default)]
+struct ReadyWork(std::collections::BTreeSet<String>);
+
 pub(crate) struct WorkPlugin;
 
 impl Plugin for WorkPlugin {
@@ -73,11 +75,10 @@ impl Plugin for WorkPlugin {
         skills::register(app);
         app.init_resource::<Runs>()
             .init_resource::<hand::Hands>()
+            .init_resource::<ReadyWork>()
             .add_systems(
                 Update,
-                (hand_collect::collect, detect_stalls)
-                    .chain()
-                    .after(AgentLoop),
+                (hand_collect::collect, maintain).chain().after(AgentLoop),
             );
     }
 }
@@ -117,7 +118,7 @@ pub(crate) fn start(world: &mut World, request: &w::StartWorkRequest) -> Result<
         updated_at: String::new(),
     };
     store.work_repo().insert_work_session(&session)?;
-    if let Err(error) = start_run(world, &session, &request.instruction, None) {
+    if let Err(error) = start_run(world, &session, &request.instruction) {
         store.work_repo().close_work(&session.id)?;
         retire(world, &session.id);
         return Err(error);
@@ -126,41 +127,78 @@ pub(crate) fn start(world: &mut World, request: &w::StartWorkRequest) -> Result<
     Ok(w::WorkSession::from(&stored))
 }
 
+struct Executor {
+    companion: Companion,
+    harness: Option<hand::SelectedHarness>,
+}
+
+impl Executor {
+    fn recorded(&self) -> RunExecutor {
+        self.harness
+            .as_ref()
+            .map_or(RunExecutor::Rig, |harness| RunExecutor::Harness {
+                connection_id: harness.connection_id.clone(),
+                plugin_id: harness.adapter.clone(),
+                plugin_revision: harness.running.package_revision().to_owned(),
+            })
+    }
+}
+
+fn executor_of(
+    store: &Store,
+    session: &WorkSession,
+    providers: Option<&Providers>,
+) -> Result<Executor> {
+    let companion = require_companion(store, session.companion_id.as_str())?;
+    let harness = hand::selected(store, providers, &companion)?;
+    Ok(Executor { companion, harness })
+}
+
 pub(crate) fn start_run(
     world: &mut World,
     session: &WorkSession,
     instruction: &str,
-    receipt: Option<WorkInputReceipt<'_>>,
 ) -> Result<Run> {
     let store = world.resource::<Store>().clone();
     if session.status == WorkStatus::Closed {
-        return Err(HostError::Conflict(("work session is closed").into()));
+        return Err(HostError::Conflict("work session is closed".into()));
     }
     if instruction.trim().is_empty() {
-        return Err(HostError::Invalid(("an instruction is required").into()));
+        return Err(HostError::Invalid("an instruction is required".into()));
     }
-    if let Some(active) = store.work_repo().active_run(&session.id)? {
-        return Err(HostError::Conflict(format!(
-            "the work session is already running run {}",
-            active.run_id
-        )));
+    if require_session(&store, &session.id)?.status == WorkStatus::Active {
+        return Err(HostError::Conflict(
+            "the work session already has work to run".into(),
+        ));
     }
-    let companion = require_companion(&store, session.companion_id.as_str())?;
-    let harness = hand::selected(&store, world.get_resource::<Providers>(), &companion)?;
-    let executor = harness
-        .as_ref()
-        .map_or(RunExecutor::Rig, |harness| RunExecutor::Harness {
-            connection_id: harness.connection_id.clone(),
-            plugin_id: harness.adapter.clone(),
-            plugin_revision: harness.running.package_revision().to_owned(),
-        });
+    let executor = executor_of(&store, session, world.get_resource::<Providers>())?;
     let run = new_run(
         uuid::Uuid::new_v4().to_string(),
         &session.id,
         instruction,
         RunState::Running,
     );
-    store.work_repo().insert_run(&run, &executor, receipt)?;
+    store
+        .work_repo()
+        .insert_run(&run, &executor.recorded(), None)?;
+    if let Err(error) = dispatch_run(world, session, &run, executor) {
+        let failed = fail_run(&store, &run, &error)?;
+        let session = require_session(&store, &session.id)?;
+        let mut notifier = world.resource_mut::<Notifier>();
+        notify_status(&mut notifier, &session);
+        notify_finished(&mut notifier, &session, &failed);
+        return Err(error);
+    }
+    Ok(run)
+}
+
+fn dispatch_run(
+    world: &mut World,
+    session: &WorkSession,
+    run: &Run,
+    executor: Executor,
+) -> Result<()> {
+    let Executor { companion, harness } = executor;
     let is_harness = harness.is_some();
     let claimed = if is_harness
         || world
@@ -171,60 +209,45 @@ pub(crate) fn start_run(
     } else {
         Ok(None)
     };
-    let claimed = claimed.map(|released| {
-        if let Some(call) = released {
-            let _removed = world.try_despawn(call);
-        }
-    });
-    let failure = match claimed {
-        Err(error) => Some(error),
-        Ok(()) if is_harness => {
-            retire(world, &session.id);
-            None
-        }
-        Ok(()) => {
-            let agent = ensure(world, &companion, &session.id, &run.run_id, instruction);
-            match agent::ensure_model(world, agent) {
-                Ok(()) => {
-                    let author = Author {
-                        request: Some(RequestId(run.run_id.clone())),
-                        ..Author::user()
-                    };
-                    world.trigger(
-                        Deliver::new(agent, instruction.to_owned(), DeliveryMode::Queue)
-                            .with_author(author),
-                    );
-                    None
-                }
-                Err(error) => Some(error),
-            }
-        }
-    };
-    if let Some(error) = failure {
-        let failed = fail_run(&store, &run, &error)?;
-        let session = require_session(&store, &session.id)?;
-        let mut notifier = world.resource_mut::<Notifier>();
-        notify_status(&mut notifier, &session);
-        notify_finished(&mut notifier, &session, &failed);
-        if receipt.is_some() {
-            return Ok(failed);
-        }
-        return Err(error);
+    if let Some(released) = claimed? {
+        let _removed = world.try_despawn(released);
+    }
+    if is_harness {
+        retire(world, &session.id);
+    } else {
+        let agent = ensure(
+            world,
+            &companion,
+            &session.id,
+            &run.run_id,
+            &run.instruction,
+        );
+        agent::ensure_model(world, agent)?;
+        let author = Author {
+            request: Some(RequestId(run.run_id.clone())),
+            ..Author::user()
+        };
+        world.trigger(
+            Deliver::new(agent, run.instruction.clone(), DeliveryMode::Queue).with_author(author),
+        );
+    }
+    if let Some(wake) = world.get_resource::<rig_ecs::tasks::Wake>() {
+        wake.wake();
     }
     world.resource_mut::<Runs>().begin(&run.run_id);
-    let session = require_session(&store, &session.id)?;
+    let session = require_session(world.resource::<Store>(), &session.id)?;
     {
         let mut notifier = world.resource_mut::<Notifier>();
         notify_status(&mut notifier, &session);
         notify_run(
             &mut notifier,
             &session,
-            &run,
+            run,
             w::WorkEventKind::RunStarted,
             w::work_event::Detail::RunStarted(Box::default()),
         );
     }
-    Ok(run)
+    Ok(())
 }
 
 fn fail_run(store: &Store, run: &Run, error: &HostError) -> Result<Run> {
@@ -264,14 +287,19 @@ fn binding_for(store: &Store, request: &w::StartWorkRequest) -> Result<Option<St
 /// Stops the open run of a session. The stop is final at once: the work agent
 /// is told to stop its turn, the run reads cancelled, and the parent is told.
 /// Nothing waits for the agent's turn to unwind.
-pub(crate) fn stop(world: &mut World, work_id: &str) -> Result<()> {
-    stop_with(world, work_id, None)
-}
-
-pub(crate) fn stop_with(world: &mut World, work_id: &str, reason: Option<&str>) -> Result<()> {
+pub(crate) fn stop(world: &mut World, work_id: &str, reason: Option<&str>) -> Result<()> {
     let store = world.resource::<Store>().clone();
     if require_session(&store, work_id)?.status == WorkStatus::Closed {
         return Ok(());
+    }
+    let waiting = store.work_repo().cancel_starting(work_id)?;
+    if !waiting.is_empty() {
+        let session = require_session(&store, work_id)?;
+        let mut notifier = world.resource_mut::<Notifier>();
+        notify_status(&mut notifier, &session);
+        for run in waiting {
+            notify_finished(&mut notifier, &session, &run);
+        }
     }
     let Some(run) = store.work_repo().active_run(work_id)? else {
         return Ok(());
@@ -296,7 +324,7 @@ pub(crate) fn close(world: &mut World, work_id: &str) -> Result<()> {
     if require_session(&store, work_id)?.status == WorkStatus::Closed {
         return Ok(());
     }
-    stop_with(world, work_id, Some("the work session is closing"))?;
+    stop(world, work_id, Some("the work session is closing"))?;
     store.work_repo().close_work(work_id)?;
     if let Ok(Some(session)) = store.work_repo().work_session(work_id) {
         notify_status(&mut world.resource_mut::<Notifier>(), &session);

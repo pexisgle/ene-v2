@@ -167,7 +167,7 @@ impl HandWorld {
         .unwrap()
     }
 
-    fn send_work(&mut self, work_id: &str, text: &str) {
+    fn send_work(&mut self, work_id: &str, text: &str) -> String {
         work::send(
             self.harness.app.world_mut(),
             &w::SendWorkRequest {
@@ -176,7 +176,9 @@ impl HandWorld {
                 ..Default::default()
             },
         )
-        .unwrap();
+        .unwrap()
+        .run_id
+        .unwrap()
     }
 
     /// The texts the head's conversation holds from the hand, in order.
@@ -407,7 +409,7 @@ fn stop_work_cancels_a_parked_plugin_hand_run() {
     let run_id = world.pending().run_id.clone();
 
     // The stop is final at once, the way the rig hand's stop is.
-    work::stop(world.harness.app.world_mut(), &session.id).unwrap();
+    work::stop(world.harness.app.world_mut(), &session.id, None).unwrap();
     assert_eq!(
         world
             .harness
@@ -422,20 +424,13 @@ fn stop_work_cancels_a_parked_plugin_hand_run() {
 
     // Send before another host frame runs. The old guest invocation must
     // finish Cancel before Prompt can run, and its Stop belongs to the old run.
-    world.send_work(&session.id, "停止の直後に続けて");
-    let next = world
-        .harness
-        .store()
-        .work_repo()
-        .active_run(&session.id)
-        .unwrap()
-        .unwrap();
-    assert_ne!(next.run_id, run_id);
+    let next = world.send_work(&session.id, "停止の直後に続けて");
+    assert_ne!(next, run_id);
     world.harness.run_until(|frame| {
         frame
             .resource::<Store>()
             .work_repo()
-            .run(&next.run_id)
+            .run(&next)
             .unwrap()
             .is_some_and(|run| run.state.is_terminal())
     });
@@ -445,7 +440,7 @@ fn stop_work_cancels_a_parked_plugin_hand_run() {
         work::RunState::Cancelled
     );
     assert_eq!(
-        store.work_repo().run(&next.run_id).unwrap().unwrap().state,
+        store.work_repo().run(&next).unwrap().unwrap().state,
         work::RunState::Completed
     );
     assert!(
@@ -454,7 +449,7 @@ fn stop_work_cancels_a_parked_plugin_hand_run() {
             .approvals(ApprovalStatus::Pending)
             .unwrap()
             .iter()
-            .all(|approval| approval.run_id != run_id && approval.run_id != next.run_id)
+            .all(|approval| approval.run_id != run_id && approval.run_id != next)
     );
     let companion = world.companion.clone();
     world

@@ -374,7 +374,7 @@ fn computer_use_sends_a_request_only_image_and_never_replays_input() {
             encoded: &encoded,
         },
     );
-    work::stop(harness.app.world_mut(), &session.id).unwrap();
+    work::stop(harness.app.world_mut(), &session.id, None).unwrap();
     let (_, mut replacement) = hub.register(&ene_domain::ClientId::parse("desk").unwrap());
     crate::host::client::computer::invalidate_client(
         harness.app.world_mut(),

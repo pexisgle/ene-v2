@@ -31,10 +31,7 @@ use ene_plugin::{Extension, HarnessEvent, HarnessInput, Operation, PermissionOpt
 use ene_plugin_runtime::instance::DenyServices;
 use ene_work::harness::HarnessBuffer;
 use rig_ecs::tasks::Wake;
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc, oneshot};
 
 /// The plugin hands this host is running, keyed by the adapter each holds.
@@ -54,8 +51,6 @@ pub(super) struct Hand {
     pub(super) invocation: Option<Invocation>,
     /// Message chunk accumulator and tool-name lookup across updates.
     pub(super) buffer: HarnessBuffer,
-    /// Input accepted while a run was active; it becomes the next prompt.
-    pub(super) parked: VecDeque<String>,
     /// The approval the turn is parked on, if any.
     pub(super) pending: Option<Pending>,
 }
@@ -162,7 +157,6 @@ pub(crate) fn claim(
             turn: Turn::New,
             invocation: None,
             buffer: HarnessBuffer::default(),
-            parked: VecDeque::new(),
             pending: None,
         },
     );
@@ -174,25 +168,11 @@ pub(crate) fn owns(hands: &Hands, work_id: &str) -> bool {
     adapter_of(hands, work_id).is_some()
 }
 
-/// `send_work` while the hand's run is active: the guest is inside its turn
-/// and cannot take a second prompt mid-invocation, so the input is parked
-/// and becomes the next prompt turn once the run settles.
-pub(crate) fn steer(hands: &mut Hands, work_id: &str, text: &str) {
-    if let Some(hand) = hands
-        .by_adapter
-        .values_mut()
-        .find(|hand| hand.work_id == work_id)
-    {
-        hand.parked.push_back(text.to_owned());
-    }
-}
-
 /// Stops the exact persisted run, including one that was accepted while the
 /// guest was still cancelling its predecessor.
 pub(crate) fn stop(hands: &mut Hands, run: &Run) -> Option<Entity> {
     let adapter = adapter_of(hands, &run.work_id)?;
     let hand = hands.by_adapter.get_mut(&adapter)?;
-    hand.parked.clear();
     if !matches!(&hand.turn, Turn::Run(id) if *id == run.run_id) {
         return None;
     }

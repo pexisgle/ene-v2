@@ -61,7 +61,7 @@ fn a_session_keeps_one_agent_across_runs_and_retires_it_with_the_session() {
     let mut world = world(store.clone());
     let kept = agent(&mut world, "run-a");
 
-    bind_work_agent(world.get_mut::<WorkAgent>(kept), "run-b");
+    lifecycle::bind_work_agent(world.get_mut::<WorkAgent>(kept), "run-b");
     assert_eq!(agent_of(&mut world, "w1"), Some(kept));
     assert_eq!(world.get::<WorkAgent>(kept).unwrap().run_id, "run-b");
 
@@ -115,7 +115,15 @@ fn a_rig_work_session_adopts_its_saved_conversation_before_the_next_run() {
     )
     .unwrap();
     let store = harness.store();
-    let idle = || store.work_repo().active_run(&session.id).unwrap().is_none();
+    let idle = || {
+        store
+            .work_repo()
+            .work_session(&session.id)
+            .unwrap()
+            .unwrap()
+            .status
+            == WorkStatus::Idle
+    };
     harness.run_until(|_| idle());
     harness.restart([
         response("second work answer"),
@@ -141,6 +149,11 @@ fn a_rig_work_session_adopts_its_saved_conversation_before_the_next_run() {
         },
     )
     .unwrap();
+    harness.run_until(|frame| {
+        frame
+            .get::<SystemPrompt>(worker)
+            .is_some_and(|prompt| prompt.0.contains("second instruction"))
+    });
     assert_eq!(agent_of(harness.app.world_mut(), &session.id), Some(worker));
     let prompt = harness.app.world().get::<SystemPrompt>(worker).unwrap();
     assert!(prompt.0.contains("second instruction"));
@@ -204,11 +217,13 @@ fn stop_then_close_settles_the_run_and_releases_the_agent() {
     let (_root, store) = store();
     session(&store);
     run(&store, "run-a", RunState::Running);
+    run(&store, "queued", RunState::Starting);
     let mut world = world(store.clone());
     let kept = agent(&mut world, "run-a");
 
-    stop(&mut world, "w1").unwrap();
+    stop(&mut world, "w1", None).unwrap();
     assert_eq!(state(&store, "run-a"), RunState::Cancelled);
+    assert_eq!(state(&store, "queued"), RunState::Cancelled);
     assert_eq!(agent_of(&mut world, "w1"), Some(kept));
 
     close(&mut world, "w1").unwrap();
@@ -231,7 +246,7 @@ fn a_completion_that_races_a_stop_stays_cancelled() {
     run(&store, "run-a", RunState::Running);
     let mut world = world(store.clone());
 
-    stop(&mut world, "w1").unwrap();
+    stop(&mut world, "w1", None).unwrap();
     settle_run(
         &mut world,
         "run-a",

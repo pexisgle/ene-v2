@@ -2,7 +2,7 @@
 
 use crate::row::{FromRow, row_fields};
 use crate::{
-    Store,
+    Store, StoreError,
     error::Result,
     json_column, require_found, to_json,
     util::{now, or_stamp},
@@ -30,6 +30,7 @@ row_fields!(Run, RUN_COLUMNS {
     started_at,
     updated_at,
 });
+const CHANGED_RUN_COLUMNS: &str = "run_id, work_id, instruction, state, NULL AS pending_request_id, failure, started_at, updated_at";
 
 /// A run is open while it can still produce events.
 pub fn open_state(state: RunState) -> bool {
@@ -56,6 +57,14 @@ pub struct WorkInputReceipt<'a> {
     pub request_key: &'a str,
     pub payload_hash: &'a [u8],
     pub request_id: &'a str,
+}
+
+/// The original receipt and its durable execution record, if available.
+#[derive(Debug)]
+pub struct AcceptedWorkInput {
+    pub payload_hash: Vec<u8>,
+    pub request_id: String,
+    pub run_id: Option<String>,
 }
 
 impl<'a> WorkRepo<'a> {
@@ -157,7 +166,7 @@ impl<'a> WorkRepo<'a> {
         self.0.fetch(
             &format!(
                 "SELECT {RUN_COLUMNS} FROM work_run_view WHERE run_id = (
-                   SELECT run_id FROM work_runs WHERE work_id = ?1 AND state IN ('starting','running')
+                   SELECT run_id FROM work_runs WHERE work_id = ?1 AND state = 'running'
                    ORDER BY started_at DESC LIMIT 1
                  )"
             ),
@@ -174,16 +183,55 @@ impl<'a> WorkRepo<'a> {
         )
     }
 
-    pub fn input_receipt(&self, work_id: &str, key: &str) -> Result<Option<(Vec<u8>, String)>> {
+    /// Admits the oldest accepted input once, only while the session can run it.
+    pub fn promote_starting(&self, work_id: &str) -> Result<Option<Run>> {
         self.0.fetch(
-            "SELECT payload_hash, request_id FROM work_input_receipts WHERE work_id = ?1 AND request_key = ?2",
-            [work_id, key],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            &format!(
+                "UPDATE work_runs SET state = 'running', updated_at = ?2 WHERE rowid = (
+                   SELECT rowid FROM work_runs WHERE work_id = ?1 AND state = 'starting'
+                   ORDER BY rowid LIMIT 1
+                 )
+                 AND EXISTS (SELECT 1 FROM work_sessions WHERE id = ?1 AND status <> 'closed')
+                 AND NOT EXISTS (SELECT 1 FROM work_runs WHERE work_id = ?1 AND state = 'running')
+                 RETURNING {CHANGED_RUN_COLUMNS}"
+            ),
+            params![work_id, now()],
+            Run::from_row,
         )
     }
 
-    pub fn record_input(&self, work_id: &str, receipt: WorkInputReceipt<'_>) -> Result<()> {
-        insert_input(&self.0.conn(), work_id, receipt)
+    /// Settles accepted inputs that have never been dispatched.
+    pub fn cancel_starting(&self, work_id: &str) -> Result<Vec<Run>> {
+        self.0.fetch_all(
+            &format!(
+                "UPDATE work_runs SET state = 'cancelled', updated_at = ?2
+                 WHERE work_id = ?1 AND state = 'starting' RETURNING {CHANGED_RUN_COLUMNS}"
+            ),
+            params![work_id, now()],
+            Run::from_row,
+        )
+    }
+
+    /// Records the interruption of all undispatched runs on startup.
+    pub fn interrupt_starting(&self, failure: &Failure) -> Result<()> {
+        self.0.conn().execute(
+            "UPDATE work_runs SET state = 'failed', failure = ?1, updated_at = ?2
+             WHERE state = 'starting'",
+            params![to_json(failure)?, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn input_receipt(&self, work_id: &str, key: &str) -> Result<Option<AcceptedWorkInput>> {
+        self.0.fetch(
+            "SELECT payload_hash, request_id, run_id FROM work_input_receipts WHERE work_id = ?1 AND request_key = ?2",
+            [work_id, key],
+            |row| Ok(AcceptedWorkInput {
+                payload_hash: row.get(0)?,
+                request_id: row.get(1)?,
+                run_id: row.get(2)?,
+            }),
+        )
     }
 
     pub fn insert_run(
@@ -200,9 +248,10 @@ impl<'a> WorkRepo<'a> {
                 )?.execute(params![run.work_id, stamp])?;
                 require_found(changed, "no open work session")?;
             }
-            transaction.prepare_cached(
+            let inserted = transaction.prepare_cached(
                 "INSERT INTO work_runs (run_id, work_id, instruction, state, failure, started_at, updated_at, executor)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8 WHERE ?4 <> 'running'
+                   OR NOT EXISTS (SELECT 1 FROM work_runs WHERE work_id = ?2 AND state = 'running')"
             )?
             .execute(params![
                 run.run_id,
@@ -214,8 +263,16 @@ impl<'a> WorkRepo<'a> {
                 stamp,
                 to_json(executor)?,
             ])?;
+            if inserted == 0 {
+                return Err(StoreError::Conflict("the work session already has a running turn".into()));
+            }
             if let Some(receipt) = receipt {
-                insert_input(transaction, &run.work_id, receipt)?;
+                transaction.prepare_cached(
+                    "INSERT INTO work_input_receipts
+                     (work_id, request_key, payload_hash, request_id, run_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                )?.execute(params![
+                    run.work_id, receipt.request_key, receipt.payload_hash, receipt.request_id, run.run_id
+                ])?;
             }
             Ok(())
         })
@@ -251,15 +308,4 @@ impl<'a> WorkRepo<'a> {
             Ok(())
         })
     }
-}
-
-fn insert_input(
-    connection: &rusqlite::Connection,
-    work_id: &str,
-    receipt: WorkInputReceipt<'_>,
-) -> Result<()> {
-    connection.prepare_cached(
-        "INSERT INTO work_input_receipts (work_id, request_key, payload_hash, request_id) VALUES (?1, ?2, ?3, ?4)",
-    )?.execute(params![work_id, receipt.request_key, receipt.payload_hash, receipt.request_id])?;
-    Ok(())
 }

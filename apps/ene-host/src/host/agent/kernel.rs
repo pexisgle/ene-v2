@@ -75,7 +75,7 @@ impl<'a> AgentKernel<'a> {
     }
 
     pub(crate) fn stop_work(&mut self, id: &str) -> Result<()> {
-        work::stop(self.app.world_mut(), id)
+        work::stop(self.app.world_mut(), id, None)
     }
 
     pub(crate) fn close_work(&mut self, id: &str) -> Result<()> {

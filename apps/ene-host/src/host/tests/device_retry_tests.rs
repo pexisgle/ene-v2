@@ -45,7 +45,7 @@ fn queued_work_reconnect_checks_the_original_run_and_current_grants() {
         );
 
         if change == "stopped" {
-            work::stop(harness.app.world_mut(), &session.id).unwrap();
+            work::stop(harness.app.world_mut(), &session.id, None).unwrap();
             assert_eq!(
                 store.work_repo().run(&run.run_id).unwrap().unwrap().state,
                 RunState::Cancelled
