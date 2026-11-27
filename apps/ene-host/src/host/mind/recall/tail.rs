@@ -13,6 +13,21 @@ use ene_mind::{RecallCandidate, RecallMode, Scored};
 use ene_store::util::now;
 use rig_ecs::prelude::{Conversation, MessageId};
 
+#[derive(Clone, Debug)]
+pub(super) struct RenderedTail {
+    pub(super) text: String,
+    pub(super) memory_ids: Vec<String>,
+}
+
+impl RenderedTail {
+    pub(super) fn fallback() -> Self {
+        Self {
+            text: opening(),
+            memory_ids: Vec::new(),
+        }
+    }
+}
+
 /// The tail's opening: the clock is part of every request, companion or not.
 pub(super) fn opening() -> String {
     format!(
@@ -47,7 +62,7 @@ struct ContextBuilder {
     budget_chars: usize,
     used_chars: usize,
     buf: String,
-    included_recalled_ids: Vec<String>,
+    included: Vec<String>,
 }
 
 impl ContextBuilder {
@@ -57,7 +72,7 @@ impl ContextBuilder {
             budget_chars: total_budget_chars.saturating_sub(closing_chars),
             used_chars: 0,
             buf: String::new(),
-            included_recalled_ids: Vec::new(),
+            included: Vec::new(),
         }
     }
 
@@ -67,19 +82,21 @@ impl ContextBuilder {
 
     /// Appends priority context (clock, profile, perception, state, pinned),
     /// clipping cleanly to the remaining budget if needed.
-    fn push_priority(&mut self, text: &str) {
+    fn push_priority(&mut self, text: &str) -> bool {
         let rem = self.remaining_chars();
         if rem == 0 {
-            return;
+            return false;
         }
         let count = text.chars().count();
         if count <= rem {
             self.buf.push_str(text);
             self.used_chars += count;
+            true
         } else {
             let clipped: String = text.chars().take(rem).collect();
             self.buf.push_str(&clipped);
             self.used_chars = self.budget_chars;
+            false
         }
     }
 
@@ -110,24 +127,26 @@ impl ContextBuilder {
             }
             self.buf.push_str(&line);
             self.used_chars += line_chars;
-            self.included_recalled_ids.push(item.memory.id.clone());
+            self.included.push(item.memory.id.clone());
         }
     }
 
-    fn finish(mut self) -> (String, Vec<String>) {
+    fn finish(mut self) -> RenderedTail {
         self.buf.push_str(TAIL_CLOSING);
-        (self.buf, self.included_recalled_ids)
+        RenderedTail {
+            text: self.buf,
+            memory_ids: self.included,
+        }
     }
 }
 
-pub(crate) struct DynamicTailQuery<'a> {
-    pub(crate) store: &'a Store,
-    pub(crate) perception: &'a Perception,
-    pub(crate) companion: &'a str,
-    pub(crate) query: Option<&'a str>,
-    pub(crate) embeddings: &'a Embeddings,
-    pub(crate) credentials: Option<&'a Credentials>,
-    pub(crate) turn: Option<u64>,
+pub(super) struct DynamicTailQuery<'a> {
+    pub(super) store: &'a Store,
+    pub(super) perception: &'a Perception,
+    pub(super) companion: &'a str,
+    pub(super) query: Option<&'a str>,
+    pub(super) embeddings: &'a Embeddings,
+    pub(super) credentials: Option<&'a Credentials>,
 }
 
 pub(super) struct TailRenderRequest<'a> {
@@ -137,11 +156,12 @@ pub(super) struct TailRenderRequest<'a> {
     pub(super) query: Option<&'a str>,
     pub(super) semantic: &'a [RecallCandidate],
     pub(super) hook_notes: &'a [String],
-    pub(super) turn: Option<u64>,
     pub(super) budget_chars: usize,
 }
 
-pub(crate) async fn dynamic_tail(req: DynamicTailQuery<'_>) -> crate::host::db::Result<String> {
+pub(super) async fn dynamic_tail(
+    req: DynamicTailQuery<'_>,
+) -> crate::host::db::Result<RenderedTail> {
     let semantic = match req.query {
         Some(query) => {
             embedding::semantic_candidates(
@@ -173,7 +193,6 @@ pub(crate) async fn dynamic_tail(req: DynamicTailQuery<'_>) -> crate::host::db::
         query: req.query,
         semantic: &semantic,
         hook_notes: &hook_notes,
-        turn: req.turn,
         budget_chars: TAIL_BUDGET_CHARS,
     })
 }
@@ -184,8 +203,7 @@ pub(super) fn render_tail(
     companion: &str,
     query: Option<&str>,
     semantic: &[RecallCandidate],
-    turn: Option<u64>,
-) -> crate::host::db::Result<String> {
+) -> crate::host::db::Result<RenderedTail> {
     render_tail_full(&TailRenderRequest {
         store,
         perception,
@@ -193,12 +211,13 @@ pub(super) fn render_tail(
         query,
         semantic,
         hook_notes: &[],
-        turn,
         budget_chars: TAIL_BUDGET_CHARS,
     })
 }
 
-pub(super) fn render_tail_full(req: &TailRenderRequest<'_>) -> crate::host::db::Result<String> {
+pub(super) fn render_tail_full(
+    req: &TailRenderRequest<'_>,
+) -> crate::host::db::Result<RenderedTail> {
     let &TailRenderRequest {
         store,
         perception,
@@ -206,7 +225,6 @@ pub(super) fn render_tail_full(req: &TailRenderRequest<'_>) -> crate::host::db::
         query,
         semantic,
         hook_notes,
-        turn,
         budget_chars,
     } = req;
     let mut builder = ContextBuilder::new(budget_chars);
@@ -241,7 +259,9 @@ pub(super) fn render_tail_full(req: &TailRenderRequest<'_>) -> crate::host::db::
         if !pinned.is_empty() {
             builder.push_priority("常に覚えていること:\n");
             for memory in pinned {
-                builder.push_priority(&format!("- {}\n", memory.content));
+                if builder.push_priority(&format!("- {}\n", memory.content)) {
+                    builder.included.push(memory.id);
+                }
             }
         }
         if let Some(query) = query {
@@ -255,16 +275,5 @@ pub(super) fn render_tail_full(req: &TailRenderRequest<'_>) -> crate::host::db::
             builder.push_recalled(&recalled.items);
         }
     }
-    let (tail, included_ids) = builder.finish();
-    if let Some(turn) = turn
-        && !included_ids.is_empty()
-    {
-        // Persisted ONLY for recalled memories that actually survived budget
-        // fitting, so the citation guard never trusts a truncated memory
-        // (docs/design/mind.md §4.2, B14).
-        store
-            .memory_repo()
-            .record_injections(companion, &turn.to_string(), &included_ids)?;
-    }
-    Ok(tail)
+    Ok(builder.finish())
 }

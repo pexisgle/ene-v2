@@ -10,10 +10,9 @@
 //! to the model's window.
 mod tail;
 
-pub(crate) use tail::{DynamicTailQuery, dynamic_tail};
+use tail::{DynamicTailQuery, RenderedTail, dynamic_tail, recall_query, render_tail};
 #[cfg(test)]
 use tail::{TAIL_BUDGET_CHARS, TailRenderRequest, render_tail_full};
-use tail::{opening, recall_query, render_tail};
 
 use super::embedding::Embeddings;
 #[cfg(test)]
@@ -31,9 +30,10 @@ use bevy_ecs::{prelude::*, system::SystemParam};
 use compaction::RequestStart;
 use rig_core::completion::Message;
 use rig_ecs::prelude::*;
+use std::sync::Arc;
 
 #[derive(Component)]
-struct DynamicTail(String);
+struct DynamicTail(RenderedTail);
 
 /// A request call with the agent it serves.
 type TurnRequest<'a> = (
@@ -80,7 +80,15 @@ struct AwaitingTail;
 #[derive(Component)]
 struct PendingTail {
     turn: Entity,
-    task: Job<crate::host::db::Result<String>>,
+    task: Job<crate::host::db::Result<RenderedTail>>,
+}
+
+#[derive(Component)]
+struct PendingInjections {
+    companion: String,
+    turn: MessageId,
+    message: Arc<Message>,
+    memory_ids: Vec<String>,
 }
 
 fn collect_tails(mut commands: Commands, mut pending: Query<(Entity, &HoldOf, &mut PendingTail)>) {
@@ -97,9 +105,9 @@ fn collect_tails(mut commands: Commands, mut pending: Query<(Entity, &HoldOf, &m
                 } else {
                     tracing::warn!(%error, "dynamic tail could not be rendered");
                 }
-                opening()
+                RenderedTail::fallback()
             }
-            None => opening(),
+            None => RenderedTail::fallback(),
         };
         commands.entity(pending.turn).try_insert(DynamicTail(tail));
         commands.entity(of.0).try_remove::<AwaitingTail>();
@@ -135,10 +143,10 @@ fn inject_tail(
             continue;
         };
         let conversation = conversations.get(agent).ok();
+        let companion = agents.get(agent).ok().and_then(|(companion, _)| companion);
         let eye_report = find_turn_eye_report(
             conversation,
-            &agents,
-            agent,
+            companion,
             turn.start,
             env.eyes.as_deref(),
             env.hub.as_deref(),
@@ -175,6 +183,7 @@ fn inject_tail(
                 turn_start: turn.start,
                 tail,
                 eye_report,
+                companion: companion.map(|agent| agent.companion_id.as_str()),
             },
         );
     }
@@ -182,15 +191,12 @@ fn inject_tail(
 
 fn find_turn_eye_report<'a>(
     conversation: Option<&Conversation>,
-    agents: &Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
-    agent: Entity,
+    companion: Option<&CompanionAgent>,
     turn_start: MessageId,
     eyes: Option<&'a Eyes>,
     hub: Option<&DeviceHub>,
 ) -> Option<(MessageId, &'a crate::host::eyes::Delivered)> {
-    let (Some(companion), _) = agents.get(agent).ok()? else {
-        return None;
-    };
+    let companion = companion?;
     let (eyes, hub) = (eyes?, hub?);
     conversation?.asked(turn_start).find_map(|entry| {
         eyes.context(&companion.companion_id, entry.author, hub)
@@ -212,7 +218,7 @@ fn compute_or_spawn_tail(
     conversation: Option<&Conversation>,
     env: &TailEnv<'_>,
     target: &SpawnTailTarget,
-) -> Option<String> {
+) -> Option<RenderedTail> {
     let SpawnTailTarget {
         call_entity,
         turn_entity,
@@ -220,15 +226,17 @@ fn compute_or_spawn_tail(
         agent,
         has_eye_report,
     } = *target;
-    let view = agent_view(agents, conversation, agent)?;
-    let query = recall_query(view.conversation, turn_start, has_eye_report);
+    let (companion, work) = agents.get(agent).ok()?;
+    let companion = companion
+        .map(|agent| &agent.companion_id)
+        .or_else(|| work.map(|agent| &agent.companion_id))?;
+    let query = recall_query(conversation, turn_start, has_eye_report);
     let empty_perception = Perception::default();
     let perception = if has_eye_report {
         &empty_perception
     } else {
         &*env.perception
     };
-    let turn_id = view.is_companion.then(|| turn_start.get());
     if let Some(runtime) = env.runtime.as_deref() {
         let store = env.store.clone();
         let perception = Perception {
@@ -236,7 +244,7 @@ fn compute_or_spawn_tail(
         };
         let embeddings = env.embeddings.clone();
         let credentials = env.credentials.as_deref().cloned();
-        let companion = view.companion;
+        let companion = companion.clone();
         let task = background::spawn(&runtime.0, env.wake.as_deref(), async move {
             dynamic_tail(DynamicTailQuery {
                 store: &store,
@@ -245,7 +253,6 @@ fn compute_or_spawn_tail(
                 query: query.as_deref(),
                 embeddings: &embeddings,
                 credentials: credentials.as_ref(),
-                turn: turn_id,
             })
             .await
         });
@@ -259,14 +266,7 @@ fn compute_or_spawn_tail(
         ));
         return None;
     }
-    let tail = match render_tail(
-        &env.store,
-        perception,
-        &view.companion,
-        query.as_deref(),
-        &[],
-        turn_id,
-    ) {
+    let tail = match render_tail(&env.store, perception, companion, query.as_deref(), &[]) {
         Ok(tail) => tail,
         Err(error) => {
             if error.is_storage() {
@@ -275,7 +275,7 @@ fn compute_or_spawn_tail(
             } else {
                 tracing::warn!(%error, "dynamic tail could not be rendered");
             }
-            opening()
+            RenderedTail::fallback()
         }
     };
     commands
@@ -289,8 +289,9 @@ struct TailHistoryTarget<'a> {
     turn_entity: Entity,
     call_entity: Entity,
     turn_start: MessageId,
-    tail: String,
+    tail: RenderedTail,
     eye_report: Option<(MessageId, &'a crate::host::eyes::Delivered)>,
+    companion: Option<&'a str>,
 }
 
 fn apply_tail_to_history(
@@ -303,8 +304,12 @@ fn apply_tail_to_history(
         turn_entity,
         call_entity,
         turn_start,
-        mut tail,
+        tail: RenderedTail {
+            text: mut tail,
+            memory_ids,
+        },
         eye_report,
+        companion,
     } = target;
     let mut tail_entry = turn_start;
     if let Some(summary) =
@@ -342,31 +347,50 @@ fn apply_tail_to_history(
         content.push(UserContent::text(tail.take()?));
         Some(Message::User { content })
     });
+    if tail.is_none()
+        && !memory_ids.is_empty()
+        && let Some(companion) = companion
+    {
+        commands.entity(call_entity).insert(PendingInjections {
+            companion: companion.to_owned(),
+            turn: turn_start,
+            message: Arc::clone(&history.messages()[at]),
+            memory_ids,
+        });
+    }
     commands.entity(call_entity).insert(TailInjected);
 }
 
-struct AgentView<'a> {
-    companion: String,
-    is_companion: bool,
-    conversation: Option<&'a Conversation>,
-}
+type ModelReplied = (With<SentTo>, Added<StreamTiming>);
 
-fn agent_view<'a>(
-    agents: &'a Query<(Option<&CompanionAgent>, Option<&WorkAgent>)>,
-    conversation: Option<&'a Conversation>,
-    agent: Entity,
-) -> Option<AgentView<'a>> {
-    let (companion, work) = agents.get(agent).ok()?;
-    let (companion, is_companion) = match (companion, work) {
-        (Some(agent), _) => (agent.companion_id.clone(), true),
-        (None, Some(agent)) => (agent.companion_id.clone(), false),
-        (None, None) => return None,
-    };
-    Some(AgentView {
-        companion,
-        is_companion,
-        conversation,
-    })
+fn record_injections(
+    mut commands: Commands,
+    store: Res<Store>,
+    calls: Query<(Entity, &ModelRequest, &PendingInjections), ModelReplied>,
+) {
+    let memories = store.into_inner().memory_repo();
+    for (call, request, pending) in &calls {
+        commands.entity(call).remove::<PendingInjections>();
+        if !request
+            .request
+            .chat_history
+            .iter()
+            .any(|message| Arc::ptr_eq(message, &pending.message))
+        {
+            continue;
+        }
+        if let Err(error) = memories.record_injections(
+            &pending.companion,
+            &pending.turn.get().to_string(),
+            &pending.memory_ids,
+        ) {
+            if error.is_storage() {
+                commands.run_system_cached_with(crate::host::stop_on_failure, error.to_string());
+            } else {
+                tracing::warn!(%error, "memory use receipt could not be saved");
+            }
+        }
+    }
 }
 
 /// Keeps the request within the model's input limit. The system prompt and
@@ -445,7 +469,8 @@ impl Plugin for RecallPlugin {
                 })
                 .in_set(PrepareSystems::Edit),
             )
-            .add_systems(AgentPass, fit.in_set(PrepareSystems::Fit));
+            .add_systems(AgentPass, fit.in_set(PrepareSystems::Fit))
+            .add_systems(AgentPass, record_injections.in_set(Stage::Review));
     }
 }
 

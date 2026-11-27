@@ -401,7 +401,7 @@ async fn b13_turn_cause_uses_schedule_instruction_instead_of_stale_user_chat() {
 }
 
 #[test]
-fn b14_context_builder_records_only_recalled_memories_that_fit_budget() {
+fn b14_context_builder_marks_only_complete_memories_that_fit_budget() {
     use crate::host::db::memories::MemoryRecord;
     use crate::host::tests::Harness;
 
@@ -415,7 +415,7 @@ fn b14_context_builder_records_only_recalled_memories_that_fit_budget() {
             id: "m-fit".into(),
             scope: harness.companion.clone(),
             content: first_content.clone(),
-            importance: 10,
+            importance: 9,
             occurred_at: None,
             source_context: serde_json::json!({}),
         })
@@ -441,11 +441,10 @@ fn b14_context_builder_records_only_recalled_memories_that_fit_budget() {
         query: None,
         semantic: &[],
         hook_notes: &[],
-        turn: None,
         budget_chars: TAIL_BUDGET_CHARS,
     })
     .unwrap();
-    let budget = base.chars().count()
+    let budget = base.text.chars().count()
         + "今の話に関係する記憶:\n".chars().count()
         + first_content.chars().count()
         + 20;
@@ -457,14 +456,16 @@ fn b14_context_builder_records_only_recalled_memories_that_fit_budget() {
         query: Some("予算テスト記憶"),
         semantic: &[],
         hook_notes: &[],
-        turn: Some(42),
         budget_chars: budget,
     })
     .unwrap();
-    assert!(tail.chars().count() <= budget);
-    assert!(tail.contains(&first_content), "first recalled memory fits");
+    assert!(tail.text.chars().count() <= budget);
     assert!(
-        !tail.contains(&second_content),
+        tail.text.contains(&first_content),
+        "first recalled memory fits"
+    );
+    assert!(
+        !tail.text.contains(&second_content),
         "second recalled memory must be omitted when over budget"
     );
     let recorded = store
@@ -472,10 +473,79 @@ fn b14_context_builder_records_only_recalled_memories_that_fit_budget() {
         .injected_between(&harness.companion, None, u64::MAX)
         .unwrap();
     assert_eq!(
-        recorded,
-        vec!["m-fit".to_owned()],
-        "citation guard injection log must contain ONLY memories that survived budget fitting"
+        tail.memory_ids,
+        ["m-fit"],
+        "rendering witnesses only memories that survived the tail budget"
     );
+    assert_eq!(recorded.len(), 0, "rendering alone never writes a receipt");
+}
+
+#[tokio::test]
+async fn only_a_confirmed_model_request_records_injected_memories() {
+    use crate::host::db::memories::MemoryRecord;
+    use crate::host::tests::{Harness, text_turn};
+
+    for fits in [false, true] {
+        let mut harness = Harness::new([]);
+        let model = MockCompletionModel::from_stream_turns([text_turn("reply")]);
+        let observed = model.clone();
+        let mut spec = Catalog::builtin()
+            .resolve("deepseek/deepseek-flash")
+            .unwrap()
+            .spec
+            .clone();
+        spec.context_window = Some(4_096);
+        spec.max_output_tokens = Some(256);
+        spec.tools = false;
+        let spec = Arc::new(spec);
+        harness
+            .app
+            .insert_resource(ModelFactory(Arc::new(move |_, _, _, _, _, _| {
+                Ok(model.clone().priced_as(spec.clone()).into())
+            })));
+        let store = harness.store();
+        for (id, content, importance) in [
+            ("matching", "purple bananas must stay in the bowl", 7),
+            ("pinned", "The fixed companion's favorite day is Friday", 10),
+        ] {
+            store
+                .memory_repo()
+                .insert_memory(&MemoryRecord {
+                    id: id.into(),
+                    scope: harness.companion.clone(),
+                    content: content.into(),
+                    importance,
+                    occurred_at: None,
+                    source_context: serde_json::json!({}),
+                })
+                .unwrap();
+        }
+        let text = if fits {
+            "purple bananas".into()
+        } else {
+            format!("purple bananas {}", "長".repeat(6_000))
+        };
+        let head = harness.companion_agent();
+        harness.accept("confirmed-injection", &text).unwrap();
+        harness.run_until(|world| {
+            world.get::<Conversation>(head).is_some_and(|conversation| {
+                conversation
+                    .turns()
+                    .next_back()
+                    .is_some_and(|(_, turn)| turn.end.is_some())
+            })
+        });
+        assert_eq!(observed.requests().len(), usize::from(fits));
+        let receipts = store
+            .memory_repo()
+            .injected_between(&harness.companion, None, u64::MAX)
+            .unwrap();
+        if fits {
+            assert_eq!(receipts, ["pinned", "matching"]);
+        } else {
+            assert_eq!(receipts.len(), 0);
+        }
+    }
 }
 
 #[test]
@@ -495,7 +565,6 @@ fn q05_storage_fault_in_tail_marks_host_failed_instead_of_empty_state() {
         &harness.companion,
         Some("query"),
         &[],
-        Some(1),
     )
     .unwrap_err();
     assert!(err.is_storage(), "expected storage error, got {err:?}");
