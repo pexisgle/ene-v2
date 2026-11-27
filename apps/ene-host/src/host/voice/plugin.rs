@@ -42,7 +42,10 @@ impl PluginSpeech {
             _ => return Ok(None),
         };
         let adapter = connection.endpoint().adapter.clone();
-        let Some(running) = providers.running(&adapter, extension) else {
+        let Some(running) = providers
+            .bound_running(&adapter, extension)
+            .map_err(|error| SetupError::Broken(error.to_string()))?
+        else {
             return Ok(None);
         };
         let secret = crate::host::model::connection_secret(connection, credentials, providers)

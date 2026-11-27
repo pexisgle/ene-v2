@@ -385,7 +385,7 @@ fn maybe_auto_start_voicevox(
                 && conn.kind == settings::ConnectionKind::Tts
                 && conn.endpoint().adapter.eq_ignore_ascii_case("voicevox")
                 && !model::is_sakura_endpoint(&conn.endpoint().endpoint)
-                && providers.get("voicevox").is_none()
+                && !providers.claims("voicevox", ene_plugin::Extension::Tts)
         })
     {
         let mgr = voicevox.clone();

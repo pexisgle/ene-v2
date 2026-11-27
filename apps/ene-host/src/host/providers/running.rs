@@ -8,6 +8,8 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use tokio::runtime::Handle;
+use tokio_util::context::TokioContext;
 use tokio_util::sync::CancellationToken;
 
 /// The provider metadata a provider extension declares once, in its manifest.
@@ -29,6 +31,7 @@ pub(crate) struct Running {
     instance: tokio::sync::Mutex<Option<Instance>>,
     loaded: Arc<Loaded>,
     entrypoint: String,
+    runtime: Handle,
     cancel: CancellationToken,
     /// A caller dropped a call before it reported. The next request releases
     /// the dead instance and reloads; a call that failed on its own keeps the
@@ -43,6 +46,8 @@ impl Running {
         extension: Extension,
         cancel: CancellationToken,
     ) -> Result<Self, HostError> {
+        let runtime = Handle::try_current()
+            .map_err(|error| HostError::Unavailable(format!("plugin runtime: {error}")))?;
         let (entrypoint, provider) = if !extension.serves_provider() {
             let entrypoint = loaded.extension_entrypoint(extension).ok_or_else(|| {
                 HostError::Unavailable(format!(
@@ -82,6 +87,7 @@ impl Running {
             instance: tokio::sync::Mutex::new(Some(instance)),
             loaded,
             entrypoint,
+            runtime,
             cancel,
             cancelled: AtomicBool::new(false),
         })
@@ -96,8 +102,9 @@ impl Running {
         let (sender, mut events) = tokio::sync::mpsc::channel(16);
         // A caller that wants no stream still must drain it, or a plugin that
         // emits would block on a full channel.
-        tokio::spawn(async move { while events.recv().await.is_some() {} });
-        self.call(operation, services, sender).await
+        self.runtime
+            .spawn(async move { while events.recv().await.is_some() {} });
+        self.invoke_streaming(operation, services, sender).await
     }
 
     /// Runs one operation and hands its events to `events` as they arrive, so
@@ -109,7 +116,7 @@ impl Running {
         services: Arc<dyn Services>,
         events: tokio::sync::mpsc::Sender<ene_plugin::Event>,
     ) -> Result<serde_json::Value, HostError> {
-        self.call(operation, services, events).await
+        TokioContext::new(self.call(operation, services, events), self.runtime.clone()).await
     }
 
     async fn call(

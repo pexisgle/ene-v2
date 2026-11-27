@@ -361,7 +361,7 @@ fn is_builtin_voicevox(
             .adapter
             .eq_ignore_ascii_case("voicevox")
         && !model::is_sakura_endpoint(&connection.endpoint().endpoint)
-        && providers.get("voicevox").is_none()
+        && !providers.claims("voicevox", ene_plugin::Extension::Tts)
 }
 
 fn model_item(id: String, spec: &ModelSpec) -> w::Model {

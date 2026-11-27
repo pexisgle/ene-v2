@@ -21,6 +21,7 @@ use std::collections::HashMap;
 #[derive(Resource, Default)]
 pub(crate) struct Connections {
     revision: u64,
+    plugin_revision: u64,
     credential_generation: u64,
     factory: Option<ModelFactory>,
     models: HashMap<(String, String), ModelConnection>,
@@ -62,10 +63,16 @@ pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
     let revision = store.settings_repo().settings_revision()?;
     let credentials = world.resource::<Credentials>().clone();
     let credential_generation = credentials.generation();
+    let providers = world
+        .get_resource::<crate::host::providers::Providers>()
+        .cloned()
+        .unwrap_or_default();
+    let plugin_revision = providers.revision();
     let factory = world.resource::<ModelFactory>().clone();
     {
         let mut cache = world.resource_mut::<Connections>();
         if cache.revision != revision
+            || cache.plugin_revision != plugin_revision
             || cache.credential_generation != credential_generation
             || cache
                 .factory
@@ -74,6 +81,7 @@ pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
         {
             cache.models.clear();
             cache.revision = revision;
+            cache.plugin_revision = plugin_revision;
             cache.credential_generation = credential_generation;
             cache.factory = Some(factory.clone());
         }
@@ -85,10 +93,6 @@ pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
         Some(connection) => connection,
         None => {
             let catalog = world.resource::<Models>().0.catalog().clone();
-            let providers = world
-                .get_resource::<crate::host::providers::Providers>()
-                .cloned()
-                .unwrap_or_default();
             let model = (factory.0)(&store, &credentials, &catalog, &companion, role, &providers)?;
             let spec = std::sync::Arc::new(model.spec().cloned().ok_or_else(|| {
                 HostError::Internal(("a completion model without catalog facts").into())

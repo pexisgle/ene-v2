@@ -99,7 +99,7 @@ pub(crate) fn connect_assignment(
     let endpoint = connection.endpoint();
     // A plugin that serves this connection's adapter answers instead of the
     // catalog, so a provider rig does not ship needs no host change.
-    if let Some(running) = providers.running(&endpoint.adapter, ene_plugin::Extension::Llm) {
+    if let Some(running) = providers.bound_running(&endpoint.adapter, ene_plugin::Extension::Llm)? {
         let secret = connection_secret(&connection, Some(credentials), providers)?;
         let context = super::providers::ProviderInvocationContext::from_connection(
             &running,

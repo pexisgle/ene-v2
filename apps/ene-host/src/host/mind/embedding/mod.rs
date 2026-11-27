@@ -47,6 +47,7 @@ struct Target {
 #[derive(Default)]
 struct Models {
     revision: u64,
+    plugin_revision: u64,
     credential_generation: Option<u64>,
     targets: HashMap<(ene_domain::ConnectionId, String), Target>,
 }
@@ -142,12 +143,7 @@ fn connect_with_ndims(params: &ConnectParams<'_>) -> Result<DynModel<Embedding>>
     let adapter = connection.endpoint().adapter.as_str();
     // A plugin provider answers through the host's broker, not through rig's
     // HTTP client, so it is resolved before the catalog is consulted.
-    if providers.get(adapter).is_some() {
-        let running = providers
-            .running(adapter, ene_plugin::Extension::Embedding)
-            .ok_or_else(|| {
-                HostError::Unavailable(format!("embedding plugin `{adapter}` is not running"))
-            })?;
+    if let Some(running) = providers.bound_running(adapter, ene_plugin::Extension::Embedding)? {
         let secret = crate::host::model::connection_secret(connection, credentials, providers)?;
         let context = crate::host::providers::ProviderInvocationContext::from_connection(
             &running,
@@ -242,7 +238,7 @@ pub(crate) async fn probe_dimensions(
     let base = crate::host::settings::endpoint_of(connection, providers)
         .ok_or(EmbeddingProbeError::MissingEndpoint)?;
     let adapter = connection.endpoint().adapter.as_str();
-    if providers.get(adapter).is_some() {
+    if providers.claims(adapter, ene_plugin::Extension::Embedding) {
         providers
             .start(adapter, ene_plugin::Extension::Embedding)
             .await
@@ -326,9 +322,14 @@ fn target(
     let key = (connection.id.clone(), model_id.to_owned());
     let mut models = embeddings.models.lock();
     let credential_generation = credentials.map(Credentials::generation);
-    if models.revision != revision || models.credential_generation != credential_generation {
+    let plugin_revision = embeddings.providers.revision();
+    if models.revision != revision
+        || models.plugin_revision != plugin_revision
+        || models.credential_generation != credential_generation
+    {
         models.targets.clear();
         models.revision = revision;
+        models.plugin_revision = plugin_revision;
         models.credential_generation = credential_generation;
     }
     if let Some(target) = models.targets.get(&key) {

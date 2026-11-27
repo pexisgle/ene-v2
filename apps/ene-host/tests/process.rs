@@ -10,6 +10,9 @@ use std::{path::Path, time::Duration};
 #[cfg(unix)]
 #[path = "process/plugin_lifetime.rs"]
 mod plugin_lifetime;
+#[cfg(unix)]
+#[path = "process/provider_routing.rs"]
+mod provider_routing;
 
 fn connection_file(runtime: &Path) -> Option<(String, String)> {
     let bytes = std::fs::read(runtime.join("connection.json")).ok()?;

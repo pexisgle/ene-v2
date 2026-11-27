@@ -33,32 +33,6 @@ pub(super) async fn update_settings(
             expected,
         ));
     }
-    // Pre-start enabled plugins referenced in `inputs` so that when
-    // `SettingsUpdated` fires on reload inside `services.call`, newly enabled
-    // plugin adapters (e.g. openrouter-wasm) are already running.
-    for (conn, _) in &inputs {
-        if !conn.enabled {
-            continue;
-        }
-        let adapter = conn.endpoint().adapter.clone();
-        if services.runtime.providers().get(&adapter).is_none() {
-            continue;
-        }
-        let extension = match conn.kind {
-            crate::host::settings::ConnectionKind::Embedding => ene_plugin::Extension::Embedding,
-            crate::host::settings::ConnectionKind::Llm => ene_plugin::Extension::Llm,
-            crate::host::settings::ConnectionKind::Tts => ene_plugin::Extension::Tts,
-            crate::host::settings::ConnectionKind::Stt => ene_plugin::Extension::Stt,
-            crate::host::settings::ConnectionKind::Acp => ene_plugin::Extension::Harness,
-            crate::host::settings::ConnectionKind::Mcp
-            | crate::host::settings::ConnectionKind::Search => continue,
-        };
-        let _discarded = services
-            .runtime
-            .providers()
-            .start(&adapter, extension)
-            .await;
-    }
     let view = services
         .change(move |services| {
             let store = &services.store;

@@ -1,6 +1,7 @@
 //! Settings service.
 
 use super::super::Services;
+use super::notify_settings;
 use crate::host::error::HostError;
 use connectrpc::RequestContext;
 use connectrpc::ServiceRequest;
@@ -155,6 +156,28 @@ pub(super) async fn remove_plugin(
     services
         .change(move |services| {
             let store = &services.store;
+            let revision = store.settings_repo().settings()?;
+            let affected: Vec<_> = revision
+                .connections
+                .into_iter()
+                .filter_map(|mut connection| {
+                    let extension = crate::host::providers::connection_extension(connection.kind)?;
+                    (connection.enabled
+                        && connection.endpoint().adapter == plugin_id
+                        && services.providers.claims(&plugin_id, extension))
+                    .then(|| {
+                        connection.enabled = false;
+                        let expected = connection.revision;
+                        (connection, expected)
+                    })
+                })
+                .collect();
+            if !affected.is_empty() {
+                let settings = store
+                    .settings_repo()
+                    .update_settings(revision.revision, &affected)?;
+                notify_settings(&services.notifier, w::Settings::from(&settings));
+            }
             services.providers.set_enabled(&plugin_id, false);
             if !crate::host::providers::remove_local_package(
                 store,

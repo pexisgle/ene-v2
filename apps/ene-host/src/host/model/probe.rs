@@ -34,7 +34,7 @@ pub(crate) async fn probe(
         };
     };
     if config.endpoint.adapter == agent_platform::ADAPTER
-        && providers.get(agent_platform::ADAPTER).is_none()
+        && !providers.claims(agent_platform::ADAPTER, ene_plugin::Extension::Llm)
     {
         let verified = |mut check: Check| {
             check
@@ -153,7 +153,7 @@ async fn list_models(
     let adapter = connection.endpoint().adapter.as_str();
     // A plugin lists its own models, through the same `ListModels` operation
     // the agent loop would use, so the probe reads what the plugin serves.
-    if providers.get(adapter).is_some() {
+    if providers.claims(adapter, ene_plugin::Extension::Llm) {
         return tokio::time::timeout(PROBE_TIMEOUT, async {
             let running = providers
                 .start(adapter, ene_plugin::Extension::Llm)

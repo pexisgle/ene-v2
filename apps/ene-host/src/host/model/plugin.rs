@@ -165,6 +165,9 @@ impl Exchange {
 
     async fn next_inner(&mut self) -> Result<Option<Bytes>, HttpError> {
         loop {
+            if self.provider.revoked() {
+                return Err(protocol("the configured plugin was disabled"));
+            }
             if let Some(bytes) = self.pending.pop_front() {
                 return Ok(Some(bytes));
             }
