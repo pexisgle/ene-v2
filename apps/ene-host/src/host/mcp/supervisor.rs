@@ -96,7 +96,7 @@ impl Mcp {
             &self.lock(),
             id,
             revision,
-            credentials.map(Credentials::generation),
+            credentials.map(|keys| keys.generation_of(id)),
         )
     }
 }

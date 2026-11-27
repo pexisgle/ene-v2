@@ -23,7 +23,14 @@ pub(super) async fn run_connection_probe(
     let providers = services.runtime.providers();
     Ok(match &connection.config {
         ConnectionConfig::Mcp(config) => {
-            return probe_mcp_connection(services, connection, &config.command).await;
+            return probe_mcp_connection(
+                services,
+                connection,
+                &config.command,
+                created_revision,
+                credential_generation,
+            )
+            .await;
         }
         ConnectionConfig::Tts(_) if is_builtin_voicevox(connection, &providers) => {
             probe_voicevox_tts(connection, &services.runtime.voicevox()).await
@@ -71,14 +78,18 @@ async fn probe_mcp_connection(
     services: &Services,
     connection: &Connection,
     command: &str,
+    created: u64,
+    generation: u64,
 ) -> Result<Check> {
     if !connection.enabled {
         return Ok(failed(now(), "MCP 接続が無効化されています。"));
     }
     let reconnect_id = connection.id.clone();
+    let revision = connection.revision;
     services
         .runtime
         .change(move |services| {
+            check_mcp_admission(services, &reconnect_id, revision, created, generation)?;
             services.mcp.request_reconnect(reconnect_id.as_str());
             Ok(())
         })
@@ -98,20 +109,10 @@ async fn probe_mcp_connection(
     tokio::time::timeout(Duration::from_secs(timeout), async {
         loop {
             let id = connection.id.clone();
-            let revision = connection.revision;
             let state = services
                 .runtime
                 .inspect(move |services| {
-                    if !services
-                        .store
-                        .settings_repo()
-                        .connection(id.as_str())?
-                        .is_some_and(|current| current.revision == revision)
-                    {
-                        return Err(HostError::Conflict(
-                            "MCP connection changed during the check".into(),
-                        ));
-                    }
+                    check_mcp_admission(services, &id, revision, created, generation)?;
                     Ok(services
                         .mcp
                         .check_state(Some(&services.credentials), id.as_str(), revision))
@@ -128,4 +129,27 @@ async fn probe_mcp_connection(
     })
     .await
     .unwrap_or_else(|_| Ok(failed(now(), message)))
+}
+
+fn check_mcp_admission(
+    services: &crate::host::HostServices,
+    id: &ene_domain::ConnectionId,
+    revision: u64,
+    created: u64,
+    generation: u64,
+) -> Result<()> {
+    if services.credentials.generation_of(id.as_str()) != generation
+        || !services
+            .store
+            .settings_repo()
+            .connection_with_creation(id.as_str())?
+            .is_some_and(|(current, incarnation)| {
+                current.enabled && current.revision == revision && incarnation == created
+            })
+    {
+        return Err(HostError::Conflict(
+            "MCP connection changed during the check".into(),
+        ));
+    }
+    Ok(())
 }

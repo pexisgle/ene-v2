@@ -27,7 +27,7 @@ pub(super) fn reload_desired_settings(
     if settings.revision != Some(revision)
         || settings.credential_generation != credential_generation
     {
-        settings.desired = desired(store, credentials, credential_generation)?.into();
+        settings.desired = desired(store, credentials)?.into();
         settings.revision = Some(revision);
         settings.credential_generation = credential_generation;
     }
@@ -37,7 +37,6 @@ pub(super) fn reload_desired_settings(
 fn desired(
     store: &Store,
     credentials: Option<&Credentials>,
-    credential_generation: Option<u64>,
 ) -> crate::host::db::Result<Vec<(String, Desired)>> {
     let settings = store.settings_repo().settings()?;
     let no_providers = Providers::none();
@@ -57,7 +56,8 @@ fn desired(
                 connection.id.as_str().to_owned(),
                 Desired {
                     revision: connection.revision,
-                    credential_generation,
+                    credential_generation: credentials
+                        .map(|keys| keys.generation_of(connection.id.as_str())),
                     name: connection.name.clone(),
                     command: config.command.trim().to_owned(),
                     args: config.args.clone(),
