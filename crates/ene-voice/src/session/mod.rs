@@ -4,11 +4,13 @@ pub mod events;
 mod turn;
 
 pub use events::{
-    AudioSubscription, Dispatch, EndedUtterance, MAX_PROBE_CHARS, MAX_SENTENCE_CHARS,
-    MAX_STT_BYTES, MIN_STT_BYTES, MIN_STT_RMS, STT_SILENCE_WINDOW, STT_TIMEOUT, VOICE_UNAVAILABLE,
-    audio_events, finished_event, flush_event, flush_sentences, split_sentences, synthesize,
+    AudioSubscription, EndedUtterance, MAX_PROBE_CHARS, MAX_SENTENCE_CHARS, MAX_STT_BYTES,
+    MIN_STT_BYTES, MIN_STT_RMS, STT_SILENCE_WINDOW, STT_TIMEOUT, VOICE_UNAVAILABLE, audio_events,
+    finished_event, flush_event, flush_sentences, split_sentences, synthesize,
     synthesize_for_probe,
 };
+
+use events::Dispatch;
 
 use crate::{
     engine::TtsEngine,
@@ -186,6 +188,16 @@ impl VoicePipeline {
         self.lock().owners.contains_key(companion)
     }
 
+    /// The audio stream currently bound to this companion and client.
+    pub fn output_subscription(&self, companion: &str, client: &str) -> Option<String> {
+        let state = self.lock();
+        let owner = state
+            .owners
+            .get(companion)
+            .filter(|owner| owner.client_id == client)?;
+        Some(state.streams.get(&owner.client_id)?.subscription.clone())
+    }
+
     pub fn streaming(&self, companion: &str) -> bool {
         self.lock().owners.get(companion).is_some_and(|owner| {
             owner
@@ -340,35 +352,6 @@ impl VoicePipeline {
             state.transcriptions.pop_front();
         }
         true
-    }
-
-    /// Returns the active utterance generation id for `companion`, if subscribed.
-    pub fn generation_of(&self, companion: &str) -> Option<u64> {
-        self.lock()
-            .owners
-            .get(companion)
-            .map(|owner| owner.generation_id)
-    }
-
-    /// Attempts direct event delivery against `generation_id` without modifying pending work.
-    pub fn deliver_raw(
-        &self,
-        companion: &str,
-        generation_id: u64,
-        event: VoiceOutputEvent,
-    ) -> Dispatch {
-        let mut state = self.lock();
-        deliver_state(&mut state, companion, generation_id, event)
-    }
-
-    /// Returns whether any synthesis work queue is currently active.
-    pub fn has_active_work(&self) -> bool {
-        !self.lock().works.is_empty()
-    }
-
-    /// Returns whether `companion` currently owns an active audio route.
-    pub fn has_owner(&self, companion: &str) -> bool {
-        self.lock().owners.contains_key(companion)
     }
 }
 

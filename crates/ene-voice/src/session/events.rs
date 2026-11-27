@@ -43,7 +43,7 @@ pub struct EndedUtterance {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Dispatch {
+pub(super) enum Dispatch {
     Sent,
     Stale,
     Full,

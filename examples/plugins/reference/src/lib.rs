@@ -174,6 +174,16 @@ mod guest {
     #[plugin_fn]
     pub fn ene_invoke(Json(operation): Json<Operation>) -> FnResult<Json<Value>> {
         match operation {
+            Operation::Transcribe { request } => {
+                if request.sample_rate != 24_000 || request.pcm_base64.is_empty() {
+                    return Err(
+                        extism_pdk::Error::msg("expected nonempty 24 kHz fixture audio").into(),
+                    );
+                }
+                return Ok(Json(serde_json::to_value(TranscriptionResult {
+                    text: "reference transcript".into(),
+                })?));
+            }
             Operation::Character { target, event } => {
                 if matches!(
                     event,

@@ -378,7 +378,7 @@ async fn process_starts_over_a_companion_whose_model_was_never_bound() {
 /// HTTP/2, and the host's plain listener accepts h2c prior knowledge.
 #[cfg(unix)]
 #[tokio::test]
-async fn process_client_opens_the_bidirectional_voice_stream() {
+async fn process_transcribes_committed_audio_through_a_wasm_provider() {
     let temp = tempfile::tempdir().unwrap();
     let state = temp.path().join("state");
     let runtime = temp.path().join("runtime");
@@ -454,7 +454,7 @@ async fn process_client_opens_the_bidirectional_voice_stream() {
         .expect("the microphone stream opens");
     call.send(ene_rpc::AudioInputChunk {
         client_id: "c1".into(),
-        pcm_data: vec![0; 1_024],
+        pcm_data: [0xb0, 0x04, 0x50, 0xfb].repeat(2_400),
         sample_rate: 24_000,
         ..Default::default()
     })
@@ -469,6 +469,23 @@ async fn process_client_opens_the_bidirectional_voice_stream() {
     .expect("the answer is not a transport failure")
     .expect("the host sends a frame");
     assert!(answered.view().is_speaking);
+    call.send(ene_rpc::AudioInputChunk::default())
+        .await
+        .expect("commit the utterance");
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        call.message::<ene_rpc::TranscriptionEvent>(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    assert_eq!(result.view().text, "reference transcript");
+    assert!(result.view().is_final);
+    assert_eq!(
+        result.view().transcription_id,
+        answered.view().transcription_id
+    );
     stop(&mut child).await;
 }
 

@@ -159,6 +159,9 @@ pub struct StreamingResampler {
     inner: rubato::Fft<f32>,
     pending: Vec<f32>,
     output: Vec<f32>,
+    input_frames: usize,
+    emitted_frames: usize,
+    leading_delay: Option<usize>,
 }
 
 impl std::fmt::Debug for StreamingResampler {
@@ -174,9 +177,12 @@ impl std::fmt::Debug for StreamingResampler {
 
 impl StreamingResampler {
     pub fn new(from: u32, to: u32) -> Result<Self, ResampleError> {
-        Self::with_chunk(from, to, STREAM_CHUNK)
+        let mut resampler = Self::with_chunk(from, to, STREAM_CHUNK)?;
+        resampler.leading_delay = Some(resampler.inner.output_delay());
+        Ok(resampler)
     }
 
+    /// Keeps each block's full output, including filter delay, for fixed-frame consumers.
     pub fn with_chunk(from: u32, to: u32, chunk: usize) -> Result<Self, ResampleError> {
         let inner = rubato::Fft::<f32>::new(
             from as usize,
@@ -192,65 +198,74 @@ impl StreamingResampler {
             inner,
             pending: Vec::with_capacity(chunk * 2),
             output: vec![0.; chunk * 4],
+            input_frames: 0,
+            emitted_frames: 0,
+            leading_delay: None,
         })
     }
 
     pub fn reset(&mut self) {
         self.inner.reset();
         self.pending.clear();
+        self.input_frames = 0;
+        self.emitted_frames = 0;
+        if let Some(delay) = self.leading_delay.as_mut() {
+            *delay = self.inner.output_delay();
+        }
     }
 
     pub fn finish(&mut self) -> Result<Vec<f32>, ResampleError> {
-        if self.pending.is_empty() {
-            self.reset();
-            return Ok(Vec::new());
+        let mut expected = (self.inner.resample_ratio() * self.input_frames as f64).ceil() as usize;
+        if self.leading_delay.is_none() && self.input_frames > 0 {
+            expected += self.inner.output_delay();
         }
-        let remainder = self.pending.len();
-        let want = self.inner.input_frames_next();
-        let pad_zeroes = want.saturating_sub(remainder % want);
-        if pad_zeroes > 0 && !remainder.is_multiple_of(want) {
-            self.pending.resize(remainder + pad_zeroes, 0.0);
+        let remaining = expected.saturating_sub(self.emitted_frames);
+        let mut tail = Vec::new();
+        while tail.len() < remaining {
+            // Rubato pads a partial frame, including zero-input frames used to drain its delay.
+            self.convert_next(&mut tail)?;
         }
-        let mut out = self.push(&[])?;
-        let delay = self.inner.output_delay();
-        let expected_tail =
-            ((remainder as f64) * f64::from(self.to) / f64::from(self.from)).ceil() as usize;
-        if delay > 0 && out.len() < expected_tail {
-            let flush_pad = vec![0.0; want];
-            out.extend(self.push(&flush_pad)?);
-        }
-        if out.len() > expected_tail {
-            out.truncate(expected_tail);
-        }
+        tail.truncate(remaining);
         self.reset();
-        Ok(out)
+        Ok(tail)
     }
 
     /// Converts everything that completes a chunk, keeping the remainder.
     pub fn push(&mut self, input: &[f32]) -> Result<Vec<f32>, ResampleError> {
+        self.input_frames += input.len();
         self.pending.extend_from_slice(input);
         let mut out = Vec::new();
-        loop {
-            let want = self.inner.input_frames_next();
-            if self.pending.len() < want {
-                break;
-            }
-            let source =
-                InterleavedSlice::new(&self.pending[..want], 1, want).map_err(convert_error)?;
-            let frames = self.inner.output_frames_max();
-            if self.output.len() < frames {
-                self.output.resize(frames, 0.);
-            }
-            let mut sink = InterleavedSlice::new_mut(&mut self.output[..frames], 1, frames)
-                .map_err(convert_error)?;
-            let (consumed, produced) = self
-                .inner
-                .process_into_buffer(&source, &mut sink, None)
-                .map_err(convert_error)?;
-            out.extend_from_slice(&self.output[..produced]);
-            self.pending.drain(..consumed);
+        while self.pending.len() >= self.inner.input_frames_next() {
+            self.convert_next(&mut out)?;
         }
+        self.emitted_frames += out.len();
         Ok(out)
+    }
+
+    fn convert_next(&mut self, out: &mut Vec<f32>) -> Result<(), ResampleError> {
+        let want = self.inner.input_frames_next();
+        let count = self.pending.len().min(want);
+        let source =
+            InterleavedSlice::new(&self.pending[..count], 1, count).map_err(convert_error)?;
+        let frames = self.inner.output_frames_max();
+        if self.output.len() < frames {
+            self.output.resize(frames, 0.);
+        }
+        let mut sink = InterleavedSlice::new_mut(&mut self.output[..frames], 1, frames)
+            .map_err(convert_error)?;
+        let indexing = (count < want).then(|| rubato::Indexing::new().partial_len(count));
+        let (consumed, produced) = self
+            .inner
+            .process_into_buffer(&source, &mut sink, indexing.as_ref())
+            .map_err(convert_error)?;
+        let skip = self.leading_delay.as_mut().map_or(0, |delay| {
+            let skip = (*delay).min(produced);
+            *delay -= skip;
+            skip
+        });
+        out.extend_from_slice(&self.output[skip..produced]);
+        self.pending.drain(..consumed.min(count));
+        Ok(())
     }
 
     // The finite-clip path compensates for filter latency and resets the FFT
@@ -295,10 +310,36 @@ mod tests {
         }
         let expected = (fed as f64 * 2.).round() as usize;
         assert!(
-            produced + STREAM_CHUNK * 2 >= expected,
+            produced + STREAM_CHUNK * 2 + up.inner.output_delay() >= expected,
             "produced {produced} against about {expected}"
         );
         assert!(produced <= expected, "no more than the input produces");
+        assert_eq!(produced + up.finish().unwrap().len(), expected);
+    }
+
+    #[test]
+    fn streaming_ends_match_the_finite_clip_with_an_impulse_on_the_last_frame() {
+        for (from, to) in [
+            (24_000, 48_000),
+            (48_000, 24_000),
+            (44_100, 24_000),
+            (24_000, 44_100),
+        ] {
+            let mut stream = StreamingResampler::new(from, to).unwrap();
+            let block = stream.inner.input_frames_next();
+            for len in [block - 1, block, block * 2, block * 2 + 1] {
+                let mut input = vec![0.; len];
+                input[len - 1] = 1.0;
+                let reference = StreamingResampler::new(from, to)
+                    .unwrap()
+                    .process_clip(&input)
+                    .unwrap();
+                let mut output = stream.push(&input).unwrap();
+                output.extend(stream.finish().unwrap());
+                assert_eq!(output, reference, "{from}->{to}, {len} frames");
+                assert!(output.iter().any(|value| value.abs() > 0.05));
+            }
+        }
     }
 
     fn pcm_bytes(samples: impl IntoIterator<Item = i16>) -> Vec<u8> {

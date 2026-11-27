@@ -43,7 +43,14 @@ pub(crate) fn subscribe_audio(
 
 /// Hands already-synthesized audio to the subscribed client as one utterance.
 /// The speech floor is not taken, so a turn in flight keeps it.
-pub(crate) fn play_once(voice: &Voice, companion: &str, pcm: Vec<u8>, rate: u32) -> Result<()> {
+pub(crate) fn play_once(
+    voice: &Voice,
+    companion: &str,
+    client: &str,
+    subscription: &str,
+    pcm: Vec<u8>,
+    rate: u32,
+) -> Result<()> {
     let pcm = ene_voice::wire_pcm(pcm, rate, &mut None)
         .map_err(|error| HostError::Unavailable(error.to_string()))?;
     if pcm.is_empty() {
@@ -51,7 +58,7 @@ pub(crate) fn play_once(voice: &Voice, companion: &str, pcm: Vec<u8>, rate: u32)
             ("the TTS engine returned no audio").into(),
         ));
     }
-    Ok(voice.play(companion, &pcm)?)
+    Ok(voice.play(companion, client, subscription, &pcm)?)
 }
 
 pub(crate) fn on_stream_text(world: &mut World, companion: &str, text: &str) {

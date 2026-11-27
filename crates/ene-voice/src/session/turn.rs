@@ -50,24 +50,52 @@ impl VoicePipeline {
     }
 
     /// Plays one already-synthesized utterance without taking the speech floor.
-    pub fn play(&self, companion: &str, pcm: &[u8]) -> Result<(), VoiceSessionError> {
-        let mut state = self.lock();
-        let Some(owner) = state.owners.get(companion) else {
+    pub fn play(
+        &self,
+        companion: &str,
+        client: &str,
+        subscription: &str,
+        pcm: &[u8],
+    ) -> Result<(), VoiceSessionError> {
+        let State {
+            next_generation,
+            owners,
+            streams,
+            ..
+        } = &mut *self.lock();
+        if owners
+            .get(companion)
+            .is_none_or(|owner| owner.client_id != client)
+        {
             return Err(VoiceSessionError::NoSubscriber);
-        };
-        let client_id = owner.client_id.clone();
-        state.next_generation += 1;
-        let generation_id = state.next_generation;
-        let utterance_id = uuid::Uuid::new_v4().to_string();
-        let events = audio_events(companion, &utterance_id, generation_id, 0, pcm);
-        let Some(stream) = state.streams.get(&client_id) else {
+        }
+        let Some(stream) = streams
+            .get(client)
+            .filter(|stream| stream.subscription == subscription)
+        else {
             return Err(VoiceSessionError::StreamMissing);
         };
-        for event in events {
-            stream.audio.try_send(event).map_err(|error| match error {
+        let count = pcm.len().div_ceil(events::AUDIO_CHUNK_BYTES) + 1;
+        let permits = stream
+            .audio
+            .try_reserve_many(count)
+            .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => VoiceSessionError::AudioQueueFull,
                 mpsc::error::TrySendError::Closed(_) => VoiceSessionError::StreamClosed,
             })?;
+        *next_generation += 1;
+        let generation_id = *next_generation;
+        let utterance_id = uuid::Uuid::new_v4().to_string();
+        let events = audio_events(companion, &utterance_id, generation_id, 0, pcm)
+            .into_iter()
+            .chain(std::iter::once(finished_event(
+                companion,
+                &utterance_id,
+                generation_id,
+                1,
+            )));
+        for (permit, event) in permits.zip(events) {
+            permit.send(event);
         }
         Ok(())
     }

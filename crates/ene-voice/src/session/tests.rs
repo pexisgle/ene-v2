@@ -69,7 +69,7 @@ fn finished(events: &[VoiceOutputEvent]) -> Option<u32> {
 
 async fn settle(voice: &VoicePipeline) {
     tokio::time::timeout(Duration::from_secs(5), async {
-        while voice.has_active_work() {
+        while !voice.lock().works.is_empty() {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
@@ -98,6 +98,40 @@ fn sentences_split_on_the_design_terminators() {
     assert_eq!(sentences.len(), 1);
     assert_eq!(sentences[0].chars().count(), MAX_SENTENCE_CHARS);
     assert_eq!(buffer.chars().count(), 5);
+}
+
+#[tokio::test]
+async fn a_voice_sample_has_a_terminal_event_on_its_original_subscription() {
+    let voice = VoicePipeline::new(tokio::runtime::Handle::current());
+    let first = voice.register("client");
+    voice.publish("ene", "client");
+    let expected = voice.output_subscription("ene", "client").unwrap();
+    assert_eq!(expected, first.subscription_id);
+    let mut replacement = voice.register("client");
+    let pcm = pcm_bytes([300, 600, 300]);
+    assert!(voice.play("ene", "client", &expected, &pcm).is_err());
+    assert!(replacement.receiver.try_recv().is_err());
+    assert_eq!(voice.output_subscription("ene", "unrelated"), None);
+    let oversized = vec![0; AUDIO_QUEUE * events::AUDIO_CHUNK_BYTES];
+    assert!(
+        voice
+            .play("ene", "client", &replacement.subscription_id, &oversized)
+            .is_err()
+    );
+    assert!(replacement.receiver.try_recv().is_err());
+    voice
+        .play("ene", "client", &replacement.subscription_id, &pcm)
+        .unwrap();
+    let VoiceOutputEvent::Chunk(audio) = replacement.receiver.try_recv().unwrap() else {
+        panic!("expected one audio chunk");
+    };
+    let VoiceOutputEvent::Finished(end) = replacement.receiver.try_recv().unwrap() else {
+        panic!("expected the terminal event after the audio");
+    };
+    assert_eq!(audio.pcm_data, pcm);
+    assert_eq!(end.generation_id, audio.generation_id);
+    assert_eq!(end.utterance_id, audio.utterance_id);
+    assert_eq!(end.total_sentences, 1);
 }
 
 #[tokio::test]
@@ -305,7 +339,7 @@ async fn a_flushed_inflight_synthesis_cannot_emit_into_the_next_generation() {
     voice.begin("ene", Arc::new(FakeTts { fail: false }), String::new());
     voice.speak("ene", "new。");
     voice.end_turn("ene");
-    let generation = voice.generation_of("ene").unwrap();
+    let generation = voice.lock().owners["ene"].generation_id;
     engine.release.notify_one();
     let collected = tokio::time::timeout(Duration::from_secs(5), async {
         let mut collected = Vec::new();
@@ -423,7 +457,7 @@ async fn a_stalled_owner_does_not_block_another() {
         flush,
         VoiceOutputEvent::Flush(flush) if flush.reason == FlushReason::Cancelled
     ));
-    assert!(!voice.has_owner("ene"));
+    assert!(!voice.owns("ene"));
 }
 
 #[tokio::test]

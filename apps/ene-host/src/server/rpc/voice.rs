@@ -204,7 +204,7 @@ impl w::VoiceService for Services {
         }
         // Synthesis is a network call, so it happens here rather than on the
         // ECS thread; only the store lookups and the dispatch run inside it.
-        let (source, voice_name, companion) = self
+        let (source, voice_name, companion, subscription) = self
             .runtime
             .inspect({
                 let client_id = client_id.clone();
@@ -222,6 +222,15 @@ impl w::VoiceService for Services {
                                 )
                             })?,
                     };
+                    require_active_output(store, &companion, &client_id)?;
+                    let subscription = services
+                        .voice
+                        .output_subscription(&companion, &client_id)
+                        .ok_or_else(|| {
+                        HostError::FailedPrecondition(
+                            "the client has no audio subscription for this companion".into(),
+                        )
+                    })?;
                     let companion_record = store.companion_repo().companion(&companion)?;
                     let source = voice::companion_tts_source(
                         &services.voice_context(),
@@ -241,7 +250,7 @@ impl w::VoiceService for Services {
                         .as_ref()
                         .and_then(|record| voice::parse_binding(record).voice_id)
                         .unwrap_or_default();
-                    Ok((source, voice, companion))
+                    Ok((source, voice, companion, subscription))
                 }
             })
             .await
@@ -250,11 +259,40 @@ impl w::VoiceService for Services {
             .await
             .map_err(|error| ConnectError::unavailable(error.to_string()))?;
         self.runtime
-            .inspect(move |services| voice::play_once(&services.voice, &companion, pcm, rate))
+            .inspect(move |services| {
+                require_active_output(&services.store, &companion, &client_id)?;
+                voice::play_once(
+                    &services.voice,
+                    &companion,
+                    &client_id,
+                    &subscription,
+                    pcm,
+                    rate,
+                )
+            })
             .await
             .map_err(ConnectError::from)?;
         Response::ok(w::Empty::default())
     }
+}
+
+fn require_active_output(
+    store: &crate::host::db::Store,
+    companion: &str,
+    client: &str,
+) -> crate::host::db::Result<()> {
+    if store
+        .client_repo()
+        .activation(companion)?
+        .and_then(|owner| owner.client_id)
+        .as_deref()
+        != Some(client)
+    {
+        return Err(HostError::FailedPrecondition(
+            "the client no longer owns this companion's audio output".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn setup_error(error: SetupError) -> ConnectError {
@@ -731,23 +769,28 @@ mod tests {
     #[tokio::test]
     async fn short_or_empty_utterance_clears_speaking_indicator() {
         use connectrpc::StreamMessage;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use w::VoiceService;
 
-        struct EmptyStt;
+        #[derive(Default)]
+        struct EmptyStt(AtomicUsize);
         impl SttEngine for EmptyStt {
             fn transcribe<'a>(
                 &'a self,
                 _: Vec<u8>,
                 _: u32,
             ) -> voice::BoxFuture<'a, voice::HttpResult<String>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async { Ok(String::new()) })
             }
         }
 
         let state = tempfile::tempdir().unwrap();
         let runtime = Runtime::start(state.path()).await.unwrap();
+        let recognizer = Arc::new(EmptyStt::default());
+        let installed = Arc::clone(&recognizer);
         runtime
-            .inspect(|services| {
+            .inspect(move |services| {
                 let store = &services.store;
                 store.client_repo().register_client(&ClientDeclaration {
                     id: "c1",
@@ -758,7 +801,7 @@ mod tests {
                     expected_revision: 0,
                 })?;
                 store.client_repo().activate("ene", Some("c1"))?;
-                services.engine_overrides.write().stt = Some(Arc::new(EmptyStt));
+                services.engine_overrides.write().stt = Some(installed);
                 Ok(())
             })
             .await
@@ -775,7 +818,7 @@ mod tests {
             StreamMessage::from_message(&w::AudioInputChunk {
                 client_id: "c1".into(),
                 sample_rate: 24_000,
-                pcm_data: vec![1; 4_000], // empty transcript from EmptyStt
+                pcm_data: [0xb0, 0x04, 0x50, 0xfb].repeat(2_400),
                 is_companion_speaking: false,
                 ..Default::default()
             }),
@@ -804,6 +847,7 @@ mod tests {
         assert!(!events[1].is_speaking && !events[1].is_final);
         assert!(events[2].is_speaking);
         assert!(!events[3].is_speaking && !events[3].is_final);
+        assert_eq!(recognizer.0.load(Ordering::SeqCst), 1);
         runtime.shutdown().await.unwrap();
     }
 }

@@ -10,7 +10,6 @@ use crate::host::{
 };
 use bevy_ecs::prelude::World;
 use ene_rpc as w;
-use ene_voice::Dispatch;
 use std::sync::Arc;
 
 struct FakeTts {
@@ -45,22 +44,9 @@ impl SttEngine for FakeStt {
     }
 }
 
-fn test_runtime() -> tokio::runtime::Handle {
-    tokio::runtime::Handle::try_current().unwrap_or_else(|_| {
-        Box::leak(Box::new(
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap(),
-        ))
-        .handle()
-        .clone()
-    })
-}
-
 fn test_world() -> World {
     let mut world = World::new();
-    world.insert_resource(Voice::new(test_runtime()));
+    world.insert_resource(Voice::new(tokio::runtime::Handle::current()));
     world.insert_resource(Engines {
         tts: Some(Arc::new(FakeTts { fail: false })),
         stt: Some(Arc::new(FakeStt)),
@@ -97,55 +83,45 @@ fn voice_world(store: &Store) -> World {
 #[tokio::test]
 async fn a_flush_invalidates_the_older_generation() {
     let mut world = test_world();
-    let subscription = world.resource::<Voice>().register("c1");
-    let mut events = subscription.control;
-    let _audio = subscription.receiver;
+    let mut subscription = world.resource::<Voice>().register("c1");
     world.resource::<Voice>().publish("ene", "c1");
     on_stream_text(&mut world, "ene", "ひとつめ。");
-    let first = world.resource::<Voice>().generation_of("ene").unwrap();
-    assert_eq!(first, 1);
-
     flush(
         world.get_resource::<Voice>(),
         "ene",
         w::FlushReason::BargeIn,
     )
     .unwrap();
-    match events.try_recv().expect("a flush reaches the client") {
-        ene_voice::VoiceOutputEvent::Flush(flush) => {
-            assert_eq!(flush.flush_generation_id, first);
-            assert_eq!(flush.reason, ene_voice::FlushReason::BargeIn);
-        }
-        other => panic!("expected a flush, got {other:?}"),
-    }
-    let stale = ene_voice::VoiceOutputEvent::Chunk(ene_voice::AudioChunk {
-        utterance_id: "one".into(),
-        generation_id: first,
-        ..Default::default()
-    });
-    assert!(matches!(
-        world.resource::<Voice>().deliver_raw("ene", first, stale),
-        Dispatch::Stale
-    ));
+    let ene_voice::VoiceOutputEvent::Flush(flush) = subscription
+        .control
+        .try_recv()
+        .expect("a flush reaches the client")
+    else {
+        panic!("expected a flush event");
+    };
+    assert_eq!(flush.reason, ene_voice::FlushReason::BargeIn);
 
     on_stream_text(&mut world, "ene", "ふたつめ。");
-    let second = world.resource::<Voice>().generation_of("ene").unwrap();
-    assert!(second > first);
-    let current = ene_voice::VoiceOutputEvent::Chunk(ene_voice::AudioChunk {
-        utterance_id: "two".into(),
-        generation_id: second,
-        ..Default::default()
-    });
-    assert!(matches!(
-        world
-            .resource::<Voice>()
-            .deliver_raw("ene", second, current),
-        Dispatch::Sent
-    ));
+    let current = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        subscription.receiver.recv(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let ene_voice::VoiceOutputEvent::Chunk(chunk) = current else {
+        panic!("expected audio from the new generation");
+    };
+    assert!(chunk.generation_id > flush.flush_generation_id);
+    let expected: Vec<_> = "ふたつめ。"
+        .bytes()
+        .flat_map(|byte| i16::from(byte).to_le_bytes())
+        .collect();
+    assert_eq!(chunk.pcm_data, expected);
 }
 
-#[test]
-fn a_peer_holding_the_floor_stops_the_waiting_companions_turn() {
+#[tokio::test]
+async fn a_peer_holding_the_floor_stops_the_waiting_companions_turn() {
     use bevy_ecs::prelude::On;
     use rig_ecs::prelude::StopTurn;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -171,8 +147,8 @@ fn a_peer_holding_the_floor_stops_the_waiting_companions_turn() {
     assert!(!voice.streaming("ene"));
 }
 
-#[test]
-fn turn_end_releases_the_floor_and_relays_the_utterance() {
+#[tokio::test]
+async fn turn_end_releases_the_floor_and_relays_the_utterance() {
     let (_root, store) = store_with_client();
     let mut world = voice_world(&store);
     world.resource::<Voice>().publish("ene", "c1");
@@ -275,8 +251,7 @@ fn voice_connection_prefers_enabled_connection_over_earlier_disabled_one() {
         .settings_repo()
         .update_settings(rev, &[(disabled, 0), (enabled, 0)])
         .unwrap();
-    let world = voice_world(&store);
-    let selected = voice_connection(world.get_resource::<Store>(), ConnectionKind::Stt).unwrap();
+    let selected = voice_connection(Some(&store), ConnectionKind::Stt).unwrap();
     assert_eq!(selected.id.as_str(), "stt-enabled");
 }
 
