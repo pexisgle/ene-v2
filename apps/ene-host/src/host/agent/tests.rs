@@ -165,7 +165,7 @@ fn messages_publish_once_oldest_first_across_additions_and_restores() {
     app.update();
     app.world_mut().resource_mut::<Notifier>().flush();
     let messages: Vec<w::Message> = std::iter::from_fn(|| events.try_recv().ok())
-        .map(|event| match event.event.unwrap() {
+        .map(|event| match event.event.as_ref().unwrap() {
             w::notification::Event::MessageCreated(created) => {
                 created.message.as_option().unwrap().clone()
             }
@@ -207,7 +207,7 @@ fn messages_publish_once_oldest_first_across_additions_and_restores() {
     app.update();
     app.world_mut().resource_mut::<Notifier>().flush();
     let texts: Vec<String> = std::iter::from_fn(|| events.try_recv().ok())
-        .map(|event| match event.event.unwrap() {
+        .map(|event| match event.event.as_ref().unwrap() {
             w::notification::Event::MessageCreated(created) => {
                 created.message.as_option().unwrap().text.clone()
             }

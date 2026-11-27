@@ -10,6 +10,12 @@ pub(crate) struct SnapshotReader<'a> {
     pub(crate) providers: &'a providers::Providers,
 }
 
+pub(crate) struct Subscription {
+    pub(crate) cursor: w::Cursor,
+    pub(crate) backlog: Vec<Arc<w::Notification>>,
+    pub(crate) live: broadcast::Receiver<Arc<w::Notification>>,
+}
+
 impl<'a> From<&'a HostServices> for SnapshotReader<'a> {
     fn from(services: &'a HostServices) -> Self {
         Self {
@@ -127,11 +133,7 @@ impl SnapshotReader<'_> {
         &self,
         client_id: Option<&str>,
         cursor: Option<&w::Cursor>,
-    ) -> Result<(
-        w::Snapshot,
-        broadcast::Receiver<w::Notification>,
-        Option<Vec<w::Notification>>,
-    )> {
+    ) -> Result<Subscription> {
         let store = self.store;
         if let Some(client_id) = client_id.filter(|id| !id.is_empty()) {
             ene_domain::validate_id(client_id)?;
@@ -139,13 +141,25 @@ impl SnapshotReader<'_> {
                 return Err(HostError::NotFound("client not found".into()));
             }
         }
-        let (receiver, replayed) = {
-            let notifier = self.notifier;
-            (
-                notifier.subscribe(),
-                cursor.and_then(|cursor| notifier.replay(cursor)),
-            )
+        let notifier = self.notifier;
+        let live = notifier.subscribe();
+        let (cursor_at_start, backlog) = match cursor.and_then(|cursor| notifier.replay(cursor)) {
+            Some(events) => (notifier.cursor(), events),
+            None => {
+                let snapshot = self.get()?;
+                let initial = Arc::new(w::Notification {
+                    cursor: snapshot.cursor.clone(),
+                    kind: "initial_state".into(),
+                    event: Some(w::notification::Event::InitialState(Box::new(snapshot))),
+                    ..Default::default()
+                });
+                (notifier.cursor(), vec![initial])
+            }
         };
-        Ok((self.get()?, receiver, replayed))
+        Ok(Subscription {
+            cursor: cursor_at_start,
+            backlog,
+            live,
+        })
     }
 }

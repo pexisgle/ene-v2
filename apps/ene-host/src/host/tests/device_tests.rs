@@ -502,7 +502,7 @@ struct ScreenshotAudit<'a> {
 fn assert_redacted_screenshot_effects(
     harness: &Harness,
     model: &MockCompletionModel,
-    events: &mut tokio::sync::broadcast::Receiver<w::Notification>,
+    events: &mut tokio::sync::broadcast::Receiver<Arc<w::Notification>>,
     audit: &ScreenshotAudit<'_>,
 ) {
     let &ScreenshotAudit {
@@ -519,7 +519,8 @@ fn assert_redacted_screenshot_effects(
     }));
     let mut result_event = false;
     while let Ok(notification) = events.try_recv() {
-        if let Some(w::notification::Event::DeviceOperationResult(result)) = notification.event
+        if let Some(w::notification::Event::DeviceOperationResult(result)) =
+            notification.event.as_ref()
             && result.operation_id == operation_id
         {
             assert!(!result.output.contains(encoded));

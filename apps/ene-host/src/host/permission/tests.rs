@@ -380,7 +380,7 @@ impl DecisionWorld {
             .expect("one held approval")
     }
 
-    fn events(&mut self) -> Vec<w::Notification> {
+    fn events(&mut self) -> Vec<Arc<w::Notification>> {
         let mut receiver = self.app.world().resource::<Notifier>().subscribe();
         self.app.world_mut().resource_mut::<Notifier>().flush();
         let mut seen = Vec::new();
@@ -392,7 +392,7 @@ impl DecisionWorld {
 }
 
 /// What one notification stream says about cards and resolutions.
-fn cards(events: &[w::Notification]) -> Vec<String> {
+fn cards(events: &[Arc<w::Notification>]) -> Vec<String> {
     events
         .iter()
         .filter_map(|event| {
@@ -407,7 +407,7 @@ fn cards(events: &[w::Notification]) -> Vec<String> {
         .collect()
 }
 
-fn notices(events: &[w::Notification], code: &str) -> usize {
+fn notices(events: &[Arc<w::Notification>], code: &str) -> usize {
     events
         .iter()
         .filter(|event| {

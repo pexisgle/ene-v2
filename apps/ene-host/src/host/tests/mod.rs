@@ -461,16 +461,17 @@ fn a_subscription_resumes_from_its_cursor_without_a_gap_or_a_duplicate() {
         notifier: world.resource::<Notifier>(),
         health: world.resource::<super::HostState>(),
     };
-    let (snapshot, mut receiver, replayed) =
-        snapshot_reader.subscribe(None, Some(&before)).unwrap();
-    let replayed = replayed.expect("a cursor from this epoch is resumable");
+    let super::Subscription {
+        cursor,
+        backlog: replayed,
+        live: mut receiver,
+    } = snapshot_reader.subscribe(None, Some(&before)).unwrap();
     assert_eq!(replayed.len(), 1);
     assert_eq!(host_event(&replayed[0]), "one");
     let seq = replayed[0].cursor.as_option().unwrap().seq;
     assert_eq!(
-        snapshot.cursor.as_option().unwrap().seq,
-        seq,
-        "the snapshot is at the replay's end"
+        cursor.seq, seq,
+        "the subscription begins at the replay's end"
     );
     assert!(
         receiver.try_recv().is_err(),

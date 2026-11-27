@@ -321,7 +321,7 @@ fn assert_response_check_and_watch_turns(
 
 fn assert_eye_notifications_and_dispositions(
     harness: &mut Harness,
-    notifications: &mut tokio::sync::broadcast::Receiver<w::Notification>,
+    notifications: &mut tokio::sync::broadcast::Receiver<Arc<w::Notification>>,
     head: &MockCompletionModel,
 ) -> String {
     let _discarded = head;
@@ -332,7 +332,7 @@ fn assert_eye_notifications_and_dispositions(
     let mut received_frame = None;
     let mut evaluated_frame = None;
     while let Ok(notification) = notifications.try_recv() {
-        match notification.event {
+        match notification.event.as_ref() {
             Some(w::notification::Event::TurnEvent(turn)) => {
                 if let Some(result) = turn.eye_report.as_option() {
                     results.push((

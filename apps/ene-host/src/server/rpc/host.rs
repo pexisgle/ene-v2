@@ -1,11 +1,13 @@
 //! Host snapshot, subscription and companion/mind services.
 use super::Services;
-use crate::host::{self, mind};
+use crate::host::{self, Subscription, mind};
 use connectrpc::{
-    ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream,
+    CodecFormat, ConnectError, Encodable, RequestContext, Response, ServiceRequest, ServiceResult,
+    ServiceStream,
 };
 use ene_rpc as w;
 use futures_util::StreamExt;
+use std::sync::Arc;
 
 #[expect(refining_impl_trait, reason = "Connect boxes futures")]
 impl w::HostService for Services {
@@ -32,7 +34,7 @@ impl w::HostService for Services {
         &self,
         _: RequestContext,
         request: ServiceRequest<'_, w::SubscribeRequest>,
-    ) -> ServiceResult<ServiceStream<w::Notification>> {
+    ) -> ServiceResult<ServiceStream<NotificationBody>> {
         let subscriber = (!request.client_id.is_empty()).then(|| request.client_id.to_owned());
         let diagnostics = request.include_diagnostics;
         let subscriber_view = subscriber.clone();
@@ -45,7 +47,11 @@ impl w::HostService for Services {
         // stale cursor (or a gap) falls back to a fresh snapshot. The replay
         // and the receiver come from one host operation, so a tick cannot slip
         // an event between them.
-        let (snapshot, mut events, replayed) = self
+        let Subscription {
+            cursor: target_cursor,
+            backlog,
+            mut live,
+        } = self
             .runtime
             .inspect(move |services| {
                 host::SnapshotReader::from(services)
@@ -53,46 +59,31 @@ impl w::HostService for Services {
             })
             .await
             .map_err(ConnectError::from)?;
-        let target_cursor = snapshot.cursor.clone();
-        let start = match replayed {
-            Some(events) => Start::Replay(events),
-            None => Start::Snapshot(Box::new(w::Notification {
-                cursor: snapshot.cursor.clone(),
-                kind: "initial_state".into(),
-                event: Some(w::notification::Event::InitialState(Box::new(snapshot))),
-                ..Default::default()
-            })),
-        };
         let stream = async_stream::stream! {
-            match start {
-                Start::Replay(events) => {
-                    for event in events {
-                        if visible(&event, subscriber_view.as_deref(), diagnostics) {
-                            yield Ok(event);
-                        }
-                    }
+            for event in backlog {
+                if visible(&event, subscriber_view.as_deref(), diagnostics) {
+                    yield Ok(NotificationBody(event));
                 }
-                Start::Snapshot(initial) => yield Ok(*initial),
             }
             loop {
-                match events.recv().await {
+                match live.recv().await {
                     Ok(event) => {
                         if visible(&event, subscriber_view.as_deref(), diagnostics) {
-                            yield Ok(event);
+                            yield Ok(NotificationBody(event));
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        yield Ok(w::Notification {
+                        yield Ok(NotificationBody(Arc::new(w::Notification {
                             kind: "resync".into(),
                             event: Some(w::notification::Event::ResyncRequired(Box::new(
                                 w::ResyncRequired {
                                     reason: "subscription lagged".into(),
-                                    target_cursor: target_cursor.clone(),
+                                    target_cursor: Some(target_cursor).into(),
                                     ..Default::default()
                                 },
                             ))),
                             ..Default::default()
-                        });
+                        })));
                         break;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -268,11 +259,12 @@ impl w::HostService for Services {
     }
 }
 
-/// How a subscription starts: replayed events, or a snapshot when resuming is
-/// not possible.
-enum Start {
-    Replay(Vec<w::Notification>),
-    Snapshot(Box<w::Notification>),
+pub(crate) struct NotificationBody(Arc<w::Notification>);
+
+impl Encodable<w::Notification> for NotificationBody {
+    fn encode(&self, codec: CodecFormat) -> Result<bytes::Bytes, ConnectError> {
+        self.0.as_ref().encode(codec)
+    }
 }
 
 /// A notification addressed to one client is not sent to another.
@@ -361,7 +353,7 @@ mod tests {
                 .unwrap()
                 .body
         };
-        let replayed = stream.next().await.unwrap().unwrap();
+        let NotificationBody(replayed) = stream.next().await.unwrap().unwrap();
         assert_eq!(replayed.client_id.as_deref(), Some("c1"));
         assert!(
             matches!(replayed.event, Some(w::notification::Event::Generic(ref item)) if item.kind == "replayed")
@@ -381,7 +373,7 @@ mod tests {
                 .await
                 .unwrap()
                 .body;
-            let diagnostic = diagnostics.next().await.unwrap().unwrap();
+            let NotificationBody(diagnostic) = diagnostics.next().await.unwrap().unwrap();
             assert_eq!(diagnostic.kind, host::notify::DIAGNOSTIC);
         }
         runtime
@@ -393,7 +385,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let live = stream.next().await.unwrap().unwrap();
+        let NotificationBody(live) = stream.next().await.unwrap().unwrap();
         assert!(
             matches!(live.event, Some(w::notification::Event::Generic(ref item)) if item.kind == "live")
         );

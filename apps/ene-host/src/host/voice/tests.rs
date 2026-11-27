@@ -162,7 +162,7 @@ async fn turn_end_releases_the_floor_and_relays_the_utterance() {
     assert!(world.resource::<Voice>().floor_holder().is_none());
     world.resource_mut::<Notifier>().flush();
     let notification = events.try_recv().expect("speech_completed is broadcast");
-    let Some(w::notification::Event::Generic(event)) = notification.event else {
+    let Some(w::notification::Event::Generic(event)) = notification.event.as_ref() else {
         panic!("expected a generic host event");
     };
     assert_eq!(event.kind, "speech_completed");

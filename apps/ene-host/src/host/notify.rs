@@ -36,14 +36,14 @@ pub(crate) fn generic(
 #[derive(Clone, Resource)]
 pub(crate) struct Notifier {
     state: Arc<Mutex<Outbox>>,
-    events: broadcast::Sender<w::Notification>,
+    events: broadcast::Sender<Arc<w::Notification>>,
 }
 
 struct Outbox {
     epoch: String,
     sequence: u64,
     outbox: Vec<w::Notification>,
-    history: VecDeque<w::Notification>,
+    history: VecDeque<Arc<w::Notification>>,
 }
 
 impl Notifier {
@@ -68,7 +68,7 @@ impl Notifier {
         }
     }
 
-    pub(crate) fn subscribe(&self) -> broadcast::Receiver<w::Notification> {
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<Arc<w::Notification>> {
         self.events.subscribe()
     }
 
@@ -139,19 +139,20 @@ impl Notifier {
                 ..Default::default()
             })
             .into();
-            state.history.push_back(event.clone());
+            let event = Arc::new(event);
+            state.history.push_back(Arc::clone(&event));
             if state.history.len() > REPLAY {
                 state.history.pop_front();
             }
             if self.events.send(event).is_err() {
-                tracing::debug!("the notification stream has no receiver; event dropped");
+                tracing::debug!("no live notification subscriber");
             }
         }
     }
 
     /// The events after `cursor`, when the caller's epoch is this boot and no
     /// event it needs has been dropped. `None` asks the caller to resnapshot.
-    pub(crate) fn replay(&self, cursor: &w::Cursor) -> Option<Vec<w::Notification>> {
+    pub(crate) fn replay(&self, cursor: &w::Cursor) -> Option<Vec<Arc<w::Notification>>> {
         let state = self.state.lock();
         if cursor.epoch != state.epoch || cursor.seq > state.sequence {
             return None;
@@ -160,7 +161,7 @@ impl Notifier {
         if first_needed > state.sequence {
             return Some(Vec::new());
         }
-        let oldest = state.history.front().and_then(seq_of);
+        let oldest = state.history.front().and_then(|event| seq_of(event));
         if oldest.is_none_or(|oldest| oldest > first_needed) {
             return None;
         }
@@ -200,7 +201,7 @@ impl Notifier {
         };
         ene_domain::debug_if_err(
             self.events
-                .send(event)
+                .send(Arc::new(event))
                 .map_err(|_| "the notification stream has no receiver"),
             "notification delivery",
         );
@@ -252,6 +253,7 @@ mod tests {
         notifier.push(None, None, event("one"));
         notifier.flush();
         let after_one = notifier.cursor();
+        let mut live = notifier.subscribe();
         notifier.push(None, None, event("two"));
         notifier.push(None, None, event("three"));
         notifier.flush();
@@ -259,6 +261,8 @@ mod tests {
         let replay = notifier.replay(&after_one).expect("same epoch");
         assert_eq!(replay.len(), 2);
         assert_eq!(replay[1].cursor.as_option().unwrap().seq, 3);
+        assert!(Arc::ptr_eq(&replay[0], &live.try_recv().unwrap()));
+        assert!(Arc::ptr_eq(&replay[1], &live.try_recv().unwrap()));
 
         let current = notifier.cursor();
         assert_eq!(notifier.replay(&current).unwrap().len(), 0);

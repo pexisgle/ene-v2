@@ -42,7 +42,7 @@ mod services;
 pub(crate) use services::HostServices;
 mod snapshot;
 
-pub(crate) use snapshot::SnapshotReader;
+pub(crate) use snapshot::{SnapshotReader, Subscription};
 #[cfg(test)]
 mod runtime_tests;
 
