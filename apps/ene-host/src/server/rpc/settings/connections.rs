@@ -76,8 +76,15 @@ pub(super) async fn check_connection(
             let (connection, created) = repo
                 .connection_with_creation(id.as_str())?
                 .ok_or_else(|| HostError::NotFound(("connection not found").into()))?;
-            let plugin_revision = (connection.kind == settings::ConnectionKind::Acp)
-                .then(|| services.providers.revision());
+            let plugin_revision = matches!(
+                connection.kind,
+                settings::ConnectionKind::Acp
+                    | settings::ConnectionKind::Llm
+                    | settings::ConnectionKind::Stt
+                    | settings::ConnectionKind::Tts
+                    | settings::ConnectionKind::Embedding
+            )
+            .then(|| services.providers.revision());
             Ok((
                 connection,
                 created,

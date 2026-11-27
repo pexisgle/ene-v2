@@ -18,6 +18,7 @@ pub(crate) use engine::VoiceEngineContext;
 pub(crate) use engine::{
     companion_tts_source, is_builtin_voicevox, start_selected_voicevox, stt_source, tts_source,
 };
+pub(crate) use plugin::probe as probe_plugin_speech;
 pub(crate) use session::{
     VoicePlugin, active_companions, flush, on_client_activated, on_client_moved, on_stream_text,
     on_turn_end, play_once, subscribe_audio,

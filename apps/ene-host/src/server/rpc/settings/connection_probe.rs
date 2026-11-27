@@ -8,7 +8,7 @@ use crate::host::{
     model,
     providers::Providers,
     settings::{Check, Connection, ConnectionConfig},
-    voice::is_builtin_voicevox,
+    voice::{is_builtin_voicevox, probe_plugin_speech},
 };
 use ene_store::util::now;
 use std::time::Duration;
@@ -39,7 +39,12 @@ pub(super) async fn run_connection_probe(
             probe_voicevox_tts(connection, &services.runtime.voicevox()).await
         }
         ConnectionConfig::Stt(_) | ConnectionConfig::Tts(_) => {
-            probe_openai_speech(connection, credentials, &providers).await
+            let checked_at = now();
+            match probe_plugin_speech(connection, credentials, &providers).await {
+                Ok(Some(resources)) => healthy(checked_at, resources),
+                Ok(None) => probe_openai_speech(connection, credentials, &providers).await,
+                Err(error) => failed(checked_at, error.to_string()),
+            }
         }
         ConnectionConfig::Embedding(config) => {
             probe_embedding(connection, credentials, &providers, config.dimensions).await

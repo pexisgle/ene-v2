@@ -276,43 +276,50 @@ pub(super) async fn probe_embedding(
     configured_dim: u32,
 ) -> settings::Check {
     let checked_at = now();
-    let Some(base) = settings::endpoint_of(connection, providers) else {
-        return failed(checked_at, "接続先URLが正しくありません");
-    };
-    if Url::parse(&base).is_err() {
-        return failed(checked_at, "接続先URLが正しくありません");
-    }
-    let secret = match model::connection_secret(connection, Some(credentials), providers) {
-        Ok(secret) => secret,
-        Err(error) => return failed(checked_at, error.to_string()),
-    };
-
     let mut resources = Vec::new();
-    if let Ok(client) = net::client()
-        && let Ok(response) = get(&client, format!("{base}/models"), secret.as_deref())
-            .send()
-            .await
-    {
-        let status = response.status();
-        if auth_failed(status) {
-            return failed(checked_at, auth_message(status));
+    // Plugin credentials and probe input must stay on the same broker route
+    // as ordinary embeddings. The native model list is optional metadata.
+    if !providers.claims(
+        &connection.endpoint().adapter,
+        ene_plugin::Extension::Embedding,
+    ) {
+        let Some(base) = settings::endpoint_of(connection, providers) else {
+            return failed(checked_at, "接続先URLが正しくありません");
+        };
+        if Url::parse(&base).is_err() {
+            return failed(checked_at, "接続先URLが正しくありません");
         }
-        if status.is_success() {
-            resources.extend(
-                read_listed_model_ids(response)
-                    .await
-                    .into_iter()
-                    .filter(|id| {
-                        let lower = id.to_ascii_lowercase();
-                        lower.contains("embed") || lower.contains("e5")
-                    }),
-            );
+        let secret = match model::connection_secret(connection, Some(credentials), providers) {
+            Ok(secret) => secret,
+            Err(error) => return failed(checked_at, error.to_string()),
+        };
+
+        if let Ok(client) = net::client()
+            && let Ok(response) = get(&client, format!("{base}/models"), secret.as_deref())
+                .send()
+                .await
+        {
+            let status = response.status();
+            if auth_failed(status) {
+                return failed(checked_at, auth_message(status));
+            }
+            if status.is_success() {
+                resources.extend(
+                    read_listed_model_ids(response)
+                        .await
+                        .into_iter()
+                        .filter(|id| {
+                            let lower = id.to_ascii_lowercase();
+                            lower.contains("embed") || lower.contains("e5")
+                        }),
+                );
+            }
         }
-    }
-    if model::is_sakura_connection(&connection.endpoint().adapter, &base) {
-        for id in model::SAKURA_EMBEDDING_MODELS {
-            if !resources.iter().any(|known| known == id) {
-                resources.push((*id).to_owned());
+        if model::is_sakura_connection(&connection.endpoint().adapter, &base) {
+            for id in model::SAKURA_EMBEDDING_MODELS {
+                if !resources.iter().any(|known| known == id) {
+                    resources.push((*id).to_owned());
+                }
             }
         }
     }
