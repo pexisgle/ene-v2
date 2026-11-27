@@ -28,8 +28,6 @@ pub(super) struct DeviceBridge {
     pub(super) workspace: Option<Arc<Workspace>>,
     /// Verified client-side Wasm plugins (`F11`).
     pub(super) client_plugins: Arc<crate::plugins::ClientPlugins>,
-    /// Long-lived workspace operations so settings updates/resyncs never abort them.
-    pub(super) work: tokio::task::JoinSet<w::DeviceOperationResult>,
     /// Fire-and-forget work whose completion nobody waits on but which must not
     /// outlive the session: draining it on shutdown is the whole point. The
     /// mutex is held only for the spawn call, never across an await.
@@ -53,7 +51,6 @@ impl DeviceBridge {
             computer_frame: None,
             workspace,
             client_plugins,
-            work: tokio::task::JoinSet::new(),
             background: parking_lot::Mutex::new(tokio::task::JoinSet::new()),
             last_avatar_interaction: HashMap::new(),
         }

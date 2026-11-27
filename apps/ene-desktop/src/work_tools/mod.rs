@@ -32,6 +32,8 @@ const REAP_TIMEOUT: Duration = Duration::from_millis(200);
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum WorkToolError {
+    #[error("the workspace operation lost its device stream")]
+    Cancelled,
     #[error("the workspace has changed")]
     WorkspaceChanged,
     #[error("unknown workspace tool")]
@@ -76,6 +78,14 @@ pub(crate) enum WorkToolError {
     Glob(#[from] globset::Error),
     #[error(transparent)]
     Join(#[from] tokio::task::JoinError),
+}
+
+fn require_active(stop: &tokio_util::sync::CancellationToken) -> Result<(), WorkToolError> {
+    if stop.is_cancelled() {
+        Err(WorkToolError::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(windows)]

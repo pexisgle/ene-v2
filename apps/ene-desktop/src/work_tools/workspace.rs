@@ -2,6 +2,7 @@ use super::{
     COMMAND_TIMEOUT, FILE_LIMIT, IMAGE_LIMIT, MAX_RESULTS, OUTPUT_LIMIT, SHELL,
     WORKSPACE_SHELL_CAPABILITY, WorkToolError,
     helpers::{Edit, edit, glob, relative, text},
+    require_active,
     search::{Browse, Search, max_results},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -23,6 +24,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tokio_util::sync::CancellationToken;
 
 pub(crate) struct Workspace {
     pub(super) root: PathBuf,
@@ -100,7 +102,7 @@ enum FileChange {
 struct FileTool {
     name: &'static str,
     spec: fn(&Workspace) -> w::ClientCapabilitySpec,
-    run: fn(&Workspace, &str) -> Result<Value, WorkToolError>,
+    run: fn(&Workspace, &str, &CancellationToken) -> Result<Value, WorkToolError>,
 }
 
 // Declare each tool's advertised schema and parser together.
@@ -111,7 +113,7 @@ macro_rules! file_tools {
         const FILE_TOOLS: &[FileTool] = &[$(FileTool {
             name: concat!($prefix, $name),
             spec: |workspace| workspace.spec::<$args>($name, $description, "{path}"),
-            run: |workspace, input| ($run)(workspace, workspace.arguments::<$args>(input)?),
+            run: |workspace, input, stop| ($run)(workspace, workspace.arguments::<$args>(input)?, stop),
         }),+];
     };
 }
@@ -119,25 +121,25 @@ macro_rules! file_tools {
 file_tools! {
     "work.";
     "read": ReadArgs, "Read text by line or a PNG, JPEG, GIF or WebP image.",
-        |workspace: &Workspace, ReadArgs { path, offset, limit }| {
+        |workspace: &Workspace, ReadArgs { path, offset, limit }, _| {
             workspace.read(relative(&path)?, offset, limit.get().min(MAX_RESULTS))
         };
     "write": WriteArgs, "Create or replace a UTF-8 text file. Creates missing parent folders.",
-        |workspace: &Workspace, WriteArgs { path, content }| {
-            workspace.change(relative(&path)?, FileChange::Write(content))
+        |workspace: &Workspace, WriteArgs { path, content }, stop| {
+            workspace.change(relative(&path)?, FileChange::Write(content), stop)
         };
     "edit": EditArgs, "Apply exact replacements in order. Each oldText must match exactly once. Save only if all replacements succeed.",
-        |workspace: &Workspace, EditArgs { path, edits }| {
-            workspace.change(relative(&path)?, FileChange::Edit(edits))
+        |workspace: &Workspace, EditArgs { path, edits }, stop| {
+            workspace.change(relative(&path)?, FileChange::Edit(edits), stop)
         };
     "grep": GrepArgs, "Search UTF-8 files for matching lines. Pattern is a Rust regular expression. Path defaults to the workspace.",
         Workspace::grep;
     "find": FindArgs, "Find paths matching a glob, for example **/*.rs. Path defaults to the workspace.",
-        |workspace: &Workspace, FindArgs { browse, pattern }| {
-            workspace.search(&browse, Search::Find(&glob(&pattern)?))
+        |workspace: &Workspace, FindArgs { browse, pattern }, stop| {
+            workspace.search(&browse, Search::Find(&glob(&pattern)?), stop)
         };
     "ls": Browse, "List a directory. Path defaults to the workspace.",
-        |workspace: &Workspace, browse| workspace.search(&browse, Search::List);
+        |workspace: &Workspace, browse, stop| workspace.search(&browse, Search::List, stop);
 }
 
 fn first_line() -> NonZeroUsize {
@@ -219,16 +221,27 @@ impl Workspace {
         self: Arc<Self>,
         capability: &str,
         input: String,
+        stop: CancellationToken,
     ) -> Result<Value, WorkToolError> {
         if capability == WORKSPACE_SHELL_CAPABILITY {
             let ShellArgs { command } = self.arguments(&input)?;
-            return Box::pin(self.shell(&command)).await;
+            return tokio::select! {
+                biased;
+                () = stop.cancelled() => Err(WorkToolError::Cancelled),
+                result = Box::pin(self.shell(&command)) => result,
+            };
         }
         let tool = FILE_TOOLS
             .iter()
             .find(|tool| tool.name == capability)
             .ok_or(WorkToolError::UnknownTool)?;
-        tokio::task::spawn_blocking(move || (tool.run)(&self, &input)).await?
+        tokio::task::spawn_blocking(move || {
+            require_active(&stop)?;
+            let output = (tool.run)(&self, &input, &stop)?;
+            require_active(&stop)?;
+            Ok(output)
+        })
+        .await?
     }
 
     fn arguments<T: DeserializeOwned>(&self, input: &str) -> Result<T, WorkToolError> {
@@ -240,7 +253,7 @@ impl Workspace {
         Ok(request.tool)
     }
 
-    fn grep(&self, arguments: GrepArgs) -> Result<Value, WorkToolError> {
+    fn grep(&self, arguments: GrepArgs, stop: &CancellationToken) -> Result<Value, WorkToolError> {
         let GrepArgs {
             browse,
             pattern,
@@ -263,16 +276,23 @@ impl Workspace {
                 regex: &regex,
                 glob: filter.as_ref(),
             },
+            stop,
         )
     }
 
-    fn change(&self, path: &Path, change: FileChange) -> Result<Value, WorkToolError> {
+    fn change(
+        &self,
+        path: &Path,
+        change: FileChange,
+        stop: &CancellationToken,
+    ) -> Result<Value, WorkToolError> {
         let _guard = self.edits.lock();
+        require_active(stop)?;
         let (content, create) = match change {
             FileChange::Write(content) => (content, true),
             FileChange::Edit(edits) => (edit(text(&self.load(path)?)?, &edits)?, false),
         };
-        self.save(path, &content, create)?;
+        self.save(path, &content, create, stop)?;
         Ok(json!({"path": path, "bytes": content.len()}))
     }
 
@@ -359,6 +379,7 @@ impl Workspace {
         path: &Path,
         content: &str,
         create: bool,
+        stop: &CancellationToken,
     ) -> Result<(), WorkToolError> {
         if content.len() > FILE_LIMIT {
             return Err(WorkToolError::FileTooLarge);
@@ -370,6 +391,7 @@ impl Workspace {
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
+        require_active(stop)?;
         if create {
             self.dir.create_dir_all(folder)?;
         }
@@ -387,6 +409,7 @@ impl Workspace {
             file.set_permissions(permissions)?;
         }
         file.sync_all()?;
+        require_active(stop)?;
         Ok(temp.replace(name)?)
     }
 }

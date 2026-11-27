@@ -3,6 +3,7 @@
 use super::{
     GREP_BYTES, MAX_RESULTS, OUTPUT_LIMIT, SCAN_LIMIT, WorkToolError,
     helpers::{relative, text},
+    require_active,
     workspace::Workspace,
 };
 use cap_fs_ext::DirExt as _;
@@ -11,6 +12,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{io, num::NonZeroUsize, path::Path};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy)]
 pub(super) enum Search<'a> {
@@ -44,6 +46,7 @@ impl Workspace {
         &self,
         browse: &Browse,
         search: Search<'_>,
+        stop: &CancellationToken,
     ) -> Result<Value, WorkToolError> {
         let path = relative(&browse.path)?;
         let limit = browse.limit.get().min(MAX_RESULTS);
@@ -72,7 +75,7 @@ impl Workspace {
         };
         let mut visit = |entry: &Path, kind: FileType| -> bool {
             scanned += 1;
-            if scanned > SCAN_LIMIT {
+            if scanned > SCAN_LIMIT || stop.is_cancelled() {
                 return false;
             }
             if glob.is_some_and(|(glob, nested)| {
@@ -128,6 +131,7 @@ impl Workspace {
             };
             walk(&dir, prefix, depth, &mut visit)?
         };
+        require_active(stop)?;
         let truncated = clipped_line || !finished;
         entries.sort_by(|left, right| {
             left["path"]

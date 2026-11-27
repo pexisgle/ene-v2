@@ -20,6 +20,8 @@ use crate::{
 };
 use ene_rpc as w;
 use std::time::Duration;
+use tokio::task::JoinSet;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 type DeviceStream = connectrpc::client::ServerStream<
     <connectrpc::client::HttpClient as connectrpc::client::ClientTransport>::ResponseBody,
@@ -37,8 +39,15 @@ struct PeriodicTimers {
     observations: tokio::task::JoinSet<()>,
 }
 
+struct WorkspaceCalls {
+    // Cancel blocking workers before dropping their async result handles.
+    stop: DropGuard,
+    tasks: JoinSet<w::DeviceOperationResult>,
+}
+
 pub(super) struct StreamLoopState {
     device: DeviceStream,
+    work: WorkspaceCalls,
     subscription: NotificationStream,
     pub(super) output: Option<AudioOutStream>,
     pub(super) mic_send: Option<MicSendHalf>,
@@ -89,9 +98,9 @@ impl Session {
         tokio::select! {
             frame = state.device.message() => {
                 let parsed = frame.map(|opt| opt.map(|m| m.to_owned_message()));
-                self.handle_device_frame(host, parsed).await
+                self.handle_device_frame(host, &mut state.work, parsed).await
             }
-            Some(result) = self.devices.work.join_next(), if !self.devices.work.is_empty() => {
+            Some(result) = state.work.tasks.join_next(), if !state.work.tasks.is_empty() => {
                 self.finish_workspace_operation(host, result).await;
                 None
             }
@@ -173,6 +182,10 @@ impl Session {
         let (mic_send, mic_recv) = open_audio_input_stream(self, host).await;
         StreamLoopState {
             device,
+            work: WorkspaceCalls {
+                stop: CancellationToken::new().drop_guard(),
+                tasks: JoinSet::new(),
+            },
             subscription,
             output,
             mic_send,
@@ -193,12 +206,13 @@ impl Session {
     async fn handle_device_frame(
         &mut self,
         host: &Host,
+        work: &mut WorkspaceCalls,
         frame: Result<Option<w::DeviceEvent>, connectrpc::ConnectError>,
     ) -> Option<Outcome> {
         match frame {
             Ok(Some(event)) => {
                 if let Some(event) = event.event {
-                    match self.device_event(host, event).await {
+                    match self.device_event(host, work, event).await {
                         Step::Continue => None,
                         Step::Restart => Some(Outcome::Resync("the binding changed".into())),
                         Step::Stop => Some(Outcome::Closed),
@@ -270,20 +284,30 @@ impl Session {
     }
 
     /// Handles one device event, executing only from the device stream.
-    async fn device_event(&mut self, host: &Host, event: w::device_event::Event) -> Step {
+    async fn device_event(
+        &mut self,
+        host: &Host,
+        work: &mut WorkspaceCalls,
+        event: w::device_event::Event,
+    ) -> Step {
         match event {
             w::device_event::Event::Ready(ready) => {
                 self.transport.subscription = ready.subscription_id;
                 Step::Continue
             }
             w::device_event::Event::Operation(operation) => {
-                self.dispatch_device_operation(host, *operation).await;
+                self.dispatch_device_operation(host, work, *operation).await;
                 Step::Continue
             }
         }
     }
 
-    async fn dispatch_device_operation(&mut self, host: &Host, mut operation: w::DeviceOperation) {
+    async fn dispatch_device_operation(
+        &mut self,
+        host: &Host,
+        work: &mut WorkspaceCalls,
+        mut operation: w::DeviceOperation,
+    ) {
         let refusal = self.refusal(&operation);
         #[cfg(windows)]
         if operation.capability == w::COMPUTER_USE {
@@ -299,7 +323,7 @@ impl Session {
         }
         if operation.capability.starts_with(work_tools::PREFIX) {
             let workspace = self.devices.workspace.clone();
-            let active_work = self.devices.work.len();
+            let active_work = work.tasks.len();
             let request: Result<_, OperationError> = (|| {
                 if let Some(reason) = refusal {
                     return Err(reason.into());
@@ -316,11 +340,13 @@ impl Session {
                 Ok(workspace) => {
                     let client_id = self.transport.options.id.clone();
                     let input = std::mem::take(&mut operation.input);
-                    self.devices.work.spawn(async move {
-                        let output = Box::pin(workspace.execute(&operation.capability, input))
-                            .await
-                            .map(OperationOutput::External)
-                            .map_err(OperationError::from);
+                    let stop = work.stop.token().clone();
+                    work.tasks.spawn(async move {
+                        let output =
+                            Box::pin(workspace.execute(&operation.capability, input, stop))
+                                .await
+                                .map(OperationOutput::External)
+                                .map_err(OperationError::from);
                         Self::operation_result(&client_id, &operation, output)
                     });
                 }
