@@ -1,4 +1,4 @@
-//! Pure view-model choice derivation and default model auto-assignment logic.
+//! Model and voice choices derived from the saved connections and discovered resources.
 
 use crate::connections::{
     active_stt_in_connections, active_tts_in_connections, tts_voice_of_connection,
@@ -11,6 +11,7 @@ use ene_catalog::{
     GOOGLE_AGENT_PLATFORM, OPENAI_TTS_VOICES, SAKURA_EMBEDDING_MODELS, SAKURA_STT_MODELS,
     SAKURA_TTS_VOICES, default_models_for_adapter, parse_voice_resource,
 };
+use indexmap::IndexMap;
 
 /// Internal host model role slots, exposed only inside progressive disclosure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,40 +83,28 @@ impl ModelRoleSlot {
     }
 }
 
-fn push_voice_unique(voices: &mut Vec<(String, String)>, raw: &str) {
-    let (vid, label) = parse_voice_resource(raw);
-    if vid.is_empty() {
-        return;
-    }
-    if let Some(existing) = voices.iter_mut().find(|(id, _)| id == &vid) {
-        if existing.1 == existing.0 && label != vid {
-            existing.1 = label;
-        }
-    } else {
-        voices.push((vid, label));
-    }
+fn push_voice_unique(voices: &mut IndexMap<String, String>, raw: &str) {
+    let (id, label) = parse_voice_resource(raw);
+    insert_choice(voices, &id, Some(&label));
 }
 
-fn push_str_unique(list: &mut Vec<(String, String)>, id: &str) {
-    let trimmed = id.trim();
-    if !trimmed.is_empty() && !list.iter().any(|(existing, _)| existing == trimmed) {
-        list.push((trimmed.to_owned(), trimmed.to_owned()));
-    }
-}
-
-fn push_unique_model(list: &mut Vec<(String, String)>, id: &str, name: Option<&str>) {
+fn insert_choice(choices: &mut IndexMap<String, String>, id: &str, label: Option<&str>) {
     let id = id.trim();
     if id.is_empty() {
         return;
     }
-    let display = name.map(str::trim).filter(|n| !n.is_empty()).unwrap_or(id);
-    if let Some(existing) = list.iter_mut().find(|(eid, _)| eid == id) {
-        if existing.1 == existing.0 && display != id {
-            existing.1 = display.to_owned();
-        }
-    } else {
-        list.push((id.to_owned(), display.to_owned()));
-    }
+    let label = label
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .unwrap_or(id);
+    choices
+        .entry(id.to_owned())
+        .and_modify(|old| {
+            if old == id && label != id {
+                *old = label.to_owned();
+            }
+        })
+        .or_insert_with(|| label.to_owned());
 }
 
 fn llm_config_parts(connection: &Connection) -> (&[String], &str) {
@@ -185,7 +174,7 @@ impl Model {
         else {
             return Vec::new();
         };
-        let mut voices = Vec::new();
+        let mut voices = IndexMap::new();
         if let Some(check) = &conn.last_check {
             for res in &check.resources {
                 push_voice_unique(&mut voices, res);
@@ -216,7 +205,7 @@ impl Model {
         {
             push_voice_unique(&mut voices, &configured);
         }
-        voices
+        voices.into_iter().collect()
     }
 
     /// Model choices for one speech-to-text connection.
@@ -227,20 +216,20 @@ impl Model {
         else {
             return Vec::new();
         };
-        let mut models = Vec::new();
+        let mut models = IndexMap::new();
         if let Some(ConnectionConfig::Stt(stt)) = conn.config.as_ref()
             && let Some(ep) = stt.endpoint.as_ref()
             && let Ok(serde_json::Value::Object(opts)) = serde_json::from_str(&ep.options)
             && let Some(model) = opts.get("model").and_then(|v| v.as_str())
         {
-            push_str_unique(&mut models, model);
+            insert_choice(&mut models, model, None);
         }
         let sakura = conn.is_sakura();
         if let Some(check) = &conn.last_check {
             for res in &check.resources {
                 let lower = res.to_ascii_lowercase();
                 if !sakura || lower.contains("whisper") || lower.contains("transcribe") {
-                    push_str_unique(&mut models, res);
+                    insert_choice(&mut models, res, None);
                 }
             }
         }
@@ -250,9 +239,9 @@ impl Model {
             &["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "whisper-1"]
         };
         for id in defaults {
-            push_str_unique(&mut models, id);
+            insert_choice(&mut models, id, None);
         }
-        models
+        models.into_iter().collect()
     }
 
     /// Model choices for one embedding connection.
@@ -263,15 +252,15 @@ impl Model {
         else {
             return Vec::new();
         };
-        let mut models = Vec::new();
+        let mut models = IndexMap::new();
         if let Some(ConnectionConfig::Embedding(emb)) = conn.config.as_ref() {
-            push_str_unique(&mut models, &emb.model_id);
+            insert_choice(&mut models, &emb.model_id, None);
         }
         if let Some(check) = &conn.last_check {
             for res in &check.resources {
                 let lower = res.to_ascii_lowercase();
                 if lower.contains("embed") || lower.contains("e5") {
-                    push_str_unique(&mut models, res);
+                    insert_choice(&mut models, res, None);
                 }
             }
         }
@@ -281,9 +270,9 @@ impl Model {
             &["text-embedding-3-small", "text-embedding-3-large"]
         };
         for id in defaults {
-            push_str_unique(&mut models, id);
+            insert_choice(&mut models, id, None);
         }
-        models
+        models.into_iter().collect()
     }
 
     /// Available `(model_id, display_label)` choices for a single LLM connection.
@@ -313,26 +302,22 @@ impl Model {
             .last_check
             .as_ref()
             .map_or(&[][..], |check| check.resources.as_slice());
-        let mut list = Vec::new();
+        let mut list = IndexMap::new();
         for id in configured {
-            let fetched_name = fetched
-                .iter()
-                .find(|m| m.id == *id)
-                .map(|m| m.name.as_str());
-            push_unique_model(&mut list, id, fetched_name);
+            insert_choice(&mut list, id, None);
         }
         for model in fetched {
-            push_unique_model(&mut list, &model.id, Some(&model.name));
+            insert_choice(&mut list, &model.id, Some(&model.name));
         }
         for id in checked {
-            push_unique_model(&mut list, id, None);
+            insert_choice(&mut list, id, None);
         }
         if list.is_empty() {
             for id in default_models_for_adapter(adapter) {
-                push_unique_model(&mut list, id, None);
+                insert_choice(&mut list, id, None);
             }
         }
-        list
+        list.into_iter().collect()
     }
 
     /// Every `(connection_id, model_id, display_label)` available across enabled LLM connections.

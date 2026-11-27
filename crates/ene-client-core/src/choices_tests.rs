@@ -38,7 +38,12 @@ fn available_models_merges_configured_fetched_and_checked_with_fallback() {
     model.snapshot = Some(Snapshot {
         settings: Some(Settings {
             connections: vec![
-                llm_conn("c-openai", "openai", vec!["gpt-5.4"], true),
+                llm_conn(
+                    "c-openai",
+                    "openai",
+                    vec![" gpt-5.4 ", "configured", "gpt-5.4"],
+                    true,
+                ),
                 llm_conn("c-empty", "anthropic", vec![], true),
                 Connection {
                     id: "c-gap".into(),
@@ -67,15 +72,27 @@ fn available_models_merges_configured_fetched_and_checked_with_fallback() {
     });
     model.connections.models.insert(
         "c-openai".into(),
-        vec![ModelInfo {
-            id: "gpt-5.4".into(),
-            name: "GPT 5.4".into(),
-        }],
+        [
+            ("gpt-5.4", " "),
+            ("discovered", "Discovered"),
+            ("gpt-5.4", " GPT 5.4 "),
+            ("gpt-5.4", "Another label"),
+        ]
+        .into_iter()
+        .map(|(id, name)| ModelInfo {
+            id: id.into(),
+            name: name.into(),
+        })
+        .collect(),
     );
 
     assert_eq!(
         model.available_models_for_connection("c-openai"),
-        vec![("gpt-5.4".into(), "GPT 5.4".into())]
+        vec![
+            ("gpt-5.4".into(), "GPT 5.4".into()),
+            ("configured".into(), "configured".into()),
+            ("discovered".into(), "Discovered".into()),
+        ]
     );
     assert_eq!(
         model.available_models_for_connection("c-empty"),

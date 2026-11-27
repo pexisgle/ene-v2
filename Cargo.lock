@@ -4029,6 +4029,7 @@ dependencies = [
  "ene-catalog",
  "ene-domain",
  "image",
+ "indexmap 2.14.2",
  "proptest",
  "serde",
  "serde_json",
