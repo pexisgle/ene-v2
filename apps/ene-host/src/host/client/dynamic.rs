@@ -339,9 +339,11 @@ fn forward(world: &mut World, request: CapabilityCall) {
 fn forward_bound(world: &mut World, effect: EffectId, name: &str, input: Value) -> Result<String> {
     let call = effect_entity(world, effect)
         .ok_or_else(|| HostError::Conflict("the capability call is no longer live".into()))?;
-    let binding = world.get::<CallBinding>(call).ok_or_else(|| {
-        HostError::Permission("the gate did not accept the capability call".into())
-    })?;
+    if world.get::<CallBinding>(call).is_none() {
+        return Err(HostError::Permission(
+            "the gate did not accept the capability call".into(),
+        ));
+    }
     if !world
         .get::<ToolRequest>(call)
         .is_some_and(|sent| sent.call.function.name.as_str() == name)
@@ -355,24 +357,7 @@ fn forward_bound(world: &mut World, effect: EffectId, name: &str, input: Value) 
         .map(|agent| agent.0)
         .filter(|agent| world.get::<CompanionAgent>(*agent).is_some())
         .ok_or_else(|| HostError::Permission("capability tools require a companion".into()))?;
-    let client = world
-        .resource::<Store>()
-        .client_repo()
-        .client(&binding.client_id)?
-        .ok_or_else(|| HostError::Conflict("the bound client is not registered".into()))?;
-    let spec = tool_spec_for(&client, name)
-        .filter(|spec| spec.name == binding.capability)
-        .ok_or_else(|| {
-            HostError::Conflict("the bound capability no longer names this tool".into())
-        })?;
-    Ok(device::accept(
-        world,
-        call,
-        agent,
-        device::Invocation::Capability(spec),
-        input,
-    )?
-    .1)
+    Ok(device::accept(world, call, agent, device::Invocation::Alias(name), input)?.1)
 }
 
 /// The effect entity an effect id names.

@@ -5,8 +5,9 @@
 //! Computer Use operation.
 
 use super::{
-    CapabilitySpec, DeviceOperation, DeviceStatus,
+    DeviceOperation, DeviceStatus,
     computer::{self, ComputerUse},
+    dynamic::tool_spec_for,
 };
 use crate::host::{
     db::{Result, Store},
@@ -26,7 +27,7 @@ use serde_json::{Value, json};
 #[derive(Clone, Copy)]
 pub(crate) enum Invocation<'a> {
     Request(&'a str),
-    Capability(&'a CapabilitySpec),
+    Alias(&'a str),
 }
 
 /// Writes and dispatches one operation, returning its id and the immediate
@@ -70,7 +71,13 @@ pub(crate) fn accept(
         Invocation::Request(capability) if capability == binding.capability => {
             client.spec(capability)
         }
-        Invocation::Capability(spec) if spec.name == binding.capability => Some(spec),
+        Invocation::Alias(name) => Some(
+            tool_spec_for(&client, name)
+                .filter(|spec| spec.name == binding.capability)
+                .ok_or_else(|| {
+                    HostError::Conflict("the bound capability no longer names this tool".into())
+                })?,
+        ),
         _ => {
             return Err(HostError::Conflict(
                 "the capability no longer matches the accepted operation".into(),

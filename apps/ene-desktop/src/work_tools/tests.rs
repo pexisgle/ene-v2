@@ -39,7 +39,7 @@ async fn workspace_tools_read_search_and_edit_only_the_bound_workspace() {
         validate(&schema(name), &input).unwrap();
         let workspace = workspace.clone();
         let name = format!("work.{name}");
-        async move { Box::pin(workspace.execute(&name, input)).await }
+        async move { Box::pin(workspace.execute(&name, input.to_string())).await }
     };
 
     call(
@@ -107,6 +107,7 @@ async fn workspace_tools_read_search_and_edit_only_the_bound_workspace() {
                 json!({
                     "workspace": "other", "path": "src/index.html", "content": "bad"
                 })
+                .to_string()
             )
             .await
             .is_err()
@@ -145,7 +146,7 @@ async fn read_and_grep_keep_the_first_unreturned_line_and_mark_truncated_text() 
     let workspace = Arc::new(Workspace::open(directory.path()).unwrap());
     let call = |tool, mut input: Value| {
         input["workspace"] = json!(workspace.root.to_string_lossy());
-        workspace.clone().execute(tool, input)
+        workspace.clone().execute(tool, input.to_string())
     };
 
     let first = call("work.read", json!({"path": "book"})).await.unwrap();
@@ -179,7 +180,8 @@ async fn file_operations_cannot_follow_a_link_out_of_the_workspace() {
     assert!(workspace.load(Path::new("link/secret")).is_err());
     assert!(workspace.save(Path::new("link/new"), "bad", true).is_err());
     assert!(!outside.path().join("new").exists());
-    let input = json!({"workspace": workspace.root.to_string_lossy(), "pattern": "secret"});
+    let input =
+        json!({"workspace": workspace.root.to_string_lossy(), "pattern": "secret"}).to_string();
     let output = workspace
         .clone()
         .execute("work.grep", input.clone())

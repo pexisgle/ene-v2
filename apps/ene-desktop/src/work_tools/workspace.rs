@@ -100,7 +100,7 @@ enum FileChange {
 struct FileTool {
     name: &'static str,
     spec: fn(&Workspace) -> w::ClientCapabilitySpec,
-    run: fn(&Workspace, Value) -> Result<Value, WorkToolError>,
+    run: fn(&Workspace, &str) -> Result<Value, WorkToolError>,
 }
 
 // Declare each tool's advertised schema and parser together.
@@ -218,21 +218,22 @@ impl Workspace {
     pub(crate) async fn execute(
         self: Arc<Self>,
         capability: &str,
-        input: Value,
+        input: String,
     ) -> Result<Value, WorkToolError> {
         if capability == WORKSPACE_SHELL_CAPABILITY {
-            let ShellArgs { command } = self.arguments(input)?;
+            let ShellArgs { command } = self.arguments(&input)?;
             return Box::pin(self.shell(&command)).await;
         }
         let tool = FILE_TOOLS
             .iter()
             .find(|tool| tool.name == capability)
             .ok_or(WorkToolError::UnknownTool)?;
-        tokio::task::spawn_blocking(move || (tool.run)(&self, input)).await?
+        tokio::task::spawn_blocking(move || (tool.run)(&self, &input)).await?
     }
 
-    fn arguments<T: DeserializeOwned>(&self, input: Value) -> Result<T, WorkToolError> {
-        let request: Request<T> = serde_json::from_value(input)?;
+    fn arguments<T: DeserializeOwned>(&self, input: &str) -> Result<T, WorkToolError> {
+        let input = if input.trim().is_empty() { "{}" } else { input };
+        let request: Request<T> = serde_json::from_str(input)?;
         if request.workspace != self.root.to_string_lossy() {
             return Err(WorkToolError::WorkspaceChanged);
         }

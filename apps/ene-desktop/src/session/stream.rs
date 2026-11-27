@@ -283,7 +283,7 @@ impl Session {
         }
     }
 
-    async fn dispatch_device_operation(&mut self, host: &Host, operation: w::DeviceOperation) {
+    async fn dispatch_device_operation(&mut self, host: &Host, mut operation: w::DeviceOperation) {
         let refusal = self.refusal(&operation);
         #[cfg(windows)]
         if operation.capability == w::COMPUTER_USE {
@@ -310,14 +310,12 @@ impl Session {
                 if active_work >= 8 {
                     return Err(OperationError::WorkspaceBusy);
                 }
-                Ok((
-                    workspace.ok_or(OperationError::NoWorkspace)?,
-                    Self::operation_input(&operation)?,
-                ))
+                workspace.ok_or(OperationError::NoWorkspace)
             })();
             match request {
-                Ok((workspace, input)) => {
+                Ok(workspace) => {
                     let client_id = self.transport.options.id.clone();
+                    let input = std::mem::take(&mut operation.input);
                     self.devices.work.spawn(async move {
                         let output = Box::pin(workspace.execute(&operation.capability, input))
                             .await
