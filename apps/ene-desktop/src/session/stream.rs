@@ -365,15 +365,9 @@ impl Session {
                 if self.transport.bindings.contains(&companion.id) {
                     self.sync_avatars().await;
                 }
-                if self.transport.pending.as_deref() == Some(companion.id.as_str()) {
-                    restart = true;
-                }
             }
             Some(w::notification::Event::CompanionRemoved(companion)) => {
                 self.transport.companion_bodies.remove(&companion.id);
-                if self.transport.pending.as_deref() == Some(companion.id.as_str()) {
-                    self.transport.pending = None;
-                }
                 restart = self.release_binding(&companion.id).await;
             }
             Some(w::notification::Event::Generic(event)) if event.kind == "perception_status" => {

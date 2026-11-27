@@ -113,17 +113,14 @@ pub(super) struct SessionTransport {
     pub(super) focused: Option<String>,
     /// Known companion IDs and the only fields the session uses from their records.
     pub(super) companion_bodies: BTreeMap<String, BodyBinding>,
-    /// Whether the next attempt may move the activation. It is set on the first
-    /// connect and when the operator picks a companion, so a reconnect never
-    /// steals the companion back from another device.
+    /// The first successful attachment consumes automatic startup activation.
+    /// Later device changes are explicit.
     pub(super) may_activate: bool,
     /// The surface of the current device stream, from `DeviceReady`.
     pub(super) subscription: String,
     eyes_generation: u64,
     /// The last notification cursor, for a resuming subscription.
     pub(super) cursor: Option<w::Cursor>,
-    /// The companion the operator asked to serve while a request was in flight.
-    pub(super) pending: Option<String>,
     pub(super) published_body: BTreeSet<String>,
 }
 
@@ -140,7 +137,6 @@ impl SessionTransport {
             subscription: String::new(),
             eyes_generation: 0,
             cursor: None,
-            pending: None,
             published_body: BTreeSet::new(),
         }
     }
@@ -255,7 +251,7 @@ impl SessionTransport {
         previous
     }
 
-    /// Binds this client to the host state and applies pending activation intent.
+    /// Binds this client to the current host state.
     pub(super) async fn bind(
         &mut self,
         host: &Host,
@@ -266,42 +262,20 @@ impl SessionTransport {
             // Re-attaching to an existing host activation must consume initial
             // activation intent so a future move away never auto-steals back (B16).
             self.may_activate = false;
-            if let Some(target) = self.pending.take() {
-                if !self.bindings.contains(&target) && self.companion_bodies.contains_key(&target) {
-                    change_activation(host, &target, Some(&self.options.id))
-                        .await
-                        .map_err(|error| self.classify(&error))?;
-                    self.bindings.insert(target.clone());
-                }
-                if self.bindings.contains(&target) {
-                    self.focused = Some(target);
-                }
-            }
             return Ok(previous != self.bindings);
         }
 
-        let wanted = self
-            .pending
-            .clone()
-            .or_else(|| snapshot.active_companion_id.clone())
-            .or_else(|| {
-                snapshot
-                    .companions
-                    .first()
-                    .map(|companion| companion.id.clone())
-            });
+        let wanted = snapshot.active_companion_id.clone().or_else(|| {
+            snapshot
+                .companions
+                .first()
+                .map(|companion| companion.id.clone())
+        });
         let Some(wanted) = wanted else {
-            self.bindings.clear();
-            self.focused = None;
             return Ok(previous != self.bindings);
         };
         if !self.may_activate {
-            // Another device holds this companion. Serving nothing is the
-            // honest state: no audio, no perception, no device results.
-            self.bindings.clear();
-            self.focused = None;
-            self.pending = None;
-            tracing::info!("another client is the active device for {wanted}");
+            tracing::info!(companion = %wanted, "the companion is not active on this client");
             return Ok(previous != self.bindings);
         }
         match change_activation(host, &wanted, Some(&self.options.id)).await {
@@ -309,7 +283,6 @@ impl SessionTransport {
                 self.bindings.insert(wanted.clone());
                 self.focused = Some(wanted);
                 self.may_activate = false;
-                self.pending = None;
                 Ok(previous != self.bindings)
             }
             Err(error) => Err(self.classify(&error)),
