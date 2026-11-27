@@ -117,13 +117,14 @@ impl Hub {
         let Some(revision) = self.model.settings().map(|settings| settings.revision) else {
             return;
         };
-        self.check_connection_at(connection_id, revision, cx);
+        self.check_connection_at(connection_id, revision, None, cx);
     }
 
     pub(crate) fn check_connection_at(
         &mut self,
         connection_id: String,
         revision: u64,
+        resource_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         if self.setup.checking_connections.contains_key(&connection_id) {
@@ -134,6 +135,7 @@ impl Hub {
             self.model.connections.link_epoch,
             connection_id.clone(),
             revision,
+            resource_id,
         ) {
             self.setup
                 .checking_connections

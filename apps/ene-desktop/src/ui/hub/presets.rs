@@ -120,11 +120,9 @@ pub(crate) fn complete_setup_selection(
     if model_id.is_empty() {
         return;
     }
-    if !settings
-        .connections
-        .iter()
-        .any(|connection| connection.id == connection_id && hub.setup.can_apply(connection))
-    {
+    if !settings.connections.iter().any(|connection| {
+        connection.id == connection_id && hub.setup.can_apply(connection, &model_id)
+    }) {
         return;
     }
     let existing_comp = hub.model.companion().cloned();

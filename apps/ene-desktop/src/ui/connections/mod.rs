@@ -6,12 +6,15 @@ mod add_panel;
 pub(crate) mod mcp_add;
 mod mcp_editor;
 mod mcp_fields;
+mod model_checks;
 mod pickers;
 mod roles_panel;
 mod roles_voice;
 mod row_editor;
 mod schema_form;
 mod web_search;
+
+pub(crate) use model_checks::model_checks;
 
 use crate::input::Draft;
 use crate::ui::hub::HubEvent;

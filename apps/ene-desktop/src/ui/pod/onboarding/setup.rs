@@ -37,9 +37,12 @@ pub(super) fn collect_setup_choices(pod: &CompanionPod, cx: &App) -> SetupChoice
             .iter()
             .find(|connection| connection.id == id)
     });
-    let model_ready = connection.is_some_and(|connection| hub.setup.can_apply(connection));
+    let model_ready = connection
+        .zip(selected_model.as_deref())
+        .is_some_and(|(connection, model)| hub.setup.can_apply(connection, model));
     let model_failure = connection
         .and_then(|connection| connection.last_check.as_ref())
+        .filter(|check| check.checked_model == selected_model)
         .and_then(|check| check.failure.as_ref())
         .map(|failure| failure.message.clone());
 
@@ -83,37 +86,12 @@ pub(super) fn append_setup_model_section(
     cx: &Context<CompanionPod>,
 ) -> gpui::Div {
     let pod_model_select = cx.weak_entity();
-    let hub_refresh_models = pod.hub.clone();
-    let refresh_id = refresh_cid.to_owned();
     let checking = choices.checking_models;
-
     body.child(
         div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap(px(8.))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.ink_muted)
-                    .child("使用モデル"),
-            )
-            .child(pill_button(
-                "onboard-refresh-models",
-                if checking {
-                    "確認中…"
-                } else {
-                    "接続を確認"
-                },
-                Tone::Ghost.enabled(!checking),
-                theme,
-                move |_, cx| {
-                    hub_refresh_models
-                        .update(cx, |hub, cx| hub.check_connection(refresh_id.clone(), cx));
-                },
-            )),
+            .text_xs()
+            .text_color(theme.ink_muted)
+            .child("使用モデル"),
     )
     .child(dropdown_select(
         DropdownSpec {
@@ -137,6 +115,13 @@ pub(super) fn append_setup_model_section(
                 cx.notify();
             });
         },
+    ))
+    .children(crate::ui::connections::model_checks(
+        &pod.hub,
+        refresh_cid,
+        choices.selected_model.as_deref(),
+        theme,
+        cx,
     ))
 }
 

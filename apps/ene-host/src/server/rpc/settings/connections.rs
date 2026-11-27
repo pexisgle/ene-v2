@@ -4,10 +4,12 @@ use super::super::Services;
 use super::connection_probe::run_connection_probe;
 use super::{notify_settings, parse_connection_id};
 use crate::host::error::HostError;
+use crate::host::mcp::ConnectionStamp;
 use crate::host::permission;
 use crate::host::settings;
 use crate::host::voice::is_builtin_voicevox;
 use crate::host::wire;
+use crate::host::{mind::ModelAssignment, model};
 use connectrpc::ConnectError;
 use connectrpc::RequestContext;
 use connectrpc::ServiceRequest;
@@ -67,10 +69,13 @@ pub(super) async fn check_connection(
 ) -> ServiceResult<w::CheckResult> {
     let id = parse_connection_id(request.id)?;
     let expected = request.expected_settings_revision;
-    let (connection, created, credentials, generation, plugin_revision) = services
+    let resource_id = request.resource_id.map(str::to_owned);
+    let requested = resource_id.clone();
+    let dependencies = services.runtime.services().clone();
+    let (connection, stamp, plugin_revision, selected_model) = services
         .runtime
-        .inspect(move |services| {
-            let repo = services.store.settings_repo();
+        .read_kernel(move |kernel| {
+            let repo = dependencies.store.settings_repo();
             validate_settings_revision(&repo, expected)?;
             let (connection, created) = repo
                 .connection_with_creation(id.as_str())?
@@ -83,26 +88,52 @@ pub(super) async fn check_connection(
                     | settings::ConnectionKind::Tts
                     | settings::ConnectionKind::Embedding
             )
-            .then(|| services.providers.revision());
-            Ok((
-                connection,
-                created,
-                services.credentials.clone(),
-                services.credentials.generation_of(id.as_str()),
-                plugin_revision,
-            ))
+            .then(|| dependencies.providers.revision());
+            let model = if connection.kind == settings::ConnectionKind::Llm
+                && let Some(model_id) = requested
+            {
+                if model_id.trim().is_empty() || model_id.chars().count() > 512 {
+                    return Err(HostError::Invalid(
+                        "a model id of 1 to 512 characters is required".into(),
+                    ));
+                }
+                let assignment = ModelAssignment {
+                    connection_id: id.to_string(),
+                    model_id,
+                };
+                let model = kernel.connect_model(&assignment);
+                Some((model, assignment.model_id))
+            } else {
+                None
+            };
+            let stamp = ConnectionStamp {
+                revision: connection.revision,
+                created_revision: created,
+                credential_generation: dependencies.credentials.generation_of(id.as_str()),
+            };
+            Ok((connection, stamp, plugin_revision, model))
         })
         .await
         .map_err(ConnectError::from)?;
-    let revision = connection.revision;
-    let check =
-        run_connection_probe(services, &credentials, &connection, created, generation).await?;
+    let check = match selected_model {
+        Some((model, model_id)) => model::probe_model(model, model_id).await,
+        None => {
+            run_connection_probe(
+                services,
+                &services.runtime.services().credentials,
+                &connection,
+                stamp.created_revision,
+                stamp.credential_generation,
+            )
+            .await?
+        }
+    };
     let request_id = request.request_key.to_owned();
-    let resource_id = request.resource_id.map(str::to_owned);
+    let kind = connection.kind;
     let id = connection.id;
     services
         .change(move |services| {
-            if services.credentials.generation_of(id.as_str()) != generation {
+            if services.credentials.generation_of(id.as_str()) != stamp.credential_generation {
                 return Err(HostError::Conflict(
                     "credentials changed during the check".into(),
                 ));
@@ -112,13 +143,19 @@ pub(super) async fn check_connection(
                     "plugins changed during the check".into(),
                 ));
             }
-            let store = &services.store;
-            store
-                .settings_repo()
-                .set_check(&id, revision, created, &check)?;
+            let repo = services.store.settings_repo();
+            let stored = if kind == settings::ConnectionKind::Llm {
+                let previous = repo
+                    .connection(id.as_str())?
+                    .and_then(|connection| connection.last_check);
+                combine_llm_checks(previous, &check)
+            } else {
+                check.clone()
+            };
+            repo.set_check(&id, stamp.revision, stamp.created_revision, &stored)?;
             notify_settings(
                 &services.notifier,
-                settings::project(&store.settings_repo().settings()?, &services.providers),
+                settings::project(&repo.settings()?, &services.providers),
             );
             Ok(w::CheckResult {
                 request_id,
@@ -129,6 +166,34 @@ pub(super) async fn check_connection(
             })
         })
         .await
+}
+
+// A listing refresh and a selected-model check record different facts.
+fn combine_llm_checks(
+    previous: Option<settings::Check>,
+    check: &settings::Check,
+) -> settings::Check {
+    let Some(previous) = previous else {
+        return check.clone();
+    };
+    if check.checked_model.is_some() {
+        return settings::Check {
+            capabilities: previous.capabilities,
+            resources: previous.resources,
+            ..check.clone()
+        };
+    }
+    if previous.checked_model.is_none() {
+        return check.clone();
+    }
+    if !check.healthy {
+        return previous;
+    }
+    settings::Check {
+        capabilities: check.capabilities.clone(),
+        resources: check.resources.clone(),
+        ..previous
+    }
 }
 
 pub(super) fn validate_settings_revision(

@@ -34,13 +34,19 @@ async fn run_connection_probe(
     connection_id: String,
     revision: u64,
     ticket: String,
+    resource_id: Option<String>,
 ) -> Result<bool, connectrpc::ConnectError> {
-    Ok(host
+    let response = host
         .settings
-        .check_connection(check_request(connection_id, revision, ticket))
-        .await?
-        .view()
-        .success)
+        .check_connection(w::CheckRequest {
+            id: connection_id,
+            request_key: ticket,
+            expected_settings_revision: Some(revision),
+            resource_id,
+            ..Default::default()
+        })
+        .await?;
+    Ok(response.view().success)
 }
 
 fn dispatch_probe<F>(
@@ -132,7 +138,7 @@ pub(crate) fn update_settings(
             },
             move |host, ticket| async move {
                 let save = before_probe(host.settings.update_settings(request)).await?;
-                run_connection_probe(host, named, save.view().revision, ticket).await
+                run_connection_probe(host, named, save.view().revision, ticket, None).await
             },
         );
     }
@@ -207,7 +213,7 @@ pub(crate) fn add_mcp_and_check(
                 .view()
                 .revision;
             }
-            run_connection_probe(host, named, revision, ticket).await
+            run_connection_probe(host, named, revision, ticket, None).await
         },
     )
 }
@@ -225,15 +231,6 @@ fn credential_request(id: String, secret: String, revision: Option<u64>) -> w::C
         id,
         secret: Some(secret),
         expected_settings_revision: revision,
-        ..Default::default()
-    }
-}
-
-fn check_request(id: String, revision: u64, request_key: String) -> w::CheckRequest {
-    w::CheckRequest {
-        id,
-        request_key,
-        expected_settings_revision: Some(revision),
         ..Default::default()
     }
 }
@@ -256,6 +253,7 @@ pub(crate) fn probe_connection(
     epoch: u64,
     connection_id: String,
     revision: u64,
+    resource_id: Option<String>,
 ) -> Option<String> {
     let named = connection_id.clone();
     dispatch_probe(
@@ -266,7 +264,7 @@ pub(crate) fn probe_connection(
             label: "接続確認",
             timeout: PROBE_TIMEOUT,
         },
-        |host, ticket| run_connection_probe(host, named, revision, ticket),
+        |host, ticket| run_connection_probe(host, named, revision, ticket, resource_id),
     )
 }
 

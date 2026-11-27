@@ -328,10 +328,16 @@ pub struct Check {
     /// Resources the service listed, such as models or voices.
     #[serde(default)]
     pub resources: Vec<String>,
+    /// Selected LLM independently exercised with a fixed test prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_model: Option<String>,
 }
 
 /// Readiness check capability for a host-loaded task harness.
 pub const TASK_HARNESS_CAPABILITY: &str = "harness";
+
+/// The only user message sent when exercising a selected dialogue model.
+pub const MODEL_CHECK_PROMPT: &str = "Reply with OK.";
 
 /// Whether a secret is stored. `registered` secrets live in the host's
 /// credential store and are not part of any connection read.

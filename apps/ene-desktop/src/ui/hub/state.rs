@@ -60,14 +60,13 @@ impl SetupFlowState {
         }
     }
 
-    pub(crate) fn can_apply(&self, connection: &ProviderConnection) -> bool {
+    pub(crate) fn can_apply(&self, connection: &ProviderConnection, model_id: &str) -> bool {
         connection.enabled
             && self.connection_id().is_none_or(|id| {
                 id == connection.id
-                    && connection
-                        .last_check
-                        .as_ref()
-                        .is_some_and(|check| check.healthy)
+                    && connection.last_check.as_ref().is_some_and(|check| {
+                        check.healthy && check.checked_model.as_deref() == Some(model_id)
+                    })
             })
     }
 

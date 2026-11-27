@@ -552,6 +552,7 @@ message ConnectionCheck {
   optional Failure failure = 3;
   repeated string capabilities = 4;
   repeated string resources = 5;
+  optional string checked_model = 6;
 }
 message Settings {
   uint64 revision = 1;

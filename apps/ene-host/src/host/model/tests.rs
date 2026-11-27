@@ -578,6 +578,7 @@ fn models_merges_configured_and_probed_resources_without_duplicates() {
         failure: None,
         capabilities: Vec::new(),
         resources: vec!["gpt-4o".into(), "gpt-5.4-mini".into(), "gpt-5".into()],
+        checked_model: None,
     });
     let ids: Vec<String> = models(&conn, Catalog::builtin())
         .into_iter()

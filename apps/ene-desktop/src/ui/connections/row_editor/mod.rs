@@ -158,27 +158,29 @@ fn render_row_header(
                 .flex_row()
                 .items_center()
                 .gap(px(8.))
-                .child(pill_button(
-                    SharedString::from(format!("conn-check-{id}")),
-                    if is_checking && is_voicevox {
-                        "起動・確認中…"
-                    } else if is_checking {
-                        "確認中…"
-                    } else {
-                        "確認"
-                    },
-                    Tone::Ghost
-                        .icon(Icon::Refresh)
-                        .enabled(live && !is_checking),
-                    theme,
-                    move |_, cx| {
-                        if let Some(revision) = revision {
-                            hub_check.update(cx, |hub, cx| {
-                                hub.check_connection_at(check_id.clone(), revision, cx)
-                            });
-                        }
-                    },
-                ))
+                .when(kind != ConnectionKind::Llm, |row| {
+                    row.child(pill_button(
+                        SharedString::from(format!("conn-check-{id}")),
+                        if is_checking && is_voicevox {
+                            "起動・確認中…"
+                        } else if is_checking {
+                            "確認中…"
+                        } else {
+                            "確認"
+                        },
+                        Tone::Ghost
+                            .icon(Icon::Refresh)
+                            .enabled(live && !is_checking),
+                        theme,
+                        move |_, cx| {
+                            if let Some(revision) = revision {
+                                hub_check.update(cx, |hub, cx| {
+                                    hub.check_connection_at(check_id.clone(), revision, None, cx)
+                                });
+                            }
+                        },
+                    ))
+                })
                 .child(pill_button(
                     SharedString::from(format!("conn-edit-{id}")),
                     if expanded {

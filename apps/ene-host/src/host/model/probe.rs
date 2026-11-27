@@ -5,6 +5,60 @@
 //! taxonomy, not model resolution. Callers reach it through `mod.rs`.
 use super::*;
 
+pub(crate) async fn probe_model(model: Result<DynModel<Completion>>, model_id: String) -> Check {
+    use crate::host::error::Failure;
+    use rig_core::completion::CompletionRequest;
+    use rig_core::error::ErrorKind;
+
+    let checked_at = ene_store::util::now();
+    let failure = match model {
+        Err(HostError::FailedPrecondition(_)) => {
+            Some(("credentials", "認証情報を確認してください。"))
+        }
+        Err(_) => Some(("connection_setup", "モデルと接続設定を確認してください。")),
+        Ok(model) => {
+            let request =
+                CompletionRequest::new(ene_domain::settings::MODEL_CHECK_PROMPT).max_tokens(64);
+            match tokio::time::timeout(PROBE_TIMEOUT, model.call(request)).await {
+                Ok(Ok(reply)) if !reply.text().trim().is_empty() => None,
+                Ok(Ok(_)) => Some(("empty_reply", "モデルからテキスト応答がありませんでした。")),
+                Err(_) => Some(("timeout", "モデルの応答が時間内にありませんでした。")),
+                Ok(Err(error)) => Some(
+                    match error
+                        .provider_response_status()
+                        .map(|status| status.as_u16())
+                    {
+                        Some(401) => ("credentials", "接続先が認証情報を受け付けませんでした。"),
+                        Some(403) => (
+                            "access",
+                            "接続先がこのモデルへのアクセスを許可しませんでした。",
+                        ),
+                        Some(404) => ("model_unavailable", "接続先でこのモデルを利用できません。"),
+                        Some(429) => (
+                            "rate_limit",
+                            "接続先の利用制限に達しました。時間をおいて再試行してください。",
+                        ),
+                        _ if error.report().kind == ErrorKind::Http => {
+                            ("transport", "接続先から応答を受け取れませんでした。")
+                        }
+                        _ => (
+                            "provider_response",
+                            "接続先でモデルの応答を取得できませんでした。",
+                        ),
+                    },
+                ),
+            }
+        }
+    };
+    Check {
+        healthy: failure.is_none(),
+        checked_at,
+        failure: failure.map(|(kind, message)| Failure::new(kind, message)),
+        checked_model: Some(model_id),
+        ..Default::default()
+    }
+}
+
 pub(crate) async fn probe(
     credentials: &Credentials,
     connection: &Connection,
@@ -20,6 +74,7 @@ pub(crate) async fn probe(
         )),
         capabilities: Vec::new(),
         resources: Vec::new(),
+        checked_model: None,
     };
     let ConnectionConfig::Llm(config) = &connection.config else {
         // Only the LLM adapter has a probe in this alpha.
@@ -65,9 +120,7 @@ pub(crate) async fn probe(
             },
             failure,
         );
-        check
-            .capabilities
-            .extend(["model_list".into(), "streaming_text".into()]);
+        check.capabilities.push("model_list".into());
         check.resources = result.ids;
         return verified(check);
     }
@@ -112,12 +165,9 @@ pub(crate) async fn probe(
         healthy: true,
         checked_at,
         failure: None,
-        capabilities: vec![
-            "streaming_text".into(),
-            "model_list".into(),
-            "openai_http".into(),
-        ],
+        capabilities: vec!["model_list".into(), "openai_http".into()],
         resources,
+        checked_model: None,
     }
 }
 

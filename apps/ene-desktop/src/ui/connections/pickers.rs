@@ -57,6 +57,9 @@ pub(super) fn render_resource_picker(
         })
         .collect();
     let placeholder = selected.as_deref().unwrap_or(labels.placeholder).to_owned();
+    let model_actions = (resource == ConnectionResource::ChatModel)
+        .then(|| super::model_checks(&pane.hub, id, selected.as_deref(), theme, cx))
+        .flatten();
     let key = format!("{}:{id}", labels.dropdown);
     let pane_entity = cx.weak_entity();
     let refresh_hub = pane.hub.clone();
@@ -77,9 +80,11 @@ pub(super) fn render_resource_picker(
             options.len(),
             (checking, live),
             theme,
-            move |_, cx| {
-                refresh_hub.update(cx, |hub, cx| hub.check_connection(refresh_id.clone(), cx));
-            },
+            (resource != ConnectionResource::ChatModel).then_some(
+                move |_: &mut Window, cx: &mut App| {
+                    refresh_hub.update(cx, |hub, cx| hub.check_connection(refresh_id.clone(), cx));
+                },
+            ),
         ))
         .child(dropdown_select(
             DropdownSpec {
@@ -102,6 +107,7 @@ pub(super) fn render_resource_picker(
                 _ = pane_entity.update(cx, |_, cx| cx.notify());
             },
         ))
+        .children(model_actions)
         .when_some(labels.hint, |this, hint| {
             this.child(div().text_xs().text_color(theme.ink_muted).child(hint))
         })
@@ -113,7 +119,7 @@ fn picker_header(
     count: usize,
     (checking, live): (bool, bool),
     theme: &Theme,
-    refresh: impl Fn(&mut Window, &mut App) + 'static,
+    refresh: Option<impl Fn(&mut Window, &mut App) + 'static>,
 ) -> gpui::Div {
     div()
         .flex()
@@ -136,17 +142,19 @@ fn picker_header(
                     this.child(kind_pill(format!("{count}{}", labels.count), theme))
                 }),
         )
-        .child(pill_button(
-            SharedString::from(format!("conn-fetch-{}-{id}", labels.fetch)),
-            if checking {
-                labels.checking
-            } else {
-                labels.refresh
-            },
-            Tone::Ghost.icon(Icon::Refresh).enabled(live && !checking),
-            theme,
-            refresh,
-        ))
+        .when_some(refresh, |row, refresh| {
+            row.child(pill_button(
+                SharedString::from(format!("conn-fetch-{}-{id}", labels.fetch)),
+                if checking {
+                    labels.checking
+                } else {
+                    labels.refresh
+                },
+                Tone::Ghost.icon(Icon::Refresh).enabled(live && !checking),
+                theme,
+                refresh,
+            ))
+        })
 }
 
 struct PickerLabels {

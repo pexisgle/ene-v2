@@ -165,7 +165,7 @@ pub(super) fn render_model_voice_onboarding(
         let message = choices
             .model_failure
             .take()
-            .unwrap_or_else(|| "接続を確認してからモデルを割り当ててください。".into());
+            .unwrap_or_else(|| "選択したモデルを確認してから割り当ててください。".into());
         body = body.child(div().text_xs().text_color(theme.ink_muted).child(message));
     }
     if let Some(message) = error {

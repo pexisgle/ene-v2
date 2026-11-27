@@ -117,6 +117,7 @@ impl From<wire::ConnectionCheck> for domain::Check {
             failure: value.failure.into_option().map(Into::into),
             capabilities: value.capabilities,
             resources: value.resources,
+            checked_model: value.checked_model,
         }
     }
 }
@@ -129,6 +130,7 @@ impl From<&domain::Check> for wire::ConnectionCheck {
             failure: value.failure.as_ref().map(Into::into).into(),
             capabilities: value.capabilities.clone(),
             resources: value.resources.clone(),
+            checked_model: value.checked_model.clone(),
             ..Default::default()
         }
     }

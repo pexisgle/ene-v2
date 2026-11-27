@@ -98,6 +98,14 @@ impl<'a> AgentKernel<'a> {
                 "the preview connection settings changed".into(),
             ));
         }
+        self.connect_model(assignment)
+    }
+
+    pub(crate) fn connect_model(
+        &self,
+        assignment: &mind::ModelAssignment,
+    ) -> Result<DynModel<Completion>> {
+        let services = self.services;
         model::connect_assignment(
             &services.store,
             &services.credentials,

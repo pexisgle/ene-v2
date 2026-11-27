@@ -322,7 +322,13 @@ pub(super) fn compute_connection_badge(
     }
     match check.map(|c| c.healthy) {
         Some(true) => RowBadge {
-            label: "接続先を確認済み",
+            label: if conn.kind == ConnectionKind::Llm
+                && check.is_some_and(|check| check.checked_model.is_none())
+            {
+                "モデル一覧取得済み"
+            } else {
+                "接続先を確認済み"
+            },
             dot: theme.mint,
             bg: theme.mint_soft,
             fg: theme.mint_fg,
