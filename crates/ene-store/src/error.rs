@@ -3,7 +3,7 @@
 /// Convenience result alias for `ene-store` operations.
 pub type Result<T> = std::result::Result<T, StoreError>;
 
-/// Errors raised during SQLite persistence, schema migrations, and constraint checks.
+/// Errors raised during SQLite persistence and constraint checks.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     /// The caller supplied an invalid identifier, JSON document, schedule, or value.

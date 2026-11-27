@@ -4333,7 +4333,6 @@ dependencies = [
  "jiff 1.0.3",
  "parking_lot 0.13.0",
  "rusqlite",
- "rusqlite_migration",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
@@ -10703,16 +10702,6 @@ dependencies = [
  "libsqlite3-sys",
  "smallvec",
  "sqlite-wasm-rs",
-]
-
-[[package]]
-name = "rusqlite_migration"
-version = "2.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ebdcf690caa87fbe286387def857714dd5582121df5bc1e985cbc8bba3bbb7b"
-dependencies = [
- "log",
- "rusqlite",
 ]
 
 [[package]]

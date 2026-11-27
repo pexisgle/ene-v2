@@ -72,7 +72,7 @@ const MAX_COMPANIONS: usize = 16;
 /// whole chain as one opaque string.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StartError {
-    /// Opening or migrating the SQLite store failed.
+    /// Opening the SQLite store failed.
     #[error("cannot prepare the store: {0}")]
     Store(#[from] HostError),
     /// A repository read or write during startup failed.

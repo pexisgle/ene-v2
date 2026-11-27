@@ -18,7 +18,6 @@ ene-policy.workspace = true
 itertools = "0.15"
 jiff.workspace = true
 rusqlite.workspace = true
-rusqlite-migration.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

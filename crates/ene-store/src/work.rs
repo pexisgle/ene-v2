@@ -311,3 +311,59 @@ impl<'a> WorkRepo<'a> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::Store;
+
+    #[test]
+    fn work_wait_state_is_recovered_from_current_approvals() {
+        use ene_domain::{RunState, WorkStatus};
+        use ene_policy::ApprovalStatus;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("host.sqlite3")).unwrap();
+        store.conn().execute_batch(
+            "INSERT INTO work_sessions (id, companion_id, title, status, created_at, updated_at)
+                  VALUES ('work', 'ene', 'with run', 'idle', '2026-01-01', '2026-01-01'),
+                         ('closed', 'ene', 'closed', '2026-01-01', '2026-01-01');
+             INSERT INTO work_runs (run_id, work_id, instruction, state, started_at, updated_at)
+                  VALUES ('run', 'work', 'continue', 'running', '2026-01-01', '2026-01-01');
+             INSERT INTO approval_requests (request_id, session_id, run_id, work_id,
+                          action_payload_hash, tool_name, normalized_arguments, status, created_at)
+                  VALUES ('later', 'ene', 'run', 'work', X'01', 'device_request', '{}', 'pending', '2026-01-02'),
+                         ('first', 'ene', 'run', 'work', X'01', 'device_request', '{}', 'pending', '2026-01-01'),
+                         ('auto', 'ene', 'run', 'work', X'01', 'device_request', '{}', 'evaluating', '2026-01-01'),
+                         ('different', 'ene', 'run', 'other', X'01', 'device_request', '{}', 'pending', '2026-01-01');",
+        ).unwrap();
+        let work = store.work_repo();
+        let state = |id| work.work_session(id).unwrap().unwrap().status;
+        assert_eq!(state("closed"), WorkStatus::Closed);
+        assert_eq!(state("work"), WorkStatus::Active);
+        let run = work.active_run("work").unwrap().unwrap();
+        assert_eq!(run.state, RunState::WaitingInput);
+        assert_eq!(run.pending_request_id.as_deref(), Some("first"));
+        assert_eq!(work.runs("work").unwrap(), [run]);
+
+        let approvals = store.approval_repo();
+        approvals
+            .resolve_approval("first", ApprovalStatus::Denied)
+            .unwrap();
+        let mut run = work.run("run").unwrap().unwrap();
+        assert_eq!(run.pending_request_id.as_deref(), Some("later"));
+        approvals
+            .resolve_approval("later", ApprovalStatus::Approved)
+            .unwrap();
+        run = work.run("run").unwrap().unwrap();
+        assert_eq!(run.state, RunState::Running);
+        assert!(run.pending_request_id.is_none());
+
+        approvals.request_user_approval("auto").unwrap();
+        run.state = RunState::Cancelled;
+        work.update_run(&run).unwrap();
+        assert_eq!(state("work"), WorkStatus::Idle);
+        let terminal = work.run("run").unwrap().unwrap();
+        assert_eq!(terminal.state, RunState::Cancelled);
+        assert!(terminal.pending_request_id.is_none());
+    }
+}

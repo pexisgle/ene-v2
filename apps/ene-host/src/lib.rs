@@ -85,7 +85,7 @@
 //!
 //! ## データベース
 //!
-//! `host.sqlite3` は `PRAGMA user_version = 6` をbaselineとし、`migrations.rs` の前方マイグレーションで `schema_migrations` に記録しながら最新版へ段階更新します（`user_version` が現在版より新しい場合と baseline 未満の旧版は起動時に拒否）。主なテーブルは `companions` / `connections` / `settings_state` / `policy_rules` / `approval_requests` / `clients` / `activations` / `work_sessions` / `work_runs` / `device_operations` / `memories` / `memories_fts` / `memory_edges` / `mind_operations` / `memory_injections` / `schedules` / `schedule_occurrences` / `skills` / `plugin_config` / `plugin_state` / `plugin_entries` / `schema_migrations` です。`approval_requests` は端末能力の承認を `client_id` / `work_id` に束縛します。
+//! `host.sqlite3` は `schema.sql` の現行スキーマから初期化します。`user_version = 1` のデータベースを開き、それ以外の既存データベースには新しい保存先が必要です。
 //!
 //! - `activations` がコンパニオンごとのアクティブクライアントを持ちます。移動は最後の `Activate` が勝ち、旧クライアントには音声の `FlushControl` を送ります。
 //! - 承認は `approval_requests` に残し、起動時に未解決分を失効させます。端末能力の承認は `client_id` / `capability` も保存します。

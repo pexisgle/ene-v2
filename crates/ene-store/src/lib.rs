@@ -1,4 +1,4 @@
-//! SQLite persistence engine, forward migrations, and domain repositories.
+//! SQLite persistence and domain repositories.
 
 // Enforced here first: this crate is free of the lint while the app crates still
 // have sites. Add this attribute to a crate only once `cargo clippy -p <crate>`
@@ -11,7 +11,6 @@ pub mod companions;
 pub mod credentials;
 pub mod error;
 pub mod memories;
-pub mod migrations;
 pub mod plugins;
 pub mod policies;
 mod row;
@@ -26,7 +25,6 @@ pub use clients::{ClientDeclaration, ClientRepo};
 pub use companions::CompanionRepo;
 pub use error::{Result, StoreError};
 pub use memories::MemoryRepo;
-pub use migrations::{BASELINE_VERSION, VERSION};
 pub use plugins::{PluginEntry, PluginRepo};
 pub use policies::PolicyRepo;
 pub use schedules::{NewSchedule, Schedule, ScheduleClock, ScheduleOccurrence, ScheduleRepo};
@@ -42,6 +40,24 @@ fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
     let connection = Connection::open(path)?;
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok(connection)
+}
+
+fn schema_version(connection: &Connection) -> Result<i64> {
+    let version = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    match version {
+        1 => Ok(version),
+        0 if !connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )? =>
+        {
+            Ok(version)
+        }
+        _ => Err(StoreError::Storage(format!(
+            "unsupported state database version {version}; a new database is required"
+        ))),
+    }
 }
 
 fn configure_connection(connection: &Connection) -> rusqlite::Result<()> {
@@ -71,7 +87,7 @@ impl fmt::Debug for Store {
 }
 
 impl Store {
-    /// Opens `path`, validates/initializes the schema, and applies pending migrations.
+    /// Opens current state or initializes an empty database.
     pub fn open(path: &Path) -> Result<Self> {
         Self::open_with_grants(path, ene_policy::CapabilityGrants::default())
     }
@@ -83,13 +99,16 @@ impl Store {
                 .map_err(|error| StoreError::Storage(format!("state directory: {error}")))?;
         }
         let mut connection = open_connection(path)?;
-        migrations::validate_open_version(&connection)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if schema_version(&transaction)? == 0 {
+            transaction.execute_batch(include_str!("schema.sql"))?;
+        }
+        transaction.commit()?;
         configure_connection(&connection)?;
-        migrations::apply_migrations(&mut connection)?;
         Ok(Self::from_connection(connection, Arc::new(grants)))
     }
 
-    /// Opens existing learned state without applying unrelated schema migrations.
+    /// Opens existing learned state without creating a database.
     pub fn open_for_history_reset(path: &Path) -> Result<Option<Self>> {
         if !path
             .try_exists()
@@ -98,7 +117,7 @@ impl Store {
             return Ok(None);
         }
         let connection = open_connection(path)?;
-        if migrations::validate_open_version(&connection)? == 0 {
+        if schema_version(&connection)? == 0 {
             return Ok(None);
         }
         configure_connection(&connection)?;
@@ -150,17 +169,9 @@ impl Store {
              DELETE FROM approval_requests;
              DELETE FROM work_runs;
              DELETE FROM work_sessions;
+             DELETE FROM compaction_checkpoints;
              DELETE FROM schedule_occurrences WHERE status = 'delivered';",
         )?;
-        // A pre-v27 database still has the original schema during maintenance.
-        let has_checkpoints = transaction.query_row(
-            "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'compaction_checkpoints')",
-            [],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if has_checkpoints {
-            transaction.execute("DELETE FROM compaction_checkpoints", [])?;
-        }
         let empty = to_json(&ene_mind::State::default())?;
         transaction.execute(
             "UPDATE companions SET state = ?1, state_revision = state_revision + 1 WHERE state <> ?1",
@@ -743,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn a_database_round_trips_and_refuses_a_newer_version() {
+    fn a_database_round_trips_and_refuses_the_legacy_ladder() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("host.sqlite3");
         let store = Store::open(&path).unwrap();
@@ -752,13 +763,13 @@ mod tests {
                 .conn()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            VERSION
+            1
         );
         drop(store);
         let store = Store::open(&path).unwrap();
         store
             .conn()
-            .pragma_update(None, "user_version", VERSION + 1)
+            .pragma_update(None, "user_version", 28)
             .unwrap();
         drop(store);
         assert!(Store::open(&path).is_err());

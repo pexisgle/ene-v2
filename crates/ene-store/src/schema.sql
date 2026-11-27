@@ -1,12 +1,8 @@
 -- The host's relational state. The conversation itself is not here: it lives
 -- in the rig session log (rig_memory::DirStore) and this file never mirrors it.
---
--- Baseline schema (PRAGMA user_version = 6). Forward migrations are applied
--- sequentially by `migrations.rs` and recorded in `schema_migrations`; pre-baseline
--- databases and unknown newer user_version values are rejected at startup.
 
 -- Companions: the author's profile, the grown mind and the assigned models.
-CREATE TABLE IF NOT EXISTS companions (
+CREATE TABLE companions (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     -- The immutable core of the persona (equivalent to MindProfile.core).
@@ -29,7 +25,7 @@ CREATE TABLE IF NOT EXISTS companions (
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS user_profiles (
+CREATE TABLE user_profiles (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     preferences TEXT NOT NULL DEFAULT '[]',
@@ -37,14 +33,14 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS bootstrap_state (
+CREATE TABLE bootstrap_state (
     key TEXT PRIMARY KEY,
     applied_at TEXT NOT NULL
 );
 
 -- Episodic memory. The explicit INTEGER PRIMARY KEY is SQLite's rowid alias,
 -- so the FTS5 external-content table below keeps a stable integer key.
-CREATE TABLE IF NOT EXISTS memories (
+CREATE TABLE memories (
     rowid INTEGER PRIMARY KEY,
     id TEXT NOT NULL UNIQUE,
     -- 'shared' or a companion id (docs/design/mind.md): the same column
@@ -58,32 +54,42 @@ CREATE TABLE IF NOT EXISTS memories (
     memory_revision INTEGER NOT NULL DEFAULT 1,
     content_revision INTEGER NOT NULL DEFAULT 1,
     emotion TEXT,
-    source_context TEXT NOT NULL DEFAULT '{}',
-    embedding BLOB,
-    embedding_model TEXT,
-    embedding_dimensions INTEGER,
-    embedding_content_revision INTEGER
+    source_context TEXT NOT NULL DEFAULT '{}'
 );
 
-CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+CREATE VIRTUAL TABLE memories_fts USING fts5(
     content,
     content='memories',
     content_rowid='rowid',
     tokenize='trigram'
 );
 
-CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
     INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
-CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
     INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
 END;
-CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF content ON memories BEGIN
+CREATE TRIGGER memories_au AFTER UPDATE OF content ON memories BEGIN
     INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
     INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
 
-CREATE TABLE IF NOT EXISTS memory_edges (
+CREATE TABLE memory_embeddings (
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    space TEXT NOT NULL,
+    vector BLOB NOT NULL CHECK (length(vector) > 0 AND length(vector) % 4 = 0),
+    PRIMARY KEY (memory_id, space)
+);
+
+CREATE INDEX idx_memory_embeddings_space ON memory_embeddings(space, memory_id);
+
+CREATE TRIGGER discard_revised_embeddings AFTER UPDATE OF content_revision ON memories
+WHEN new.content_revision <> old.content_revision BEGIN
+    DELETE FROM memory_embeddings WHERE memory_id = old.id;
+END;
+
+CREATE TABLE memory_edges (
     from_id TEXT NOT NULL,
     relation TEXT NOT NULL,
     to_id TEXT NOT NULL,
@@ -93,16 +99,17 @@ CREATE TABLE IF NOT EXISTS memory_edges (
 
 -- Which memory ids the host injected into each turn: the citation guard reads
 -- the verified injection set back after a restart (docs/design/mind.md).
-CREATE TABLE IF NOT EXISTS memory_injections (
+CREATE TABLE memory_injections (
     companion_id TEXT NOT NULL,
     turn_id TEXT NOT NULL,
     memory_id TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    memory_revision INTEGER,
     PRIMARY KEY (companion_id, turn_id, memory_id)
 );
 
 -- Idempotency of mind_update: one row per tool operation.
-CREATE TABLE IF NOT EXISTS mind_operations (
+CREATE TABLE mind_operations (
     operation_id TEXT PRIMARY KEY,
     companion_id TEXT NOT NULL,
     request_hash BLOB NOT NULL,
@@ -110,7 +117,14 @@ CREATE TABLE IF NOT EXISTS mind_operations (
     created_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS schedules (
+CREATE TABLE compaction_checkpoints (
+    companion_id TEXT PRIMARY KEY REFERENCES companions(id) ON DELETE CASCADE,
+    lineage TEXT NOT NULL,
+    through_message_id INTEGER NOT NULL,
+    summary TEXT NOT NULL
+);
+
+CREATE TABLE schedules (
     id TEXT PRIMARY KEY,
     companion_id TEXT NOT NULL,
     cron_expr TEXT,
@@ -128,7 +142,7 @@ CREATE TABLE IF NOT EXISTS schedules (
 
 -- Settings: one row per connection, kind and config kept apart so the kind can
 -- be checked against the config oneof on every read.
-CREATE TABLE IF NOT EXISTS connections (
+CREATE TABLE connections (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 0,
@@ -137,16 +151,23 @@ CREATE TABLE IF NOT EXISTS connections (
     credential_state TEXT NOT NULL DEFAULT 'absent',
     last_check TEXT,
     revision INTEGER NOT NULL DEFAULT 1,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    created_revision INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS settings_state (
+CREATE TABLE credential_slots (
+    id TEXT NOT NULL PRIMARY KEY,
+    connection_id TEXT UNIQUE REFERENCES connections(id) ON DELETE SET NULL,
+    session_only INTEGER NOT NULL CHECK (session_only IN (0, 1))
+);
+
+CREATE TABLE settings_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     revision INTEGER NOT NULL,
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS policy_rules (
+CREATE TABLE policy_rules (
     id TEXT PRIMARY KEY,
     tool_name TEXT NOT NULL,
     pattern TEXT NOT NULL,
@@ -156,7 +177,7 @@ CREATE TABLE IF NOT EXISTS policy_rules (
 
 -- Free-text policies: prose the decision engine reads, never a mechanical
 -- gate (docs/design/work.md).
-CREATE TABLE IF NOT EXISTS policy_texts (
+CREATE TABLE policy_texts (
     id TEXT PRIMARY KEY,
     text TEXT NOT NULL,
     created_at TEXT NOT NULL
@@ -164,7 +185,7 @@ CREATE TABLE IF NOT EXISTS policy_texts (
 
 -- Approval requests outlive the effect that asked, so a restart can expire
 -- them instead of silently running the operation.
-CREATE TABLE IF NOT EXISTS approval_requests (
+CREATE TABLE approval_requests (
     request_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
     run_id TEXT NOT NULL,
@@ -178,18 +199,21 @@ CREATE TABLE IF NOT EXISTS approval_requests (
     resolved_at TEXT,
     -- The client the approval is bound to; a move does not void it.
     client_id TEXT,
-    capability TEXT
+    capability TEXT,
+    external_destination TEXT,
+    search_summary TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_approvals_status ON approval_requests(status);
+CREATE INDEX idx_pending_approvals_work_run
+    ON approval_requests(work_id, run_id, created_at, request_id) WHERE status = 'pending';
+CREATE INDEX idx_approvals_status ON approval_requests(status);
 
 -- Clients declare capabilities; the host records what it granted.
-CREATE TABLE IF NOT EXISTS clients (
+CREATE TABLE clients (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL DEFAULT '',
     platform TEXT NOT NULL DEFAULT '',
     capabilities TEXT NOT NULL DEFAULT '[]',
-    granted_capabilities TEXT NOT NULL DEFAULT '[]',
     capability_specs TEXT NOT NULL DEFAULT '[]',
     revision INTEGER NOT NULL DEFAULT 1,
     last_seen TEXT NOT NULL
@@ -198,13 +222,14 @@ CREATE TABLE IF NOT EXISTS clients (
 -- One activation row per companion: the active client. The latest Activate
 -- wins; audio, perception, approvals and device operations bind to a client
 -- id, never to a generation.
-CREATE TABLE IF NOT EXISTS activations (
-    companion_id TEXT PRIMARY KEY,
+CREATE TABLE activations (
+    companion_id TEXT NOT NULL PRIMARY KEY REFERENCES companions(id) ON DELETE CASCADE,
     client_id TEXT,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    generation INTEGER NOT NULL DEFAULT 1
 );
 
-CREATE TABLE IF NOT EXISTS work_sessions (
+CREATE TABLE work_sessions (
     id TEXT PRIMARY KEY,
     companion_id TEXT NOT NULL,
     title TEXT NOT NULL,
@@ -215,28 +240,58 @@ CREATE TABLE IF NOT EXISTS work_sessions (
 );
 
 -- `WorkRepo::work_sessions` reads one companion's sessions newest first; this
--- index column order matches its `WHERE` and `ORDER BY` exactly. It is also
--- added by migration 8 so existing databases get it.
-CREATE INDEX IF NOT EXISTS idx_work_sessions_companion
+-- index column order matches its `WHERE` and `ORDER BY` exactly.
+CREATE INDEX idx_work_sessions_companion
     ON work_sessions(companion_id, updated_at DESC, id);
 
-CREATE TABLE IF NOT EXISTS work_runs (
+CREATE TABLE work_runs (
     run_id TEXT PRIMARY KEY,
     work_id TEXT NOT NULL,
     instruction TEXT NOT NULL,
     state TEXT NOT NULL,
-    pending_request_id TEXT,
     failure TEXT,
     started_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    executor TEXT NOT NULL DEFAULT '{"type":"unrecorded"}'
 );
 
-CREATE INDEX IF NOT EXISTS idx_runs_work ON work_runs(work_id, state);
+CREATE INDEX idx_runs_work ON work_runs(work_id, state);
+
+CREATE VIEW work_run_view AS
+    SELECT r.run_id, r.work_id, r.instruction,
+           CASE WHEN a.request_id IS NOT NULL THEN 'waiting_input' ELSE r.state END AS state,
+           a.request_id AS pending_request_id, r.failure, r.started_at, r.updated_at
+    FROM work_runs r LEFT JOIN approval_requests a ON a.request_id = (
+        SELECT p.request_id FROM approval_requests p
+        WHERE r.state IN ('starting', 'running') AND p.status = 'pending'
+          AND p.work_id = r.work_id AND p.run_id = r.run_id
+        ORDER BY p.created_at, p.request_id LIMIT 1
+    );
+
+CREATE VIEW work_session_view AS
+    SELECT s.id, s.companion_id, s.title,
+           CASE
+               WHEN s.status = 'closed' THEN 'closed'
+               WHEN EXISTS (SELECT 1 FROM work_runs r
+                            WHERE r.work_id = s.id AND r.state IN ('starting', 'running')) THEN 'active'
+               ELSE s.status
+           END AS status,
+           s.client_id, s.created_at, s.updated_at
+    FROM work_sessions s;
+
+CREATE TABLE work_input_receipts (
+    work_id TEXT NOT NULL REFERENCES work_sessions(id) ON DELETE CASCADE,
+    request_key TEXT NOT NULL,
+    payload_hash BLOB NOT NULL CHECK (length(payload_hash) = 32),
+    request_id TEXT NOT NULL,
+    run_id TEXT,
+    PRIMARY KEY (work_id, request_key)
+) WITHOUT ROWID;
 
 -- Device operations: the idempotency key, the client the host dispatched to and
 -- the terminal state the host can answer again after a reconnect. A result is
 -- matched to its operation by id.
-CREATE TABLE IF NOT EXISTS device_operations (
+CREATE TABLE device_operations (
     operation_id TEXT PRIMARY KEY,
     client_id TEXT NOT NULL,
     capability TEXT NOT NULL,
@@ -246,40 +301,39 @@ CREATE TABLE IF NOT EXISTS device_operations (
     output TEXT,
     failure TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    companion_id TEXT,
+    run_id TEXT,
+    dispatch_subscription TEXT,
+    activation_generation INTEGER
 );
 
-CREATE INDEX IF NOT EXISTS idx_operations_client ON device_operations(client_id, status);
+CREATE INDEX idx_device_active_run ON device_operations(run_id)
+    WHERE status IN ('pending', 'dispatched');
+CREATE INDEX idx_operations_client ON device_operations(client_id, status);
 
-CREATE INDEX IF NOT EXISTS idx_memories_scope_importance ON memories(scope, importance);
+CREATE INDEX idx_memories_scope_importance ON memories(scope, importance);
 -- Recall lists one scope's recent page.
-CREATE INDEX IF NOT EXISTS idx_memories_scope_rowid ON memories(scope, rowid);
--- The embedding backfill looks for valid vectors of one space.
-CREATE INDEX IF NOT EXISTS idx_memories_embedding_space
-    ON memories(embedding_model, embedding_content_revision);
--- The vector index mirrors the rows one companion can recall, so it reads
--- that companion's scope and the shared pool only.
-CREATE INDEX IF NOT EXISTS idx_memories_embedding_scope
-    ON memories(scope, embedding_model, embedding_content_revision);
+CREATE INDEX idx_memories_scope_rowid ON memories(scope, rowid);
 -- The citation guard reads the newest injection records of one companion.
-CREATE INDEX IF NOT EXISTS idx_memory_injections_turn
+CREATE INDEX idx_memory_injections_turn
     ON memory_injections(companion_id, turn_id);
 -- `mind_read` walks both directions of the cognitive edges.
-CREATE INDEX IF NOT EXISTS idx_memory_edges_to ON memory_edges(to_id, relation);
+CREATE INDEX idx_memory_edges_to ON memory_edges(to_id, relation);
 -- Consolidation context and receipts are read per companion.
-CREATE INDEX IF NOT EXISTS idx_mind_operations_companion
+CREATE INDEX idx_mind_operations_companion
     ON mind_operations(companion_id, created_at);
 -- `schedule_list` reads one companion's enabled rows.
-CREATE INDEX IF NOT EXISTS idx_schedules_companion_enabled ON schedules(companion_id, enabled);
+CREATE INDEX idx_schedules_companion_enabled ON schedules(companion_id, enabled);
 -- The firing loop reads only due rows: equality on `enabled` first, then the
 -- ordered range on `next_run_at`.
-CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_run_at);
+CREATE INDEX idx_schedules_due ON schedules(enabled, next_run_at);
 
 -- Materialized schedule occurrences keep delivery idempotent across restarts
 -- and transient model-binding failures: a due firing is recorded once with a
 -- deterministic `occurrence_key` and only transitions to `delivered` once the
 -- companion's conversation confirms receipt.
-CREATE TABLE IF NOT EXISTS schedule_occurrences (
+CREATE TABLE schedule_occurrences (
     occurrence_key TEXT PRIMARY KEY,
     schedule_id TEXT NOT NULL,
     companion_id TEXT NOT NULL,
@@ -292,17 +346,17 @@ CREATE TABLE IF NOT EXISTS schedule_occurrences (
     created_at TEXT NOT NULL,
     delivered_at TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_schedule_occurrences_pending
+CREATE INDEX idx_schedule_occurrences_pending
     ON schedule_occurrences(status, scheduled_for);
 
 -- Per-plugin configuration document and isolated key-value state (`F19`).
-CREATE TABLE IF NOT EXISTS plugin_config (
+CREATE TABLE plugin_config (
     plugin_id TEXT PRIMARY KEY,
     config TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS plugin_state (
+CREATE TABLE plugin_state (
     plugin_id TEXT NOT NULL,
     key TEXT NOT NULL,
     value TEXT NOT NULL,
@@ -311,7 +365,7 @@ CREATE TABLE IF NOT EXISTS plugin_state (
 );
 
 -- Companion procedural skills (`F06`).
-CREATE TABLE IF NOT EXISTS skills (
+CREATE TABLE skills (
     companion_id TEXT NOT NULL,
     name TEXT NOT NULL,
     description TEXT NOT NULL,
@@ -321,12 +375,16 @@ CREATE TABLE IF NOT EXISTS skills (
 );
 
 -- Installed plugin registry entries (`F12`).
-CREATE TABLE IF NOT EXISTS plugin_entries (
+CREATE TABLE plugin_entries (
     plugin_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     version TEXT NOT NULL,
     path TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
     installed_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    revision TEXT,
+    installation_id TEXT NOT NULL DEFAULT ''
 );
+
+PRAGMA user_version = 1;
