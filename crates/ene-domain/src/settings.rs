@@ -256,6 +256,29 @@ pub fn validate_agent_platform(
 }
 
 impl ConnectionConfig {
+    /// Whether a registered credential can stay bound after this settings edit.
+    pub fn same_credential_receiver(&self, other: &Self) -> bool {
+        if self.kind() != other.kind() {
+            return false;
+        }
+        if let (Self::Mcp(current), Self::Mcp(proposed)) = (self, other) {
+            return current.same_credential_receiver(proposed);
+        }
+        let current = self.endpoint();
+        let proposed = other.endpoint();
+        if current.adapter != proposed.adapter {
+            return false;
+        }
+        if current.adapter == GOOGLE_AGENT_PLATFORM {
+            return agent_platform_publisher_endpoint(current)
+                .ok()
+                .zip(agent_platform_publisher_endpoint(proposed).ok())
+                .is_some_and(|(current, proposed)| current == proposed);
+        }
+        credential_receiver_parts(&current.endpoint)
+            == credential_receiver_parts(&proposed.endpoint)
+    }
+
     /// Validates the endpoint and kind-specific configuration fields.
     pub fn validate(&self) -> Result<(), DomainError> {
         self.endpoint().validate()?;
@@ -290,6 +313,13 @@ impl ConnectionConfig {
         }
         Ok(())
     }
+}
+
+fn credential_receiver_parts(endpoint: &str) -> (&str, &str) {
+    let endpoint = endpoint.trim();
+    let suffix = endpoint.find(['?', '#']).unwrap_or(endpoint.len());
+    let (base, suffix) = endpoint.split_at(suffix);
+    (base.trim_end_matches('/'), suffix)
 }
 
 fn validate_search(config: &SearchConnection) -> Result<(), DomainError> {
@@ -454,6 +484,37 @@ mod tests {
             revision: 1,
             last_check: None,
         }
+    }
+
+    #[test]
+    fn credential_receivers_keep_the_query_and_effective_google_tenant() {
+        let current = llm_conn(
+            "openai",
+            "https://example.invalid/v1/?tenant=one/",
+            "{}",
+            "a",
+        );
+        let same = llm_conn(
+            "openai",
+            "https://example.invalid/v1?tenant=one/",
+            "{}",
+            "b",
+        );
+        let changed = llm_conn(
+            "openai",
+            "https://example.invalid/v1/?tenant=one",
+            "{}",
+            "a",
+        );
+        assert!(current.config.same_credential_receiver(&same.config));
+        assert!(!current.config.same_credential_receiver(&changed.config));
+        let google =
+            |options| llm_conn(GOOGLE_AGENT_PLATFORM, "", options, "gemini-flash-lite").config;
+        let named = google(r#"{"project_id":"tenant-a","location":"global"}"#);
+        let defaulted = google(r#"{"project_id":"tenant-a"}"#);
+        let different = google(r#"{"project_id":"tenant-b","location":"global"}"#);
+        assert!(named.same_credential_receiver(&defaulted));
+        assert!(!named.same_credential_receiver(&different));
     }
 
     #[test]

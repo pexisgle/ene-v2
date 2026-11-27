@@ -50,19 +50,6 @@ const COLUMNS: &str = "id, name, enabled, kind, config, credential_state, last_c
 #[derive(Clone, Copy, Debug)]
 pub struct SettingsRepo<'a>(&'a Store);
 
-fn changes_mcp_credential_receiver(
-    current: &ConnectionConfig,
-    proposed: &ConnectionConfig,
-) -> bool {
-    match (current, proposed) {
-        (ConnectionConfig::Mcp(current), ConnectionConfig::Mcp(proposed)) => {
-            !current.same_credential_receiver(proposed)
-        }
-        (ConnectionConfig::Mcp(_), _) | (_, ConnectionConfig::Mcp(_)) => true,
-        _ => false,
-    }
-}
-
 impl<'a> SettingsRepo<'a> {
     pub(crate) fn new(store: &'a Store) -> Self {
         Self(store)
@@ -197,12 +184,16 @@ impl<'a> SettingsRepo<'a> {
                         )));
                     }
                 };
-                if existing.is_some_and(|previous| {
-                    previous.credential_state == CredentialState::Registered
-                        && changes_mcp_credential_receiver(&previous.config, &input.config)
-                }) {
+                let changes_receiver = existing.is_some_and(|previous| {
+                    !previous.config.same_credential_receiver(&input.config)
+                });
+                if changes_receiver
+                    && existing.is_some_and(|previous| {
+                        previous.credential_state == CredentialState::Registered
+                    })
+                {
                     return Err(StoreError::Conflict(
-                        "remove the registered credential before changing the MCP receiver".into(),
+                        "remove the registered credential before changing its receiver".into(),
                     ));
                 }
                 let reset_check = existing.is_some_and(|previous| {
@@ -227,7 +218,8 @@ impl<'a> SettingsRepo<'a> {
                         config = excluded.config, revision = excluded.revision, \
                         updated_at = excluded.updated_at, \
                         last_check = CASE WHEN ?9 THEN NULL ELSE connections.last_check END \
-                     WHERE connections.revision = ?11",
+                     WHERE connections.revision = ?11
+                       AND (NOT ?12 OR connections.credential_state <> 'registered')",
                 )?
                 .execute(params![
                     input.id.as_str(),
@@ -241,6 +233,7 @@ impl<'a> SettingsRepo<'a> {
                     reset_check,
                     next,
                     expected,
+                    changes_receiver,
                 ])?;
                 if changed == 0 {
                     return Err(StoreError::Conflict(format!(
@@ -485,6 +478,36 @@ mod tests {
                 .last_check
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_registered_key_blocks_recipient_changes_until_it_is_revoked() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        let repo = store.settings_repo();
+        let settings = repo.update_settings(1, &[(connection("c1"), 0)]).unwrap();
+        let current = repo.connection("c1").unwrap().unwrap();
+        repo.set_credential_state(&current.id, CredentialState::Registered)
+            .unwrap();
+        let mut edited = current.clone();
+        edited.name = "Same receiver".into();
+        let settings = repo
+            .update_settings(settings.revision, &[(edited, current.revision)])
+            .unwrap();
+        let current = repo.connection("c1").unwrap().unwrap();
+        assert_eq!(current.credential_state, CredentialState::Registered);
+
+        let mut redirected = current.clone();
+        redirected.config.endpoint_mut().endpoint = "http://127.0.0.1:8142/v1".into();
+        assert!(matches!(
+            repo.update_settings(settings.revision, &[(redirected.clone(), current.revision)]),
+            Err(StoreError::Conflict(_))
+        ));
+        assert_eq!(repo.connection("c1").unwrap().as_ref(), Some(&current));
+        repo.set_credential_state(&current.id, CredentialState::Absent)
+            .unwrap();
+        repo.update_settings(settings.revision, &[(redirected, current.revision)])
+            .unwrap();
     }
 
     #[test]
