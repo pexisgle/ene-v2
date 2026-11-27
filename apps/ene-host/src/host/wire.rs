@@ -21,25 +21,6 @@ macro_rules! wire_enum {
     };
 }
 
-/// Copies the listed fields into the target type, cloning each.
-macro_rules! wire_copy {
-    ($name:ident, $from:ty => $to:path { $($field:ident),+ $(,)? }) => {
-        pub(crate) fn $name(value: &$from) -> $to {
-            $to {
-                $($field: value.$field.clone(),)+
-                ..Default::default()
-            }
-        }
-    };
-    (exact $name:ident, $from:ty => $to:path { $($field:ident),+ $(,)? }) => {
-        pub(crate) fn $name(value: &$from) -> $to {
-            $to {
-                $($field: value.$field.clone(),)+
-            }
-        }
-    };
-}
-
 pub(crate) fn document(document: &JsonDoc) -> w::JsonDocument {
     w::JsonDocument {
         schema: document.schema.clone(),
@@ -82,7 +63,14 @@ pub(crate) fn mind_profile(value: &Companion) -> w::MindProfile {
     }
 }
 
-wire_copy!(exact profile_from, w::MindProfile => Profile { facets, examples, background, expression });
+pub(crate) fn profile_from(value: &w::MindProfile) -> Profile {
+    Profile {
+        facets: value.facets.clone(),
+        examples: value.examples.clone(),
+        background: value.background.clone(),
+        expression: value.expression.clone(),
+    }
+}
 
 pub(crate) fn mind_state(value: &Companion) -> w::MindState {
     let state: &State = &value.state;

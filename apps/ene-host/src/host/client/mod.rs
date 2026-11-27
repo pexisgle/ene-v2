@@ -108,7 +108,14 @@ impl Plugin for ClientPlugin {
 
 /// Every registered client, with its live connection state.
 pub(crate) fn clients(store: &Store, hub: &DeviceHub) -> Result<Vec<w::Client>> {
-    let activations = store.client_repo().activations()?;
+    clients_with_activations(store, hub, &store.client_repo().activations()?)
+}
+
+pub(crate) fn clients_with_activations(
+    store: &Store,
+    hub: &DeviceHub,
+    activations: &[ene_domain::Activation],
+) -> Result<Vec<w::Client>> {
     Ok(store
         .client_repo()
         .clients()?

@@ -60,7 +60,7 @@ impl SnapshotReader<'_> {
             .flatten()
             .map(|session| w::WorkSession::from(&session))
             .collect();
-        let clients = client::clients(store, hub)?;
+        let clients = client::clients_with_activations(store, hub, &activations)?;
         Ok(w::Snapshot {
             server_version: env!("CARGO_PKG_VERSION").into(),
             health: w::HostHealth::from(health.health()).into(),
