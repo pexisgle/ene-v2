@@ -72,10 +72,7 @@ pub(super) struct PreviewTarget {
 fn preview_target(hub: &Hub) -> Option<PreviewTarget> {
     let assignment = hub.model.dialogue_assignment()?;
     let settings = hub.model.settings()?;
-    let connection = settings
-        .connections
-        .iter()
-        .find(|connection| connection.id == assignment.connection_id)?;
+    let connection = settings.connection(&assignment.connection_id)?;
     let providers = hub
         .model
         .connections

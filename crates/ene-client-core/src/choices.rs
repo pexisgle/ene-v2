@@ -156,7 +156,7 @@ impl Model {
         choices_for: impl FnOnce(&Connection) -> Vec<(String, String)>,
     ) -> Vec<(String, String)> {
         self.settings()
-            .and_then(|settings| settings.connections.iter().find(|conn| conn.id == id))
+            .and_then(|settings| settings.connection(id))
             .map_or_else(Vec::new, choices_for)
     }
 

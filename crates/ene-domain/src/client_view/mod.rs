@@ -79,6 +79,15 @@ pub struct Settings {
     pub policy_texts: Vec<PolicyText>,
 }
 
+impl Settings {
+    /// Finds the configured connection with the given ID.
+    pub fn connection(&self, id: &str) -> Option<&Connection> {
+        self.connections
+            .iter()
+            .find(|connection| connection.id == id)
+    }
+}
+
 /// Authoritative host state snapshot received on subscribe or resnapshot.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Snapshot {

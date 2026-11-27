@@ -222,12 +222,9 @@ fn merge_chat_event(model: &mut Model, event: NotificationEvent, cursor: Option<
                 && companions.chat.companion_id == message.companion_id
                 && is_user_facing_message(&message)
             {
-                companions.streaming.retain(|(companion, _), _| {
-                    message
-                        .companion_id
-                        .as_ref()
-                        .is_none_or(|id| companion != id.as_str())
-                });
+                companions
+                    .streaming
+                    .retain(|(companion, _), _| !companions.chat.is_for(companion));
                 if cursor.is_some() {
                     companions.chat.latest_live_message = cursor;
                 }
@@ -235,12 +232,7 @@ fn merge_chat_event(model: &mut Model, event: NotificationEvent, cursor: Option<
             }
         }
         NotificationEvent::MessageDelta(delta) => {
-            if companions
-                .chat
-                .companion_id
-                .as_ref()
-                .is_some_and(|id| id.as_str() == delta.companion_id)
-            {
+            if companions.chat.is_for(&delta.companion_id) {
                 let text = companions
                     .streaming
                     .entry((delta.companion_id.as_str().to_owned(), delta.stream_id))

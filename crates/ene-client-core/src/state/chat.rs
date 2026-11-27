@@ -45,3 +45,9 @@ pub struct Chat {
     /// A stop the host accepted but has not finished.
     pub stop_requested: bool,
 }
+
+impl Chat {
+    pub(crate) fn is_for(&self, companion: &str) -> bool {
+        self.companion_id.as_ref().map(CompanionId::as_str) == Some(companion)
+    }
+}

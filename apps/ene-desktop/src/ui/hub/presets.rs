@@ -163,11 +163,7 @@ pub(crate) fn add_voicevox_preset(
     if !hub.rpc.has_host() {
         return;
     }
-    let existing_rev = settings
-        .connections
-        .iter()
-        .find(|c| c.id == "voicevox")
-        .map_or(0, |c| c.revision);
+    let existing_rev = settings.connection("voicevox").map_or(0, |c| c.revision);
     let input = build_voicevox_preset_input(existing_rev, speaker, speed);
     hub.update_connections(
         "VOICEVOX接続の追加",

@@ -30,13 +30,9 @@ pub(super) fn collect_setup_choices(pod: &CompanionPod, cx: &App) -> SetupChoice
     let checking_models = target_conn_id
         .as_deref()
         .is_some_and(|cid| hub.setup.checking_connections.contains_key(cid));
-    let connection = target_conn_id.as_deref().and_then(|id| {
-        hub.model
-            .settings()?
-            .connections
-            .iter()
-            .find(|connection| connection.id == id)
-    });
+    let connection = target_conn_id
+        .as_deref()
+        .and_then(|id| hub.model.settings()?.connection(id));
     let model_ready = connection
         .zip(selected_model.as_deref())
         .is_some_and(|(connection, model)| hub.setup.can_apply(connection, model));

@@ -141,10 +141,7 @@ pub(super) fn handle_transcription_frame(
                     state.mic_error_reported = true;
                     super::notify_ui(
                         &session.updates,
-                        Update::Failed {
-                            context: "音声認識",
-                            message: error.to_string(),
-                        },
+                        Update::failed("音声認識", error.to_string()),
                     );
                 }
                 if !session.transport.bindings.is_empty() && session.audio.microphone.is_some() {

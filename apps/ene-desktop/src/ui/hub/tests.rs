@@ -4,6 +4,34 @@ use ene_client_core::state::{Link, Notice, NoticeKind};
 use gpui::{AppContext as _, TestAppContext};
 use tokio::sync::mpsc::unbounded_channel;
 
+#[test]
+fn only_revision_conflicts_request_a_refresh_for_notice_and_check_results() {
+    for (kind, refresh) in [
+        (NoticeKind::Conflict, true),
+        (NoticeKind::Denied, false),
+        (NoticeKind::Failed, false),
+    ] {
+        let notice = Notice {
+            context: "fixture action".into(),
+            message: "fixture result".into(),
+            kind,
+        };
+        for update in [
+            Update::Notice(notice.clone()),
+            Update::Checked {
+                connection_id: "fixture".into(),
+                ticket: "fixture-check".into(),
+                result: Err(notice.clone()),
+            },
+        ] {
+            assert_eq!(ApplyFlags::from_update(&update).conflicted, refresh);
+            let mut model = Model::new("fixture".into());
+            model.apply_accepted(update);
+            assert_eq!(*model.notices[0], notice);
+        }
+    }
+}
+
 fn test_hub(cx: &mut App, runtime: &tokio::runtime::Handle) -> gpui::Entity<Hub> {
     let (commands, _sent) = unbounded_channel();
     let (updates_tx, updates) = unbounded_channel();

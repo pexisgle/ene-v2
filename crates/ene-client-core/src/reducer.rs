@@ -61,15 +61,6 @@ impl Model {
             | Update::SetupApplied(_)
             | Update::CredentialRegistered { .. } => {}
             Update::Devices(devices) => self.connections.devices = *devices,
-            Update::Failed { context, message } => {
-                self.notice(NoticeKind::Failed, context, message)
-            }
-            Update::Conflict { context, message } => {
-                self.notice(NoticeKind::Conflict, context, message);
-            }
-            Update::Denied { context, message } => {
-                self.notice(NoticeKind::Denied, context, message)
-            }
             Update::Providers(providers) => self.connections.providers = Some(providers),
             Update::Models {
                 connection_id,
@@ -78,10 +69,11 @@ impl Model {
                 self.connections.models.insert(connection_id, models);
             }
             Update::Resnapshot | Update::Checked { result: Ok(_), .. } => effects.snapshot = true,
-            Update::Checked {
+            Update::Notice(notice)
+            | Update::Checked {
                 result: Err(notice),
                 ..
-            } => self.notice(notice.kind, notice.context, notice.message),
+            } => self.push_notice(notice),
             Update::Plugins(plugins) => self.connections.plugins = plugins,
             Update::PluginsChanged => effects.plugins = true,
             other => apply_domain_update(self, other, &mut effects),
@@ -205,23 +197,13 @@ fn apply_companion_update(model: &mut Model, update: Update, effects: &mut Effec
             companion_id,
             message,
         } => {
-            if companions
-                .chat
-                .companion_id
-                .as_ref()
-                .is_some_and(|id| id.as_str() == companion_id)
-            {
+            if companions.chat.is_for(&companion_id) {
                 companions.chat.loading = false;
                 companions.chat.error = Some(message);
             }
         }
         Update::StopRequested { companion_id } => {
-            if companions
-                .chat
-                .companion_id
-                .as_ref()
-                .is_some_and(|id| id.as_str() == companion_id)
-            {
+            if companions.chat.is_for(&companion_id) {
                 companions.chat.stop_requested = true;
             }
         }
@@ -251,11 +233,7 @@ fn apply_history(
     observed_at: Option<HostCursor>,
     effects: &mut Effects,
 ) {
-    if chat
-        .companion_id
-        .as_ref()
-        .is_none_or(|id| id.as_str() != companion_id)
-    {
+    if !chat.is_for(companion_id) {
         return;
     }
     if let Some(live) = &chat.latest_live_message {

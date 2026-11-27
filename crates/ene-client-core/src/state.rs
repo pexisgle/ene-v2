@@ -452,11 +452,15 @@ impl Model {
         context: impl Into<String>,
         message: impl Into<String>,
     ) {
-        self.notices.push(Arc::new(Notice {
+        self.push_notice(Notice {
             context: context.into(),
             message: message.into(),
             kind,
-        }));
+        });
+    }
+
+    pub(crate) fn push_notice(&mut self, notice: Notice) {
+        self.notices.push(Arc::new(notice));
         if self.notices.len() > 8 {
             self.notices.remove(0);
         }

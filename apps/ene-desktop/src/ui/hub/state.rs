@@ -119,14 +119,11 @@ impl ApplyFlags {
         Self {
             conflicted: matches!(
                 update,
-                Update::Conflict { .. }
+                Update::Notice(notice)
                     | Update::Checked {
-                        result: Err(Notice {
-                            kind: NoticeKind::Conflict,
-                            ..
-                        }),
+                        result: Err(notice),
                         ..
-                    }
+                    } if notice.kind == NoticeKind::Conflict
             ),
             history_arrived: matches!(update, Update::History { .. }),
             settings_changed: matches!(

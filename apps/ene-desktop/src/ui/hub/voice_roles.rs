@@ -35,7 +35,7 @@ pub(crate) fn assign_tts_voice(
         return;
     }
     let probe_voicevox_id = selection.as_ref().and_then(|(cid, _)| {
-        let conn = settings.connections.iter().find(|c| c.id == *cid)?;
+        let conn = settings.connection(cid)?;
         (conn.is_local_voicevox()
             && (!conn.enabled || hub.model.voice_choices_for_connection(&conn.id).len() <= 1))
             .then(|| conn.id.clone())

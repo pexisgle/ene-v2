@@ -5,7 +5,7 @@ use crate::domain::{
     CompanionTemplate, HostCursor, HostNotification, LlmProvider, Message, MindView, ModelInfo,
     PluginInfo,
 };
-use crate::state::{Devices, Link, Notice};
+use crate::state::{Devices, Link, Notice, NoticeKind};
 
 /// Microphone capture mode (`F07`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -28,27 +28,8 @@ pub enum Update {
     Resync,
     /// A local device changed state.
     Devices(Box<Devices>),
-    /// An action the operator asked for did not happen.
-    Failed {
-        /// The action that failed, in the user's words.
-        context: &'static str,
-        /// What happened, written for the operator.
-        message: String,
-    },
-    /// A revision the window used was stale; the window refetches the authority.
-    Conflict {
-        /// The action that failed, in the user's words.
-        context: &'static str,
-        /// What happened, written for the operator.
-        message: String,
-    },
-    /// The host refused the owner credential or the endpoint.
-    Denied {
-        /// The action that failed, in the user's words.
-        context: &'static str,
-        /// What happened, written for the operator.
-        message: String,
-    },
+    /// A failure, conflict or refusal to show to the operator.
+    Notice(Notice),
     /// A message was accepted into the conversation.
     Accepted {
         /// Client-side key that makes a retry idempotent.
@@ -238,6 +219,15 @@ pub(crate) enum ReplyTarget {
 }
 
 impl Update {
+    /// Reports a local action that could not be completed.
+    pub fn failed(context: &str, message: impl Into<String>) -> Self {
+        Self::Notice(Notice {
+            context: context.into(),
+            message: message.into(),
+            kind: NoticeKind::Failed,
+        })
+    }
+
     pub(crate) fn reply_target(&self) -> Option<ReplyTarget> {
         Some(match self {
             Self::Providers(_) => ReplyTarget::Providers,

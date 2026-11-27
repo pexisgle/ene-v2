@@ -156,12 +156,7 @@ impl RpcDispatcher {
 }
 
 pub(crate) fn failure(context: &'static str, error: &ConnectError) -> Update {
-    let message = error.to_string();
-    match failure_kind(error) {
-        NoticeKind::Conflict => Update::Conflict { context, message },
-        NoticeKind::Denied => Update::Denied { context, message },
-        NoticeKind::Failed => Update::Failed { context, message },
-    }
+    Update::Notice(failure_notice(context, error))
 }
 
 fn failure_notice(context: &'static str, error: &ConnectError) -> Notice {

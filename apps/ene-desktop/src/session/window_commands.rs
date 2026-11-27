@@ -126,10 +126,10 @@ fn request_activation(
     if !stream.activation.is_empty() {
         super::notify_ui(
             &session.updates,
-            Update::Failed {
+            Update::failed(
                 context,
-                message: "処理中の切り替えが完了してから、もう一度操作してください。".into(),
-            },
+                "処理中の切り替えが完了してから、もう一度操作してください。",
+            ),
         );
         return Step::Continue;
     }
@@ -138,13 +138,7 @@ fn request_activation(
     let updates = session.updates.clone();
     stream.activation.spawn(async move {
         if let Err(error) = change_activation(&host, &companion_id, client.as_deref()).await {
-            super::notify_ui(
-                &updates,
-                Update::Failed {
-                    context,
-                    message: error.to_string(),
-                },
-            );
+            super::notify_ui(&updates, Update::failed(context, error.to_string()));
         }
     });
     Step::Continue
@@ -159,10 +153,10 @@ async fn cmd_set_avatar_scale(session: &mut Session, scale: f32) -> Step {
     ) else {
         super::notify_ui(
             &session.updates,
-            Update::Failed {
-                context: "アバターのサイズ変更",
-                message: "アバター描画プロセスまたはコンパニオンが設定されていません".into(),
-            },
+            Update::failed(
+                "アバターのサイズ変更",
+                "アバター描画プロセスまたはコンパニオンが設定されていません",
+            ),
         );
         return Step::Continue;
     };
@@ -177,10 +171,7 @@ async fn cmd_set_avatar_scale(session: &mut Session, scale: f32) -> Step {
         }
         Err(error) => super::notify_ui(
             &session.updates,
-            Update::Failed {
-                context: "アバターのサイズ変更",
-                message: error.to_string(),
-            },
+            Update::failed("アバターのサイズ変更", error.to_string()),
         ),
     }
     Step::Continue
@@ -219,19 +210,16 @@ async fn cmd_center_avatar(session: &mut Session) {
         if let Err(error) = avatar.center(&target).await {
             super::notify_ui(
                 &session.updates,
-                Update::Failed {
-                    context: "アバターの中央移動",
-                    message: error.to_string(),
-                },
+                Update::failed("アバターの中央移動", error.to_string()),
             );
         }
     } else {
         super::notify_ui(
             &session.updates,
-            Update::Failed {
-                context: "アバターの中央移動",
-                message: "アバター描画プロセスが起動していません".into(),
-            },
+            Update::failed(
+                "アバターの中央移動",
+                "アバター描画プロセスが起動していません",
+            ),
         );
     }
 }

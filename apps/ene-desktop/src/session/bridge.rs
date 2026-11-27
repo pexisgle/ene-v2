@@ -242,10 +242,7 @@ impl DeviceBridge {
                 }
                 super::notify_ui(
                     updates,
-                    Update::Failed {
-                        context: "「目」の設定を保存",
-                        message: error.to_string(),
-                    },
+                    Update::failed("「目」の設定を保存", error.to_string()),
                 );
             }
         }
@@ -278,10 +275,7 @@ impl DeviceBridge {
             Err(error) => {
                 super::notify_ui(
                     updates,
-                    Update::Failed {
-                        context: "画面操作の設定を保存",
-                        message: error.to_string(),
-                    },
+                    Update::failed("画面操作の設定を保存", error.to_string()),
                 );
             }
         }
