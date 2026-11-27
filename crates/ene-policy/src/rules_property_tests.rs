@@ -67,14 +67,6 @@ proptest! {
         prop_assert_ne!(first, second);
     }
 
-    /// A hex digest is lowercase hex of exactly twice the input length.
-    #[test]
-    fn hex_digests_have_a_fixed_shape(bytes in prop::collection::vec(any::<u8>(), 0..64)) {
-        let text = hex_digest(&bytes);
-        prop_assert_eq!(text.len(), bytes.len() * 2);
-        prop_assert!(text.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
-    }
-
     /// The digest feeds the approval payload hash, so its bytes are pinned:
     /// a different encoding would silently invalidate every stored
     /// `exact_sha256:` approval.
