@@ -12,9 +12,9 @@ mod headers;
 
 use crate::limits::{HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_CHUNK};
 use ene_plugin::{Failure, HttpChunk, HttpRequest};
-use headers::{copy_headers, is_host_owned};
+use headers::{copy_headers, request_headers};
 use parking_lot::Mutex;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::HeaderMap;
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     sync::{
@@ -80,7 +80,7 @@ pub struct HttpBroker {
     grants: Arc<dyn HttpGrants>,
     client: reqwest::Client,
     open: Mutex<HashMap<String, Open>>,
-    next: AtomicU64,
+    next: Arc<AtomicU64>,
     lifetime: CancellationToken,
     /// How long one exchange may take, end to end.
     deadline: Duration,
@@ -124,10 +124,22 @@ impl HttpBroker {
             grants,
             client,
             open: Mutex::new(HashMap::new()),
-            next: AtomicU64::new(1),
+            next: Arc::new(AtomicU64::new(1)),
             lifetime,
             deadline: deadline.unwrap_or(HTTP_TIMEOUT),
         })
+    }
+
+    /// Shares the client and grants, with replies private to this invocation.
+    pub fn for_invocation(&self) -> Self {
+        Self {
+            grants: Arc::clone(&self.grants),
+            client: self.client.clone(),
+            open: Mutex::default(),
+            next: Arc::clone(&self.next),
+            lifetime: self.lifetime.child_token(),
+            deadline: self.deadline,
+        }
     }
 
     /// Rejects work and drops retained replies after the admission ends.
@@ -167,19 +179,7 @@ impl HttpBroker {
         }
         let method = reqwest::Method::from_bytes(request.method.as_bytes())
             .map_err(|_| Failure::new("invalid_method"))?;
-        let mut headers = HeaderMap::new();
-        for (name, value) in &request.headers {
-            // A plugin may add headers, but not the ones the host owns: the
-            // credential is the host's to attach, and a plugin that sets it
-            // would be choosing what the host authenticates as.
-            let name = HeaderName::from_bytes(name.as_bytes())
-                .map_err(|_| Failure::new("invalid_header"))?;
-            if is_host_owned(&name) {
-                return Err(Failure::new("reserved_header"));
-            }
-            let value = HeaderValue::from_str(value).map_err(|_| Failure::new("invalid_header"))?;
-            headers.insert(name, value);
-        }
+        let mut headers = request_headers(&request.headers)?;
         self.grants.authorize(provider, &mut headers)?;
         let body = request
             .body_base64
@@ -491,6 +491,7 @@ async fn bounded(response: reqwest::Response) -> Result<Vec<u8>, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::header::{HeaderName, HeaderValue};
 
     /// Grants that allow one origin and attach one bearer.
     struct Allow(String);

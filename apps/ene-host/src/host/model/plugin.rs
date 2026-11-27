@@ -8,7 +8,6 @@ use super::super::providers::{ProviderInvocationContext, Running};
 use crate::host::error::HostError;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ene_plugin::{Event as PluginEvent, HttpChunk, HttpRequest, Operation as PluginOperation};
-use ene_plugin_runtime::service::HttpBroker;
 use http::header::HeaderName;
 use rig_core::{
     catalog::{ModelFacts, ModelSpec},
@@ -95,8 +94,6 @@ struct Exchange {
     invocation: Invocation,
     events: mpsc::Receiver<PluginEvent>,
     provider: Arc<Running>,
-    broker: Arc<HttpBroker>,
-    handles: Vec<String>,
     status: Option<StatusCode>,
     headers: Option<HeaderMap>,
     pending: VecDeque<Bytes>,
@@ -135,9 +132,6 @@ impl Exchange {
             }
             self.status = Some(status);
             self.headers = Some(headers);
-        }
-        if !chunk.handle.is_empty() && !self.handles.contains(&chunk.handle) {
-            self.handles.push(chunk.handle.clone());
         }
         if !chunk.data_base64.is_empty() {
             let bytes = STANDARD
@@ -234,9 +228,6 @@ impl Drop for Exchange {
         if !self.completed && !self.failed {
             self.provider.note_cancelled();
         }
-        for handle in &self.handles {
-            let _discarded = self.broker.close(handle);
-        }
     }
 }
 
@@ -284,8 +275,6 @@ impl GuestClient {
             invocation,
             events,
             provider: Arc::clone(&self.provider),
-            broker: Arc::clone(&self.context.broker),
-            handles: Vec::new(),
             status: None,
             headers: None,
             pending: VecDeque::new(),

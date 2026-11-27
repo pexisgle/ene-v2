@@ -33,16 +33,9 @@ fn broker(
 }
 
 /// The services a provider call declares: the broker, and nothing else.
-struct BrokerServices {
-    broker: Arc<HttpBroker>,
-    provider: String,
-}
-
-impl BrokerServices {
-    /// Serves `provider`'s exchanges through `broker`.
-    fn new(broker: Arc<HttpBroker>, provider: String) -> Arc<Self> {
-        Arc::new(Self { broker, provider })
-    }
+pub(crate) struct BrokerServices {
+    pub(crate) broker: HttpBroker,
+    provider: Arc<str>,
 }
 
 /// Logging, configuration and isolated state for non-provider extensions.
@@ -92,10 +85,10 @@ impl Services for PluginServices {
 /// and speech provider plugins.
 #[derive(Clone)]
 pub(crate) struct ProviderInvocationContext {
-    pub(crate) provider_id: String,
+    provider_id: Arc<str>,
     pub(crate) endpoint: String,
     pub(crate) options: Value,
-    pub(crate) broker: Arc<HttpBroker>,
+    broker: Arc<HttpBroker>,
 }
 
 impl ProviderInvocationContext {
@@ -137,16 +130,19 @@ impl ProviderInvocationContext {
             .unwrap_or_else(|| role.configuration.endpoint.clone());
         let options = merge_options(&role.configuration.options, &connection.endpoint().options);
         Self {
-            provider_id: role.id.to_string(),
+            provider_id: role.id.to_string().into(),
             endpoint,
             options,
             broker,
         }
     }
 
-    /// Services handle backed by this context's broker and provider identity.
-    pub(crate) fn services(&self) -> Arc<dyn Services> {
-        BrokerServices::new(Arc::clone(&self.broker), self.provider_id.clone())
+    /// Creates a fresh reply namespace for one guest invocation.
+    pub(crate) fn services(&self) -> Arc<BrokerServices> {
+        Arc::new(BrokerServices {
+            broker: self.broker.for_invocation(),
+            provider: Arc::clone(&self.provider_id),
+        })
     }
 }
 

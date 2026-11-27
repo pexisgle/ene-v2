@@ -512,8 +512,9 @@ async fn p08_actual_grant_overwrites_guest_auth_and_refuses_invalid_auth() {
 }
 
 #[tokio::test]
-async fn p08_providers_cannot_read_retained_replies_after_revocation() {
+async fn p08_provider_replies_are_owned_by_one_live_invocation() {
     use ene_plugin::{Operation, ServiceRequest};
+    use ene_plugin_runtime::instance::Services;
     let upstream = NativeEndpoint::start().await;
     let root = tempfile::tempdir().unwrap();
     let connection = connection(ConnectionKind::Llm, &upstream.base);
@@ -537,50 +538,50 @@ async fn p08_providers_cannot_read_retained_replies_after_revocation() {
         None,
     )
     .unwrap();
-    let broker = context.broker.clone();
-    for _ in 0..2 {
-        let services = context.services();
+    let first = context.services();
+    let second = context.services();
+    for services in [&first, &second] {
         running
             .invoke(
                 Operation::ListModels {
                     endpoint: upstream.base.clone(),
                     options: json!({}),
                 },
-                services,
+                services.clone(),
             )
             .await
             .unwrap();
     }
+    for (services, handle) in [(&first, "http-2"), (&second, "http-1")] {
+        assert_eq!(
+            services.broker.read(handle).await.unwrap_err().code,
+            "unknown_handle"
+        );
+    }
+    let dropped = Arc::downgrade(&first);
+    drop(first);
+    assert!(dropped.upgrade().is_none());
     providers.set_enabled("openrouter", false);
     assert!(providers.running("openrouter", Extension::Llm).is_none());
-    let revoked = context.services();
-    assert_eq!(revoked.check().await.unwrap_err().code, "provider_revoked");
+    let later = context.services();
+    assert_eq!(later.check().await.unwrap_err().code, "provider_revoked");
     assert_eq!(
-        revoked
+        second
             .handle(ServiceRequest::HttpRead {
-                handle: "http-1".into()
+                handle: "http-2".into()
             })
             .await
             .unwrap_err()
             .code,
         "provider_revoked"
     );
-    drop(revoked);
     drop(context);
     drop(running);
     drop(providers);
     assert_eq!(
-        broker.read("http-2").await.unwrap_err().code,
+        second.broker.read("http-2").await.unwrap_err().code,
         "provider_revoked"
     );
-    let separate = http_broker(Arc::new(ene_plugin_runtime::service::DenyHttp)).unwrap();
-    assert_eq!(
-        separate.read("http-2").await.unwrap_err().code,
-        "unknown_handle"
-    );
-    let weak = Arc::downgrade(&broker);
-    drop(broker);
-    assert!(weak.upgrade().is_none());
     upstream.assert_requests(2);
 }
 

@@ -14,7 +14,7 @@ use crate::host::{
 use ene_plugin::{
     AudioFormat, Extension, Operation as PluginOperation, SynthesisRequest, TranscriptionRequest,
 };
-use ene_plugin_runtime::instance::Services;
+use ene_plugin_runtime::service::HttpBroker;
 use std::sync::Arc;
 
 /// The most audio one utterance may produce. A minute of 24 kHz PCM is about
@@ -57,13 +57,8 @@ impl PluginSpeech {
         Ok(Some(Self { running, context }))
     }
 
-    /// The services a speech call needs: the broker, and nothing else.
-    fn services(&self) -> Arc<dyn Services> {
-        self.context.services()
-    }
-
     /// Reads a synthesis answer back, chunk by chunk, into one buffer.
-    async fn read_audio(&self, handle: &str, bytes: u64) -> HttpResult<Vec<u8>> {
+    async fn read_audio(broker: &HttpBroker, handle: &str, bytes: u64) -> HttpResult<Vec<u8>> {
         use base64::Engine;
         if bytes > MAX_AUDIO_BYTES {
             return Err(VoiceHttpError::LimitExceeded(
@@ -72,7 +67,7 @@ impl PluginSpeech {
         }
         let mut audio = Vec::with_capacity(bytes as usize);
         loop {
-            let chunk = self.context.broker.read(handle).await.map_err(|error| {
+            let chunk = broker.read(handle).await.map_err(|error| {
                 VoiceHttpError::Transport(format!("the speech provider's audio: {error}"))
             })?;
             audio.extend_from_slice(
@@ -145,9 +140,14 @@ impl TtsEngine for PluginSpeech {
                 }
                 Ok::<_, VoiceHttpError>((got_chunks, streamed, sample_rate))
             });
+            let services = self.context.services();
             let reply = self
                 .running
-                .invoke_streaming(PluginOperation::Synthesize { request }, self.services(), tx)
+                .invoke_streaming(
+                    PluginOperation::Synthesize { request },
+                    services.clone(),
+                    tx,
+                )
                 .await
                 .map_err(|error| {
                     VoiceHttpError::Transport(format!("the speech provider: {error}"))
@@ -179,7 +179,7 @@ impl TtsEngine for PluginSpeech {
                 .and_then(|rate| u32::try_from(rate).ok())
                 .filter(|rate| *rate > 0)
                 .unwrap_or(SAMPLE_RATE);
-            let audio = self.read_audio(handle, bytes).await?;
+            let audio = Self::read_audio(&services.broker, handle, bytes).await?;
             Ok((audio, rate))
         })
     }
@@ -219,7 +219,11 @@ impl SttEngine for PluginSpeech {
             });
             let reply = self
                 .running
-                .invoke_streaming(PluginOperation::Transcribe { request }, self.services(), tx)
+                .invoke_streaming(
+                    PluginOperation::Transcribe { request },
+                    self.context.services(),
+                    tx,
+                )
                 .await
                 .map_err(|error| {
                     VoiceHttpError::Transport(format!("the speech provider: {error}"))
