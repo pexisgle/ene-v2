@@ -8,10 +8,7 @@ mod policy;
 mod probe;
 
 use super::Services;
-use crate::host::model;
 use crate::host::notify::Notifier;
-use crate::host::settings;
-use crate::host::settings::Connection;
 use connectrpc::RequestContext;
 use connectrpc::ServiceRequest;
 use connectrpc::ServiceResult;
@@ -348,20 +345,6 @@ fn notify_settings(notifier: &Notifier, settings: w::Settings) {
             ..Default::default()
         })),
     );
-}
-
-fn is_builtin_voicevox(
-    connection: &Connection,
-    providers: &crate::host::providers::Providers,
-) -> bool {
-    connection.enabled
-        && connection.kind == settings::ConnectionKind::Tts
-        && connection
-            .endpoint()
-            .adapter
-            .eq_ignore_ascii_case("voicevox")
-        && !model::is_sakura_endpoint(&connection.endpoint().endpoint)
-        && !providers.claims("voicevox", ene_plugin::Extension::Tts)
 }
 
 fn model_item(id: String, spec: &ModelSpec) -> w::Model {

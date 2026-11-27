@@ -2,11 +2,12 @@
 
 use super::super::Services;
 use super::connection_probe::run_connection_probe;
-use super::{is_builtin_voicevox, notify_settings, parse_connection_id};
+use super::{notify_settings, parse_connection_id};
 use crate::host::error::HostError;
 use crate::host::model;
 use crate::host::permission;
 use crate::host::settings;
+use crate::host::voice::is_builtin_voicevox;
 use crate::host::wire;
 use connectrpc::ConnectError;
 use connectrpc::RequestContext;
@@ -49,7 +50,9 @@ pub(super) async fn delete_connection(
                 .settings()?
                 .connections
                 .iter()
-                .any(|connection| is_builtin_voicevox(connection, &services.providers)))
+                .any(|connection| {
+                    connection.enabled && is_builtin_voicevox(connection, &services.providers)
+                }))
         })
         .await;
     if matches!(has_voicevox, Ok(false)) {

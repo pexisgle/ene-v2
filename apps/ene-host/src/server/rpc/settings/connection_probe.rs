@@ -7,6 +7,7 @@ use crate::host::{
     mcp::CheckState,
     model,
     settings::{Check, Connection, ConnectionConfig},
+    voice::is_builtin_voicevox,
 };
 use ene_store::util::now;
 use std::time::Duration;
@@ -23,14 +24,7 @@ pub(super) async fn run_connection_probe(
         ConnectionConfig::Mcp(config) => {
             return probe_mcp_connection(services, connection, &config.command).await;
         }
-        ConnectionConfig::Tts(_)
-            if connection
-                .endpoint()
-                .adapter
-                .eq_ignore_ascii_case("voicevox")
-                && !model::is_sakura_endpoint(&connection.endpoint().endpoint)
-                && !providers.claims("voicevox", ene_plugin::Extension::Tts) =>
-        {
+        ConnectionConfig::Tts(_) if is_builtin_voicevox(connection, &providers) => {
             probe_voicevox_tts(connection, &services.runtime.voicevox()).await
         }
         ConnectionConfig::Stt(_) | ConnectionConfig::Tts(_) => {

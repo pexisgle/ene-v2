@@ -12,6 +12,41 @@ use crate::host::{
 use bevy_ecs::prelude::*;
 use std::sync::Arc;
 
+pub(crate) fn is_builtin_voicevox(connection: &Connection, providers: &Providers) -> bool {
+    let endpoint = connection.endpoint();
+    connection.kind == ConnectionKind::Tts
+        && endpoint.adapter.eq_ignore_ascii_case("voicevox")
+        && !model::is_sakura_endpoint(&endpoint.endpoint)
+        && !providers.claims("voicevox", ene_plugin::Extension::Tts)
+}
+
+pub(crate) fn start_selected_voicevox(
+    settings: &ene_domain::settings::Settings,
+    providers: &Providers,
+    manager: &super::voicevox::VoicevoxManager,
+) -> bool {
+    let Some(connection) = settings
+        .connections
+        .iter()
+        .find(|connection| connection.enabled && is_builtin_voicevox(connection, providers))
+    else {
+        return false;
+    };
+    if !cfg!(test) {
+        let manager = manager.clone();
+        let endpoint = connection.endpoint().clone();
+        tokio::spawn(async move {
+            if let Err(error) = manager
+                .ensure_running(&endpoint.endpoint, &endpoint.options)
+                .await
+            {
+                tracing::warn!(%error, "could not auto-start VOICEVOX");
+            }
+        });
+    }
+    true
+}
+
 /// Engines a test injects to stand in for the plugin path.
 #[derive(Resource, Clone, Default)]
 pub(crate) struct Engines {

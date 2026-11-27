@@ -120,15 +120,15 @@ fn push_unique_model(list: &mut Vec<(String, String)>, id: &str, name: Option<&s
     }
 }
 
-fn llm_config_parts(connection: &Connection) -> (Vec<String>, &str) {
+fn llm_config_parts(connection: &Connection) -> (&[String], &str) {
     match connection.config.as_ref() {
         Some(ConnectionConfig::Llm(llm)) => (
-            llm.model_ids.clone(),
+            &llm.model_ids,
             llm.endpoint
                 .as_ref()
                 .map_or_default(|ep| ep.adapter.as_str()),
         ),
-        _ => (Vec::new(), ""),
+        _ => (&[], ""),
     }
 }
 
@@ -312,44 +312,41 @@ impl Model {
             return Vec::new();
         };
         let (configured, adapter) = llm_config_parts(connection);
-        let fetched = if adapter == GOOGLE_AGENT_PLATFORM && connection.last_check.is_none() {
-            Vec::new()
-        } else {
-            self.connections
-                .models
-                .get(&connection.id)
-                .cloned()
-                .unwrap_or_default()
-        };
+        let fetched: &[ModelInfo] =
+            if adapter == GOOGLE_AGENT_PLATFORM && connection.last_check.is_none() {
+                &[]
+            } else {
+                self.connections
+                    .models
+                    .get(&connection.id)
+                    .map_or(&[], Vec::as_slice)
+            };
         if adapter == GOOGLE_AGENT_PLATFORM
-            && let Some(verified) = verified_google_platform_models(connection, &fetched)
+            && let Some(verified) = verified_google_platform_models(connection, fetched)
         {
             return verified;
         }
         let checked = if adapter == GOOGLE_AGENT_PLATFORM {
-            connection
-                .last_check
-                .as_ref()
-                .map_or_default(|check| check.resources.clone())
+            connection.last_check.as_ref()
         } else {
             self.connections
                 .checks
                 .get(&connection.id)
                 .or(connection.last_check.as_ref())
-                .map_or_default(|check| check.resources.clone())
-        };
+        }
+        .map_or(&[][..], |check| check.resources.as_slice());
         let mut list = Vec::new();
-        for id in &configured {
+        for id in configured {
             let fetched_name = fetched
                 .iter()
                 .find(|m| m.id == *id)
                 .map(|m| m.name.as_str());
             push_unique_model(&mut list, id, fetched_name);
         }
-        for model in &fetched {
+        for model in fetched {
             push_unique_model(&mut list, &model.id, Some(&model.name));
         }
-        for id in &checked {
+        for id in checked {
             push_unique_model(&mut list, id, None);
         }
         if list.is_empty() {

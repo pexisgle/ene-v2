@@ -1,8 +1,9 @@
 //! Settings service.
 
 use super::super::Services;
-use super::{is_builtin_voicevox, notify_settings};
+use super::notify_settings;
 use crate::host::error::HostError;
+use crate::host::voice::start_selected_voicevox;
 use connectrpc::RequestContext;
 use connectrpc::ServiceRequest;
 use connectrpc::ServiceResult;
@@ -50,26 +51,10 @@ pub(super) async fn update_settings(
     let services = services.runtime.services();
     let store = &services.store;
     services.providers.start_used(store).await;
-    if let Ok(current) = store.settings_repo().settings() {
-        let providers = &services.providers;
-        let active_vv = current
-            .connections
-            .iter()
-            .find(|conn| is_builtin_voicevox(conn, providers));
-        if let Some(vv) = active_vv {
-            if !cfg!(test) {
-                let mgr = services.voicevox.clone();
-                let base = vv.endpoint().endpoint.clone();
-                let options = vv.endpoint().options.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = mgr.ensure_running(&base, &options).await {
-                        tracing::warn!(%error, "could not auto-start VOICEVOX engine after settings update");
-                    }
-                });
-            }
-        } else {
-            services.voicevox.stop().await;
-        }
+    if let Ok(current) = store.settings_repo().settings()
+        && !start_selected_voicevox(&current, &services.providers, &services.voicevox)
+    {
+        services.voicevox.stop().await;
     }
     Ok(view)
 }

@@ -371,30 +371,3 @@ fn restore_after_first_frame(world: &mut World) -> Result<()> {
     client::dynamic::init(world);
     Ok(())
 }
-
-/// The whole public state, used for `GetSnapshot` and `Subscribe`.
-fn maybe_auto_start_voicevox(
-    store: &Store,
-    providers: &providers::Providers,
-    voicevox: &voice::voicevox::VoicevoxManager,
-) {
-    if !cfg!(test)
-        && let Ok(settings) = store.settings_repo().settings()
-        && let Some(vv) = settings.connections.iter().find(|conn| {
-            conn.enabled
-                && conn.kind == settings::ConnectionKind::Tts
-                && conn.endpoint().adapter.eq_ignore_ascii_case("voicevox")
-                && !model::is_sakura_endpoint(&conn.endpoint().endpoint)
-                && !providers.claims("voicevox", ene_plugin::Extension::Tts)
-        })
-    {
-        let mgr = voicevox.clone();
-        let base = vv.endpoint().endpoint.clone();
-        let options = vv.endpoint().options.clone();
-        tokio::spawn(async move {
-            if let Err(error) = mgr.ensure_running(&base, &options).await {
-                tracing::warn!(%error, "could not auto-start VOICEVOX engine at startup");
-            }
-        });
-    }
-}

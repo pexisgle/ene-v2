@@ -95,7 +95,9 @@ impl Runtime {
             .await
             .map_err(|_| StartError::Kernel)?
             .map_err(|_| StartError::Kernel)?;
-        maybe_auto_start_voicevox(&services.store, &services.providers, &services.voicevox);
+        if let Ok(settings) = services.store.settings_repo().settings() {
+            voice::start_selected_voicevox(&settings, &services.providers, &services.voicevox);
+        }
         Ok(Self {
             handle: Arc::new(Handle {
                 commands,
