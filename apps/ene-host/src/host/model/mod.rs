@@ -171,20 +171,23 @@ pub(crate) fn connect_assignment(
     if endpoint.adapter == agent_platform::ADAPTER {
         return agent_platform::model(endpoint, secret.as_deref(), &spec, catalog);
     }
-    let default = super::settings::provider(&endpoint.adapter, providers)
-        .map_or_else(String::new, |p| p.endpoint);
+    let secret = match secret {
+        Some(secret) => secret,
+        None if spec.provider.requires_credential() => {
+            return Err(HostError::FailedPrecondition(
+                "the assigned endpoint requires a credential".into(),
+            ));
+        }
+        None => String::new(),
+    };
     // Rig builds the model requests, so their deadline sits on the model
     // client; every other host request shares the unbounded one.
     let client = net::model_client().map_err(|error| HostError::Unavailable(error.to_string()))?;
-    let mut options = ConnectOptions::new().http(rig_reqwest::ReqwestClient::from(client));
-    if let Some(secret) = secret {
-        options = options.api_key(secret);
-    }
-    // rig is handed the base URL only when it is not the provider's own, so a
-    // connection that leaves the field empty keeps the provider default.
-    if base != default {
-        options = options.base_url(base);
-    }
+    // Supplying both values keeps Rig from applying its own environment defaults.
+    let options = ConnectOptions::new()
+        .api_key(secret)
+        .base_url(base)
+        .http(rig_reqwest::ReqwestClient::from(client));
     let model = catalog
         .connect_with(spec.as_ref(), options)
         .map_err(|error| HostError::Unavailable(format!("model connection: {error}")))?;

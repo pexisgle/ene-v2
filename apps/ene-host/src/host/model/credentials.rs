@@ -160,9 +160,7 @@ pub(crate) fn credential_state(
     if credentials.secret(connection.id.as_str())?.is_some() {
         return Ok(CredentialState::Registered);
     }
-    if crate::host::settings::environment_variable(connection, loaded)
-        .is_some_and(|name| std::env::var_os(name).is_some())
-    {
+    if environment_secret(connection, loaded).is_some() {
         return Ok(CredentialState::Environment);
     }
     Ok(CredentialState::Absent)
@@ -178,9 +176,15 @@ pub(crate) fn connection_secret(
     {
         return Ok(Some(secret));
     }
-    Ok(
-        crate::host::settings::environment_variable(connection, loaded)
-            .and_then(|name| std::env::var(name).ok())
-            .filter(|secret| !secret.is_empty()),
-    )
+    Ok(environment_secret(connection, loaded))
+}
+
+fn environment_secret(
+    connection: &Connection,
+    providers: &crate::host::providers::Providers,
+) -> Option<String> {
+    crate::host::settings::environment_variables(connection, providers)
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|secret| !secret.is_empty())
 }

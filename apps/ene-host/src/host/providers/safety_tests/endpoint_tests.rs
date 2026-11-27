@@ -632,13 +632,34 @@ fn p10_listed_providers_cover_installed_plugins_and_their_defaults() {
         Some("https://plugin.example")
     );
     assert_eq!(
-        settings::environment_variable(&empty, &providers).as_deref(),
-        Some("ENE_P08_KEY")
+        settings::environment_variables(&empty, &providers),
+        ["ENE_P08_KEY"]
     );
     let configured = connection(ConnectionKind::Llm, "https://operator.example/");
     assert_eq!(
         settings::endpoint_of(&configured, &providers).as_deref(),
         Some("https://operator.example")
+    );
+}
+
+#[test]
+fn ambient_credentials_are_only_available_for_the_advertised_endpoint() {
+    let providers = Providers::default();
+    let default = settings::provider("openrouter", &providers)
+        .unwrap()
+        .endpoint;
+    let names = |endpoint: &str| {
+        settings::environment_variables(&connection(ConnectionKind::Llm, endpoint), &providers)
+    };
+    assert_eq!(names(""), ["OPENROUTER_API_KEY"]);
+    assert_eq!(
+        names(&format!("{}/", default.trim_end_matches('/'))),
+        ["OPENROUTER_API_KEY"]
+    );
+    assert_eq!(names("https://provider.example.invalid/api/v1").len(), 0);
+    assert_eq!(
+        names(&format!("{}/alternate", default.trim_end_matches('/'))).len(),
+        0
     );
 }
 

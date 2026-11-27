@@ -16,18 +16,52 @@ pub(crate) use ene_domain::settings::{
 use ene_plugin::{Extension, provider::AuthProfile};
 use ene_rpc as w;
 
-/// Resolves the environment-variable name that may supply the secret for `connection`.
-pub(crate) fn environment_variable(connection: &Connection, loaded: &Providers) -> Option<String> {
+/// Environment credentials apply to the provider's advertised endpoint.
+pub(crate) fn environment_variables(connection: &Connection, loaded: &Providers) -> Vec<String> {
+    let endpoint = connection.endpoint();
     if connection.kind == ConnectionKind::Mcp {
-        return None;
+        return Vec::new();
     }
     if connection.kind == ConnectionKind::Search {
-        return SearchAdapter::parse(&connection.endpoint().adapter)
-            .and_then(|adapter| adapter.provider().key_environment)
-            .map(str::to_owned);
+        return SearchAdapter::parse(&endpoint.adapter)
+            .map(SearchAdapter::provider)
+            .filter(|provider| {
+                provider
+                    .default_endpoint
+                    .is_some_and(|default| matches_provider_endpoint(&endpoint.endpoint, default))
+            })
+            .and_then(|provider| provider.key_environment)
+            .map(str::to_owned)
+            .into_iter()
+            .collect();
     }
-    provider(&connection.endpoint().adapter, loaded)
-        .and_then(|provider| provider.environment_variable)
+    let plugin = plugin_entry(&endpoint.adapter, loaded);
+    let is_native = plugin.is_none();
+    let provider = plugin.or_else(|| builtin_provider(&endpoint.adapter));
+    let Some(provider) = provider
+        .filter(|provider| matches_provider_endpoint(&endpoint.endpoint, &provider.endpoint))
+    else {
+        return Vec::new();
+    };
+    if is_native && let Some(native) = super::model::provider_of(&endpoint.adapter) {
+        let names = native.api_key_envs();
+        if !names.is_empty() {
+            return names.into_iter().map(str::to_owned).collect();
+        }
+    }
+    provider.environment_variable.into_iter().collect()
+}
+
+fn matches_provider_endpoint(configured: &str, default: &str) -> bool {
+    let configured = if configured.trim().is_empty() {
+        default
+    } else {
+        configured
+    };
+    url::Url::parse(configured.trim().trim_end_matches('/'))
+        .ok()
+        .zip(url::Url::parse(default.trim().trim_end_matches('/')).ok())
+        .is_some_and(|(configured, default)| configured == default)
 }
 
 /// One built-in LLM provider adapter in the contract's own shape. TTS/STT/MCP/ACP
@@ -180,11 +214,13 @@ fn setting_field(field: &ene_plugin::SettingField) -> w::SettingField {
 }
 
 pub(crate) fn provider(adapter: &str, loaded: &Providers) -> Option<w::LlmProvider> {
-    plugin_entry(adapter, loaded).or_else(|| {
-        builtin_providers()
-            .into_iter()
-            .find(|provider| provider.adapter == adapter)
-    })
+    plugin_entry(adapter, loaded).or_else(|| builtin_provider(adapter))
+}
+
+fn builtin_provider(adapter: &str) -> Option<w::LlmProvider> {
+    builtin_providers()
+        .into_iter()
+        .find(|provider| provider.adapter == adapter)
 }
 
 /// The endpoint a connection calls: its configured one without a trailing

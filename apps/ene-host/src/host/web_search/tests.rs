@@ -175,6 +175,30 @@ async fn spawn_mock_search_adapters() -> (std::net::SocketAddr, tokio::task::Joi
     (addr, server)
 }
 
+#[test]
+fn search_credentials_from_the_environment_require_the_provider_endpoint() {
+    let providers = Providers::default();
+    for (adapter, name) in [
+        ("exa", "EXA_API_KEY"),
+        ("tavily", "TAVILY_API_KEY"),
+        ("brave", "BRAVE_API_KEY"),
+    ] {
+        let names = |endpoint: &str| {
+            let connection = search_test_connection(
+                adapter,
+                adapter,
+                adapter,
+                endpoint.to_owned(),
+                CredentialState::Absent,
+                5,
+            );
+            crate::host::settings::environment_variables(&connection, &providers)
+        };
+        assert_eq!(names(""), [name]);
+        assert_eq!(names("https://search.example.invalid/").len(), 0);
+    }
+}
+
 #[tokio::test]
 async fn f13_configured_search_adapters_execute_and_respect_credentials() {
     let (addr, server) = spawn_mock_search_adapters().await;
@@ -251,14 +275,6 @@ async fn f13_configured_search_adapters_execute_and_respect_credentials() {
         format!("http://{addr}/exa"),
         CredentialState::Registered,
         5,
-    );
-    assert_eq!(
-        crate::host::settings::environment_variable(&exa_conn, &providers).as_deref(),
-        Some("EXA_API_KEY")
-    );
-    assert_eq!(
-        crate::host::settings::environment_variable(&tavily_conn, &providers).as_deref(),
-        Some("TAVILY_API_KEY")
     );
     let resolved_exa = resolve_connection(&exa_conn, Some(&creds), &providers, 0).unwrap();
     let out = execute(&resolved_exa, "rust", 5, || Ok(())).await.unwrap();
