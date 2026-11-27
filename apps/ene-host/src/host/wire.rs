@@ -131,6 +131,7 @@ pub(crate) fn capability_spec(value: &CapabilitySpec) -> w::ClientCapabilitySpec
         approval: capability_approval(value.approval).into(),
         approval_target: value.approval_target.clone(),
         output_schema: value.output_schema.clone(),
+        requires_body_availability: value.requires_body_availability,
         ..Default::default()
     }
 }
@@ -149,6 +150,7 @@ pub(crate) fn capability_spec_from(value: &w::ClientCapabilitySpec) -> Capabilit
         },
         approval_target: value.approval_target.clone(),
         output_schema: value.output_schema.clone(),
+        requires_body_availability: value.requires_body_availability,
     }
 }
 

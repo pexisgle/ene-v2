@@ -92,13 +92,15 @@ pub(super) fn describe_device_request(
         else {
             continue;
         };
-        let (target, work, connection) = match agents.get(agent.0) {
+        let (companion_id, target, work, connection) = match agents.get(agent.0) {
             Ok((Some(companion), _, model)) => (
+                companion.companion_id.as_str(),
                 store.client_repo().target(&companion.companion_id, None),
                 None,
                 model,
             ),
             Ok((_, Some(work), model)) => (
+                work.companion_id.as_str(),
                 store
                     .client_repo()
                     .target(&work.companion_id, Some(&work.work_id)),
@@ -140,7 +142,9 @@ pub(super) fn describe_device_request(
         let mut inputs = String::from("JSON input for the selected capability.");
         if let Some(client) = client {
             for name in &client.granted_capabilities {
+                let spec = client.spec(name);
                 if permission::hard_denied(name).is_some()
+                    || !hub.capability_available(&client.id, companion_id, spec)
                     || (work.is_none() && name.starts_with(super::WORKSPACE_CAPABILITY_PREFIX))
                     || (name == w::COMPUTER_USE
                         && (work.is_none() || !hub.connected(&client.id) || !computer_model))
@@ -148,7 +152,7 @@ pub(super) fn describe_device_request(
                     continue;
                 }
                 names.push(name.clone());
-                if let Some(spec) = client.spec(name)
+                if let Some(spec) = spec
                     && let Ok(schema) = ene_domain::json::parse_schema(&spec.input_schema)
                 {
                     let _discarded = write!(
@@ -197,7 +201,11 @@ pub(crate) fn get_state(
 pub(super) fn settle_disconnections(world: &mut World) {
     let hub = world.resource::<DeviceHub>().clone();
     let store = world.resource::<Store>().clone();
-    for client in hub.take_disconnected() {
+    let disconnected = hub.take_disconnected();
+    if disconnected.is_empty() {
+        return;
+    }
+    for client in disconnected {
         if hub.connected(client.as_str()) {
             continue;
         }
@@ -220,6 +228,11 @@ pub(super) fn settle_disconnections(world: &mut World) {
                 return;
             }
         }
+    }
+    if let Err(error) =
+        super::dynamic::sync_tools(world, super::dynamic::PublicationChange::Refresh)
+    {
+        crate::host::fail(world, &error.to_string());
     }
 }
 

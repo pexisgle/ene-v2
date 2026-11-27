@@ -718,6 +718,7 @@ message ClientCapabilitySpec {
   CapabilityApproval approval = 6;
   string approval_target = 7;   // 承認カードに表示する対象説明のテンプレート
   string output_schema = 8;     // JSON Schema object text（結果がJSONの場合）
+  bool requires_body_availability = 9; // この能力は描画準備済みの常駐コンパニオンに限る
 }
 message Client {
   string id = 1;
@@ -776,6 +777,11 @@ message DeviceOperation {
   string companion_id = 9;          // 操作を要求したコンパニオン
 }
 message DeviceReady { string subscription_id = 1; }
+message BodyAvailability {
+  string client_id = 1;
+  string subscription_id = 2;
+  repeated string ready_companion_ids = 3;
+}
 message DeviceEvent {
   oneof event {
     DeviceReady ready = 1;
@@ -997,6 +1003,8 @@ service ClientService {
   rpc SetCapabilities(SetCapabilitiesRequest) returns (Client);
   // ホスト -> クライアントの操作ストリーム。未配送の操作は再接続時に再送される。
   rpc DeviceStream(Id) returns (stream DeviceEvent);
+  // 描画準備ができている常駐コンパニオン。現在の端末ストリームにのみ適用する。
+  rpc ReportBodyAvailability(BodyAvailability) returns (Empty);
   rpc ReportPerception(PerceptionEvent) returns (Empty);
   // クライアントは操作結果を返す。完了済み操作の再送は同じ状態を返す。
   rpc CompleteOperation(DeviceOperationResult) returns (DeviceOperationState);

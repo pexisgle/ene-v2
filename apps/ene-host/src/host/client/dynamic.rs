@@ -7,7 +7,7 @@ use crate::host::{
     db::{Result, Store},
     error::HostError,
     permission::CallBinding,
-    resources::CompanionAgent,
+    resources::{CompanionAgent, DeviceHub},
 };
 use bevy_ecs::prelude::*;
 use ene_domain::json;
@@ -142,7 +142,7 @@ impl Serve for CapabilityHandler {
     }
 }
 
-fn desired(store: &Store) -> Result<HashMap<String, CapabilityTool>> {
+fn desired(store: &Store, hub: &DeviceHub) -> Result<HashMap<String, CapabilityTool>> {
     let repo = store.client_repo();
     let clients = repo.clients()?;
     let clients: HashMap<_, _> = clients
@@ -159,6 +159,9 @@ fn desired(store: &Store) -> Result<HashMap<String, CapabilityTool>> {
             continue;
         };
         for spec in client.tool_specs() {
+            if !hub.capability_available(&client.id, activation.companion_id.as_str(), Some(spec)) {
+                continue;
+            }
             let Ok(parameters) = json::parse_schema(&spec.input_schema) else {
                 tracing::warn!(tool = %spec.tool_name, "invalid stored capability schema");
                 continue;
@@ -208,7 +211,7 @@ impl PublicationChange<'_> {
 /// Reconciles aliases. A schema change updates the binding without replacing
 /// the alias or interrupting an unrelated companion's tools.
 pub(crate) fn sync_tools(world: &mut World, change: PublicationChange<'_>) -> Result<()> {
-    let mut wanted = desired(world.resource::<Store>())?;
+    let mut wanted = desired(world.resource::<Store>(), world.resource::<DeviceHub>())?;
     let external: HashSet<_> = world
         .query_filtered::<&ToolDef, Without<CapabilityTool>>()
         .iter(world)

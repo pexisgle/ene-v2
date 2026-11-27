@@ -77,10 +77,10 @@ struct DeviceStreams {
     disconnected: HashSet<ClientId>,
 }
 
-#[derive(Clone)]
 struct Stream {
     subscription: SubscriptionId,
     sender: tokio::sync::mpsc::Sender<w::DeviceEvent>,
+    body: Option<HashSet<String>>,
 }
 
 impl DeviceHub {
@@ -104,6 +104,7 @@ impl DeviceHub {
             Stream {
                 subscription,
                 sender,
+                body: None,
             },
         );
         (subscription, receiver)
@@ -130,6 +131,40 @@ impl DeviceHub {
         self.inner.lock().active.contains_key(client)
     }
 
+    /// Installs renderer readiness only on the generation that reported it.
+    pub(crate) fn report_body(
+        &self,
+        client: &str,
+        subscription: &str,
+        ready: HashSet<String>,
+    ) -> Result<()> {
+        let mut streams = self.inner.lock();
+        let stream = streams
+            .active
+            .get_mut(client)
+            .filter(|stream| stream.subscription.matches_wire(subscription))
+            .ok_or_else(|| HostError::Conflict("the device stream changed".into()))?;
+        stream.body = Some(ready);
+        Ok(())
+    }
+
+    pub(crate) fn capability_available(
+        &self,
+        client: &str,
+        companion: &str,
+        spec: Option<&ene_policy::CapabilitySpec>,
+    ) -> bool {
+        if !spec.is_some_and(|spec| spec.requires_body_availability) {
+            return true;
+        }
+        self.inner
+            .lock()
+            .active
+            .get(client)
+            .and_then(|stream| stream.body.as_ref())
+            .is_some_and(|ready| ready.contains(companion))
+    }
+
     pub(crate) fn take_disconnected(&self) -> HashSet<ClientId> {
         std::mem::take(&mut self.inner.lock().disconnected)
     }
@@ -151,8 +186,13 @@ impl DeviceHub {
         SubscriptionId,
         tokio::sync::mpsc::OwnedPermit<w::DeviceEvent>,
     )> {
-        let stream = self.inner.lock().active.get(client).cloned()?;
-        Some((stream.subscription, stream.sender.try_reserve_owned().ok()?))
+        let (subscription, sender) = self
+            .inner
+            .lock()
+            .active
+            .get(client)
+            .map(|stream| (stream.subscription, stream.sender.clone()))?;
+        Some((subscription, sender.try_reserve_owned().ok()?))
     }
 }
 
@@ -201,6 +241,35 @@ impl Default for Options {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn body_readiness_is_owned_by_one_stream_and_companion() {
+        let hub = DeviceHub::default();
+        let client = ClientId::parse("c1").unwrap();
+        let body = ene_policy::CapabilitySpec {
+            requires_body_availability: true,
+            ..Default::default()
+        };
+        let (first, _receiver) = hub.register(&client);
+        assert!(!hub.capability_available("c1", "ene", Some(&body)));
+        assert!(hub.capability_available("c1", "ene", None));
+        hub.report_body("c1", &first.to_string(), HashSet::from(["ene".into()]))
+            .unwrap();
+        assert!(hub.capability_available("c1", "ene", Some(&body)));
+        assert!(!hub.capability_available("c1", "other", Some(&body)));
+
+        let (second, _receiver) = hub.register(&client);
+        assert!(
+            hub.report_body("c1", &first.to_string(), HashSet::from(["ene".into()]))
+                .is_err()
+        );
+        assert!(!hub.capability_available("c1", "ene", Some(&body)));
+        hub.report_body("c1", &second.to_string(), HashSet::from(["other".into()]))
+            .unwrap();
+        assert!(hub.capability_available("c1", "other", Some(&body)));
+        assert!(hub.unregister(&client, second));
+        assert!(!hub.capability_available("c1", "other", Some(&body)));
+    }
 
     #[tokio::test]
     async fn a_new_stream_supersedes_the_old_one() {

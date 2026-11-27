@@ -320,7 +320,9 @@ impl Session {
         })
         .await;
 
-        let _record = match self.transport.register(&host, &self.devices).await {
+        self.transport.subscription.clear();
+        self.transport.published_body.clear();
+        let _record = match self.transport.register(&host, &self.devices, false).await {
             Ok(record) => record,
             Err(error) => return self.transport.classify(&error),
         };

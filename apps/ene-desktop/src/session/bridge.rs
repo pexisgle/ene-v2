@@ -13,7 +13,11 @@ use crate::{
 use backon::{BackoffBuilder as _, ExponentialBackoff};
 use ene_avatar_ipc::{AvatarEvent, AvatarStatus};
 use ene_rpc as w;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::mpsc::UnboundedSender;
 
 pub(super) struct DeviceBridge {
@@ -339,10 +343,17 @@ impl DeviceBridge {
         });
     }
 
-    pub(super) fn body_available(&self, transport: &SessionTransport) -> bool {
-        self.avatar
-            .as_ref()
-            .is_some_and(|avatar| transport.bindings.iter().any(|id| avatar.is_ready(id)))
+    pub(super) fn ready_bodies(&self, transport: &SessionTransport) -> BTreeSet<String> {
+        transport
+            .bindings
+            .iter()
+            .filter(|id| {
+                self.avatar
+                    .as_ref()
+                    .is_some_and(|avatar| avatar.is_ready(id))
+            })
+            .cloned()
+            .collect()
     }
 
     pub(super) fn avatar_state(&self, transport: &SessionTransport) -> Device {

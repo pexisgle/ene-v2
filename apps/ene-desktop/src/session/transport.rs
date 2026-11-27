@@ -29,7 +29,7 @@ pub(super) struct SessionTransport {
     pub(super) cursor: Option<w::Cursor>,
     /// The companion the operator asked to serve while a request was in flight.
     pub(super) pending: Option<String>,
-    pub(super) published_body: bool,
+    pub(super) published_body: BTreeSet<String>,
 }
 
 impl SessionTransport {
@@ -45,7 +45,7 @@ impl SessionTransport {
             subscription: String::new(),
             cursor: None,
             pending: None,
-            published_body: false,
+            published_body: BTreeSet::new(),
         }
     }
 
@@ -76,17 +76,54 @@ impl SessionTransport {
         self.connection.read().clone()
     }
 
-    pub(super) async fn sync_capabilities(&mut self, host: &Host, devices: &DeviceBridge) {
-        if let Err(error) = self.register(host, devices).await {
+    pub(super) async fn sync_capabilities(&self, host: &Host, devices: &DeviceBridge) {
+        let body = !self.published_body.is_empty();
+        if let Err(error) = self.register(host, devices, body).await {
             tracing::warn!("failed to sync client capabilities in place: {error}");
         }
     }
 
+    pub(super) async fn sync_body(&mut self, host: &Host, devices: &DeviceBridge) {
+        if self.subscription.is_empty() {
+            return;
+        }
+        let ready = devices.ready_bodies(self);
+        if self.published_body == ready {
+            return;
+        }
+        let report = host
+            .client
+            .report_body_availability(w::BodyAvailability {
+                client_id: self.options.id.clone(),
+                subscription_id: self.subscription.clone(),
+                ready_companion_ids: ready.iter().cloned().collect(),
+                ..Default::default()
+            })
+            .await;
+        // An older host still accepts the device-wide declaration.
+        if let Err(error) = report
+            && error.code != connectrpc::ErrorCode::Unimplemented
+        {
+            tracing::warn!(%error, "failed to sync avatar readiness");
+            return;
+        }
+        let previous = !self.published_body.is_empty();
+        let available = !ready.is_empty();
+        if previous != available
+            && let Err(error) = self.register(host, devices, available).await
+        {
+            tracing::warn!(%error, "failed to sync avatar capabilities");
+            return;
+        }
+        self.published_body = ready;
+    }
+
     /// Registers this client, keeping the host's grants across restarts.
     pub(super) async fn register(
-        &mut self,
+        &self,
         host: &Host,
         devices: &DeviceBridge,
+        body: bool,
     ) -> Result<w::Client, connectrpc::ConnectError> {
         // A declaration is an optimistic update, so a restart must send the
         // revision the host already stored or it conflicts with itself.
@@ -115,7 +152,6 @@ impl SessionTransport {
                 None
             }
         };
-        let body = devices.body_available(self);
         let mut declaration = capabilities::Declaration::probe(body);
         declaration.eyes &= devices.eyes_enabled;
         let mut specs = declaration.specs();
@@ -124,8 +160,7 @@ impl SessionTransport {
         }
         specs.extend(devices.client_plugins.specs().iter().cloned());
         specs.extend(computer_spec);
-        let client = host
-            .client
+        host.client
             .register_client(w::RegisterClientRequest {
                 id: self.options.id.clone(),
                 name: self.options.name.clone(),
@@ -138,9 +173,7 @@ impl SessionTransport {
             .await?
             .view()
             .to_owned_message()
-            .map_err(|error| connectrpc::ConnectError::internal(error.to_string()))?;
-        self.published_body = body;
-        Ok(client)
+            .map_err(|error| connectrpc::ConnectError::internal(error.to_string()))
     }
 
     /// Installs the host snapshot and the cursor at which it was taken.

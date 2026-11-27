@@ -79,6 +79,9 @@ pub struct CapabilitySpec {
     /// JSON Schema object text for the result; empty skips validation.
     #[serde(default)]
     pub output_schema: String,
+    /// The client reports the companions whose avatars can use this capability.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requires_body_availability: bool,
 }
 
 fn default_schema() -> String {

@@ -201,6 +201,7 @@ impl<'a> AgentKernel<'a> {
         let client_id = client.as_str();
         let services = self.services;
         let world = self.app.world_mut();
+        client::dynamic::sync_tools(world, client::dynamic::PublicationChange::Refresh)?;
         client::computer::invalidate_client(world, client_id, services.hub.subscription(client_id));
         for id in services
             .store
@@ -235,6 +236,29 @@ impl<'a> AgentKernel<'a> {
                 );
             }
         })
+    }
+
+    pub(crate) fn report_body_availability(&mut self, request: &w::BodyAvailability) -> Result<()> {
+        let client = &request.client_id;
+        let active = self
+            .services
+            .store
+            .client_repo()
+            .active_companions_for_client(client)?;
+        let ready: std::collections::HashSet<_> =
+            request.ready_companion_ids.iter().cloned().collect();
+        if !ready.iter().all(|id| active.contains(id)) {
+            return Err(HostError::Conflict(
+                "the device's active companions changed".into(),
+            ));
+        }
+        self.services
+            .hub
+            .report_body(client, &request.subscription_id, ready)?;
+        client::dynamic::sync_tools(
+            self.app.world_mut(),
+            client::dynamic::PublicationChange::Refresh,
+        )
     }
 
     pub(crate) fn complete_operation(

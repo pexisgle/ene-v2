@@ -56,7 +56,6 @@ pub(super) struct StreamLoopState {
 impl Session {
     /// Serves the device stream, audio, the microphone and the subscription.
     pub(super) async fn serve(&mut self, host: Host) -> Outcome {
-        self.transport.subscription.clear();
         self.devices.sensor.reset();
         #[cfg(windows)]
         {
@@ -139,9 +138,7 @@ impl Session {
                     .pump_lip(&self.transport, self.devices.avatar.as_mut(), &self.updates);
             }
             PeriodicTick::Sample => {
-                if self.transport.published_body != self.devices.body_available(&self.transport) {
-                    self.transport.sync_capabilities(host, &self.devices).await;
-                }
+                self.transport.sync_body(host, &self.devices).await;
                 self.open_avatar().await;
                 // Fire-and-forget reports are only reaped here; without this
                 // the set grew for the life of the session.

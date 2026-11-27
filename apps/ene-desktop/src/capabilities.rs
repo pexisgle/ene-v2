@@ -151,11 +151,15 @@ impl Declaration {
     }
 
     fn body_specs(&self) -> Vec<w::ClientCapabilitySpec> {
-        vec![
+        let mut specs = vec![
             self.body_motion_spec(),
             body_look_at_spec(),
             body_perch_spec(),
-        ]
+        ];
+        for spec in &mut specs {
+            spec.requires_body_availability = true;
+        }
+        specs
     }
 
     fn body_motion_spec(&self) -> w::ClientCapabilitySpec {

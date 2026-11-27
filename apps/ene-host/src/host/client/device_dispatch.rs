@@ -56,6 +56,15 @@ pub(crate) fn accept(
         .client(&binding.client_id)?
         .ok_or_else(|| HostError::Conflict(("the bound client is no longer registered").into()))?;
     let spec = admitted_spec(&client, binding, invocation)?;
+    if let Some(companion) = binding.scope.companion_id()
+        && !world
+            .resource::<DeviceHub>()
+            .capability_available(&client.id, companion.as_str(), spec)
+    {
+        return Err(HostError::Conflict(
+            "the target companion's avatar is unavailable".into(),
+        ));
+    }
     if let Some(spec) = spec {
         super::validate_input(spec, &input)?;
     }
@@ -356,6 +365,15 @@ pub(crate) fn resend(
             reject(&operation.id, None);
         } else if scope_is_live(ctx.store, &operation.scope, &operation.client_id)?
             && capability_still_authorized(&rules, declaration.as_ref(), &operation)
+            && operation.scope.companion_id().is_some_and(|companion| {
+                ctx.hub.capability_available(
+                    &operation.client_id,
+                    companion.as_str(),
+                    declaration
+                        .as_ref()
+                        .and_then(|client| client.spec(&operation.capability)),
+                )
+            })
         {
             let _status = dispatch(ctx, &operation, None)?;
         } else {

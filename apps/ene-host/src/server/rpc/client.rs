@@ -111,6 +111,19 @@ impl w::ClientService for Services {
         Response::stream_ok(stream)
     }
 
+    async fn report_body_availability(
+        &self,
+        _: RequestContext,
+        request: ServiceRequest<'_, w::BodyAvailability>,
+    ) -> ServiceResult<w::Empty> {
+        let request = request.to_owned_message();
+        self.call(move |kernel| {
+            kernel.report_body_availability(&request)?;
+            Ok(w::Empty::default())
+        })
+        .await
+    }
+
     async fn report_perception(
         &self,
         _: connectrpc::RequestContext,
