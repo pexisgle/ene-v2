@@ -108,7 +108,7 @@ impl Hub {
     }
 
     pub(crate) fn live(&self) -> bool {
-        self.model.connections.link.is_live() && self.rpc.host().is_some()
+        self.model.connections.link.is_live() && self.rpc.has_host()
     }
 
     fn apply(&mut self, update: Update, cx: &mut Context<Self>) {

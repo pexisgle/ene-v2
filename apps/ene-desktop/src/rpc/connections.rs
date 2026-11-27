@@ -1,13 +1,15 @@
 //! Connection CRUD, probing, credential registration, and onboarding setup RPCs.
 
 use super::{
-    CallContext, RPC_TIMEOUT, RpcDispatcher, companions::shared_model_assignments, failure,
-    failure_notice, id_request,
+    RPC_TIMEOUT, RpcDispatcher, companions::shared_model_assignments, failure, failure_notice,
+    id_request, remaining_options,
 };
 use crate::{host::Host, update::Update};
+use connectrpc::client::CallOptions;
 use ene_client_core::domain::{Companion, ConnectionInput, ModelAssignment};
 use ene_rpc as w;
 use std::{future::Future, time::Duration};
+use tokio::time::Instant;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(65);
 
@@ -38,13 +40,16 @@ async fn run_connection_probe(
 ) -> Result<bool, connectrpc::ConnectError> {
     let response = host
         .settings
-        .check_connection(w::CheckRequest {
-            id: connection_id,
-            request_key: ticket,
-            expected_settings_revision: Some(revision),
-            resource_id,
-            ..Default::default()
-        })
+        .check_connection_with_options(
+            w::CheckRequest {
+                id: connection_id,
+                request_key: ticket,
+                expected_settings_revision: Some(revision),
+                resource_id,
+                ..Default::default()
+            },
+            CallOptions::default().with_timeout(PROBE_TIMEOUT),
+        )
         .await?;
     Ok(response.view().success)
 }
@@ -53,7 +58,7 @@ fn dispatch_probe<F>(
     rpc: &RpcDispatcher,
     epoch: u64,
     connection_id: String,
-    context: CallContext,
+    context: &'static str,
     run: impl FnOnce(Host, String) -> F,
 ) -> Option<String>
 where
@@ -91,7 +96,7 @@ pub(crate) fn load_providers(rpc: &RpcDispatcher, epoch: u64) {
 }
 
 pub(crate) fn load_models(rpc: &RpcDispatcher, epoch: u64, connection_ids: Vec<String>) {
-    let Some(host) = rpc.host() else {
+    let Some(host) = rpc.unary_host() else {
         return;
     };
     for id in connection_ids {
@@ -99,7 +104,7 @@ pub(crate) fn load_models(rpc: &RpcDispatcher, epoch: u64, connection_ids: Vec<S
         let host = host.clone();
         rpc.dispatch(
             epoch,
-            "モデル一覧の取得".into(),
+            "モデル一覧の取得",
             async move {
                 host.settings
                     .list_models(w::ModelsRequest {
@@ -128,19 +133,10 @@ pub(crate) fn update_settings(
     let request = settings_request(expected_revision, inputs);
     if let Some(id) = probe {
         let named = id.clone();
-        return dispatch_probe(
-            rpc,
-            epoch,
-            id,
-            CallContext {
-                label: context,
-                timeout: RPC_TIMEOUT + PROBE_TIMEOUT,
-            },
-            move |host, ticket| async move {
-                let save = before_probe(host.settings.update_settings(request)).await?;
-                run_connection_probe(host, named, save.view().revision, ticket, None).await
-            },
-        );
+        return dispatch_probe(rpc, epoch, id, context, move |host, ticket| async move {
+            let save = host.settings.update_settings(request).await?;
+            run_connection_probe(host, named, save.view().revision, ticket, None).await
+        });
     }
     rpc.call_with(
         epoch,
@@ -150,16 +146,6 @@ pub(crate) fn update_settings(
         failure,
     );
     None
-}
-
-async fn before_probe<T>(
-    request: impl Future<Output = Result<T, connectrpc::ConnectError>>,
-) -> Result<T, connectrpc::ConnectError> {
-    tokio::time::timeout(RPC_TIMEOUT, request)
-        .await
-        .map_err(|_| {
-            connectrpc::ConnectError::deadline_exceeded("the connection setup timed out")
-        })?
 }
 
 pub(crate) fn add_mcp_and_check(
@@ -175,18 +161,14 @@ pub(crate) fn add_mcp_and_check(
         rpc,
         epoch,
         id,
-        CallContext {
-            label: "MCP の追加",
-            timeout: 3 * RPC_TIMEOUT + PROBE_TIMEOUT,
-        },
+        "MCP の追加",
         move |host, ticket| async move {
             let mut create = input.clone();
             create.enabled = secret.is_empty();
-            let saved = before_probe(
-                host.settings
-                    .update_settings(settings_request(revision, vec![create])),
-            )
-            .await?;
+            let saved = host
+                .settings
+                .update_settings(settings_request(revision, vec![create]))
+                .await?;
             let mut revision = saved.view().revision;
             if !secret.is_empty() {
                 input.expected_revision = saved
@@ -198,20 +180,16 @@ pub(crate) fn add_mcp_and_check(
                         connectrpc::ConnectError::not_found("the saved MCP connection is missing")
                     })?
                     .revision;
-                before_probe(host.settings.register_credentials(credential_request(
-                    named.clone(),
-                    secret,
-                    Some(revision),
-                )))
-                .await?;
+                host.settings
+                    .register_credentials(credential_request(named.clone(), secret, Some(revision)))
+                    .await?;
                 input.enabled = true;
-                revision = before_probe(
-                    host.settings
-                        .update_settings(settings_request(revision, vec![input])),
-                )
-                .await?
-                .view()
-                .revision;
+                revision = host
+                    .settings
+                    .update_settings(settings_request(revision, vec![input]))
+                    .await?
+                    .view()
+                    .revision;
             }
             run_connection_probe(host, named, revision, ticket, None).await
         },
@@ -256,16 +234,9 @@ pub(crate) fn probe_connection(
     resource_id: Option<String>,
 ) -> Option<String> {
     let named = connection_id.clone();
-    dispatch_probe(
-        rpc,
-        epoch,
-        connection_id,
-        CallContext {
-            label: "接続確認",
-            timeout: PROBE_TIMEOUT,
-        },
-        |host, ticket| run_connection_probe(host, named, revision, ticket, resource_id),
-    )
+    dispatch_probe(rpc, epoch, connection_id, "接続確認", |host, ticket| {
+        run_connection_probe(host, named, revision, ticket, resource_id)
+    })
 }
 
 pub(crate) fn register_secret(
@@ -295,9 +266,13 @@ pub(crate) fn register_secret_for_connections(
         epoch,
         "複数接続への資格情報登録",
         |host| async move {
+            let deadline = Instant::now() + RPC_TIMEOUT;
             for id in connection_ids {
                 host.settings
-                    .register_credentials(credential_request(id, secret.clone(), Some(revision)))
+                    .register_credentials_with_options(
+                        credential_request(id, secret.clone(), Some(revision)),
+                        remaining_options(deadline)?,
+                    )
                     .await?;
             }
             Ok::<_, connectrpc::ConnectError>(())
@@ -322,29 +297,25 @@ pub(crate) fn revoke_secret(rpc: &RpcDispatcher, epoch: u64, connection_id: Stri
 pub(crate) fn save_setup_connection(rpc: &RpcDispatcher, epoch: u64, req: SetupConnection) -> bool {
     rpc.call_with(
         epoch,
-        CallContext {
-            label: "接続設定の保存",
-            timeout: 2 * RPC_TIMEOUT,
-        },
+        "接続設定の保存",
         |host| async move {
             let revision = if req.create {
-                before_probe(
-                    host.settings
-                        .update_settings(settings_request(req.revision, vec![req.input])),
-                )
-                .await?
-                .view()
-                .revision
+                host.settings
+                    .update_settings(settings_request(req.revision, vec![req.input]))
+                    .await?
+                    .view()
+                    .revision
             } else {
                 req.revision
             };
             if !req.secret.is_empty() {
-                before_probe(host.settings.register_credentials(credential_request(
-                    req.id.clone(),
-                    req.secret,
-                    Some(revision),
-                )))
-                .await?;
+                host.settings
+                    .register_credentials(credential_request(
+                        req.id.clone(),
+                        req.secret,
+                        Some(revision),
+                    ))
+                    .await?;
             }
             Ok(req.id)
         },

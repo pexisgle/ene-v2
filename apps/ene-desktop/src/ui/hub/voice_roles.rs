@@ -28,7 +28,7 @@ pub(crate) fn assign_tts_voice(
     let Some(settings) = hub.model.settings() else {
         return;
     };
-    if hub.rpc.host().is_none() {
+    if !hub.rpc.has_host() {
         return;
     }
     let inputs = build_tts_assignment_inputs(&settings.connections, selection);

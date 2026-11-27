@@ -152,7 +152,7 @@ impl Hub {
         cx: &mut Context<Self>,
     ) {
         let secret = secret.trim();
-        if secret.is_empty() || self.rpc.host().is_none() {
+        if secret.is_empty() || !self.rpc.has_host() {
             return;
         }
         rpc::connections::register_secret(

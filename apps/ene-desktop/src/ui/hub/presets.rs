@@ -160,7 +160,7 @@ pub(crate) fn add_voicevox_preset(
     let Some(settings) = hub.model.settings() else {
         return;
     };
-    if hub.rpc.host().is_none() {
+    if !hub.rpc.has_host() {
         return;
     }
     let existing_rev = settings

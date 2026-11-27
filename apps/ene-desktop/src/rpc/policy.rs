@@ -1,10 +1,11 @@
 //! Approval resolution, policy rules/texts, and host plugin management RPCs.
 
-use super::{RpcDispatcher, failure};
+use super::{RPC_TIMEOUT, RpcDispatcher, failure, remaining_options};
 use crate::{host::Host, update::Update};
 use ene_client_core::domain::{ApprovalDecision, PolicyRulesUpdate, PolicyTextsUpdate};
 use ene_rpc as w;
 use std::future::Future;
+use tokio::time::Instant;
 
 pub(crate) fn load_plugins(rpc: &RpcDispatcher, epoch: u64) {
     rpc.call(
@@ -137,8 +138,11 @@ fn change_plugins<T, F>(
         |host| {
             let change = run(host.clone());
             async move {
+                let deadline = Instant::now() + RPC_TIMEOUT;
                 change.await?;
-                host.settings.list_plugins(w::Empty::default()).await
+                host.settings
+                    .list_plugins_with_options(w::Empty::default(), remaining_options(deadline)?)
+                    .await
             }
         },
         |response| plugins_update(response.view()),

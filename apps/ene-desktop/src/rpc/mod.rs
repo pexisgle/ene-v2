@@ -23,7 +23,10 @@ pub mod policy;
 
 use crate::{host::Host, session::Connection, update::Update};
 use buffa::view::{MessageView, OwnedView};
-use connectrpc::{ConnectError, client::UnaryResponse};
+use connectrpc::{
+    ConnectError,
+    client::{CallOptions, UnaryResponse},
+};
 use ene_client_core::{
     domain::HostNotification,
     state::{Notice, NoticeKind},
@@ -32,7 +35,7 @@ use ene_rpc as w;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::{sync::mpsc::UnboundedSender, time::Instant};
 
 /// How long one RPC may take before the UI gives up on it.
 ///
@@ -40,19 +43,14 @@ use tokio::sync::mpsc::UnboundedSender;
 /// from hanging the window, not to police normal latency.
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Clone, Copy)]
-struct CallContext {
-    label: &'static str,
-    timeout: Duration,
-}
-
-impl From<&'static str> for CallContext {
-    fn from(label: &'static str) -> Self {
-        Self {
-            label,
-            timeout: RPC_TIMEOUT,
-        }
+fn remaining_options(deadline: Instant) -> Result<CallOptions, ConnectError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(ConnectError::deadline_exceeded(
+            "the host did not answer in time",
+        ));
     }
+    Ok(CallOptions::default().with_timeout(remaining))
 }
 
 /// Dispatches asynchronous Connect RPC calls on the session Tokio runtime and routes scoped updates back to the UI.
@@ -78,8 +76,21 @@ impl RpcDispatcher {
         }
     }
 
-    pub(crate) fn host(&self) -> Option<Host> {
-        self.connection.read().clone()
+    pub(crate) fn has_host(&self) -> bool {
+        self.connection.read().is_some()
+    }
+
+    fn unary_host(&self) -> Option<Host> {
+        let mut host = self.connection.read().clone()?;
+        // The session keeps its original clients for long-lived streams.
+        for config in [
+            host.host.config_mut(),
+            host.chat.config_mut(),
+            host.settings.config_mut(),
+        ] {
+            *config = config.clone().with_default_timeout(RPC_TIMEOUT);
+        }
+        Some(host)
     }
 
     /// Runs a unary request with the default failure update.
@@ -115,7 +126,7 @@ impl RpcDispatcher {
     fn call_with<T, F>(
         &self,
         epoch: u64,
-        context: impl Into<CallContext>,
+        context: &'static str,
         run: impl FnOnce(Host) -> F,
         done: impl FnOnce(T) -> Update + Send + 'static,
         error: impl FnOnce(&'static str, &ConnectError) -> Update + Send + 'static,
@@ -124,17 +135,17 @@ impl RpcDispatcher {
         T: Send + 'static,
         F: Future<Output = Result<T, ConnectError>> + Send + 'static,
     {
-        let Some(host) = self.host() else {
+        let Some(host) = self.unary_host() else {
             return false;
         };
-        self.dispatch(epoch, context.into(), run(host), done, error);
+        self.dispatch(epoch, context, run(host), done, error);
         true
     }
 
     fn dispatch<T>(
         &self,
         epoch: u64,
-        context: CallContext,
+        context: &'static str,
         future: impl Future<Output = Result<T, ConnectError>> + Send + 'static,
         done: impl FnOnce(T) -> Update + Send + 'static,
         error: impl FnOnce(&'static str, &ConnectError) -> Update + Send + 'static,
@@ -144,13 +155,9 @@ impl RpcDispatcher {
         let updates = self.updates.clone();
         let seq = self.request_seq.fetch_add(1, Ordering::Relaxed);
         self.runtime.spawn(async move {
-            let inner = match tokio::time::timeout(context.timeout, future).await {
-                Ok(Ok(value)) => done(value),
-                Ok(Err(failed)) => error(context.label, &failed),
-                Err(_) => error(
-                    context.label,
-                    &ConnectError::deadline_exceeded("the host did not answer in time"),
-                ),
+            let inner = match future.await {
+                Ok(value) => done(value),
+                Err(failed) => error(context, &failed),
             };
             crate::session::notify_ui(
                 &updates,
