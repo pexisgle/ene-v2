@@ -8,6 +8,7 @@
 pub mod approvals;
 pub mod clients;
 pub mod companions;
+pub mod credentials;
 pub mod error;
 pub mod memories;
 pub mod migrations;
@@ -154,6 +155,11 @@ impl Store {
     /// Repository for companion profiles and state revisions.
     pub fn companion_repo(&self) -> CompanionRepo<'_> {
         CompanionRepo::new(self)
+    }
+
+    /// Repository for nonsecret credential publication and erasure metadata.
+    pub fn credential_repo(&self) -> credentials::CredentialRepo<'_> {
+        credentials::CredentialRepo::new(self)
     }
 
     /// Repository for episodic memories, vector backfill, and consolidation.

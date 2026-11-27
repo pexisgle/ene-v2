@@ -141,11 +141,7 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
             }
             "recreate" => {
                 let (settings, _) = repo
-                    .delete_connection::<crate::host::error::HostError>(
-                        &row.id,
-                        old_launch.stamp.revision,
-                        || Ok(()),
-                    )
+                    .delete_connection(&row.id, old_launch.stamp.revision)
                     .unwrap();
                 row.config = ConnectionConfig::Mcp(replacement.config());
                 repo.update_settings(settings.revision, &[(row.clone(), 0)])

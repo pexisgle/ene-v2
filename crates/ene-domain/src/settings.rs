@@ -384,12 +384,14 @@ pub enum CredentialState {
     Registered,
     /// The secret comes from an environment variable named by the config.
     Environment,
+    /// The old registration has no verified binding to this host and recipient.
+    RegistrationRequired,
 }
 
 impl CredentialState {
     /// Whether the service has a configured credential source.
     pub fn is_configured(self) -> bool {
-        self != Self::Absent
+        matches!(self, Self::Registered | Self::Environment)
     }
 
     /// Returns the canonical snake-case wire/database representation.

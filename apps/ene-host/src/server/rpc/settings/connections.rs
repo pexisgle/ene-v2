@@ -27,10 +27,9 @@ pub(super) async fn delete_connection(
     let response = services
         .call(move |kernel| {
             let store = &dependencies.store;
-            let (settings, companions) =
-                store.settings_repo().delete_connection(&id, revision, || {
-                    crate::host::model::delete_secret(&dependencies.credentials, id.as_str())
-                })?;
+            let (settings, companions) = store.settings_repo().delete_connection(&id, revision)?;
+            dependencies.credentials.forget(id.as_str());
+            dependencies.credentials.recover_detached();
             let view = settings::project(&settings, &dependencies.providers);
             notify_settings(&dependencies.notifier, view.clone());
             for companion in companions {

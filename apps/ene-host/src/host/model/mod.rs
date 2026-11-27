@@ -7,9 +7,7 @@ mod plugin;
 mod probe;
 mod provider_wiring;
 
-pub(crate) use credentials::{
-    Credentials, connection_secret, credential_state, delete_secret, save_secret,
-};
+pub(crate) use credentials::{Credentials, connection_secret, delete_secret, save_secret};
 pub(crate) use probe::{probe, probe_model};
 pub(crate) use provider_wiring::{
     SAKURA_CHAT_MODELS, SAKURA_EMBEDDING_MODELS, SAKURA_STT_MODELS, SAKURA_TTS_VOICES,

@@ -270,28 +270,22 @@ impl<'a> SettingsRepo<'a> {
         require_found(changed, "connection not found")
     }
 
-    pub fn delete_connection<E>(
+    pub fn delete_connection(
         &self,
         id: &ConnectionId,
         revision: u64,
-        on_delete_secret: impl FnOnce() -> std::result::Result<(), E>,
-    ) -> std::result::Result<(Settings, Vec<Companion>), E>
-    where
-        E: From<StoreError>,
-    {
+    ) -> Result<(Settings, Vec<Companion>)> {
         let mut companions = self.0.companion_repo().companions()?;
         let mut db = self.0.conn();
-        let tx = db.transaction().map_err(StoreError::from)?;
-        let deleted = tx
-            .execute(
-                "DELETE FROM connections WHERE id = ?1 AND revision = ?2",
-                params![id.as_str(), revision],
-            )
-            .map_err(StoreError::from)?;
+        let tx = db.transaction()?;
+        let deleted = tx.execute(
+            "DELETE FROM connections WHERE id = ?1 AND revision = ?2",
+            params![id.as_str(), revision],
+        )?;
         if deleted == 0 {
-            return Err(E::from(StoreError::Conflict(
+            return Err(StoreError::Conflict(
                 "connection changed or was already deleted".into(),
-            )));
+            ));
         }
         let stamp = now();
         companions.retain_mut(|companion| companion.assignments.remove_connection(id.as_str()));
@@ -302,17 +296,13 @@ impl<'a> SettingsRepo<'a> {
             tx.execute(
                 "UPDATE companions SET assignments = ?1, revision = ?2, updated_at = ?3 WHERE id = ?4",
                 params![encoded, companion.revision, stamp, companion.id],
-            )
-            .map_err(StoreError::from)?;
+            )?;
         }
         tx.execute(
             "UPDATE settings_state SET revision = revision + 1, updated_at = ?1 WHERE id = 1",
             [&stamp],
-        )
-        .map_err(StoreError::from)?;
-        // Do not commit the removal if the registered key could not be erased.
-        on_delete_secret()?;
-        tx.commit().map_err(StoreError::from)?;
+        )?;
+        tx.commit()?;
         drop(db);
         Ok((self.settings()?, companions))
     }
@@ -563,7 +553,7 @@ mod tests {
             Some(check)
         );
         let (settings, _) = repo
-            .delete_connection(&current.id, current.revision, || Ok::<_, StoreError>(()))
+            .delete_connection(&current.id, current.revision)
             .unwrap();
         repo.update_settings(settings.revision, &[(connection("c1"), 0)])
             .unwrap();
@@ -571,9 +561,7 @@ mod tests {
         assert_ne!(created, 2);
         assert!(replacement.revision > current.revision);
         assert!(matches!(
-            repo.delete_connection::<StoreError>(&current.id, current.revision, || {
-                panic!("stale deletion cannot reach credential erasure")
-            }),
+            repo.delete_connection(&current.id, current.revision),
             Err(StoreError::Conflict(_))
         ));
         assert_eq!(repo.connection("c1").unwrap().as_ref(), Some(&replacement));
@@ -583,11 +571,45 @@ mod tests {
         ));
     }
 
+    fn a_failed_removal_keeps_the_published_slot(
+        store: &Store,
+        removed: &Connection,
+        removed_slot: uuid::Uuid,
+    ) {
+        let repo = store.settings_repo();
+        let credentials = store.credential_repo();
+        store
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER reject_revision BEFORE UPDATE ON settings_state BEGIN
+                SELECT RAISE(ABORT, 'fixture failure after detaching the slot');
+             END;",
+            )
+            .unwrap();
+        assert!(
+            repo.delete_connection(&removed.id, removed.revision)
+                .is_err()
+        );
+        store
+            .conn()
+            .execute_batch("DROP TRIGGER reject_revision;")
+            .unwrap();
+        assert!(repo.connection(removed.id.as_str()).unwrap().is_some());
+        assert_eq!(
+            credentials
+                .binding(removed.id.as_str())
+                .unwrap()
+                .unwrap()
+                .slot
+                .id,
+            removed_slot
+        );
+        assert!(credentials.detached().unwrap().is_empty());
+    }
+
     #[test]
     fn removing_a_connection_checks_revision_and_clears_only_its_bindings_and_secret() {
         use ene_mind::{ModelAssignment, default_ene_companion};
-        use std::collections::HashMap;
-
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("state.sqlite3")).unwrap();
         let repo = store.settings_repo();
@@ -595,11 +617,17 @@ mod tests {
         let settings = repo
             .update_settings(1, &[(connection("drop"), 0), (connection("keep"), 0)])
             .unwrap();
-        let revision = repo.connection("drop").unwrap().unwrap().revision;
-        let mut secrets = HashMap::from([
-            ("drop".to_owned(), "discarded".to_owned()),
-            ("keep".to_owned(), "preserved".to_owned()),
-        ]);
+        let credentials = store.credential_repo();
+        let publish = |id| {
+            let (connection, created) = repo.connection_with_creation(id).unwrap().unwrap();
+            let slot = credentials.stage(false).unwrap();
+            credentials
+                .publish(&connection.id, connection.revision, created, slot)
+                .unwrap();
+            (connection, slot.id)
+        };
+        let (removed, removed_slot) = publish("drop");
+        let (_, retained_slot) = publish("keep");
         let mut companion = default_ene_companion(&now());
         let assignment = |id: &str| ModelAssignment {
             connection_id: id.into(),
@@ -611,46 +639,26 @@ mod tests {
         companions.insert_companion(&companion).unwrap();
 
         assert!(matches!(
-            repo.delete_connection(
-                &ConnectionId::parse("drop").unwrap(),
-                revision - 1,
-                || -> Result<()> {
-                    secrets.remove("drop");
-                    Ok(())
-                }
-            ),
+            repo.delete_connection(&removed.id, removed.revision - 1),
             Err(StoreError::Conflict(_))
         ));
-        assert_eq!(secrets.get("drop").map(String::as_str), Some("discarded"));
+        assert_eq!(
+            credentials.binding("drop").unwrap().unwrap().slot.id,
+            removed_slot
+        );
         assert_eq!(
             companions.companion(&companion.id).unwrap().unwrap(),
             companion
         );
 
-        // If secret erasure fails, the SQLite transaction must roll back cleanly.
-        assert!(matches!(
-            repo.delete_connection(
-                &ConnectionId::parse("drop").unwrap(),
-                revision,
-                || -> Result<()> { Err(StoreError::Storage("keyring unavailable".into())) }
-            ),
-            Err(StoreError::Storage(_))
-        ));
-        assert!(repo.connection("drop").unwrap().is_some());
+        a_failed_removal_keeps_the_published_slot(&store, &removed, removed_slot);
         assert_eq!(
             companions.companion(&companion.id).unwrap().unwrap(),
             companion
         );
 
         let (next, changed) = repo
-            .delete_connection(
-                &ConnectionId::parse("drop").unwrap(),
-                revision,
-                || -> Result<()> {
-                    secrets.remove("drop");
-                    Ok(())
-                },
-            )
+            .delete_connection(&removed.id, removed.revision)
             .unwrap();
         assert_eq!(next.revision, settings.revision + 1);
         assert_eq!(
@@ -667,8 +675,12 @@ mod tests {
         assert_eq!(saved.assignments.task, assignment("keep"));
         assert!(saved.assignments.perception.is_none());
         assert_eq!(saved.revision, companion.revision + 1);
-        assert!(!secrets.contains_key("drop"));
-        assert_eq!(secrets.get("keep").map(String::as_str), Some("preserved"));
+        assert!(credentials.binding("drop").unwrap().is_none());
+        assert_eq!(credentials.detached().unwrap()[0].id, removed_slot);
+        assert_eq!(
+            credentials.binding("keep").unwrap().unwrap().slot.id,
+            retained_slot
+        );
     }
 
     #[test]

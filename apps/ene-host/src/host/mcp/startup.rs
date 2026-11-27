@@ -57,6 +57,11 @@ async fn read_secret(
     keys: Option<&Credentials>,
     id: &str,
 ) -> Result<Option<String>, ConnectFailure> {
+    if state == CredentialState::RegistrationRequired {
+        return Err(ConnectFailure::Configuration(
+            "the MCP credential must be registered again".into(),
+        ));
+    }
     if state != CredentialState::Registered {
         return Ok(None);
     }

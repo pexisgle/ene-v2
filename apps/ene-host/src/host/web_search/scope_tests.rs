@@ -141,8 +141,7 @@ fn persisted_search_rules_follow_effective_requests_and_accounts() {
     }
     let repo = store.settings_repo();
     let revision = repo.connection(exa.id.as_str()).unwrap().unwrap().revision;
-    repo.delete_connection(&exa.id, revision, || Ok::<_, ene_store::StoreError>(()))
-        .unwrap();
+    repo.delete_connection(&exa.id, revision).unwrap();
     repo.update_settings(repo.settings_revision().unwrap(), &[(exa, 0)])
         .unwrap();
     assert!(matches!(
@@ -391,8 +390,7 @@ fn held_search_pins_the_current_connection_and_effective_credential() {
     ));
     let resumed = resolve(&store, Some(&creds), &providers).unwrap().binding;
     let revision = repo.connection(exa.id.as_str()).unwrap().unwrap().revision;
-    repo.delete_connection(&exa.id, revision, || Ok::<(), ene_store::StoreError>(()))
-        .unwrap();
+    repo.delete_connection(&exa.id, revision).unwrap();
     repo.update_settings(repo.settings_revision().unwrap(), &[(exa, 0)])
         .unwrap();
     assert!(matches!(

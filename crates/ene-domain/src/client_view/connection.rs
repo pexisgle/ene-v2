@@ -170,6 +170,9 @@ impl Connection {
 
     /// Returns true when the connection requires an unregistered credential.
     pub fn needs_key(&self, providers: &[LlmProvider]) -> bool {
+        if self.credential_state == CredentialState::RegistrationRequired {
+            return true;
+        }
         if self.credential_state.is_configured() {
             return false;
         }

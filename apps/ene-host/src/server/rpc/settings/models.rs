@@ -67,7 +67,6 @@ pub(super) async fn register_credentials(
                 return Err(HostError::NotFound("connection not found".into()));
             }
             model::save_secret(&services.credentials, id.as_str(), &secret)?;
-            repo.set_credential_state(&id, CredentialState::Registered)?;
             notify_settings(
                 &services.notifier,
                 settings::project(&repo.settings()?, &services.providers),
@@ -89,14 +88,7 @@ pub(super) async fn revoke_credentials(
     services
         .change(move |services| {
             let store = &services.store;
-            let connection = store
-                .settings_repo()
-                .connection(id.as_str())?
-                .ok_or_else(|| HostError::NotFound("connection not found".into()))?;
             model::delete_secret(&services.credentials, id.as_str())?;
-            let state =
-                model::credential_state(&connection, &services.credentials, &services.providers)?;
-            store.settings_repo().set_credential_state(&id, state)?;
             notify_settings(
                 &services.notifier,
                 settings::project(&store.settings_repo().settings()?, &services.providers),

@@ -25,8 +25,12 @@ impl Runtime {
         // tests independent of the platform backend; the binary still reads
         // the environment.
         let session_only = cfg!(test) || std::env::var_os("ENE_HOST_SESSION_CREDENTIALS").is_some();
-        let mut credentials = Credentials::new(session_only);
+        let mut credentials = Credentials::managed(&store, state, session_only)?;
         credentials.approval_key = options.approval_key;
+        let detached = credentials.clone();
+        drop(tokio::task::spawn_blocking(move || {
+            detached.recover_detached()
+        }));
         let log_path = state.join("rig");
         let logs = DirStore::open(&log_path).map_err(|source| StartError::SessionLog {
             path: log_path,

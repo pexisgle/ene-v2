@@ -42,7 +42,6 @@ fn an_unreadable_credential_store_is_not_an_absent_credential() {
         Err(HostError::Unavailable(_))
     ));
     assert!(connection_secret(&connection, Some(&credentials), &providers).is_err());
-    assert!(credential_state(&connection, &credentials, &providers).is_err());
 }
 
 #[test]

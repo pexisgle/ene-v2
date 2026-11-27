@@ -590,10 +590,11 @@ mod tests {
                     last_check: None,
                 };
                 store.settings_repo().update_settings(1, &[(conn, 0)])?;
-                app.world()
-                    .resource::<host::model::Credentials>()
-                    .remember("llm-preview", "test-key".into());
-                Ok(())
+                host::model::save_secret(
+                    app.world().resource::<host::model::Credentials>(),
+                    "llm-preview",
+                    "test-key",
+                )
             })
             .await
             .unwrap();

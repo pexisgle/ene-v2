@@ -28,7 +28,7 @@ use rusqlite_migration::{HookResult, M, Migrations};
 pub const BASELINE_VERSION: i64 = 6;
 
 /// Latest database schema version managed by [`ladder_steps`].
-pub const VERSION: i64 = 27;
+pub const VERSION: i64 = 28;
 
 /// Every version this host applies above the baseline, in order. The position
 /// in this table is the version, so adding a row is the only way to add a
@@ -199,6 +199,16 @@ const STEPS_ABOVE_BASELINE: &[(&str, &str)] = &[
            through_message_id INTEGER NOT NULL,
            summary TEXT NOT NULL
          );",
+    ),
+    (
+        "0028_credential_publications",
+        "CREATE TABLE credential_slots (
+             id TEXT NOT NULL PRIMARY KEY,
+             connection_id TEXT UNIQUE REFERENCES connections(id) ON DELETE SET NULL,
+             session_only INTEGER NOT NULL CHECK (session_only IN (0, 1))
+         );
+         UPDATE connections SET credential_state = 'registration_required', last_check = NULL
+         WHERE credential_state = 'registered';",
     ),
 ];
 
