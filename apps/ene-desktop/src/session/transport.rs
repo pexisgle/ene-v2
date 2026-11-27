@@ -25,6 +25,7 @@ pub(super) struct SessionTransport {
     pub(super) may_activate: bool,
     /// The surface of the current device stream, from `DeviceReady`.
     pub(super) subscription: String,
+    eyes_generation: u64,
     /// The last notification cursor, for a resuming subscription.
     pub(super) cursor: Option<w::Cursor>,
     /// The companion the operator asked to serve while a request was in flight.
@@ -43,6 +44,7 @@ impl SessionTransport {
             companions: BTreeMap::new(),
             may_activate: true,
             subscription: String::new(),
+            eyes_generation: 0,
             cursor: None,
             pending: None,
             published_body: BTreeSet::new(),
@@ -334,9 +336,14 @@ impl SessionTransport {
         w::PerceptionEvent {
             client_id: self.options.id.clone(),
             subscription_id: self.subscription.clone(),
+            consent_generation: Some(self.eyes_generation),
             event: Some(event),
             ..Default::default()
         }
+    }
+
+    pub(super) fn advance_eyes_generation(&mut self) {
+        self.eyes_generation = self.eyes_generation.saturating_add(1);
     }
 }
 

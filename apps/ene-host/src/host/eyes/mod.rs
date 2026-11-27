@@ -73,6 +73,7 @@ pub(crate) struct Eyes {
 struct Session {
     client: String,
     subscription: String,
+    consent_generation: u64,
     seen: Instant,
     next_evaluation: Instant,
     dirty: bool,
@@ -132,6 +133,7 @@ impl Session {
         Self {
             client,
             subscription,
+            consent_generation: 0,
             seen: now,
             next_evaluation: now + Duration::from_secs(2),
             dirty: false,

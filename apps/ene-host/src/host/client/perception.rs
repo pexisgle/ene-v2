@@ -1,5 +1,4 @@
-//! Perception events: observations routed to the eyes, and the legacy passive
-//! summary fallback.
+//! Routes consented sensor data to Eyes and direct clicks to the avatar.
 
 use super::super::error::{HostError, Result};
 use super::super::{
@@ -21,7 +20,7 @@ pub(crate) struct PerceptionInputs<'w> {
     notifier: Option<Res<'w, Notifier>>,
 }
 
-/// Routes live observations to the eyes and supports legacy passive summaries.
+/// Routes live observations and direct avatar interactions.
 pub(crate) fn ingest_perception(
     InRef(event): InRef<w::PerceptionEvent>,
     inputs: PerceptionInputs<'_>,
@@ -34,6 +33,8 @@ pub(crate) fn ingest_perception(
         mut perception,
         notifier,
     } = inputs;
+    use w::perception_event::Event;
+
     let store = store.into_inner();
     ene_domain::validate_id(&event.client_id)?;
     let client = store
@@ -58,18 +59,19 @@ pub(crate) fn ingest_perception(
         None => active_companions,
     };
     if !event.subscription_id.is_empty() {
-        if matches!(
-            &event.event,
-            Some(w::perception_event::Event::WatchMatch(_))
-        ) && !client.is_granted("eye.watch")
-        {
+        if matches!(&event.event, Some(Event::WatchMatch(_))) && !client.is_granted("eye.watch") {
             return Ok(());
         }
-        if hub
-            .into_inner()
-            .subscription(&event.client_id)
-            .is_some_and(|subscription| subscription.matches_wire(&event.subscription_id))
-        {
+        let consent = match &event.event {
+            Some(Event::Enabled(enabled)) => Some(*enabled),
+            _ => None,
+        };
+        if hub.into_inner().admit_eyes(
+            &event.client_id,
+            &event.subscription_id,
+            event.consent_generation.unwrap_or_default(),
+            consent,
+        ) {
             let notifier = notifier.map(Res::into_inner);
             for companion_id in targets {
                 eyes::apply_report(
@@ -83,39 +85,28 @@ pub(crate) fn ingest_perception(
         }
         return Ok(());
     }
-    let Some(summary) = perception_summary(event) else {
+    let Some(Event::AvatarInteraction(interaction)) = &event.event else {
         return Ok(());
     };
-    let avatar_interaction = match &event.event {
-        Some(w::perception_event::Event::AvatarInteraction(interaction)) => Some((
-            format!("{:?}", interaction.kind),
-            interaction.character_id.clone(),
-            interaction.region.clone(),
-        )),
-        _ => None,
-    };
-    for companion_id in &targets {
+    let summary = avatar_summary(interaction);
+    for companion_id in targets {
         perception.events.insert(
             companion_id.clone(),
             PerceptionEvent {
                 summary: summary.clone(),
             },
         );
-    }
-    if let Some((kind, character_id, region)) = avatar_interaction {
-        for companion_id in targets {
-            commands.trigger(TriggerCharacterEvent {
-                companion_id,
-                event: ene_plugin::CharacterEvent::Custom {
-                    name: "avatar_interaction".into(),
-                    data: serde_json::json!({
-                        "kind": kind,
-                        "character_id": character_id,
-                        "region": region,
-                    }),
-                },
-            });
-        }
+        commands.trigger(TriggerCharacterEvent {
+            companion_id,
+            event: ene_plugin::CharacterEvent::Custom {
+                name: "avatar_interaction".into(),
+                data: serde_json::json!({
+                    "kind": format!("{:?}", interaction.kind),
+                    "character_id": interaction.character_id,
+                    "region": interaction.region,
+                }),
+            },
+        });
     }
     Ok(())
 }
@@ -127,43 +118,19 @@ pub(crate) fn report_perception(world: &mut World, event: &w::PerceptionEvent) -
         .unwrap()
 }
 
-fn perception_summary(event: &w::PerceptionEvent) -> Option<String> {
-    let summary = match event.event.as_ref()? {
-        w::perception_event::Event::ActiveWindow(active) => {
-            if active.title.is_empty() && active.app_id.is_empty() {
-                return None;
-            }
-            format!("アクティブウィンドウ: {} ({})", active.title, active.app_id)
-        }
-        w::perception_event::Event::UserActivity(state) => {
-            if state.is_active {
-                "ユーザーは操作中です".to_owned()
-            } else {
-                format!("ユーザーは離席中です (idle {} 秒)", state.idle_seconds)
-            }
-        }
-        w::perception_event::Event::PerceptionSummary(summary) => {
-            if summary.summary.trim().is_empty() {
-                return None;
-            }
-            summary.summary.clone()
-        }
-        w::perception_event::Event::AvatarInteraction(interaction) => {
-            let kind_label = match interaction.kind.as_known() {
-                Some(w::AvatarInteractionKind::DoubleClick) => "ダブルクリック",
-                Some(w::AvatarInteractionKind::Drag) => "ドラッグ",
-                _ => "クリック",
-            };
-            if interaction.region.trim().is_empty() {
-                format!("ユーザーがアバターを{kind_label}しました")
-            } else {
-                format!(
-                    "ユーザーがアバター({})を{kind_label}しました",
-                    interaction.region.trim()
-                )
-            }
-        }
-        _ => return None,
+fn avatar_summary(interaction: &w::AvatarInteraction) -> String {
+    let action = match interaction.kind.as_known() {
+        Some(w::AvatarInteractionKind::DoubleClick) => "ダブルクリック",
+        Some(w::AvatarInteractionKind::Drag) => "ドラッグ",
+        _ => "クリック",
     };
-    Some(util::truncate(&summary, 1_000))
+    let summary = if interaction.region.trim().is_empty() {
+        format!("ユーザーがアバターを{action}しました")
+    } else {
+        format!(
+            "ユーザーがアバター({})を{action}しました",
+            interaction.region.trim()
+        )
+    };
+    util::truncate(&summary, 1_000)
 }

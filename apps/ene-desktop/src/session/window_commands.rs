@@ -3,13 +3,19 @@
 //! These are free functions rather than methods because the session already
 //! spans three inherent `impl` files; each takes the session it acts on.
 
+use super::stream::StreamLoopState;
 use super::{Session, Step};
 use crate::update::Update;
 use crate::{host::Host, perception::Sensor, update::Command};
 use ene_rpc as w;
 
 /// Handles one window command.
-pub(super) async fn command(session: &mut Session, host: &Host, command: Command) -> Step {
+pub(super) async fn command(
+    session: &mut Session,
+    host: &Host,
+    stream: &mut StreamLoopState,
+    command: Command,
+) -> Step {
     match command {
         Command::Serve(companion_id) => cmd_serve(session, host, companion_id).await,
         Command::ActivateCompanion(companion_id) => {
@@ -31,6 +37,17 @@ pub(super) async fn command(session: &mut Session, host: &Host, command: Command
         }
         Command::SetEyesEnabled(enabled) => {
             session.devices.set_eyes_enabled(enabled, &session.updates);
+            if !enabled && stream.pause_eyes() {
+                session.transport.advance_eyes_generation();
+                let event = session
+                    .transport
+                    .perception_event(w::perception_event::Event::Enabled(false));
+                let _reported = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    host.client.report_perception(event),
+                )
+                .await;
+            }
             session
                 .transport
                 .sync_capabilities(host, &session.devices)

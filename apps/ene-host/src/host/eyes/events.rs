@@ -44,6 +44,7 @@ pub(crate) fn apply_report(
                 stream: StreamId {
                     client: event.client_id,
                     subscription: event.subscription_id,
+                    consent_generation: event.consent_generation.unwrap_or_default(),
                 },
                 enabled,
                 now,
@@ -52,11 +53,10 @@ pub(crate) fn apply_report(
         return Ok(());
     }
     let outcome = {
-        let Some(session) = eyes
-            .sessions
-            .get_mut(companion)
-            .filter(|s| s.subscription == event.subscription_id)
-        else {
+        let Some(session) = eyes.sessions.get_mut(companion).filter(|session| {
+            session.subscription == event.subscription_id
+                && session.consent_generation == event.consent_generation.unwrap_or_default()
+        }) else {
             return Ok(());
         };
         session.seen = now;
@@ -91,6 +91,7 @@ enum SessionOutcome {
 struct StreamId {
     client: String,
     subscription: String,
+    consent_generation: u64,
 }
 
 /// What `handle_enabled_event` mutates besides the two maps.
@@ -116,26 +117,24 @@ fn handle_enabled_event(
     let StreamId {
         client: client_id,
         subscription: subscription_id,
+        consent_generation,
     } = stream;
     let diag_action = {
-        let same_stream = eyes
-            .sessions
-            .get(companion)
-            .is_some_and(|session| session.subscription == subscription_id);
+        let session = eyes.sessions.get_mut(companion);
         if enabled {
-            if same_stream {
-                if let Some(session) = eyes.sessions.get_mut(companion) {
-                    session.seen = now;
-                }
+            if let Some(session) = session.filter(|session| {
+                session.subscription == subscription_id
+                    && session.consent_generation == consent_generation
+            }) {
+                session.seen = now;
                 None
             } else {
-                eyes.sessions.insert(
-                    companion.to_string(),
-                    Session::new(client_id, subscription_id, now),
-                );
+                let mut session = Session::new(client_id, subscription_id, now);
+                session.consent_generation = consent_generation;
+                eyes.sessions.insert(companion.to_string(), session);
                 Some("enabled")
             }
-        } else if same_stream {
+        } else if session.is_some_and(|session| session.subscription == subscription_id) {
             eyes.sessions.remove(companion);
             Some("paused")
         } else {
@@ -145,7 +144,7 @@ fn handle_enabled_event(
     if let Some(action) = diag_action {
         diagnostic(notifier, companion, action, &json!({}));
     }
-    if enabled {
+    if enabled || diag_action.is_some() {
         perception.events.remove(companion);
     }
 }

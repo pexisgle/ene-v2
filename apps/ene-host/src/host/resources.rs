@@ -81,6 +81,43 @@ struct Stream {
     subscription: SubscriptionId,
     sender: tokio::sync::mpsc::Sender<w::DeviceEvent>,
     body: Option<HashSet<String>>,
+    eyes: Option<EyesConsent>,
+}
+
+#[derive(Clone, Copy)]
+struct EyesConsent {
+    generation: u64,
+    enabled: bool,
+}
+
+impl EyesConsent {
+    fn admit(consent: &mut Option<Self>, generation: u64, enabled: Option<bool>) -> bool {
+        match (*consent, enabled) {
+            (None, Some(enabled)) => {
+                *consent = Some(Self {
+                    generation,
+                    enabled,
+                });
+                true
+            }
+            (Some(current), Some(enabled)) if generation > current.generation => {
+                *consent = Some(Self {
+                    generation,
+                    enabled,
+                });
+                true
+            }
+            (Some(current), Some(false)) if generation == current.generation => {
+                *consent = Some(Self {
+                    generation,
+                    enabled: false,
+                });
+                true
+            }
+            (Some(current), _) => current.enabled && generation == current.generation,
+            _ => false,
+        }
+    }
 }
 
 impl DeviceHub {
@@ -105,6 +142,7 @@ impl DeviceHub {
                 subscription,
                 sender,
                 body: None,
+                eyes: None,
             },
         );
         (subscription, receiver)
@@ -176,6 +214,21 @@ impl DeviceHub {
             .active
             .get(client)
             .map(|stream| stream.subscription)
+    }
+
+    pub(crate) fn admit_eyes(
+        &self,
+        client: &str,
+        subscription: &str,
+        generation: u64,
+        enabled: Option<bool>,
+    ) -> bool {
+        let mut streams = self.inner.lock();
+        streams
+            .active
+            .get_mut(client)
+            .filter(|stream| stream.subscription.matches_wire(subscription))
+            .is_some_and(|stream| EyesConsent::admit(&mut stream.eyes, generation, enabled))
     }
 
     /// Reserves space on a specific stream generation for one dispatch.

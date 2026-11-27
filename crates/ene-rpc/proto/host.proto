@@ -823,6 +823,7 @@ message PerceptionEvent {
   }
   string subscription_id = 9; // DeviceReady の購読 ID。旧形式では空。
   optional string companion_id = 10; // 明示ルーティング先のコンパニオン
+  optional uint64 consent_generation = 12; // 端末の観測許可が変わるたびに進む購読内の世代。
 }
 
 enum AvatarInteractionKind {

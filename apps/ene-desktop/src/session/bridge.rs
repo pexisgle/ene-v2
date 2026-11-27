@@ -291,7 +291,7 @@ impl DeviceBridge {
     /// Keeps socket waits and screenshot encoding off the audio/device loop.
     pub(super) fn sample(
         &mut self,
-        transport: &SessionTransport,
+        transport: &mut SessionTransport,
         host: &Host,
         screen_at: &mut tokio::time::Instant,
         eyes_open: &mut bool,
@@ -309,6 +309,7 @@ impl DeviceBridge {
             if std::mem::take(eyes_open) {
                 observations.abort_all();
                 self.sensor.reset();
+                transport.advance_eyes_generation();
                 let event = transport.perception_event(Event::Enabled(false));
                 let host = host.clone();
                 observations.spawn(async move {
@@ -323,7 +324,9 @@ impl DeviceBridge {
         let mut events = Vec::new();
         if periodic {
             *screen_at = now + SCREEN_SAMPLE;
-            *eyes_open = true;
+            if !std::mem::replace(eyes_open, true) {
+                transport.advance_eyes_generation();
+            }
             events.push(Event::Enabled(true));
         }
         events.extend(

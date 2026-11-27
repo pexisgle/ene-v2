@@ -53,6 +53,13 @@ pub(super) struct StreamLoopState {
     timers: PeriodicTimers,
 }
 
+impl StreamLoopState {
+    pub(super) fn pause_eyes(&mut self) -> bool {
+        self.timers.observations.abort_all();
+        std::mem::take(&mut self.eyes_open)
+    }
+}
+
 impl Session {
     /// Serves the device stream, audio, the microphone and the subscription.
     pub(super) async fn serve(&mut self, host: Host) -> Outcome {
@@ -144,7 +151,7 @@ impl Session {
                 // the set grew for the life of the session.
                 self.devices.reap_background();
                 self.devices.sample(
-                    &self.transport,
+                    &mut self.transport,
                     host,
                     &mut state.screen_at,
                     &mut state.eyes_open,
@@ -231,20 +238,7 @@ impl Session {
         state: &mut StreamLoopState,
         command: Command,
     ) -> Option<Outcome> {
-        if matches!(command, Command::SetEyesEnabled(false)) {
-            state.timers.observations.abort_all();
-            if state.eyes_open {
-                let event = self
-                    .transport
-                    .perception_event(w::perception_event::Event::Enabled(false));
-                let _waited = tokio::time::timeout(
-                    Duration::from_secs(1),
-                    host.client.report_perception(event),
-                )
-                .await;
-            }
-        }
-        match super::window_commands::command(self, host, command).await {
+        match super::window_commands::command(self, host, state, command).await {
             Step::Continue => None,
             Step::Restart => Some(Outcome::Resync("the session settings changed".into())),
             Step::Stop => Some(Outcome::Closed),

@@ -60,11 +60,22 @@ fn bind(
 }
 
 fn report(harness: &mut Harness, client: &str, subscription: &str, event: Event) {
+    report_at(harness, client, subscription, None, event);
+}
+
+fn report_at(
+    harness: &mut Harness,
+    client: &str,
+    subscription: &str,
+    consent_generation: Option<u64>,
+    event: Event,
+) {
     client::report_perception(
         harness.app.world_mut(),
         &w::PerceptionEvent {
             client_id: client.into(),
             subscription_id: subscription.into(),
+            consent_generation,
             event: Some(event),
             ..Default::default()
         },
@@ -486,10 +497,27 @@ fn disable_and_handoff_clear_a_watch_waiting_to_wake_the_head() {
         }))
     };
     let id = harness.companion.clone();
-    report(&mut harness, "desktop", &sub, watch());
+    report_at(&mut harness, "desktop", &sub, Some(1), watch());
+    report(
+        &mut harness,
+        "desktop",
+        "",
+        Event::PerceptionSummary(Box::new(w::PerceptionSummary {
+            summary: "unbound preview".into(),
+            ..Default::default()
+        })),
+    );
+    assert!(
+        harness
+            .app
+            .world()
+            .resource::<super::super::resources::Perception>()
+            .events
+            .is_empty()
+    );
     assert!(harness.app.world().resource::<Eyes>().sessions.is_empty());
-    report(&mut harness, "desktop", &sub, Event::Enabled(true));
-    report(&mut harness, "desktop", &sub, watch());
+    report_at(&mut harness, "desktop", &sub, Some(1), Event::Enabled(true));
+    report_at(&mut harness, "desktop", &sub, Some(1), watch());
     assert!(
         harness.app.world().resource::<Eyes>().sessions[&id]
             .pending
@@ -498,13 +526,31 @@ fn disable_and_handoff_clear_a_watch_waiting_to_wake_the_head() {
             .kind
             == ReportKind::Watch
     );
-    report(&mut harness, "desktop", &sub, Event::Enabled(false));
-    report(&mut harness, "desktop", &sub, watch());
+    report_at(
+        &mut harness,
+        "desktop",
+        &sub,
+        Some(2),
+        Event::Enabled(false),
+    );
+    report_at(&mut harness, "desktop", &sub, Some(1), Event::Enabled(true));
+    report_at(&mut harness, "desktop", &sub, Some(1), watch());
     assert!(harness.app.world().resource::<Eyes>().sessions.is_empty());
-    report(&mut harness, "desktop", &sub, Event::Enabled(true));
-    report(&mut harness, "desktop", &sub, watch());
+    report_at(&mut harness, "desktop", &sub, Some(3), Event::Enabled(true));
+    report_at(&mut harness, "desktop", &sub, Some(1), watch());
+    assert!(
+        harness.app.world().resource::<Eyes>().sessions[&id]
+            .pending
+            .is_none()
+    );
+    report_at(&mut harness, "desktop", &sub, Some(3), watch());
+    assert!(
+        harness.app.world().resource::<Eyes>().sessions[&id]
+            .pending
+            .is_some()
+    );
     let (_new_sub, _new_stream) = bind(&mut harness, "new-desktop");
-    report(&mut harness, "desktop", &sub, Event::Enabled(true));
+    report_at(&mut harness, "desktop", &sub, Some(3), Event::Enabled(true));
     assert!(harness.app.world().resource::<Eyes>().sessions.is_empty());
 }
 
