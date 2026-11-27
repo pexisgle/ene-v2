@@ -23,7 +23,6 @@ pub(crate) fn merge_notification(
         }
         Some(
             event @ (NotificationEvent::InitialState(_)
-            | NotificationEvent::Health(_)
             | NotificationEvent::Companion(_)
             | NotificationEvent::SettingsUpdated(_)
             | NotificationEvent::ClientUpdated(_)
@@ -54,16 +53,9 @@ pub(crate) fn merge_notification(
             }
         }
         Some(NotificationEvent::Generic(event)) => merge_generic_notice(model, &event),
-        Some(NotificationEvent::MindUpdated(updated)) => {
-            // `updated.companion_id` is a CompanionId, so it is never empty and
-            // the emptiness guard this used to carry is dead.
-            effects.mind |= model.companion_id() == Some(updated.companion_id.as_str())
-                || model
-                    .companions
-                    .chat
-                    .companion_id
-                    .as_ref()
-                    .is_some_and(|id| id.as_str() == updated.companion_id);
+        Some(NotificationEvent::MindUpdated(companion)) => {
+            effects.mind |= model.companion_id() == Some(companion.as_str())
+                || model.companions.chat.companion_id.as_ref() == Some(&companion);
         }
         Some(NotificationEvent::Other) | None => {}
     }
@@ -84,9 +76,6 @@ pub(crate) fn remove_companion(model: &mut Model, companion_id: &str, effects: &
                 .iter()
                 .find(|activation| activation.client_id.is_some())
                 .map(|activation| activation.companion_id.to_string());
-        }
-        for client in &mut snapshot.clients {
-            client.active_companions.retain(|id| id != companion_id);
         }
         snapshot
             .active_work
@@ -124,11 +113,6 @@ fn merge_snapshot_event(model: &mut Model, event: NotificationEvent, effects: &m
                 .sort_by(|left, right| left.name.cmp(&right.name));
             model.snapshot = Some(*snapshot);
             effects.approvals = false;
-        }
-        NotificationEvent::Health(health) => {
-            if let Some(snapshot) = model.snapshot.as_mut() {
-                snapshot.health = Some(health);
-            }
         }
         NotificationEvent::Companion(companion) => {
             if let Some(snapshot) = model.snapshot.as_mut() {

@@ -51,20 +51,6 @@ from_fields! {
     }
 }
 
-impl From<w::HostHealth> for domain::HostHealth {
-    fn from(value: w::HostHealth) -> Self {
-        if value.recovery_required {
-            Self::RecoveryRequired
-        } else if value.stopping {
-            Self::Stopping
-        } else if value.ready {
-            Self::Ready
-        } else {
-            Self::Starting
-        }
-    }
-}
-
 impl From<domain::HostHealth> for w::HostHealth {
     fn from(value: domain::HostHealth) -> Self {
         Self {
@@ -78,8 +64,7 @@ impl From<domain::HostHealth> for w::HostHealth {
 
 from_fields! {
     w::Client => domain::ClientInfo {
-        id, name, platform, capabilities, granted_capabilities, revision,
-        last_seen, connected, active_companions,
+        id, capabilities, granted_capabilities, revision,
     }
 }
 
@@ -95,8 +80,6 @@ from_fields! {
 impl From<w::Snapshot> for domain::Snapshot {
     fn from(value: w::Snapshot) -> Self {
         Self {
-            server_version: value.server_version,
-            health: value.health.into_option().map(Into::into),
             settings: value.settings.into_option().map(Into::into),
             companions: value.companions.into_iter().map(Into::into).collect(),
             active_work: value
@@ -139,12 +122,6 @@ from_fields! {
 }
 
 from_fields! {
-    w::MindUpdated => domain::MindUpdated {
-        companion_id, profile_revision, state_revision, updated_at,
-    }
-}
-
-from_fields! {
     w::MessageDelta => domain::MessageDelta {
         companion_id, stream_id, delta,
     }
@@ -177,12 +154,13 @@ fn notification_event(
     use w::notification::Event as Wire;
 
     match wire {
-        Wire::Health(value) => Event::Health((*value).into()),
+        Wire::Health(_) => Event::Other,
         Wire::Companion(value) => Event::Companion(Box::new((*value).into())),
         Wire::CompanionRemoved(value) => {
             ene_domain::CompanionId::parse(&value.id).map_or(Event::Other, Event::CompanionRemoved)
         }
-        Wire::MindUpdated(value) => Event::MindUpdated((*value).into()),
+        Wire::MindUpdated(value) => ene_domain::CompanionId::parse(&value.companion_id)
+            .map_or(Event::Other, Event::MindUpdated),
         Wire::MessageCreated(value) => value
             .message
             .into_option()

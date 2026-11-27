@@ -58,22 +58,12 @@ pub enum HostHealth {
 pub struct ClientInfo {
     /// Client-assigned id, unique across registered clients.
     pub id: String,
-    /// Display name shown to the operator.
-    pub name: String,
-    /// Platform the client runs on, as the client reports it.
-    pub platform: String,
     /// Capabilities the client declared at registration.
     pub capabilities: Vec<String>,
     /// Declared capabilities the host has since granted.
     pub granted_capabilities: Vec<String>,
     /// Optimistic-concurrency counter, bumped on every write.
     pub revision: u64,
-    /// Last contact, as the host stamped it.
-    pub last_seen: String,
-    /// Whether the host currently holds a session to the client.
-    pub connected: bool,
-    /// Companions currently resident on the client.
-    pub active_companions: Vec<String>,
 }
 
 /// Persisted host settings and configured connections.
@@ -92,10 +82,6 @@ pub struct Settings {
 /// Authoritative host state snapshot received on subscribe or resnapshot.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Snapshot {
-    /// Version string the host reported.
-    pub server_version: String,
-    /// Host readiness, when the host reported it.
-    pub health: Option<HostHealth>,
     /// Settings and connections, when the host returned them.
     pub settings: Option<Settings>,
     /// Every companion on the host.
@@ -123,19 +109,6 @@ pub struct HostEvent {
     pub payload: Option<JsonDocument>,
 }
 
-/// Notification indicating a companion's mind profile or state changed.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct MindUpdated {
-    /// The companion whose mind changed.
-    pub companion_id: String,
-    /// The profile revision after the change.
-    pub profile_revision: u64,
-    /// The state revision after the change.
-    pub state_revision: u64,
-    /// When the change happened, as the host stamped it.
-    pub updated_at: String,
-}
-
 /// Streaming assistant text fragment.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MessageDelta {
@@ -150,14 +123,12 @@ pub struct MessageDelta {
 /// Domain representation of host notification events processed by the client reducer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NotificationEvent {
-    /// Host readiness changed.
-    Health(HostHealth),
     /// A companion was added or changed.
     Companion(Box<Companion>),
     /// A companion and its active binding were removed.
     CompanionRemoved(crate::CompanionId),
     /// A companion's mind changed.
-    MindUpdated(MindUpdated),
+    MindUpdated(crate::CompanionId),
     /// A message was recorded.
     MessageCreated(Box<Message>),
     /// More text arrived for a streaming reply.

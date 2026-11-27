@@ -256,8 +256,6 @@ fn apply_approval_update(model: &mut Model, update: Update, effects: &mut Effect
                     .pending_approvals
                     .retain(|approval| approval.request_id != request_id);
             }
-            model.approval.last_resolved_id = Some(request_id);
-            model.approval.last_rule_warning = rule_warning.clone();
             if let Some(warning) = rule_warning {
                 model.notice(NoticeKind::Failed, "許可ルールの保存", warning);
             }

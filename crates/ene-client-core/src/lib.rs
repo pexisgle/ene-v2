@@ -26,8 +26,7 @@ pub use ene_catalog::{
 pub use ene_domain::client_view as domain;
 pub use reducer::{is_user_facing_message, merge_message, upsert_approval};
 pub use state::{
-    ApprovalState, AudioState, Capture, Chat, CompanionState, ConnectionViewState, Device, Devices,
-    Effects, Link, LiveTranscription, Model, Notice, NoticeKind, PerceptionState, Sending,
-    SpeechReport, Unsent,
+    AudioState, Capture, Chat, CompanionState, ConnectionViewState, Device, Devices, Effects, Link,
+    LiveTranscription, Model, Notice, NoticeKind, PerceptionState, Sending, SpeechReport, Unsent,
 };
 pub use update::{CaptureMode, Command, Update};

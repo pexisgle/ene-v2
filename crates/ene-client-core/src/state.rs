@@ -317,15 +317,6 @@ impl Default for PerceptionState {
     }
 }
 
-/// Approval resolution and policy rule tracking state.
-#[derive(Debug, Default)]
-pub struct ApprovalState {
-    /// The approval most recently answered.
-    pub last_resolved_id: Option<String>,
-    /// A warning about a saved rule, when one needs saying.
-    pub last_rule_warning: Option<String>,
-}
-
 /// Everything the window draws, organized by domain sub-state.
 #[derive(Debug)]
 pub struct Model {
@@ -341,8 +332,6 @@ pub struct Model {
     pub audio: AudioState,
     /// Perception and avatar state.
     pub perception: PerceptionState,
-    /// Approval and policy tracking.
-    pub approval: ApprovalState,
 }
 
 impl Model {
@@ -355,7 +344,6 @@ impl Model {
             companions: CompanionState::default(),
             audio: AudioState::default(),
             perception: PerceptionState::default(),
-            approval: ApprovalState::default(),
         }
     }
 

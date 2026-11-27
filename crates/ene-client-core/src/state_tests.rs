@@ -1,8 +1,8 @@
 use crate::{
     domain::{
         Activation, ApprovalRequest, ApprovalStatus, Companion, HostNotification, Message,
-        MessageDelta, MessageRole, MindUpdated, NotificationEvent, PolicyText, Settings, Snapshot,
-        TurnEvent, TurnStatus, WorkStatus,
+        MessageDelta, MessageRole, NotificationEvent, PolicyText, Settings, Snapshot, TurnEvent,
+        TurnStatus, WorkStatus,
     },
     reducer::is_user_facing_message,
     state::{Link, Model, Sending},
@@ -16,10 +16,7 @@ fn model() -> Model {
 }
 
 fn snapshot() -> Snapshot {
-    Snapshot {
-        server_version: "1".into(),
-        ..Default::default()
-    }
+    Snapshot::default()
 }
 
 fn notification(event: NotificationEvent) -> HostNotification {
@@ -72,7 +69,6 @@ fn removing_a_companion_updates_the_live_view_and_selects_the_remaining_one() {
             .collect(),
         clients: vec![ClientInfo {
             id: "desk".into(),
-            active_companions: vec!["ene".into(), "mio".into()],
             ..Default::default()
         }],
         active_work: [("task".to_owned(), ene.clone())].into(),
@@ -88,7 +84,7 @@ fn removing_a_companion_updates_the_live_view_and_selects_the_remaining_one() {
     assert!(!model.has_active_work());
     let snapshot = model.snapshot.unwrap();
     assert_eq!(snapshot.active_companion_id.as_deref(), Some("mio"));
-    assert_eq!(snapshot.clients[0].active_companions, ["mio"]);
+    assert_eq!(snapshot.clients[0].id, "desk");
     assert!(effects.history && effects.mind);
 }
 
@@ -393,18 +389,12 @@ fn audio_levels_and_transcription_reset_when_link_drops() {
 fn mind_updated_requests_refresh_only_for_active_companion() {
     let mut model = with_chat();
     let other = model.apply(Update::Notification(Box::new(notification(
-        NotificationEvent::MindUpdated(MindUpdated {
-            companion_id: "other".to_owned(),
-            ..Default::default()
-        }),
+        NotificationEvent::MindUpdated(CompanionId::parse("other").unwrap()),
     ))));
     assert!(!other.mind);
 
     let mine = model.apply(Update::Notification(Box::new(notification(
-        NotificationEvent::MindUpdated(MindUpdated {
-            companion_id: "ene".to_owned(),
-            ..Default::default()
-        }),
+        NotificationEvent::MindUpdated(CompanionId::parse("ene").unwrap()),
     ))));
     assert!(mine.mind);
 }
