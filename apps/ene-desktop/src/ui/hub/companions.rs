@@ -13,7 +13,8 @@ use ene_client_core::{
 use gpui::Context;
 
 fn default_model(hub: &Hub) -> Option<ModelAssignment> {
-    hub.model_choices()
+    hub.model
+        .model_choices()
         .into_iter()
         .next()
         .map(|(connection_id, model_id, _)| ModelAssignment {
@@ -115,14 +116,7 @@ pub(super) fn preview_companion(
         return;
     }
     hub.model.companions.preview_reply = None;
-    let model = hub
-        .model_choices()
-        .into_iter()
-        .next()
-        .map(|(connection_id, model_id, _)| ModelAssignment {
-            connection_id,
-            model_id,
-        });
+    let model = default_model(hub);
     rpc::companions::preview_companion(
         &hub.rpc,
         hub.model.connections.link_epoch,

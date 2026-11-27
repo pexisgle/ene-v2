@@ -21,7 +21,7 @@ use crate::{
 };
 use ene_client_core::domain::ConnectionKind;
 use ene_platform_os::TrayAction;
-use gpui::{AnyWindowHandle, App, Context, Task, WeakEntity};
+use gpui::{AnyWindowHandle, App, Context, EventEmitter, Task, WeakEntity};
 use state::ApplyFlags;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -36,6 +36,17 @@ pub struct Hub {
     _tray_pump: Option<Task<()>>,
     _pump: Task<()>,
 }
+
+pub(super) enum HubEvent {
+    CredentialsSaved(String),
+    CompanionCreated(String),
+    CompanionPreviewFinished,
+}
+
+impl EventEmitter<HubEvent> for Hub {}
+
+#[cfg(test)]
+mod tests;
 
 impl std::fmt::Debug for Hub {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -99,18 +110,10 @@ impl Hub {
         self.model.connections.link.is_live() && self.rpc.host().is_some()
     }
 
-    fn apply(&mut self, mut update: Update, cx: &mut Context<Self>) {
-        if let Update::Scoped { epoch, seq, inner } = update {
-            // The same staleness rule the reducer applies, needed here because
-            // the hub does its own pre-apply work before handing the update on.
-            if epoch != self.model.connections.link_epoch
-                || seq <= self.model.connections.applied_seq
-            {
-                return;
-            }
-            self.model.connections.applied_seq = seq;
-            update = *inner;
-        }
+    fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
+        let Some(update) = self.model.accept_update(update) else {
+            return;
+        };
         let flags = self.pre_apply_hub_state(&update, cx);
         let had_companion = self.model.companion_id().is_some();
         let had_approvals = self.model.approvals().len();
@@ -144,12 +147,7 @@ impl Hub {
     fn apply_ui_update_bookkeeping(&mut self, update: &Update, cx: &mut Context<Self>) {
         match update {
             Update::CredentialRegistered { connection_id } => {
-                let next_seq = self
-                    .setup
-                    .cleared_secret_for
-                    .as_ref()
-                    .map_or(1, |(_, seq)| seq + 1);
-                self.setup.cleared_secret_for = Some((connection_id.clone(), next_seq));
+                cx.emit(HubEvent::CredentialsSaved(connection_id.clone()));
             }
             Update::Checked {
                 connection_id: id,
@@ -192,11 +190,11 @@ impl Hub {
             }
             Update::Resnapshot => self.resnapshot(),
             Update::Created(id) => {
-                let created_id = id.clone();
-                self.setup.created_ping = self.setup.created_ping.saturating_add(1);
                 self.resnapshot();
-                self.select_companion(&created_id, cx);
+                self.select_companion(id, cx);
+                cx.emit(HubEvent::CompanionCreated(id.clone()));
             }
+            Update::CompanionPreview { .. } => cx.emit(HubEvent::CompanionPreviewFinished),
             _ => {}
         }
     }
@@ -337,38 +335,6 @@ impl Hub {
     /// Opens or focuses the standalone `SettingsStudio` window at `section`.
     pub fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         windows::open_settings(self, section, cx);
-    }
-
-    pub(crate) fn tts_voice_choices(&self) -> Vec<(String, String, String, String)> {
-        self.model.tts_voice_choices()
-    }
-
-    pub(crate) fn voice_choices_for_connection(&self, conn_id: &str) -> Vec<(String, String)> {
-        self.model.voice_choices_for_connection(conn_id)
-    }
-
-    pub(crate) fn available_models_for_connection(&self, conn_id: &str) -> Vec<(String, String)> {
-        self.model.available_models_for_connection(conn_id)
-    }
-
-    pub(crate) fn model_choices(&self) -> Vec<(String, String, String)> {
-        self.model.model_choices()
-    }
-
-    pub(crate) fn all_llm_models(&self) -> Vec<(String, String, String)> {
-        self.model.all_llm_models()
-    }
-
-    pub(crate) fn all_embedding_models(&self) -> Vec<(String, String, String)> {
-        self.model.all_embedding_models()
-    }
-
-    pub(crate) fn all_stt_models(&self) -> Vec<(String, String, String)> {
-        self.model.all_stt_models()
-    }
-
-    pub(crate) fn active_stt_selection(&self) -> Option<(String, String)> {
-        self.model.active_stt_selection()
     }
 
     pub(crate) fn all_tts_voices(&self) -> Vec<(String, String, String)> {

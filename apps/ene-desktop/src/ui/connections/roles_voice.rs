@@ -51,8 +51,8 @@ pub(super) fn collect_roles_context(hub: &Hub) -> RolesContext {
     RolesContext {
         refresh_ids,
         checking_any: !hub.setup.checking_connections.is_empty(),
-        stt_models: hub.all_stt_models(),
-        active_stt: hub.active_stt_selection(),
+        stt_models: hub.model.all_stt_models(),
+        active_stt: hub.model.active_stt_selection(),
         tts_voices: hub.all_tts_voices(),
         active_tts: hub.active_tts_selection(),
         conn_names,

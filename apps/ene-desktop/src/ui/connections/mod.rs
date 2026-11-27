@@ -13,6 +13,7 @@ mod schema_form;
 mod web_search;
 
 use crate::input::Draft;
+use crate::ui::hub::HubEvent;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{
@@ -52,7 +53,6 @@ struct ConnectionFormState {
     expanded: Option<ExpandedConnection>,
     advanced_roles_open: bool,
     auto_probed_connections: HashSet<String>,
-    last_cleared_secret_seq: Option<u64>,
 }
 
 impl ConnectionFormState {
@@ -117,6 +117,7 @@ pub(crate) struct ConnectionsPane {
     form: ConnectionFormState,
     pub(super) open_dropdown: Option<String>,
     _observe: Subscription,
+    _events: Subscription,
 }
 
 impl std::fmt::Debug for ConnectionsPane {
@@ -146,12 +147,14 @@ fn close_pane_dropdown(pane: &Entity<ConnectionsPane>, cx: &mut gpui::App) {
 impl ConnectionsPane {
     pub(crate) fn new(hub: Entity<Hub>, cx: &mut Context<Self>) -> Self {
         let _observe = cx.observe(&hub, |_, _, cx| cx.notify());
+        let _events = cx.subscribe(&hub, Self::on_hub_event);
         Self {
             hub,
             drafts: DraftStore::default(),
             form: ConnectionFormState::default(),
             open_dropdown: None,
             _observe,
+            _events,
         }
     }
 
@@ -167,20 +170,17 @@ impl ConnectionsPane {
         self.drafts.retain(|key| !key.starts_with("add:mcp:"));
     }
 
-    fn sync_hub_events(&mut self, cx: &mut Context<Self>) {
-        let cleared = self.hub.read(cx).setup.cleared_secret_for.clone();
-        let current = cleared.as_ref().map_or(0, |(_, seq)| *seq);
-        let previous = self.form.last_cleared_secret_seq.replace(current);
-        if let Some((conn_id, seq)) = cleared
-            && previous.is_some_and(|previous| previous != seq)
-        {
-            let key = format!("conn:secret:{conn_id}");
-            self.drafts.clear_keys(cx, [key.as_str()]);
-            if let Some(editor) = self.form.editor_mut(&conn_id) {
-                editor.key_visible = false;
-                editor.mode = EditorMode::Editing;
-            }
+    fn on_hub_event(&mut self, _: Entity<Hub>, event: &HubEvent, cx: &mut Context<Self>) {
+        let HubEvent::CredentialsSaved(conn_id) = event else {
+            return;
+        };
+        let key = format!("conn:secret:{conn_id}");
+        self.drafts.clear_keys(cx, [key.as_str()]);
+        if let Some(editor) = self.form.editor_mut(conn_id) {
+            editor.key_visible = false;
+            editor.mode = EditorMode::Editing;
         }
+        cx.notify();
     }
 
     fn consume_pending_mcp_probe(&mut self, connections: &[Connection], cx: &mut Context<Self>) {
@@ -218,7 +218,6 @@ impl ConnectionsPane {
 
 impl gpui::Render for ConnectionsPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_hub_events(cx);
         let (theme, live, connections, providers, checks, companion, all_models, embedding_models) = {
             let hub = self.hub.read(cx);
             (
@@ -230,8 +229,8 @@ impl gpui::Render for ConnectionsPane {
                 hub.model.connections.providers.clone().unwrap_or_default(),
                 hub.model.connections.checks.clone(),
                 hub.model.companion().cloned(),
-                hub.all_llm_models(),
-                hub.all_embedding_models(),
+                hub.model.all_llm_models(),
+                hub.model.all_embedding_models(),
             )
         };
 

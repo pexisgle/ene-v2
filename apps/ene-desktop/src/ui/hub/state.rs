@@ -33,11 +33,9 @@ impl std::fmt::Debug for WindowState {
     }
 }
 
-/// First-run onboarding, connection check, and secret-clear tracking owned by [`Hub`].
+/// First-run onboarding and connection check state owned by [`Hub`].
 #[derive(Debug, Default)]
 pub struct SetupFlowState {
-    pub cleared_secret_for: Option<(String, u64)>,
-    pub created_ping: u64,
     pub(crate) pending: bool,
     pub(crate) error: Option<&'static str>,
     pub error_detail: Option<String>,

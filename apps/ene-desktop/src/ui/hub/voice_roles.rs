@@ -155,7 +155,7 @@ pub(super) fn assign_tts_voice(
     let probe_voicevox_id = selection.as_ref().and_then(|(cid, _)| {
         let conn = settings.connections.iter().find(|c| c.id == *cid)?;
         (conn.is_local_voicevox()
-            && (!conn.enabled || hub.voice_choices_for_connection(&conn.id).len() <= 1))
+            && (!conn.enabled || hub.model.voice_choices_for_connection(&conn.id).len() <= 1))
             .then(|| conn.id.clone())
     });
     if let Some(check_id) = &probe_voicevox_id {

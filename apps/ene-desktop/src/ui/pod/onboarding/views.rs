@@ -65,7 +65,8 @@ pub(super) fn is_voicevox_connection(c: &Connection) -> bool {
 }
 
 pub(super) fn build_model_options(hub: &Hub, target_conn_id: Option<&str>) -> Vec<DropdownOption> {
-    let mut pairs = target_conn_id.map_or_default(|cid| hub.available_models_for_connection(cid));
+    let mut pairs =
+        target_conn_id.map_or_default(|cid| hub.model.available_models_for_connection(cid));
     for model_id in &hub.setup.pending_models {
         if !pairs.iter().any(|(id, _)| id == model_id) {
             pairs.push((model_id.clone(), model_id.clone()));
@@ -89,7 +90,7 @@ pub(super) fn build_voice_options(
     voicevox_conn_id: Option<&str>,
 ) -> Vec<DropdownOption> {
     voicevox_conn_id
-        .map_or_default(|cid| hub.voice_choices_for_connection(cid))
+        .map_or_default(|cid| hub.model.voice_choices_for_connection(cid))
         .into_iter()
         .map(|(vid, label)| {
             let detail = (label != vid).then(|| format!("話者ID: {vid}"));

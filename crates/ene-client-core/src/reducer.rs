@@ -16,23 +16,25 @@ use crate::{
 pub use crate::notifications::{merge_message, upsert_approval};
 
 impl Model {
+    /// Admits a reply before any reducer or front-end effects use it.
+    pub fn accept_update(&mut self, mut update: Update) -> Option<Update> {
+        while let Update::Scoped { epoch, seq, inner } = update {
+            if epoch != self.connections.link_epoch || seq <= self.connections.applied_seq {
+                return None;
+            }
+            self.connections.applied_seq = seq;
+            update = *inner;
+        }
+        Some(update)
+    }
+
     /// Folds one update into the view and reports what must be refetched.
     pub fn apply(&mut self, update: Update) -> Effects {
         let mut effects = Effects::default();
+        let Some(update) = self.accept_update(update) else {
+            return effects;
+        };
         match update {
-            Update::Scoped { epoch, seq, inner } => {
-                if epoch != self.connections.link_epoch {
-                    return Effects::default();
-                }
-                // A reply that started earlier can arrive later. Applying it
-                // would put an older answer over a newer one, so anything at or
-                // below the highest sequence already applied is stale.
-                if seq <= self.connections.applied_seq {
-                    return Effects::default();
-                }
-                self.connections.applied_seq = seq;
-                return self.apply(*inner);
-            }
             Update::Link(link) => apply_link(self, *link, &mut effects),
             Update::Notification(notification) => {
                 notifications::merge_notification(self, *notification, &mut effects);

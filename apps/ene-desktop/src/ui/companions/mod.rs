@@ -7,6 +7,7 @@ mod rows;
 pub(crate) mod voice;
 mod voice_stt;
 
+use super::hub::HubEvent;
 use super::icons::Icon;
 use super::theme::Theme;
 use super::widgets::{ButtonStyle, Tone, pill_button};
@@ -24,7 +25,6 @@ pub(super) struct CompanionFormState {
     pub(super) expanded_companion_id: Option<String>,
     pub(super) mind_disclosure_open: bool,
     pub(super) delete_armed_companion: Option<String>,
-    last_created_ping: u64,
 }
 
 /// Companion management chapter rendered as an independent GPUI pane entity.
@@ -35,6 +35,7 @@ pub(crate) struct CompanionsPane {
     pub(super) open_dropdown: Option<String>,
     initialized: bool,
     _observe: Subscription,
+    _events: Subscription,
 }
 
 impl std::fmt::Debug for CompanionsPane {
@@ -76,8 +77,8 @@ impl CompanionsSnapshot {
                 .map_or_default(|s| s.companions.clone()),
             active_id: hub.model.companion_id().map(str::to_owned),
             resident_ids: hub.model.resident_companions(&hub.options.id),
-            has_models: !hub.model_choices().is_empty(),
-            tts_voices: hub.tts_voice_choices(),
+            has_models: !hub.model.model_choices().is_empty(),
+            tts_voices: hub.model.tts_voice_choices(),
             tts_conn_ids,
             minds: hub.model.companions.minds.clone(),
             templates: hub.model.companions.templates.clone(),
@@ -90,6 +91,7 @@ impl CompanionsSnapshot {
 impl CompanionsPane {
     pub(crate) fn new(hub: Entity<Hub>, cx: &mut Context<Self>) -> Self {
         let _observe = cx.observe(&hub, |_, _, cx| cx.notify());
+        let _events = cx.subscribe(&hub, Self::on_hub_event);
         Self {
             hub,
             drafts: DraftStore::default(),
@@ -97,6 +99,7 @@ impl CompanionsPane {
             open_dropdown: None,
             initialized: false,
             _observe,
+            _events,
         }
     }
 
@@ -104,41 +107,31 @@ impl CompanionsPane {
         self.open_dropdown = None;
     }
 
-    fn sync_hub_events(&mut self, cx: &mut Context<Self>) {
-        let (created_ping, active_comp, has_preview) = {
-            let hub = self.hub.read(cx);
-            (
-                hub.setup.created_ping,
-                hub.model.companion_id().map(str::to_owned),
-                hub.model.companions.preview_reply.is_some(),
-            )
-        };
-        if has_preview {
-            self.form.preview_pending = false;
+    fn on_hub_event(&mut self, _: Entity<Hub>, event: &HubEvent, cx: &mut Context<Self>) {
+        match event {
+            HubEvent::CompanionCreated(id) => {
+                self.form.creating_companion = false;
+                self.form.importing_template = false;
+                self.form.preview_pending = false;
+                self.form.expanded_companion_id = Some(id.clone());
+                self.drafts
+                    .clear_keys(cx, ["new:name", "new:mind", "new:persona", "import:json"]);
+            }
+            HubEvent::CompanionPreviewFinished => self.form.preview_pending = false,
+            HubEvent::CredentialsSaved(_) => return,
         }
-        if !self.initialized {
-            self.initialized = true;
-            self.form.expanded_companion_id = active_comp;
-            self.form.last_created_ping = created_ping;
-            return;
-        }
-        if created_ping != self.form.last_created_ping {
-            self.form.last_created_ping = created_ping;
-            self.form.creating_companion = false;
-            self.form.importing_template = false;
-            self.form.preview_pending = false;
-            self.form.expanded_companion_id = active_comp;
-            self.drafts
-                .clear_keys(cx, ["new:name", "new:mind", "new:persona", "import:json"]);
-        }
+        cx.notify();
     }
 }
 
 impl gpui::Render for CompanionsPane {
     fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_hub_events(cx);
         let theme = self.hub.read(cx).theme();
         let snap = CompanionsSnapshot::capture(self.hub.read(cx));
+        if !self.initialized {
+            self.initialized = true;
+            self.form.expanded_companion_id = snap.active_id.clone();
+        }
         let creating = self.form.creating_companion;
         let importing = self.form.importing_template;
         let header = render_companions_header(snap.live, creating, importing, &theme, cx);

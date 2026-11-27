@@ -191,7 +191,7 @@ pub struct ConnectionViewState {
     /// RPC replies race: two requests start in order, and the earlier one can
     /// arrive second. Its `seq` is lower, so applying it would overwrite newer
     /// state with an older answer.
-    pub applied_seq: u64,
+    pub(crate) applied_seq: u64,
     /// The provider catalog, once fetched.
     pub providers: Option<Vec<LlmProvider>>,
     /// Models per connection id, once fetched.
