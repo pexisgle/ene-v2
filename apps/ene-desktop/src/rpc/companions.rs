@@ -120,26 +120,6 @@ pub(crate) fn assign_model(
     update_companion(rpc, epoch, "モデル割当の変更", request);
 }
 
-pub(crate) fn sync_companion_voice(
-    rpc: &RpcDispatcher,
-    epoch: u64,
-    companion_id: String,
-    revision: u64,
-    voice_clean: String,
-) {
-    update_companion(
-        rpc,
-        epoch,
-        "コンパニオン話者の同期",
-        w::UpdateCompanionRequest {
-            id: companion_id,
-            revision,
-            voice_identifier: Some(voice_clean),
-            ..Default::default()
-        },
-    );
-}
-
 pub(crate) fn delete_companion(rpc: &RpcDispatcher, epoch: u64, companion_id: String) {
     let gone_id = companion_id.clone();
     rpc.call(

@@ -1,11 +1,11 @@
 use super::ConnectionsPane;
-use super::roles_voice::{collect_roles_context, render_voice_role_row, voice_role_specs};
+use super::roles_voice::render_voice_roles;
 use crate::ui::ModelRoleSlot;
 use crate::ui::hub::companions as companion_actions;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{DropdownOption, DropdownSpec, dropdown_select};
 use ene_client_core::domain::{Companion, ModelAssignment, ModelAssignments};
-use gpui::{AnyElement, Context, FontWeight, div, prelude::*, px};
+use gpui::{AnyElement, App, Context, FontWeight, Window, div, prelude::*, px};
 
 #[derive(Clone, Copy)]
 pub(super) struct ModelRoleChoices<'a> {
@@ -26,7 +26,6 @@ pub(super) fn render_advanced_roles_panel(
         return render_no_companion_roles_hint(theme);
     };
     let assignments = comp.assignments.clone().unwrap_or_default();
-    let roles_ctx = collect_roles_context(pane.hub.read(cx));
 
     let mut rows: Vec<AnyElement> = ModelRoleSlot::ALL
         .into_iter()
@@ -57,16 +56,7 @@ pub(super) fn render_advanced_roles_panel(
         })
         .collect();
 
-    for spec in voice_role_specs(&roles_ctx) {
-        rows.push(render_voice_role_row(
-            pane,
-            &spec,
-            &roles_ctx.conn_names,
-            live,
-            theme,
-            cx,
-        ));
-    }
+    rows.extend(render_voice_roles(pane, live, theme, cx));
 
     div()
         .w_full()
@@ -121,39 +111,33 @@ fn render_model_role_row(
         },
     );
 
-    let dd_key = format!("adv-role:{slot:?}");
-    let options = build_slot_model_options(slot, slot_models.iter().chain(harnesses));
-    let current_value = current.map(Some).or_else(|| {
-        (!matches!(slot, ModelRoleSlot::Companion | ModelRoleSlot::Task)).then_some(None)
-    });
+    let clear = (!matches!(slot, ModelRoleSlot::Companion | ModelRoleSlot::Task))
+        .then_some(slot.fallback_hint());
+    let options = role_options(slot_models.iter().chain(harnesses), clear);
+    let current_value = current.map(Some).or_else(|| clear.map(|_| None));
     let hub_assign = pane.hub.clone();
 
-    div()
-        .when(idx > 0, |this| {
-            this.border_t_1().border_color(theme.border).pt(px(12.))
-        })
-        .flex()
-        .flex_col()
-        .gap(px(6.))
-        .child(render_role_row_header(slot.label(), &current_text, theme))
-        .child(dropdown_select(
-            DropdownSpec {
-                id: dd_key,
-                selected_value: current_value,
-                placeholder: current_text.into(),
-                options,
-                enabled: live,
-                max_list_height: 200.,
-                search_placeholder: "モデル名で絞り込み…",
-                empty_label: "利用可能なモデルがありません（接続を追加・確認してください）",
-            },
-            move |picked, _, cx| {
-                hub_assign.update(cx, |hub, cx| {
-                    companion_actions::assign_model(hub, slot, picked, cx)
-                });
-            },
-        ))
-        .into_any_element()
+    render_role_row(
+        slot.label(),
+        idx > 0,
+        DropdownSpec {
+            id: format!("adv-role:{slot:?}"),
+            selected_value: current_value,
+            placeholder: current_text.into(),
+            options,
+            enabled: live,
+            max_list_height: 200.,
+            search_placeholder: "モデル名で絞り込み…",
+            empty_label: "利用可能なモデルがありません（接続を追加・確認してください）",
+        },
+        None,
+        theme,
+        move |picked, _, cx| {
+            hub_assign.update(cx, |hub, cx| {
+                companion_actions::assign_model(hub, slot, picked, cx)
+            });
+        },
+    )
 }
 
 fn render_no_companion_roles_hint(theme: &Theme) -> AnyElement {
@@ -170,15 +154,15 @@ fn render_no_companion_roles_hint(theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-fn build_slot_model_options<'a>(
-    slot: ModelRoleSlot,
+pub(super) fn role_options<'a>(
     slot_models: impl Iterator<Item = &'a (String, String, String)>,
+    clear: Option<&str>,
 ) -> Vec<DropdownOption<Option<ModelAssignment>>> {
     let mut options = Vec::new();
-    if !matches!(slot, ModelRoleSlot::Companion | ModelRoleSlot::Task) {
+    if let Some(label) = clear {
         options.push(DropdownOption {
             value: None,
-            label: slot.fallback_hint().to_owned(),
+            label: label.to_owned(),
             detail: None,
         });
     }
@@ -195,7 +179,29 @@ fn build_slot_model_options<'a>(
     options
 }
 
-pub(super) fn render_role_row_header(title: &str, current_text: &str, theme: &Theme) -> gpui::Div {
+pub(super) fn render_role_row(
+    title: &str,
+    separated: bool,
+    spec: DropdownSpec<Option<ModelAssignment>>,
+    hint: Option<AnyElement>,
+    theme: &Theme,
+    on_select: impl Fn(Option<ModelAssignment>, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let heading = render_role_row_header(title, &spec.placeholder, theme);
+    div()
+        .when(separated, |this| {
+            this.border_t_1().border_color(theme.border).pt(px(12.))
+        })
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(heading)
+        .child(dropdown_select(spec, on_select))
+        .when_some(hint, gpui::ParentElement::child)
+        .into_any_element()
+}
+
+fn render_role_row_header(title: &str, current_text: &str, theme: &Theme) -> gpui::Div {
     div()
         .flex()
         .flex_row()

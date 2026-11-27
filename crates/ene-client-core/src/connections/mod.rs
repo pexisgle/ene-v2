@@ -197,13 +197,6 @@ pub fn active_tts_in_connections(connections: &[Connection]) -> Option<(String, 
         .and_then(|c| tts_voice_of_connection(c).map(|v| (c.id.clone(), v)))
 }
 
-/// Builds a `ConnectionInput` disabling an existing connection while preserving its config.
-pub fn disable_connection_input(conn: &Connection) -> ConnectionInput {
-    let mut input = conn.to_input();
-    input.enabled = false;
-    input
-}
-
 fn build_voice_assignment_inputs<F>(
     connections: &[Connection],
     kind: ConnectionKind,
@@ -226,20 +219,19 @@ where
             }
             for conn in connections.iter().filter(|c| c.kind == kind) {
                 if conn.id == target_id {
-                    let mut input = conn.to_input();
-                    input.enabled = true;
+                    let mut input = build_connection_enabled_input(conn, true);
                     if let Some(cfg) = input.config.as_mut() {
                         apply_cfg(conn, cfg, clean);
                     }
                     inputs.push(input);
                 } else if conn.enabled {
-                    inputs.push(disable_connection_input(conn));
+                    inputs.push(build_connection_enabled_input(conn, false));
                 }
             }
         }
         None => {
             for conn in connections.iter().filter(|c| c.kind == kind && c.enabled) {
-                inputs.push(disable_connection_input(conn));
+                inputs.push(build_connection_enabled_input(conn, false));
             }
         }
     }

@@ -299,12 +299,4 @@ impl Hub {
         }
         cx.notify();
     }
-
-    pub(crate) fn all_tts_voices(&self) -> Vec<(String, String, String)> {
-        self.model.all_tts_voices()
-    }
-
-    pub(crate) fn active_tts_selection(&self) -> Option<(String, String)> {
-        self.model.active_tts_selection()
-    }
 }
