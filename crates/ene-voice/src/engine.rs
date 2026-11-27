@@ -1,8 +1,10 @@
 //! Speech engine ports and connection selection.
 
 use crate::error::{BoxFuture, HttpResult, SetupError};
+use ene_domain::VoiceBinding;
 use ene_domain::settings::{Connection, ConnectionKind};
 use ene_mind::Companion;
+use serde::Deserialize as _;
 
 pub trait TtsEngine: Send + Sync + 'static {
     fn synthesize<'a>(
@@ -20,10 +22,8 @@ pub trait SttEngine: Send + Sync + 'static {
     ) -> BoxFuture<'a, HttpResult<String>>;
 }
 
-pub fn parse_binding(companion: &Companion) -> ene_domain::VoiceBinding {
-    let mut binding =
-        serde_json::from_value::<ene_domain::VoiceBinding>(companion.voice.json.clone())
-            .unwrap_or_default();
+pub fn parse_binding(companion: &Companion) -> VoiceBinding {
+    let mut binding = VoiceBinding::deserialize(&companion.voice.json).unwrap_or_default();
     if binding
         .voice_id
         .as_deref()

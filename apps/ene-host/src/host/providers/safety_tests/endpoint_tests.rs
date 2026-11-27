@@ -129,7 +129,7 @@ async fn p08_speech_construction_failure_never_selects_native() {
         world.insert_resource(providers);
         let _failure = construction_failure::Guard::enter();
         let error = if kind == ConnectionKind::Tts {
-            voice::tts_source(&voice::VoiceEngineContext::for_test(&world))
+            voice::tts_source(&voice::VoiceEngineContext::for_test(&world), None)
                 .err()
                 .expect("TTS must fail")
         } else {
@@ -191,7 +191,7 @@ async fn p08_absent_plugin_leaves_speech_unavailable() {
         world.insert_resource(store(root.path(), &connection));
         world.insert_resource(Providers::none());
         let error = if kind == ConnectionKind::Tts {
-            voice::tts_source(&voice::VoiceEngineContext::for_test(&world))
+            voice::tts_source(&voice::VoiceEngineContext::for_test(&world), None)
                 .err()
                 .expect("TTS must fail")
         } else {
@@ -230,7 +230,7 @@ async fn p08_plugin_serves_tts() {
     let mut world = World::new();
     world.insert_resource(store(root.path(), &connection));
     world.insert_resource(providers);
-    let engine = voice::tts_source(&voice::VoiceEngineContext::for_test(&world)).unwrap();
+    let engine = voice::tts_source(&voice::VoiceEngineContext::for_test(&world), None).unwrap();
     for _ in 0..2 {
         let (pcm, rate) = engine.synthesize("hello".into(), "v".into()).await.unwrap();
         assert_eq!(pcm, [7, 0]);

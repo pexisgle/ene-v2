@@ -141,7 +141,7 @@ impl w::VoiceService for Services {
     ) -> ServiceResult<ServiceStream<w::AudioOutputEvent>> {
         if let Err(error) = self
             .runtime
-            .inspect(|services| Ok(voice::tts_source(&services.voice_context())))
+            .inspect(|services| Ok(voice::tts_source(&services.voice_context(), None)))
             .await
             .map_err(ConnectError::from)?
         {
@@ -234,24 +234,24 @@ impl w::VoiceService for Services {
                             "the client has no audio subscription for this companion".into(),
                         )
                     })?;
-                    let companion_record = store.companion_repo().companion(&companion)?;
-                    let source = voice::companion_tts_source(
-                        &services.voice_context(),
-                        companion_record.as_ref(),
-                    )
-                    .map_err(|error| match error {
-                        SetupError::Missing => {
-                            HostError::FailedPrecondition(voice::VOICE_UNAVAILABLE.into())
-                        }
-                        SetupError::Disabled(message)
-                        | SetupError::Broken(message)
-                        | SetupError::Unsupported(message) => {
-                            HostError::FailedPrecondition(message)
-                        }
-                    })?;
-                    let voice = companion_record
+                    let binding = store
+                        .companion_repo()
+                        .companion(&companion)?
                         .as_ref()
-                        .and_then(|record| voice::parse_binding(record).voice_id)
+                        .map(voice::parse_binding);
+                    let source = voice::tts_source(&services.voice_context(), binding.as_ref())
+                        .map_err(|error| match error {
+                            SetupError::Missing => {
+                                HostError::FailedPrecondition(voice::VOICE_UNAVAILABLE.into())
+                            }
+                            SetupError::Disabled(message)
+                            | SetupError::Broken(message)
+                            | SetupError::Unsupported(message) => {
+                                HostError::FailedPrecondition(message)
+                            }
+                        })?;
+                    let voice = binding
+                        .and_then(|binding| binding.voice_id)
                         .unwrap_or_default();
                     Ok((source, voice, companion, subscription))
                 }

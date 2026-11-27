@@ -1,11 +1,10 @@
 //! Speech synthesis and recognition engine resolution (`HttpEngine` and plugin adapters).
 
 use super::http::HttpEngine;
-use super::{SAMPLE_RATE, SetupError, SttEngine, TtsEngine, parse_binding, plugin};
+use super::{SAMPLE_RATE, SetupError, SttEngine, TtsEngine, plugin};
 use crate::host::{
     db::Store,
     error::{HostError, Result},
-    mind::Companion,
     model::{self, Credentials},
     net,
     providers::Providers,
@@ -13,6 +12,7 @@ use crate::host::{
 };
 #[cfg(test)]
 use bevy_ecs::prelude::*;
+use ene_domain::VoiceBinding;
 use std::{sync::Arc, time::Duration};
 
 pub(crate) fn is_builtin_voicevox(connection: &Connection, providers: &Providers) -> bool {
@@ -131,22 +131,14 @@ fn http_engine(
 
 pub(crate) fn tts_source(
     ctx: &VoiceEngineContext<'_>,
-) -> std::result::Result<Arc<dyn TtsEngine>, SetupError> {
-    companion_tts_source(ctx, None)
-}
-
-pub(crate) fn companion_tts_source(
-    ctx: &VoiceEngineContext<'_>,
-    companion: Option<&Companion>,
+    binding: Option<&VoiceBinding>,
 ) -> std::result::Result<Arc<dyn TtsEngine>, SetupError> {
     #[cfg(test)]
     if let Some(engine) = &ctx.engines.tts {
         return Ok(Arc::clone(engine));
     }
-    let binding = companion.map_or_default(parse_binding);
     let connection = match binding
-        .connection_id
-        .as_deref()
+        .and_then(|binding| binding.connection_id.as_deref())
         .map(str::trim)
         .filter(|id| !id.is_empty())
     {
@@ -162,7 +154,7 @@ pub(crate) fn companion_tts_source(
         ctx,
         &connection,
         ConnectionKind::Tts,
-        Some(&binding),
+        binding,
     )?))
 }
 

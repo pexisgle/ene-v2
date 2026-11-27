@@ -53,31 +53,23 @@ pub(super) enum Dispatch {
 pub fn split_sentences(buffer: &mut String) -> Vec<String> {
     let mut sentences = Vec::new();
     let mut start = 0usize;
-    for (index, character) in buffer.char_indices() {
-        if !matches!(character, '。' | '！' | '？' | '\n') {
-            continue;
-        }
-        let end = index + character.len_utf8();
+    for (index, delimiter) in buffer.match_indices(['。', '！', '？', '\n']) {
+        let end = index + delimiter.len();
         let sentence = buffer[start..end].trim();
         if !sentence.is_empty() {
             sentences.push(sentence.to_owned());
         }
         start = end;
     }
-    if start > 0 {
-        buffer.drain(..start);
-    }
-    while buffer.chars().count() > MAX_SENTENCE_CHARS {
-        let cut = buffer
-            .char_indices()
-            .nth(MAX_SENTENCE_CHARS)
-            .map_or(buffer.len(), |(index, _)| index);
-        let sentence = buffer[..cut].trim().to_owned();
-        buffer.drain(..cut);
+    while let Some((cut, _)) = buffer[start..].char_indices().nth(MAX_SENTENCE_CHARS) {
+        let end = start + cut;
+        let sentence = buffer[start..end].trim();
         if !sentence.is_empty() {
-            sentences.push(sentence);
+            sentences.push(sentence.to_owned());
         }
+        start = end;
     }
+    buffer.drain(..start);
     sentences
 }
 
@@ -94,11 +86,9 @@ pub fn audio_events(
     sequence_no: u32,
     pcm: &[u8],
 ) -> Vec<VoiceOutputEvent> {
-    if pcm.is_empty() {
-        return Vec::new();
-    }
-    let total = pcm.len().div_ceil(AUDIO_CHUNK_BYTES);
-    pcm.chunks(AUDIO_CHUNK_BYTES)
+    let chunks = pcm.chunks(AUDIO_CHUNK_BYTES);
+    let total = chunks.len();
+    chunks
         .enumerate()
         .map(|(index, chunk)| {
             VoiceOutputEvent::Chunk(AudioChunk {

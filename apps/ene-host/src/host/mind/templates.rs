@@ -11,6 +11,7 @@ use bevy_ecs::prelude::*;
 use ene_mind::JsonDoc;
 use ene_rpc as w;
 use ene_store::util::now;
+use serde::Deserialize as _;
 
 const TEMPLATE_FORMAT_VERSION: u32 = 1;
 
@@ -110,8 +111,7 @@ pub(crate) fn export_template(store: &Store, id: &str) -> Result<w::CompanionTem
         .companion(id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
     let mut voice_binding =
-        serde_json::from_value::<ene_domain::VoiceBinding>(companion.voice.json.clone())
-            .unwrap_or_default();
+        ene_domain::VoiceBinding::deserialize(&companion.voice.json).unwrap_or_default();
     // Host-local connection IDs must not leak across machines on export.
     voice_binding.connection_id = None;
     let voice_json = serde_json::to_string(&voice_binding).unwrap_or_else(|_| "{}".into());

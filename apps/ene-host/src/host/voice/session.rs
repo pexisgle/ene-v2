@@ -1,6 +1,6 @@
 //! ECS facade and plugin registration for [`super::Voice`].
 
-use super::{AudioSubscription, Voice, companion_tts_source, parse_binding, speech};
+use super::{AudioSubscription, Voice, parse_binding, speech, tts_source};
 use crate::host::{
     agent,
     db::{Result, Store},
@@ -107,7 +107,8 @@ fn speak_new_utterance(
     let record = context
         .store
         .and_then(|store| store.companion_repo().companion(companion).ok().flatten());
-    let Ok(source) = companion_tts_source(context, record.as_ref()) else {
+    let binding = record.as_ref().map(parse_binding);
+    let Ok(source) = tts_source(context, binding.as_ref()) else {
         return SpeechEffect::ContinueTurn;
     };
     if voice
@@ -116,9 +117,8 @@ fn speak_new_utterance(
     {
         return SpeechEffect::StopTurn;
     }
-    let voice_name = record
-        .as_ref()
-        .and_then(|record| parse_binding(record).voice_id)
+    let voice_name = binding
+        .and_then(|binding| binding.voice_id)
         .unwrap_or_default();
     if voice.begin(companion, source, voice_name) {
         voice.speak(companion, text);
