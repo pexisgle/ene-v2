@@ -1,5 +1,9 @@
 //! Pure connection preset input builders for search, LLM, voice, and embedding providers.
 
+mod featured;
+
+pub use featured::FeaturedPreset;
+
 use crate::domain::{
     Connection, ConnectionConfig, ConnectionEndpoint, ConnectionInput, ConnectionKind,
     EmbeddingConnection, LlmConnection, LlmProvider, SearchConnection, SttConnection,

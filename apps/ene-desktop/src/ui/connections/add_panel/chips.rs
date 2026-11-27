@@ -9,7 +9,7 @@ use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button};
 use ene_client_core::connections::build_custom_connection_input;
-use ene_client_core::{SearchAdapter, domain::ConnectionKind};
+use ene_client_core::{SearchAdapter, domain::ConnectionKind, presets::FeaturedPreset};
 use gpui::{AnyElement, Context, Entity, SharedString};
 
 #[derive(Clone, Copy)]
@@ -18,7 +18,7 @@ struct PresetChipSpec {
     label: &'static str,
     style: crate::ui::widgets::ButtonStyle,
     expand_id: Option<&'static str>,
-    action: fn(&mut Hub, &mut Context<Hub>),
+    preset: FeaturedPreset,
 }
 
 pub(super) fn build_voice_embedding_chips(
@@ -33,82 +33,56 @@ pub(super) fn build_voice_embedding_chips(
             label: "VOICEVOX（ローカル）",
             style: Tone::Mint.icon(Icon::Volume2).enabled(live),
             expand_id: Some("voicevox"),
-            action: |hub, cx| presets::add_voicevox_preset(hub, 3, None, cx),
+            preset: FeaturedPreset::Voicevox,
         },
         PresetChipSpec {
             id: "add-preset-sakura-tts",
             label: "さくらのAI Engine TTS",
             style: Tone::Soft.icon(Icon::Volume2).enabled(live),
             expand_id: Some("sakura-tts"),
-            action: |hub, cx| presets::add_sakura_tts_preset(hub, cx),
+            preset: FeaturedPreset::SakuraTts,
         },
         PresetChipSpec {
             id: "add-preset-openai-tts",
             label: "OpenAI互換 TTS",
             style: Tone::Ghost.icon(Icon::Volume2).enabled(live),
             expand_id: None,
-            action: |hub, cx| {
-                presets::add_openai_tts_preset(
-                    hub,
-                    "https://api.openai.com/v1",
-                    "tts-1",
-                    "alloy",
-                    cx,
-                );
-            },
+            preset: FeaturedPreset::OpenAiTts,
         },
         PresetChipSpec {
             id: "add-preset-sakura-stt",
             label: "さくらのAI Engine STT",
             style: Tone::Soft.icon(Icon::Mic).enabled(live),
             expand_id: Some("sakura-stt"),
-            action: |hub, cx| presets::add_sakura_stt_preset(hub, cx),
+            preset: FeaturedPreset::SakuraStt,
         },
         PresetChipSpec {
             id: "add-preset-openai-stt",
             label: "OpenAI 音声認識（STT）",
             style: Tone::Ghost.icon(Icon::Mic).enabled(live),
             expand_id: None,
-            action: |hub, cx| {
-                presets::add_stt_preset(
-                    hub,
-                    "OpenAI 音声認識".into(),
-                    "https://api.openai.com/v1".into(),
-                    "gpt-4o-mini-transcribe".into(),
-                    "ja".into(),
-                    cx,
-                );
-            },
+            preset: FeaturedPreset::OpenAiStt,
         },
         PresetChipSpec {
             id: "add-preset-whisper-stt",
             label: "Whisper STT（ローカル）",
             style: Tone::Ghost.icon(Icon::Mic).enabled(live),
             expand_id: None,
-            action: |hub, cx| {
-                presets::add_stt_preset(
-                    hub,
-                    "ローカル Whisper".into(),
-                    "http://127.0.0.1:8080/v1".into(),
-                    "whisper-1".into(),
-                    "ja".into(),
-                    cx,
-                );
-            },
+            preset: FeaturedPreset::WhisperStt,
         },
         PresetChipSpec {
             id: "add-preset-sakura-embedding",
             label: "さくらのAI Engine Embedding",
             style: Tone::Soft.icon(Icon::Search).enabled(live),
             expand_id: Some("sakura-embedding"),
-            action: |hub, cx| presets::add_sakura_embedding_preset(hub, cx),
+            preset: FeaturedPreset::SakuraEmbedding,
         },
         PresetChipSpec {
             id: "add-preset-openai-embedding",
             label: "OpenAI Embedding",
             style: Tone::Ghost.icon(Icon::Search).enabled(live),
             expand_id: Some("openai-embedding"),
-            action: |hub, cx| presets::add_openai_embedding_preset(hub, cx),
+            preset: FeaturedPreset::OpenAiEmbedding,
         },
     ];
     specs
@@ -126,9 +100,9 @@ fn preset_chip(
     let hub = hub.clone();
     let pane = cx.entity();
     let expand_id = spec.expand_id;
-    let action = spec.action;
+    let preset = spec.preset;
     pill_button(spec.id, spec.label, spec.style, theme, move |_, cx| {
-        hub.update(cx, action);
+        hub.update(cx, |hub, cx| presets::add_featured_preset(hub, preset, cx));
         pane.update(cx, |this, cx| {
             this.form.add = AddFlow::Closed;
             if let Some(eid) = expand_id {

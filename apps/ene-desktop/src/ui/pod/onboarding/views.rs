@@ -143,7 +143,11 @@ pub(super) fn render_launch_voicevox_row(
                             hub.check_connection(id, cx);
                         }
                     } else {
-                        presets::add_voicevox_preset(hub, 3, None, cx);
+                        presets::add_featured_preset(
+                            hub,
+                            ene_client_core::presets::FeaturedPreset::Voicevox,
+                            cx,
+                        );
                     }
                 });
             },

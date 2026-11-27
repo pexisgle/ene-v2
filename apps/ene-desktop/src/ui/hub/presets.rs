@@ -6,13 +6,11 @@ use crate::rpc::{
     connections::{SetupConnection, SetupSelection},
 };
 use ene_client_core::{
-    SAKURA_AI_ENDPOINT as SAKURA_ENDPOINT, SearchAdapter,
+    SearchAdapter,
     domain::LlmProvider,
     presets::{
-        EmbeddingPresetSpec, SttPresetSpec, build_embedding_preset_input, build_llm_provider_input,
-        build_openai_tts_preset_input, build_sakura_tts_preset_input,
-        build_search_assignment_inputs, build_search_preset_input, build_stt_preset_input,
-        build_voicevox_preset_input, find_reusable_quick_connect_connection,
+        FeaturedPreset, build_llm_provider_input, build_search_assignment_inputs,
+        build_search_preset_input, find_reusable_quick_connect_connection,
     },
 };
 use gpui::Context;
@@ -151,139 +149,13 @@ pub(crate) fn complete_setup_selection(
     }
 }
 
-pub(crate) fn add_voicevox_preset(
-    hub: &mut Hub,
-    speaker: u32,
-    speed: Option<f32>,
-    cx: &mut Context<Hub>,
-) {
+pub(crate) fn add_featured_preset(hub: &mut Hub, preset: FeaturedPreset, cx: &mut Context<Hub>) {
     let Some(settings) = hub.model.settings() else {
         return;
     };
-    if !hub.rpc.has_host() {
+    let (label, input, probe_id) = preset.prepare(&settings.connections);
+    if probe_id.is_some() && !hub.rpc.has_host() {
         return;
     }
-    let existing_rev = settings.connection("voicevox").map_or(0, |c| c.revision);
-    let input = build_voicevox_preset_input(existing_rev, speaker, speed);
-    hub.update_connections(
-        "VOICEVOX接続の追加",
-        settings.revision,
-        vec![input],
-        Some("voicevox".into()),
-        cx,
-    );
-}
-
-pub(crate) fn add_openai_tts_preset(
-    hub: &mut Hub,
-    endpoint: &str,
-    model: &str,
-    voice: &str,
-    cx: &mut Context<Hub>,
-) {
-    hub.upsert_connection(
-        "TTS接続の追加",
-        build_openai_tts_preset_input(endpoint, model, voice),
-        cx,
-    );
-}
-
-pub(crate) fn add_stt_preset(
-    hub: &mut Hub,
-    name: String,
-    endpoint: String,
-    model: String,
-    language: String,
-    cx: &mut Context<Hub>,
-) {
-    add_stt_preset_with_spec(
-        hub,
-        SttPresetSpec {
-            fixed_id: None,
-            adapter: "openai",
-            name,
-            endpoint,
-            model,
-            language,
-        },
-        cx,
-    );
-}
-
-fn add_stt_preset_with_spec(hub: &mut Hub, spec: SttPresetSpec<'_>, cx: &mut Context<Hub>) {
-    let input = {
-        let connections = hub
-            .model
-            .settings()
-            .map_or(&[][..], |s| s.connections.as_slice());
-        build_stt_preset_input(connections, spec)
-    };
-    hub.upsert_connection("音声認識（STT）接続の追加", input, cx);
-}
-
-pub(crate) fn add_sakura_tts_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
-    let input = {
-        let connections = hub
-            .model
-            .settings()
-            .map_or(&[][..], |s| s.connections.as_slice());
-        build_sakura_tts_preset_input(connections)
-    };
-    hub.upsert_connection("さくらのAI Engine TTS接続の追加", input, cx);
-}
-
-pub(crate) fn add_sakura_stt_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
-    add_stt_preset_with_spec(
-        hub,
-        SttPresetSpec {
-            fixed_id: Some("sakura-stt"),
-            adapter: "sakura",
-            name: "さくらのAI Engine STT".into(),
-            endpoint: SAKURA_ENDPOINT.into(),
-            model: "whisper-large-v3-turbo".into(),
-            language: "ja".into(),
-        },
-        cx,
-    );
-}
-
-pub(crate) fn add_sakura_embedding_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
-    add_embedding_preset(
-        hub,
-        &EmbeddingPresetSpec {
-            id: "sakura-embedding",
-            name: "さくらのAI Engine Embedding",
-            adapter: "sakura",
-            endpoint: SAKURA_ENDPOINT,
-            model_id: "multilingual-e5-large",
-            dimensions: 1024,
-        },
-        cx,
-    );
-}
-
-pub(crate) fn add_openai_embedding_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
-    add_embedding_preset(
-        hub,
-        &EmbeddingPresetSpec {
-            id: "openai-embedding",
-            name: "OpenAI Embedding",
-            adapter: "openai",
-            endpoint: "https://api.openai.com/v1",
-            model_id: "text-embedding-3-small",
-            dimensions: 1536,
-        },
-        cx,
-    );
-}
-
-fn add_embedding_preset(hub: &mut Hub, spec: &EmbeddingPresetSpec<'_>, cx: &mut Context<Hub>) {
-    let input = {
-        let connections = hub
-            .model
-            .settings()
-            .map_or(&[][..], |s| s.connections.as_slice());
-        build_embedding_preset_input(connections, spec)
-    };
-    hub.upsert_connection("埋め込み（Embedding）接続の追加", input, cx);
+    hub.update_connections(label, settings.revision, vec![input], probe_id, cx);
 }
