@@ -4,7 +4,7 @@
 
 ## 設計文書
 
-製品仕様、利用シナリオと実装方針は[ドキュメント一覧](docs/README.md)を参照してください。起動と開発の手順はこのREADMEと各パッケージのREADMEにまとめています。
+全体の案内は[ドキュメント一覧](docs/README.md)にまとめています。現在の採用設計は[全体アーキテクチャ](docs/architecture.md)、[心・記憶・会話圧縮の設計](docs/design/mind.md)、[作業実行・操作確認・接続保護の設計](docs/design/work.md)、[クライアント設計](docs/design/client.md)、[プラグイン拡張の設計](docs/design/plugins.md)、[ホスト API の概要](docs/api.md)を参照してください（[調査・選定根拠](docs/references.md#alpha-design-sources)）。現行の動作・起動方法は各パッケージのドキュメントを参照してください。
 
 ## ワークスペース
 
