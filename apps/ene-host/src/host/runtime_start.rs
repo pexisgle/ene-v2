@@ -34,7 +34,13 @@ impl Runtime {
         let (wake_tx, wake_rx) = crossbeam_channel::bounded::<()>(1);
         let (shutdown, shutdown_rx) = crossbeam_channel::bounded::<()>(1);
         let (ready_tx, ready_rx) = oneshot::channel();
-        let hub = DeviceHub::default();
+        let wake = rig_ecs::tasks::Wake::new({
+            let sender = wake_tx.clone();
+            move || {
+                let _wake = sender.try_send(());
+            }
+        });
+        let hub = DeviceHub::new(wake.clone());
         // Plugin packages are read and verified once, before the kernel runs,
         // so every path that resolves a connection stays synchronous. The
         // instances the stored connections reference start here too, for the
@@ -72,7 +78,7 @@ impl Runtime {
                 catalog_refresh,
                 host_runtime: tokio::runtime::Handle::current(),
                 device_timeout: options.device_timeout,
-                wake: wake_tx,
+                wake,
                 logs,
             },
             initial_plugin_tools,

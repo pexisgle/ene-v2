@@ -157,6 +157,17 @@ impl<'a> AgentKernel<'a> {
         let services = self.services;
         let world = self.app.world_mut();
         client::computer::invalidate_client(world, client_id, services.hub.subscription(client_id));
+        for id in services
+            .store
+            .client_repo()
+            .mark_unanswered_operations_uncertain(Some(client_id))?
+        {
+            client::device::uncertain(
+                world,
+                &id,
+                "the device stream was replaced; the result is unknown",
+            );
+        }
         let context = client::device::DeviceDispatchContext {
             store: &services.store,
             hub: &services.hub,
@@ -179,18 +190,6 @@ impl<'a> AgentKernel<'a> {
                 );
             }
         })
-    }
-
-    pub(crate) fn client_disconnected(&mut self, client: &ClientId) -> Result<()> {
-        let client_id = client.as_str();
-        if !self.services.hub.connected(client_id) {
-            client::computer::invalidate_client(self.app.world_mut(), client_id, None);
-            self.services
-                .store
-                .client_repo()
-                .mark_unanswered_operations_uncertain(Some(client_id))?;
-        }
-        Ok(())
     }
 
     pub(crate) fn complete_operation(

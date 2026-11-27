@@ -1,6 +1,6 @@
 //! Client registration, device streams and perception.
 use super::{Services, parse_client_id};
-use crate::host::{Runtime, client, error::HostError, resources::DeviceHub};
+use crate::host::{client, error::HostError, resources::DeviceHub};
 use connectrpc::{
     ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream,
 };
@@ -97,7 +97,6 @@ impl w::ClientService for Services {
                 let hub = services.hub.clone();
                 let (subscription, receiver) = hub.register(&client_id);
                 let guard = StreamGuard {
-                    runtime,
                     hub,
                     client_id,
                     subscription,
@@ -158,11 +157,9 @@ impl w::ClientService for Services {
     }
 }
 
-/// Closes a device stream when the response stream is dropped, including a
-/// client disconnect. Operations that can no longer be answered become
-/// uncertain; a stream superseded by a newer one leaves them alone.
+/// Closes a stream only if it still owns the client. The hub wakes the kernel
+/// to settle outstanding dispatches.
 struct StreamGuard {
-    runtime: Runtime,
     hub: DeviceHub,
     client_id: ClientId,
     subscription: SubscriptionId,
@@ -170,20 +167,14 @@ struct StreamGuard {
 
 impl Drop for StreamGuard {
     fn drop(&mut self) {
-        if !self.hub.unregister(&self.client_id, self.subscription) {
-            return;
-        }
-        let client_id = self.client_id.clone();
-        drop(
-            self.runtime
-                .call_kernel(move |kernel| kernel.client_disconnected(&client_id)),
-        );
+        self.hub.unregister(&self.client_id, self.subscription);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::Runtime;
     use crate::host::client::{DeviceOperation, DeviceStatus};
     use crate::host::db::Store;
 
@@ -220,7 +211,6 @@ mod tests {
 
     #[tokio::test]
     async fn device_guard_cleanup_outside_tokio_preserves_replacement_and_pending_operations() {
-        use ene_domain::{CompanionId, DeviceScope};
         let state = tempfile::tempdir().unwrap();
         let runtime = Runtime::start(state.path()).await.unwrap();
         runtime
@@ -231,18 +221,7 @@ mod tests {
                     ("unsent", "c1", DeviceStatus::Pending),
                     ("other-client", "c2", DeviceStatus::Dispatched),
                 ] {
-                    store.client_repo().insert_operation(&DeviceOperation {
-                        id: id.into(),
-                        client_id: client.into(),
-                        capability: "device.files".into(),
-                        input: serde_json::json!({}),
-                        scope: DeviceScope::Companion(CompanionId::parse("ene")?),
-                        status,
-                        output: None,
-                        failure: None,
-                        created_at: String::new(),
-                        updated_at: String::new(),
-                    })?;
+                    seed_operation(store, id, client, status)?;
                 }
                 Ok(())
             })
@@ -252,14 +231,12 @@ mod tests {
         let client_id = ClientId::parse("c1").unwrap();
         let (old, _old_receiver) = hub.register(&client_id);
         let old = StreamGuard {
-            runtime: runtime.clone(),
             hub: hub.clone(),
             client_id: client_id.clone(),
             subscription: old,
         };
         let (subscription, mut receiver) = hub.register(&client_id);
         let current = StreamGuard {
-            runtime: runtime.clone(),
             hub: hub.clone(),
             client_id,
             subscription,
@@ -286,7 +263,6 @@ mod tests {
 
         // Drop the current stream and install its replacement in one kernel
         // job, before the queued disconnect can run.
-        let runtime_for_guard = runtime.clone();
         let replacement = runtime
             .read(move |_| {
                 let hub = current.hub.clone();
@@ -294,7 +270,6 @@ mod tests {
                 drop(current);
                 let (subscription, _receiver) = hub.register(&client_id);
                 Ok(StreamGuard {
-                    runtime: runtime_for_guard,
                     hub,
                     client_id,
                     subscription,
@@ -319,21 +294,23 @@ mod tests {
             .join()
             .unwrap();
         assert!(!hub.connected("c1"));
-        let statuses = runtime
-            .read(|app| {
-                let store = app.world().resource::<Store>();
-                Ok((
-                    store.client_repo().operation("sent")?.unwrap().status,
-                    store.client_repo().operation("unsent")?.unwrap().status,
-                    store
-                        .client_repo()
-                        .operation("other-client")?
-                        .unwrap()
-                        .status,
-                ))
-            })
-            .await
-            .unwrap();
+        let statuses = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let store = &runtime.services().store;
+            loop {
+                let repo = store.client_repo();
+                let sent = repo.operation("sent").unwrap().unwrap().status;
+                if sent == DeviceStatus::Uncertain {
+                    break (
+                        sent,
+                        repo.operation("unsent").unwrap().unwrap().status,
+                        repo.operation("other-client").unwrap().unwrap().status,
+                    );
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(
             statuses,
             (
@@ -343,5 +320,72 @@ mod tests {
             )
         );
         runtime.shutdown().await.unwrap();
+    }
+    #[tokio::test]
+    async fn replacing_the_device_stream_settles_unanswered_dispatches() {
+        use connectrpc::StreamMessage;
+        use w::ClientService;
+
+        let state = tempfile::tempdir().unwrap();
+        let runtime = Runtime::start(state.path()).await.unwrap();
+        let store = &runtime.services().store;
+        store
+            .client_repo()
+            .register_client(&ene_store::clients::ClientDeclaration {
+                id: "desk",
+                name: "desk",
+                platform: "test",
+                capabilities: &[],
+                specs: &[],
+                expected_revision: 0,
+            })
+            .unwrap();
+        let service = Services {
+            runtime: runtime.clone(),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+        };
+        let rpc = StreamMessage::from_message(&w::Id {
+            id: "desk".into(),
+            ..Default::default()
+        });
+        let open = || {
+            service.device_stream(
+                RequestContext::new(http::HeaderMap::new()),
+                ServiceRequest::from_parts(rpc.view(), rpc.bytes()),
+            )
+        };
+
+        let first = open().await.unwrap();
+        seed_operation(store, "sent", "desk", DeviceStatus::Dispatched).unwrap();
+        let replacement = open().await.unwrap();
+        let saved = store.client_repo().operation("sent").unwrap().unwrap();
+        assert_eq!(saved.status, DeviceStatus::Uncertain);
+        let owner = runtime.services().hub.subscription("desk").unwrap();
+        drop(first);
+        assert_eq!(runtime.services().hub.subscription("desk"), Some(owner));
+        drop(replacement);
+        runtime.shutdown().await.unwrap();
+    }
+
+    fn seed_operation(
+        store: &Store,
+        id: &str,
+        client: &str,
+        status: DeviceStatus,
+    ) -> crate::host::error::Result<()> {
+        use ene_domain::{CompanionId, DeviceScope};
+        store.client_repo().insert_operation(&DeviceOperation {
+            id: id.into(),
+            client_id: client.into(),
+            capability: "device.files".into(),
+            input: serde_json::json!({}),
+            scope: DeviceScope::Companion(CompanionId::parse("ene")?),
+            status,
+            output: None,
+            failure: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        })?;
+        Ok(())
     }
 }

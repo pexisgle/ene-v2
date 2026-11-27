@@ -98,6 +98,7 @@ impl Plugin for ClientPlugin {
         .add_systems(
             Update,
             (
+                device::settle_disconnections.before(AgentLoop),
                 dynamic::drain.after(AgentLoop),
                 super::eyes::poll.after(AgentLoop),
             ),

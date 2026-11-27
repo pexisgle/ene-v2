@@ -5,7 +5,7 @@ use ene_domain::{ClientId, SubscriptionId, client_view::HostHealth};
 use ene_rpc as w;
 use parking_lot::Mutex;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -67,7 +67,14 @@ impl HostState {
 /// host thread. Registering a new stream for a client supersedes the old one.
 #[derive(Clone, Default, bevy_ecs::prelude::Resource)]
 pub(crate) struct DeviceHub {
-    inner: Arc<Mutex<HashMap<ClientId, Stream>>>,
+    inner: Arc<Mutex<DeviceStreams>>,
+    wake: rig_ecs::tasks::Wake,
+}
+
+#[derive(Default)]
+struct DeviceStreams {
+    active: HashMap<ClientId, Stream>,
+    disconnected: HashSet<ClientId>,
 }
 
 #[derive(Clone)]
@@ -77,6 +84,13 @@ struct Stream {
 }
 
 impl DeviceHub {
+    pub(crate) fn new(wake: rig_ecs::tasks::Wake) -> Self {
+        Self {
+            wake,
+            ..Self::default()
+        }
+    }
+
     /// Registers `client` as connected and returns the receiver the RPC layer
     /// streams. The previous stream, if any, is closed.
     pub(crate) fn register(
@@ -85,8 +99,7 @@ impl DeviceHub {
     ) -> (SubscriptionId, tokio::sync::mpsc::Receiver<w::DeviceEvent>) {
         let (sender, receiver) = tokio::sync::mpsc::channel(64);
         let subscription = SubscriptionId::from(uuid::Uuid::new_v4());
-        let mut streams = self.inner.lock();
-        streams.insert(
+        self.inner.lock().active.insert(
             client.clone(),
             Stream {
                 subscription,
@@ -100,23 +113,32 @@ impl DeviceHub {
     pub(crate) fn unregister(&self, client: &ClientId, subscription: SubscriptionId) -> bool {
         let mut streams = self.inner.lock();
         if streams
+            .active
             .get(client)
             .is_some_and(|stream| stream.subscription == subscription)
         {
-            streams.remove(client);
+            streams.active.remove(client);
+            streams.disconnected.insert(client.clone());
+            drop(streams);
+            self.wake.wake();
             return true;
         }
         false
     }
 
     pub(crate) fn connected(&self, client: &str) -> bool {
-        self.inner.lock().contains_key(client)
+        self.inner.lock().active.contains_key(client)
+    }
+
+    pub(crate) fn take_disconnected(&self) -> HashSet<ClientId> {
+        std::mem::take(&mut self.inner.lock().disconnected)
     }
 
     /// The subscription id of the live stream for `client`.
     pub(crate) fn subscription(&self, client: &str) -> Option<SubscriptionId> {
         self.inner
             .lock()
+            .active
             .get(client)
             .map(|stream| stream.subscription)
     }
@@ -129,7 +151,7 @@ impl DeviceHub {
         SubscriptionId,
         tokio::sync::mpsc::OwnedPermit<w::DeviceEvent>,
     )> {
-        let stream = self.inner.lock().get(client).cloned()?;
+        let stream = self.inner.lock().active.get(client).cloned()?;
         Some((stream.subscription, stream.sender.try_reserve_owned().ok()?))
     }
 }

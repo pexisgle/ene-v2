@@ -44,20 +44,26 @@ pub(crate) fn complete(
             "the operation has not been dispatched".into(),
         ));
     }
-    let computer = match prepare_computer_use(
-        world.get_resource::<ComputerUse>(),
-        &store,
-        world.get_resource::<DeviceHub>(),
-        &operation,
-        result,
-    ) {
+    let hub = world.resource::<DeviceHub>();
+    let delivery = if hub.connected(&operation.client_id) {
+        prepare_computer_use(
+            world.get_resource::<ComputerUse>(),
+            &store,
+            Some(hub),
+            &operation,
+            result,
+        )
+    } else {
+        ComputerUseCheck::MarkUncertain
+    };
+    let computer = match delivery {
         ComputerUseCheck::Skip => None,
         ComputerUseCheck::Ready(pending) => Some(pending),
         ComputerUseCheck::MarkUncertain => {
             uncertain(
                 world,
                 &operation.id,
-                "the Computer Use operation's result is unknown; do not retry it",
+                "the device operation's result is unknown; do not retry it",
             );
             return get_state(
                 &store,

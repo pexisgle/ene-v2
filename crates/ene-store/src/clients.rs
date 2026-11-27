@@ -392,15 +392,17 @@ impl<'a> ClientRepo<'a> {
     }
 
     /// Marks unanswered dispatches uncertain at startup or for one disconnected client.
-    pub fn mark_unanswered_operations_uncertain(&self, client: Option<&str>) -> Result<()> {
-        self.0
-            .conn()
-            .prepare_cached(
-                "UPDATE device_operations SET status = 'uncertain', updated_at = ?1 \
-             WHERE status = 'dispatched' AND (?2 IS NULL OR client_id = ?2)",
-            )?
-            .execute(params![now(), client])?;
-        Ok(())
+    pub fn mark_unanswered_operations_uncertain(
+        &self,
+        client: Option<&str>,
+    ) -> Result<Vec<String>> {
+        self.0.fetch_all(
+            "UPDATE device_operations SET status = 'uncertain', updated_at = ?1
+             WHERE status = 'dispatched' AND (?2 IS NULL OR client_id = ?2)
+             RETURNING operation_id",
+            params![now(), client],
+            |row| row.get(0),
+        )
     }
 
     /// The companion a client is currently the active client of, if any.

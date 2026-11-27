@@ -66,11 +66,12 @@ fn queued_work_reconnect_checks_the_original_run_and_current_grants() {
             )
             .unwrap();
         }
-        let hub = harness.app.world().resource::<DeviceHub>();
-        let (_, mut stream) = hub.register(&ClientId::parse("desk").unwrap());
+        let hub = harness.app.world().resource::<DeviceHub>().clone();
+        let client_id = ClientId::parse("desk").unwrap();
+        let (subscription, mut stream) = hub.register(&client_id);
         let context = device::DeviceDispatchContext {
             store: &store,
-            hub,
+            hub: &hub,
             notifier: harness.app.world().resource(),
         };
         let mut rejected = Vec::new();
@@ -93,6 +94,19 @@ fn queued_work_reconnect_checks_the_original_run_and_current_grants() {
                 "other-client",
                 DeviceStatus::Dispatched,
             );
+            assert!(hub.unregister(&client_id, subscription));
+            let late = device::complete(
+                harness.app.world_mut(),
+                &w::DeviceOperationResult {
+                    client_id: "desk".into(),
+                    operation_id: queued.id.clone(),
+                    success: true,
+                    output: "{}".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(late.status, w::DeviceOperationStatus::Uncertain);
         } else {
             assert!(
                 stream.try_recv().is_err(),

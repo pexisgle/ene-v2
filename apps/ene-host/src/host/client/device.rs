@@ -194,6 +194,35 @@ pub(crate) fn get_state(
     Ok(wire::device_state(&operation))
 }
 
+pub(super) fn settle_disconnections(world: &mut World) {
+    let hub = world.resource::<DeviceHub>().clone();
+    let store = world.resource::<Store>().clone();
+    for client in hub.take_disconnected() {
+        if hub.connected(client.as_str()) {
+            continue;
+        }
+        computer::invalidate_client(world, client.as_str(), None);
+        match store
+            .client_repo()
+            .mark_unanswered_operations_uncertain(Some(client.as_str()))
+        {
+            Ok(ids) => {
+                for id in ids {
+                    uncertain(
+                        world,
+                        &id,
+                        "the device stream closed; the result is unknown",
+                    );
+                }
+            }
+            Err(error) => {
+                crate::host::fail(world, &error.to_string());
+                return;
+            }
+        }
+    }
+}
+
 /// Expires device calls that have outlived their response deadline.
 pub(crate) fn expire(
     store: Res<Store>,

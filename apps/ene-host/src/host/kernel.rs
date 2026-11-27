@@ -7,7 +7,7 @@ pub(super) struct KernelResources {
     pub(super) catalog_refresh: model::catalog::Refresh,
     pub(super) host_runtime: tokio::runtime::Handle,
     pub(super) device_timeout: Duration,
-    pub(super) wake: crossbeam_channel::Sender<()>,
+    pub(super) wake: rig_ecs::tasks::Wake,
     pub(super) logs: DirStore,
 }
 
@@ -85,9 +85,7 @@ fn build_kernel_app(res: KernelResources) -> App {
         .insert_resource(Approvals::default())
         .init_resource::<delegation::DeliveredClaims>()
         .insert_resource(DeviceTimeout(res.device_timeout))
-        .insert_resource(rig_ecs::tasks::Wake::new(move || {
-            let _wake = res.wake.try_send(());
-        }))
+        .insert_resource(res.wake)
         .insert_resource(SessionStore::new(res.logs))
         .add_plugins((
             AgentPlugin,
