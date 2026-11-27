@@ -219,8 +219,8 @@ pub struct CompanionProfilePatch {
     pub persona: String,
     /// New standing instructions.
     pub mind: String,
-    /// New avatar binding.
-    pub body: BodyBinding,
+    /// New avatar binding, when the model control changed.
+    pub body: Option<BodyBinding>,
     /// New voice binding, when the voice controls changed.
     pub voice: Option<VoiceBinding>,
 }

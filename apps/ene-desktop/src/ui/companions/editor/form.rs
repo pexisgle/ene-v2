@@ -156,7 +156,7 @@ pub(super) fn non_empty_trimmed(draft: &Entity<Draft>, cx: &gpui::App) -> Option
     trimmed(draft.read(cx).text())
 }
 
-fn trimmed(text: &str) -> Option<String> {
+pub(super) fn trimmed(text: &str) -> Option<String> {
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_owned())
 }

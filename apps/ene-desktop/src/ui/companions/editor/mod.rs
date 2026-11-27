@@ -12,7 +12,10 @@ use views::*;
 use voice_view::*;
 
 use super::CompanionsPane;
-use crate::ui::{CompanionProfilePatch, studio::labeled_field, theme::Theme};
+use crate::{
+    input::single_line,
+    ui::{CompanionProfilePatch, studio::labeled_field, theme::Theme},
+};
 use ene_client_core::domain::{BodyBinding, VoiceBinding};
 use ene_domain::CompanionId;
 use gpui::{AnyElement, Context, div, prelude::*, px};
@@ -37,9 +40,15 @@ pub(super) fn render_companion_editor(
     let name_val = drafts.name_d.read(cx).text().trim().to_owned();
     let mind_val = drafts.mind_d.read(cx).text().trim().to_owned();
     let persona_val = drafts.persona_d.read(cx).text().trim().to_owned();
-    let body_model_val = drafts.body_model_d.read(cx).text().trim().to_owned();
-    let mut next_body = current_body;
-    next_body.model = (!body_model_val.is_empty()).then_some(body_model_val);
+    let model = non_empty_trimmed(&drafts.body_model_d, cx);
+    let displayed_model = current_body
+        .model
+        .as_deref()
+        .and_then(|path| trimmed(&single_line(path)));
+    let next_body = (model != displayed_model).then_some(BodyBinding {
+        model,
+        ..current_body
+    });
     let next_voice = VoiceBinding {
         connection_id: CompanionId::parse(id.clone())
             .ok()

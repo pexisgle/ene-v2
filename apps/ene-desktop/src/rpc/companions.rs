@@ -70,7 +70,10 @@ pub(crate) fn update_companion_profile(
     companion: Companion,
     patch: CompanionProfilePatch,
 ) {
-    let body_doc = binding_document("ene.body.v1", &patch.body);
+    let body_doc = patch
+        .body
+        .as_ref()
+        .and_then(|body| binding_document("ene.body.v1", body));
     let voice_doc = patch
         .voice
         .as_ref()
