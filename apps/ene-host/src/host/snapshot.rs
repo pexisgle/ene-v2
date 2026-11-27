@@ -106,7 +106,11 @@ impl SnapshotReader<'_> {
                 ..Default::default()
             }
             .into(),
-            settings: Some(w::Settings::from(&store.settings_repo().settings()?)).into(),
+            settings: Some(settings::project(
+                &store.settings_repo().settings()?,
+                providers,
+            ))
+            .into(),
             companions,
             work_sessions,
             active_companion_id,

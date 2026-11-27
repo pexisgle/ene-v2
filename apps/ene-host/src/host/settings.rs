@@ -16,6 +16,33 @@ pub(crate) use ene_domain::settings::{
 use ene_plugin::{Extension, provider::AuthProfile};
 use ene_rpc as w;
 
+/// The credential status clients can display without opening the platform store.
+pub(crate) fn project(
+    settings: &ene_domain::settings::Settings,
+    loaded: &Providers,
+) -> w::Settings {
+    let mut view = w::Settings::from(settings);
+    for (row, connection) in view.connections.iter_mut().zip(&settings.connections) {
+        if connection.credential_state == CredentialState::Registered {
+            continue;
+        }
+        let state = if environment_secret(connection, loaded).is_some() {
+            CredentialState::Environment
+        } else {
+            CredentialState::Absent
+        };
+        row.credential_state = state.as_str().into();
+    }
+    view
+}
+
+pub(crate) fn environment_secret(connection: &Connection, loaded: &Providers) -> Option<String> {
+    environment_variables(connection, loaded)
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|secret| !secret.is_empty())
+}
+
 /// Environment credentials apply to the provider's advertised endpoint.
 pub(crate) fn environment_variables(connection: &Connection, loaded: &Providers) -> Vec<String> {
     let endpoint = connection.endpoint();

@@ -3,6 +3,7 @@
 use super::super::Services;
 use super::notify_settings;
 use crate::host::error::HostError;
+use crate::host::settings;
 use crate::host::voice::start_selected_voicevox;
 use connectrpc::RequestContext;
 use connectrpc::ServiceRequest;
@@ -14,8 +15,14 @@ pub(super) async fn get_settings(
     _arg1: RequestContext,
     _arg2: ServiceRequest<'_, w::Empty>,
 ) -> ServiceResult<w::Settings> {
+    let providers = services.runtime.providers();
     services
-        .with_store(|store| Ok(w::Settings::from(&store.settings_repo().settings()?)))
+        .with_store(move |store| {
+            Ok(settings::project(
+                &store.settings_repo().settings()?,
+                &providers,
+            ))
+        })
         .await
 }
 
@@ -40,7 +47,7 @@ pub(super) async fn update_settings(
             let settings = store
                 .settings_repo()
                 .update_settings(expected_revision, &inputs)?;
-            let view = w::Settings::from(&settings);
+            let view = settings::project(&settings, &services.providers);
             notify_settings(&services.notifier, view.clone());
             Ok(view)
         })

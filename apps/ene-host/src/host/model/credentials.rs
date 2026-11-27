@@ -2,11 +2,11 @@
 //!
 //! A registered secret lives in the OS keyring, or only in memory when the host
 //! was told to keep sessions credential-free (`ENE_HOST_SESSION_CREDENTIALS`).
-//! An unreadable store is reported as an error rather than "no credential", so a
-//! request never goes out unauthenticated because the store could not be read.
+//! An unreadable registered credential fails closed. An injected environment
+//! credential is available independently for an unregistered provider endpoint.
 use crate::host::db::Result;
 use crate::host::error::HostError;
-use crate::host::settings::{Connection, CredentialState};
+use crate::host::settings::{Connection, CredentialState, environment_secret};
 use parking_lot::Mutex;
 use std::{collections::HashMap, sync::Arc};
 
@@ -157,13 +157,7 @@ pub(crate) fn credential_state(
     credentials: &Credentials,
     loaded: &crate::host::providers::Providers,
 ) -> Result<CredentialState> {
-    if credentials.secret(connection.id.as_str())?.is_some() {
-        return Ok(CredentialState::Registered);
-    }
-    if environment_secret(connection, loaded).is_some() {
-        return Ok(CredentialState::Environment);
-    }
-    Ok(CredentialState::Absent)
+    Ok(resolve(connection, Some(credentials), loaded)?.0)
 }
 
 pub(crate) fn connection_secret(
@@ -171,20 +165,25 @@ pub(crate) fn connection_secret(
     credentials: Option<&Credentials>,
     loaded: &crate::host::providers::Providers,
 ) -> Result<Option<String>> {
-    if let Some(credentials) = credentials
-        && let Some(secret) = credentials.secret(connection.id.as_str())?
-    {
-        return Ok(Some(secret));
-    }
-    Ok(environment_secret(connection, loaded))
+    Ok(resolve(connection, credentials, loaded)?.1)
 }
 
-fn environment_secret(
+fn resolve(
     connection: &Connection,
+    credentials: Option<&Credentials>,
     providers: &crate::host::providers::Providers,
-) -> Option<String> {
-    crate::host::settings::environment_variables(connection, providers)
-        .into_iter()
-        .filter_map(|name| std::env::var(name).ok())
-        .find(|secret| !secret.is_empty())
+) -> Result<(CredentialState, Option<String>)> {
+    let stored = credentials.map_or(Ok(None), |store| store.secret(connection.id.as_str()));
+    let absent = match stored {
+        Ok(Some(secret)) => return Ok((CredentialState::Registered, Some(secret))),
+        Ok(None) => Ok((CredentialState::Absent, None)),
+        Err(error) if connection.credential_state == CredentialState::Registered => {
+            return Err(error);
+        }
+        Err(error) => Err(error),
+    };
+    match environment_secret(connection, providers) {
+        Some(secret) => Ok((CredentialState::Environment, Some(secret))),
+        None => absent,
+    }
 }

@@ -107,7 +107,7 @@ pub(super) async fn install_plugin(
         services.providers.replace(package, entry.installation_id);
         notify_settings(
             &services.notifier,
-            w::Settings::from(&store.settings_repo().settings()?),
+            crate::host::settings::project(&store.settings_repo().settings()?, &services.providers),
         );
         Ok(view)
     })
@@ -134,7 +134,10 @@ pub(super) async fn set_plugin_enabled(
         if services.providers.revision() != previous {
             notify_settings(
                 &services.notifier,
-                w::Settings::from(&store.settings_repo().settings()?),
+                crate::host::settings::project(
+                    &store.settings_repo().settings()?,
+                    &services.providers,
+                ),
             );
         }
         Ok(w::PluginInfo {
@@ -178,7 +181,10 @@ pub(super) async fn remove_plugin(
             let settings = store
                 .settings_repo()
                 .update_settings(revision.revision, &affected)?;
-            notify_settings(&services.notifier, w::Settings::from(&settings));
+            notify_settings(
+                &services.notifier,
+                crate::host::settings::project(&settings, &services.providers),
+            );
         }
         services.providers.set_enabled(&plugin_id, false);
         if !crate::host::providers::remove_local_package(store, &services.state_dir, &plugin_id)? {

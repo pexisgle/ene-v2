@@ -68,7 +68,10 @@ pub(super) async fn register_credentials(
             }
             model::save_secret(&services.credentials, id.as_str(), &secret)?;
             repo.set_credential_state(&id, CredentialState::Registered)?;
-            notify_settings(&services.notifier, w::Settings::from(&repo.settings()?));
+            notify_settings(
+                &services.notifier,
+                settings::project(&repo.settings()?, &services.providers),
+            );
             Ok(w::CredentialResult {
                 credential_state: CredentialState::Registered.as_str().into(),
                 ..Default::default()
@@ -96,7 +99,7 @@ pub(super) async fn revoke_credentials(
             store.settings_repo().set_credential_state(&id, state)?;
             notify_settings(
                 &services.notifier,
-                w::Settings::from(&store.settings_repo().settings()?),
+                settings::project(&store.settings_repo().settings()?, &services.providers),
             );
             Ok(w::Empty::default())
         })
