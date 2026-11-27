@@ -4060,7 +4060,6 @@ dependencies = [
  "ene-voice",
  "globset",
  "gpui-kit",
- "libc",
  "object",
  "parking_lot 0.13.0",
  "process-wrap",
@@ -4078,6 +4077,7 @@ dependencies = [
  "url",
  "uuid",
  "which",
+ "windows 0.62.2",
 ]
 
 [[package]]

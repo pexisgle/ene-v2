@@ -5,7 +5,11 @@ use super::{
     search::{Browse, Search, max_results},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use cap_std::{ambient_authority, fs::Dir};
+use cap_fs_ext::OpenOptionsSyncExt as _;
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, OpenOptions},
+};
 use cap_tempfile::TempFile;
 use ene_client_core::is_attachment_image;
 use ene_rpc as w;
@@ -14,7 +18,6 @@ use schemars::{JsonSchema, generate::SchemaSettings};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
-    borrow::Cow,
     io::{self, Read, Write},
     num::NonZeroUsize,
     path::{Path, PathBuf},
@@ -89,10 +92,9 @@ struct ShellArgs {
     command: String,
 }
 
-#[derive(Clone, Copy)]
-enum FileChange<'a> {
-    Write(&'a str),
-    Edit(&'a [Edit]),
+enum FileChange {
+    Write(String),
+    Edit(Vec<Edit>),
 }
 
 struct FileTool {
@@ -122,11 +124,11 @@ file_tools! {
         };
     "write": WriteArgs, "Create or replace a UTF-8 text file. Creates missing parent folders.",
         |workspace: &Workspace, WriteArgs { path, content }| {
-            workspace.change(relative(&path)?, FileChange::Write(&content))
+            workspace.change(relative(&path)?, FileChange::Write(content))
         };
     "edit": EditArgs, "Apply exact replacements in order. Each oldText must match exactly once. Save only if all replacements succeed.",
         |workspace: &Workspace, EditArgs { path, edits }| {
-            workspace.change(relative(&path)?, FileChange::Edit(&edits))
+            workspace.change(relative(&path)?, FileChange::Edit(edits))
         };
     "grep": GrepArgs, "Search UTF-8 files for matching lines. Pattern is a Rust regular expression. Path defaults to the workspace.",
         Workspace::grep;
@@ -263,11 +265,11 @@ impl Workspace {
         )
     }
 
-    fn change(&self, path: &Path, change: FileChange<'_>) -> Result<Value, WorkToolError> {
+    fn change(&self, path: &Path, change: FileChange) -> Result<Value, WorkToolError> {
         let _guard = self.edits.lock();
         let (content, create) = match change {
-            FileChange::Write(content) => (Cow::Borrowed(content), true),
-            FileChange::Edit(edits) => (Cow::Owned(edit(text(&self.load(path)?)?, edits)?), false),
+            FileChange::Write(content) => (content, true),
+            FileChange::Edit(edits) => (edit(text(&self.load(path)?)?, &edits)?, false),
         };
         self.save(path, &content, create)?;
         Ok(json!({"path": path, "bytes": content.len()}))
@@ -282,17 +284,10 @@ impl Workspace {
         if metadata.len() > FILE_LIMIT as u64 {
             return Err(WorkToolError::FileTooLarge);
         }
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        let file = {
-            use cap_std::fs::{OpenOptions, OpenOptionsExt as _};
-            // A replacement FIFO between metadata and open must not block before fstat.
-            self.dir.open_with(
-                path,
-                OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK),
-            )?
-        };
-        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-        let file = self.dir.open(path)?;
+        // A replacement FIFO between metadata and open must not block before fstat.
+        let file = self
+            .dir
+            .open_with(path, OpenOptions::new().read(true).nonblock(true))?;
         if !file.metadata()?.is_file() {
             return Err(io::Error::other("path must name a regular file").into());
         }

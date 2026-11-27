@@ -60,5 +60,5 @@ which.workspace = true
 [target.'cfg(windows)'.dev-dependencies]
 object = { version = "0.40", default-features = false, features = ["pe", "read_core", "std"] }
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
-libc = "0.2"
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_System_Threading"] }

@@ -5,6 +5,8 @@ use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use serde_json::{Value, json};
 use std::{io, process::Stdio, time::Duration};
 use tokio::io::{AsyncRead, AsyncReadExt as _};
+#[cfg(windows)]
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 impl Workspace {
     pub(super) async fn shell(&self, command: &str) -> Result<Value, WorkToolError> {
@@ -22,7 +24,6 @@ impl Workspace {
             child.args(["--noprofile", "--norc", "-c", command]);
             #[cfg(windows)]
             {
-                child.creation_flags(0x08000000); // CREATE_NO_WINDOW
                 let script =
                     format!("[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); {command}");
                 let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
@@ -39,7 +40,10 @@ impl Workspace {
         #[cfg(unix)]
         process.wrap(process_wrap::tokio::ProcessGroup::leader());
         #[cfg(windows)]
-        process.wrap(process_wrap::tokio::JobObject);
+        {
+            process.wrap(process_wrap::tokio::CreationFlags(CREATE_NO_WINDOW));
+            process.wrap(process_wrap::tokio::JobObject);
+        }
         process.wrap(KillOnDrop);
         let mut child = scopeguard::guard(process.spawn()?, |mut child| {
             reap_killed_child(child.as_mut());
