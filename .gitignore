@@ -33,3 +33,4 @@
 # the system temp can be removed mid-build, which fails rustc with LNK1104.
 .cargo-tmp/
 __pycache__/
+*.tsuzuri/
