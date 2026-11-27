@@ -79,6 +79,7 @@ message Notification {
     ResyncRequired resync_required = 20;
     Activation activation_updated = 21;  // Activate によるアクティブクライアント/revisionの変更
     PolicyTextsUpdated policy_texts_updated = 22;  // UpdatePolicyTexts による自由文ポリシー変更
+    Id companion_removed = 24;
   }
 }
 

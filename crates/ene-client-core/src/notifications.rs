@@ -10,7 +10,7 @@ use crate::{
         WorkStatus,
     },
     reducer::is_user_facing_message,
-    state::{Effects, Model, NoticeKind},
+    state::{Chat, Effects, Model, NoticeKind},
 };
 
 pub(crate) fn merge_notification(
@@ -19,6 +19,9 @@ pub(crate) fn merge_notification(
     effects: &mut Effects,
 ) {
     match notification.event {
+        Some(NotificationEvent::CompanionRemoved(id)) => {
+            remove_companion(model, id.as_str(), effects);
+        }
         Some(
             event @ (NotificationEvent::InitialState(_)
             | NotificationEvent::Health(_)
@@ -52,6 +55,57 @@ pub(crate) fn merge_notification(
                     .is_some_and(|id| id.as_str() == updated.companion_id);
         }
         Some(NotificationEvent::Other) | None => {}
+    }
+}
+
+pub(crate) fn remove_companion(model: &mut Model, companion_id: &str, effects: &mut Effects) {
+    let was_shown = model.companion_id() == Some(companion_id);
+    if let Some(snapshot) = model.snapshot.as_mut() {
+        snapshot
+            .companions
+            .retain(|companion| companion.id != companion_id);
+        snapshot
+            .activations
+            .retain(|activation| activation.companion_id.as_str() != companion_id);
+        if snapshot.active_companion_id.as_deref() == Some(companion_id) {
+            snapshot.active_companion_id = snapshot
+                .activations
+                .iter()
+                .find(|activation| activation.client_id.is_some())
+                .map(|activation| activation.companion_id.to_string());
+        }
+        for client in &mut snapshot.clients {
+            client.active_companions.retain(|id| id != companion_id);
+        }
+        snapshot
+            .work_sessions
+            .retain(|session| session.companion_id.as_str() != companion_id);
+        model.companions.work_active = snapshot
+            .work_sessions
+            .iter()
+            .any(|session| session.status == WorkStatus::Active);
+    }
+    model.companions.minds.remove(companion_id);
+    model
+        .companions
+        .streaming
+        .retain(|(id, _), _| id != companion_id);
+    if model.companions.selected.as_deref() == Some(companion_id) {
+        model.companions.selected = None;
+    }
+    if model
+        .companions
+        .chat
+        .companion_id
+        .as_ref()
+        .map(ene_domain::CompanionId::as_str)
+        == Some(companion_id)
+    {
+        model.companions.chat = Chat::default();
+    }
+    if was_shown && model.companion_id().is_some() {
+        effects.history = true;
+        effects.mind = true;
     }
 }
 

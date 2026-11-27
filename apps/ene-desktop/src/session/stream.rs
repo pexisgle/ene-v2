@@ -382,6 +382,13 @@ impl Session {
                     restart = true;
                 }
             }
+            Some(w::notification::Event::CompanionRemoved(companion)) => {
+                self.transport.companions.remove(&companion.id);
+                if self.transport.pending.as_deref() == Some(companion.id.as_str()) {
+                    self.transport.pending = None;
+                }
+                restart = self.release_binding(&companion.id).await;
+            }
             Some(w::notification::Event::Generic(event)) if event.kind == "perception_status" => {
                 if self.devices.eyes_enabled
                     && let Some(payload) = event.payload.as_option()
@@ -407,30 +414,37 @@ impl Session {
 
     async fn handle_activation_update(&mut self, activation: &w::Activation) -> bool {
         let ours = activation.client_id.as_deref() == Some(self.transport.options.id.as_str());
-        if ours {
-            if self
-                .transport
-                .bindings
-                .insert(activation.companion_id.clone())
-            {
-                if self.transport.focused.is_none() {
-                    self.transport.focused = Some(activation.companion_id.clone());
-                }
-                self.sync_avatars().await;
-                return self.transport.bindings.len() == 1;
-            }
-        } else if self.transport.bindings.remove(&activation.companion_id) {
-            self.audio.clear_speaking_if(&activation.companion_id);
-            if self.transport.focused.as_deref() == Some(activation.companion_id.as_str()) {
-                self.transport.focused = self.transport.bindings.first().cloned();
-            }
-            self.sync_avatars().await;
-            if self.transport.bindings.is_empty() {
-                self.devices.sensor = Sensor::default();
-                return true;
-            }
+        if !ours {
+            return self.release_binding(&activation.companion_id).await;
         }
-        false
+        if !self
+            .transport
+            .bindings
+            .insert(activation.companion_id.clone())
+        {
+            return false;
+        }
+        self.transport
+            .focused
+            .get_or_insert_with(|| activation.companion_id.clone());
+        self.sync_avatars().await;
+        self.transport.bindings.len() == 1
+    }
+
+    async fn release_binding(&mut self, companion_id: &str) -> bool {
+        if !self.transport.bindings.remove(companion_id) {
+            return false;
+        }
+        self.audio.clear_speaking_if(companion_id);
+        if self.transport.focused.as_deref() == Some(companion_id) {
+            self.transport.focused = self.transport.bindings.first().cloned();
+        }
+        self.sync_avatars().await;
+        let last = self.transport.bindings.is_empty();
+        if last {
+            self.devices.sensor = Sensor::default();
+        }
+        last
     }
 }
 

@@ -106,11 +106,13 @@ fn apply_domain_update(model: &mut Model, update: Update, effects: &mut Effects)
         | Update::History { .. }
         | Update::HistoryFailed { .. }
         | Update::StopRequested { .. }
-        | Update::Gone { .. }
         | Update::MindLoaded { .. }
         | Update::CompanionTemplates(_)
         | Update::CompanionExported { .. }
         | Update::CompanionPreview { .. } => apply_companion_update(model, update),
+        Update::Gone { companion_id } => {
+            notifications::remove_companion(model, &companion_id, effects);
+        }
         Update::Approvals(_)
         | Update::Resolved { .. }
         | Update::ApprovalStale { .. }
@@ -184,7 +186,6 @@ fn apply_companion_update(model: &mut Model, update: Update) {
                 companions.chat.stop_requested = true;
             }
         }
-        Update::Gone { companion_id } => remove_companion(model, &companion_id),
         Update::MindLoaded { companion_id, view } => {
             companions.minds.insert(companion_id, *view);
         }
@@ -224,23 +225,6 @@ fn apply_history(chat: &mut Chat, companion_id: &str, messages: Vec<Message>) {
             .iter()
             .any(|message| message.role == MessageRole::User && message.text == sending.text)
     });
-}
-
-fn remove_companion(model: &mut Model, companion_id: &str) {
-    if let Some(snapshot) = model.snapshot.as_mut() {
-        snapshot
-            .companions
-            .retain(|companion| companion.id != companion_id);
-        snapshot
-            .activations
-            .retain(|activation| activation.companion_id.as_str() != companion_id);
-    }
-    model.companions.minds.remove(companion_id);
-    if model.companions.selected.as_deref() == Some(companion_id) {
-        model.companions.selected = None;
-        model.companions.chat = Chat::default();
-        model.companions.streaming.clear();
-    }
 }
 
 fn apply_approval_update(model: &mut Model, update: Update, effects: &mut Effects) {

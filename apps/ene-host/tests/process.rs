@@ -557,6 +557,145 @@ async fn settings_changes_grant_and_revoke_an_active_clients_capability() {
     stop(&mut child).await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn companion_removal_reaches_existing_subscribers_and_closes_retained_work() {
+    use ene_rpc as w;
+
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    let runtime = temp.path().join("runtime");
+    let mut child = spawn(&state, &runtime);
+    let (endpoint, token) = discovery(&runtime).await;
+    let (transport, config) = w::connect(&endpoint, &token).unwrap();
+    let host = w::HostServiceClient::new(transport.clone(), config.clone());
+    let settings = w::SettingsServiceClient::new(transport.clone(), config.clone());
+    let clients = w::ClientServiceClient::new(transport.clone(), config.clone());
+    let works = w::WorkServiceClient::new(transport, config);
+    let id = seed_companion(
+        &settings,
+        &host,
+        &w::ModelAssignment {
+            connection_id: "c1".into(),
+            model_id: "gpt-4o-mini".into(),
+            ..Default::default()
+        },
+    )
+    .await;
+    clients
+        .register_client(w::RegisterClientRequest {
+            id: "desk".into(),
+            name: "Desk".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for companion in ["ene", &id] {
+        clients
+            .activate(w::ActivationRequest {
+                companion_id: companion.into(),
+                client_id: "desk".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+    let work = works
+        .start_work(w::StartWorkRequest {
+            companion_id: id.clone(),
+            client_id: "desk".into(),
+            instruction: "check the reminder".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .view()
+        .id
+        .to_owned();
+    let mut stream = host
+        .subscribe(w::SubscribeRequest {
+            client_id: "desk".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let start = stream.message().await.unwrap().unwrap().to_owned_message();
+    assert!(matches!(
+        start.event,
+        Some(w::notification::Event::InitialState(_))
+    ));
+
+    host.delete_companion(w::Id {
+        id: id.clone(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = stream.message().await.unwrap().unwrap().to_owned_message();
+            if let Some(w::notification::Event::CompanionRemoved(removed)) = event.event {
+                assert_eq!(removed.id, id);
+                assert_eq!(event.companion_id.as_deref(), Some(id.as_str()));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("deletion reaches a live subscription");
+
+    assert_companion_removed(&host, &works, work).await;
+    stop(&mut child).await;
+}
+
+#[cfg(unix)]
+async fn assert_companion_removed(
+    host: &ene_rpc::HostServiceClient<connectrpc::client::HttpClient>,
+    works: &ene_rpc::WorkServiceClient<connectrpc::client::HttpClient>,
+    work: String,
+) {
+    use ene_rpc as w;
+
+    let snapshot = host.get_snapshot(w::Empty::default()).await.unwrap();
+    assert_eq!(
+        snapshot
+            .view()
+            .companions
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        ["ene"]
+    );
+    assert_eq!(
+        snapshot
+            .view()
+            .activations
+            .iter()
+            .map(|item| item.companion_id)
+            .collect::<Vec<_>>(),
+        ["ene"]
+    );
+    assert_eq!(snapshot.view().work_sessions.iter().count(), 0);
+
+    let detail = works
+        .get_work(w::WorkRequest {
+            work_id: work,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let detail = detail.view();
+    assert_eq!(
+        detail.session.as_option().unwrap().status.as_known(),
+        Some(w::WorkStatus::WORK_STATUS_CLOSED)
+    );
+    assert_eq!(detail.runs.len(), 1);
+    assert!(matches!(
+        detail.runs.iter().next().unwrap().state.as_known(),
+        Some(w::RunStatus::RUN_STATUS_CANCELLED | w::RunStatus::RUN_STATUS_FAILED)
+    ));
+}
+
 /// A supervisor must be able to ask whether the host is alive and ready, and
 /// must be able to do so without the Owner Bearer: the auth layer is exactly
 /// what a health check needs to see past.

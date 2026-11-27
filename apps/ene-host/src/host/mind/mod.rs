@@ -176,14 +176,34 @@ pub(crate) fn update(
 
 pub(crate) fn delete(world: &mut World, id: &str) -> Result<()> {
     let store = world.resource::<Store>().clone();
+    let previous_client = store.client_repo().target(id, None)?;
+    for session in store.work_repo().work_sessions(id)? {
+        super::work::close(world, &session.id)?;
+    }
     if !store.companion_repo().delete_companion(id)? {
         return Err(HostError::NotFound(("companion not found").into()));
     }
     if let Some(entity) = agent::agent_of(world, id) {
         world.trigger(Retire { entity });
     }
+    if let Some(client) = previous_client {
+        super::voice::on_client_moved(world.get_resource::<super::voice::Voice>(), id, &client);
+    }
+    world
+        .resource_mut::<super::resources::Perception>()
+        .events
+        .remove(id);
+    super::eyes::clear(&mut world.resource_mut::<super::eyes::Eyes>(), id);
     use super::client::dynamic::{PublicationChange, sync_tools};
     ene_domain::warn_if_err(sync_tools(world, PublicationChange::Refresh), "tool resync");
+    world.resource::<Notifier>().push(
+        Some(id),
+        None,
+        w::notification::Event::CompanionRemoved(Box::new(w::Id {
+            id: id.to_owned(),
+            ..Default::default()
+        })),
+    );
     Ok(())
 }
 

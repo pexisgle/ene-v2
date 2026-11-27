@@ -178,6 +178,9 @@ fn notification_event(wire: w::notification::Event) -> domain::NotificationEvent
     match wire {
         Wire::Health(value) => Event::Health((*value).into()),
         Wire::Companion(value) => Event::Companion(Box::new((*value).into())),
+        Wire::CompanionRemoved(value) => {
+            ene_domain::CompanionId::parse(&value.id).map_or(Event::Other, Event::CompanionRemoved)
+        }
         Wire::MindUpdated(value) => Event::MindUpdated((*value).into()),
         Wire::MessageCreated(value) => value
             .message

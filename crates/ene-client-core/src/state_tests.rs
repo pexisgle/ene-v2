@@ -47,6 +47,61 @@ fn with_chat() -> Model {
 }
 
 #[test]
+fn removing_a_companion_updates_the_live_view_and_selects_the_remaining_one() {
+    use crate::domain::{ClientInfo, WorkSession, WorkStatus};
+
+    let mut model = with_chat();
+    let ene = CompanionId::parse("ene").unwrap();
+    model.companions.selected = Some("ene".into());
+    model.snapshot = Some(Snapshot {
+        companions: ["ene", "mio"]
+            .into_iter()
+            .map(|id| Companion {
+                id: id.into(),
+                ..Default::default()
+            })
+            .collect(),
+        active_companion_id: Some("ene".into()),
+        activations: ["ene", "mio"]
+            .into_iter()
+            .map(|id| Activation {
+                companion_id: CompanionId::parse(id).unwrap(),
+                client_id: Some("desk".into()),
+            })
+            .collect(),
+        clients: vec![ClientInfo {
+            id: "desk".into(),
+            active_companions: vec!["ene".into(), "mio".into()],
+            ..Default::default()
+        }],
+        work_sessions: vec![WorkSession {
+            id: "task".into(),
+            companion_id: ene.clone(),
+            title: "Task".into(),
+            client_id: Some("desk".into()),
+            status: WorkStatus::Active,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }],
+        ..snapshot()
+    });
+    model.companions.work_active = true;
+
+    let effects = model.apply(Update::Notification(Box::new(notification(
+        NotificationEvent::CompanionRemoved(ene),
+    ))));
+    assert_eq!(model.companion_id(), Some("mio"));
+    assert_eq!(model.resident_companions("desk"), ["mio"]);
+    assert!(model.companions.chat.companion_id.is_none());
+    assert!(!model.companions.work_active);
+    let snapshot = model.snapshot.unwrap();
+    assert_eq!(snapshot.work_sessions, [] as [WorkSession; 0]);
+    assert_eq!(snapshot.active_companion_id.as_deref(), Some("mio"));
+    assert_eq!(snapshot.clients[0].active_companions, ["mio"]);
+    assert!(effects.history && effects.mind);
+}
+
+#[test]
 fn a_delta_is_a_preview_until_the_host_records_the_message() {
     let mut model = with_chat();
     model.apply(Update::Notification(Box::new(notification(

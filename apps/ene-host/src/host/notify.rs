@@ -218,6 +218,7 @@ fn kind_of(event: &w::notification::Event) -> &'static str {
     match event {
         w::notification::Event::Health(_) => "health",
         w::notification::Event::Companion(_) => "companion",
+        w::notification::Event::CompanionRemoved(_) => "companion_removed",
         w::notification::Event::MindUpdated(_) => "mind",
         w::notification::Event::MessageCreated(_) => "message_created",
         w::notification::Event::MessageDelta(_) => "message_delta",

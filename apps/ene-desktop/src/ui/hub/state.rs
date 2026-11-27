@@ -88,6 +88,7 @@ impl ApplyFlags {
                 Some(
                     NotificationEvent::InitialState(_)
                         | NotificationEvent::Companion(_)
+                        | NotificationEvent::CompanionRemoved(_)
                         | NotificationEvent::SettingsUpdated(_)
                 )
             ),

@@ -181,6 +181,8 @@ pub enum NotificationEvent {
     Health(HostHealth),
     /// A companion was added or changed.
     Companion(Box<Companion>),
+    /// A companion and its active binding were removed.
+    CompanionRemoved(crate::CompanionId),
     /// A companion's mind changed.
     MindUpdated(MindUpdated),
     /// A message was recorded.
