@@ -6,42 +6,20 @@ pub use featured::FeaturedPreset;
 
 use crate::domain::{
     Connection, ConnectionConfig, ConnectionEndpoint, ConnectionInput, ConnectionKind,
-    EmbeddingConnection, LlmConnection, LlmProvider, SearchConnection, SttConnection,
-    TtsConnection,
+    LlmConnection, LlmProvider, SearchConnection,
 };
 
-/// Parameters for creating or updating an STT preset connection.
-#[derive(Debug)]
-pub struct SttPresetSpec<'a> {
-    /// Id to store the connection under, when it must be stable.
-    pub fixed_id: Option<&'a str>,
-    /// Adapter name the driver selects on.
-    pub adapter: &'a str,
-    /// Display name shown to the operator.
-    pub name: String,
-    /// Base URL of the provider.
-    pub endpoint: String,
-    /// Model to call for this preset.
-    pub model: String,
-    /// Language hint passed with each request.
-    pub language: String,
-}
-
-/// Parameters for creating or updating an embedding preset connection.
-#[derive(Debug)]
-pub struct EmbeddingPresetSpec<'a> {
-    /// Id the connection is stored under.
-    pub id: &'a str,
-    /// Display name shown to the operator.
-    pub name: &'a str,
-    /// Adapter name the driver selects on.
-    pub adapter: &'a str,
-    /// Base URL of the provider.
-    pub endpoint: &'a str,
-    /// Embedding model to call.
-    pub model_id: &'a str,
-    /// Width of the returned vector.
-    pub dimensions: u32,
+fn preset_endpoint(
+    adapter: impl Into<String>,
+    endpoint: impl Into<String>,
+    options: impl Into<String>,
+) -> ConnectionEndpoint {
+    ConnectionEndpoint {
+        adapter: adapter.into(),
+        endpoint: endpoint.into(),
+        options_schema: String::new(),
+        options: options.into(),
+    }
 }
 
 /// Opens the catalog preset's own connection or creates it disabled.
@@ -75,12 +53,7 @@ pub fn build_search_preset_input(
         enabled: false,
         expected_revision: 0,
         config: Some(ConnectionConfig::Search(SearchConnection {
-            endpoint: Some(ConnectionEndpoint {
-                adapter: provider.adapter_id.into(),
-                endpoint: endpoint.into(),
-                options_schema: String::new(),
-                options: "{}".into(),
-            }),
+            endpoint: Some(preset_endpoint(provider.adapter_id, endpoint, "{}")),
             max_results: 5,
         })),
     };
@@ -123,12 +96,7 @@ pub fn build_llm_provider_input(
         enabled: true,
         expected_revision: 0,
         config: Some(ConnectionConfig::Llm(LlmConnection {
-            endpoint: Some(ConnectionEndpoint {
-                adapter: provider.adapter,
-                endpoint: provider.endpoint,
-                options_schema: String::new(),
-                options: "{}".into(),
-            }),
+            endpoint: Some(preset_endpoint(provider.adapter, provider.endpoint, "{}")),
             model_ids,
         })),
     }
@@ -155,178 +123,6 @@ pub fn find_reusable_quick_connect_connection<'a>(
                             != Some(true))
             })
     })
-}
-
-/// Builds the preset input for a local VOICEVOX TTS connection.
-pub fn build_voicevox_preset_input(
-    existing_rev: u64,
-    speaker: u32,
-    speed: Option<f32>,
-) -> ConnectionInput {
-    let options = match speed {
-        Some(speed) => format!("{{\"speaker\":{speaker},\"speed\":{speed:.2}}}"),
-        None => format!("{{\"speaker\":{speaker}}}"),
-    };
-    ConnectionInput {
-        id: "voicevox".into(),
-        name: "VOICEVOX（ローカル）".into(),
-        enabled: true,
-        expected_revision: existing_rev,
-        config: Some(ConnectionConfig::Tts(TtsConnection {
-            endpoint: Some(ConnectionEndpoint {
-                adapter: "voicevox".into(),
-                endpoint: crate::VOICEVOX_DEFAULT_ENDPOINT.into(),
-                options_schema: String::new(),
-                options,
-            }),
-            voice_ids: vec![speaker.to_string()],
-        })),
-    }
-}
-
-/// Builds a new OpenAI-compatible TTS preset connection input.
-pub fn build_openai_tts_preset_input(endpoint: &str, model: &str, voice: &str) -> ConnectionInput {
-    let model = if model.trim().is_empty() {
-        "tts-1"
-    } else {
-        model.trim()
-    };
-    let voice = if voice.trim().is_empty() {
-        "alloy"
-    } else {
-        voice.trim()
-    };
-    let options = serde_json::json!({
-        "protocol": "openai",
-        "model": model,
-        "voice": voice,
-    })
-    .to_string();
-    ConnectionInput {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: "OpenAI互換 TTS".into(),
-        enabled: true,
-        expected_revision: 0,
-        config: Some(ConnectionConfig::Tts(TtsConnection {
-            endpoint: Some(ConnectionEndpoint {
-                adapter: "openai".into(),
-                endpoint: if endpoint.trim().is_empty() {
-                    "https://api.openai.com/v1".into()
-                } else {
-                    endpoint.trim().to_owned()
-                },
-                options_schema: String::new(),
-                options,
-            }),
-            voice_ids: vec![voice.to_owned()],
-        })),
-    }
-}
-
-/// Builds a preset input for an STT connection (OpenAI-compatible or Sakura AI Engine).
-pub fn build_stt_preset_input(
-    connections: &[Connection],
-    spec: SttPresetSpec<'_>,
-) -> ConnectionInput {
-    let existing_rev = spec
-        .fixed_id
-        .and_then(|fid| connections.iter().find(|c| c.id == fid).map(|c| c.revision))
-        .unwrap_or(0);
-    let protocol = if spec.adapter == "sakura" {
-        "sakura"
-    } else {
-        "openai"
-    };
-    let model = if spec.model.trim().is_empty() {
-        "whisper-1"
-    } else {
-        spec.model.trim()
-    };
-    let lang = if spec.language.trim().is_empty() {
-        "ja".to_owned()
-    } else {
-        spec.language.trim().to_owned()
-    };
-    let options = serde_json::json!({
-        "protocol": protocol,
-        "model": model,
-        "language": lang,
-    })
-    .to_string();
-    ConnectionInput {
-        id: spec
-            .fixed_id
-            .map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned),
-        name: spec.name,
-        enabled: true,
-        expected_revision: existing_rev,
-        config: Some(ConnectionConfig::Stt(SttConnection {
-            endpoint: Some(ConnectionEndpoint {
-                adapter: spec.adapter.to_owned(),
-                endpoint: spec.endpoint,
-                options_schema: String::new(),
-                options,
-            }),
-            language_hints: vec![lang],
-        })),
-    }
-}
-
-/// Builds the preset input for Sakura AI Engine TTS.
-pub fn build_sakura_tts_preset_input(connections: &[Connection]) -> ConnectionInput {
-    let existing_rev = connections
-        .iter()
-        .find(|c| c.id == "sakura-tts")
-        .map_or(0, |c| c.revision);
-    let options = serde_json::json!({
-        "protocol": "sakura",
-        "model": "zundamon",
-        "voice": "normal",
-        "response_format": "wav",
-    })
-    .to_string();
-    ConnectionInput {
-        id: "sakura-tts".into(),
-        name: "さくらのAI Engine TTS".into(),
-        enabled: true,
-        expected_revision: existing_rev,
-        config: Some(ConnectionConfig::Tts(TtsConnection {
-            endpoint: Some(ConnectionEndpoint {
-                adapter: "sakura".into(),
-                endpoint: ene_catalog::SAKURA_AI_ENDPOINT.into(),
-                options_schema: String::new(),
-                options,
-            }),
-            voice_ids: vec!["zundamon/normal".into()],
-        })),
-    }
-}
-
-/// Builds the preset input for an embedding provider connection.
-pub fn build_embedding_preset_input(
-    connections: &[Connection],
-    spec: &EmbeddingPresetSpec<'_>,
-) -> ConnectionInput {
-    let existing_rev = connections
-        .iter()
-        .find(|c| c.id == spec.id)
-        .map_or(0, |c| c.revision);
-    ConnectionInput {
-        id: spec.id.into(),
-        name: spec.name.into(),
-        enabled: true,
-        expected_revision: existing_rev,
-        config: Some(ConnectionConfig::Embedding(EmbeddingConnection {
-            endpoint: Some(ConnectionEndpoint {
-                adapter: spec.adapter.into(),
-                endpoint: spec.endpoint.into(),
-                options_schema: String::new(),
-                options: "{}".into(),
-            }),
-            model_id: spec.model_id.into(),
-            dimensions: spec.dimensions,
-        })),
-    }
 }
 
 #[cfg(test)]
@@ -383,14 +179,37 @@ mod tests {
     }
 
     #[test]
-    fn sakura_and_voicevox_presets_preserve_expected_defaults() {
-        let vv = build_voicevox_preset_input(4, 3, Some(1.1));
-        assert_eq!(vv.id, "voicevox");
-        assert_eq!(vv.expected_revision, 4);
-        assert!(matches!(vv.config, Some(ConnectionConfig::Tts(_))));
-
-        let sakura_tts = build_sakura_tts_preset_input(&[]);
-        assert_eq!(sakura_tts.id, "sakura-tts");
-        assert!(matches!(sakura_tts.config, Some(ConnectionConfig::Tts(_))));
+    fn synthesis_presets_preserve_expected_defaults() {
+        for (preset, adapter, voice, options) in [
+            (
+                FeaturedPreset::Voicevox,
+                "voicevox",
+                "3",
+                serde_json::json!({"speaker": 3}),
+            ),
+            (
+                FeaturedPreset::SakuraTts,
+                "sakura",
+                "zundamon/normal",
+                serde_json::json!({
+                    "protocol": "sakura", "model": "zundamon", "voice": "normal", "response_format": "wav",
+                }),
+            ),
+            (
+                FeaturedPreset::OpenAiTts,
+                "openai",
+                "alloy",
+                serde_json::json!({"protocol": "openai", "model": "tts-1", "voice": "alloy"}),
+            ),
+        ] {
+            let (_, input, _) = preset.prepare(&[]);
+            let Some(ConnectionConfig::Tts(tts)) = input.config else {
+                panic!("the preset provides a TTS config");
+            };
+            let endpoint = tts.endpoint.unwrap();
+            assert_eq!(endpoint.adapter, adapter);
+            assert_eq!(tts.voice_ids, [voice]);
+            assert_eq!(endpoint.options, options.to_string());
+        }
     }
 }

@@ -1,11 +1,15 @@
 //! Fixed presets for the add panel and first-run setup.
 
-use super::{
-    EmbeddingPresetSpec, SttPresetSpec, build_embedding_preset_input,
-    build_openai_tts_preset_input, build_sakura_tts_preset_input, build_stt_preset_input,
-    build_voicevox_preset_input,
+use super::preset_endpoint;
+use crate::domain::{
+    Connection, ConnectionConfig, ConnectionInput, EmbeddingConnection, SttConnection,
+    TtsConnection,
 };
-use crate::domain::{Connection, ConnectionInput};
+use ene_catalog::SAKURA_AI_ENDPOINT;
+
+const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1";
+const STT_LABEL: &str = "音声認識（STT）接続の追加";
+const EMBEDDING_LABEL: &str = "埋め込み（Embedding）接続の追加";
 
 /// Featured connection choices exposed by the desktop's add panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,90 +39,113 @@ impl FeaturedPreset {
         connections: &[Connection],
     ) -> (&'static str, ConnectionInput, Option<String>) {
         use FeaturedPreset::*;
-        let stt = |fixed_id, adapter, name: &str, endpoint: &str, model: &str| {
-            let spec = SttPresetSpec {
-                fixed_id,
-                adapter,
-                name: name.into(),
-                endpoint: endpoint.into(),
-                model: model.into(),
-                language: "ja".into(),
-            };
-            (
-                "音声認識（STT）接続の追加",
-                build_stt_preset_input(connections, spec),
-            )
-        };
-        let (label, input) = match self {
+        let (fixed_id, name, label, config) = match self {
             Voicevox => (
+                Some("voicevox"),
+                "VOICEVOX（ローカル）",
                 "VOICEVOX接続の追加",
-                build_voicevox_preset_input(
-                    connections
-                        .iter()
-                        .find(|c| c.id == "voicevox")
-                        .map_or(0, |c| c.revision),
-                    3,
-                    None,
+                tts(
+                    "voicevox",
+                    crate::VOICEVOX_DEFAULT_ENDPOINT,
+                    r#"{"speaker":3}"#,
+                    "3",
                 ),
             ),
             SakuraTts => (
+                Some("sakura-tts"),
+                "さくらのAI Engine TTS",
                 "さくらのAI Engine TTS接続の追加",
-                build_sakura_tts_preset_input(connections),
+                tts(
+                    "sakura",
+                    SAKURA_AI_ENDPOINT,
+                    serde_json::json!({
+                        "protocol": "sakura", "model": "zundamon", "voice": "normal",
+                        "response_format": "wav",
+                    })
+                    .to_string(),
+                    "zundamon/normal",
+                ),
             ),
             OpenAiTts => (
+                None,
+                "OpenAI互換 TTS",
                 "TTS接続の追加",
-                build_openai_tts_preset_input("https://api.openai.com/v1", "tts-1", "alloy"),
+                tts(
+                    "openai",
+                    OPENAI_ENDPOINT,
+                    serde_json::json!({"protocol": "openai", "model": "tts-1", "voice": "alloy"})
+                        .to_string(),
+                    "alloy",
+                ),
             ),
-            SakuraStt => stt(
+            SakuraStt => (
                 Some("sakura-stt"),
-                "sakura",
                 "さくらのAI Engine STT",
-                ene_catalog::SAKURA_AI_ENDPOINT,
-                "whisper-large-v3-turbo",
+                STT_LABEL,
+                stt("sakura", SAKURA_AI_ENDPOINT, "whisper-large-v3-turbo"),
             ),
-            OpenAiStt => stt(
+            OpenAiStt => (
                 None,
-                "openai",
                 "OpenAI 音声認識",
-                "https://api.openai.com/v1",
-                "gpt-4o-mini-transcribe",
+                STT_LABEL,
+                stt("openai", OPENAI_ENDPOINT, "gpt-4o-mini-transcribe"),
             ),
-            WhisperStt => stt(
+            WhisperStt => (
                 None,
-                "openai",
                 "ローカル Whisper",
-                "http://127.0.0.1:8080/v1",
-                "whisper-1",
+                STT_LABEL,
+                stt("openai", "http://127.0.0.1:8080/v1", "whisper-1"),
             ),
-            SakuraEmbedding | OpenAiEmbedding => {
-                let spec = if self == SakuraEmbedding {
-                    EmbeddingPresetSpec {
-                        id: "sakura-embedding",
-                        name: "さくらのAI Engine Embedding",
-                        adapter: "sakura",
-                        endpoint: ene_catalog::SAKURA_AI_ENDPOINT,
-                        model_id: "multilingual-e5-large",
-                        dimensions: 1024,
-                    }
-                } else {
-                    EmbeddingPresetSpec {
-                        id: "openai-embedding",
-                        name: "OpenAI Embedding",
-                        adapter: "openai",
-                        endpoint: "https://api.openai.com/v1",
-                        model_id: "text-embedding-3-small",
-                        dimensions: 1536,
-                    }
-                };
-                (
-                    "埋め込み（Embedding）接続の追加",
-                    build_embedding_preset_input(connections, &spec),
-                )
-            }
+            SakuraEmbedding => (
+                Some("sakura-embedding"),
+                "さくらのAI Engine Embedding",
+                EMBEDDING_LABEL,
+                embedding("sakura", SAKURA_AI_ENDPOINT, "multilingual-e5-large", 1024),
+            ),
+            OpenAiEmbedding => (
+                Some("openai-embedding"),
+                "OpenAI Embedding",
+                EMBEDDING_LABEL,
+                embedding("openai", OPENAI_ENDPOINT, "text-embedding-3-small", 1536),
+            ),
+        };
+        let expected_revision = fixed_id
+            .and_then(|id| connections.iter().find(|c| c.id == id))
+            .map_or(0, |connection| connection.revision);
+        let input = ConnectionInput {
+            id: fixed_id.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned),
+            name: name.into(),
+            enabled: true,
+            expected_revision,
+            config: Some(config),
         };
         let probe = (self == Voicevox).then(|| input.id.clone());
         (label, input, probe)
     }
+}
+
+fn tts(adapter: &str, endpoint: &str, options: impl Into<String>, voice: &str) -> ConnectionConfig {
+    ConnectionConfig::Tts(TtsConnection {
+        endpoint: Some(preset_endpoint(adapter, endpoint, options)),
+        voice_ids: vec![voice.into()],
+    })
+}
+
+fn stt(adapter: &str, endpoint: &str, model: &str) -> ConnectionConfig {
+    let language = "ja";
+    let options = serde_json::json!({"protocol": adapter, "model": model, "language": language});
+    ConnectionConfig::Stt(SttConnection {
+        endpoint: Some(preset_endpoint(adapter, endpoint, options.to_string())),
+        language_hints: vec![language.into()],
+    })
+}
+
+fn embedding(adapter: &str, endpoint: &str, model: &str, dimensions: u32) -> ConnectionConfig {
+    ConnectionConfig::Embedding(EmbeddingConnection {
+        endpoint: Some(preset_endpoint(adapter, endpoint, "{}")),
+        model_id: model.into(),
+        dimensions,
+    })
 }
 
 #[cfg(test)]
