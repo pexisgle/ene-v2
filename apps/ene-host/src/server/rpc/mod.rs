@@ -200,15 +200,37 @@ pub(super) fn router(
 }
 
 fn request_span(request: &http::Request<axum::body::Body>) -> tracing::Span {
-    if let Some(method) = request
+    if let Some((service, method)) = request
         .uri()
         .path()
-        .strip_prefix("/rpc/ene.host.v1.SettingsService/")
+        .strip_prefix("/rpc/ene.host.v1.")
+        .and_then(|path| path.split_once('/'))
+        && matches!(
+            service,
+            "HostService" | "ChatService" | "SettingsService" | "WorkService" | "ClientService" | "VoiceService"
+        )
+        // Streaming handlers retain their own spans at stream setup.
+        && !matches!(
+            (service, method),
+            ("HostService", "Subscribe")
+                | ("ClientService", "DeviceStream")
+                | ("VoiceService", "StreamAudioInput" | "SubscribeAudioOutput")
+        )
         && !method.is_empty()
         && method.len() <= 64
         && method.bytes().all(|byte| byte.is_ascii_alphanumeric())
     {
-        return settings::procedure_span(method);
+        return tracing::info_span!(
+            "rpc",
+            service,
+            method = %heck::AsSnakeCase(method),
+            companion_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+            connection_id = tracing::field::Empty,
+            plugin_id = tracing::field::Empty,
+            client_id = tracing::field::Empty,
+            work_id = tracing::field::Empty,
+        );
     }
     DefaultMakeSpan::new().make_span(request)
 }

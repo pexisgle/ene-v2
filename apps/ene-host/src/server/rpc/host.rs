@@ -9,15 +9,6 @@ use futures_util::StreamExt;
 
 #[expect(refining_impl_trait, reason = "Connect boxes futures")]
 impl w::HostService for Services {
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "get_snapshot",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-        )
-    )]
     async fn get_snapshot(
         &self,
         _: RequestContext,
@@ -112,33 +103,16 @@ impl w::HostService for Services {
         Response::stream_ok(stream)
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "get_perception_frame",
-            companion_id = tracing::field::Empty,
-            request_id = %request.id,
-        )
-    )]
     async fn get_perception_frame(
         &self,
         _: RequestContext,
         request: ServiceRequest<'_, w::Id>,
     ) -> ServiceResult<w::ScreenFrame> {
+        tracing::Span::current().record("request_id", request.id);
         let id = request.id.to_owned();
         self.read(move |kernel| kernel.screen_preview(&id)).await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "list_companions",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-        )
-    )]
     async fn list_companions(
         &self,
         _: RequestContext,
@@ -153,7 +127,6 @@ impl w::HostService for Services {
         .await
     }
 
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "get_companion", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn get_companion(
         &self,
         _: connectrpc::RequestContext,
@@ -163,7 +136,6 @@ impl w::HostService for Services {
         // `mind::get` takes only the store, so this never needs the actor thread.
         self.with_store(move |store| mind::get(&store, &id)).await
     }
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "create_companion", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn create_companion(
         &self,
         _: connectrpc::RequestContext,
@@ -173,7 +145,6 @@ impl w::HostService for Services {
         self.call(move |kernel| kernel.create_companion(request))
             .await
     }
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "update_companion", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn update_companion(
         &self,
         _: connectrpc::RequestContext,
@@ -183,7 +154,6 @@ impl w::HostService for Services {
         self.call(move |kernel| kernel.update_companion(request))
             .await
     }
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "delete_companion", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn delete_companion(
         &self,
         _: connectrpc::RequestContext,
@@ -197,15 +167,6 @@ impl w::HostService for Services {
         .await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "list_companion_templates",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-        )
-    )]
     async fn list_companion_templates(
         &self,
         _: RequestContext,
@@ -214,7 +175,6 @@ impl w::HostService for Services {
         Response::ok(mind::list_templates())
     }
 
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "export_companion", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn export_companion(
         &self,
         _: connectrpc::RequestContext,
@@ -225,7 +185,6 @@ impl w::HostService for Services {
         self.with_store(move |store| mind::export_template(&store, &id))
             .await
     }
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "import_companion", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn import_companion(
         &self,
         _: connectrpc::RequestContext,
@@ -236,15 +195,6 @@ impl w::HostService for Services {
             .await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "preview_companion",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-        )
-    )]
     async fn preview_companion(
         &self,
         _: RequestContext,
@@ -285,7 +235,6 @@ impl w::HostService for Services {
         })
     }
 
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "get_mind", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn get_mind(
         &self,
         _: connectrpc::RequestContext,
@@ -296,7 +245,6 @@ impl w::HostService for Services {
         self.with_store(move |store| mind::mind_view(&store, &id))
             .await
     }
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "update_mind_profile", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn update_mind_profile(
         &self,
         _: connectrpc::RequestContext,
@@ -308,7 +256,6 @@ impl w::HostService for Services {
         })
         .await
     }
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "control_memory", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn control_memory(
         &self,
         _: connectrpc::RequestContext,
@@ -320,7 +267,6 @@ impl w::HostService for Services {
         })
         .await
     }
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "list_memories", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn list_memories(
         &self,
         _: connectrpc::RequestContext,

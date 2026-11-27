@@ -10,7 +10,6 @@ use futures_util::StreamExt;
 
 #[expect(refining_impl_trait, reason = "Connect boxes futures")]
 impl w::ClientService for Services {
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "register_client", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn register_client(
         &self,
         _: connectrpc::RequestContext,
@@ -21,15 +20,6 @@ impl w::ClientService for Services {
             .await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "list",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-        )
-    )]
     async fn list(
         &self,
         _: RequestContext,
@@ -44,7 +34,6 @@ impl w::ClientService for Services {
         .await
     }
 
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "activate", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn activate(
         &self,
         _: connectrpc::RequestContext,
@@ -54,7 +43,6 @@ impl w::ClientService for Services {
         self.call(move |kernel| kernel.activate_client(&request))
             .await
     }
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "set_capabilities", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn set_capabilities(
         &self,
         _: connectrpc::RequestContext,
@@ -123,7 +111,6 @@ impl w::ClientService for Services {
         Response::stream_ok(stream)
     }
 
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "report_perception", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn report_perception(
         &self,
         _: connectrpc::RequestContext,
@@ -136,7 +123,6 @@ impl w::ClientService for Services {
         })
         .await
     }
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "complete_operation", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn complete_operation(
         &self,
         _: connectrpc::RequestContext,
@@ -146,7 +132,6 @@ impl w::ClientService for Services {
         self.call(move |kernel| kernel.complete_operation(&request))
             .await
     }
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "get_operation", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn get_operation(
         &self,
         _: connectrpc::RequestContext,

@@ -170,21 +170,13 @@ impl w::VoiceService for Services {
         Response::stream_ok(stream)
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "speak",
-            companion_id = request.companion_id.unwrap_or(""),
-            request_id = tracing::field::Empty,
-            client_id = %request.client_id,
-        )
-    )]
     async fn speak(
         &self,
         _: RequestContext,
         request: ServiceRequest<'_, w::SpeakRequest>,
     ) -> ServiceResult<w::Empty> {
+        tracing::Span::current().record("companion_id", request.companion_id.unwrap_or(""));
+        tracing::Span::current().record("client_id", request.client_id);
         let client_id = request.client_id.to_owned();
         let requested_companion = request
             .companion_id

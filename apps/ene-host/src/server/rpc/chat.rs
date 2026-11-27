@@ -4,7 +4,6 @@ use ene_rpc as w;
 
 #[expect(refining_impl_trait, reason = "Connect boxes futures")]
 impl w::ChatService for Services {
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "send_message", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn send_message(
         &self,
         _: connectrpc::RequestContext,
@@ -13,7 +12,6 @@ impl w::ChatService for Services {
         let request = request.to_owned_message();
         self.call(move |kernel| kernel.accept(&request)).await
     }
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "stop", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn stop(
         &self,
         _: connectrpc::RequestContext,
@@ -26,7 +24,6 @@ impl w::ChatService for Services {
         })
         .await
     }
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "get_history", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn get_history(
         &self,
         _: connectrpc::RequestContext,
@@ -36,7 +33,6 @@ impl w::ChatService for Services {
         self.read(move |kernel| kernel.history(request.reborrow()))
             .await
     }
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "get_message", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn get_message(
         &self,
         _: connectrpc::RequestContext,

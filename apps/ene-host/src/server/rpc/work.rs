@@ -6,45 +6,27 @@ use ene_rpc as w;
 
 #[expect(refining_impl_trait, reason = "Connect boxes futures")]
 impl w::WorkService for Services {
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "list_works",
-            companion_id = %request.companion_id,
-            request_id = tracing::field::Empty,
-        )
-    )]
     async fn list_works(
         &self,
         _: RequestContext,
         request: ServiceRequest<'_, w::ListWorksRequest>,
     ) -> ServiceResult<w::WorkViews> {
+        tracing::Span::current().record("companion_id", request.companion_id);
         let companion = request.companion_id.to_owned();
         self.with_store(move |store| work::list(&store, &companion))
             .await
     }
 
-    #[tracing::instrument(
-        name = "rpc",
-        skip_all,
-        fields(
-            method = "get_work",
-            companion_id = tracing::field::Empty,
-            request_id = tracing::field::Empty,
-            work_id = %request.work_id,
-        )
-    )]
     async fn get_work(
         &self,
         _: RequestContext,
         request: ServiceRequest<'_, w::WorkRequest>,
     ) -> ServiceResult<w::WorkView> {
+        tracing::Span::current().record("work_id", request.work_id);
         let id = request.work_id.to_owned();
         self.with_store(move |store| work::get(&store, &id)).await
     }
 
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "start_work", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn start_work(
         &self,
         _: connectrpc::RequestContext,
@@ -53,7 +35,6 @@ impl w::WorkService for Services {
         let request = request.to_owned_message();
         self.call(move |kernel| kernel.start_work(&request)).await
     }
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "send_work", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn send_work(
         &self,
         _: connectrpc::RequestContext,
@@ -62,7 +43,6 @@ impl w::WorkService for Services {
         let request = request.to_owned_message();
         self.call(move |kernel| kernel.send_work(&request)).await
     }
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "stop_work", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn stop_work(
         &self,
         _: connectrpc::RequestContext,
@@ -75,7 +55,6 @@ impl w::WorkService for Services {
         })
         .await
     }
-    #[tracing::instrument(name = "rpc", skip_all, fields(method = "close_work", companion_id = tracing::field::Empty, request_id = tracing::field::Empty))]
     async fn close_work(
         &self,
         _: connectrpc::RequestContext,

@@ -20,17 +20,6 @@ fn parse_connection_id(id: &str) -> Result<ene_domain::ConnectionId, connectrpc:
         .map_err(|error| connectrpc::ConnectError::invalid_argument(error.to_string()))
 }
 
-pub(super) fn procedure_span(method: &str) -> tracing::Span {
-    tracing::info_span!(
-        "rpc",
-        method = %heck::AsSnakeCase(method),
-        companion_id = tracing::field::Empty,
-        request_id = tracing::field::Empty,
-        connection_id = tracing::field::Empty,
-        plugin_id = tracing::field::Empty,
-    )
-}
-
 #[expect(refining_impl_trait, reason = "Connect boxes futures")]
 impl w::SettingsService for Services {
     async fn get_settings(
