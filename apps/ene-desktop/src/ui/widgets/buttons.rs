@@ -4,7 +4,7 @@ use crate::ui::icons::{Icon, icon};
 use crate::ui::theme::Theme;
 use gpui::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui::component::switch::Switch;
-use gpui::component::{Disableable, Sizable};
+use gpui::component::{Disableable, Selectable, Sizable};
 use gpui::{AnyElement, App, ElementId, Hsla, SharedString, Window, prelude::*, px};
 
 /// Semantic tone for capsule buttons and tags.
@@ -125,6 +125,58 @@ where
         fg,
         border,
         hover: style.tone.hover(bg, theme),
+    }
+    .into_any_element()
+}
+
+/// A keyboard-accessible chapter button in the settings palette.
+pub(crate) fn navigation_button(
+    id: &'static str,
+    label: &'static str,
+    leading: Icon,
+    active: bool,
+    theme: &Theme,
+    activate: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let (bg, fg, icon_fg, hover) = if active {
+        (theme.accent, theme.accent_fg, theme.accent_fg, theme.accent)
+    } else {
+        (
+            gpui::transparent_black(),
+            theme.ink,
+            theme.ink_muted,
+            theme.bg_surface.alpha(0.65),
+        )
+    };
+    ThemedButton {
+        button: Button::new(id)
+            .w_full()
+            .h_auto()
+            .px(px(14.))
+            .py(px(9.))
+            .rounded(px(999.))
+            .text_sm()
+            .font_weight(if active {
+                gpui::FontWeight::BOLD
+            } else {
+                gpui::FontWeight::MEDIUM
+            })
+            .selected(active)
+            .accessibility_label(label)
+            .child(
+                gpui::div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(icon(leading, 15., icon_fg))
+                    .child(label),
+            )
+            .on_click(move |_, window, cx| activate(window, cx)),
+        bg,
+        fg,
+        border: None,
+        hover,
     }
     .into_any_element()
 }

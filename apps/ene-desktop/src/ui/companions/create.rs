@@ -385,9 +385,7 @@ fn render_missing_model_banner(hub: Entity<crate::ui::Hub>, theme: &Theme) -> An
             theme,
             move |_, cx| {
                 hub.update(cx, |hub, cx| {
-                    hub.windows.settings_section = SettingsSection::Connections;
-                    hub.load_providers(cx);
-                    cx.notify();
+                    hub.select_settings_section(SettingsSection::Connections, cx);
                 });
             },
         ))

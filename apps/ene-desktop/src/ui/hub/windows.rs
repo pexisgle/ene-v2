@@ -186,13 +186,7 @@ pub(super) fn set_pod_mode(hub: &mut Hub, mode: PodMode, cx: &mut Context<Hub>) 
 }
 
 pub(super) fn open_settings(hub: &mut Hub, section: SettingsSection, cx: &mut Context<Hub>) {
-    hub.windows.settings_section = section;
-    hub.load_providers(cx);
-    hub.load_models(cx);
-    hub.load_mind(cx);
-    hub.load_companion_templates(cx);
-    hub.load_plugins(cx);
-    cx.notify();
+    hub.select_settings_section(section, cx);
 
     cx.spawn(async move |this, cx| {
         cx.update(|cx| {

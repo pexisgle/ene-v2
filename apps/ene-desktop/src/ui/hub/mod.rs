@@ -296,6 +296,29 @@ impl Hub {
         windows::open_settings(self, section, cx);
     }
 
+    pub(crate) fn select_settings_section(
+        &mut self,
+        section: SettingsSection,
+        cx: &mut Context<Self>,
+    ) {
+        self.windows.settings_section = section;
+        match section {
+            SettingsSection::Companions => {
+                self.load_providers(cx);
+                self.load_mind(cx);
+                self.load_companion_templates(cx);
+            }
+            SettingsSection::Connections => {
+                self.load_providers(cx);
+                self.load_models(cx);
+                self.load_plugins(cx);
+            }
+            SettingsSection::Voice => self.load_providers(cx),
+            SettingsSection::Device => self.load_plugins(cx),
+        }
+        cx.notify();
+    }
+
     pub(crate) fn all_tts_voices(&self) -> Vec<(String, String, String)> {
         self.model.all_tts_voices()
     }

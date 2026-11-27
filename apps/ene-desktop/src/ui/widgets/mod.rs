@@ -3,6 +3,7 @@
 //! Each submodule owns one family and re-exports its surface here, so
 
 mod buttons;
+pub(super) use buttons::navigation_button;
 mod dropdown;
 mod pills;
 

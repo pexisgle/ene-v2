@@ -1,18 +1,17 @@
 //! Standalone `設定 — ene` window with 38px Strawberry-Milk titlebar,
-//! 196px 3-chapter sidebar (`コンパニオン`, `接続`, `この端末`), and flat content pane.
+//! 196px four-chapter sidebar, and flat content pane.
 
 use super::companions::{CompanionsPane, voice::VoicePane};
 use super::connections::ConnectionsPane;
 use super::device::DevicePane;
-use super::icons::{Icon, icon};
+use super::icons::Icon;
 use super::theme::{Theme, resolve_ui_font_family, ui_font_fallbacks};
-use super::widgets::{CircleButtonStyle, Tone, circle_icon_button, pill_button, window_drag_area};
+use super::widgets::{
+    CircleButtonStyle, Tone, circle_icon_button, navigation_button, pill_button, window_drag_area,
+};
 use super::{Hub, SettingsSection};
 use crate::state::NoticeKind;
-use gpui::{
-    AnyElement, Context, Entity, MouseButton, MouseDownEvent, SharedString, Window, div,
-    prelude::*, px,
-};
+use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*, px};
 
 /// Settings window managing companions, connections and local device permissions.
 pub struct SettingsStudio {
@@ -22,6 +21,7 @@ pub struct SettingsStudio {
     voice: Entity<VoicePane>,
     device: Entity<DevicePane>,
     content_scroll: gpui::ScrollHandle,
+    shown_section: SettingsSection,
 }
 
 impl std::fmt::Debug for SettingsStudio {
@@ -36,6 +36,7 @@ impl SettingsStudio {
         let connections = cx.new(|cx| ConnectionsPane::new(hub.clone(), cx));
         let voice = cx.new(|cx| VoicePane::new(hub.clone(), cx));
         let device = cx.new(|_| DevicePane::new(hub.clone()));
+        let shown_section = hub.read(cx).windows.settings_section;
         Self {
             hub,
             companions,
@@ -43,6 +44,7 @@ impl SettingsStudio {
             voice,
             device,
             content_scroll: gpui::ScrollHandle::new(),
+            shown_section,
         }
     }
 
@@ -98,87 +100,7 @@ impl SettingsStudio {
             .into_any_element()
     }
 
-    fn render_sidebar(
-        &self,
-        active: SettingsSection,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mut items: Vec<AnyElement> = Vec::new();
-        for section in SettingsSection::ALL {
-            let is_active = section == active;
-            let hub = self.hub.clone();
-            let studio = cx.entity();
-            items.push(
-                div()
-                    .id(SharedString::from(section.key()))
-                    .w_full()
-                    .px(px(14.))
-                    .py(px(9.))
-                    .rounded_full()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(10.))
-                    .cursor_pointer()
-                    .bg(if is_active {
-                        theme.accent
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .when(!is_active, |this| {
-                        this.hover(|this| this.bg(theme.bg_surface.alpha(0.65)))
-                    })
-                    .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _, cx| {
-                        studio.update(cx, |this, cx| {
-                            this.connections.update(cx, |p, _| p.on_leave());
-                            this.device.update(cx, |p, _| p.on_leave());
-                            this.content_scroll.set_offset(gpui::point(px(0.), px(0.)));
-                        });
-                        hub.update(cx, |hub, cx| {
-                            hub.windows.settings_section = section;
-                            if section == SettingsSection::Companions {
-                                hub.load_companion_templates(cx);
-                            } else if section == SettingsSection::Connections {
-                                hub.load_providers(cx);
-                                hub.load_models(cx);
-                                hub.load_plugins(cx);
-                            } else if section == SettingsSection::Voice {
-                                hub.load_providers(cx);
-                            } else if section == SettingsSection::Device {
-                                hub.load_plugins(cx);
-                            }
-                            cx.notify();
-                        });
-                    })
-                    .child(icon(
-                        section.icon(),
-                        15.,
-                        if is_active {
-                            theme.accent_fg
-                        } else {
-                            theme.ink_muted
-                        },
-                    ))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(if is_active {
-                                gpui::FontWeight::BOLD
-                            } else {
-                                gpui::FontWeight::MEDIUM
-                            })
-                            .text_color(if is_active {
-                                theme.accent_fg
-                            } else {
-                                theme.ink
-                            })
-                            .child(section.label()),
-                    )
-                    .into_any_element(),
-            );
-        }
-
+    fn render_sidebar(&self, active: SettingsSection, theme: &Theme) -> AnyElement {
         div()
             .flex_none()
             .w(px(196.))
@@ -190,7 +112,19 @@ impl SettingsStudio {
             .flex()
             .flex_col()
             .gap(px(4.))
-            .children(items)
+            .children(SettingsSection::ALL.into_iter().map(|section| {
+                let hub = self.hub.clone();
+                navigation_button(
+                    section.key(),
+                    section.label(),
+                    section.icon(),
+                    section == active,
+                    theme,
+                    move |_, cx| {
+                        hub.update(cx, |hub, cx| hub.select_settings_section(section, cx));
+                    },
+                )
+            }))
             .into_any_element()
     }
 
@@ -279,6 +213,17 @@ impl Render for SettingsStudio {
             (hub.windows.settings_section, hub.theme())
         };
 
+        if section != self.shown_section {
+            match self.shown_section {
+                SettingsSection::Connections => {
+                    self.connections.update(cx, |pane, _| pane.on_leave())
+                }
+                SettingsSection::Device => self.device.update(cx, |pane, _| pane.on_leave()),
+                _ => {}
+            }
+            self.content_scroll.set_offset(gpui::point(px(0.), px(0.)));
+            self.shown_section = section;
+        }
         let notice_block = self.render_notices(&theme, cx);
         let section_body: AnyElement = match section {
             SettingsSection::Companions => self.companions.clone().into_any_element(),
@@ -305,7 +250,7 @@ impl Render for SettingsStudio {
                     .min_h_0()
                     .flex()
                     .flex_row()
-                    .child(self.render_sidebar(section, &theme, cx))
+                    .child(self.render_sidebar(section, &theme))
                     .child(
                         div()
                             .flex_1()
