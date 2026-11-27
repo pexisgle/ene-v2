@@ -1,6 +1,6 @@
 //! ECS-free MCP transport connection opening, backoff calculation, and tool naming helpers.
 
-use super::stdio::CancellableStdio;
+use super::stdio::{CancellableStdio, owned_command};
 use backon::{BackoffBuilder as _, ExponentialBuilder};
 use ene_domain::settings::McpConnection as McpConfig;
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
@@ -18,9 +18,6 @@ use rmcp::{
 };
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-
-#[cfg(windows)]
-use super::npx::CREATE_NO_WINDOW;
 
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
@@ -140,7 +137,9 @@ async fn open_stdio(
     let handler = McpClientHandler::new(ClientConfig::default(), registry);
     #[cfg(windows)]
     let mut command = if super::npx::is_npx_command(want.command.trim()) {
-        super::npx::build_command(want).await?
+        super::until_cancelled(stop, super::npx::build_command(want))
+            .await
+            .ok_or_else(cancelled_startup)??
     } else {
         let mut command = tokio::process::Command::new(want.command.trim());
         command.args(&want.args);
@@ -163,38 +162,26 @@ async fn open_stdio(
     {
         command.env(want.secret_env_var.trim(), secret);
     }
-    let mut wrap = process_wrap::tokio::CommandWrap::from(command);
-    #[cfg(unix)]
-    wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
-    #[cfg(windows)]
-    {
-        // JobObject::pre_spawn sets the process creation flags from whatever
-        // `CreationFlags` wrapper is registered, and zero when none is. The raw
-        // `Command::creation_flags` a caller set would be overwritten, so the
-        // suppression has to be registered here to survive.
-        wrap.wrap(process_wrap::tokio::CreationFlags(
-            windows::Win32::System::Threading::PROCESS_CREATION_FLAGS(CREATE_NO_WINDOW),
-        ));
-        wrap.wrap(process_wrap::tokio::JobObject);
-    }
-    wrap.wrap(process_wrap::tokio::KillOnDrop);
     if stop.is_cancelled() {
-        return Err(ConnectFailure::Transient(
-            "MCP startup was cancelled".into(),
-        ));
+        return Err(cancelled_startup());
     }
-    let child = TokioChildProcess::new(wrap).map_err(|error| match error.kind() {
-        std::io::ErrorKind::NotFound
-        | std::io::ErrorKind::PermissionDenied
-        | std::io::ErrorKind::InvalidInput => {
-            ConnectFailure::Configuration(format!("MCP process could not start: {error}"))
-        }
-        _ => ConnectFailure::Transient(format!("MCP process could not start: {error}")),
-    })?;
+    let child =
+        TokioChildProcess::new(owned_command(command)).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::InvalidInput => {
+                ConnectFailure::Configuration(format!("MCP process could not start: {error}"))
+            }
+            _ => ConnectFailure::Transient(format!("MCP process could not start: {error}")),
+        })?;
     let transport = CancellableStdio::new(child, stop.clone());
     Box::pin(handler.connect(transport))
         .await
         .map_err(connect_failure)
+}
+
+fn cancelled_startup() -> ConnectFailure {
+    ConnectFailure::Transient("MCP startup was cancelled".into())
 }
 
 async fn open_http(

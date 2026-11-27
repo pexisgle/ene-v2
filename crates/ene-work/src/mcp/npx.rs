@@ -1,7 +1,7 @@
 //! Windows-safe `npx` resolution for stdio MCP servers.
 
 #[cfg(windows)]
-use super::transport::ConnectFailure;
+use super::{stdio::owned_command, transport::ConnectFailure};
 #[cfg(windows)]
 use ene_domain::settings::McpConnection;
 #[cfg(windows)]
@@ -13,10 +13,9 @@ use std::{
 };
 
 #[cfg(windows)]
-/// Suppresses the console window a Windows child process would otherwise open.
-pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-#[cfg(windows)]
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+const PROBE_OUTPUT_LIMIT: u64 = 64 * 1024;
 #[cfg(windows)]
 const NPX_DIRECT_BOOTSTRAP_JS: &str = include_str!("npx_bootstrap.js");
 
@@ -70,18 +69,13 @@ pub(crate) async fn build_command(
             npx_cli_js,
         } => {
             let mut cmd = tokio::process::Command::new(&node_exe);
-            cmd.creation_flags(CREATE_NO_WINDOW);
             cmd.arg("-e");
             cmd.arg(NPX_DIRECT_BOOTSTRAP_JS);
             cmd.arg("--");
             cmd.arg(&npx_cli_js);
             cmd
         }
-        NpxLaunch::DirectExecutable(program) => {
-            let mut cmd = tokio::process::Command::new(&program);
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            cmd
-        }
+        NpxLaunch::DirectExecutable(program) => tokio::process::Command::new(program),
     };
     command.args(&want.args);
     Ok(command)
@@ -111,6 +105,20 @@ async fn resolve_launch(
     let explicit_dir = explicit_path
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty());
+
+    if explicit_dir.is_some()
+        && explicit_path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+    {
+        return if explicit_path.is_file() {
+            Ok(NpxLaunch::DirectExecutable(explicit_path.to_path_buf()))
+        } else {
+            Err(ConnectFailure::Configuration(
+                "the specified npx executable was not found".into(),
+            ))
+        };
+    }
 
     let mut npx_dirs: Vec<PathBuf> = Vec::new();
     if let Some(dir) = explicit_dir {
@@ -175,14 +183,6 @@ async fn resolve_launch(
         }
     }
 
-    if explicit_dir.is_some()
-        && explicit_path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-        && explicit_path.is_file()
-    {
-        return Ok(NpxLaunch::DirectExecutable(explicit_path.to_path_buf()));
-    }
     if let Some(npx_exe) = find_file_in_dirs(path_dirs, "npx.exe") {
         return Ok(NpxLaunch::DirectExecutable(npx_exe));
     }
@@ -287,34 +287,29 @@ async fn run_node_probe(
     cwd: &str,
     env: &BTreeMap<String, String>,
 ) -> Option<PathBuf> {
+    use tokio::io::AsyncReadExt as _;
     let mut cmd = tokio::process::Command::new(node_exe);
-    cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.args(args);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::null());
-    if !cwd.is_empty() && Path::new(cwd).is_dir() {
+    if !cwd.is_empty() {
         cmd.current_dir(cwd);
     }
-    if !env.is_empty() {
-        cmd.envs(env);
-    }
-    cmd.kill_on_drop(true);
-    let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
-        .await
-        .ok()?
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout.lines().find(|line| !line.trim().is_empty())?.trim();
-    let path = PathBuf::from(line);
-    if path.as_os_str().is_empty() {
-        None
-    } else {
-        Some(path)
-    }
+    cmd.envs(env);
+    let mut child = owned_command(cmd).spawn().ok()?;
+    let mut stdout = child.stdout().take()?.take(PROBE_OUTPUT_LIMIT + 1);
+    let mut output = Vec::new();
+    let (status, bytes) = tokio::time::timeout(PROBE_TIMEOUT, async {
+        tokio::try_join!(child.wait(), stdout.read_to_end(&mut output))
+    })
+    .await
+    .ok()?
+    .ok()?;
+    (status.success() && bytes as u64 <= PROBE_OUTPUT_LIMIT)
+        .then(|| String::from_utf8_lossy(&output))?
+        .lines()
+        .find_map(|line| (!line.trim().is_empty()).then(|| PathBuf::from(line.trim())))
 }
 
 #[cfg(windows)]

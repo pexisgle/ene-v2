@@ -1,5 +1,6 @@
 //! Stdio transport and ownership of the server's process group.
 use super::until_cancelled;
+use process_wrap::tokio::{CommandWrap, KillOnDrop};
 use rmcp::{
     RoleClient,
     service::{RxJsonRpcMessage, TxJsonRpcMessage},
@@ -7,6 +8,22 @@ use rmcp::{
 };
 use std::io;
 use tokio_util::sync::CancellationToken;
+
+pub(super) fn owned_command(command: tokio::process::Command) -> CommandWrap {
+    let mut command = CommandWrap::from(command);
+    #[cfg(unix)]
+    command.wrap(process_wrap::tokio::ProcessGroup::leader());
+    #[cfg(windows)]
+    {
+        // The JobObject wrapper takes its flags from CreationFlags.
+        command.wrap(process_wrap::tokio::CreationFlags(
+            windows::Win32::System::Threading::CREATE_NO_WINDOW,
+        ));
+        command.wrap(process_wrap::tokio::JobObject);
+    }
+    command.wrap(KillOnDrop);
+    command
+}
 
 pub(super) struct CancellableStdio {
     child: Option<TokioChildProcess>,
