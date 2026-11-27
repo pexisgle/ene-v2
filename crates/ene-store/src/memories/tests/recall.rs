@@ -1,4 +1,5 @@
 use super::*;
+use crate::memories::recall::lexical_candidates;
 
 #[test]
 fn hybrid_recall_fuses_and_forgetting_excludes_auto_but_keeps_explicit() {
@@ -111,7 +112,7 @@ fn lexical_recall_handles_short_terms_and_literal_wildcards() {
         ("！", 0),
     ] {
         assert_eq!(
-            repo.lexical_candidates("ene", query, RecallMode::Auto)
+            lexical_candidates(&store, "ene", query, RecallMode::Auto)
                 .unwrap()
                 .len(),
             count,
@@ -119,13 +120,11 @@ fn lexical_recall_handles_short_terms_and_literal_wildcards() {
         );
     }
     assert_eq!(
-        repo.lexical_candidates("ene", "_%", RecallMode::Auto)
-            .unwrap(),
+        lexical_candidates(&store, "ene", "_%", RecallMode::Auto).unwrap(),
         [ai]
     );
     assert_eq!(
-        repo.lexical_candidates("ene", "東京都", RecallMode::Auto)
-            .unwrap(),
+        lexical_candidates(&store, "ene", "東京都", RecallMode::Auto).unwrap(),
         [dog]
     );
 }
@@ -145,8 +144,7 @@ fn lexical_ties_and_repeated_query_terms_keep_the_same_top_twenty() {
         "frequent ".repeat(200) + "marker",
     ] {
         assert_eq!(
-            repo.lexical_candidates("ene", &query, RecallMode::Auto)
-                .unwrap(),
+            lexical_candidates(&store, "ene", &query, RecallMode::Auto).unwrap(),
             rows[..20]
         );
     }
@@ -178,10 +176,15 @@ fn short_recall_combines_private_and_shared_top_candidates_after_filtering() {
         expected.sort_by_key(|row| std::cmp::Reverse(row.importance));
         expected.truncate(20);
         assert_eq!(
-            repo.lexical_candidates(companion, "犬 ai", RecallMode::AutoExcept(&excluded))
-                .unwrap()
-                .iter()
-                .collect::<Vec<_>>(),
+            lexical_candidates(
+                &store,
+                companion,
+                "犬 ai",
+                RecallMode::AutoExcept(&excluded)
+            )
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
             expected
         );
     }
@@ -204,6 +207,11 @@ fn another_companions_scope_is_private_and_sharing_moves_the_row_to_the_pool() {
         )
         .unwrap();
     assert_eq!(private.items.len(), 0);
+    assert!(matches!(
+        repo.control_memory(&other.id, MemoryActionKind::Share, "ene"),
+        Err(StoreError::Permission(_))
+    ));
+    assert_eq!(repo.memory(&other.id).unwrap(), Some(other.clone()));
     let shared = repo
         .control_memory(&other.id, MemoryActionKind::Share, "other")
         .unwrap();

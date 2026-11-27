@@ -51,6 +51,17 @@ fn load_memory(connection: &rusqlite::Connection, id: &str) -> Result<Option<Mem
         .optional()?)
 }
 
+fn visible_memory(connection: &rusqlite::Connection, id: &str, companion: &str) -> Result<Memory> {
+    let memory = load_memory(connection, id)?
+        .ok_or_else(|| StoreError::NotFound("memory not found".into()))?;
+    if !memory.visible_to(companion) {
+        return Err(StoreError::Permission(
+            "this memory is outside the companion's scope".into(),
+        ));
+    }
+    Ok(memory)
+}
+
 fn cite_visible_memory(
     transaction: &rusqlite::Transaction<'_>,
     companion: &str,
@@ -81,22 +92,15 @@ pub(super) fn supersede_tx(
     if old_id == new_id {
         return Ok(());
     }
-    let exists = transaction
-        .prepare_cached("SELECT 1 FROM memories WHERE id = ?1 AND (scope = ?2 OR scope = ?3)")?
-        .query_row(params![old_id, companion_id, SHARED_SCOPE], |_| Ok(()))
-        .optional()?
-        .is_some();
-    if !exists {
-        return Ok(());
+    let updated = transaction
+        .prepare_cached(&format!(
+            "UPDATE memories AS m SET importance = MIN(importance, 2), \
+             memory_revision = memory_revision + 1 WHERE {VISIBLE} AND m.id = ?2"
+        ))?
+        .execute(params![companion_id, old_id])?;
+    if updated != 0 {
+        add_edge(transaction, new_id, "supersedes", old_id, stamp)?;
     }
-    add_edge(transaction, new_id, "supersedes", old_id, stamp)?;
-    transaction
-        .prepare_cached(
-            "UPDATE memories SET importance = MIN(importance, 2), \
-             memory_revision = memory_revision + 1 \
-             WHERE id = ?1 AND (scope = ?2 OR scope = ?3)",
-        )?
-        .execute(params![old_id, companion_id, SHARED_SCOPE])?;
     Ok(())
 }
 
@@ -125,32 +129,24 @@ impl<'a> MemoryRepo<'a> {
         action: MemoryActionKind,
         companion: &str,
     ) -> Result<Memory> {
-        let memory = self
-            .memory(id)?
-            .ok_or_else(|| StoreError::NotFound("memory not found".into()))?;
-        let (importance, scope) = match action {
-            MemoryActionKind::Forget => (0u8, memory.scope.clone()),
-            MemoryActionKind::Remember => (memory.importance.max(3), memory.scope.clone()),
-            MemoryActionKind::Share => (memory.importance, SHARED_SCOPE.to_owned()),
-            MemoryActionKind::Unshare => (memory.importance, companion.to_owned()),
-        };
-        if importance == memory.importance && scope == memory.scope {
-            return Ok(memory);
-        }
-        let updated = self
-            .0
-            .conn()
-            .prepare_cached(&format!(
-                "UPDATE memories SET importance = ?2, scope = ?3, \
-                 memory_revision = memory_revision + 1 \
-                 WHERE id = ?1 AND memory_revision = ?4 RETURNING {FIELDS}"
-            ))?
-            .query_row(
-                params![id, importance, scope, memory.memory_revision],
-                Memory::from_row,
-            )
-            .optional()?;
-        updated.ok_or_else(|| StoreError::Conflict("memory changed since it was read".into()))
+        self.0.write_tx(|tx| {
+            let memory = visible_memory(tx, id, companion)?;
+            let (importance, scope) = match action {
+                MemoryActionKind::Forget => (0, memory.scope.as_str()),
+                MemoryActionKind::Remember => (memory.importance.max(3), memory.scope.as_str()),
+                MemoryActionKind::Share => (memory.importance, SHARED_SCOPE),
+                MemoryActionKind::Unshare => (memory.importance, companion),
+            };
+            if importance == memory.importance && scope == memory.scope {
+                return Ok(memory);
+            }
+            Ok(tx
+                .prepare_cached(&format!(
+                    "UPDATE memories SET importance = ?2, scope = ?3, \
+                     memory_revision = memory_revision + 1 WHERE id = ?1 RETURNING {FIELDS}"
+                ))?
+                .query_row(params![id, importance, scope], Memory::from_row)?)
+        })
     }
 
     pub fn read_and_cite(
@@ -189,7 +185,7 @@ impl<'a> MemoryRepo<'a> {
         if query.trim().is_empty() || limit == 0 {
             return Ok(RecallOutcome::default());
         }
-        let lexical = self.lexical_candidates(companion, query, mode)?;
+        let lexical = recall::lexical_candidates(self.0, companion, query, mode)?;
         let semantic = self.semantic_memories(companion, mode, semantic)?;
         Ok(RecallOutcome {
             semantic: !semantic.is_empty(),
@@ -280,15 +276,6 @@ impl<'a> MemoryRepo<'a> {
             items.push(Memory::from_row(row)?);
         }
         Ok((items, None))
-    }
-
-    fn lexical_candidates(
-        &self,
-        companion: &str,
-        query: &str,
-        mode: RecallMode<'_>,
-    ) -> Result<Vec<Memory>> {
-        recall::lexical_candidates(self.0, companion, query, mode)
     }
 
     pub fn current_revisions<'b>(

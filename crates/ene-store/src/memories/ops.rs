@@ -1,10 +1,10 @@
 use super::{
     Memory, MemoryRecord, MemoryRepo, MindStateChange, MindUpdate, NewMemory, PendingEmbedding,
-    Result, VISIBLE, add_edge, check_importance, insert_row, json, load_memory, now, supersede_tx,
-    to_json,
+    Result, VISIBLE, add_edge, check_importance, insert_row, json, now, supersede_tx, to_json,
+    visible_memory,
 };
 use crate::{Store, StoreError};
-use ene_mind::{RecallCandidate, dimensions_of_space, in_scope};
+use ene_mind::{RecallCandidate, dimensions_of_space};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json as value};
 
@@ -308,13 +308,7 @@ fn editable_memory(
     id: &str,
     expected: u64,
 ) -> Result<Memory> {
-    let current = load_memory(connection, id)?
-        .ok_or_else(|| StoreError::NotFound("memory not found".into()))?;
-    if !in_scope(&current.scope, companion) {
-        return Err(StoreError::Permission(
-            "this memory is outside the companion's scope".into(),
-        ));
-    }
+    let current = visible_memory(connection, id, companion)?;
     if expected != current.memory_revision {
         return Err(StoreError::Conflict(
             "memory changed since it was read".into(),

@@ -266,15 +266,6 @@ pub(crate) fn control_memory(
             return Err(HostError::Invalid(("a memory action is required").into()));
         }
     };
-    let memory = store
-        .memory_repo()
-        .memory(&request.memory_id)?
-        .ok_or_else(|| HostError::NotFound(("memory not found").into()))?;
-    if !memory.visible_to(&request.companion_id) {
-        return Err(HostError::Permission(
-            ("this memory is outside the companion's scope").into(),
-        ));
-    }
     let memory =
         store
             .memory_repo()
