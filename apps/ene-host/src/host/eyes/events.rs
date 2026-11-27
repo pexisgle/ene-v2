@@ -207,14 +207,7 @@ fn record_activity_event(
         session.event(now, json!({"active": activity.is_active}));
     }
     session.activity = Some((activity.is_active, activity.idle_seconds));
-    changed.then(|| {
-        (
-            "activity_changed",
-            json!({
-                "active": activity.is_active, "idle_seconds": activity.idle_seconds,
-            }),
-        )
-    })
+    changed.then(|| ("activity_changed", json!({})))
 }
 
 fn record_screen_frame(

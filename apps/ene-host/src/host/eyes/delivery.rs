@@ -50,7 +50,6 @@ pub(super) fn deliver(
                     "important": reaction.kind.important(),
                     "heartbeat": reaction.kind == ReportKind::Heartbeat,
                     "report_id": id.0,
-                    "summary": reaction.summary
                 }),
             );
         }

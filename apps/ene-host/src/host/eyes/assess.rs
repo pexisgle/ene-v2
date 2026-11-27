@@ -68,13 +68,10 @@ impl Evaluation {
             }
         };
         publish_status(notifier, companion, session, status);
-        let (decision, summary) = match assessment {
-            Some(assessment) => (
-                session.queue_assessment(now, assessment, sample.is_some()),
-                Some(session.previous.as_str()),
-            ),
-            None if status == "unavailable" => ("unavailable", None),
-            None => ("failed", None),
+        let decision = match assessment {
+            Some(assessment) => session.queue_assessment(now, assessment, sample.is_some()),
+            None if status == "unavailable" => "unavailable",
+            None => "failed",
         };
         let frame_id = sample.as_ref().map(|sample| sample.id.as_str());
         diagnostic(
@@ -83,7 +80,7 @@ impl Evaluation {
             "evaluated",
             &json!({
                 "image": frame_id.is_some(), "input": input, "frame_id": frame_id,
-                "decision": decision, "summary": summary,
+                "decision": decision,
             }),
         );
         if sample.is_some() {

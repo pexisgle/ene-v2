@@ -189,9 +189,12 @@ impl Session {
 
     fn valid(&self, hub: &DeviceHub, now: Instant) -> bool {
         now.duration_since(self.seen) <= OBSERVATION_LIFETIME
-            && hub
-                .subscription(&self.client)
-                .is_some_and(|id| id.matches_wire(&self.subscription))
+            && hub.admit_eyes(
+                &self.client,
+                &self.subscription,
+                self.consent_generation,
+                None,
+            )
     }
 
     fn queue_assessment(
@@ -308,11 +311,12 @@ pub(crate) fn poll(world: &mut World) {
             if !session.valid(&hub, now)
                 || store
                     .client_repo()
-                    .activation_for_client(&session.client)
+                    .activation(companion_id)
                     .ok()
                     .flatten()
-                    .as_ref()
-                    != Some(companion_id)
+                    .and_then(|activation| activation.client_id)
+                    .as_deref()
+                    != Some(session.client.as_str())
             {
                 return false;
             }

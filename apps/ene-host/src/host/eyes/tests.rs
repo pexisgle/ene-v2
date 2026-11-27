@@ -358,6 +358,7 @@ fn assert_eye_notifications_and_dispositions(
                 let detail = &data["detail"];
                 match data["action"].as_str() {
                     Some("delivered") => {
+                        assert!(detail.get("summary").is_none());
                         delivered.push(detail["report_id"].as_str().unwrap().to_owned());
                         important.push(detail["important"].as_bool().unwrap());
                     }
@@ -365,6 +366,7 @@ fn assert_eye_notifications_and_dispositions(
                         received_frame = detail["frame_id"].as_str().map(str::to_owned)
                     }
                     Some("evaluated") if detail["input"] == "image" => {
+                        assert!(detail.get("summary").is_none());
                         evaluated_frame = detail["frame_id"].as_str().map(str::to_owned);
                     }
                     _ => {}
@@ -408,6 +410,36 @@ fn assert_eye_notifications_and_dispositions(
         2
     );
     frame_id
+}
+
+#[test]
+fn all_active_companions_retain_their_own_observation_session() {
+    let mut harness = Harness::new([]);
+    let (subscription, _stream) = bind(&mut harness, "desktop");
+    let second = super::super::mind::create(
+        harness.app.world_mut(),
+        w::CreateCompanionRequest {
+            name: "second".into(),
+            mind: "kind".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .id;
+    client::activate(
+        harness.app.world_mut(),
+        &w::ActivationRequest {
+            client_id: "desktop".into(),
+            companion_id: second.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    report(&mut harness, "desktop", &subscription, Event::Enabled(true));
+    poll(harness.app.world_mut());
+    let sessions = &harness.app.world().resource::<Eyes>().sessions;
+    assert!(sessions.contains_key(&harness.companion));
+    assert!(sessions.contains_key(&second));
 }
 
 #[test]
