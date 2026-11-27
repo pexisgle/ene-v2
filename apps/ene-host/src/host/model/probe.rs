@@ -4,59 +4,76 @@
 //! Split out of `mod.rs` because a probe is I/O with its own timeout and error
 //! taxonomy, not model resolution. Callers reach it through `mod.rs`.
 use super::*;
+use crate::host::error::Failure;
+use itertools::Itertools as _;
+use rig_core::error::{ErrorKind, ProviderError};
 
 pub(crate) async fn probe_model(model: Result<DynModel<Completion>>, model_id: String) -> Check {
-    use crate::host::error::Failure;
     use rig_core::completion::CompletionRequest;
-    use rig_core::error::ErrorKind;
 
     let checked_at = ene_store::util::now();
     let failure = match model {
         Err(HostError::FailedPrecondition(_)) => {
-            Some(("credentials", "認証情報を確認してください。"))
+            Some(Failure::new("credentials", "認証情報を確認してください。"))
         }
-        Err(_) => Some(("connection_setup", "モデルと接続設定を確認してください。")),
+        Err(_) => Some(Failure::new(
+            "connection_setup",
+            "モデルと接続設定を確認してください。",
+        )),
         Ok(model) => {
             let request =
                 CompletionRequest::new(ene_domain::settings::MODEL_CHECK_PROMPT).max_tokens(64);
             match tokio::time::timeout(PROBE_TIMEOUT, model.call(request)).await {
                 Ok(Ok(reply)) if !reply.text().trim().is_empty() => None,
-                Ok(Ok(_)) => Some(("empty_reply", "モデルからテキスト応答がありませんでした。")),
-                Err(_) => Some(("timeout", "モデルの応答が時間内にありませんでした。")),
-                Ok(Err(error)) => Some(
-                    match error
-                        .provider_response_status()
-                        .map(|status| status.as_u16())
-                    {
-                        Some(401) => ("credentials", "接続先が認証情報を受け付けませんでした。"),
-                        Some(403) => (
-                            "access",
-                            "接続先がこのモデルへのアクセスを許可しませんでした。",
-                        ),
-                        Some(404) => ("model_unavailable", "接続先でこのモデルを利用できません。"),
-                        Some(429) => (
-                            "rate_limit",
-                            "接続先の利用制限に達しました。時間をおいて再試行してください。",
-                        ),
-                        _ if error.report().kind == ErrorKind::Http => {
-                            ("transport", "接続先から応答を受け取れませんでした。")
-                        }
-                        _ => (
-                            "provider_response",
-                            "接続先でモデルの応答を取得できませんでした。",
-                        ),
-                    },
-                ),
+                Ok(Ok(_)) => Some(Failure::new(
+                    "empty_reply",
+                    "モデルからテキスト応答がありませんでした。",
+                )),
+                Err(_) => Some(Failure::new(
+                    "timeout",
+                    "モデルの応答が時間内にありませんでした。",
+                )),
+                Ok(Err(error)) => Some(provider_failure(&error)),
             }
         }
     };
     Check {
         healthy: failure.is_none(),
         checked_at,
-        failure: failure.map(|(kind, message)| Failure::new(kind, message)),
+        failure,
         checked_model: Some(model_id),
         ..Default::default()
     }
+}
+
+fn provider_failure(error: &ProviderError) -> Failure {
+    let (code, message) = match error
+        .provider_response_status()
+        .map(|status| status.as_u16())
+    {
+        Some(401) => ("credentials", "接続先が認証情報を受け付けませんでした。"),
+        Some(403) => ("access", "接続先が指定した操作を許可しませんでした。"),
+        Some(404) => (
+            "model_unavailable",
+            "接続先で指定の機能やモデルを利用できません。",
+        ),
+        Some(429) => (
+            "rate_limit",
+            "接続先の利用制限に達しました。時間をおいて再試行してください。",
+        ),
+        Some(500..=599) => (
+            "provider_unavailable",
+            "接続先のサービスで障害が発生しています。",
+        ),
+        _ if error.kind() == ErrorKind::Http => {
+            ("transport", "接続先から応答を受け取れませんでした。")
+        }
+        _ => (
+            "provider_response",
+            "接続先から必要な応答を取得できませんでした。",
+        ),
+    };
+    Failure::new(code, message)
 }
 
 pub(crate) async fn probe(
@@ -65,28 +82,17 @@ pub(crate) async fn probe(
     providers: &crate::host::providers::Providers,
 ) -> Check {
     let checked_at = ene_store::util::now();
-    let failure = |message: String| Check {
-        healthy: false,
+    let failed = |failure: Failure| Check {
         checked_at: checked_at.clone(),
-        failure: Some(crate::host::error::Failure::new(
-            "connection_check",
-            message,
-        )),
-        capabilities: Vec::new(),
-        resources: Vec::new(),
-        checked_model: None,
+        failure: Some(failure),
+        ..Default::default()
     };
+    let failure = |message: String| failed(Failure::new("connection_check", message));
     let ConnectionConfig::Llm(config) = &connection.config else {
-        // Only the LLM adapter has a probe in this alpha.
-        return Check {
-            healthy: false,
-            checked_at,
-            failure: Some(crate::host::error::Failure::new(
-                "unsupported",
-                "connection checks are implemented for LLM connections only",
-            )),
-            ..Default::default()
-        };
+        return failed(Failure::new(
+            "unsupported",
+            "this connection has no model catalog",
+        ));
     };
     if config.endpoint.adapter == agent_platform::ADAPTER
         && !providers.claims(agent_platform::ADAPTER, ene_plugin::Extension::Llm)
@@ -131,7 +137,7 @@ pub(crate) async fn probe(
     };
     let listed = match list_models(connection, &base, credentials, providers).await {
         Ok(models) => models,
-        Err(error) => return failure(error.to_string()),
+        Err(error) => return failed(error.failure()),
     };
     let listed = if is_sakura_connection(&connection.endpoint().adapter, &base) {
         let chat_only: Vec<String> = listed
@@ -152,15 +158,14 @@ pub(crate) async fn probe(
     } else {
         listed
     };
-    let mut resources: Vec<String> = config.model_ids.clone();
-    for model in listed {
-        if resources.len() >= MAX_MODELS {
-            break;
-        }
-        if !resources.iter().any(|known| known == &model) {
-            resources.push(model);
-        }
-    }
+    let resources = config
+        .model_ids
+        .iter()
+        .cloned()
+        .chain(listed)
+        .unique()
+        .take(MAX_MODELS)
+        .collect();
     Check {
         healthy: true,
         checked_at,
@@ -177,18 +182,29 @@ enum ModelProbeError {
     PluginTimeout(u64),
     #[error("OpenRouterのAPIキーが未登録です")]
     MissingOpenRouterKey,
-    #[error("OpenRouterのキーを確認できませんでした（{0}）")]
-    OpenRouterKeyRejected(reqwest::StatusCode),
     #[error("the endpoint did not answer in {0}s")]
     EndpointTimeout(u64),
-    #[error("the endpoint is unreachable: {0}")]
-    EndpointUnreachable(String),
+    #[error("provider catalog request failed")]
+    Provider(Failure),
     #[error("the plugin returned no Models event")]
     MissingModelsEvent,
     #[error(transparent)]
     Net(#[from] net::NetError),
     #[error("{0}")]
     Failed(String),
+}
+
+impl ModelProbeError {
+    fn failure(self) -> Failure {
+        match self {
+            Self::Provider(failure) => failure,
+            Self::MissingOpenRouterKey => Failure::new("credentials", self.to_string()),
+            Self::EndpointTimeout(_) | Self::PluginTimeout(_) => {
+                Failure::new("timeout", self.to_string())
+            }
+            _ => Failure::new("connection_check", self.to_string()),
+        }
+    }
 }
 
 /// Asks the provider's own model-listing endpoint, through rig's provider
@@ -227,33 +243,29 @@ async fn list_models(
     let secret = connection_secret(connection, Some(credentials), providers)
         .map_err(|error| ModelProbeError::Failed(error.to_string()))?;
     // OpenRouter's model list is public even when the supplied key is invalid.
-    if adapter == "openrouter" && base.trim_end_matches('/') == "https://openrouter.ai/api/v1" {
-        let key = secret
-            .as_deref()
-            .ok_or(ModelProbeError::MissingOpenRouterKey)?;
-        let response = net::client()?
-            .get("https://openrouter.ai/api/v1/key")
-            .bearer_auth(key)
-            .timeout(PROBE_TIMEOUT)
-            .send()
-            .await
-            .map_err(|error| ModelProbeError::Failed(error.to_string()))?;
-        if !response.status().is_success() {
-            return Err(ModelProbeError::OpenRouterKeyRejected(response.status()));
-        }
+    let verify_key =
+        adapter == "openrouter" && base.trim_end_matches('/') == "https://openrouter.ai/api/v1";
+    if verify_key && secret.is_none() {
+        return Err(ModelProbeError::MissingOpenRouterKey);
     }
     let config = provider_config(adapter, base, secret, providers);
     let http = rig_reqwest::ReqwestClient::from(net::client()?);
     let list = tokio::time::timeout(PROBE_TIMEOUT, async move {
-        match &config {
-            ProviderConfig::OpenAi(config) => config.clone().connect(http).list_models().await,
-            ProviderConfig::Anthropic(config) => config.clone().connect(http).list_models().await,
-            ProviderConfig::Gemini(config) => config.clone().connect(http).list_models().await,
+        match config {
+            ProviderConfig::OpenAi(config) => {
+                let client = config.connect(http);
+                if verify_key {
+                    client.verify().await?;
+                }
+                client.list_models().await
+            }
+            ProviderConfig::Anthropic(config) => config.connect(http).list_models().await,
+            ProviderConfig::Gemini(config) => config.connect(http).list_models().await,
         }
     })
     .await
     .map_err(|_| ModelProbeError::EndpointTimeout(PROBE_TIMEOUT.as_secs()))?
-    .map_err(|error| ModelProbeError::EndpointUnreachable(error.to_string()))?;
+    .map_err(|error| ModelProbeError::Provider(provider_failure(&error)))?;
     Ok(list.data.into_iter().map(|model| model.id).collect())
 }
 

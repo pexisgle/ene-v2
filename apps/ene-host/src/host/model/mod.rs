@@ -24,6 +24,7 @@ use super::error::HostError;
 use super::mind::{Companion, Role};
 use super::net;
 use super::settings::{Check, Connection, ConnectionConfig, ConnectionKind};
+use itertools::Itertools as _;
 pub(crate) use plugin::completion as plugin_completion;
 use rig_core::catalog::{Catalog, ModelFacts, ModelSpec};
 use rig_core::driver::{DynModel, Model};
@@ -258,40 +259,25 @@ pub(crate) fn models(connection: &Connection, catalog: &Catalog) -> Vec<(String,
         .as_ref()
         .map_or(&[][..], |check| check.resources.as_slice());
 
-    let mut ordered = Vec::new();
-    fn push_unique_id(ordered: &mut Vec<String>, id: &str) {
-        if ordered.len() < MAX_MODELS && !ordered.iter().any(|existing| existing == id) {
-            ordered.push(id.to_owned());
-        }
-    }
-
-    for id in &config.model_ids {
-        let trimmed = id.trim();
-        if !trimmed.is_empty() && (!verified || resources.iter().any(|id| id == trimmed)) {
-            push_unique_id(&mut ordered, trimmed);
-        }
-    }
-    if !resources.is_empty() {
-        for &pref in preferred {
-            if let Some(found) = resources.iter().find(|id| id.as_str() == pref) {
-                push_unique_id(&mut ordered, found);
-            }
-        }
-        for id in resources {
-            push_unique_id(&mut ordered, id);
-        }
-    } else if ordered.is_empty() && !verified {
-        for &id in preferred {
-            push_unique_id(&mut ordered, id);
-        }
-    }
-
-    ordered
-        .into_iter()
+    let mut configured = config
+        .model_ids
+        .iter()
+        .map(|id| id.trim())
+        .filter(|&id| !id.is_empty() && (!verified || resources.iter().any(|known| known == id)))
+        .peekable();
+    let use_defaults = !verified && resources.is_empty() && configured.peek().is_none();
+    let preferred = preferred
+        .iter()
+        .copied()
+        .filter(|&id| use_defaults || resources.iter().any(|known| known == id));
+    configured
+        .chain(preferred)
+        .chain(resources.iter().map(String::as_str))
+        .unique()
         .take(MAX_MODELS)
         .filter_map(|model| {
             let spec = if is_sakura_connection(adapter, &connection.endpoint().endpoint) {
-                sakura_model_spec(&model)?
+                sakura_model_spec(model)?
             } else {
                 let provider = provider_of(adapter).or_else(|| ProviderId::catalog("openai"))?;
                 let reference = format!("{}/{}", provider.vendor(), model);
@@ -301,11 +287,11 @@ pub(crate) fn models(connection: &Connection, catalog: &Catalog) -> Vec<(String,
                         .flatten()
                 });
                 resolved.map_or_else(
-                    || ModelSpec::new(provider, &model).with_tools(true),
+                    || ModelSpec::new(provider, model).with_tools(true),
                     |resolved| resolved.spec.clone(),
                 )
             };
-            Some((model, spec))
+            Some((model.to_owned(), spec))
         })
         .collect()
 }
