@@ -307,12 +307,19 @@ fn held_search_pins_the_current_connection_and_effective_credential() {
         Err(SearchConfigError::ConnectionChanged)
     ));
 
+    creds.forget("exa");
+    creds.remember("exa", "original".into());
+    assert!(matches!(
+        original.current(&store, Some(&creds), &providers),
+        Err(SearchConfigError::ConnectionChanged)
+    ));
+    let resumed = resolve(&store, Some(&creds), &providers).unwrap().binding;
     repo.delete_connection(&exa.id, 1, || Ok::<(), ene_store::StoreError>(()))
         .unwrap();
     repo.update_settings(repo.settings_revision().unwrap(), &[(exa, 0)])
         .unwrap();
     assert!(matches!(
-        original.current(&store, Some(&creds), &providers),
+        resumed.current(&store, Some(&creds), &providers),
         Err(SearchConfigError::ConnectionChanged)
     ));
 }

@@ -105,6 +105,7 @@ pub(crate) struct SearchBinding {
     connection: ConnectionId,
     created_revision: u64,
     revision: u64,
+    credential_generation: u64,
     adapter: SearchAdapter,
     pub(crate) endpoint: Url,
     pub(crate) display_destination: String,
@@ -155,6 +156,7 @@ impl SearchBinding {
         if self.connection != current.connection
             || self.created_revision != current.created_revision
             || self.revision != current.revision
+            || self.credential_generation != current.credential_generation
             || self.adapter != current.adapter
             || self.endpoint != current.endpoint
             || !same_secret
@@ -274,10 +276,23 @@ pub(crate) fn resolve_connection(
         configured
     };
     let endpoint = search_endpoint(adapter, endpoint)?;
-    let secret = if provider.key_environment.is_some() {
+    let keyed = provider.key_environment.is_some();
+    let credential_generation = if keyed {
+        credentials.map_or(0, |credentials| {
+            credentials.generation_of(connection.id.as_str())
+        })
+    } else {
+        0
+    };
+    let secret = if keyed {
         let secret = connection_secret(connection, credentials, providers)?
             .filter(|value| !value.trim().is_empty())
             .ok_or(SearchConfigError::MissingCredential(provider.name))?;
+        if credentials.is_some_and(|credentials| {
+            credentials.generation_of(connection.id.as_str()) != credential_generation
+        }) {
+            return Err(SearchConfigError::ConnectionChanged);
+        }
         Some(Arc::from(secret.trim()))
     } else {
         None
@@ -301,6 +316,7 @@ pub(crate) fn resolve_connection(
             connection: connection.id.clone(),
             created_revision,
             revision: connection.revision,
+            credential_generation,
             adapter,
             endpoint,
             display_destination,

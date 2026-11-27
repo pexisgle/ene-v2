@@ -7,27 +7,31 @@
 use crate::host::db::Result;
 use crate::host::error::HostError;
 use crate::host::settings::{Connection, CredentialState};
-use parking_lot::{Mutex, MutexGuard};
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use parking_lot::Mutex;
+use std::{collections::HashMap, sync::Arc};
 
 const KEYRING_SERVICE: &str = "ene-host";
 
 #[derive(Clone, Default, bevy_ecs::prelude::Resource)]
 pub(crate) struct Credentials {
-    session_secrets: Arc<Mutex<HashMap<String, String>>>,
-    generation: Arc<AtomicU64>,
+    memory: Arc<Mutex<CredentialMemory>>,
     session_only: bool,
     pub(crate) approval_key: Option<[u8; 32]>,
     /// Test-only: makes the credential store unreadable, so a test can check
     /// that the failure is reported instead of becoming "no credential".
     #[cfg(test)]
     unreadable: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[derive(Default)]
+struct CredentialMemory {
+    generation: u64,
+    entries: HashMap<String, CredentialEntry>,
+}
+
+struct CredentialEntry {
+    generation: u64,
+    session_secret: Option<String>,
 }
 
 impl Credentials {
@@ -38,26 +42,37 @@ impl Credentials {
         }
     }
 
-    fn session_secrets(&self) -> MutexGuard<'_, HashMap<String, String>> {
-        self.session_secrets.lock()
-    }
-
     pub(crate) fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
+        self.memory.lock().generation
     }
 
-    fn invalidate(&self) {
-        self.generation.fetch_add(1, Ordering::Release);
+    pub(crate) fn generation_of(&self, connection: &str) -> u64 {
+        self.memory
+            .lock()
+            .entries
+            .get(connection)
+            .map_or(0, |entry| entry.generation)
+    }
+
+    fn record(&self, connection: &str, session_secret: Option<String>) {
+        let mut memory = self.memory.lock();
+        memory.generation += 1;
+        let generation = memory.generation;
+        memory.entries.insert(
+            connection.to_owned(),
+            CredentialEntry {
+                generation,
+                session_secret,
+            },
+        );
     }
 
     pub(crate) fn remember(&self, connection: &str, secret: String) {
-        self.session_secrets().insert(connection.to_owned(), secret);
-        self.invalidate();
+        self.record(connection, Some(secret));
     }
 
     pub(crate) fn forget(&self, connection: &str) {
-        self.session_secrets().remove(connection);
-        self.invalidate();
+        self.record(connection, None);
     }
 
     /// The registered secret, `None` when none is registered. An unreadable
@@ -65,7 +80,12 @@ impl Credentials {
     /// go out unauthenticated because the store could not be read.
     pub(crate) fn secret(&self, connection: &str) -> Result<Option<String>> {
         if self.session_only {
-            return Ok(self.session_secrets().get(connection).cloned());
+            return Ok(self
+                .memory
+                .lock()
+                .entries
+                .get(connection)
+                .and_then(|slot| slot.session_secret.clone()));
         }
         #[cfg(test)]
         if self.unreadable.load(std::sync::atomic::Ordering::SeqCst) {
@@ -115,7 +135,7 @@ pub(crate) fn save_secret(credentials: &Credentials, connection: &str, secret: &
     if credentials.session_only() {
         credentials.remember(connection, secret.to_owned());
     } else {
-        credentials.invalidate();
+        credentials.record(connection, None);
     }
     Ok(())
 }
