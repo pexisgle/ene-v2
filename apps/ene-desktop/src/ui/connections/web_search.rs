@@ -1,4 +1,5 @@
 use super::{ConnectionsPane, add_panel::build_search_preset_chips};
+use crate::ui::hub::presets;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button, status_pill};
@@ -140,7 +141,9 @@ fn render_search_switcher(
                     .enabled(live),
                 theme,
                 move |_, cx| {
-                    hub_sw.update(cx, |hub, cx| hub.assign_search_connection(Some(&cid), cx));
+                    hub_sw.update(cx, |hub, cx| {
+                        presets::assign_search_connection(hub, Some(&cid), cx)
+                    });
                 },
             )
         })
@@ -154,7 +157,11 @@ fn render_search_switcher(
             .maybe_icon(is_off.then_some(Icon::Check))
             .enabled(live),
         theme,
-        move |_, cx| hub_off.update(cx, |hub, cx| hub.assign_search_connection(None, cx)),
+        move |_, cx| {
+            hub_off.update(cx, |hub, cx| {
+                presets::assign_search_connection(hub, None, cx)
+            })
+        },
     ));
     Some(
         div()

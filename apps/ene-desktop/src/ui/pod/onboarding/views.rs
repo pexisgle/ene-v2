@@ -1,6 +1,7 @@
 //! The connect-submit row, voice launch and finish button.
 
 use crate::input::Draft;
+use crate::ui::hub::presets;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{DropdownOption, Tone, pill_button};
@@ -40,7 +41,7 @@ pub(super) fn render_connect_submit_row(
             };
             let secret = key.read(cx).text().trim().to_owned();
             if hub_connect.update(cx, |hub, cx| {
-                hub.save_setup_connection(provider, secret, cx)
+                presets::save_setup_connection(hub, provider, secret, cx)
             }) {
                 key.update(cx, Draft::clear);
             }
@@ -141,7 +142,7 @@ pub(super) fn render_launch_voicevox_row(
                             hub.check_connection(id, cx);
                         }
                     } else {
-                        hub.add_voicevox_preset(3, None, cx);
+                        presets::add_voicevox_preset(hub, 3, None, cx);
                     }
                 });
             },
@@ -183,7 +184,7 @@ pub(super) fn render_setup_finish_button(
             let voice_arg = params.voice_id.clone();
             if let (Some(cid), Some(mid)) = (params.conn_id.clone(), params.model_id.clone()) {
                 hub_start.update(cx, |hub, cx| {
-                    hub.complete_setup_selection(cid, &mid, name_arg, voice_arg, cx);
+                    presets::complete_setup_selection(hub, cid, &mid, name_arg, voice_arg, cx);
                 });
             } else if params.companions_empty && !params.name.is_empty() {
                 hub_start.update(cx, |hub, cx| {

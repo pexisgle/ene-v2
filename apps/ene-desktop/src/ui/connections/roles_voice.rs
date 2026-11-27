@@ -3,6 +3,7 @@
 use super::ConnectionsPane;
 use super::roles_panel::render_role_row_header;
 use crate::ui::Hub;
+use crate::ui::hub::voice_roles;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{DropdownOption, DropdownSpec, Tone, dropdown_select, pill_button};
@@ -142,7 +143,7 @@ pub(super) fn voice_role_specs(ctx: &RolesContext) -> [VoiceRoleSpec; 2] {
             add_btn_id: "adv-role-stt-add",
             choices: ctx.stt_models.clone(),
             active: ctx.active_stt.clone(),
-            assign: Hub::assign_stt_model,
+            assign: voice_roles::assign_stt_model,
         },
         VoiceRoleSpec {
             title: "音声合成（TTS）",
@@ -154,7 +155,7 @@ pub(super) fn voice_role_specs(ctx: &RolesContext) -> [VoiceRoleSpec; 2] {
             add_btn_id: "adv-role-tts-add",
             choices: ctx.tts_voices.clone(),
             active: ctx.active_tts.clone(),
-            assign: Hub::assign_tts_voice,
+            assign: voice_roles::assign_tts_voice,
         },
     ]
 }

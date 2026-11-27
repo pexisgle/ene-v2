@@ -1,11 +1,10 @@
 //! Connection CRUD, model/voice selection, probing, credentials, and preset entrypoints on [`Hub`].
 
-use super::{Hub, presets, voice_roles};
+use super::Hub;
 use crate::rpc;
 use ene_client_core::{
-    SearchAdapter,
     connections::build_connection_enabled_input,
-    domain::{Connection, ConnectionInput, ConnectionKind, LlmProvider},
+    domain::{Connection, ConnectionInput, ConnectionKind},
 };
 use gpui::Context;
 
@@ -143,25 +142,6 @@ impl Hub {
         }
     }
 
-    /// Assigns the active STT connection and model atomically across all STT connections.
-    pub(crate) fn assign_stt_model(
-        &mut self,
-        selection: Option<(&str, &str)>,
-        cx: &mut Context<Self>,
-    ) {
-        voice_roles::assign_stt_model(self, selection, cx);
-    }
-
-    /// Assigns the active TTS connection and voice atomically across all TTS connections,
-    /// probing local VOICEVOX when newly enabled and syncing companion `voice_identifier`.
-    pub(crate) fn assign_tts_voice(
-        &mut self,
-        selection: Option<(&str, &str)>,
-        cx: &mut Context<Self>,
-    ) {
-        voice_roles::assign_tts_voice(self, selection, cx);
-    }
-
     pub(crate) fn register_secret(
         &mut self,
         connection_id: &str,
@@ -211,103 +191,5 @@ impl Hub {
             connection_id,
         );
         cx.notify();
-    }
-
-    pub(crate) fn assign_search_connection(
-        &mut self,
-        connection_id: Option<&str>,
-        cx: &mut Context<Self>,
-    ) {
-        presets::assign_search_connection(self, connection_id, cx);
-    }
-
-    pub(crate) fn add_search_preset(
-        &mut self,
-        adapter: SearchAdapter,
-        cx: &mut Context<Self>,
-    ) -> String {
-        presets::add_search_preset(self, adapter, cx)
-    }
-
-    pub(crate) fn add_llm_from_provider(
-        &mut self,
-        provider: LlmProvider,
-        model_ids: Vec<String>,
-        cx: &mut Context<Self>,
-    ) {
-        presets::add_llm_from_provider(self, provider, model_ids, cx);
-    }
-
-    pub(crate) fn save_setup_connection(
-        &mut self,
-        provider: LlmProvider,
-        secret: String,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        presets::save_setup_connection(self, provider, secret, cx)
-    }
-
-    pub(crate) fn complete_setup_selection(
-        &mut self,
-        connection_id: String,
-        model_id: &str,
-        companion_name: Option<String>,
-        voice_identifier: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        presets::complete_setup_selection(
-            self,
-            connection_id,
-            model_id,
-            companion_name,
-            voice_identifier,
-            cx,
-        );
-    }
-
-    pub(crate) fn add_voicevox_preset(
-        &mut self,
-        speaker: u32,
-        speed: Option<f32>,
-        cx: &mut Context<Self>,
-    ) {
-        presets::add_voicevox_preset(self, speaker, speed, cx);
-    }
-
-    pub(crate) fn add_openai_tts_preset(
-        &mut self,
-        endpoint: &str,
-        model: &str,
-        voice: &str,
-        cx: &mut Context<Self>,
-    ) {
-        presets::add_openai_tts_preset(self, endpoint, model, voice, cx);
-    }
-
-    pub(crate) fn add_stt_preset(
-        &mut self,
-        name: String,
-        endpoint: String,
-        model: String,
-        language: String,
-        cx: &mut Context<Self>,
-    ) {
-        presets::add_stt_preset(self, name, endpoint, model, language, cx);
-    }
-
-    pub(crate) fn add_sakura_tts_preset(&mut self, cx: &mut Context<Self>) {
-        presets::add_sakura_tts_preset(self, cx);
-    }
-
-    pub(crate) fn add_sakura_stt_preset(&mut self, cx: &mut Context<Self>) {
-        presets::add_sakura_stt_preset(self, cx);
-    }
-
-    pub(crate) fn add_sakura_embedding_preset(&mut self, cx: &mut Context<Self>) {
-        presets::add_sakura_embedding_preset(self, cx);
-    }
-
-    pub(crate) fn add_openai_embedding_preset(&mut self, cx: &mut Context<Self>) {
-        presets::add_openai_embedding_preset(self, cx);
     }
 }

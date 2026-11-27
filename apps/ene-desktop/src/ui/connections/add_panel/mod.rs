@@ -2,6 +2,7 @@ mod chips;
 
 use super::{AddFlow, ConnectionsPane};
 use crate::ui::Hub;
+use crate::ui::hub::presets;
 use crate::ui::icons::Icon;
 use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
@@ -208,7 +209,7 @@ fn build_llm_provider_chips(
                 theme,
                 move |_, cx| {
                     hub.update(cx, |hub, cx| {
-                        hub.add_llm_from_provider(p.clone(), vec![], cx)
+                        presets::add_llm_from_provider(hub, p.clone(), vec![], cx)
                     });
                     pane.update(cx, |this, cx| {
                         this.form.add = AddFlow::Closed;

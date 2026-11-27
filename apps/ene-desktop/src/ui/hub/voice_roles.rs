@@ -5,7 +5,7 @@ use crate::rpc;
 use ene_client_core::connections::{build_stt_assignment_inputs, build_tts_assignment_inputs};
 use gpui::Context;
 
-pub(super) fn assign_stt_model(
+pub(crate) fn assign_stt_model(
     hub: &mut Hub,
     selection: Option<(&str, &str)>,
     cx: &mut Context<Hub>,
@@ -20,7 +20,7 @@ pub(super) fn assign_stt_model(
     hub.update_connections("音声認識モデルの割当", settings.revision, inputs, None, cx);
 }
 
-pub(super) fn assign_tts_voice(
+pub(crate) fn assign_tts_voice(
     hub: &mut Hub,
     selection: Option<(&str, &str)>,
     cx: &mut Context<Hub>,

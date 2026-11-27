@@ -4,9 +4,9 @@ mod actions;
 mod chat;
 mod companions;
 mod connections;
-mod presets;
+pub(crate) mod presets;
 mod state;
-mod voice_roles;
+pub(crate) mod voice_roles;
 mod windows;
 
 pub(crate) use state::SetupStage;

@@ -4,6 +4,7 @@
 use super::AddFlow;
 use super::ConnectionsPane;
 use crate::ui::Hub;
+use crate::ui::hub::presets;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button};
@@ -32,14 +33,14 @@ pub(super) fn build_voice_embedding_chips(
             label: "VOICEVOX（ローカル）",
             style: Tone::Mint.icon(Icon::Volume).enabled(live),
             expand_id: Some("voicevox"),
-            action: |hub, cx| hub.add_voicevox_preset(3, None, cx),
+            action: |hub, cx| presets::add_voicevox_preset(hub, 3, None, cx),
         },
         PresetChipSpec {
             id: "add-preset-sakura-tts",
             label: "さくらのAI Engine TTS",
             style: Tone::Soft.icon(Icon::Volume).enabled(live),
             expand_id: Some("sakura-tts"),
-            action: |hub, cx| hub.add_sakura_tts_preset(cx),
+            action: |hub, cx| presets::add_sakura_tts_preset(hub, cx),
         },
         PresetChipSpec {
             id: "add-preset-openai-tts",
@@ -47,7 +48,13 @@ pub(super) fn build_voice_embedding_chips(
             style: Tone::Ghost.icon(Icon::Volume).enabled(live),
             expand_id: None,
             action: |hub, cx| {
-                hub.add_openai_tts_preset("https://api.openai.com/v1", "tts-1", "alloy", cx);
+                presets::add_openai_tts_preset(
+                    hub,
+                    "https://api.openai.com/v1",
+                    "tts-1",
+                    "alloy",
+                    cx,
+                );
             },
         },
         PresetChipSpec {
@@ -55,7 +62,7 @@ pub(super) fn build_voice_embedding_chips(
             label: "さくらのAI Engine STT",
             style: Tone::Soft.icon(Icon::Mic).enabled(live),
             expand_id: Some("sakura-stt"),
-            action: |hub, cx| hub.add_sakura_stt_preset(cx),
+            action: |hub, cx| presets::add_sakura_stt_preset(hub, cx),
         },
         PresetChipSpec {
             id: "add-preset-openai-stt",
@@ -63,7 +70,8 @@ pub(super) fn build_voice_embedding_chips(
             style: Tone::Ghost.icon(Icon::Mic).enabled(live),
             expand_id: None,
             action: |hub, cx| {
-                hub.add_stt_preset(
+                presets::add_stt_preset(
+                    hub,
                     "OpenAI 音声認識".into(),
                     "https://api.openai.com/v1".into(),
                     "gpt-4o-mini-transcribe".into(),
@@ -78,7 +86,8 @@ pub(super) fn build_voice_embedding_chips(
             style: Tone::Ghost.icon(Icon::Mic).enabled(live),
             expand_id: None,
             action: |hub, cx| {
-                hub.add_stt_preset(
+                presets::add_stt_preset(
+                    hub,
                     "ローカル Whisper".into(),
                     "http://127.0.0.1:8080/v1".into(),
                     "whisper-1".into(),
@@ -92,14 +101,14 @@ pub(super) fn build_voice_embedding_chips(
             label: "さくらのAI Engine Embedding",
             style: Tone::Soft.icon(Icon::Search).enabled(live),
             expand_id: Some("sakura-embedding"),
-            action: |hub, cx| hub.add_sakura_embedding_preset(cx),
+            action: |hub, cx| presets::add_sakura_embedding_preset(hub, cx),
         },
         PresetChipSpec {
             id: "add-preset-openai-embedding",
             label: "OpenAI Embedding",
             style: Tone::Ghost.icon(Icon::Search).enabled(live),
             expand_id: Some("openai-embedding"),
-            action: |hub, cx| hub.add_openai_embedding_preset(cx),
+            action: |hub, cx| presets::add_openai_embedding_preset(hub, cx),
         },
     ];
     specs
@@ -159,7 +168,8 @@ pub(in crate::ui::connections) fn build_search_preset_chips(
             tone.icon(Icon::Search).enabled(live),
             theme,
             move |_, cx| {
-                let target_id = hub_s.update(cx, |hub, cx| hub.add_search_preset(adapter, cx));
+                let target_id =
+                    hub_s.update(cx, |hub, cx| presets::add_search_preset(hub, adapter, cx));
                 pane_s.update(cx, |this, cx| {
                     this.form.add = AddFlow::Closed;
                     this.form.open_editor(target_id);

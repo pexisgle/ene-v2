@@ -17,12 +17,12 @@ use ene_client_core::{
 };
 use gpui::Context;
 
-pub(super) fn assign_search_connection(
+pub(crate) fn assign_search_connection(
     hub: &mut Hub,
     connection_id: Option<&str>,
     cx: &mut Context<Hub>,
 ) {
-    let Some(settings) = hub.model.settings().cloned() else {
+    let Some(settings) = hub.model.settings() else {
         return;
     };
     let inputs = build_search_assignment_inputs(&settings.connections, connection_id);
@@ -32,7 +32,7 @@ pub(super) fn assign_search_connection(
     hub.update_connections("Web 検索接続の割当", settings.revision, inputs, None, cx);
 }
 
-pub(super) fn add_search_preset(
+pub(crate) fn add_search_preset(
     hub: &mut Hub,
     adapter: SearchAdapter,
     cx: &mut Context<Hub>,
@@ -47,7 +47,7 @@ pub(super) fn add_search_preset(
     target
 }
 
-pub(super) fn add_llm_from_provider(
+pub(crate) fn add_llm_from_provider(
     hub: &mut Hub,
     provider: LlmProvider,
     model_ids: Vec<String>,
@@ -60,7 +60,7 @@ pub(super) fn add_llm_from_provider(
     );
 }
 
-pub(super) fn save_setup_connection(
+pub(crate) fn save_setup_connection(
     hub: &mut Hub,
     provider: LlmProvider,
     secret: String,
@@ -97,7 +97,7 @@ pub(super) fn save_setup_connection(
     true
 }
 
-pub(super) fn complete_setup_selection(
+pub(crate) fn complete_setup_selection(
     hub: &mut Hub,
     connection_id: String,
     model_id: &str,
@@ -153,13 +153,13 @@ pub(super) fn complete_setup_selection(
     }
 }
 
-pub(super) fn add_voicevox_preset(
+pub(crate) fn add_voicevox_preset(
     hub: &mut Hub,
     speaker: u32,
     speed: Option<f32>,
     cx: &mut Context<Hub>,
 ) {
-    let Some(settings) = hub.model.settings().cloned() else {
+    let Some(settings) = hub.model.settings() else {
         return;
     };
     if hub.rpc.host().is_none() {
@@ -180,7 +180,7 @@ pub(super) fn add_voicevox_preset(
     );
 }
 
-pub(super) fn add_openai_tts_preset(
+pub(crate) fn add_openai_tts_preset(
     hub: &mut Hub,
     endpoint: &str,
     model: &str,
@@ -194,7 +194,7 @@ pub(super) fn add_openai_tts_preset(
     );
 }
 
-pub(super) fn add_stt_preset(
+pub(crate) fn add_stt_preset(
     hub: &mut Hub,
     name: String,
     endpoint: String,
@@ -227,7 +227,7 @@ fn add_stt_preset_with_spec(hub: &mut Hub, spec: SttPresetSpec<'_>, cx: &mut Con
     hub.upsert_connection("音声認識（STT）接続の追加", input, cx);
 }
 
-pub(super) fn add_sakura_tts_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
+pub(crate) fn add_sakura_tts_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
     let input = {
         let connections = hub
             .model
@@ -238,7 +238,7 @@ pub(super) fn add_sakura_tts_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
     hub.upsert_connection("さくらのAI Engine TTS接続の追加", input, cx);
 }
 
-pub(super) fn add_sakura_stt_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
+pub(crate) fn add_sakura_stt_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
     add_stt_preset_with_spec(
         hub,
         SttPresetSpec {
@@ -253,7 +253,7 @@ pub(super) fn add_sakura_stt_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
     );
 }
 
-pub(super) fn add_sakura_embedding_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
+pub(crate) fn add_sakura_embedding_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
     add_embedding_preset(
         hub,
         &EmbeddingPresetSpec {
@@ -268,7 +268,7 @@ pub(super) fn add_sakura_embedding_preset(hub: &mut Hub, cx: &mut Context<Hub>) 
     );
 }
 
-pub(super) fn add_openai_embedding_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
+pub(crate) fn add_openai_embedding_preset(hub: &mut Hub, cx: &mut Context<Hub>) {
     add_embedding_preset(
         hub,
         &EmbeddingPresetSpec {
