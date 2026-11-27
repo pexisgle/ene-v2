@@ -16,6 +16,23 @@ const CAPACITY: usize = 256;
 const REPLAY: usize = 512;
 pub(crate) const DIAGNOSTIC: &str = "diagnostic";
 
+pub(crate) fn generic(
+    kind: &str,
+    schema: &str,
+    payload: &serde_json::Value,
+) -> w::notification::Event {
+    w::notification::Event::Generic(Box::new(w::HostEvent {
+        kind: kind.into(),
+        payload: Some(w::JsonDocument {
+            schema: schema.into(),
+            json: payload.to_string(),
+            ..Default::default()
+        })
+        .into(),
+        ..Default::default()
+    }))
+}
+
 #[derive(Clone, Resource)]
 pub(crate) struct Notifier {
     state: Arc<Mutex<Outbox>>,
@@ -89,40 +106,25 @@ impl Notifier {
             kind: DIAGNOSTIC.into(),
             emitted_at: ene_store::util::now(),
             companion_id: Some(companion.to_owned()),
-            event: Some(w::notification::Event::Generic(Box::new(w::HostEvent {
-                kind: DIAGNOSTIC.into(),
-                payload: Some(w::JsonDocument {
-                    schema: "ene.diagnostic.v1".into(),
-                    json: json!({
-                        "role": role,
-                        "action": action,
-                        "detail": detail,
-                    })
-                    .to_string(),
-                    ..Default::default()
-                })
-                .into(),
-                ..Default::default()
-            }))),
+            event: Some(generic(
+                DIAGNOSTIC,
+                "ene.diagnostic.v1",
+                &json!({"role": role, "action": action, "detail": detail}),
+            )),
             ..Default::default()
         });
     }
 
     /// A host-level notice the clients can display.
     pub(crate) fn notice(&self, companion: Option<&str>, code: &str, message: &str) {
-        let document = w::JsonDocument {
-            schema: "ene.notice.v1".into(),
-            json: json!({"code": code, "message": message}).to_string(),
-            ..Default::default()
-        };
         self.push(
             companion,
             None,
-            w::notification::Event::Generic(Box::new(w::HostEvent {
-                kind: "notice".into(),
-                payload: Some(document).into(),
-                ..Default::default()
-            })),
+            generic(
+                "notice",
+                "ene.notice.v1",
+                &json!({"code": code, "message": message}),
+            ),
         );
     }
 
@@ -181,11 +183,6 @@ impl Notifier {
         let mut state = self.state.lock();
         state.outbox.clear();
         state.sequence += 1;
-        let document = w::JsonDocument {
-            schema: "ene.notice.v1".into(),
-            json: json!({"code": "storage_error", "message": reason}).to_string(),
-            ..Default::default()
-        };
         let event = w::Notification {
             cursor: Some(w::Cursor {
                 epoch: state.epoch.clone(),
@@ -194,11 +191,11 @@ impl Notifier {
             })
             .into(),
             kind: "host_storage_failed".into(),
-            event: Some(w::notification::Event::Generic(Box::new(w::HostEvent {
-                kind: "host_storage_failed".into(),
-                payload: Some(document).into(),
-                ..Default::default()
-            }))),
+            event: Some(generic(
+                "host_storage_failed",
+                "ene.notice.v1",
+                &json!({"code": "storage_error", "message": reason}),
+            )),
             ..Default::default()
         };
         ene_domain::debug_if_err(

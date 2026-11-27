@@ -5,9 +5,11 @@
 //! diagnostic the client receives, and the bookkeeping that keeps a repeated
 //! report from waking the head twice.
 use super::{AUTHOR, Delivered, Reaction, ReportKind, Session};
-use crate::host::{agent, notify::Notifier};
+use crate::host::{
+    agent,
+    notify::{Notifier, generic},
+};
 use bevy_ecs::prelude::*;
-use ene_rpc as w;
 use rig_core::conversation::{Author, RequestId};
 use rig_ecs::prelude::*;
 use serde_json::{Value, json};
@@ -81,16 +83,10 @@ pub(super) fn publish_status(
     notifier.push(
         Some(companion),
         Some(&session.client),
-        w::notification::Event::Generic(Box::new(w::HostEvent {
-            kind: "perception_status".into(),
-            payload: Some(w::JsonDocument {
-                schema: "ene.perception_status.v1".into(),
-                json: json!({"subscription_id": session.subscription, "status": status})
-                    .to_string(),
-                ..Default::default()
-            })
-            .into(),
-            ..Default::default()
-        })),
+        generic(
+            "perception_status",
+            "ene.perception_status.v1",
+            &json!({"subscription_id": session.subscription, "status": status}),
+        ),
     );
 }

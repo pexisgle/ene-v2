@@ -5,7 +5,7 @@ use crate::host::{
     agent,
     db::{Result, Store},
     error::HostError,
-    notify::Notifier,
+    notify::{Notifier, generic},
 };
 use bevy_ecs::prelude::*;
 use ene_domain::ClientId;
@@ -134,26 +134,20 @@ pub(crate) fn on_turn_end(voice: Option<&Voice>, notifier: Option<&Notifier>, co
     else {
         return;
     };
-    let document = w::JsonDocument {
-        schema: "ene.speech_completed.v1".into(),
-        json: serde_json::json!({
-            "companion_id": companion,
-            "client_id": ended.client_id,
-            "utterance_id": ended.utterance_id,
-            "generation_id": ended.generation_id,
-            "total_sentences": ended.total_sentences,
-        })
-        .to_string(),
-        ..Default::default()
-    };
     notifier.push(
         Some(companion),
         None,
-        w::notification::Event::Generic(Box::new(w::HostEvent {
-            kind: "speech_completed".into(),
-            payload: Some(document).into(),
-            ..Default::default()
-        })),
+        generic(
+            "speech_completed",
+            "ene.speech_completed.v1",
+            &serde_json::json!({
+                "companion_id": companion,
+                "client_id": ended.client_id,
+                "utterance_id": ended.utterance_id,
+                "generation_id": ended.generation_id,
+                "total_sentences": ended.total_sentences,
+            }),
+        ),
     );
 }
 
