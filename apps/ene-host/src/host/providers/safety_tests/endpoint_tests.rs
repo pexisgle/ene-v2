@@ -553,7 +553,8 @@ async fn p08_handles_remain_broker_scoped_after_calls_and_provider_cancellation(
             .await
             .unwrap();
     }
-    running.cancel.cancel();
+    providers.set_enabled("openrouter", false);
+    assert!(providers.running("openrouter", Extension::Llm).is_none());
     let foreign = BrokerServices::new(Arc::clone(&broker), "foreign-provider".into());
     assert!(
         running

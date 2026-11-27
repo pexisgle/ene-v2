@@ -123,13 +123,13 @@ fn builtin_providers() -> Vec<w::LlmProvider> {
 /// A package named like a built-in replaces that built-in, because a running
 /// plugin already answers for the adapter name the connection carries.
 pub(crate) fn providers(loaded: &Providers) -> Vec<w::LlmProvider> {
-    let mut adapters: Vec<&str> = loaded.adapters().collect();
+    let mut adapters: Vec<String> = loaded.adapters().collect();
     // The registry is a hash map; sorting keeps the catalogue the same on
     // every read, in this process and the next.
     adapters.sort_unstable();
     let plugins: Vec<w::LlmProvider> = adapters
         .into_iter()
-        .filter_map(|adapter| plugin_entry(adapter, loaded))
+        .filter_map(|adapter| plugin_entry(&adapter, loaded))
         .collect();
     let mut entries: Vec<w::LlmProvider> = builtin_providers()
         .into_iter()

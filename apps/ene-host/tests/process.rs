@@ -7,6 +7,10 @@
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use std::{path::Path, time::Duration};
 
+#[cfg(unix)]
+#[path = "process/plugin_lifetime.rs"]
+mod plugin_lifetime;
+
 fn connection_file(runtime: &Path) -> Option<(String, String)> {
     let bytes = std::fs::read(runtime.join("connection.json")).ok()?;
     let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;

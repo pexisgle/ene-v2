@@ -112,17 +112,16 @@ pub(crate) fn selected(
     companion: &crate::host::mind::Companion,
 ) -> Option<(String, Arc<Running>)> {
     let assignment = companion.model(crate::host::mind::Role::Task)?;
-    let settings = store.settings_repo().settings().ok()?;
-    let connection = settings
-        .connections
-        .iter()
-        .find(|connection| connection.id.as_str() == assignment.connection_id)?;
-    if connection.kind != crate::host::settings::ConnectionKind::Acp {
+    let connection = store
+        .settings_repo()
+        .connection(&assignment.connection_id)
+        .ok()??;
+    if !connection.enabled || connection.kind != crate::host::settings::ConnectionKind::Acp {
         return None;
     }
-    let adapter = connection.endpoint().adapter.clone();
-    let running = providers?.running(&adapter, Extension::Harness)?;
-    Some((adapter, running))
+    let adapter = &connection.endpoint().adapter;
+    let running = providers?.running(adapter, Extension::Harness)?;
+    Some((adapter.clone(), running))
 }
 
 /// The session, run and instruction an invocation is started for.

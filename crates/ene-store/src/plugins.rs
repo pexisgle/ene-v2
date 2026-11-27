@@ -160,15 +160,17 @@ impl<'a> PluginRepo<'a> {
         Ok(entry)
     }
 
-    pub fn set_plugin_enabled(&self, plugin_id: &str, enabled: bool) -> Result<bool> {
-        let changed = self
-            .0
-            .conn()
-            .prepare_cached(
-                "UPDATE plugin_entries SET enabled = ?2, updated_at = ?3 WHERE plugin_id = ?1",
-            )?
-            .execute(params![plugin_id, if enabled { 1 } else { 0 }, now()])?;
-        Ok(changed > 0)
+    pub fn set_plugin_enabled(
+        &self,
+        plugin_id: &str,
+        enabled: bool,
+    ) -> Result<Option<PluginEntry>> {
+        self.0.fetch(
+            "UPDATE plugin_entries SET enabled = ?2, updated_at = ?3 WHERE plugin_id = ?1
+             RETURNING plugin_id, name, version, path, enabled, installed_at, updated_at",
+            params![plugin_id, enabled, now()],
+            PluginEntry::from_row,
+        )
     }
 
     pub fn remove_plugin_entry(&self, plugin_id: &str) -> Result<Option<PluginEntry>> {
@@ -252,7 +254,11 @@ mod tests {
             Some(serde_json::json!(42))
         );
 
-        assert!(repo.set_plugin_enabled("demo-tool", false).unwrap());
+        assert!(
+            repo.set_plugin_enabled("demo-tool", false)
+                .unwrap()
+                .is_some()
+        );
         assert!(!repo.plugin_entries().unwrap()[0].enabled);
 
         assert!(repo.remove_plugin_entry("demo-tool").unwrap().is_some());

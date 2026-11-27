@@ -4,6 +4,7 @@ use crate::host::{
     db::{Result, Store, plugins::PluginEntry},
     error::HostError,
 };
+use ene_plugin_runtime::Package;
 use std::path::Path;
 
 /// Validates a local plugin package directory with `ene-plugin-runtime`, copies
@@ -12,8 +13,8 @@ pub(crate) fn install_local_package(
     store: &Store,
     state_dir: &Path,
     source_dir: &Path,
-) -> Result<(PluginEntry, ene_plugin::Manifest)> {
-    let package = ene_plugin_runtime::Package::load(source_dir)
+) -> Result<(PluginEntry, Package)> {
+    let package = Package::load(source_dir)
         .map_err(|error| HostError::Invalid(format!("invalid plugin package: {error}")))?;
     let manifest = package.manifest.clone();
     let dest = plugins_dir(state_dir).join(&manifest.id);
@@ -35,7 +36,7 @@ pub(crate) fn install_local_package(
         }
     }
     // Re-verify the installed copy before recording it.
-    let _loaded = ene_plugin_runtime::Package::load(&dest).map_err(|error| {
+    let installed = Package::load(&dest).map_err(|error| {
         HostError::Storage(format!("installed plugin verification failed: {error}"))
     })?;
     let entry = store.plugin_repo().upsert_plugin_entry(
@@ -45,7 +46,7 @@ pub(crate) fn install_local_package(
         &dest.to_string_lossy(),
         true,
     )?;
-    Ok((entry, manifest))
+    Ok((entry, installed))
 }
 
 /// Removes an installed plugin directory under `<plugins_dir>/<id>/` and deletes
@@ -135,7 +136,7 @@ mod tests {
 
         let (entry, parsed) = install_local_package(&store, state.path(), src.path()).unwrap();
         assert_eq!(entry.plugin_id, "demo-tool");
-        assert_eq!(parsed.version, "0.2.0");
+        assert_eq!(parsed.manifest.version, "0.2.0");
         assert!(entry.enabled);
         assert_eq!(store.plugin_repo().plugin_entries().unwrap().len(), 1);
 
@@ -144,6 +145,7 @@ mod tests {
                 .plugin_repo()
                 .set_plugin_enabled("demo-tool", false)
                 .unwrap()
+                .is_some()
         );
         assert!(!store.plugin_repo().plugin_entries().unwrap()[0].enabled);
 

@@ -349,6 +349,50 @@ fn head_received(frame: &mut bevy_ecs::prelude::World, companion: &str, needle: 
 }
 
 #[test]
+fn disabling_a_plugin_expires_its_parked_approval_and_fails_the_run() {
+    let mut world = HandWorld::start();
+    let session = world.start_work();
+    world.harness.run_until(|frame| {
+        frame
+            .resource::<Store>()
+            .work_repo()
+            .active_run(&session.id)
+            .unwrap()
+            .is_some_and(|run| run.state == work::RunState::WaitingInput)
+    });
+    let request = world.pending();
+    world
+        .harness
+        .app
+        .world()
+        .resource::<Providers>()
+        .set_enabled("reference", false);
+    world.harness.run_until(|frame| {
+        frame
+            .resource::<Store>()
+            .approval_repo()
+            .approval(&request.request_id)
+            .unwrap()
+            .is_some_and(|approval| approval.status == ApprovalStatus::Expired)
+    });
+    assert_eq!(
+        world
+            .harness
+            .store()
+            .work_repo()
+            .run(&request.run_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        work::RunState::Failed
+    );
+    assert!(!hand::owns(
+        world.harness.app.world().resource::<hand::Hands>(),
+        &session.id
+    ));
+}
+
+#[test]
 fn stop_work_cancels_a_parked_plugin_hand_run() {
     let mut world = HandWorld::start();
     let session = world.start_work();

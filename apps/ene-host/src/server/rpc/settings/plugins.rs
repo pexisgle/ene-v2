@@ -33,7 +33,7 @@ pub(super) async fn list_plugins(
                 })
                 .collect();
             for adapter in providers.adapters() {
-                let Some(loaded) = providers.get(adapter) else {
+                let Some(loaded) = providers.get(&adapter) else {
                     continue;
                 };
                 let manifest = &loaded.package.manifest;
@@ -74,33 +74,39 @@ pub(super) async fn install_plugin(
     request: ServiceRequest<'_, w::InstallPluginRequest>,
 ) -> ServiceResult<w::PluginInfo> {
     let source_path = request.to_owned_message().source_path;
-    services
+    let info = services
         .change(move |services| {
             let store = &services.store;
-            let (entry, manifest) = crate::host::providers::install_local_package(
+            let (entry, package) = crate::host::providers::install_local_package(
                 store,
                 &services.state_dir,
                 std::path::Path::new(&source_path),
             )?;
+            let manifest = &package.manifest;
             let extensions = manifest
                 .entrypoints
                 .iter()
                 .flat_map(|ep| ep.provides.iter())
                 .map(|ext| format!("{ext:?}").to_ascii_lowercase())
                 .collect();
-            Ok(w::PluginInfo {
+            let view = w::PluginInfo {
                 id: entry.plugin_id,
                 name: entry.name,
                 version: entry.version,
-                description: manifest.description,
+                description: manifest.description.clone(),
                 enabled: entry.enabled,
                 extensions,
                 path: entry.path,
                 installed_at: entry.installed_at,
                 ..Default::default()
-            })
+            };
+            services.providers.replace(package);
+            Ok(view)
         })
-        .await
+        .await?;
+    let shared = services.runtime.services();
+    shared.providers.start_used(&shared.store).await;
+    Ok(info)
 }
 
 pub(super) async fn set_plugin_enabled(
@@ -109,24 +115,19 @@ pub(super) async fn set_plugin_enabled(
     request: ServiceRequest<'_, w::SetPluginEnabledRequest>,
 ) -> ServiceResult<w::PluginInfo> {
     let req = request.to_owned_message();
-    services
+    let enabled = req.enabled;
+    let view = services
         .change(move |services| {
             let store = &services.store;
-            if !store
-                .plugin_repo()
-                .set_plugin_enabled(&req.plugin_id, req.enabled)?
-            {
-                return Err(HostError::NotFound(format!(
-                    "plugin `{}` not found",
-                    req.plugin_id
-                )));
-            }
             let entry = store
                 .plugin_repo()
-                .plugin_entries()?
-                .into_iter()
-                .find(|e| e.plugin_id == req.plugin_id)
-                .ok_or_else(|| HostError::NotFound("plugin not found".into()))?;
+                .set_plugin_enabled(&req.plugin_id, enabled)?
+                .ok_or_else(|| {
+                    HostError::NotFound(format!("plugin `{}` not found", req.plugin_id))
+                })?;
+            services
+                .providers
+                .set_enabled(&entry.plugin_id, entry.enabled);
             Ok(w::PluginInfo {
                 id: entry.plugin_id,
                 name: entry.name,
@@ -137,7 +138,12 @@ pub(super) async fn set_plugin_enabled(
                 ..Default::default()
             })
         })
-        .await
+        .await?;
+    if enabled {
+        let shared = services.runtime.services();
+        shared.providers.start_used(&shared.store).await;
+    }
+    Ok(view)
 }
 
 pub(super) async fn remove_plugin(
@@ -149,6 +155,7 @@ pub(super) async fn remove_plugin(
     services
         .change(move |services| {
             let store = &services.store;
+            services.providers.set_enabled(&plugin_id, false);
             if !crate::host::providers::remove_local_package(
                 store,
                 &services.state_dir,
@@ -158,6 +165,7 @@ pub(super) async fn remove_plugin(
                     "plugin `{plugin_id}` not found"
                 )));
             }
+            services.providers.remove(&plugin_id);
             Ok(w::Empty::default())
         })
         .await

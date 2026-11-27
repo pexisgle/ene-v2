@@ -12,6 +12,7 @@ use crate::host::{
     },
 };
 use ene_mind::JsonDoc;
+use parking_lot::Mutex;
 use rig_core::catalog::Catalog;
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};

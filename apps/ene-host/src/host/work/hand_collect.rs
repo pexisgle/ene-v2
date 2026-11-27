@@ -6,7 +6,7 @@
 //! session's next turn. The hand state it reads is `hand`'s; this module only
 //! turns what arrived into host effects.
 
-use super::hand::{Hands, Pending, dispatch_to_hand};
+use super::hand::{CallDespawner, Hands, Pending, dispatch_to_hand};
 use super::{Run, RunState, WorkSession, WorkStatus};
 use crate::host::{
     background,
@@ -29,9 +29,27 @@ use tokio::sync::mpsc;
 /// approval, and the input a finished run parked.
 pub(crate) fn collect(world: &mut World) {
     let mut hands = std::mem::take(&mut *world.resource_mut::<Hands>());
-    let batches = take_events(&mut hands);
     let store = world.resource::<Store>().clone();
-    for (adapter, events) in batches {
+    let revoked: Vec<_> = hands
+        .by_adapter
+        .values()
+        .filter(|hand| hand.running.revoked())
+        .map(|hand| hand.work_id.clone())
+        .collect();
+    for work in revoked {
+        super::hand::release(&mut CallDespawner::new(world), &mut hands, &work);
+        match store.work_repo().active_run(&work) {
+            Ok(Some(run)) => super::finish_run(
+                world,
+                run,
+                RunState::Failed,
+                Some("ハーネスが無効になったため、作業を中止しました".into()),
+            ),
+            Ok(None) => {}
+            Err(error) => crate::host::fail(world, &error.to_string()),
+        }
+    }
+    for (adapter, events) in take_events(&mut hands) {
         for event in events {
             apply(world, &mut hands, &store, &adapter, event);
         }

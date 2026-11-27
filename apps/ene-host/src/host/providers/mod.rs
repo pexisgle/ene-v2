@@ -16,33 +16,29 @@ pub(crate) mod character;
 pub(crate) mod extensions;
 mod grant;
 mod install;
+mod running;
 #[cfg(test)]
 mod safety_tests;
 mod services;
 
 pub(crate) use grant::Grant;
 pub(crate) use install::{install_local_package, remove_local_package};
+pub(crate) use running::{ProviderRole, Running};
 #[cfg(test)]
 pub(crate) use services::construction_failure;
 #[cfg(test)]
 pub(crate) use services::{BrokerServices, http_broker};
 pub(crate) use services::{PluginServices, ProviderInvocationContext};
 
-use ene_plugin::{Extension, ProviderConfiguration};
-use ene_plugin_runtime::{Package, instance::Instance};
-use parking_lot::Mutex;
-use rig_core::providers::registry::ProviderId;
-/// Startup cells, keyed by the adapter and extension they serve.
-type RunningMap = HashMap<(String, Extension), Arc<tokio::sync::OnceCell<Arc<Running>>>>;
-
+use ene_plugin::{EntryPoint, Extension, ProviderConfiguration, Target};
+use ene_plugin_runtime::Package;
+use parking_lot::RwLock;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
 };
+use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
 use crate::host::error::HostError;
@@ -52,48 +48,69 @@ pub(crate) const PLUGINS_DIR: &str = "plugins";
 /// The environment override, for a development checkout or a test.
 pub(crate) const PLUGINS_DIR_ENV: &str = "ENE_HOST_PLUGINS_DIR";
 
-/// One loaded provider package.
+/// A verified package with an entrypoint this host can select.
 pub(crate) struct Loaded {
     pub(crate) package: Package,
-    /// Every entrypoint that serves a provider extension, with the provider
-    /// configuration that entrypoint declared. One package may serve several
-    /// extensions with different endpoints and credentials.
-    entries: HashMap<Extension, (String, ProviderConfiguration)>,
-    /// The entrypoint that serves the harness extension. A harness is not a
-    /// provider: it carries no endpoint or credential, so it lives apart from
-    /// `entries` and `Running` holds no provider configuration for it.
-    harness: Option<String>,
-    /// Non-provider extension entrypoints (`Character`, `Hook`, `Tool`).
-    extensions: HashMap<Extension, String>,
+}
+
+fn serves(entry: &EntryPoint, extension: Extension) -> bool {
+    entry.target != Target::Client
+        && entry.provides.contains(&extension)
+        && if extension.serves_provider() {
+            entry.provider.is_some()
+        } else {
+            matches!(
+                extension,
+                Extension::Harness | Extension::Character | Extension::Hook | Extension::Tool
+            )
+        }
 }
 
 impl Loaded {
-    /// The entrypoint that serves `extension` and its provider configuration.
+    /// The first entrypoint that serves this provider extension and its configuration.
     pub(crate) fn entry(&self, extension: Extension) -> Option<(&str, &ProviderConfiguration)> {
-        self.entries
-            .get(&extension)
-            .map(|(entrypoint, provider)| (entrypoint.as_str(), provider))
-    }
-
-    /// The entrypoint that serves the harness extension, when one is declared.
-    pub(crate) fn harness_entrypoint(&self) -> Option<&str> {
-        self.harness.as_deref()
-    }
-
-    /// The entrypoint that serves a non-provider extension (`Character`, `Hook`, `Tool`).
-    pub(crate) fn extension_entrypoint(&self, extension: Extension) -> Option<&str> {
-        if extension == Extension::Harness {
-            return self.harness_entrypoint();
+        if !extension.serves_provider() {
+            return None;
         }
-        self.extensions.get(&extension).map(String::as_str)
+        let entry = self.entrypoint(extension)?;
+        Some((&entry.id, entry.provider.as_ref()?))
+    }
+
+    /// The first entrypoint that serves the given non-provider extension.
+    pub(crate) fn extension_entrypoint(&self, extension: Extension) -> Option<&str> {
+        self.entrypoint(extension).map(|entry| entry.id.as_str())
+    }
+
+    fn entrypoint(&self, extension: Extension) -> Option<&EntryPoint> {
+        self.package
+            .manifest
+            .entrypoints
+            .iter()
+            .find(|entry| serves(entry, extension))
     }
 }
 
 /// The providers a host may call, by the adapter name a connection names.
 #[derive(Clone, Default, bevy_ecs::prelude::Resource)]
 pub(crate) struct Providers {
-    loaded: Arc<HashMap<String, Arc<Loaded>>>,
-    running: Arc<Mutex<RunningMap>>,
+    installed: Arc<RwLock<HashMap<String, Registration>>>,
+}
+
+struct Registration {
+    loaded: Arc<Loaded>,
+    active: Option<Admission>,
+}
+
+#[derive(Default)]
+struct Admission {
+    lifetime: CancellationToken,
+    started: HashMap<Extension, Arc<OnceCell<Arc<Running>>>>,
+}
+
+impl Drop for Admission {
+    fn drop(&mut self) {
+        self.lifetime.cancel();
+    }
 }
 
 impl Providers {
@@ -112,7 +129,7 @@ impl Providers {
         let Ok(entries) = std::fs::read_dir(&directory) else {
             return Self::none();
         };
-        let mut loaded = HashMap::new();
+        let registry = Self::none();
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_dir() {
@@ -120,37 +137,75 @@ impl Providers {
             }
             match load_one(&path) {
                 Ok((id, plugin)) => {
-                    loaded.insert(id, Arc::new(plugin));
+                    registry.install(id, plugin);
                 }
                 Err(error) => {
                     tracing::warn!(plugin = %path.display(), "the plugin was not loaded: {error}");
                 }
             }
         }
-        Self {
-            loaded: Arc::new(loaded),
-            running: Arc::new(Mutex::new(HashMap::new())),
-        }
+        registry
     }
 
     /// The plugin a connection's `adapter` names, when one is installed.
-    pub(crate) fn get(&self, adapter: &str) -> Option<&Arc<Loaded>> {
-        self.loaded.get(adapter)
+    pub(crate) fn get(&self, adapter: &str) -> Option<Arc<Loaded>> {
+        self.installed
+            .read()
+            .get(adapter)
+            .map(|entry| Arc::clone(&entry.loaded))
     }
 
     /// The adapters this host loaded.
-    pub(crate) fn adapters(&self) -> impl Iterator<Item = &str> {
-        self.loaded.keys().map(String::as_str)
+    pub(crate) fn adapters(&self) -> impl Iterator<Item = String> + use<> {
+        self.installed
+            .read()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    fn install(&self, id: String, plugin: Loaded) {
+        self.installed.write().insert(
+            id,
+            Registration {
+                loaded: Arc::new(plugin),
+                active: Some(Admission::default()),
+            },
+        );
+    }
+
+    pub(crate) fn replace(&self, package: Package) {
+        let id = package.manifest.id.clone();
+        match load_package(package) {
+            Ok(plugin) => self.install(id, plugin),
+            Err(_) => self.remove(&id),
+        }
+    }
+
+    pub(crate) fn set_enabled(&self, id: &str, enabled: bool) {
+        let mut installed = self.installed.write();
+        if let Some(entry) = installed.get_mut(id) {
+            if enabled {
+                entry.active.get_or_insert_with(Admission::default);
+            } else {
+                entry.active = None;
+            }
+        }
+    }
+
+    pub(crate) fn remove(&self, id: &str) {
+        self.installed.write().remove(id);
     }
 
     /// Deterministically sorted plugin IDs that provide `extension`.
     pub(crate) fn with_extension(&self, extension: Extension) -> Vec<String> {
         let mut ids: Vec<String> = self
-            .loaded
+            .installed
+            .read()
             .iter()
-            .filter(|(_, loaded)| {
-                loaded.entry(extension).is_some()
-                    || loaded.extension_entrypoint(extension).is_some()
+            .filter(|(_, entry)| {
+                entry.active.is_some() && (entry.loaded.entrypoint(extension).is_some())
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -165,32 +220,39 @@ impl Providers {
         adapter: &str,
         extension: Extension,
     ) -> Result<Arc<Running>, HostError> {
-        let loaded = self.get(adapter).ok_or_else(|| {
-            HostError::Unavailable(format!("no plugin is installed as `{adapter}`"))
-        })?;
-        let cell = {
-            let mut running = self.running.lock();
-            Arc::clone(
-                running
-                    .entry((adapter.to_owned(), extension))
-                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+        let unavailable = || HostError::Unavailable(format!("plugin `{adapter}` is not enabled"));
+        let (loaded, cell, lifetime) = {
+            let mut installed = self.installed.write();
+            let entry = installed.get_mut(adapter).ok_or_else(unavailable)?;
+            let active = entry.active.as_mut().ok_or_else(unavailable)?;
+            (
+                Arc::clone(&entry.loaded),
+                Arc::clone(active.started.entry(extension).or_default()),
+                active.lifetime.clone(),
             )
         };
         let running = cell
             .get_or_try_init(|| async {
-                Running::start(Arc::clone(loaded), extension)
+                Running::start(loaded, extension, lifetime.clone())
                     .await
                     .map(Arc::new)
             })
             .await?;
+        if lifetime.is_cancelled() {
+            return Err(unavailable());
+        }
         Ok(Arc::clone(running))
     }
 
     /// The started instance for `adapter` and `extension`, when there is one.
     pub(crate) fn running(&self, adapter: &str, extension: Extension) -> Option<Arc<Running>> {
-        self.running
-            .lock()
-            .get(&(adapter.to_owned(), extension))?
+        self.installed
+            .read()
+            .get(adapter)?
+            .active
+            .as_ref()?
+            .started
+            .get(&extension)?
             .get()
             .map(Arc::clone)
     }
@@ -247,217 +309,22 @@ fn load_one(path: &Path) -> Result<(String, Loaded), HostError> {
     let package = Package::load(path)
         .map_err(|error| HostError::Unavailable(format!("plugin package: {error}")))?;
     let id = package.manifest.id.clone();
-    let mut entries = HashMap::new();
-    let mut harness = None;
-    let mut extensions = HashMap::new();
-    for entrypoint in &package.manifest.entrypoints {
-        if entrypoint.target == ene_plugin::Target::Client {
-            continue;
-        }
-        if entrypoint.provides.contains(&Extension::Harness) {
-            harness.get_or_insert_with(|| entrypoint.id.clone());
-        }
-        for ext in [Extension::Character, Extension::Hook, Extension::Tool] {
-            if entrypoint.provides.contains(&ext) {
-                extensions
-                    .entry(ext)
-                    .or_insert_with(|| entrypoint.id.clone());
-            }
-        }
-        let Some(configuration) = &entrypoint.provider else {
-            continue;
-        };
-        for extension in &entrypoint.provides {
-            if extension.serves_provider() {
-                entries
-                    .entry(*extension)
-                    .or_insert_with(|| (entrypoint.id.clone(), configuration.clone()));
-            }
-        }
-    }
-    if entries.is_empty() && harness.is_none() && extensions.is_empty() {
-        return Err(HostError::Unavailable(format!(
-            "the plugin `{id}` serves no supported host extension"
-        )));
-    }
-    Ok((
-        id,
-        Loaded {
-            package,
-            entries,
-            harness,
-            extensions,
-        },
-    ))
+    Ok((id, load_package(package)?))
 }
 
-/// What a running provider-plugin instance is answering as.
-pub(crate) enum RunningRole {
-    /// The extension serves one provider; both values come from its manifest.
-    /// Boxed because the configuration dwarfs the unit variant.
-    Provider(Box<ProviderRole>),
-    /// A tool-only extension: it has no provider configuration at all.
-    Harness,
-}
-
-/// The provider metadata a provider extension declares once, in its manifest.
-pub(crate) struct ProviderRole {
-    pub(crate) configuration: ProviderConfiguration,
-    /// The catalog vendor this provider's models are filed under. A plugin
-    /// serves a provider rig does not ship, so it is declared once here and
-    /// every model spec the host builds for it names it.
-    pub(crate) id: ProviderId,
-}
-
-/// One running provider: its loaded package and the instance that answers.
-///
-/// An instance is not `Sync`, so calls serialize behind a mutex. One provider
-/// serves one connection, and a call is short, so this is not a bottleneck.
-///
-pub(crate) struct Running {
-    /// Present only when the extension serves a provider. One field rather
-    /// than two `Option`s, so "has a configuration but no vendor name" cannot
-    /// be constructed.
-    role: RunningRole,
-    instance: tokio::sync::Mutex<Option<Instance>>,
-    package: Package,
-    entrypoint: String,
-    cancel: CancellationToken,
-    /// A caller dropped a call before it reported. The next request releases
-    /// the dead instance and reloads; a call that failed on its own keeps the
-    /// old policy and is not restarted automatically.
-    cancelled: AtomicBool,
-}
-
-impl Running {
-    /// Starts the entrypoint that serves `extension`.
-    pub(crate) async fn start(
-        loaded: Arc<Loaded>,
-        extension: Extension,
-    ) -> Result<Self, HostError> {
-        let (entrypoint, role) = if !extension.serves_provider() {
-            let entrypoint = loaded.extension_entrypoint(extension).ok_or_else(|| {
-                HostError::Unavailable(format!(
-                    "the plugin `{}` serves no {extension:?} entrypoint",
-                    loaded.package.manifest.id
-                ))
-            })?;
-            (entrypoint.to_owned(), RunningRole::Harness)
-        } else {
-            let (entrypoint, provider) = loaded.entry(extension).ok_or_else(|| {
-                HostError::Unavailable(format!(
-                    "the plugin `{}` serves no {extension:?}",
-                    loaded.package.manifest.id
-                ))
-            })?;
-            let provider_id = ProviderId::declare(&provider.id).map_err(|error| {
-                HostError::Unavailable(format!(
-                    "the plugin provider id `{}` is not a vendor name: {error}",
-                    provider.id
-                ))
-            })?;
-            (
-                entrypoint.to_owned(),
-                RunningRole::Provider(Box::new(ProviderRole {
-                    configuration: provider.clone(),
-                    id: provider_id,
-                })),
-            )
-        };
-        let package = loaded.package.clone();
-        let cancel = CancellationToken::new();
-        // `Instance::load` runs the guest's initialization hook, so this is the
-        // one place `ene_initialize` is called for an instance.
-        let instance = Instance::load(package.clone(), entrypoint.clone(), &cancel)
-            .await
-            .map_err(|error| HostError::Unavailable(format!("plugin load: {error}")))?;
-        Ok(Self {
-            role,
-            instance: tokio::sync::Mutex::new(Some(instance)),
-            package,
-            entrypoint,
-            cancel,
-            cancelled: AtomicBool::new(false),
-        })
+fn load_package(package: Package) -> Result<Loaded, HostError> {
+    if package.manifest.entrypoints.iter().any(|entry| {
+        entry
+            .provides
+            .iter()
+            .any(|&extension| serves(entry, extension))
+    }) {
+        return Ok(Loaded { package });
     }
-
-    /// Runs one operation on the plugin and returns its reply document.
-    pub(crate) async fn invoke(
-        &self,
-        operation: ene_plugin::Operation,
-        services: Arc<dyn ene_plugin_runtime::instance::Services>,
-    ) -> Result<serde_json::Value, HostError> {
-        let (sender, mut events) = tokio::sync::mpsc::channel(16);
-        // A caller that wants no stream still must drain it, or a plugin that
-        // emits would block on a full channel.
-        tokio::spawn(async move { while events.recv().await.is_some() {} });
-        self.call(operation, services, sender).await
-    }
-
-    /// Runs one operation and hands its events to `events` as they arrive, so
-    /// a streamed answer reaches the caller while the plugin is still
-    /// producing it.
-    pub(crate) async fn invoke_streaming(
-        &self,
-        operation: ene_plugin::Operation,
-        services: Arc<dyn ene_plugin_runtime::instance::Services>,
-        events: tokio::sync::mpsc::Sender<ene_plugin::Event>,
-    ) -> Result<serde_json::Value, HostError> {
-        self.call(operation, services, events).await
-    }
-
-    async fn call(
-        &self,
-        operation: ene_plugin::Operation,
-        services: Arc<dyn ene_plugin_runtime::instance::Services>,
-        events: tokio::sync::mpsc::Sender<ene_plugin::Event>,
-    ) -> Result<serde_json::Value, HostError> {
-        let mut slot = self.instance.lock().await;
-        if self.cancelled.swap(false, Ordering::SeqCst)
-            && slot.as_ref().is_none_or(|instance| !instance.is_usable())
-        {
-            // A dropped caller cancelled the previous call before it could
-            // report, leaving the instance without its plugin. Drop it first,
-            // releasing its execution slot, then load a fresh instance for the
-            // next, distinct request.
-            *slot = None;
-            *slot = Some(self.reload().await?);
-        }
-        let Some(instance) = slot.as_mut().filter(|instance| instance.is_usable()) else {
-            return Err(HostError::Unavailable(
-                ("the plugin is unavailable after a failed call; it is not restarted automatically")
-                    .into(),
-            ));
-        };
-        instance
-            .invoke(operation, services, events, &self.cancel)
-            .await
-            .map_err(|error| HostError::Unavailable(format!("plugin call: {error}")))
-    }
-
-    /// Notes that a caller dropped a call before it reported. The next request
-    /// reloads; the dropped operation itself is never replayed.
-    pub(crate) fn note_cancelled(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
-    }
-
-    async fn reload(&self) -> Result<Instance, HostError> {
-        Instance::load(self.package.clone(), self.entrypoint.clone(), &self.cancel)
-            .await
-            .map_err(|error| HostError::Unavailable(format!("plugin reload: {error}")))
-    }
-
-    /// The provider this instance answers under.
-    ///
-    /// `None` is the harness case: a tool-only extension has no configuration
-    /// and no vendor name, so callers on a provider path turn that into their
-    /// own error instead of the accessor panicking.
-    pub(crate) fn provider(&self) -> Option<&ProviderRole> {
-        match &self.role {
-            RunningRole::Provider(role) => Some(role),
-            RunningRole::Harness => None,
-        }
-    }
+    Err(HostError::Unavailable(format!(
+        "the plugin `{}` serves no supported host extension",
+        package.manifest.id,
+    )))
 }
 
 #[cfg(test)]
@@ -520,7 +387,7 @@ mod tests {
             "embedding",
         );
         let providers = Providers::load(temp.path());
-        let mut adapters: Vec<&str> = providers.adapters().collect();
+        let mut adapters: Vec<String> = providers.adapters().collect();
         adapters.sort_unstable();
         assert_eq!(adapters, ["local-embed", "voicevox"]);
         assert_eq!(
