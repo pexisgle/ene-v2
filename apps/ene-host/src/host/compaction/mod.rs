@@ -9,13 +9,14 @@ use super::{
     resources::{HostRuntime, HostState},
 };
 use bevy_ecs::prelude::*;
+use ene_mind::Summary;
 use job::{CompactionError, Outcome, run};
 use rig_core::completion::Message;
 use rig_core::conversation::{
     Aside, Author, AuthorKind, Conversation as History, Entry, EntryRef, pairing,
 };
 use rig_ecs::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::{collections::HashMap, sync::Arc};
 
 // Only the tests reach these through `use super::*`.
@@ -41,27 +42,63 @@ const NOTICE: &str = "[System Notice: 過去の一部ログを一時的に省略
 const SUMMARY_HEAD: &str =
     "Earlier messages of this conversation were compacted into the summary below.";
 
-/// The rolling summary snapshot kept as the newest `ene.summary` aside.
-///
-/// The snapshot is view-only by design (docs/design/mind.md): the
-/// append-only session log is never rewritten, so rig-memory's `apply_summary`
-/// (which splices older messages out in place) and the `summary_state` /
-/// `summary_in` bookkeeping of that splice are not the host's path. The
-/// summary text is injected into the request view alone, by
-/// [`inject_summary`], and the aside makes it survive a restart.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Summary {
-    pub(crate) text: String,
-    /// The newest message the summary stands for.
-    pub(crate) through_message_id: u64,
-}
-
 pub(crate) fn summary_of(conversation: &History) -> Option<Summary> {
     conversation
         .asides()
         .rev()
         .find(|(_, aside)| aside.kind == SUMMARY)
         .and_then(|(_, aside)| Summary::deserialize(&aside.value).ok())
+}
+
+fn saved_summary(
+    store: &Store,
+    companion: &str,
+    conversation: &History,
+) -> ene_store::Result<Option<Summary>> {
+    let Some(checkpoint) = store.memory_repo().compaction_checkpoint(companion)? else {
+        return Ok(None);
+    };
+    let through = checkpoint.summary.through_message_id;
+    if checkpoint.lineage != log_lineage(conversation)?
+        || !conversation
+            .entries()
+            .any(|entry| entry.id.get() == through)
+    {
+        return Err(ene_store::StoreError::Storage(
+            "the compaction checkpoint has no matching source log".into(),
+        ));
+    }
+    Ok(Some(checkpoint.summary))
+}
+
+fn log_lineage(conversation: &History) -> ene_store::Result<String> {
+    let lineage = conversation.lineage();
+    if !lineage.is_log() {
+        return Err(ene_store::StoreError::Conflict(
+            "the conversation log is not ready".into(),
+        ));
+    }
+    serde_json::to_string(&lineage)
+        .map_err(|error| ene_store::StoreError::Storage(error.to_string()))
+}
+
+pub(crate) fn restore_summary(
+    store: &Store,
+    companion: &str,
+    conversation: &mut History,
+) -> ene_store::Result<()> {
+    if let Some(summary) = saved_summary(store, companion, conversation)? {
+        publish_summary(conversation, &summary);
+    }
+    Ok(())
+}
+
+fn publish_summary(conversation: &mut History, summary: &Summary) {
+    if summary_of(conversation).as_ref() == Some(summary) {
+        return;
+    }
+    let value = serde_json::to_value(summary).unwrap_or_default();
+    conversation.add_aside(Aside::new(SUMMARY, Author::plugin("ene-host"), value));
 }
 
 /// Injects `summary` at the head of the request view, in place of the messages
@@ -288,11 +325,7 @@ fn summarize_at_turn_boundary(
     }
 }
 
-/// Saves a finished summary as the newest `ene.summary` aside. The aside is the
-/// position the next job starts from, so it is written only once the memories,
-/// edges and reflection of the same window committed (docs/design/mind.md
-/// §5.2): a failed pass leaves the stored summary alone, and the range it could
-/// not consolidate waits for the next compaction instead of a queue or a cursor.
+/// Projects the committed checkpoint into the append-only Rig log.
 fn collect_summaries(
     mut state: ResMut<CompactionState>,
     mut agents: Query<(&CompanionAgent, &mut Conversation)>,
@@ -301,27 +334,13 @@ fn collect_summaries(
         return;
     };
     match outcome {
-        Ok(collected) => {
-            if let Err(error) = collected.memories {
-                tracing::warn!(
-                    companion = %companion,
-                    %error,
-                    "the consolidation pass failed; its range stays pending"
-                );
-                return;
-            }
+        Ok(summary) => {
             let Some(mut conversation) = agents.iter_mut().find_map(|(agent, conversation)| {
                 (agent.companion_id == companion).then_some(conversation)
             }) else {
                 return;
             };
-            if summary_of(&conversation).is_some_and(|current| {
-                current.through_message_id >= collected.summary.through_message_id
-            }) {
-                return;
-            }
-            let value = serde_json::to_value(&collected.summary).unwrap_or_default();
-            conversation.add_aside(Aside::new(SUMMARY, Author::plugin("ene-host"), value));
+            publish_summary(&mut conversation, &summary);
         }
         Err(why) => {
             tracing::warn!(%why, companion = %companion, "the compaction summary failed")

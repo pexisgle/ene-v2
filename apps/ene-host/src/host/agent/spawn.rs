@@ -91,6 +91,13 @@ pub(crate) fn spawn_companion(world: &mut World, companion: &Companion) -> Entit
         )
         .id(),
     };
+    if let Some(store) = world.get_resource::<Store>().cloned()
+        && let Some(mut conversation) = world.get_mut::<Conversation>(entity)
+        && let Err(error) =
+            crate::host::compaction::restore_summary(&store, &companion.id, &mut conversation)
+    {
+        crate::host::fail(world, &error.to_string());
+    }
     let published = published_through(world.get::<Conversation>(entity));
     world.entity_mut(entity).insert((
         CompanionAgent {

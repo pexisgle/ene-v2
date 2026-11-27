@@ -481,7 +481,7 @@ fn v26_retains_legacy_receipts_without_inventing_a_memory_revision() {
         )
         .unwrap();
     apply_migrations(&mut connection).unwrap();
-    assert_eq!(user_version(&connection), 26);
+    assert_eq!(user_version(&connection), VERSION);
     let receipt: (String, Option<u64>) = connection.query_row(
         "SELECT created_at, memory_revision FROM memory_injections WHERE companion_id = 'ene' AND turn_id = '5' AND memory_id = 'old-id'",
         [], |row| Ok((row.get(0)?, row.get(1)?)),

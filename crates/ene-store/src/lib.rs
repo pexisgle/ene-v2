@@ -125,6 +125,7 @@ impl Store {
             "DELETE FROM memory_edges;
              DELETE FROM memory_injections;
              DELETE FROM mind_operations;
+             DELETE FROM compaction_checkpoints;
              DELETE FROM memories;
              DELETE FROM device_operations;
              DELETE FROM approval_requests;

@@ -13,8 +13,8 @@ pub mod prompt;
 
 pub use companion::{Companion, Profile, Role, State, default_ene_companion, validate_id};
 pub use consolidate::{
-    Batch, Commit, EXTRACTION_SYSTEM_PROMPT, Extraction, Fact, MemoryContext, Turn,
-    extraction_prompt, normalize, validate_citations,
+    Batch, Checkpoint, Commit, EXTRACTION_SYSTEM_PROMPT, Extraction, Fact, MemoryContext, Summary,
+    Turn, extraction_prompt, normalize, validate_citations,
 };
 pub use embedding::{PREP_VERSION, PendingEmbedding, dimensions_of_space, space_id};
 pub use ene_domain::{ModelAssignment, ModelAssignments};

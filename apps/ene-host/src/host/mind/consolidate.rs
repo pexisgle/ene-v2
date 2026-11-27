@@ -3,10 +3,7 @@
 //! validates citations and commits memories, edges and the reflection
 //! (docs/design/mind.md).
 //!
-//! The pass is one async function the compaction job awaits. Nothing schedules
-//! it and nothing stores where it stands: its range is the message window
-//! between the previous summary and the new one, so the newest `ene.summary`
-//! aside is the only position (docs/design/mind.md).
+//! The compaction job commits one source window and its summary checkpoint.
 use super::{
     Companion, Role,
     embedding::{self, Embeddings},
@@ -29,7 +26,7 @@ const MAX_QUERY_CHARS: usize = 2_000;
 /// How many newest turns are joined into that query.
 const QUERY_TURNS: usize = 4;
 
-use ene_mind::{Batch, Commit, EXTRACTION_SYSTEM_PROMPT, Extraction, Turn, extraction_prompt};
+use ene_mind::{Batch, EXTRACTION_SYSTEM_PROMPT, Extraction, Turn, extraction_prompt};
 
 /// The turns inside the message-id window `(after, through]`, in conversation
 /// order: exactly the turns the summary this pass runs beside stands for.
@@ -110,23 +107,69 @@ pub(crate) async fn pass(
     companion_id: &str,
     conversation: &CoreConversation,
     after: Option<u64>,
-    through: u64,
-) -> Result<Commit> {
+    checkpoint: ene_mind::Checkpoint,
+) -> Result<ene_mind::Summary> {
+    let through = checkpoint.summary.through_message_id;
     let turns = pending_turns(conversation, after, through);
-    if turns.is_empty() {
-        return Ok(Commit::default());
-    }
     let companion = services
         .store
         .companion_repo()
         .companion(companion_id)?
         .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
-    let target = target(services, &companion)?;
+    let (context, injected, extraction) = if turns.is_empty() {
+        (
+            Vec::new(),
+            Vec::new(),
+            Extraction {
+                facts: Vec::new(),
+                state: None,
+            },
+        )
+    } else {
+        prepare_extraction(services, &companion, &turns, after, through).await?
+    };
+    let reflection = extraction.state.map(|patch| {
+        let mut state = companion.state;
+        patch.apply(&mut state);
+        ene_mind::MindStateChange {
+            expected_revision: companion.state_revision,
+            state,
+        }
+    });
+    let batch = Batch {
+        companion_id: companion_id.to_owned(),
+        companion_created_at: companion.created_at,
+        after,
+        checkpoint,
+        context,
+        injected,
+        reflection,
+    };
+    services
+        .store
+        .memory_repo()
+        .consolidate(&batch, &extraction.facts)?;
+    Ok(batch.checkpoint.summary)
+}
+
+async fn prepare_extraction(
+    services: &Services,
+    companion: &Companion,
+    turns: &[Turn],
+    after: Option<u64>,
+    through: u64,
+) -> Result<(
+    Vec<ene_mind::MemoryContext>,
+    Vec<ene_mind::MemoryVersion>,
+    Extraction,
+)> {
+    let companion_id = &companion.id;
+    let target = target(services, companion)?;
     // Merge candidates come from the same hybrid retrieval recall uses: FTS5
     // over the newest turns plus vector similarity, with pinned and important
     // memories only as a fallback. Forgotten memories surface when the topic
     // matches, so the model sees that the user asked to forget them.
-    let query = turn_query(&turns);
+    let query = turn_query(turns);
     let semantic = embedding::semantic_candidates(
         &services.store,
         &services.embeddings,
@@ -148,29 +191,10 @@ pub(crate) async fn pass(
         .injected_between(companion_id, after, through)?;
     let extraction = extract(
         &target,
-        extraction_prompt(&turns, &context, &injected, &companion.state),
+        extraction_prompt(turns, &context, &injected, &companion.state),
     )
     .await?;
-    let reflection = extraction.state.map(|patch| {
-        let mut state = companion.state;
-        patch.apply(&mut state);
-        ene_mind::MindStateChange {
-            expected_revision: companion.state_revision,
-            state,
-        }
-    });
-    let batch = Batch {
-        companion_id: companion_id.to_owned(),
-        companion_created_at: companion.created_at,
-        through,
-        context,
-        injected,
-        reflection,
-    };
-    Ok(services
-        .store
-        .memory_repo()
-        .consolidate(&batch, &extraction.facts)?)
+    Ok((context, injected, extraction))
 }
 
 /// Resolves the companion's `Consolidation` assignment (or its documented
@@ -253,7 +277,14 @@ mod tests {
         Batch {
             companion_id: "ene".into(),
             companion_created_at: companion().created_at,
-            through,
+            after: None,
+            checkpoint: ene_mind::Checkpoint {
+                lineage: "fixture".into(),
+                summary: ene_mind::Summary {
+                    text: "Summary".into(),
+                    through_message_id: through,
+                },
+            },
             context,
             injected: Vec::new(),
             reflection: None,
@@ -617,16 +648,16 @@ mod tests {
             .unwrap();
         let mut conversation = CoreConversation::new();
         answer(&mut conversation, "紅茶の店はどこ", "新宿にある");
-        let commit = pass(
+        let summary = pass(
             &services(&setup),
             "ene",
             &conversation,
             None,
-            newest(&conversation),
+            batch(newest(&conversation), Vec::new()).checkpoint,
         )
         .await
         .unwrap();
-        assert_eq!((commit.inserted, commit.updated), (0, 1));
+        assert_eq!(summary.through_message_id, newest(&conversation));
         let updated = setup
             .store
             .memory_repo()
@@ -659,16 +690,16 @@ mod tests {
         let setup = setup(&server.base);
         let mut conversation = CoreConversation::new();
         answer(&mut conversation, "一緒に紅茶を飲もう", "いいね");
-        let commit = pass(
+        let summary = pass(
             &services(&setup),
             "ene",
             &conversation,
             None,
-            newest(&conversation),
+            batch(newest(&conversation), Vec::new()).checkpoint,
         )
         .await
         .unwrap();
-        assert_eq!((commit.inserted, commit.updated), (0, 0));
+        assert_eq!(summary.through_message_id, newest(&conversation));
         let after = setup
             .store
             .companion_repo()

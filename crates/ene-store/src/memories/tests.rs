@@ -555,7 +555,14 @@ fn batch(through: u64, context: Vec<MemoryContext>) -> Batch {
     Batch {
         companion_id: "ene".into(),
         companion_created_at: "now".into(),
-        through,
+        after: None,
+        checkpoint: ene_mind::Checkpoint {
+            lineage: "fixture".into(),
+            summary: ene_mind::Summary {
+                text: "Summary".into(),
+                through_message_id: through,
+            },
+        },
         context,
         injected: Vec::new(),
         reflection: None,
@@ -620,9 +627,11 @@ fn consolidation_does_not_resurrect_a_forgotten_memory() {
     assert_eq!(after.importance, 0, "the forgotten row stays forgotten");
     assert_eq!(after.content, "coffee");
 
+    let mut second = batch(9, Vec::new());
+    second.after = Some(7);
     let commit = repo
         .consolidate(
-            &batch(9, Vec::new()),
+            &second,
             &[Fact {
                 content: "A drinks coffee every morning".into(),
                 importance: Some(9),
@@ -676,8 +685,10 @@ fn stale_consolidation_cannot_recreate_forgotten_text_or_use_revoked_context() {
     assert!(context.iter().any(|memory| memory.id == shared.id));
     repo.control_memory(&shared.id, MemoryActionKind::Unshare, "other")
         .unwrap();
+    let mut second = batch(9, context);
+    second.after = Some(7);
     assert!(matches!(
-        repo.consolidate(&batch(9, context), &[pinned("derived from stale context")]),
+        repo.consolidate(&second, &[pinned("derived from stale context")]),
         Err(StoreError::Conflict(_))
     ));
     assert_eq!(repo.pinned("ene").unwrap().len(), 1);
@@ -854,6 +865,7 @@ fn failed_reflection_and_retired_owner_leave_no_consolidated_fact() {
         repo.consolidate(&proposal, &facts),
         Err(StoreError::Storage(_))
     ));
+    assert_eq!(repo.compaction_checkpoint("ene").unwrap(), None);
     assert_eq!(
         repo.list_memories("any-companion", None, 9).unwrap().0,
         [] as [Memory; 0]
@@ -880,4 +892,32 @@ fn failed_reflection_and_retired_owner_leave_no_consolidated_fact() {
         repo.list_memories("any-companion", None, 9).unwrap().0,
         [] as [Memory; 0]
     );
+}
+
+#[test]
+fn a_persisted_checkpoint_prevents_a_replayed_window_from_writing_again() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("host.sqlite3");
+    let proposal = batch(7, Vec::new());
+    let facts = [Fact {
+        content: "a durable fact".into(),
+        ..Fact::default()
+    }];
+    let store = Store::open(&path).unwrap();
+    companion_row(&store);
+    store.memory_repo().consolidate(&proposal, &facts).unwrap();
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    let repo = store.memory_repo();
+    assert_eq!(
+        repo.compaction_checkpoint("ene").unwrap(),
+        Some(proposal.checkpoint.clone())
+    );
+    assert!(matches!(
+        repo.consolidate(&proposal, &facts),
+        Err(StoreError::Conflict(_))
+    ));
+    assert_eq!(repo.list_memories("ene", None, 9).unwrap().0.len(), 1);
+    store.reset_learned_state().unwrap();
+    assert_eq!(repo.compaction_checkpoint("ene").unwrap(), None);
 }

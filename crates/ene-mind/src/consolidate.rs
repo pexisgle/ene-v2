@@ -22,14 +22,27 @@ pub struct MemoryContext {
     pub content: String,
 }
 
+/// A rolling summary through a confirmed message in the source conversation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Summary {
+    pub text: String,
+    pub through_message_id: u64,
+}
+
+/// The published summary and exact log it belongs to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub lineage: String,
+    pub summary: Summary,
+}
+
 /// The window one pass commits, with the material its commit needs.
 #[derive(Clone, Debug)]
 pub struct Batch {
     pub companion_id: String,
     pub companion_created_at: String,
-    /// The newest message the summary this pass runs beside stands for: the id
-    /// every memory and edge of the window is stamped with.
-    pub through: u64,
+    pub after: Option<u64>,
+    pub checkpoint: Checkpoint,
     pub context: Vec<MemoryContext>,
     /// Memory versions the host actually injected into those turns.
     pub injected: Vec<MemoryVersion>,

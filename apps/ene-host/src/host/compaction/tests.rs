@@ -601,7 +601,16 @@ impl SummaryWorld {
     /// is what the trigger measures the conversation against;
     /// `summary_window` is the room the summarizer's keep window is
     /// measured in, so a test can cut the conversation where it wants.
-    fn at(conversation: History, threshold_window: u32, summary_window: u32, base: &str) -> Self {
+    fn at(
+        mut conversation: History,
+        threshold_window: u32,
+        summary_window: u32,
+        base: &str,
+    ) -> Self {
+        conversation.continue_log(
+            rig_core::conversation::Lineage::fresh(),
+            conversation.revision(),
+        );
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
         store

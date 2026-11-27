@@ -28,7 +28,7 @@ use rusqlite_migration::{HookResult, M, Migrations};
 pub const BASELINE_VERSION: i64 = 6;
 
 /// Latest database schema version managed by [`ladder_steps`].
-pub const VERSION: i64 = 26;
+pub const VERSION: i64 = 27;
 
 /// Every version this host applies above the baseline, in order. The position
 /// in this table is the version, so adding a row is the only way to add a
@@ -190,6 +190,15 @@ const STEPS_ABOVE_BASELINE: &[(&str, &str)] = &[
     (
         "0026_memory_injection_version",
         "ALTER TABLE memory_injections ADD COLUMN memory_revision INTEGER;",
+    ),
+    (
+        "0027_compaction_checkpoint",
+        "CREATE TABLE compaction_checkpoints (
+           companion_id TEXT PRIMARY KEY REFERENCES companions(id) ON DELETE CASCADE,
+           lineage TEXT NOT NULL,
+           through_message_id INTEGER NOT NULL,
+           summary TEXT NOT NULL
+         );",
     ),
 ];
 

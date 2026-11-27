@@ -9,8 +9,8 @@ use super::{
 };
 use crate::StoreError;
 use crate::row::FromRow;
-use ene_mind::{MemoryVersion, RecallCandidate, RecallMode};
-use rusqlite::params;
+use ene_mind::{Checkpoint, MemoryVersion, RecallCandidate, RecallMode, Summary};
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::json as value;
 use std::collections::{HashMap, HashSet};
 
@@ -68,67 +68,104 @@ impl<'a> MemoryRepo<'a> {
         Ok(contexts)
     }
 
+    pub fn compaction_checkpoint(&self, companion: &str) -> Result<Option<Checkpoint>> {
+        load_checkpoint(&self.0.conn(), companion)
+    }
+
     pub fn consolidate(&self, batch: &Batch, facts: &[Fact]) -> Result<Commit> {
-        if batch.companion_id.trim().is_empty() {
+        let checkpoint = &batch.checkpoint;
+        let through = checkpoint.summary.through_message_id;
+        if checkpoint.summary.text.trim().is_empty()
+            || checkpoint.lineage.is_empty()
+            || batch.after.is_some_and(|after| after >= through)
+        {
             return Err(StoreError::Invalid(
                 "consolidation batch is incomplete".into(),
             ));
         }
-        let expected: HashMap<&str, u64> = batch
-            .context
-            .iter()
-            .map(|memory| (memory.id.as_str(), memory.revision))
-            .collect();
-        let accepted = validate_citations(
-            facts
-                .iter()
-                .flat_map(|fact| fact.cited_memory_ids.iter().map(String::as_str)),
-            &batch.injected,
-        );
-        let stamp = now();
-        let mut commit = Commit {
-            inserted: 0,
-            updated: 0,
-        };
-        self.0.write_tx(|transaction| {
-        let owner = transaction.prepare_cached(
-            "SELECT 1 FROM companions WHERE id = ?1 AND created_at = ?2",
-        )?.exists(params![batch.companion_id, batch.companion_created_at])?;
-        if !owner {
-            return Err(StoreError::Conflict("the consolidation companion was retired".into()));
-        }
-        let mut current = transaction.prepare_cached(&format!(
-            "SELECT EXISTS (SELECT 1 FROM memories m WHERE {VISIBLE} \
-             AND m.id = ?2 AND m.memory_revision = ?3)"
-        ))?;
-        for (id, revision) in expected
-            .iter()
-            .map(|(&id, &revision)| (id, revision))
-            .chain(
-                accepted
-                    .iter()
-                    .map(|memory| (memory.id.as_str(), memory.revision)),
-            )
-        {
-            if !current.query_row(params![batch.companion_id, id, revision], |row| {
-                row.get::<_, bool>(0)
-            })? {
-                return Err(StoreError::Conflict(
-                    "memory changed while consolidation was running".into(),
-                ));
-            }
-        }
-        drop(current);
-        record_consolidation_citations(transaction, batch, &accepted, &stamp)?;
-        for fact in facts {
-            apply_consolidated_fact(transaction, batch, fact, &expected, &stamp, &mut commit)?;
-        }
-        if let Some(state) = &batch.reflection && !update_mind_state(transaction, &batch.companion_id, state, &stamp)? {
-            tracing::debug!(companion = %batch.companion_id, "consolidation kept the newer mind state");
-        }
-        Ok(commit)
-        })
+        self.0
+            .write_tx(|transaction| apply_batch(transaction, batch, facts))
     }
+}
+
+fn load_checkpoint(
+    connection: &rusqlite::Connection,
+    companion: &str,
+) -> Result<Option<Checkpoint>> {
+    Ok(connection
+        .prepare_cached("SELECT lineage, through_message_id, summary FROM compaction_checkpoints WHERE companion_id = ?1")?
+        .query_row([companion], |row| Ok(Checkpoint {
+            lineage: row.get(0)?,
+            summary: Summary { through_message_id: row.get(1)?, text: row.get(2)? },
+        }))
+        .optional()?)
+}
+
+fn apply_batch(transaction: &Transaction<'_>, batch: &Batch, facts: &[Fact]) -> Result<Commit> {
+    let checkpoint = &batch.checkpoint;
+    let owner = transaction
+        .prepare_cached("SELECT 1 FROM companions WHERE id = ?1 AND created_at = ?2")?
+        .exists(params![batch.companion_id, batch.companion_created_at])?;
+    if !owner {
+        return Err(StoreError::Conflict(
+            "the consolidation companion was retired".into(),
+        ));
+    }
+    if let Some(previous) = load_checkpoint(transaction, &batch.companion_id)?
+        && (previous.lineage != checkpoint.lineage
+            || Some(previous.summary.through_message_id) != batch.after)
+    {
+        return Err(StoreError::Conflict(
+            "the compaction checkpoint changed".into(),
+        ));
+    }
+    let expected: HashMap<&str, u64> = batch
+        .context
+        .iter()
+        .map(|memory| (memory.id.as_str(), memory.revision))
+        .collect();
+    let accepted = validate_citations(
+        facts
+            .iter()
+            .flat_map(|fact| fact.cited_memory_ids.iter().map(String::as_str)),
+        &batch.injected,
+    );
+    let mut current = transaction.prepare_cached(&format!(
+        "SELECT 1 FROM memories m WHERE {VISIBLE} AND m.id = ?2 AND m.memory_revision = ?3"
+    ))?;
+    let versions = expected
+        .iter()
+        .map(|(&id, &revision)| (id, revision))
+        .chain(
+            accepted
+                .iter()
+                .map(|memory| (memory.id.as_str(), memory.revision)),
+        );
+    for (id, revision) in versions {
+        if !current.exists(params![batch.companion_id, id, revision])? {
+            return Err(StoreError::Conflict(
+                "memory changed while consolidation was running".into(),
+            ));
+        }
+    }
+    let stamp = now();
+    let mut commit = Commit::default();
+    record_consolidation_citations(transaction, batch, &accepted, &stamp)?;
+    for fact in facts {
+        apply_consolidated_fact(transaction, batch, fact, &expected, &stamp, &mut commit)?;
+    }
+    if let Some(state) = &batch.reflection
+        && !update_mind_state(transaction, &batch.companion_id, state, &stamp)?
+    {
+        tracing::debug!(companion = %batch.companion_id, "consolidation kept the newer mind state");
+    }
+    transaction.prepare_cached(
+        "INSERT INTO compaction_checkpoints (companion_id, lineage, through_message_id, summary)
+         VALUES (?1, ?2, ?3, ?4) ON CONFLICT(companion_id) DO UPDATE SET
+         lineage = excluded.lineage, through_message_id = excluded.through_message_id,
+         summary = excluded.summary",
+    )?.execute(params![batch.companion_id, checkpoint.lineage, checkpoint.summary.through_message_id, checkpoint.summary.text])?;
+    Ok(commit)
 }
 
 fn apply_consolidated_fact(
@@ -203,7 +240,7 @@ fn apply_consolidated_fact(
             occurred_at: None,
             source_context: value!({
                 "source": "consolidation",
-                "turn_id": batch.through.to_string(),
+                "turn_id": batch.checkpoint.summary.through_message_id.to_string(),
             }),
         },
         stamp,
@@ -219,7 +256,7 @@ fn record_consolidation_citations(
     accepted: &[&MemoryVersion],
     stamp: &str,
 ) -> Result<()> {
-    let turn = batch.through.to_string();
+    let turn = batch.checkpoint.summary.through_message_id.to_string();
     for memory in accepted {
         if !cite_visible_memory(
             transaction,

@@ -3,9 +3,10 @@
 use super::{
     Summary,
     budget::{cut, input_budget},
+    log_lineage, saved_summary,
 };
 use crate::host::mind::consolidate::{self, Services};
-use ene_mind::Commit;
+use ene_mind::Checkpoint;
 use rig_core::catalog::ModelSpec;
 use rig_core::completion::{CompletionRequest, Message};
 use rig_core::conversation::Conversation as History;
@@ -34,16 +35,11 @@ pub(super) enum CompactionError {
     Timeout,
     #[error("{0}")]
     Model(String),
+    #[error("the consolidation pass left its range pending: {0}")]
+    Consolidation(#[from] crate::host::error::HostError),
 }
 
-pub(super) type Outcome = std::result::Result<Collected, CompactionError>;
-
-/// What one job produced: the summary the aside keeps, and the memories the
-/// pass committed for the same window when it succeeded.
-pub(super) struct Collected {
-    pub(super) summary: Summary,
-    pub(super) memories: crate::host::db::Result<Commit>,
-}
+pub(super) type Outcome = std::result::Result<Summary, CompactionError>;
 
 /// One job: the summary, then the memory pass over the window that summary
 /// stands for. The summary runs first because its `through_message_id` is the
@@ -56,19 +52,22 @@ pub(super) async fn run(
     services: Services,
     companion: String,
 ) -> Outcome {
-    let after = previous
-        .as_ref()
-        .map(|previous| previous.through_message_id);
+    let lineage = log_lineage(&history).map_err(crate::host::error::HostError::from)?;
+    if let Some(saved) = saved_summary(&services.store, &companion, &history)
+        .map_err(crate::host::error::HostError::from)?
+        && previous.as_ref() != Some(&saved)
+    {
+        return Ok(saved);
+    }
     let summary = summarize(&history, previous.as_ref(), &spec, &model).await?;
-    let memories = consolidate::pass(
+    Ok(consolidate::pass(
         &services,
         &companion,
         &history,
-        after,
-        summary.through_message_id,
+        previous.map(|summary| summary.through_message_id),
+        Checkpoint { lineage, summary },
     )
-    .await;
-    Ok(Collected { summary, memories })
+    .await?)
 }
 
 /// Asks for the summary on the shared background runtime.
