@@ -184,9 +184,9 @@ $$\text{Score} = \min\left(1.0, \frac{\text{Importance}}{0.3}\right) \times (0.5
 // ※SQLite FTS5 trigram は空白・句読点（記号）のみで分割するか、クエリ文字列から連続する3文字を抽出する。
 // 助詞等によるヒューリスティックな正規表現分割は「東京都」「外国人」等の固有名詞が誤分割されて
 // 3文字未満になるアンチパターンを引き起こすため行わない。
-// 3文字以上のトークンが存在しない場合（例:「犬」「AI」）は LIKE へフォールバック。
-let tokens: Vec<String> = split_punctuation_and_whitespace(&query_text)
-    .into_iter()
+// 語句は初出順に重複を除く。3文字以上の語句がなければ短い語句それぞれを LIKE で照合する。
+let terms = unique_nonempty(split_punctuation_and_whitespace(&query_text));
+let tokens: Vec<String> = terms.iter()
     .filter(|t| t.chars().count() >= 3)
     .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
     .collect();
@@ -200,23 +200,25 @@ let lexical_matches = if !tokens.is_empty() {
         WHERE (m.scope = ?1 OR m.scope = 'shared')
           AND (?4 = false OR m.importance >= 2) -- 自動想起時は >= 2、明示的想起は全件
           AND memories_fts MATCH ?3
-        ORDER BY rank ASC
+        ORDER BY rank ASC, m.rowid
         LIMIT 20
     "#)?;
     stmt.query_map(params![companion_id, companion_id, fts_expr, is_auto_recall], |row| ...)?
-} else {
-    // 2文字以下のフォールバック検索（LIKE）
-    let like_pattern = format!("%{}%", query_text.replace('%', "\\%").replace('_', "\\_"));
+} else if !terms.is_empty() {
+    // 例として「犬 AI」は、犬または AI を含む記憶を探す。ワイルドカード文字はリテラルに扱う。
+    let patterns = terms.iter().map(escape_like_pattern).collect::<Vec<_>>();
     let mut stmt = conn.prepare(r#"
         SELECT m.id, m.content, m.importance, m.occurred_at, m.last_accessed_at, 0.0 AS rank
         FROM memories m
         WHERE (m.scope = ?1 OR m.scope = 'shared')
           AND (?4 = false OR m.importance >= 2)
-          AND m.content LIKE ?3 ESCAPE '\'
-        ORDER BY m.importance DESC
+          AND EXISTS (SELECT 1 FROM json_each(?3) p WHERE m.content LIKE p.value ESCAPE '\')
+        ORDER BY m.importance DESC, m.rowid DESC
         LIMIT 20
     "#)?;
-    stmt.query_map(params![companion_id, companion_id, like_pattern, is_auto_recall], |row| ...)?
+    stmt.query_map(params![companion_id, companion_id, to_json(&patterns)?, is_auto_recall], |row| ...)?
+} else {
+    Vec::new()
 };
 
 // 2. ベクトル意味検索候補の取得（Rust内スライスコサイン類似度順・最大20件）

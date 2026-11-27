@@ -22,7 +22,7 @@ pub use json::JsonDoc;
 pub use memory::{
     MAX_IMPORTANCE, Memory, MemoryActionKind, MemoryRecord, MindStateChange, MindUpdate, NewMemory,
     PINNED_BUDGET_CHARS, RecallCandidate, RecallMode, RecallOutcome, SHARED_SCOPE, Scored,
-    StateUpdate, in_scope, rank_recall, score, tokens,
+    StateUpdate, in_scope, rank_recall, recall_terms, score,
 };
 
 pub type Result<T> = std::result::Result<T, ene_domain::DomainError>;
@@ -62,8 +62,8 @@ mod tests {
         assert!(s_high > s_low);
 
         assert_eq!(
-            tokens("hi rust, メモリ管理!"),
-            vec!["\"rust\"", "\"メモリ管理\""]
+            recall_terms("hi rust, メモリ管理!").collect::<Vec<_>>(),
+            ["hi", "rust", "メモリ管理"]
         );
         assert_eq!(
             validate_citations(&["m1".into(), "m2".into(), "m1".into()], &["m1".into()]),

@@ -155,16 +155,11 @@ pub fn rank_recall(lists: [Vec<Memory>; 2], now_epoch: i64, limit: usize) -> Vec
     ranked
 }
 
-/// Splits a query into FTS5 tokens: whitespace and punctuation only. Tokens
-/// shorter than three characters cannot match a trigram index, so they are
-/// dropped and the caller falls back to `LIKE`.
-pub fn tokens(query: &str) -> Vec<String> {
+/// Splits a recall query on whitespace and punctuation, retaining short terms.
+pub fn recall_terms(query: &str) -> impl Iterator<Item = &str> {
     query
         .split(|character: char| character.is_whitespace() || is_punctuation(character))
-        .map(str::trim)
-        .filter(|token| token.chars().count() >= 3)
-        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
-        .collect()
+        .filter(|token| !token.is_empty())
 }
 
 fn is_punctuation(character: char) -> bool {
@@ -293,7 +288,7 @@ pub struct MindUpdate {
 
 /// The result of a hybrid recall: the ranked items plus whether a semantic
 /// candidate list was actually used.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct RecallOutcome {
     pub items: Vec<Scored>,
     pub semantic: bool,

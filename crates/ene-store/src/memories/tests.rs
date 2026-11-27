@@ -277,6 +277,64 @@ fn semantic_retrieval_restores_only_current_revisions_in_candidate_order() {
     );
 }
 
+#[test]
+fn lexical_recall_handles_short_terms_and_literal_wildcards() {
+    let store = store();
+    let repo = store.memory_repo();
+    let dog = repo
+        .insert_memory(&new_memory("犬 café 東京都", 4))
+        .unwrap();
+    let ai = repo.insert_memory(&new_memory("Uses AI _%", 4)).unwrap();
+    for (query, count) in [
+        ("犬、ai", 2),
+        ("café", 1),
+        ("東京都", 1),
+        ("_%", 1),
+        ("  ", 0),
+        ("！", 0),
+    ] {
+        assert_eq!(
+            repo.lexical_candidates("ene", query, RecallMode::Auto)
+                .unwrap()
+                .len(),
+            count,
+            "{query:?}"
+        );
+    }
+    assert_eq!(
+        repo.lexical_candidates("ene", "_%", RecallMode::Auto)
+            .unwrap(),
+        [ai]
+    );
+    assert_eq!(
+        repo.lexical_candidates("ene", "東京都", RecallMode::Auto)
+            .unwrap(),
+        [dog]
+    );
+}
+
+#[test]
+fn lexical_ties_and_repeated_query_terms_keep_the_same_top_twenty() {
+    let store = store();
+    let repo = store.memory_repo();
+    let rows = (0..21)
+        .map(|_| {
+            repo.insert_memory(&new_memory("frequent marker", 4))
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    for query in [
+        "frequent marker".to_owned(),
+        "frequent ".repeat(200) + "marker",
+    ] {
+        assert_eq!(
+            repo.lexical_candidates("ene", &query, RecallMode::Auto)
+                .unwrap(),
+            rows[..20]
+        );
+    }
+}
+
 fn companion_row(store: &Store) {
     let initial_state = serde_json::to_string(&ene_mind::State::default()).unwrap();
     let document = r#"{"schema":"ene.body.v1","json":{}}"#;

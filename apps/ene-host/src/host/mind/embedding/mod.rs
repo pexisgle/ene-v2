@@ -355,6 +355,9 @@ pub(crate) async fn semantic_candidates(
     query: &str,
     mode: RecallMode,
 ) -> Vec<RecallCandidate> {
+    if query.trim().is_empty() {
+        return Vec::new();
+    }
     let Ok(Some(record)) = store.companion_repo().companion(companion) else {
         return Vec::new();
     };

@@ -20,8 +20,7 @@ use crate::{
 pub use ene_mind::{
     Batch, Commit, Fact, MAX_IMPORTANCE, Memory, MemoryActionKind, MemoryContext, MemoryRecord,
     MindStateChange, MindUpdate, NewMemory, PINNED_BUDGET_CHARS, PendingEmbedding, RecallCandidate,
-    RecallMode, RecallOutcome, SHARED_SCOPE, Scored, StateUpdate, score, tokens,
-    validate_citations,
+    RecallMode, RecallOutcome, SHARED_SCOPE, Scored, StateUpdate, score, validate_citations,
 };
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
@@ -200,6 +199,9 @@ impl<'a> MemoryRepo<'a> {
         semantic: &[RecallCandidate],
         limit: usize,
     ) -> Result<RecallOutcome> {
+        if query.trim().is_empty() || limit == 0 {
+            return Ok(RecallOutcome::default());
+        }
         let lexical = self.lexical_candidates(companion, query, mode)?;
         let semantic = self.semantic_memories(companion, mode, semantic)?;
         Ok(RecallOutcome {
@@ -293,42 +295,62 @@ impl<'a> MemoryRepo<'a> {
         query: &str,
         mode: RecallMode,
     ) -> Result<Vec<Memory>> {
-        let minimum = mode.minimum_importance();
-        let connection = self.0.conn();
-        let terms = tokens(query);
-        let mut memories = Vec::new();
+        let mut seen = HashSet::new();
+        let terms: Vec<_> = ene_mind::recall_terms(query)
+            .filter(|term| seen.insert(*term))
+            .collect();
         if terms.is_empty() {
-            let pattern = format!(
+            return Ok(Vec::new());
+        }
+        let phrases = terms
+            .iter()
+            .filter(|term| term.chars().nth(2).is_some())
+            .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+            .collect::<Vec<_>>();
+        if phrases.is_empty() {
+            return self.short_lexical_candidates(companion, mode, &terms);
+        }
+        self.0.fetch_all(
+            &format!(
+                "SELECT {JOINED_COLUMNS} FROM memories m JOIN memories_fts f ON m.rowid = f.rowid \
+                 WHERE {VISIBLE} AND m.importance >= ?2 AND memories_fts MATCH ?3 \
+                 ORDER BY bm25(memories_fts), f.rowid LIMIT 20"
+            ),
+            params![companion, mode.minimum_importance(), phrases.join(" OR ")],
+            Memory::from_row,
+        )
+    }
+
+    fn short_lexical_candidates(
+        &self,
+        companion: &str,
+        mode: RecallMode,
+        terms: &[&str],
+    ) -> Result<Vec<Memory>> {
+        let pattern = |term: &str| {
+            format!(
                 "%{}%",
-                query
-                    .replace('\\', "\\\\")
+                term.replace('\\', "\\\\")
                     .replace('%', "\\%")
                     .replace('_', "\\_")
-            );
-            let mut statement = connection.prepare_cached(&format!(
+            )
+        };
+        let (predicate, parameter) = if let [term] = terms {
+            ("m.content LIKE ?3 ESCAPE '\\'", pattern(term))
+        } else {
+            (
+                "EXISTS (SELECT 1 FROM json_each(?3) term WHERE m.content LIKE term.value ESCAPE '\\')",
+                to_json(&terms.iter().map(|term| pattern(term)).collect::<Vec<_>>())?,
+            )
+        };
+        self.0.fetch_all(
+            &format!(
                 "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance >= ?2 \
-                 AND m.content LIKE ?3 ESCAPE '\\' ORDER BY m.importance DESC, m.rowid DESC \
-                 LIMIT 20"
-            ))?;
-            let rows =
-                statement.query_map(params![companion, minimum, pattern], Memory::from_row)?;
-            for row in rows {
-                memories.push(row?);
-            }
-            return Ok(memories);
-        }
-        let expression = terms.join(" OR ");
-        let mut statement = connection.prepare_cached(&format!(
-            "SELECT {JOINED_COLUMNS} FROM memories m JOIN memories_fts f ON m.rowid = f.rowid \
-             WHERE {VISIBLE} AND m.importance >= ?2 AND memories_fts MATCH ?3 \
-             ORDER BY bm25(memories_fts) ASC LIMIT 20"
-        ))?;
-        let rows =
-            statement.query_map(params![companion, minimum, expression], Memory::from_row)?;
-        for row in rows {
-            memories.push(row?);
-        }
-        Ok(memories)
+                AND {predicate} ORDER BY m.importance DESC, m.rowid DESC LIMIT 20"
+            ),
+            params![companion, mode.minimum_importance(), parameter],
+            Memory::from_row,
+        )
     }
 
     pub fn record_injections(&self, companion: &str, turn_id: &str, ids: &[String]) -> Result<()> {
