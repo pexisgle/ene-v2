@@ -6,14 +6,14 @@ use super::decision::{
     request_context, start_decision,
 };
 use super::resolve::{
-    AgentCapabilityContext, CandidateOutcome, PreToolChecked, build_candidate_action,
+    AgentCapabilityContext, CandidateOutcome, PreToolChecked, binding_of, build_candidate_action,
     collect_pre_tool_hooks, load_gate_rules, resolve_device_candidate, start_pre_tool_hooks,
 };
 use crate::host::{
     db::Store,
     error::Result,
     notify::Notifier,
-    resources::{CompanionAgent, HostExternalTool, WorkAgent},
+    resources::{HostExternalTool, WorkAgent},
 };
 use bevy_ecs::prelude::*;
 use ene_policy::{
@@ -240,7 +240,11 @@ fn process_gate_call(
             return std::ops::ControlFlow::Break(());
         }
     };
-    let (companion_id, work_id, run_id) = binding_of(world, item.agent);
+    let Some((companion_id, work_id, run_id)) =
+        binding_of(world, &ctx.store, item.agent, item.entity)
+    else {
+        return std::ops::ControlFlow::Continue(());
+    };
     tracing::Span::current().record("companion_id", companion_id.as_str());
     if world.get::<PreToolChecked>(item.entity).is_none() {
         match start_pre_tool_hooks(ctx, &item, &companion_id) {
@@ -466,22 +470,6 @@ pub(crate) fn notify_approval_card(
         "approval_required",
         &format!("{target}: approval is required before this operation runs"),
     );
-}
-
-/// The companion, work session and run an agent serves. A work agent carries
-/// both ids; a companion agent leaves the work ones empty.
-fn binding_of(world: &World, agent: Entity) -> (String, Option<String>, String) {
-    if let Some(companion) = world.get::<CompanionAgent>(agent) {
-        return (companion.companion_id.clone(), None, String::new());
-    }
-    match world.get::<WorkAgent>(agent) {
-        Some(work) => (
-            work.companion_id.clone(),
-            Some(work.work_id.clone()),
-            work.run_id.clone(),
-        ),
-        None => (String::new(), None, String::new()),
-    }
 }
 
 #[cfg(test)]

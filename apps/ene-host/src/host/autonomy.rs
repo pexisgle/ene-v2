@@ -71,7 +71,7 @@ pub(crate) fn register(app: &mut App) {
         "noop",
         "Do nothing this turn: stay silent and keep watching.",
         ToolOptions::default(),
-        run_tool(|world, entity, _: &str, _: NoopArgs| {
+        run_tool(|world, entity, _, _: NoopArgs| {
             let turn = world
                 .get::<ActiveTurn>(entity)
                 .and_then(|active| world.get::<Turn>(active.turn()));

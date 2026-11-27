@@ -160,7 +160,13 @@ pub(crate) fn restore(world: &mut World) -> Result<()> {
             if let Some(entity) = restored
                 && let Some(run) = active.as_ref().or_else(|| history.last())
             {
-                if !recoverable {
+                if recoverable {
+                    if let Some(turn) = world.get::<ActiveTurn>(entity).map(ActiveTurn::turn) {
+                        world
+                            .entity_mut(turn)
+                            .insert(crate::host::resources::WorkTurn(run.run_id.clone()));
+                    }
+                } else {
                     world.trigger(StopTurn::plugin(
                         entity,
                         "ene-host",

@@ -70,7 +70,7 @@ pub(crate) fn register(app: &mut App) {
         "report",
         "Report progress (`activity`), important update (`message`), a clarifying question for the user (`question`), completion (`completed`), or failure (`failed`). The host binds the session and run.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, args: ReportArgs| report(world, agent, &args)),
+        run_tool(|world, agent, call, args: ReportArgs| report(world, agent, call, &args)),
     );
 }
 
@@ -193,21 +193,22 @@ fn stop(world: &mut World, agent: Entity, args: &StopArgs) -> Result<String> {
     Ok(json!({"work_id": session.id, "stopping": true}).to_string())
 }
 
-fn report(world: &mut World, agent: Entity, args: &ReportArgs) -> Result<String> {
+fn report(world: &mut World, agent: Entity, call: Entity, args: &ReportArgs) -> Result<String> {
     let Some(work) = world.get::<WorkAgent>(agent).cloned() else {
         return Err(HostError::Permission(
             ("report is only available to a running task").into(),
         ));
     };
     let store = world.resource::<Store>().clone();
-    // The active run is the source of truth, never the run captured when the
-    // agent was spawned: a session agent serves several runs.
+    let call_run = world
+        .get::<CallOf>(call)
+        .and_then(|turn| world.get::<crate::host::resources::WorkTurn>(turn.0));
     let Some(run) = store.work_repo().active_run(&work.work_id)? else {
         return Ok(
             json!({"accepted": false, "reason": "the session has no active run"}).to_string(),
         );
     };
-    if run.state.is_terminal() || run.run_id != work.run_id {
+    if call_run.is_none_or(|bound| run.run_id != bound.0) {
         // A report from an older turn is audit data only; it must not touch
         // the run that is active now.
         return Ok(json!({"accepted": false, "reason": "the run already ended"}).to_string());
@@ -300,7 +301,7 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn report_binds_to_the_active_run_not_the_spawned_one() {
+    fn a_report_stays_on_its_call_turn_when_the_worker_is_rebound() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&root.path().join("host.sqlite3")).unwrap();
         store
@@ -339,18 +340,24 @@ mod tests {
             content: "working".into(),
         };
 
-        assert!(
-            super::report(&mut world, agent, &args())
-                .unwrap()
-                .contains("\"accepted\":false")
-        );
+        let [old_call, new_call] = ["run-a", "run-b"].map(|id| {
+            let turn = world
+                .spawn(crate::host::resources::WorkTurn(id.into()))
+                .id();
+            world.spawn(CallOf(turn)).id()
+        });
         world.entity_mut(agent).insert(WorkAgent {
             work_id: "w1".into(),
             run_id: "run-b".into(),
             companion_id: "ene".into(),
         });
         assert!(
-            super::report(&mut world, agent, &args())
+            super::report(&mut world, agent, old_call, &args())
+                .unwrap()
+                .contains("\"accepted\":false")
+        );
+        assert!(
+            super::report(&mut world, agent, new_call, &args())
                 .unwrap()
                 .contains("\"accepted\":true")
         );

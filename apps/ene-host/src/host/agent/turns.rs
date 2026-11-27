@@ -8,14 +8,14 @@ use super::companion_of;
 use super::transcript::{entry_text, role_of};
 use crate::host::{
     notify::Notifier,
-    resources::{CompanionAgent, WorkAgent},
+    resources::{CompanionAgent, WorkAgent, WorkTurn},
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
 use rig_ecs::prelude::*;
 
 /// The agent rows a turn projection needs.
-type TurnAgentRows = (
+pub(super) type TurnAgentRows = (
     &'static AgentId,
     Option<&'static CompanionAgent>,
     Option<&'static WorkAgent>,
@@ -25,13 +25,22 @@ type TurnAgentRows = (
 pub(super) fn turn_started(
     entity: Entity,
     turns: Query<(&Turn, &TurnOf)>,
-    agents: Query<&CompanionAgent>,
+    agents: Query<TurnAgentRows>,
     notifier: Res<Notifier>,
+    mut commands: Commands,
 ) {
     let Ok((turn, of)) = turns.get(entity) else {
         return;
     };
-    let Ok(agent) = agents.get(of.0) else {
+    let Ok((_, companion, work)) = agents.get(of.0) else {
+        return;
+    };
+    if let Some(work) = work {
+        commands
+            .entity(entity)
+            .try_insert(WorkTurn(work.run_id.clone()));
+    }
+    let Some(agent) = companion else {
         return;
     };
     notifier.into_inner().push(
@@ -47,14 +56,21 @@ pub(super) fn turn_started(
 }
 
 type ToolActivity = Or<(Added<ToolRequest>, Added<Settled>)>;
+type LoggedTool = (
+    &'static ToolRequest,
+    &'static ForAgent,
+    Option<&'static CallOf>,
+    Has<Settled>,
+);
 
 pub(super) fn log_tools(
-    tools: Query<(&ToolRequest, &ForAgent, Has<Settled>), ToolActivity>,
+    tools: Query<LoggedTool, ToolActivity>,
     agents: Query<TurnAgentRows>,
+    turns: Query<&WorkTurn>,
     notifier: ResMut<Notifier>,
 ) {
     let notifier = notifier.into_inner();
-    for (request, target, settled) in &tools {
+    for (request, target, turn, settled) in &tools {
         let Ok((_, companion, work)) = agents.get(target.0) else {
             continue;
         };
@@ -73,7 +89,7 @@ pub(super) fn log_tools(
                 "tool": request.call.function.name.as_str(),
                 "call_id": request.call.id.to_string(),
                 "work_id": work.map(|work| work.work_id.as_str()),
-                "run_id": work.map(|work| work.run_id.as_str()),
+                "run_id": turn.and_then(|turn| turns.get(turn.0).ok()).map(|work| work.0.as_str()),
             }),
         );
     }
@@ -88,6 +104,7 @@ pub(super) struct TurnSettledParams<'w, 's> {
         (
             &'static Turn,
             Option<&'static crate::host::eyes::ReportOfTurn>,
+            Option<&'static WorkTurn>,
         ),
     >,
     agents: Query<'w, 's, TurnAgentRows>,
@@ -106,13 +123,14 @@ pub(super) fn turn_settled(
     let Ok((outcome, of)) = params.outcomes.get(turn_entity) else {
         return;
     };
-    let Ok((id, companion, work)) = params.agents.get(of.0) else {
+    let Ok((id, companion, _)) = params.agents.get(of.0) else {
         return;
     };
     if let Some(companion) = companion {
         let companion_id = companion.companion_id.clone();
         let turn = params.turns.get(turn_entity).ok();
-        let turn_id = turn.map_or_else(|| id.0.clone(), |(turn, _)| turn.start.get().to_string());
+        let turn_id =
+            turn.map_or_else(|| id.0.clone(), |(turn, _, _)| turn.start.get().to_string());
         let (status, failure) = match outcome {
             TurnOutcome::Answered(_) => (w::TurnStatus::Answered, None),
             TurnOutcome::Stopped(_) => (w::TurnStatus::Stopped, None),
@@ -125,7 +143,7 @@ pub(super) fn turn_settled(
                 }),
             ),
         };
-        let eye_report = turn.and_then(|(turn, report)| {
+        let eye_report = turn.and_then(|(turn, report, _)| {
             Some(eye_report_result(
                 turn,
                 &report?.id.0,
@@ -163,8 +181,8 @@ pub(super) fn turn_settled(
             }
         });
     }
-    if let Some(work) = work {
-        let run_id = work.run_id.clone();
+    if let Ok((_, _, Some(work))) = params.turns.get(turn_entity) {
+        let run_id = work.0.clone();
         let outcome = outcome.clone();
         commands.queue(move |world: &mut World| {
             crate::host::work::settle_run(world, &run_id, &outcome);

@@ -68,9 +68,10 @@ impl Plugin for AgentPlugin {
             .add_observer(
                 |event: On<Add<Turn>>,
                  turns: Query<(&Turn, &TurnOf)>,
-                 agents: Query<&CompanionAgent>,
-                 notifier: Res<crate::host::notify::Notifier>| {
-                    turn_started(event.entity, turns, agents, notifier);
+                 agents: Query<turns::TurnAgentRows>,
+                 notifier: Res<crate::host::notify::Notifier>,
+                 commands: Commands| {
+                    turn_started(event.entity, turns, agents, notifier, commands);
                 },
             )
             .add_observer(

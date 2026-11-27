@@ -8,14 +8,16 @@ use rig_ecs::prelude::*;
 
 /// Wraps a synchronous world handler into an open-tool observer.
 pub(crate) fn run_tool<A: Clone + Send + Sync + 'static>(
-    handler: fn(&mut World, Entity, &str, A) -> std::result::Result<String, HostError>,
+    handler: fn(&mut World, Entity, Entity, A) -> std::result::Result<String, HostError>,
 ) -> impl Fn(On<ToolCalled<A>>, Commands) {
     move |called: On<ToolCalled<A>>, mut commands: Commands| {
         let event = called.event();
         let (call, agent, args) = (event.call, event.agent, event.args.clone());
-        let call_id = event.tool_call.id.to_string();
         commands.queue(move |world: &mut World| {
-            let result = handler(world, agent, &call_id, args);
+            if world.get::<ToolRequest>(call).is_none() {
+                return;
+            }
+            let result = handler(world, agent, call, args);
             match result {
                 Ok(text) => super::permission::answer(world, call, &text),
                 Err(error) => {

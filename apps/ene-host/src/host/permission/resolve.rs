@@ -8,14 +8,47 @@ use crate::host::{
     db::Store,
     error::{HostError, Result},
     providers::extensions::run_hooks,
-    resources::HostExternalTool,
+    resources::{CompanionAgent, HostExternalTool, WorkAgent, WorkTurn},
 };
 use bevy_ecs::prelude::*;
 use ene_policy::{CandidateAction, CapabilitySpec, PolicyRule};
 use ene_rpc as w;
-use rig_ecs::prelude::{Decider, Decision, HoldOf, Outcome, SupersededBy};
+use rig_ecs::prelude::{CallOf, Decider, Decision, HoldOf, Outcome, SupersededBy};
 use serde_json::Value;
 use tokio::sync::oneshot::{self, error::TryRecvError};
+
+/// A work call belongs to its admitted turn, even when the agent is reused.
+pub(super) fn binding_of(
+    world: &mut World,
+    store: &Store,
+    agent: Entity,
+    call: Entity,
+) -> Option<(String, Option<String>, String)> {
+    if let Some(companion) = world.get::<CompanionAgent>(agent) {
+        return Some((companion.companion_id.clone(), None, String::new()));
+    }
+    let Some(work) = world.get::<WorkAgent>(agent) else {
+        return Some((String::new(), None, String::new()));
+    };
+    let run = world
+        .get::<CallOf>(call)
+        .and_then(|of| world.get::<WorkTurn>(of.0));
+    match store.work_repo().active_run(&work.work_id) {
+        Ok(Some(active)) if run.is_some_and(|bound| bound.0 == active.run_id) => Some((
+            work.companion_id.clone(),
+            Some(work.work_id.clone()),
+            active.run_id,
+        )),
+        Err(error) if error.is_storage() => {
+            crate::host::fail(world, &error.to_string());
+            None
+        }
+        _ => {
+            refuse(world, call, "the work run is no longer active");
+            None
+        }
+    }
+}
 
 pub(super) fn load_gate_rules(
     ctx: &mut GateContext,

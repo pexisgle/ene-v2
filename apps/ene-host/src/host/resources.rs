@@ -244,6 +244,10 @@ pub(crate) struct WorkAgent {
     pub(crate) companion_id: String,
 }
 
+/// The run that admitted a Rig turn, even after its agent serves another run.
+#[derive(Component)]
+pub(crate) struct WorkTurn(pub(crate) String);
+
 /// Identifies the source of an external tool for permission checks and refreshes.
 #[derive(Component, Clone, Debug)]
 pub(crate) enum HostExternalTool {

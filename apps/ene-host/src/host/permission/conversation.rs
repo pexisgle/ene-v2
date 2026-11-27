@@ -47,8 +47,16 @@ pub(super) fn register_approval_tool(app: &mut App) {
                  the user has agreed or refused in conversation to the operation the approval \
                  card names. Arguments: request_id, decision (`approve` or `deny`).",
         ToolOptions::default(),
-        run_tool(|world, agent, request, args: ResolveApprovalArgs| {
-            resolve_approval(world, agent, request, &args)
+        run_tool(|world, agent, call, args: ResolveApprovalArgs| {
+            let request = world
+                .get::<ToolRequest>(call)
+                .ok_or_else(|| {
+                    HostError::Conflict("the approval tool call is no longer live".into())
+                })?
+                .call
+                .id
+                .to_string();
+            resolve_approval(world, agent, &request, &args)
         }),
     );
 }
