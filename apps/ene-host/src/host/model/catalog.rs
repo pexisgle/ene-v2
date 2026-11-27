@@ -2,13 +2,12 @@
 
 use crate::host::{agent, background::AbortOnDropHandle, net};
 use bevy_ecs::prelude::*;
-use parking_lot::RwLock;
 use rig_core::{
-    catalog::{Catalog, ModelSpec},
+    catalog::{Catalog, Connector, ModelSpec},
     providers::registry::ProviderId,
 };
 use rig_ecs::model::Models;
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 use tokio::sync::watch;
 
 const URL: &str = "https://models.dev/api.json";
@@ -18,15 +17,12 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Resource)]
 pub(crate) struct Refresh {
-    published: Arc<RwLock<Catalog>>,
     pending: watch::Receiver<Catalog>,
     _fetch: Option<AbortOnDropHandle<()>>,
 }
 
 impl Refresh {
-    pub(crate) async fn initial(
-        wake: crossbeam_channel::Sender<()>,
-    ) -> (Arc<RwLock<Catalog>>, Self) {
+    pub(crate) async fn initial(wake: crossbeam_channel::Sender<()>) -> Self {
         let (catalog, delay) = if cfg!(test) {
             (Catalog::builtin().clone(), None)
         } else {
@@ -34,18 +30,17 @@ impl Refresh {
             let delay = Some(next_delay(catalog.is_some()));
             (catalog.unwrap_or_else(|| Catalog::builtin().clone()), delay)
         };
-        let (updates, pending) = watch::channel(catalog.clone());
-        let published = Arc::new(RwLock::new(catalog));
+        let (updates, pending) = watch::channel(catalog);
         let fetch = delay
             .map(|delay| AbortOnDropHandle::new(tokio::spawn(fetch_updates(updates, wake, delay))));
-        (
-            Arc::clone(&published),
-            Self {
-                published,
-                pending,
-                _fetch: fetch,
-            },
-        )
+        Self {
+            pending,
+            _fetch: fetch,
+        }
+    }
+
+    pub(crate) fn initial_models(&self) -> Models {
+        Models(Connector::new(self.pending.borrow().clone()))
     }
 }
 
@@ -73,10 +68,8 @@ pub(crate) fn apply_refresh(
     mut connections: ResMut<agent::Connections>,
 ) {
     if matches!(refresh.pending.has_changed(), Ok(true)) {
-        let catalog = refresh.pending.borrow_and_update().clone();
-        *models.0.catalog_mut() = catalog.clone();
+        *models.0.catalog_mut() = refresh.pending.borrow_and_update().clone();
         connections.clear_models();
-        *refresh.published.write() = catalog;
     }
 }
 
@@ -155,31 +148,35 @@ fn supplement(base: &Catalog, json: &str) -> Result<Catalog, CatalogError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::catalog::Connector;
 
     #[test]
     fn ready_catalog_is_published_when_the_agent_connector_is_updated() {
         let catalog = Catalog::default();
-        let (updates, pending) = watch::channel(catalog.clone());
-        let published = Arc::new(RwLock::new(catalog.clone()));
+        let (updates, pending) = watch::channel(catalog);
         let mut world = World::new();
-        world.insert_resource(Refresh {
-            published: Arc::clone(&published),
+        let refresh = Refresh {
             pending,
             _fetch: None,
-        });
-        world.insert_resource(Models(Connector::new(catalog)));
+        };
+        world.insert_resource(refresh.initial_models());
+        world.insert_resource(refresh);
         world.init_resource::<agent::Connections>();
 
         let provider = ProviderId::catalog("openai").unwrap();
         let mut updated = Catalog::default();
         updated.insert(ModelSpec::new(provider, "new-model"));
         updates.send(updated).unwrap();
-        assert!(published.read().get_exact(provider, "new-model").is_none());
+        assert!(
+            world
+                .resource::<Models>()
+                .0
+                .catalog()
+                .get_exact(provider, "new-model")
+                .is_none()
+        );
 
         world.run_system_cached(apply_refresh).unwrap();
 
-        assert!(published.read().get_exact(provider, "new-model").is_some());
         assert!(
             world
                 .resource::<Models>()

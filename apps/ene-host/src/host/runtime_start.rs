@@ -55,7 +55,7 @@ impl Runtime {
         if !installed.is_empty() {
             tracing::info!(plugins = %installed.join(","), "provider plugins loaded");
         }
-        let ((), initial_plugin_tools, (catalog, catalog_refresh)) = tokio::join!(
+        let ((), initial_plugin_tools, catalog_refresh) = tokio::join!(
             providers.start_used(&store),
             providers::extensions::discover_plugin_tools(&providers, &store),
             model::catalog::Refresh::initial(wake_tx.clone())
@@ -64,7 +64,6 @@ impl Runtime {
             state_dir: state.to_path_buf(),
             store,
             credentials,
-            catalog,
             hub,
             providers,
             voice: voice::Voice::new(tokio::runtime::Handle::current()),

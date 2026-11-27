@@ -4,11 +4,19 @@ use crate::host::{
     HostServices, chat, client,
     delegation::{self, DeliveredClaims},
     error::{HostError, Result},
-    eyes, mind, permission, work,
+    eyes, mind, model, permission, work,
 };
-use ene_domain::ClientId;
+use ene_domain::{ClientId, ConnectionId};
 use ene_rpc as w;
-use rig_ecs::prelude::{App, Aside, Author, Conversation, RequestId};
+use rig_core::{
+    catalog::{Catalog, ModelSpec},
+    driver::DynModel,
+    operation::Completion,
+};
+use rig_ecs::{
+    model::Models,
+    prelude::{App, Aside, Author, Conversation, RequestId},
+};
 
 /// The RPC boundary for operations that touch live agents or their tools.
 pub(crate) struct AgentKernel<'a> {
@@ -60,6 +68,36 @@ impl<'a> AgentKernel<'a> {
         request: w::ImportCompanionRequest,
     ) -> Result<w::Companion> {
         mind::import_template(self.app.world_mut(), request)
+    }
+
+    pub(crate) fn list_models(&self, id: &ConnectionId) -> Result<Vec<(String, ModelSpec)>> {
+        let connection = self
+            .services
+            .store
+            .settings_repo()
+            .connection(id.as_str())?
+            .ok_or_else(|| HostError::NotFound("connection not found".into()))?;
+        Ok(model::models(&connection, self.catalog()))
+    }
+
+    pub(crate) fn preview_model(
+        &self,
+        requested: mind::ModelAssignment,
+    ) -> Result<DynModel<Completion>> {
+        let services = self.services;
+        let catalog = self.catalog();
+        let assignment = model::preview_assignment(&services.store, catalog, requested)?;
+        model::connect_assignment(
+            &services.store,
+            &services.credentials,
+            catalog,
+            &assignment,
+            &services.providers,
+        )
+    }
+
+    fn catalog(&self) -> &Catalog {
+        self.app.world().resource::<Models>().0.catalog()
     }
 
     pub(crate) fn rebind_companion(&mut self, id: &str) -> Result<()> {

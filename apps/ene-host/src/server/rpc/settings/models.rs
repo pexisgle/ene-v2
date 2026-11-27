@@ -33,14 +33,10 @@ pub(super) async fn list_models(
 ) -> ServiceResult<w::Models> {
     let id = parse_connection_id(request.id)?;
     services
-        .inspect(move |services| {
-            let connection = services
-                .store
-                .settings_repo()
-                .connection(id.as_str())?
-                .ok_or_else(|| HostError::NotFound("connection not found".into()))?;
+        .read(move |kernel| {
             Ok(w::Models {
-                items: model::models(&connection, &services.catalog.read())
+                items: kernel
+                    .list_models(&id)?
                     .into_iter()
                     .map(|(id, spec)| model_item(id, &spec))
                     .collect(),

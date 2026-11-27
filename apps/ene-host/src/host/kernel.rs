@@ -70,9 +70,7 @@ fn build_kernel_app(res: KernelResources) -> App {
         .insert_resource(res.services.store.clone())
         .insert_resource(res.services.providers.clone())
         .insert_resource(res.services.credentials.clone())
-        .insert_resource(rig_ecs::model::Models(rig_core::catalog::Connector::new(
-            res.services.catalog.read().clone(),
-        )))
+        .insert_resource(res.catalog_refresh.initial_models())
         .insert_resource(res.catalog_refresh)
         .insert_resource(HostRuntime(res.host_runtime))
         .insert_resource(res.services.hub.clone())

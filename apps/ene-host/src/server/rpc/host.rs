@@ -212,18 +212,7 @@ impl w::HostService for Services {
         let user_message = req.user_message;
         let model = self
             .runtime
-            .inspect(move |services| {
-                let catalog = services.catalog.read();
-                let assignment =
-                    host::model::preview_assignment(&services.store, &catalog, requested_model)?;
-                host::model::connect_assignment(
-                    &services.store,
-                    &services.credentials,
-                    &catalog,
-                    &assignment,
-                    &services.providers,
-                )
-            })
+            .read_kernel(move |kernel| kernel.preview_model(requested_model))
             .await
             .map_err(ConnectError::from)?;
         let reply = host::model::preview_reply(model, system_prompt, user_message)
