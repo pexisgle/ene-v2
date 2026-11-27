@@ -289,6 +289,22 @@ fn older_settings_are_ignored_so_a_replay_cannot_roll_the_window_back() {
 }
 
 #[test]
+fn a_settings_ack_refetches_without_replacing_streamed_policy_text() {
+    let mut model = model();
+    model.snapshot = Some(snapshot());
+    let text = PolicyText {
+        id: "p".into(),
+        text: "外部送信は毎回確認".into(),
+        ..Default::default()
+    };
+    model.apply(Update::Notification(Box::new(notification(
+        NotificationEvent::PolicyTextsUpdated(vec![text.clone()]),
+    ))));
+    assert!(model.apply(Update::Resnapshot).snapshot);
+    assert_eq!(model.policy_texts(), &[text]);
+}
+
+#[test]
 fn snapshots_reject_stale_state_without_skipping_buffered_chat() {
     let mut model = with_chat();
     let stamped = |epoch: &str, seq, event| {

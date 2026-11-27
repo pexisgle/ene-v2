@@ -58,8 +58,7 @@ impl Model {
             Update::Resync => self.companions.streaming.clear(),
             Update::Created(_)
             | Update::SetupFinished { .. }
-            | Update::CredentialRegistered { .. }
-            | Update::Resnapshot => {}
+            | Update::CredentialRegistered { .. } => {}
             Update::Devices(devices) => self.connections.devices = *devices,
             Update::Failed { context, message } => {
                 self.notice(NoticeKind::Failed, context, message)
@@ -77,10 +76,11 @@ impl Model {
             } => {
                 self.connections.models.insert(connection_id, models);
             }
-            Update::Checked { result, .. } => match result {
-                Ok(_) => effects.snapshot = true,
-                Err(notice) => self.notice(notice.kind, notice.context, notice.message),
-            },
+            Update::Resnapshot | Update::Checked { result: Ok(_), .. } => effects.snapshot = true,
+            Update::Checked {
+                result: Err(notice),
+                ..
+            } => self.notice(notice.kind, notice.context, notice.message),
             Update::Plugins(plugins) => self.connections.plugins = plugins,
             other => apply_domain_update(self, other, &mut effects),
         }

@@ -190,7 +190,6 @@ impl Hub {
                     self.load_models(cx);
                 }
             }
-            Update::Resnapshot => self.resnapshot(),
             Update::Created(id) => {
                 self.resnapshot();
                 self.select_companion(id, cx);

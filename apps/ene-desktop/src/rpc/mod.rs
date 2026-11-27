@@ -209,12 +209,6 @@ fn failure_kind(error: &ConnectError) -> NoticeKind {
     }
 }
 
-pub(crate) fn settings_update(settings: w::Settings) -> Update {
-    Update::Notification(Box::new(HostNotification::settings_updated(
-        settings.into(),
-    )))
-}
-
 pub(crate) fn companion_update(companion: w::Companion) -> Update {
     Update::Notification(Box::new(HostNotification::companion(companion.into())))
 }

@@ -2,7 +2,7 @@
 
 use super::{
     CallContext, RPC_TIMEOUT, RpcDispatcher, companion_update,
-    companions::shared_model_assignments, failure, failure_notice, id_request, settings_update,
+    companions::shared_model_assignments, failure, failure_notice, id_request,
 };
 use crate::{host::Host, update::Update};
 use ene_client_core::{
@@ -145,7 +145,7 @@ pub(crate) fn update_settings(
         epoch,
         context,
         request!(settings.update_settings(request)),
-        |response| settings_update(response.into_owned()),
+        |_| Update::Resnapshot,
         failure,
     );
     None
@@ -244,7 +244,7 @@ fn check_request(id: String, revision: u64, request_key: String) -> w::CheckRequ
 }
 
 pub(crate) fn delete_connection(rpc: &RpcDispatcher, epoch: u64, id: String, revision: u64) {
-    rpc.call_owned(
+    rpc.call(
         epoch,
         "接続の削除",
         request!(settings.delete_connection(w::DeleteConnectionRequest {
@@ -252,7 +252,7 @@ pub(crate) fn delete_connection(rpc: &RpcDispatcher, epoch: u64, id: String, rev
             expected_revision: revision,
             ..Default::default()
         })),
-        settings_update,
+        |_| Update::Resnapshot,
     );
 }
 

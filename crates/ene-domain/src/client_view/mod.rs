@@ -196,14 +196,6 @@ impl HostNotification {
         }
     }
 
-    /// Builds a `settings` notification from an updated settings payload.
-    pub fn settings_updated(settings: Settings) -> Self {
-        Self {
-            cursor: None,
-            event: Some(NotificationEvent::SettingsUpdated(Some(Box::new(settings)))),
-        }
-    }
-
     /// Builds a `companion` notification from an updated companion record.
     pub fn companion(companion: Companion) -> Self {
         Self {
