@@ -12,8 +12,9 @@ use crate::host::{
 };
 use bevy_ecs::prelude::*;
 use jiff::Timestamp;
-use rig_core::conversation::{Author, RequestId};
+use rig_core::conversation::{Author, AuthorKind, RequestId};
 use rig_ecs::prelude::*;
+use rig_ecs::{Persist, WriteLogs, session_log::SessionLog};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -23,6 +24,7 @@ use std::time::Duration;
 /// The firing loop runs at most once per this real-time interval, so a burst
 /// of frames (and the frames a client request adds) never fires twice.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
+const SCHEDULE_AUTHOR: &str = "ene-host";
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct NoopArgs {}
@@ -175,57 +177,48 @@ fn cancel_schedule(store: &Store, companion: &str, schedule_id: &str) -> Result<
 }
 
 fn schedule_author(occurrence_key: &str) -> Author {
-    let mut author = Author::plugin("ene-host");
+    let mut author = Author::plugin(SCHEDULE_AUTHOR);
     author.request = Some(RequestId(occurrence_key.to_owned()));
     author
 }
 
+fn scheduled_request_key(author: &Author) -> Option<&str> {
+    match &author.kind {
+        AuthorKind::Plugin(name) if name == SCHEDULE_AUTHOR => {
+            author.request.as_ref().map(|request| request.0.as_str())
+        }
+        _ => None,
+    }
+}
+
 fn conversation_has_occurrence(conversation: Option<&Conversation>, occurrence_key: &str) -> bool {
     conversation.is_some_and(|conv| {
-        conv.entries().any(|entry| {
-            entry
-                .author
-                .and_then(|author| author.request.as_ref())
-                .is_some_and(|req| req.0 == occurrence_key)
-        })
+        conv.entries()
+            .any(|entry| entry.author.and_then(scheduled_request_key) == Some(occurrence_key))
     })
 }
 
-fn mark_delivered_if_present(
-    store: &Store,
-    conversation: Option<&Conversation>,
-    occurrence_key: &str,
-    now: Timestamp,
-) -> Result<bool> {
-    if !conversation_has_occurrence(conversation, occurrence_key) {
-        return Ok(false);
-    }
-    store
-        .schedule_repo()
-        .mark_occurrence_delivered(occurrence_key, now)?;
-    Ok(true)
-}
-
-/// Confirms any pending schedule occurrences that have already landed in their
-/// companion's conversation log.
+/// Confirms occurrences after Rig has written the companion's conversation log.
 fn confirm_delivered_schedules(
+    log: Res<SessionLog>,
     store: Res<Store>,
     clock: Res<ScheduleClock>,
     agents: Query<(&CompanionAgent, &Conversation)>,
     mut commands: Commands,
 ) {
-    let store = store.into_inner();
+    if log.into_inner().failure().is_some() {
+        return;
+    }
+    let schedules = store.into_inner().schedule_repo();
     let now = clock.into_inner().now();
     let result = (|| -> Result<()> {
-        for occurrence in store.schedule_repo().pending_schedule_occurrences()? {
+        for occurrence in schedules.pending_schedule_occurrences()? {
             let conversation = agents.iter().find_map(|(agent, conversation)| {
-                (agent.companion_id == occurrence.companion_id).then_some(conversation)
+                (agent.companion_id == occurrence.companion_id && conversation.unsaved().is_empty())
+                    .then_some(conversation)
             });
-            if let Err(error) =
-                mark_delivered_if_present(store, conversation, &occurrence.occurrence_key, now)
-                && error.is_storage()
-            {
-                return Err(error);
+            if conversation_has_occurrence(conversation, &occurrence.occurrence_key) {
+                schedules.mark_occurrence_delivered(&occurrence.occurrence_key, now)?;
             }
         }
         Ok(())
@@ -249,7 +242,7 @@ fn confirm_delivered_schedules(
 /// - Restarts after the conversation persisted the message mark the occurrence
 ///   `delivered` without queuing a duplicate.
 enum OccurrenceOutcome {
-    Delivered,
+    Queued,
     Skipped,
     FatalStorage,
 }
@@ -289,18 +282,14 @@ pub(crate) fn poll_schedules(world: &mut World, now: Timestamp) -> usize {
         query
             .iter(world)
             .filter_map(|(of, incoming)| {
-                incoming
-                    .author
-                    .request
-                    .as_ref()
-                    .map(|req| (of.0, req.0.clone()))
+                scheduled_request_key(&incoming.author).map(|key| (of.0, key.to_owned()))
             })
             .collect()
     };
     let mut fired = 0;
     for occ in occurrences {
-        match dispatch_due_occurrence(world, &store, &mut queued_inbox, &occ, now) {
-            OccurrenceOutcome::Delivered => fired += 1,
+        match dispatch_due_occurrence(world, &store, &mut queued_inbox, &occ) {
+            OccurrenceOutcome::Queued => fired += 1,
             OccurrenceOutcome::Skipped => {}
             OccurrenceOutcome::FatalStorage => return fired,
         }
@@ -313,29 +302,13 @@ fn dispatch_due_occurrence(
     store: &Store,
     queued_inbox: &mut HashSet<(Entity, String)>,
     occ: &super::db::schedules::ScheduleOccurrence,
-    now: Timestamp,
 ) -> OccurrenceOutcome {
     let Some(agent) = agent::agent_of(world, &occ.companion_id) else {
         return OccurrenceOutcome::Skipped;
     };
-    match mark_delivered_if_present(
-        store,
-        world.get::<Conversation>(agent),
-        &occ.occurrence_key,
-        now,
-    ) {
-        Ok(true) => return OccurrenceOutcome::Skipped,
-        Ok(false) => {}
-        Err(error) => {
-            if error.is_storage() {
-                super::fail(world, &error.to_string());
-                return OccurrenceOutcome::FatalStorage;
-            }
-            tracing::warn!(%error, key = %occ.occurrence_key, "delivered schedule occurrence was not recorded");
-            return OccurrenceOutcome::Skipped;
-        }
-    }
-    if queued_inbox.contains(&(agent, occ.occurrence_key.clone())) {
+    if queued_inbox.contains(&(agent, occ.occurrence_key.clone()))
+        || conversation_has_occurrence(world.get::<Conversation>(agent), &occ.occurrence_key)
+    {
         return OccurrenceOutcome::Skipped;
     }
     // The head decides what to do; the reason is the only extra context it
@@ -353,7 +326,7 @@ fn dispatch_due_occurrence(
         // same frame sees the queued `Incoming` entity and stays idempotent.
         world.flush();
         queued_inbox.insert((agent, occ.occurrence_key.clone()));
-        return OccurrenceOutcome::Delivered;
+        return OccurrenceOutcome::Queued;
     }
     if let Err(error) = store
         .schedule_repo()
@@ -383,15 +356,19 @@ pub(crate) struct AutonomyPlugin;
 impl Plugin for AutonomyPlugin {
     fn build(&self, app: &mut App) {
         register(app);
-        app.init_resource::<ScheduleClock>().add_systems(
-            Update,
-            (
-                confirm_delivered_schedules,
-                fire_due_schedules.run_if(on_real_timer(POLL_INTERVAL).or_else(run_once)),
+        app.init_resource::<ScheduleClock>()
+            .add_systems(
+                Update,
+                fire_due_schedules
+                    .run_if(on_real_timer(POLL_INTERVAL).or_else(run_once))
+                    .after(AgentLoop),
             )
-                .chain()
-                .after(AgentLoop),
-        );
+            .add_systems(
+                Persist,
+                confirm_delivered_schedules
+                    .after(WriteLogs)
+                    .run_if(resource_exists::<SessionRestored>),
+            );
     }
 }
 
@@ -690,6 +667,7 @@ mod tests {
             .unwrap();
         harness.restart([]);
         assert_eq!(poll_schedules(harness.app.world_mut(), now), 0);
+        harness.tick();
         assert!(
             harness
                 .store()
@@ -711,5 +689,77 @@ mod tests {
             })
             .count();
         assert_eq!(matches, 1);
+    }
+
+    #[test]
+    fn a_failed_conversation_append_leaves_the_one_shot_pending() {
+        let now = utc(2026, 11, 14, 8, 0);
+        let clock = ScheduleClock::fixed(jiff::tz::TimeZone::UTC, now);
+        let mut harness = Harness::with_clock([text_turn("予定の時刻です")], clock.clone());
+        let schedule = harness
+            .store()
+            .schedule_repo()
+            .insert_schedule(
+                crate::host::db::schedules::NewSchedule {
+                    companion: &harness.companion,
+                    title: "保存の確認",
+                    instruction: "予定を伝える",
+                    run_at: Some("2026-11-14T08:00:00Z"),
+                    cron_expr: None,
+                },
+                &clock,
+            )
+            .unwrap();
+        let agent_id = agent::companion_agent_id(&harness.companion);
+        let logs = harness.root.path().join("rig/logs");
+        let log = logs.join(format!("{agent_id}.jsonl"));
+        let saved = logs.join("original-log-backup");
+        assert_eq!(poll_schedules(harness.app.world_mut(), now), 1);
+        let key = harness
+            .store()
+            .schedule_repo()
+            .pending_schedule_occurrences()
+            .unwrap()[0]
+            .occurrence_key
+            .clone();
+        let agent = harness.companion_agent();
+        let (blocked, backup) = (log.clone(), saved.clone());
+        harness.app.add_systems(
+            Persist,
+            (move |agents: Query<&Conversation>| {
+                if !conversation_has_occurrence(agents.get(agent).ok(), &key) || blocked.is_dir() {
+                    return;
+                }
+                if blocked.exists() {
+                    std::fs::rename(&blocked, &backup).unwrap();
+                }
+                std::fs::create_dir_all(&blocked).unwrap();
+            })
+            .before(WriteLogs),
+        );
+        harness.run_until(|world| world.resource::<SessionLog>().failure().is_some());
+
+        let pending = harness
+            .store()
+            .schedule_repo()
+            .pending_schedule_occurrences()
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].schedule_id, schedule.id);
+
+        std::fs::remove_dir(&log).unwrap();
+        if saved.exists() {
+            std::fs::rename(&saved, &log).unwrap();
+        }
+        harness.restart([text_turn("予定の時刻です")]);
+        assert_eq!(poll_schedules(harness.app.world_mut(), now), 1);
+        harness.run_until(|world| {
+            world
+                .resource::<Store>()
+                .schedule_repo()
+                .pending_schedule_occurrences()
+                .unwrap()
+                .is_empty()
+        });
     }
 }

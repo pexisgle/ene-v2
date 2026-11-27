@@ -192,40 +192,6 @@ impl<'a> ScheduleRepo<'a> {
         )
     }
 
-    /// The enabled schedules due at `now`.
-    pub fn due_schedules(&self, now: Timestamp) -> Result<Vec<Schedule>> {
-        self.0.fetch_all(
-            "SELECT id, companion_id, title, instruction, run_at, cron_expr, enabled, \
-             next_run_at, created_at, last_triggered_at FROM schedules \
-             WHERE enabled = 1 AND next_run_at <= ?1 ORDER BY next_run_at, id",
-            [stamp(now)],
-            Schedule::from_row,
-        )
-    }
-
-    /// Records that `id` fired at `at` and moves it to `next_run_at`.
-    pub fn mark_schedule_fired(
-        &self,
-        id: &str,
-        at: Timestamp,
-        next_run_at: Option<Timestamp>,
-    ) -> Result<bool> {
-        let changed = self
-            .0
-            .conn()
-            .prepare_cached(
-                "UPDATE schedules SET last_triggered_at = ?2, next_run_at = ?3, enabled = ?4 \
-                 WHERE id = ?1",
-            )?
-            .execute(params![
-                id,
-                stamp(at),
-                next_run_at.map(stamp),
-                if next_run_at.is_some() { 1 } else { 0 }
-            ])?;
-        Ok(changed > 0)
-    }
-
     /// Atomically materializes all due schedules for `ready_companions` into
     /// idempotent `schedule_occurrences` rows and returns pending occurrences.
     pub fn materialize_due_occurrences(

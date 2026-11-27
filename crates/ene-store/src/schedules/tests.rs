@@ -254,46 +254,65 @@ fn firing_a_row_advances_or_disables_it() {
         repeating.next_run_at.as_deref(),
         Some("2026-11-14T00:00:00Z")
     );
-    let due = repo.due_schedules(clock.now()).unwrap();
-    assert_eq!(due.len(), 1);
-    assert_eq!(due[0].id, one_shot.id);
+    let ready = ["ene".to_owned()].into();
     assert_eq!(repo.schedules("ene").unwrap().len(), 2);
+    let due = repo
+        .materialize_due_occurrences(clock.now(), &clock, &ready)
+        .unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].schedule_id, one_shot.id);
+    assert_eq!(repo.schedules("ene").unwrap().len(), 1);
 
     assert!(
-        repo.mark_schedule_fired(&one_shot.id, clock.now(), None)
+        repo.mark_occurrence_delivered(&due[0].occurrence_key, clock.now())
             .unwrap()
     );
     assert!(
         !repo
-            .mark_schedule_fired("missing", clock.now(), None)
+            .mark_occurrence_delivered("missing", clock.now())
             .unwrap()
     );
-    let (enabled, last, next) = stored(&store, &one_shot.id);
-    assert!(!enabled, "a one-shot row is disabled after firing");
-    assert_eq!(last.as_deref(), Some("2026-11-13T23:00:00Z"));
-    assert_eq!(next, None);
+    assert_eq!(
+        stored(&store, &one_shot.id),
+        (false, Some("2026-11-13T23:00:00Z".into()), None)
+    );
 
     let fired_at = utc(2026, 11, 14, 0, 0);
-    let due = repo.due_schedules(fired_at).unwrap();
+    let due = repo
+        .materialize_due_occurrences(fired_at, &clock, &ready)
+        .unwrap();
     assert_eq!(due.len(), 1);
-    assert_eq!(due[0].id, repeating.id);
+    assert_eq!(due[0].schedule_id, repeating.id);
     assert!(
-        repo.mark_schedule_fired(&repeating.id, fired_at, Some(utc(2026, 11, 15, 0, 0)))
+        repo.mark_occurrence_delivered(&due[0].occurrence_key, fired_at)
             .unwrap()
     );
-    let (enabled, last, next) = stored(&store, &repeating.id);
-    assert!(enabled, "a repeating row stays enabled");
-    assert_eq!(last.as_deref(), Some("2026-11-14T00:00:00Z"));
-    assert_eq!(next.as_deref(), Some("2026-11-15T00:00:00Z"));
-    assert_eq!(repo.due_schedules(fired_at).unwrap().len(), 0);
     assert_eq!(
-        repo.due_schedules(utc(2026, 11, 15, 0, 0)).unwrap().len(),
+        stored(&store, &repeating.id),
+        (
+            true,
+            Some("2026-11-14T00:00:00Z".into()),
+            Some("2026-11-15T00:00:00Z".into())
+        )
+    );
+    assert_eq!(
+        repo.materialize_due_occurrences(fired_at, &clock, &ready)
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        repo.materialize_due_occurrences(utc(2026, 11, 15, 0, 0), &clock, &ready)
+            .unwrap()
+            .len(),
         1
     );
 
     assert!(repo.cancel_schedule("ene", &repeating.id).unwrap());
     assert_eq!(
-        repo.due_schedules(utc(2026, 11, 16, 0, 0)).unwrap().len(),
+        repo.materialize_due_occurrences(utc(2026, 11, 16, 0, 0), &clock, &ready)
+            .unwrap()
+            .len(),
         0
     );
 }
