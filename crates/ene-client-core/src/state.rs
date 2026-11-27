@@ -238,8 +238,6 @@ pub struct CompanionState {
     pub streaming: BTreeMap<(String, String), String>,
     /// Mind views per companion id, once fetched.
     pub minds: BTreeMap<String, MindView>,
-    /// Whether a work session is running.
-    pub work_active: bool,
     /// Starter templates the host offers.
     pub templates: Vec<CompanionTemplate>,
     /// The last export, as a file name and its JSON.
@@ -364,6 +362,12 @@ impl Model {
     /// The snapshot, when one has arrived.
     pub fn snapshot(&self) -> Option<&Snapshot> {
         self.snapshot.as_ref()
+    }
+
+    /// Whether any work session is active in the current host view.
+    pub fn has_active_work(&self) -> bool {
+        self.snapshot()
+            .is_some_and(|snapshot| !snapshot.active_work.is_empty())
     }
 
     /// The companion the window is showing.

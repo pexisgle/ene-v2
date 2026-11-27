@@ -1,5 +1,7 @@
 //! Pure client domain models decoupled from Connect RPC / Protobuf wire types.
 
+use std::collections::BTreeMap;
+
 pub mod companion;
 pub mod connection;
 pub mod policy;
@@ -74,35 +76,6 @@ pub struct ClientInfo {
     pub active_companions: Vec<String>,
 }
 
-/// Detail payload for a work notification event.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WorkEventDetail {
-    /// The session moved to a new lifecycle state.
-    StatusChanged(WorkStatus),
-    /// A run started.
-    RunStarted,
-    /// A run ended, for whatever reason.
-    RunFinished {
-        /// The state the run ended in.
-        state: Option<RunState>,
-        /// Why the run failed, when it did.
-        failure: Option<Failure>,
-        /// The approval the run stopped on, when it is waiting for one.
-        pending_request_id: Option<String>,
-    },
-}
-
-/// Work session or run lifecycle event emitted by the host.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct WorkEvent {
-    /// The session the event is about.
-    pub work_id: String,
-    /// The run the event is about; empty for a session-level event.
-    pub run_id: String,
-    /// What happened, when the host described it.
-    pub detail: Option<WorkEventDetail>,
-}
-
 /// Persisted host settings and configured connections.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Settings {
@@ -127,8 +100,8 @@ pub struct Snapshot {
     pub settings: Option<Settings>,
     /// Every companion on the host.
     pub companions: Vec<Companion>,
-    /// Work sessions retained on the host.
-    pub work_sessions: Vec<WorkSession>,
+    /// Running sessions keyed by work ID, with their owning companions.
+    pub active_work: BTreeMap<String, crate::CompanionId>,
     /// The companion the host considers active.
     pub active_companion_id: Option<String>,
     /// Approvals waiting on a person.
@@ -191,8 +164,15 @@ pub enum NotificationEvent {
     MessageDelta(MessageDelta),
     /// A turn changed state.
     TurnEvent(Box<TurnEvent>),
-    /// A work session or run changed state.
-    WorkEvent(WorkEvent),
+    /// A work session changed its lifecycle state.
+    WorkStatusChanged {
+        /// The session whose status changed.
+        work_id: String,
+        /// The owner identified by the host's notification envelope.
+        companion_id: crate::CompanionId,
+        /// The session's current status.
+        status: WorkStatus,
+    },
     /// An approval was raised; `None` when it was withdrawn.
     ApprovalRequested(Option<Box<ApprovalRequest>>),
     /// The saved permission rules changed.

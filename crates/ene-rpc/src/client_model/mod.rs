@@ -83,34 +83,6 @@ from_fields! {
     }
 }
 
-impl From<w::WorkEvent> for domain::WorkEvent {
-    fn from(value: w::WorkEvent) -> Self {
-        let detail = value.detail.and_then(|detail| match detail {
-            w::work_event::Detail::StatusChanged(changed) => changed
-                .status
-                .as_known()
-                .and_then(|status| status.try_into().ok())
-                .map(domain::WorkEventDetail::StatusChanged),
-            w::work_event::Detail::RunStarted(_) => Some(domain::WorkEventDetail::RunStarted),
-            w::work_event::Detail::RunFinished(finished) => {
-                Some(domain::WorkEventDetail::RunFinished {
-                    state: finished
-                        .state
-                        .as_known()
-                        .and_then(|state| state.try_into().ok()),
-                    failure: finished.failure.into_option().map(Into::into),
-                    pending_request_id: finished.pending_request_id,
-                })
-            }
-        });
-        Self {
-            work_id: value.work_id,
-            run_id: value.run_id,
-            detail,
-        }
-    }
-}
-
 from_fields! {
     w::Settings => domain::Settings {
         revision,
@@ -120,18 +92,42 @@ from_fields! {
     }
 }
 
-from_fields! {
-    w::Snapshot => domain::Snapshot {
-        server_version,
-        health.into_option().map(Into::into),
-        settings.into_option().map(Into::into),
-        companions.into_iter().map(Into::into).collect(),
-        work_sessions.into_iter().filter_map(|item| item.try_into().ok()).collect(),
-        active_companion_id,
-        pending_approvals.into_iter().map(Into::into).collect(),
-        clients.into_iter().map(Into::into).collect(),
-        policy_rules.into_iter().filter_map(|rule| rule.try_into().ok()).collect(),
-        activations.into_iter().filter_map(|value| value.try_into().ok()).collect(),
+impl From<w::Snapshot> for domain::Snapshot {
+    fn from(value: w::Snapshot) -> Self {
+        Self {
+            server_version: value.server_version,
+            health: value.health.into_option().map(Into::into),
+            settings: value.settings.into_option().map(Into::into),
+            companions: value.companions.into_iter().map(Into::into).collect(),
+            active_work: value
+                .work_sessions
+                .into_iter()
+                .filter_map(|session| {
+                    if session.id.is_empty()
+                        || session.status.as_known() != Some(w::WorkStatus::Active)
+                    {
+                        return None;
+                    }
+                    Some((
+                        session.id,
+                        ene_domain::CompanionId::parse(&session.companion_id).ok()?,
+                    ))
+                })
+                .collect(),
+            active_companion_id: value.active_companion_id,
+            pending_approvals: value
+                .pending_approvals
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            clients: value.clients.into_iter().map(Into::into).collect(),
+            policy_rules: policy_rules(value.policy_rules),
+            activations: value
+                .activations
+                .into_iter()
+                .filter_map(|item| item.try_into().ok())
+                .collect(),
+        }
     }
 }
 
@@ -158,7 +154,9 @@ impl From<w::Notification> for domain::HostNotification {
     fn from(value: w::Notification) -> Self {
         Self {
             kind: value.kind,
-            event: value.event.map(notification_event),
+            event: value
+                .event
+                .map(|event| notification_event(event, value.companion_id.as_deref())),
         }
     }
 }
@@ -171,7 +169,10 @@ pub fn policy_rules(rules: Vec<w::PolicyRule>) -> Vec<domain::PolicyRule> {
         .collect()
 }
 
-fn notification_event(wire: w::notification::Event) -> domain::NotificationEvent {
+fn notification_event(
+    wire: w::notification::Event,
+    companion_id: Option<&str>,
+) -> domain::NotificationEvent {
     use domain::NotificationEvent as Event;
     use w::notification::Event as Wire;
 
@@ -192,7 +193,7 @@ fn notification_event(wire: w::notification::Event) -> domain::NotificationEvent
         Wire::MessageDelta(value) => Event::MessageDelta((*value).into()),
         Wire::TurnEvent(value) => domain::TurnEvent::try_from(*value)
             .map_or(Event::Other, |turn| Event::TurnEvent(Box::new(turn))),
-        Wire::WorkEvent(value) => Event::WorkEvent((*value).into()),
+        Wire::WorkEvent(value) => work_status(*value, companion_id).unwrap_or(Event::Other),
         Wire::ApprovalRequested(value) => Event::ApprovalRequested(
             value
                 .request
@@ -224,9 +225,81 @@ fn notification_event(wire: w::notification::Event) -> domain::NotificationEvent
     }
 }
 
+fn work_status(
+    work: w::WorkEvent,
+    companion_id: Option<&str>,
+) -> Option<domain::NotificationEvent> {
+    let w::work_event::Detail::StatusChanged(change) = work.detail? else {
+        return None;
+    };
+    if work.work_id.is_empty() {
+        return None;
+    }
+    Some(domain::NotificationEvent::WorkStatusChanged {
+        work_id: work.work_id,
+        companion_id: ene_domain::CompanionId::parse(companion_id?).ok()?,
+        status: change.status.as_known()?.try_into().ok()?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn work_activity_is_projected_from_session_status() {
+        let companion = ene_domain::CompanionId::parse("ene").unwrap();
+        let snapshot: domain::Snapshot = w::Snapshot {
+            work_sessions: [
+                ("active", w::WorkStatus::Active),
+                ("idle", w::WorkStatus::Idle),
+            ]
+            .into_iter()
+            .map(|(id, status)| w::WorkSession {
+                id: id.into(),
+                companion_id: "ene".into(),
+                status: status.into(),
+                ..Default::default()
+            })
+            .collect(),
+            ..Default::default()
+        }
+        .into();
+        assert_eq!(
+            snapshot.active_work,
+            [("active".into(), companion.clone())].into()
+        );
+        let notify = |detail| {
+            domain::HostNotification::from(w::Notification {
+                companion_id: Some("ene".into()),
+                event: Some(w::notification::Event::WorkEvent(Box::new(w::WorkEvent {
+                    work_id: "active".into(),
+                    run_id: "previous-run".into(),
+                    detail: Some(detail),
+                    ..Default::default()
+                }))),
+                ..Default::default()
+            })
+            .event
+        };
+        assert_eq!(
+            notify(w::work_event::Detail::RunFinished(Box::default())),
+            Some(domain::NotificationEvent::Other)
+        );
+        assert_eq!(
+            notify(w::work_event::Detail::StatusChanged(Box::new(
+                w::WorkStatusChanged {
+                    status: w::WorkStatus::Idle.into(),
+                    ..Default::default()
+                }
+            ))),
+            Some(domain::NotificationEvent::WorkStatusChanged {
+                work_id: "active".into(),
+                companion_id: companion,
+                status: domain::WorkStatus::Idle,
+            })
+        );
+    }
 
     #[test]
     fn wire_acl_preserves_connection_template_and_policy_round_trips() {

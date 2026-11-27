@@ -1,8 +1,8 @@
 use crate::{
     domain::{
         Activation, ApprovalRequest, ApprovalStatus, Companion, HostNotification, Message,
-        MessageDelta, MessageRole, MindUpdated, NotificationEvent, PolicyText, RunState, Settings,
-        Snapshot, TurnEvent, TurnStatus, WorkEvent, WorkEventDetail,
+        MessageDelta, MessageRole, MindUpdated, NotificationEvent, PolicyText, Settings, Snapshot,
+        TurnEvent, TurnStatus, WorkStatus,
     },
     reducer::is_user_facing_message,
     state::{Link, Model, Sending},
@@ -48,7 +48,7 @@ fn with_chat() -> Model {
 
 #[test]
 fn removing_a_companion_updates_the_live_view_and_selects_the_remaining_one() {
-    use crate::domain::{ClientInfo, WorkSession, WorkStatus};
+    use crate::domain::ClientInfo;
 
     let mut model = with_chat();
     let ene = CompanionId::parse("ene").unwrap();
@@ -75,18 +75,9 @@ fn removing_a_companion_updates_the_live_view_and_selects_the_remaining_one() {
             active_companions: vec!["ene".into(), "mio".into()],
             ..Default::default()
         }],
-        work_sessions: vec![WorkSession {
-            id: "task".into(),
-            companion_id: ene.clone(),
-            title: "Task".into(),
-            client_id: Some("desk".into()),
-            status: WorkStatus::Active,
-            created_at: String::new(),
-            updated_at: String::new(),
-        }],
+        active_work: [("task".to_owned(), ene.clone())].into(),
         ..snapshot()
     });
-    model.companions.work_active = true;
 
     let effects = model.apply(Update::Notification(Box::new(notification(
         NotificationEvent::CompanionRemoved(ene),
@@ -94,9 +85,8 @@ fn removing_a_companion_updates_the_live_view_and_selects_the_remaining_one() {
     assert_eq!(model.companion_id(), Some("mio"));
     assert_eq!(model.resident_companions("desk"), ["mio"]);
     assert!(model.companions.chat.companion_id.is_none());
-    assert!(!model.companions.work_active);
+    assert!(!model.has_active_work());
     let snapshot = model.snapshot.unwrap();
-    assert_eq!(snapshot.work_sessions, [] as [WorkSession; 0]);
     assert_eq!(snapshot.active_companion_id.as_deref(), Some("mio"));
     assert_eq!(snapshot.clients[0].active_companions, ["mio"]);
     assert!(effects.history && effects.mind);
@@ -420,7 +410,7 @@ fn mind_updated_requests_refresh_only_for_active_companion() {
 }
 
 #[test]
-fn internal_work_messages_are_hidden_and_work_event_tracks_active_status() {
+fn internal_work_messages_do_not_appear_in_chat() {
     let mut model = with_chat();
     let internal = Message {
         id: "w1".into(),
@@ -438,28 +428,33 @@ fn internal_work_messages_are_hidden_and_work_event_tracks_active_status() {
     });
     assert_eq!(model.companions.chat.messages.len(), 1);
     assert_eq!(model.companions.chat.messages[0].text, "調べて");
+}
 
-    model.apply(Update::Notification(Box::new(notification(
-        NotificationEvent::WorkEvent(WorkEvent {
-            work_id: "work-1".into(),
-            run_id: "run-1".into(),
-            detail: Some(WorkEventDetail::RunStarted),
-        }),
-    ))));
-    assert!(model.companions.work_active);
-
-    model.apply(Update::Notification(Box::new(notification(
-        NotificationEvent::WorkEvent(WorkEvent {
-            work_id: "work-1".into(),
-            run_id: "run-1".into(),
-            detail: Some(WorkEventDetail::RunFinished {
-                state: Some(RunState::Completed),
-                failure: None,
-                pending_request_id: None,
-            }),
-        }),
-    ))));
-    assert!(!model.companions.work_active);
+#[test]
+fn each_work_clears_only_its_own_activity() {
+    let mut model = model();
+    let ene = CompanionId::parse("ene").unwrap();
+    let mio = CompanionId::parse("mio").unwrap();
+    model.snapshot = Some(Snapshot {
+        active_work: [("first".into(), ene.clone())].into(),
+        ..snapshot()
+    });
+    let event = |work_id: &str, companion_id, status| {
+        Update::Notification(Box::new(notification(
+            NotificationEvent::WorkStatusChanged {
+                work_id: work_id.into(),
+                companion_id,
+                status,
+            },
+        )))
+    };
+    assert!(model.has_active_work());
+    model.apply(event("second", mio.clone(), WorkStatus::Active));
+    model.apply(event("first", ene.clone(), WorkStatus::Idle));
+    model.apply(event("first", ene, WorkStatus::Idle));
+    assert!(model.has_active_work(), "the second work is still running");
+    model.apply(event("second", mio, WorkStatus::Closed));
+    assert!(!model.has_active_work());
 }
 
 #[test]

@@ -40,7 +40,7 @@ pub(super) fn compute_status_word(
         Link::Lost { .. } | Link::Unset { .. } | Link::Unusable { .. } => "未接続",
         Link::Live { .. } if !model.approvals().is_empty() => "確認待ち",
         Link::Live { .. } if in_onboarding => "初期設定",
-        Link::Live { .. } if model.companions.work_active => "作業中",
+        Link::Live { .. } if model.has_active_work() => "作業中",
         Link::Live { .. } if model.audio.companion_speaking => "発話中",
         Link::Live { .. } if !model.companions.chat.sending.is_empty() => "送信中",
         Link::Live { .. } if is_streaming => "返答を考え中",

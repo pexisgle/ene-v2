@@ -6,8 +6,7 @@
 use crate::{
     domain::{
         Activation, ApprovalRequest, ApprovalStatus, ConnectionKind, HostEvent, HostNotification,
-        Message, NotificationEvent, RunState, TurnEvent, TurnStatus, WorkEvent, WorkEventDetail,
-        WorkStatus,
+        Message, NotificationEvent, TurnEvent, TurnStatus, WorkStatus,
     },
     reducer::is_user_facing_message,
     state::{Chat, Effects, Model, NoticeKind},
@@ -41,7 +40,19 @@ pub(crate) fn merge_notification(
             | NotificationEvent::PolicyRulesUpdated(_)
             | NotificationEvent::PolicyTextsUpdated(_)),
         ) => merge_approval_event(model, event, effects),
-        Some(NotificationEvent::WorkEvent(work)) => merge_work_event(model, &work),
+        Some(NotificationEvent::WorkStatusChanged {
+            work_id,
+            companion_id,
+            status,
+        }) => {
+            if let Some(snapshot) = model.snapshot.as_mut() {
+                if status == WorkStatus::Active {
+                    snapshot.active_work.insert(work_id, companion_id);
+                } else {
+                    snapshot.active_work.remove(&work_id);
+                }
+            }
+        }
         Some(NotificationEvent::Generic(event)) => merge_generic_notice(model, &event),
         Some(NotificationEvent::MindUpdated(updated)) => {
             // `updated.companion_id` is a CompanionId, so it is never empty and
@@ -78,12 +89,8 @@ pub(crate) fn remove_companion(model: &mut Model, companion_id: &str, effects: &
             client.active_companions.retain(|id| id != companion_id);
         }
         snapshot
-            .work_sessions
-            .retain(|session| session.companion_id.as_str() != companion_id);
-        model.companions.work_active = snapshot
-            .work_sessions
-            .iter()
-            .any(|session| session.status == WorkStatus::Active);
+            .active_work
+            .retain(|_, owner| owner.as_str() != companion_id);
     }
     model.companions.minds.remove(companion_id);
     model
@@ -115,10 +122,6 @@ fn merge_snapshot_event(model: &mut Model, event: NotificationEvent, effects: &m
             snapshot
                 .companions
                 .sort_by(|left, right| left.name.cmp(&right.name));
-            model.companions.work_active = snapshot
-                .work_sessions
-                .iter()
-                .any(|session| session.status == WorkStatus::Active);
             model.snapshot = Some(*snapshot);
             effects.approvals = false;
         }
@@ -257,18 +260,6 @@ fn merge_approval_event(model: &mut Model, event: NotificationEvent, effects: &m
         }
         _ => {}
     }
-}
-
-fn merge_work_event(model: &mut Model, work: &WorkEvent) {
-    model.companions.work_active = match &work.detail {
-        Some(WorkEventDetail::RunStarted) => true,
-        Some(WorkEventDetail::StatusChanged(status)) => *status == WorkStatus::Active,
-        Some(WorkEventDetail::RunFinished { state, .. }) => matches!(
-            state,
-            Some(RunState::Starting | RunState::Running | RunState::WaitingInput)
-        ),
-        None => false,
-    };
 }
 
 fn merge_generic_notice(model: &mut Model, event: &HostEvent) {

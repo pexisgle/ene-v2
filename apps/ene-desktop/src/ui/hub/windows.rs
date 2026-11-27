@@ -127,7 +127,7 @@ pub(super) fn sync_tray_state(hub: &Hub) {
     let name = hub.model.companion().map_or("ene", |c| c.name.as_str());
     let status = match &hub.model.connections.link {
         Link::Live { .. } if !hub.model.approvals().is_empty() => "確認待ち",
-        Link::Live { .. } if hub.model.companions.work_active => "作業中",
+        Link::Live { .. } if hub.model.has_active_work() => "作業中",
         Link::Live { .. } if hub.model.audio.companion_speaking => "発話中",
         Link::Live { .. } if !hub.model.companions.streaming.is_empty() => "生成中",
         Link::Live { .. } => "待機中",
