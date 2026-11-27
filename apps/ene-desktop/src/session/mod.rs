@@ -116,6 +116,8 @@ pub struct Options {
     pub name: String,
     /// The platform string, for the host's list.
     pub platform: String,
+    /// Whether the operator explicitly supplied the discovery file.
+    pub explicit_connection: bool,
     /// The `ene-avatar` binary, or `None` to run without a renderer.
     pub renderer: Option<PathBuf>,
     /// The VRM model to show.
@@ -128,6 +130,7 @@ impl Default for Options {
             id: "desktop".into(),
             name: "Desktop".into(),
             platform: std::env::consts::OS.into(),
+            explicit_connection: false,
             renderer: None,
             model: avatar::default_model(),
         }
@@ -303,7 +306,12 @@ impl Session {
             }
             Err(error) => return Outcome::Dropped(error.to_string()),
         };
-        let host = match Host::connect(&discovery) {
+        let connected = if self.transport.options.explicit_connection {
+            Host::connect_explicit(&discovery)
+        } else {
+            Host::connect(&discovery)
+        };
+        let host = match connected {
             Ok(host) => host,
             Err(error) => {
                 self.report_phase(ConnectionPhase::Unusable {

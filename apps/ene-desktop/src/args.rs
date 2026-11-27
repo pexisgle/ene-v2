@@ -50,6 +50,10 @@ impl DesktopArgs {
                 .map_or_else(ene_desktop::persistent_client_id, str::to_owned),
             name: self.client_name.clone(),
             platform: std::env::consts::OS.into(),
+            explicit_connection: self
+                .connection
+                .as_ref()
+                .is_some_and(|path| !path.is_empty()),
             renderer: self
                 .renderer
                 .as_deref()

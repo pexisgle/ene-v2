@@ -23,10 +23,16 @@ pub(crate) fn unary_options() -> CallOptions {
 }
 
 /// What the host publishes for a client to connect with.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Discovery {
     pub endpoint: String,
     pub token: String,
+}
+
+impl std::fmt::Debug for Discovery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Discovery").finish_non_exhaustive()
+    }
 }
 
 /// Selected host target: local discovery file or explicit remote HTTPS host.
@@ -165,6 +171,19 @@ impl Host {
         Ok(Self::from_parts(transport, config))
     }
 
+    /// A file selected by the operator may identify a remote HTTPS ingress.
+    pub(crate) fn connect_explicit(discovery: &Discovery) -> Result<Self, Connect> {
+        if discovery
+            .endpoint
+            .split_once(':')
+            .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
+        {
+            Self::connect_remote(&discovery.endpoint, &discovery.token)
+        } else {
+            Self::connect(discovery)
+        }
+    }
+
     /// Connects to an explicitly configured remote HTTPS ingress using TLS +
     /// Bearer authentication (`ene_rpc::connect_remote`).
     // Exercised by unit tests and reserved for remote ingress UI; remove once wired to UI.
@@ -234,5 +253,9 @@ mod tests {
             }
         );
         assert!(Host::connect_target(&loaded).is_ok());
+        let fields = Discovery::read(&path).unwrap();
+        assert!(Host::connect(&fields).is_err());
+        assert!(Host::connect_explicit(&fields).is_ok());
+        assert!(!format!("{fields:?}").contains(&fields.token));
     }
 }
