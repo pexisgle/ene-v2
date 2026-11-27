@@ -576,42 +576,32 @@ fn finalized_lines_keep_the_newest_twenty_in_order() {
     );
 }
 
-/// An RPC reply that started earlier can arrive later. Applying it would put an
-/// older answer over a newer one, so its sequence must be refused.
+/// Replacement ordering is local to the resource whose state would change.
 #[test]
-fn a_stale_scoped_update_is_refused_but_a_newer_one_applies() {
+fn scoped_model_lists_replace_only_the_same_connections_older_reply() {
     let mut model = with_chat();
     model.apply(Update::Link(Box::new(Link::Live {
         version: "1".into(),
     })));
     let epoch = model.connections.link_epoch;
-    let scoped = |seq: u64, text: &str| Update::Scoped {
+    let scoped = |seq: u64, connection: &str, id: &str| Update::Scoped {
         epoch,
         seq,
-        inner: Box::new(Update::Transcription {
-            text: text.into(),
-            is_final: true,
-            is_speaking: false,
+        inner: Box::new(Update::Models {
+            connection_id: connection.into(),
+            models: vec![crate::domain::ModelInfo {
+                id: id.into(),
+                name: id.into(),
+            }],
         }),
     };
 
-    model.apply(scoped(1, "first"));
-    assert_eq!(model.audio.recognized, ["first"]);
-
-    // Out of order: the older request answers after the newer one did.
-    model.apply(scoped(3, "third"));
-    model.apply(scoped(2, "second"));
-    assert_eq!(
-        model.audio.recognized,
-        ["first", "third"],
-        "the late reply with a lower sequence must not be applied"
-    );
-
-    // A newer sequence still applies.
-    model.apply(scoped(4, "fourth"));
-    assert_eq!(model.audio.recognized, ["first", "third", "fourth"]);
-
-    // A replayed sequence is refused too, so a duplicate cannot double-apply.
-    model.apply(scoped(4, "fourth"));
-    assert_eq!(model.audio.recognized.len(), 3);
+    model.apply(scoped(3, "a", "fresh"));
+    model.apply(scoped(1, "b", "first"));
+    model.apply(scoped(2, "a", "old"));
+    model.apply(scoped(3, "a", "replay"));
+    assert_eq!(model.connections.models["a"][0].id, "fresh");
+    assert_eq!(model.connections.models["b"][0].id, "first");
+    model.apply(scoped(4, "a", "newer"));
+    assert_eq!(model.connections.models["a"][0].id, "newer");
 }

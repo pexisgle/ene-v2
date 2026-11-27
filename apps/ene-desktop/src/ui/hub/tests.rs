@@ -40,7 +40,7 @@ fn accepted_credential_replies_clear_each_hidden_draft(cx: &mut TestAppContext) 
     cx.update(|cx| {
         hub.update(cx, |hub, cx| {
             let epoch = hub.model.connections.link_epoch;
-            for (seq, id) in [(2, "a"), (3, "b"), (1, "stale")] {
+            for (epoch, seq, id) in [(epoch, 3, "a"), (epoch, 2, "b"), (epoch - 1, 4, "stale")] {
                 hub.apply(
                     Update::Scoped {
                         epoch,

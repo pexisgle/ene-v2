@@ -19,10 +19,16 @@ impl Model {
     /// Admits a reply before any reducer or front-end effects use it.
     pub fn accept_update(&mut self, mut update: Update) -> Option<Update> {
         while let Update::Scoped { epoch, seq, inner } = update {
-            if epoch != self.connections.link_epoch || seq <= self.connections.applied_seq {
+            if epoch != self.connections.link_epoch {
                 return None;
             }
-            self.connections.applied_seq = seq;
+            if let Some(target) = inner.reply_target() {
+                let applied = self.connections.applied_seq.entry(target).or_default();
+                if seq <= *applied {
+                    return None;
+                }
+                *applied = seq;
+            }
             update = *inner;
         }
         Some(update)
@@ -80,6 +86,7 @@ fn apply_link(model: &mut Model, link: Link, effects: &mut Effects) {
     let appeared = is_live && !was_live;
     if was_live != is_live {
         model.connections.link_epoch = model.connections.link_epoch.saturating_add(1);
+        model.connections.applied_seq.clear();
     }
     model.connections.link = link;
     if !model.connections.link.is_live() {

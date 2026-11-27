@@ -237,6 +237,47 @@ pub enum Update {
     Plugins(Vec<PluginInfo>),
 }
 
+/// A newer response can replace an older one for the same view resource.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ReplyTarget {
+    Providers,
+    Models(String),
+    Check(String),
+    Credential(String),
+    History(String),
+    Mind(String),
+    Approvals,
+    PolicyRules,
+    PolicyTexts,
+    Plugins,
+    Templates,
+    Preview,
+}
+
+impl Update {
+    pub(crate) fn reply_target(&self) -> Option<ReplyTarget> {
+        Some(match self {
+            Self::Providers(_) => ReplyTarget::Providers,
+            Self::Models { connection_id, .. } => ReplyTarget::Models(connection_id.clone()),
+            Self::Checked { connection_id, .. } => ReplyTarget::Check(connection_id.clone()),
+            Self::CredentialRegistered { connection_id } => {
+                ReplyTarget::Credential(connection_id.clone())
+            }
+            Self::History { companion_id, .. } | Self::HistoryFailed { companion_id, .. } => {
+                ReplyTarget::History(companion_id.clone())
+            }
+            Self::MindLoaded { companion_id, .. } => ReplyTarget::Mind(companion_id.clone()),
+            Self::Approvals(_) => ReplyTarget::Approvals,
+            Self::PolicyRules(_) => ReplyTarget::PolicyRules,
+            Self::PolicyTexts(_) => ReplyTarget::PolicyTexts,
+            Self::Plugins(_) => ReplyTarget::Plugins,
+            Self::CompanionTemplates(_) => ReplyTarget::Templates,
+            Self::CompanionPreview { .. } => ReplyTarget::Preview,
+            _ => return None,
+        })
+    }
+}
+
 /// What the window asks the session to do, because the session owns it.
 #[derive(Debug)]
 pub enum Command {

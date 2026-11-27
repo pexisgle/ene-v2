@@ -4,9 +4,12 @@ use crate::domain::{
     Activation, ApprovalRequest, Companion, CompanionTemplate, ConnectionCheck, LlmProvider,
     Message, MindView, ModelInfo, PluginInfo, PolicyText, Settings, Snapshot, TurnEvent,
 };
-use crate::update::CaptureMode;
+use crate::update::{CaptureMode, ReplyTarget};
 use ene_domain::CompanionId;
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
 
 /// The link to the host, in the states the window must tell apart.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -186,12 +189,8 @@ pub struct ConnectionViewState {
     pub link: Link,
     /// Bumped on every new link, so stale replies can be dropped.
     pub link_epoch: u64,
-    /// Highest `Update::Scoped` sequence applied in `link_epoch`.
-    ///
-    /// RPC replies race: two requests start in order, and the earlier one can
-    /// arrive second. Its `seq` is lower, so applying it would overwrite newer
-    /// state with an older answer.
-    pub(crate) applied_seq: u64,
+    /// Latest replacement reply per view resource on this link.
+    pub(crate) applied_seq: HashMap<ReplyTarget, u64>,
     /// The provider catalog, once fetched.
     pub providers: Option<Vec<LlmProvider>>,
     /// Models per connection id, once fetched.
@@ -213,7 +212,7 @@ impl ConnectionViewState {
                 reason: String::new(),
             },
             link_epoch: 1,
-            applied_seq: 0,
+            applied_seq: HashMap::new(),
             providers: None,
             models: BTreeMap::new(),
             checks: BTreeMap::new(),
