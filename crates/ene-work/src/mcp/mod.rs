@@ -2,6 +2,7 @@
 
 mod http;
 pub mod npx;
+mod stdio;
 pub mod transport;
 
 pub use npx::is_npx_command;

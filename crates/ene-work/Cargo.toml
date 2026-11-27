@@ -20,12 +20,15 @@ rig-agent.workspace = true
 rig-rmcp.workspace = true
 rmcp.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "process"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "process", "signal"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))'.dependencies]
+rustix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # `process_wrap::tokio::CreationFlags` takes `PROCESS_CREATION_FLAGS`, which

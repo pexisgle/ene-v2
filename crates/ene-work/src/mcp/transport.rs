@@ -1,24 +1,24 @@
 //! ECS-free MCP transport connection opening, backoff calculation, and tool naming helpers.
 
-use super::until_cancelled;
+use super::stdio::CancellableStdio;
 use backon::{BackoffBuilder as _, ExponentialBuilder};
 use ene_domain::settings::McpConnection as McpConfig;
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use rig_agent::tool::server::ToolServerHandle;
 use rig_rmcp::{McpClientError, McpClientHandler, McpConnection};
 use rmcp::{
-    RoleClient, ServiceError,
+    ServiceError,
     model::ClientConfig,
-    service::{ClientInitializeError, RxJsonRpcMessage, TxJsonRpcMessage},
+    service::ClientInitializeError,
     transport::{
-        DynamicTransportError, Transport,
+        DynamicTransportError,
         child_process::TokioChildProcess,
         streamable_http_client::{
             StreamableHttpClientTransport, StreamableHttpClientTransportConfig, StreamableHttpError,
         },
     },
 };
-use std::{io, time::Duration};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(windows)]
@@ -193,45 +193,10 @@ async fn open_stdio(
         }
         _ => ConnectFailure::Transient(format!("MCP process could not start: {error}")),
     })?;
-    let transport = CancellableStdio {
-        child,
-        stop: stop.clone(),
-    };
+    let transport = CancellableStdio::new(child, stop.clone());
     Box::pin(handler.connect(transport))
         .await
         .map_err(connect_failure)
-}
-
-struct CancellableStdio {
-    child: TokioChildProcess,
-    stop: CancellationToken,
-}
-
-impl Transport<RoleClient> for CancellableStdio {
-    type Error = io::Error;
-
-    fn send(
-        &mut self,
-        item: TxJsonRpcMessage<RoleClient>,
-    ) -> impl Future<Output = io::Result<()>> + Send + 'static {
-        let stop = self.stop.clone();
-        let send = self.child.send(item);
-        async move {
-            until_cancelled(&stop, send)
-                .await
-                .ok_or(io::ErrorKind::Interrupted)?
-        }
-    }
-
-    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
-        until_cancelled(&self.stop, self.child.receive())
-            .await
-            .flatten()
-    }
-
-    async fn close(&mut self) -> io::Result<()> {
-        self.child.close().await
-    }
 }
 
 async fn open_http(
