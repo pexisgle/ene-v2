@@ -226,7 +226,7 @@ pub struct MemoryRecord {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewMemory {
-    /// Correct an existing memory instead of recording a new one.
+    /// The existing memory to update. Replacing its text preserves it as history and returns a new ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// The memory text; a correction may omit it to change only importance.

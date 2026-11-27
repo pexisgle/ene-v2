@@ -4,14 +4,14 @@
 use super::ops::update_mind_state;
 use super::{
     Batch, COLUMNS, Commit, Fact, Memory, MemoryContext, MemoryRecord, MemoryRepo, Result,
-    SHARED_SCOPE, VISIBLE, add_edge, cite_visible_memory, insert_row, now, read_memory_tx,
+    SHARED_SCOPE, VISIBLE, add_edge, cite_visible_memory, insert_row, load_memory, now,
     supersede_tx, truncate, validate_citations,
 };
 use crate::StoreError;
 use crate::row::FromRow;
 use ene_mind::{Checkpoint, MemoryVersion, RecallCandidate, RecallMode, Summary};
 use rusqlite::{OptionalExtension, Transaction, params};
-use serde_json::json as value;
+use serde_json::{Value, json as value};
 use std::collections::{HashMap, HashSet};
 
 impl<'a> MemoryRepo<'a> {
@@ -209,12 +209,15 @@ fn apply_consolidated_fact(
             return Ok(());
         };
         let Some(old) =
-            read_memory_tx(transaction, old_id)?.filter(|memory| memory.memory_revision == version)
+            load_memory(transaction, old_id)?.filter(|memory| memory.memory_revision == version)
         else {
             return Err(StoreError::Conflict(
                 "memory changed while consolidation was running".into(),
             ));
         };
+        if old.source_context.get("source").and_then(Value::as_str) == Some("mind_correction") {
+            return Ok(());
+        }
         shared &= old.scope == SHARED_SCOPE;
     }
     if transaction

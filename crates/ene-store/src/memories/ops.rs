@@ -1,7 +1,7 @@
 use super::{
     Memory, MemoryRecord, MemoryRepo, MindStateChange, MindUpdate, NewMemory, PendingEmbedding,
-    Result, VISIBLE, add_edge, check_content, check_importance, insert_row, json, now,
-    read_memory_tx, supersede_tx, to_json,
+    Result, VISIBLE, add_edge, check_importance, insert_row, json, load_memory, now, supersede_tx,
+    to_json,
 };
 use crate::{Store, StoreError};
 use ene_mind::{RecallCandidate, dimensions_of_space, in_scope};
@@ -50,7 +50,7 @@ impl<'a> MemoryRepo<'a> {
                 };
                 forget_memory_tx(&transaction, update, id, memory.expected_revision)?;
                 forgotten.push(id.clone());
-            } else if let Some(id) = &memory.id {
+            } else if let Some(id) = memory.id.as_ref().or(memory.supersedes.as_ref()) {
                 if memory.content.trim().is_empty()
                     && memory.importance.is_none()
                     && memory.supersedes.is_none()
@@ -59,33 +59,17 @@ impl<'a> MemoryRepo<'a> {
                         "a correction needs content, importance or supersedes".into(),
                     ));
                 }
-                correct_memory_tx(&transaction, update, memory, id, &stamp)?;
+                inserted.extend(correct_memory_tx(&transaction, update, memory, id, &stamp)?);
                 updated.push(id.clone());
             } else {
-                if memory.content.trim().is_empty() {
-                    return Err(StoreError::Invalid("memory content is required".into()));
-                }
-                let id = uuid::Uuid::new_v4().to_string();
-                insert_row(
+                inserted.push(insert_mind_memory(
                     &transaction,
-                    &MemoryRecord {
-                        id: id.clone(),
-                        scope: update.companion_id.clone(),
-                        content: memory.content.clone(),
-                        importance: memory.importance.unwrap_or(3).min(10),
-                        occurred_at: memory.occurred_at.clone(),
-                        source_context: value!({
-                            "source": "mind_update",
-                            "operation_id": update.operation_id,
-                        }),
-                    },
+                    update,
+                    memory,
+                    None,
+                    memory.importance.unwrap_or(3).min(10),
                     &stamp,
-                )?;
-                add_edge(&transaction, &update.companion_id, "remembers", &id, &stamp)?;
-                if let Some(old) = &memory.supersedes {
-                    supersede_tx(&transaction, &update.companion_id, &id, old, &stamp)?;
-                }
-                inserted.push(id);
+                )?);
             }
         }
         let mut state_revision = None;
@@ -264,26 +248,14 @@ fn forget_memory_tx(
     id: &str,
     expected_revision: Option<u64>,
 ) -> Result<()> {
-    let current = read_memory_tx(transaction, id)?
-        .ok_or_else(|| StoreError::NotFound("memory not found".into()))?;
-    if !in_scope(&current.scope, &update.companion_id) {
-        return Err(StoreError::Permission(
-            "this memory is outside the companion's scope".into(),
-        ));
-    }
-    let expected = expected_revision.unwrap_or(current.memory_revision);
-    if current.memory_revision != expected {
-        return Err(StoreError::Conflict(
-            "memory changed since it was read".into(),
-        ));
-    }
+    let current = editable_memory(transaction, &update.companion_id, id, expected_revision)?;
     let rows = transaction
         .prepare_cached(
             "UPDATE memories SET importance = 0, \
              memory_revision = memory_revision + 1 \
              WHERE id = ?1 AND memory_revision = ?2",
         )?
-        .execute(params![id, expected])?;
+        .execute(params![id, current.memory_revision])?;
     if rows == 0 {
         return Err(StoreError::Conflict(
             "memory changed since it was read".into(),
@@ -298,57 +270,99 @@ fn correct_memory_tx(
     memory: &NewMemory,
     id: &str,
     stamp: &str,
-) -> Result<()> {
-    let current = read_memory_tx(transaction, id)?
+) -> Result<Option<String>> {
+    let current = editable_memory(
+        transaction,
+        &update.companion_id,
+        id,
+        memory.expected_revision,
+    )?;
+    let importance = memory.importance.unwrap_or(current.importance);
+    check_importance(importance)?;
+    let replacement = if !memory.content.trim().is_empty() && memory.content != current.content {
+        let next = insert_mind_memory(
+            transaction,
+            update,
+            memory,
+            Some(&current),
+            importance,
+            stamp,
+        )?;
+        supersede_tx(transaction, &update.companion_id, &next, id, stamp)?;
+        Some(next)
+    } else {
+        if importance != current.importance {
+            transaction
+                .prepare_cached(
+                    "UPDATE memories SET importance = ?2, \
+                 memory_revision = memory_revision + 1, last_accessed_at = ?3 WHERE id = ?1",
+                )?
+                .execute(params![id, importance, stamp])?;
+        }
+        None
+    };
+    if let Some(old) = memory.supersedes.as_deref().filter(|old| *old != id) {
+        supersede_tx(
+            transaction,
+            &update.companion_id,
+            replacement.as_deref().unwrap_or(id),
+            old,
+            stamp,
+        )?;
+    }
+    Ok(replacement)
+}
+
+fn editable_memory(
+    connection: &rusqlite::Connection,
+    companion: &str,
+    id: &str,
+    expected: Option<u64>,
+) -> Result<Memory> {
+    let current = load_memory(connection, id)?
         .ok_or_else(|| StoreError::NotFound("memory not found".into()))?;
-    if !in_scope(&current.scope, &update.companion_id) {
+    if !in_scope(&current.scope, companion) {
         return Err(StoreError::Permission(
             "this memory is outside the companion's scope".into(),
         ));
     }
-    let expected = memory.expected_revision.unwrap_or(current.memory_revision);
-    if current.memory_revision != expected {
+    if expected.is_some_and(|revision| revision != current.memory_revision) {
         return Err(StoreError::Conflict(
             "memory changed since it was read".into(),
         ));
     }
-    let content = if memory.content.trim().is_empty() {
-        current.content.clone()
-    } else {
-        memory.content.clone()
-    };
-    check_content(&content)?;
-    let importance = memory.importance.unwrap_or(current.importance);
-    check_importance(importance)?;
-    let content_changed = content != current.content;
-    let importance_changed = importance != current.importance;
-    if content_changed || importance_changed {
-        let changed_content = if content_changed { 1i64 } else { 0i64 };
-        let rows = transaction
-            .prepare_cached(
-                "UPDATE memories SET content = ?3, importance = ?4, \
-                 content_revision = content_revision + ?5, \
-                 memory_revision = memory_revision + 1, last_accessed_at = ?6 \
-                 WHERE id = ?1 AND memory_revision = ?2",
-            )?
-            .execute(params![
-                id,
-                expected,
-                content,
-                importance,
-                changed_content,
-                stamp
-            ])?;
-        if rows == 0 {
-            return Err(StoreError::Conflict(
-                "memory changed since it was read".into(),
-            ));
-        }
-    }
-    if let Some(old) = &memory.supersedes {
-        supersede_tx(transaction, &update.companion_id, id, old, stamp)?;
-    }
-    Ok(())
+    Ok(current)
+}
+
+fn insert_mind_memory(
+    transaction: &rusqlite::Transaction<'_>,
+    update: &MindUpdate,
+    memory: &NewMemory,
+    prior: Option<&Memory>,
+    importance: u8,
+    stamp: &str,
+) -> Result<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    insert_row(
+        transaction,
+        &MemoryRecord {
+            id: id.clone(),
+            scope: prior.map_or_else(|| update.companion_id.clone(), |old| old.scope.clone()),
+            content: memory.content.clone(),
+            importance,
+            occurred_at: memory
+                .occurred_at
+                .clone()
+                .or_else(|| prior?.occurred_at.clone()),
+            source_context: value!({
+                "source": if prior.is_some() { "mind_correction" } else { "mind_update" },
+                "operation_id": update.operation_id,
+            }),
+        },
+        stamp,
+    )?;
+    add_edge(transaction, &update.companion_id, "remembers", &id, stamp)?;
+    Ok(id)
 }
 
 /// The profile lines injected into dynamic context recall.

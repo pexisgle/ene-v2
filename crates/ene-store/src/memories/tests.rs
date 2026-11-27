@@ -388,7 +388,7 @@ fn mind_update_is_idempotent_and_corrections_forgets_and_state_use_cas() {
         ),
         Err(StoreError::Conflict(_))
     ));
-    apply(
+    let correction = apply(
         &store,
         "op-2",
         &repo.mind_hash(&value!({"content": "green tea"})),
@@ -417,26 +417,24 @@ fn mind_update_is_idempotent_and_corrections_forgets_and_state_use_cas() {
         ),
         Err(StoreError::Conflict(_))
     ));
-    let corrected = repo.memory(&id).unwrap().unwrap();
-    assert_eq!(corrected.content, "green tea");
-    assert_eq!(corrected.importance, 7);
-    assert_eq!(corrected.memory_revision, 2);
+    let corrected_id = correction["memories"][0].as_str().unwrap().to_owned();
+    assert_preserved_correction(repo, &id, &corrected_id);
     apply(
         &store,
         "op-4",
         &repo.mind_hash(&value!({"forget": 1})),
         vec![NewMemory {
-            id: Some(id.clone()),
+            id: Some(corrected_id.clone()),
             forget: true,
-            expected_revision: Some(2),
+            expected_revision: Some(1),
             ..NewMemory::default()
         }],
         None,
     )
     .unwrap();
-    let forgotten = repo.memory(&id).unwrap().unwrap();
+    let forgotten = repo.memory(&corrected_id).unwrap().unwrap();
     assert_eq!(forgotten.importance, 0);
-    assert_eq!(forgotten.memory_revision, 3);
+    assert_eq!(forgotten.memory_revision, 2);
     state_only(&store, "op-5", 1).unwrap();
     assert_eq!(
         companions.companion("ene").unwrap().unwrap().state_revision,
@@ -449,6 +447,39 @@ fn mind_update_is_idempotent_and_corrections_forgets_and_state_use_cas() {
     assert_eq!(
         companions.companion("ene").unwrap().unwrap().state_revision,
         2
+    );
+}
+
+fn assert_preserved_correction(repo: MemoryRepo<'_>, previous: &str, corrected_id: &str) {
+    assert_ne!(corrected_id, previous);
+    let original = repo.memory(previous).unwrap().unwrap();
+    assert_eq!(original.content, "tea");
+    assert_eq!(original.importance, 2);
+    assert_eq!(original.memory_revision, 2);
+    let corrected = repo.memory(corrected_id).unwrap().unwrap();
+    assert_eq!(corrected.content, "green tea");
+    assert_eq!(corrected.importance, 7);
+    assert_eq!(corrected.memory_revision, 1);
+    assert!(
+        repo.memory_edges(corrected_id)
+            .unwrap()
+            .contains(&("supersedes".into(), previous.into()))
+    );
+    let context = repo
+        .consolidation_context("ene", "green tea", &[], 5)
+        .unwrap();
+    assert_eq!(
+        repo.consolidate(
+            &batch(8, context),
+            &[Fact {
+                content: "The tea was counterfeit".into(),
+                supersedes: Some(corrected_id.into()),
+                ..Fact::default()
+            }]
+        )
+        .unwrap()
+        .inserted,
+        0
     );
 }
 

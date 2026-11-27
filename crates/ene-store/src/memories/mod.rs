@@ -8,7 +8,7 @@ mod store;
 mod tests;
 
 pub use ops::{detail, profile_lines};
-pub(crate) use store::{add_edge, check_content, check_importance, insert_row};
+pub(crate) use store::{add_edge, check_importance, insert_row};
 
 use crate::row::FromRow;
 use crate::{
@@ -70,34 +70,6 @@ fn cite_visible_memory(
     Ok(updated)
 }
 
-pub(super) struct StoredMemory {
-    pub(super) scope: String,
-    pub(super) content: String,
-    pub(super) importance: u8,
-    pub(super) memory_revision: u64,
-}
-
-pub(super) fn read_memory_tx(
-    transaction: &rusqlite::Transaction<'_>,
-    id: &str,
-) -> Result<Option<StoredMemory>> {
-    transaction
-        .prepare_cached(
-            "SELECT scope, content, importance, memory_revision \
-             FROM memories WHERE id = ?1",
-        )?
-        .query_row([id], |row| {
-            Ok(StoredMemory {
-                scope: row.get(0)?,
-                content: row.get(1)?,
-                importance: row.get(2)?,
-                memory_revision: row.get(3)?,
-            })
-        })
-        .optional()
-        .map_err(Into::into)
-}
-
 pub(super) fn supersede_tx(
     transaction: &rusqlite::Transaction<'_>,
     companion_id: &str,
@@ -117,18 +89,6 @@ pub(super) fn supersede_tx(
         return Ok(());
     }
     add_edge(transaction, new_id, "supersedes", old_id, stamp)?;
-    lower_superseded_tx(transaction, companion_id, old_id, new_id)
-}
-
-fn lower_superseded_tx(
-    transaction: &rusqlite::Transaction<'_>,
-    companion_id: &str,
-    old_id: &str,
-    new_id: &str,
-) -> Result<()> {
-    if old_id == new_id {
-        return Ok(());
-    }
     transaction
         .prepare_cached(
             "UPDATE memories SET importance = MIN(importance, 2), \
