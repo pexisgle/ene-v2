@@ -12,7 +12,7 @@ use crate::{
 };
 use ene_avatar_ipc::{AvatarEvent, AvatarStatus};
 use ene_rpc as w;
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::mpsc::UnboundedSender;
 
 pub(super) struct DeviceBridge {
@@ -81,32 +81,19 @@ impl DeviceBridge {
     /// Reconciles all resident companions onto the running renderer with their
     /// resolved `BodyBinding` models and placements.
     pub(super) async fn sync_avatars(&mut self, transport: &SessionTransport) {
-        if self.avatar.is_none() {
+        let Some(avatar) = self.avatar.as_mut() else {
             return;
-        }
-        let resident: Vec<(String, ene_domain::BodyBinding, Option<PathBuf>)> = transport
-            .bindings
-            .iter()
-            .map(|id| {
-                let body = transport.body_binding_for(id);
-                let model = transport.model_for(id);
-                (id.clone(), body, model)
-            })
-            .collect();
+        };
+        avatar.retain_characters(&transport.bindings).await;
         let idle = avatar::motion("idle");
-        let default_scale = self.avatar_scale;
-        if let Some(avatar) = self.avatar.as_mut() {
-            remove_stale_avatars(avatar, &resident).await;
-            for (id, body, model) in resident {
-                let Some(model) = model else {
-                    continue;
-                };
-                if let Err(error) = avatar
-                    .show_with_body(&id, &model, idle.as_deref(), &body, default_scale)
+        for id in &transport.bindings {
+            let body = transport.body_binding_for(id);
+            if let Some(model) = transport.resolve_model(&body)
+                && let Err(error) = avatar
+                    .show_with_body(id, &model, idle.as_deref(), &body, self.avatar_scale)
                     .await
-                {
-                    tracing::warn!(character = %id, %error, "the renderer did not show the model");
-                }
+            {
+                tracing::warn!(character = %id, %error, "the renderer did not show the model");
             }
         }
     }
@@ -141,8 +128,7 @@ impl DeviceBridge {
         match event {
             AvatarEvent::Finished { character } => {
                 if transport.bindings.contains(&character)
-                    && let Some(model) = transport.model_for(&character)
-                    && let Err(error) = avatar.return_to_idle(&character, &model).await
+                    && let Err(error) = avatar.return_to_idle(&character).await
                 {
                     tracing::warn!(%character, %error, "the renderer could not return to idle");
                 }
@@ -383,20 +369,6 @@ impl DeviceBridge {
             {
                 tracing::warn!("a background report panicked: {error}");
             }
-        }
-    }
-}
-
-async fn remove_stale_avatars(
-    avatar: &mut Avatar,
-    resident: &[(String, ene_domain::BodyBinding, Option<PathBuf>)],
-) {
-    let shown = avatar.shown_characters();
-    for stale in shown {
-        if !resident.iter().any(|(id, _, _)| id == &stale)
-            && let Err(error) = avatar.remove_character(&stale).await
-        {
-            tracing::warn!(character = %stale, %error, "failed to remove released avatar");
         }
     }
 }

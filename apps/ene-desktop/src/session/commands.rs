@@ -7,6 +7,7 @@ use super::device_commands::{LookAtInput, MotionInput, OperationOutput, PerchInp
 use crate::{avatar, capabilities, host::Host, perception::Watch};
 use buffa::view::MessageView;
 use ene_rpc as w;
+#[cfg(windows)]
 use std::time::Duration;
 
 /// One validated `body.motion` request, before anything is sent anywhere.
@@ -98,8 +99,6 @@ pub(super) enum OperationError {
     InvalidLookAtAngles,
     #[error("body.perch coordinates must be finite")]
     NonFinitePerchCoord,
-    #[error("no model is configured for the renderer")]
-    NoModelForMotion,
     #[error("the target companion's avatar is not ready")]
     AvatarNotReady,
     #[error("「目」はオフです")]
@@ -373,19 +372,16 @@ impl Session {
         if !x.is_finite() || !y.is_finite() || x.abs() > 1_000_000. || y.abs() > 1_000_000. {
             return Err(OperationError::NonFinitePerchCoord);
         }
-        let model = self.transport.model_for(companion_id);
         let avatar = self.ready_avatar(companion_id)?;
         avatar
             .place(companion_id, input.monitor.clone(), [x, y])
             .await?;
-        if let Some(posture) = input.posture
-            && let Some(model_path) = model
-        {
+        if let Some(posture) = input.posture {
             let posture_name = posture.preset();
             let clip = avatar::motion(posture_name);
             if clip.is_some() || posture_name == "idle" {
                 let _spawned = avatar
-                    .show_preset(companion_id, &model_path, posture_name, clip.as_deref())
+                    .show_preset(companion_id, posture_name, clip.as_deref())
                     .await;
             }
         }
@@ -399,19 +395,10 @@ impl Session {
         input: MotionInput,
     ) -> Result<OperationOutput, OperationError> {
         let plan = MotionPlan::parse(input)?;
-        let model = self
-            .transport
-            .model_for(companion_id)
-            .ok_or(OperationError::NoModelForMotion)?;
         let avatar = self.ready_avatar(companion_id)?;
-        if avatar
-            .show_preset(companion_id, &model, &plan.motion, plan.clip.as_deref())
-            .await?
-        {
-            avatar
-                .await_state(companion_id, Duration::from_secs(2))
-                .await?;
-        }
+        avatar
+            .show_preset(companion_id, &plan.motion, plan.clip.as_deref())
+            .await?;
         // A face is separate from the motion: `neutral` clears it, and the
         // renderer keeps it across later motion changes.
         if let Some(name) = &plan.expression {

@@ -40,8 +40,8 @@ pub enum AvatarError {
     Exited,
     #[error("the renderer timed out answering an IPC command")]
     Timeout,
-    #[error("the renderer did not load the model")]
-    ModelLoadFailed,
+    #[error("the character is not displayed by the renderer")]
+    UnknownCharacter,
     #[error("the renderer sent invalid JSON: {0}")]
     InvalidJson(String),
     #[error("the renderer output failed: {0}")]
@@ -241,81 +241,6 @@ impl Avatar {
     pub fn notifications(&mut self) -> Vec<AvatarEvent> {
         self.drain_incoming_events();
         self.events.drain(..).collect()
-    }
-
-    /// Waits for the renderer to publish a terminal `state` event without
-    /// discarding unrelated notifications or blocking the async runtime.
-    pub async fn await_state(
-        &mut self,
-        character: &str,
-        wait: Duration,
-    ) -> Result<(), AvatarError> {
-        let deadline = tokio::time::Instant::now() + wait;
-        self.drain_incoming_events();
-        if let Some(result) = self.take_terminal_state(character) {
-            return result;
-        }
-        loop {
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                return Ok(());
-            }
-            match tokio::time::timeout(deadline - now, self.events_rx.recv()).await {
-                Ok(Some(event)) => match &event {
-                    AvatarEvent::State {
-                        character: got,
-                        status,
-                        error,
-                    } if got == character => match status {
-                        AvatarStatus::Ready | AvatarStatus::Suspended => {
-                            self.push_event(event);
-                            return Ok(());
-                        }
-                        AvatarStatus::Error => {
-                            let err = error
-                                .clone()
-                                .map_or(AvatarError::ModelLoadFailed, AvatarError::Renderer);
-                            self.push_event(event);
-                            return Err(err);
-                        }
-                        AvatarStatus::Loading => {}
-                    },
-                    _ => self.push_event(event),
-                },
-                Ok(None) | Err(_) => return Ok(()),
-            }
-        }
-    }
-
-    fn take_terminal_state(&mut self, character: &str) -> Option<Result<(), AvatarError>> {
-        let pos = self.events.iter().position(|event| {
-            matches!(
-                event,
-                AvatarEvent::State {
-                    character: got,
-                    status: AvatarStatus::Ready | AvatarStatus::Suspended | AvatarStatus::Error,
-                    ..
-                } if got == character
-            )
-        })?;
-        // Consume the event: leaving it queued returned the same terminal state
-        // on every later `await_state`, so a character that recovered still
-        // reported its old error.
-        let event = self.events.remove(pos)?;
-        match &event {
-            AvatarEvent::State {
-                status: AvatarStatus::Ready | AvatarStatus::Suspended,
-                ..
-            } => Some(Ok(())),
-            AvatarEvent::State {
-                status: AvatarStatus::Error,
-                error,
-                ..
-            } => Some(Err(error
-                .clone()
-                .map_or(AvatarError::ModelLoadFailed, AvatarError::Renderer))),
-            _ => None,
-        }
     }
 
     /// Sends `quit` without waiting indefinitely; kills the child if it does

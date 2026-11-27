@@ -11,7 +11,6 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -263,11 +262,11 @@ fn fake_renderer(renderer: TestRenderer) -> Arc<Mutex<Vec<Command>>> {
     sent
 }
 
-/// A terminal `state` event is published once. Returning it on every later wait
-/// made a character that recovered keep reporting its old error.
-#[tokio::test]
-async fn a_terminal_state_event_is_observed_once() {
-    let (mut avatar, renderer) = Avatar::for_test(HashMap::new());
+#[test]
+fn recovery_replaces_the_previous_renderer_error() {
+    let shown = CharacterConfig::for_model("ene.vrm");
+    let (mut avatar, renderer) = Avatar::for_test(HashMap::from([("ene".to_owned(), shown)]));
+    assert!(avatar.is_ready("ene"));
     renderer
         .events
         .send(AvatarEvent::State {
@@ -276,21 +275,24 @@ async fn a_terminal_state_event_is_observed_once() {
             error: Some("model missing".into()),
         })
         .unwrap();
+    assert_eq!(avatar.notifications().len(), 1);
+    assert_eq!(avatar.failure("ene"), Some("model missing"));
+    assert!(!avatar.is_ready("ene"));
+    assert_eq!(avatar.notifications(), [] as [AvatarEvent; 0]);
 
-    let first = avatar.await_state("ene", Duration::from_millis(500)).await;
-    assert!(
-        matches!(first, Err(AvatarError::Renderer(_))),
-        "the queued failure must be reported: {first:?}"
-    );
-
-    let second = avatar.await_state("ene", Duration::from_millis(50)).await;
-    assert!(
-        second.is_ok(),
-        "the same terminal event was replayed to a later wait: {second:?}"
-    );
-    // Keep the sender alive so the second wait polls to its deadline instead of
-    // seeing the channel close.
-    drop(renderer);
+    for (status, ready) in [(AvatarStatus::Loading, false), (AvatarStatus::Ready, true)] {
+        renderer
+            .events
+            .send(AvatarEvent::State {
+                character: "ene".into(),
+                status,
+                error: None,
+            })
+            .unwrap();
+        assert_eq!(avatar.notifications().len(), 1);
+        assert_eq!(avatar.is_ready("ene"), ready);
+        assert!(avatar.failure("ene").is_none());
+    }
 }
 
 /// Explicit body placement is sent atomically. Unrelated scale changes keep

@@ -64,8 +64,7 @@ impl SessionTransport {
             .unwrap_or_default()
     }
 
-    pub(super) fn model_for(&self, companion_id: &str) -> Option<PathBuf> {
-        let body = self.body_binding_for(companion_id);
+    pub(super) fn resolve_model(&self, body: &ene_domain::BodyBinding) -> Option<PathBuf> {
         avatar::resolve_model_path(body.model.as_deref(), self.options.model.as_deref())
     }
 

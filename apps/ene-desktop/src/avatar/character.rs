@@ -4,13 +4,23 @@
 use super::client::{Avatar, AvatarError, ModelState, ShownCharacter, WriteItem, lip_sync_line};
 use super::presets::{idle_return_preset, is_looping_motion, is_persistent_idle, motion};
 use ene_avatar_ipc::{AvatarEvent, CharacterConfig, Command};
-use std::path::Path;
 use std::sync::atomic::Ordering;
+use std::{collections::BTreeSet, path::Path};
 use tokio::sync::mpsc;
 
 impl Avatar {
-    pub fn shown_characters(&self) -> Vec<String> {
-        self.shown.keys().cloned().collect()
+    pub async fn retain_characters(&mut self, resident: &BTreeSet<String>) {
+        let stale: Vec<_> = self
+            .shown
+            .keys()
+            .filter(|id| !resident.contains(*id))
+            .cloned()
+            .collect();
+        for id in stale {
+            if let Err(error) = self.remove_character(&id).await {
+                tracing::warn!(character = %id, %error, "failed to remove released avatar");
+            }
+        }
     }
 
     /// Removes `character` from the renderer when its companion is released.
@@ -33,7 +43,7 @@ impl Avatar {
         motion: Option<&Path>,
         body: &ene_domain::BodyBinding,
         default_scale: f32,
-    ) -> Result<bool, AvatarError> {
+    ) -> Result<(), AvatarError> {
         let existing = self.shown.get(character).map(|shown| &shown.config);
         let mut next = existing
             .cloned()
@@ -51,77 +61,48 @@ impl Avatar {
         }
         next.size_percent = body.size_percent.unwrap_or(default_scale).clamp(50., 200.);
         if existing == Some(&next) {
-            return Ok(false);
+            return Ok(());
         }
-        let loads_model = existing.is_none_or(|shown| shown.model != next.model);
-        self.configure(character, next, Some(body)).await?;
-        Ok(loads_model)
+        self.configure(character, next, Some(body)).await
     }
 
-    /// Shows `motion` on `character`, adding it first if it is not there.
-    pub async fn show(
-        &mut self,
-        character: &str,
-        model: &Path,
-        motion: Option<&Path>,
-        looping: bool,
-    ) -> Result<bool, AvatarError> {
-        let motion = motion.map(|path| path.to_string_lossy().into_owned());
-        let existing = self.shown.get(character).map(|shown| &shown.config);
-        let mut next = existing
-            .cloned()
-            .unwrap_or_else(|| CharacterConfig::for_model(model.to_string_lossy()));
-        next.model = model.to_string_lossy().into_owned();
-        next.motion = motion;
-        next.looping = looping;
-        if looping && existing == Some(&next) {
-            return Ok(false);
-        }
-        let loads_model = existing.is_none_or(|shown| shown.model != next.model);
-        if loads_model {
-            self.configure(character, next, None).await?;
-        } else {
-            self.call(Command::Motion {
-                character: character.to_owned(),
-                motion: next.motion.clone(),
-                looping,
-            })
-            .await?;
-            if let Some(shown) = self.shown.get_mut(character) {
-                shown.config = next;
-            }
-        }
-        self.drain_incoming_events();
-        self.events.retain(|event| {
-            !(matches!(event, AvatarEvent::Finished { .. }) && event.character() == character)
-        });
-        Ok(loads_model)
-    }
-
-    /// Shows a declared motion preset, tracking looping resting postures for return-to-idle.
+    /// Plays a preset on the displayed model and remembers its resting posture.
     pub async fn show_preset(
         &mut self,
         character: &str,
-        model: &Path,
         preset: &str,
         clip: Option<&Path>,
-    ) -> Result<bool, AvatarError> {
+    ) -> Result<(), AvatarError> {
         let looping = is_looping_motion(preset);
-        let loads_model = self.show(character, model, clip, looping).await?;
+        let clip = clip.map(|path| path.to_string_lossy().into_owned());
+        let shown = self
+            .shown
+            .get(character)
+            .ok_or(AvatarError::UnknownCharacter)?;
+        if !looping || !shown.config.looping || shown.config.motion != clip {
+            self.call(Command::Motion {
+                character: character.to_owned(),
+                motion: clip.clone(),
+                looping,
+            })
+            .await?;
+            self.drain_incoming_events();
+            self.events.retain(|event| {
+                !(matches!(event, AvatarEvent::Finished { .. }) && event.character() == character)
+            });
+        }
         if let Some(shown) = self.shown.get_mut(character) {
+            shown.config.motion = clip;
+            shown.config.looping = looping;
             shown.last_motion = Some(preset.to_owned());
             if is_persistent_idle(preset) {
                 shown.base_motion = Some(preset.to_owned());
             }
         }
-        Ok(loads_model)
+        Ok(())
     }
 
-    pub async fn return_to_idle(
-        &mut self,
-        character: &str,
-        model: &Path,
-    ) -> Result<(), AvatarError> {
+    pub async fn return_to_idle(&mut self, character: &str) -> Result<(), AvatarError> {
         if let Some(shown) = self
             .shown
             .get(character)
@@ -129,7 +110,7 @@ impl Avatar {
         {
             let preset =
                 idle_return_preset(shown.base_motion.as_deref(), shown.last_motion.as_deref());
-            self.show_preset(character, model, preset, motion(preset).as_deref())
+            self.show_preset(character, preset, motion(preset).as_deref())
                 .await?;
         }
         Ok(())

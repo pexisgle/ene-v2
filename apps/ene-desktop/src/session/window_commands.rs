@@ -7,7 +7,6 @@ use super::{Session, Step};
 use crate::update::Update;
 use crate::{host::Host, perception::Sensor, update::Command};
 use ene_rpc as w;
-use std::path::PathBuf;
 
 /// Handles one window command.
 pub(super) async fn command(session: &mut Session, host: &Host, command: Command) -> Step {
@@ -162,11 +161,10 @@ async fn cmd_release_companion(session: &mut Session, host: &Host, companion_id:
 async fn cmd_set_avatar_scale(session: &mut Session, scale: f32) -> Step {
     let scale = scale.clamp(50., 200.);
     session.devices.avatar_scale = scale;
-    let target_ids: Vec<String> = session.transport.focused_companion_id().map_or_else(
-        || session.transport.bindings.iter().cloned().collect(),
-        |id| vec![id.to_owned()],
-    );
-    if target_ids.is_empty() || session.devices.avatar.is_none() {
+    let (Some(id), Some(avatar)) = (
+        session.transport.focused_companion_id(),
+        session.devices.avatar.as_mut(),
+    ) else {
         super::notify_ui(
             &session.updates,
             Update::Failed {
@@ -175,39 +173,23 @@ async fn cmd_set_avatar_scale(session: &mut Session, scale: f32) -> Step {
             },
         );
         return Step::Continue;
-    }
-    let models: Vec<(String, Option<PathBuf>)> = target_ids
-        .into_iter()
-        .map(|id| {
-            let model = session.transport.model_for(&id);
-            (id, model)
-        })
-        .collect();
-    let mut updated = false;
-    let mut last_err = None;
-    if let Some(avatar) = session.devices.avatar.as_mut() {
-        for (id, model) in models {
-            if let Some(model) = model {
-                match avatar.set_scale(&id, &model, scale).await {
-                    Ok(()) => updated = true,
-                    Err(error) => last_err = Some(error),
-                }
-            }
+    };
+    let body = session.transport.body_binding_for(id);
+    let Some(model) = session.transport.resolve_model(&body) else {
+        return Step::Continue;
+    };
+    match avatar.set_scale(id, &model, scale).await {
+        Ok(()) => {
+            super::notify_ui(&session.updates, Update::AvatarScaleChanged(scale));
+            session.report_devices().await;
         }
-    }
-    if let Some(error) = last_err
-        && !updated
-    {
-        super::notify_ui(
+        Err(error) => super::notify_ui(
             &session.updates,
             Update::Failed {
                 context: "アバターのサイズ変更",
                 message: error.to_string(),
             },
-        );
-    } else if updated {
-        super::notify_ui(&session.updates, Update::AvatarScaleChanged(scale));
-        session.report_devices().await;
+        ),
     }
     Step::Continue
 }
