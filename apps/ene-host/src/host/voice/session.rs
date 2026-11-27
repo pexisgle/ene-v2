@@ -76,6 +76,7 @@ pub(crate) fn on_stream_text(world: &mut World, companion: &str, text: &str) {
         store: world.get_resource::<Store>(),
         credentials: world.get_resource::<crate::host::model::Credentials>(),
         providers: world.get_resource::<crate::host::providers::Providers>(),
+        #[cfg(test)]
         engines: world
             .get_resource::<super::Engines>()
             .cloned()

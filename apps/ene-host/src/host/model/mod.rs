@@ -39,6 +39,7 @@ const MAX_MODELS: usize = 4_096;
 /// How long the model-list probe may take.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[cfg(test)]
 type ConnectModel = dyn Fn(
         &Store,
         &Credentials,
@@ -50,9 +51,11 @@ type ConnectModel = dyn Fn(
     + Send
     + Sync;
 
+#[cfg(test)]
 #[derive(Clone, bevy_ecs::prelude::Resource)]
 pub(crate) struct ModelFactory(pub(crate) Arc<ConnectModel>);
 
+#[cfg(test)]
 impl Default for ModelFactory {
     fn default() -> Self {
         Self(Arc::new(connect))

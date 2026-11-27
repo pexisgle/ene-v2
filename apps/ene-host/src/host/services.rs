@@ -34,8 +34,6 @@ impl HostServices {
             providers: Some(&self.providers),
             #[cfg(test)]
             engines: self.engine_overrides.read().clone(),
-            #[cfg(not(test))]
-            engines: Default::default(),
         }
     }
 }

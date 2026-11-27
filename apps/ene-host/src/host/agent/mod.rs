@@ -15,6 +15,7 @@ mod spawn;
 mod transcript;
 mod turns;
 
+#[cfg(test)]
 use super::model::ModelFactory;
 use bevy_ecs::prelude::*;
 use rig_ecs::prelude::*;
@@ -62,8 +63,9 @@ pub(crate) struct AgentPlugin;
 
 impl Plugin for AgentPlugin {
     fn build(&self, app: &mut App) {
+        #[cfg(test)]
+        app.init_resource::<ModelFactory>();
         app.init_resource::<Connections>()
-            .init_resource::<ModelFactory>()
             .init_resource::<WorkReports>()
             .add_observer(
                 |event: On<Add<Turn>>,

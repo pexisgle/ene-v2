@@ -6,7 +6,7 @@ use crate::host::{
     db::{Result, Store},
     error::HostError,
     mind::Role,
-    model::{Credentials, ModelFactory},
+    model::{self, Credentials},
     providers::Providers,
     resources::{CompanionAgent, HostRuntime},
     tools::run_tool,
@@ -189,8 +189,11 @@ pub(crate) fn consider_user_reply(world: &mut World, agent: Entity, input: &str,
     };
     let fallback = Providers::default();
     let providers = world.get_resource::<Providers>().unwrap_or(&fallback);
-    let factory = world.resource::<ModelFactory>();
-    let Ok(model) = (factory.0)(
+    #[cfg(not(test))]
+    let connect = model::connect;
+    #[cfg(test)]
+    let connect = &world.resource::<model::ModelFactory>().0;
+    let Ok(model) = connect(
         store,
         credentials,
         models.0.catalog(),

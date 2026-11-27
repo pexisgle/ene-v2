@@ -9,6 +9,7 @@ use crate::host::{
     providers::Providers,
     settings::{Connection, ConnectionKind},
 };
+#[cfg(test)]
 use bevy_ecs::prelude::*;
 use std::sync::Arc;
 
@@ -48,6 +49,7 @@ pub(crate) fn start_selected_voicevox(
 }
 
 /// Engines a test injects to stand in for the plugin path.
+#[cfg(test)]
 #[derive(Resource, Clone, Default)]
 pub(crate) struct Engines {
     pub(crate) tts: Option<Arc<dyn TtsEngine>>,
@@ -80,6 +82,7 @@ pub(crate) struct VoiceEngineContext<'a> {
     pub(crate) store: Option<&'a Store>,
     pub(crate) credentials: Option<&'a Credentials>,
     pub(crate) providers: Option<&'a Providers>,
+    #[cfg(test)]
     pub(crate) engines: Engines,
 }
 
@@ -121,6 +124,7 @@ pub(crate) fn companion_tts_source(
     ctx: &VoiceEngineContext<'_>,
     companion: Option<&Companion>,
 ) -> std::result::Result<Arc<dyn TtsEngine>, SetupError> {
+    #[cfg(test)]
     if let Some(engine) = &ctx.engines.tts {
         return Ok(Arc::clone(engine));
     }
@@ -155,6 +159,7 @@ pub(crate) fn companion_tts_source(
 pub(crate) fn stt_source(
     ctx: &VoiceEngineContext<'_>,
 ) -> std::result::Result<Arc<dyn SttEngine>, SetupError> {
+    #[cfg(test)]
     if let Some(engine) = &ctx.engines.stt {
         return Ok(Arc::clone(engine));
     }

@@ -2,13 +2,15 @@
 //!
 //! The store is the source of truth and the binding is derived: a cached
 //! connection is dropped when the settings revision, the credential generation
-//! or the model factory changes, and rebuilt from the companion's assignment.
+//! changes, and rebuilt from the companion's assignment.
 
+#[cfg(test)]
+use crate::host::model::ModelFactory;
 use crate::host::{
     db::{Result, Store},
     error::HostError,
     mind::Role,
-    model::{Credentials, ModelFactory},
+    model::Credentials,
     notify::Notifier,
     resources::{CompanionAgent, WorkAgent},
 };
@@ -23,6 +25,7 @@ pub(crate) struct Connections {
     revision: u64,
     plugin_revision: u64,
     credential_generation: u64,
+    #[cfg(test)]
     factory: Option<ModelFactory>,
     models: HashMap<(String, String), ModelConnection>,
 }
@@ -68,22 +71,28 @@ pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
         .cloned()
         .unwrap_or_default();
     let plugin_revision = providers.revision();
+    #[cfg(test)]
     let factory = world.resource::<ModelFactory>().clone();
     {
         let mut cache = world.resource_mut::<Connections>();
-        if cache.revision != revision
+        let changed = cache.revision != revision
             || cache.plugin_revision != plugin_revision
-            || cache.credential_generation != credential_generation
+            || cache.credential_generation != credential_generation;
+        #[cfg(test)]
+        let changed = changed
             || cache
                 .factory
                 .as_ref()
-                .is_none_or(|previous| !std::sync::Arc::ptr_eq(&previous.0, &factory.0))
-        {
+                .is_none_or(|previous| !std::sync::Arc::ptr_eq(&previous.0, &factory.0));
+        if changed {
             cache.models.clear();
             cache.revision = revision;
             cache.plugin_revision = plugin_revision;
             cache.credential_generation = credential_generation;
-            cache.factory = Some(factory.clone());
+            #[cfg(test)]
+            {
+                cache.factory = Some(factory.clone());
+            }
         }
     }
     let cached = assignment
@@ -92,8 +101,12 @@ pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
     let connection = match cached {
         Some(connection) => connection,
         None => {
-            let catalog = world.resource::<Models>().0.catalog().clone();
-            let model = (factory.0)(&store, &credentials, &catalog, &companion, role, &providers)?;
+            #[cfg(not(test))]
+            let connect = crate::host::model::connect;
+            #[cfg(test)]
+            let connect = factory.0;
+            let catalog = world.resource::<Models>().0.catalog();
+            let model = connect(&store, &credentials, catalog, &companion, role, &providers)?;
             let spec = std::sync::Arc::new(model.spec().cloned().ok_or_else(|| {
                 HostError::Internal(("a completion model without catalog facts").into())
             })?);

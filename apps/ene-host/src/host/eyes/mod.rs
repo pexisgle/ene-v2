@@ -6,12 +6,14 @@
 //! hands the resulting reaction to the head. This file keeps the state itself,
 //! the assessment-to-reaction rules in [`Session::queue_assessment`], and the
 //! [`poll`] loop that drives all three.
+#[cfg(test)]
+use super::model::ModelFactory;
 use super::{
     agent, background,
     db::Store,
     error::{HostError, Result},
     mind::Role,
-    model::{Credentials, ModelFactory},
+    model::Credentials,
     providers::Providers,
     resources::{DeviceHub, HostRuntime},
 };
@@ -358,7 +360,10 @@ pub(crate) fn poll(world: &mut World) {
                     session.next_evaluation = now + EVALUATION_INTERVAL;
                     session.dirty = false;
                     if let Ok(Some(companion)) = store.companion_repo().companion(companion_id) {
-                        let factory = world.resource::<ModelFactory>().clone();
+                        #[cfg(not(test))]
+                        let connect = super::model::connect;
+                        #[cfg(test)]
+                        let connect = world.resource::<ModelFactory>().0.clone();
                         let credentials = world.resource::<Credentials>().clone();
                         let catalog = world
                             .resource::<rig_ecs::model::Models>()
@@ -372,7 +377,7 @@ pub(crate) fn poll(world: &mut World) {
                         let store = store.clone();
                         let since_user = seconds_since_user(world.get::<Conversation>(entity));
                         let evaluation = evaluate(session, since_user, now, move || {
-                            (factory.0)(
+                            connect(
                                 &store,
                                 &credentials,
                                 &catalog,

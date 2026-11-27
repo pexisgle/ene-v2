@@ -12,7 +12,9 @@ pub(crate) use ene_voice::{
     SetupError, SttEngine, TtsEngine, VOICE_UNAVAILABLE, VoiceHttpError, parse_binding, speech,
     synthesize_for_probe, voicevox,
 };
-pub(crate) use engine::{Engines, VoiceEngineContext};
+#[cfg(test)]
+pub(crate) use engine::Engines;
+pub(crate) use engine::VoiceEngineContext;
 pub(crate) use engine::{
     companion_tts_source, is_builtin_voicevox, start_selected_voicevox, stt_source, tts_source,
 };
