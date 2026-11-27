@@ -54,19 +54,10 @@ impl BrokerServices {
     }
 }
 
-/// Callback invoked when a plugin calls `ServiceRequest::Tool` (always gated
-/// by the caller; fail-closed when absent).
-pub(crate) type PluginToolCallback =
-    Arc<dyn Fn(String, Value) -> BoxFuture<'static, Result<Value, Failure>> + Send + Sync>;
-
-/// Full host-service implementation for non-provider and extension plugins
-/// (`Log`, `Configuration`, isolated `State`, optional `HttpBroker`, and
-/// optional policy-gated `Tool` invocation) (`F19`).
+/// Logging, configuration and isolated state for non-provider extensions.
 pub(crate) struct PluginServices {
     plugin_id: String,
     store: crate::host::db::Store,
-    broker: Option<(Arc<HttpBroker>, String)>,
-    tool_callback: Option<PluginToolCallback>,
 }
 
 impl PluginServices {
@@ -74,91 +65,35 @@ impl PluginServices {
         Arc::new(Self {
             plugin_id: plugin_id.into(),
             store,
-            broker: None,
-            tool_callback: None,
-        })
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn with_tool_callback(
-        plugin_id: impl Into<String>,
-        store: crate::host::db::Store,
-        tool_callback: PluginToolCallback,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            plugin_id: plugin_id.into(),
-            store,
-            broker: None,
-            tool_callback: Some(tool_callback),
         })
     }
 }
 
 impl Services for PluginServices {
     fn handle(&self, request: ServiceRequest) -> BoxFuture<'_, Result<Value, Failure>> {
-        let plugin_id = self.plugin_id.clone();
-        let store = self.store.clone();
-        let broker = self.broker.clone();
-        let tool_callback = self.tool_callback.clone();
         Box::pin(async move {
+            let repo = self.store.plugin_repo();
             match request {
                 ServiceRequest::Log { message } => {
                     let clipped = ene_store::util::truncate(&message, 4_096);
-                    tracing::info!(plugin = %plugin_id, "{clipped}");
+                    tracing::info!(plugin = %self.plugin_id, "{clipped}");
                     Ok(Value::Null)
                 }
-                ServiceRequest::Configuration => store
-                    .plugin_repo()
-                    .plugin_config(&plugin_id)
+                ServiceRequest::Configuration => repo
+                    .plugin_config(&self.plugin_id)
                     .map_err(|_| Failure::new("service_failed")),
-                ServiceRequest::StateRead { key } => {
-                    let val = store
-                        .plugin_repo()
-                        .plugin_state_read(&plugin_id, &key)
-                        .map_err(|_| Failure::new("service_failed"))?;
-                    Ok(val.unwrap_or(Value::Null))
-                }
-                ServiceRequest::StateWrite { key, value } => {
-                    store
-                        .plugin_repo()
-                        .plugin_state_write(&plugin_id, &key, &value)
-                        .map_err(|_| Failure::new("service_failed"))?;
-                    Ok(Value::Null)
-                }
-                ServiceRequest::HttpOpen { request } => {
-                    let Some((broker, provider)) = broker else {
-                        return Err(Failure::new("undeclared_service"));
-                    };
-                    serde_json::to_value(broker.open(&provider, request).await?)
-                        .map_err(|_| Failure::new("serialize"))
-                }
-                ServiceRequest::HttpRead { handle } => {
-                    let Some((broker, _)) = broker else {
-                        return Err(Failure::new("undeclared_service"));
-                    };
-                    serde_json::to_value(broker.read(&handle).await?)
-                        .map_err(|_| Failure::new("serialize"))
-                }
-                ServiceRequest::HttpClose { handle } => {
-                    let Some((broker, _)) = broker else {
-                        return Err(Failure::new("undeclared_service"));
-                    };
-                    broker.close(&handle)?;
-                    Ok(Value::Null)
-                }
-                ServiceRequest::Tool { name, arguments } => {
-                    let Some(cb) = tool_callback else {
-                        return Err(Failure::new("permission_required"));
-                    };
-                    cb(name, arguments).await
-                }
-                ServiceRequest::AudioRead { .. } => Err(Failure::new("undeclared_service")),
+                ServiceRequest::StateRead { key } => repo
+                    .plugin_state_read(&self.plugin_id, &key)
+                    .map(|value| value.unwrap_or(Value::Null))
+                    .map_err(|_| Failure::new("service_failed")),
+                ServiceRequest::StateWrite { key, value } => repo
+                    .plugin_state_write(&self.plugin_id, &key, &value)
+                    .map(|()| Value::Null)
+                    .map_err(|_| Failure::new("service_failed")),
+                ServiceRequest::Tool { .. } => Err(Failure::new("permission_required")),
+                _ => Err(Failure::new("undeclared_service")),
             }
         })
-    }
-
-    fn check(&self) -> BoxFuture<'_, Result<(), Failure>> {
-        Box::pin(async { Ok(()) })
     }
 }
 
@@ -236,9 +171,7 @@ pub(crate) fn merge_options(defaults: &Value, raw_connection_options: &str) -> V
     match (defaults, conn_val) {
         (Value::Object(base), Some(Value::Object(override_map))) => {
             let mut merged = base.clone();
-            for (key, value) in override_map {
-                merged.insert(key, value);
-            }
+            merged.extend(override_map);
             Value::Object(merged)
         }
         (_, Some(override_val @ Value::Object(_))) => override_val,
@@ -250,20 +183,18 @@ pub(crate) fn merge_options(defaults: &Value, raw_connection_options: &str) -> V
 
 impl Services for BrokerServices {
     fn handle(&self, request: ServiceRequest) -> BoxFuture<'_, Result<Value, Failure>> {
-        let broker = Arc::clone(&self.broker);
-        let provider = self.provider.clone();
         Box::pin(async move {
             Ok(match request {
                 ServiceRequest::HttpOpen { request } => {
-                    serde_json::to_value(broker.open(&provider, request).await?)
+                    serde_json::to_value(self.broker.open(&self.provider, request).await?)
                         .map_err(|_| Failure::new("serialize"))?
                 }
                 ServiceRequest::HttpRead { handle } => {
-                    serde_json::to_value(broker.read(&handle).await?)
+                    serde_json::to_value(self.broker.read(&handle).await?)
                         .map_err(|_| Failure::new("serialize"))?
                 }
                 ServiceRequest::HttpClose { handle } => {
-                    broker.close(&handle)?;
+                    self.broker.close(&handle)?;
                     Value::Null
                 }
                 // Audio is read by the host from its own synthesis answer, not
@@ -271,10 +202,6 @@ impl Services for BrokerServices {
                 _ => return Err(Failure::new("undeclared_service")),
             })
         })
-    }
-
-    fn check(&self) -> BoxFuture<'_, Result<(), Failure>> {
-        Box::pin(async { Ok(()) })
     }
 }
 

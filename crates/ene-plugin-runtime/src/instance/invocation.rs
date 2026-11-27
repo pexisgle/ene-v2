@@ -17,16 +17,15 @@ use tracing::Instrument as _;
 pub trait Services: Send + Sync {
     fn handle(&self, request: ServiceRequest)
     -> BoxFuture<'_, std::result::Result<Value, Failure>>;
-    fn check(&self) -> BoxFuture<'_, std::result::Result<(), Failure>>;
+    fn check(&self) -> BoxFuture<'_, std::result::Result<(), Failure>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 #[derive(Debug)]
 pub struct DenyServices;
 impl Services for DenyServices {
     fn handle(&self, _: ServiceRequest) -> BoxFuture<'_, std::result::Result<Value, Failure>> {
         Box::pin(async { Err(Failure::new("permission_required")) })
-    }
-    fn check(&self) -> BoxFuture<'_, std::result::Result<(), Failure>> {
-        Box::pin(async { Ok(()) })
     }
 }
 

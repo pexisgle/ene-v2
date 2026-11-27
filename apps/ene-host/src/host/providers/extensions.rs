@@ -380,24 +380,17 @@ mod tests {
             None
         );
 
-        // Policy-gated ServiceRequest::Tool callback check (`F19`).
-        let tool_services = PluginServices::with_tool_callback(
-            "reference-ext",
-            store.clone(),
-            std::sync::Arc::new(|name, args| {
-                Box::pin(async move { Ok(serde_json::json!({ "called": name, "args": args })) })
-            }),
-        );
-        let reply = ene_plugin_runtime::instance::Services::handle(
-            tool_services.as_ref(),
+        let services = PluginServices::new("reference-ext", store);
+        let failure = ene_plugin_runtime::instance::Services::handle(
+            services.as_ref(),
             ene_plugin::ServiceRequest::Tool {
                 name: "ping".into(),
                 arguments: serde_json::json!({"ok": true}),
             },
         )
         .await
-        .unwrap();
-        assert_eq!(reply["called"], "ping");
+        .unwrap_err();
+        assert_eq!(failure.code, "permission_required");
     }
 
     #[tokio::test]
