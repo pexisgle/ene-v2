@@ -122,30 +122,22 @@ fn use_control(
     }
 }
 
-struct ControlButtonSpec {
+fn control_button(
     id: &'static str,
     label: &'static str,
-    icon: Icon,
-    tone: Tone,
+    style: ButtonStyle,
     action: ChatControl,
-}
-
-fn control_button(
-    spec: &ControlButtonSpec,
     theme: &Theme,
     cx: &Context<CompanionPod>,
 ) -> AnyElement {
     let pod = cx.entity();
-    let action = spec.action;
-    pill_button(
-        spec.id,
-        spec.label,
-        ButtonStyle::new(spec.tone).icon(spec.icon),
-        theme,
-        move |window, cx| {
-            pod.update(cx, |this, cx| use_control(this, action, window, cx));
-        },
-    )
+    pill_button(id, label, style, theme, move |window, cx| {
+        pod.update(cx, |this, cx| use_control(this, action, window, cx));
+    })
+}
+
+fn control_row() -> gpui::Div {
+    div().w_full().flex().flex_row().flex_wrap().gap(px(6.))
 }
 
 fn render_media_controls(
@@ -170,47 +162,37 @@ fn render_media_controls(
     } else {
         "音声をオン"
     };
-    div()
-        .w_full()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .gap(px(6.))
+    control_row()
         .child(control_button(
-            &ControlButtonSpec {
-                id: "pod-control-companions",
-                label: "コンパニオン",
-                icon: Icon::BookUser,
-                tone: Tone::Ghost,
-                action: ChatControl::Companions,
-            },
+            "pod-control-companions",
+            "コンパニオン",
+            Tone::Ghost.icon(Icon::BookUser),
+            ChatControl::Companions,
             theme,
             cx,
         ))
         .child(control_button(
-            &ControlButtonSpec {
-                id: "pod-control-mic",
-                label: mic_label,
-                icon: if mic_on { Icon::Mic } else { Icon::MicOff },
-                tone: if mic_on { Tone::Mint } else { Tone::Ghost },
-                action: ChatControl::Microphone { ready: mic_ready },
-            },
+            "pod-control-mic",
+            mic_label,
+            (if mic_on { Tone::Mint } else { Tone::Ghost }).icon(if mic_on {
+                Icon::Mic
+            } else {
+                Icon::MicOff
+            }),
+            ChatControl::Microphone { ready: mic_ready },
             theme,
             cx,
         ))
         .child(control_button(
-            &ControlButtonSpec {
-                id: "pod-control-speaker",
-                label: speaker_label,
-                icon: if speaker_on {
-                    Icon::Volume2
-                } else {
-                    Icon::VolumeX
-                },
-                tone: if speaker_on { Tone::Mint } else { Tone::Ghost },
-                action: ChatControl::Speaker {
-                    ready: speaker_ready,
-                },
+            "pod-control-speaker",
+            speaker_label,
+            (if speaker_on { Tone::Mint } else { Tone::Ghost }).icon(if speaker_on {
+                Icon::Volume2
+            } else {
+                Icon::VolumeX
+            }),
+            ChatControl::Speaker {
+                ready: speaker_ready,
             },
             theme,
             cx,
@@ -224,58 +206,45 @@ fn render_capture_controls(
     theme: &Theme,
     cx: &Context<CompanionPod>,
 ) -> gpui::Div {
-    div()
-        .w_full()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .gap(px(6.))
+    control_row()
         .child(control_button(
-            &ControlButtonSpec {
-                id: "pod-control-capture-mode",
-                // Plain words: "PTT" and "VAD" are names for how the mic
-                // decides when to listen, and the label says that instead.
-                label: if is_ptt {
-                    "押している間だけ話す"
-                } else {
-                    "自動で声を検出"
-                },
-                icon: Icon::Mic,
-                tone: if is_ptt { Tone::Primary } else { Tone::Ghost },
-                action: ChatControl::CaptureMode,
+            "pod-control-capture-mode",
+            // Plain words: "PTT" and "VAD" are names for how the mic
+            // decides when to listen, and the label says that instead.
+            if is_ptt {
+                "押している間だけ話す"
+            } else {
+                "自動で声を検出"
             },
+            (if is_ptt { Tone::Primary } else { Tone::Ghost }).icon(Icon::Mic),
+            ChatControl::CaptureMode,
             theme,
             cx,
         ))
         .when(is_ptt && mic_on, |row| {
             row.child(control_button(
-                &ControlButtonSpec {
-                    id: "pod-control-ptt-toggle",
-                    label: if ptt_active {
-                        "送信（話す終了）"
-                    } else {
-                        "押して話す"
-                    },
-                    icon: Icon::Mic,
-                    tone: if ptt_active {
-                        Tone::Mint
-                    } else {
-                        Tone::Primary
-                    },
-                    action: ChatControl::PttToggle,
+                "pod-control-ptt-toggle",
+                if ptt_active {
+                    "送信（話す終了）"
+                } else {
+                    "押して話す"
                 },
+                (if ptt_active {
+                    Tone::Mint
+                } else {
+                    Tone::Primary
+                })
+                .icon(Icon::Mic),
+                ChatControl::PttToggle,
                 theme,
                 cx,
             ))
             .when(ptt_active, |row| {
                 row.child(control_button(
-                    &ControlButtonSpec {
-                        id: "pod-control-ptt-cancel",
-                        label: "キャンセル",
-                        icon: Icon::Close,
-                        tone: Tone::Danger,
-                        action: ChatControl::PttCancel,
-                    },
+                    "pod-control-ptt-cancel",
+                    "キャンセル",
+                    Tone::Danger.icon(Icon::Close),
+                    ChatControl::PttCancel,
                     theme,
                     cx,
                 ))
@@ -284,50 +253,36 @@ fn render_capture_controls(
 }
 
 fn render_nav_controls(expanded: bool, theme: &Theme, cx: &Context<CompanionPod>) -> gpui::Div {
-    div()
-        .w_full()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .gap(px(6.))
+    control_row()
         .child(control_button(
-            &ControlButtonSpec {
-                id: "pod-control-history",
-                label: if expanded {
-                    "履歴を閉じる"
-                } else {
-                    "履歴を表示"
-                },
-                icon: if expanded {
-                    Icon::Minimize2
-                } else {
-                    Icon::MessageCircle
-                },
-                tone: Tone::Ghost,
-                action: ChatControl::History,
+            "pod-control-history",
+            if expanded {
+                "履歴を閉じる"
+            } else {
+                "履歴を表示"
             },
+            Tone::Ghost.icon(if expanded {
+                Icon::Minimize2
+            } else {
+                Icon::MessageCircle
+            }),
+            ChatControl::History,
             theme,
             cx,
         ))
         .child(control_button(
-            &ControlButtonSpec {
-                id: "pod-control-settings",
-                label: "設定",
-                icon: Icon::Settings,
-                tone: Tone::Ghost,
-                action: ChatControl::Settings,
-            },
+            "pod-control-settings",
+            "設定",
+            Tone::Ghost.icon(Icon::Settings),
+            ChatControl::Settings,
             theme,
             cx,
         ))
         .child(control_button(
-            &ControlButtonSpec {
-                id: "pod-control-close",
-                label: "チャットを閉じる",
-                icon: Icon::Close,
-                tone: Tone::Danger,
-                action: ChatControl::Close,
-            },
+            "pod-control-close",
+            "チャットを閉じる",
+            Tone::Danger.icon(Icon::Close),
+            ChatControl::Close,
             theme,
             cx,
         ))

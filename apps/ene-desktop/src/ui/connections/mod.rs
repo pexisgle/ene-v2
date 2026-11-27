@@ -103,6 +103,11 @@ fn secret_row(
         .child(div().flex_1().min_w_0().child(draft))
         .child(circle_icon_button(
             gpui::SharedString::from(button_id),
+            if revealed {
+                "APIキーを隠す"
+            } else {
+                "APIキーを表示"
+            },
             CircleButtonStyle::new(if revealed { Icon::EyeOff } else { Icon::Eye }, 30., 14.),
             theme,
             move |_, cx| {

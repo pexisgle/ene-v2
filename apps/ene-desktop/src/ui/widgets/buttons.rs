@@ -247,10 +247,16 @@ impl CircleButtonStyle {
         self.tone = tone;
         self
     }
+
+    pub const fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
 }
 /// Compact circular icon button inside inputs or rows.
 pub fn circle_icon_button<F>(
     id: impl Into<ElementId>,
+    label: &'static str,
     style: CircleButtonStyle,
     theme: &Theme,
     on_press: F,
@@ -261,10 +267,12 @@ where
     let (bg, fg, border) = style.tone.colors(style.enabled, theme);
     ThemedButton {
         button: Button::new(id)
+            .flex_none()
             .size(px(style.button_size))
             .rounded(px(style.button_size / 2.))
             .p_0()
             .disabled(!style.enabled)
+            .accessibility_label(label)
             .child(icon(style.icon, style.icon_size, fg))
             .on_click(move |_, window, cx| on_press(window, cx)),
         bg,

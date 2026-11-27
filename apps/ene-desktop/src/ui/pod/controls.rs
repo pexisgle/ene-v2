@@ -90,6 +90,7 @@ fn render_input_capsule(
     theme: &Theme,
     cx: &Context<CompanionPod>,
 ) -> gpui::Div {
+    let pod_entity = cx.entity();
     div()
         .flex_1()
         .min_w_0()
@@ -111,41 +112,15 @@ fn render_input_capsule(
                 .pl(px(4.))
                 .child(pod.chat_input.clone()),
         )
-        .child(
-            div()
-                .id("pod-send-btn")
-                .flex_none()
-                .w(px(30.))
-                .h(px(30.))
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(if can_send {
-                    theme.accent
-                } else {
-                    theme.bg_blush
-                })
-                .when(can_send, |this| {
-                    this.cursor_pointer()
-                        .hover(|this| this.bg(theme.accent_hover))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                                this.submit(window, cx);
-                            }),
-                        )
-                })
-                .child(icon(
-                    Icon::Send,
-                    14.,
-                    if can_send {
-                        theme.accent_fg
-                    } else {
-                        theme.ink_placeholder
-                    },
-                )),
-        )
+        .child(circle_icon_button(
+            "pod-send-btn",
+            "メッセージを送信",
+            CircleButtonStyle::new(Icon::Send, 30., 14.)
+                .tone(Tone::Primary)
+                .enabled(can_send),
+            theme,
+            move |window, cx| pod_entity.update(cx, |pod, cx| pod.submit(window, cx)),
+        ))
 }
 
 pub(super) fn render_roster_popover(
@@ -273,6 +248,7 @@ fn render_unsent_rows(
                 ))
                 .child(circle_icon_button(
                     SharedString::from(format!("pod-dismiss-unsent-{idx}")),
+                    "未送信メッセージを破棄",
                     CircleButtonStyle::new(Icon::Close, 22., 11.),
                     theme,
                     move |_, cx| {

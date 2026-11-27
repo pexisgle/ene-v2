@@ -80,18 +80,21 @@ impl SettingsStudio {
                     .gap(px(6.))
                     .child(circle_icon_button(
                         "studio-win-min",
+                        "設定を最小化",
                         CircleButtonStyle::new(Icon::WindowMinimize, 24., 12.),
                         theme,
                         |window, _| window.minimize_window(),
                     ))
                     .child(circle_icon_button(
                         "studio-win-max",
+                        "設定の最大化を切り替え",
                         CircleButtonStyle::new(Icon::WindowMaximize, 24., 12.),
                         theme,
                         |window, _| window.zoom_window(),
                     ))
                     .child(circle_icon_button(
                         "studio-win-close",
+                        "設定を閉じる",
                         CircleButtonStyle::new(Icon::Close, 24., 12.).tone(Tone::Danger),
                         theme,
                         |window, _| window.remove_window(),
@@ -182,6 +185,7 @@ impl SettingsStudio {
                     })
                     .child(circle_icon_button(
                         SharedString::from(format!("studio-notice-close-{idx}")),
+                        "通知を閉じる",
                         CircleButtonStyle::new(Icon::Close, 22., 11.),
                         theme,
                         move |_, cx| {
