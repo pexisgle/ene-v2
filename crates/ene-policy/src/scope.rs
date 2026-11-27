@@ -96,17 +96,31 @@ impl InvocationScope {
     }
 }
 
-/// A tool invocation bound to one installed plugin.
+/// The receiver of an external tool invocation.
 #[derive(Clone, Debug)]
-pub struct PluginToolAction {
-    /// Id of the plugin providing the tool.
-    pub plugin_id: String,
-    /// The tool the plugin exposes.
+pub enum ExternalToolSource {
+    /// An enabled MCP connection and its display-safe destination.
+    Mcp {
+        /// The configured connection ID used by operator policies.
+        server_id: String,
+        /// The display-safe destination of the actual connection.
+        receiver: String,
+    },
+    /// An installed plugin with a published tool.
+    Plugin(String),
+}
+
+/// An invocation of a published MCP or plugin tool.
+#[derive(Clone, Debug)]
+pub struct ExternalToolAction {
+    /// The owner of the registered tool.
+    pub source: ExternalToolSource,
+    /// The model-facing tool name.
     pub tool_name: String,
     /// The tool arguments.
     pub input: serde_json::Value,
-    /// The host-authenticated identity of the installed invocation.
-    pub scope: Option<crate::InvocationScope>,
+    /// The host-authenticated identity of this invocation.
+    pub scope: Option<InvocationScope>,
 }
 
 /// The effective query and destination, with literal arguments for older rules.

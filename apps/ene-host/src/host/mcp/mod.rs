@@ -12,12 +12,14 @@
 //! tools: the connection closes and the tool entities despawn.
 mod failures;
 mod projection;
+mod registration;
 mod settings;
 mod supervisor;
 
 pub(crate) use ene_work::mcp::is_npx_command;
 #[cfg(test)]
 use projection::tool_names;
+pub(crate) use registration::McpRegistration;
 pub(crate) use settings::ConnectionStamp;
 pub(crate) use supervisor::{CheckState, Mcp};
 

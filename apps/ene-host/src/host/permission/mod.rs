@@ -3,6 +3,7 @@
 mod approval;
 mod conversation;
 mod decision;
+mod external;
 mod gate;
 #[cfg(test)]
 mod prompt_tests;

@@ -1,8 +1,8 @@
 //! Approval submission, hold release, rule persistence, and orphan expiration.
 use super::{
     decision::Decisions,
+    external::PreparedExternalTool,
     gate::{Approvals, Approved, CallBinding},
-    resolve::PreparedPluginTool,
 };
 use crate::host::{
     db::Store,
@@ -234,14 +234,9 @@ fn approve_call(
     let name = approval.tool_name.as_str();
     let repo = store.approval_repo();
     let request_id = &approval.request_id;
-    let verdict = if let Some(tool) = world.get::<PreparedPluginTool>(call) {
-        if tool.revoked() {
-            Err(HostError::Conflict(
-                "the tool plugin was replaced or disabled".into(),
-            ))
-        } else {
-            revalidate_action(store, &tool.candidate(), tool.action.scope.as_ref())
-        }
+    let verdict = if let Some(tool) = world.get::<PreparedExternalTool>(call) {
+        tool.validate()
+            .and_then(|()| revalidate_action(store, &tool.candidate(), tool.action.scope.as_ref()))
     } else if name == web_search::NAME {
         let fallback = crate::host::providers::Providers::default();
         revalidate_search(
@@ -403,7 +398,7 @@ pub(crate) fn submit_with_outcome(
     }
     let rule = if matches!(decision, ApprovalDecision::AlwaysApprove) {
         let requires_scope = approval.tool_name == web_search::NAME
-            || world.get::<PreparedPluginTool>(hold.call).is_some();
+            || world.get::<PreparedExternalTool>(hold.call).is_some();
         match persist_always_allow_rule(
             &store,
             &mut world.resource_mut::<Notifier>(),
@@ -446,7 +441,7 @@ fn notify_resolved(notifier: &mut Notifier, approval: &Approval) {
 /// A stopped turn takes its held calls with it; the approval must not become reusable.
 pub(super) fn expire_orphaned_approvals(
     mut approvals: ResMut<Approvals>,
-    mut calls: Query<(Option<&PreparedPluginTool>, Option<&mut Decision>)>,
+    mut calls: Query<(Option<&PreparedExternalTool>, Option<&mut Decision>)>,
     store: Res<Store>,
     mut notifier: ResMut<Notifier>,
     mut decisions: ResMut<Decisions>,
@@ -461,7 +456,7 @@ pub(super) fn expire_orphaned_approvals(
             if let Some(mut decision) = decision {
                 decision.decide(
                     Decider::plugin("ene-host"),
-                    Outcome::refused("the tool plugin was replaced or disabled"),
+                    Outcome::refused("the external tool registration changed"),
                 );
             }
         }

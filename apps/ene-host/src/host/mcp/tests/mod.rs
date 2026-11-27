@@ -4,7 +4,7 @@ mod supervisor_tests;
 
 use super::supervisor::*;
 use super::*;
-use crate::host::resources::HostExternalTool;
+use crate::host::resources::{ExternalToolOwner, HostExternalTool};
 use rig_agent::tool::server::{ToolServer, ToolServerHandle};
 use rig_core::message::ToolName;
 use rig_core::tool::{DynamicTool, ToolContext, ToolOutput};
@@ -213,6 +213,8 @@ pub(super) fn server_tools(world: &mut World, id: &str) -> usize {
     world
         .query::<&HostExternalTool>()
         .iter(world)
-        .filter(|tool| matches!(tool, HostExternalTool::Mcp { server, .. } if server == id))
+        .filter(
+            |tool| matches!(&tool.owner, ExternalToolOwner::Mcp(binding) if binding.server == id),
+        )
         .count()
 }

@@ -135,17 +135,7 @@ fn check_mcp_admission(
     id: &ene_domain::ConnectionId,
     stamp: ConnectionStamp,
 ) -> Result<()> {
-    if services.credentials.generation_of(id.as_str()) != stamp.credential_generation
-        || !services
-            .store
-            .settings_repo()
-            .connection_with_creation(id.as_str())?
-            .is_some_and(|(current, incarnation)| {
-                current.enabled
-                    && current.revision == stamp.revision
-                    && incarnation == stamp.created_revision
-            })
-    {
+    if !stamp.current(&services.store, Some(&services.credentials), id.as_str())? {
         return Err(HostError::Conflict(
             "MCP connection changed during the check".into(),
         ));

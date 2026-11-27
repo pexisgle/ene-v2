@@ -1,6 +1,12 @@
 //! ECS tool projection for connected MCP servers.
-use super::supervisor::{McpServers, Server};
-use crate::host::resources::HostExternalTool;
+use super::{
+    registration::{McpRegistration, ServeRegisteredTool},
+    supervisor::{Launch, Mcp, McpServers, Server},
+};
+use crate::host::{
+    db::Store,
+    resources::{ExternalToolOwner, HostExternalTool},
+};
 use bevy_ecs::prelude::*;
 use rig_agent::tool::{RegisteredTool, ToolCatalog};
 use rig_core::{completion::ToolDefinition, message::ToolName};
@@ -10,7 +16,7 @@ use std::collections::HashSet;
 use std::{collections::HashMap, sync::Arc};
 
 type ServerTools = HashMap<ToolName, (Arc<ToolDefinition>, RegisteredTool)>;
-pub(super) type ToolSnapshot = HashMap<String, ServerTools>;
+pub(super) type ToolSnapshot = HashMap<String, (Launch, ServerTools)>;
 
 pub(super) fn snapshot_tools(servers: &McpServers) -> ToolSnapshot {
     servers
@@ -19,7 +25,10 @@ pub(super) fn snapshot_tools(servers: &McpServers) -> ToolSnapshot {
         .map(|(id, server)| {
             (
                 id.clone(),
-                collect_server_tools(id, server, &server.registry.snapshot()),
+                (
+                    server.launch.clone(),
+                    collect_server_tools(id, server, &server.registry.snapshot()),
+                ),
             )
         })
         .collect()
@@ -56,18 +65,24 @@ pub(super) fn project_servers(world: &mut World, mut desired: ToolSnapshot) -> b
         .query::<(Entity, &ToolDef, &HostExternalTool)>()
         .iter(world)
         .filter_map(|(entity, definition, owner)| {
-            let HostExternalTool::Mcp { server, key } = owner else {
+            let ExternalToolOwner::Mcp(binding) = &owner.owner else {
                 return None;
             };
 
             let name = &definition.0.name;
-            if let Some((definition, tool)) =
-                desired.get_mut(server).and_then(|tools| tools.remove(name))
+            if let Some((launch, (definition, tool))) = desired
+                .get_mut(&binding.server)
+                .and_then(|(launch, tools)| tools.remove(name).map(|tool| (&*launch, tool)))
             {
-                if tool.key() == key {
+                if tool.key() == &binding.key && launch == &binding.launch {
                     return None;
                 }
-                replacements.push((server.clone(), name.clone(), (definition, tool)));
+                replacements.push((
+                    binding.server.clone(),
+                    launch.clone(),
+                    name.clone(),
+                    (definition, tool),
+                ));
             }
             Some(entity)
         })
@@ -76,21 +91,32 @@ pub(super) fn project_servers(world: &mut World, mut desired: ToolSnapshot) -> b
     for entity in obsolete {
         let _despawned = world.try_despawn(entity);
     }
-    let added = desired.into_iter().flat_map(|(server, tools)| {
+    let added = desired.into_iter().flat_map(|(server, (launch, tools))| {
         tools
             .into_iter()
-            .map(move |(name, tool)| (server.clone(), name, tool))
+            .map(move |(name, tool)| (server.clone(), launch.clone(), name, tool))
     });
     // A refresh can reclaim its name before a colliding server is considered.
-    for (server, name, (definition, tool)) in replacements.into_iter().chain(added) {
-        let mut definition = Arc::unwrap_or_clone(definition);
-        definition.name = name;
-        if let Some(entity) =
-            world.spawn_tool(definition, tool.handler().clone(), ToolOptions::default())
-        {
-            world.entity_mut(entity).insert(HostExternalTool::Mcp {
-                server,
-                key: tool.key().clone(),
+    for (server, launch, name, (definition, tool)) in replacements.into_iter().chain(added) {
+        let mut offered = (*definition).clone();
+        offered.name = name;
+        let registration = Arc::new(McpRegistration {
+            server,
+            launch,
+            definition,
+            key: tool.key().clone(),
+            store: world.resource::<Store>().clone(),
+            credentials: world.get_resource().cloned(),
+            mcp: world.resource::<Mcp>().clone(),
+        });
+        let handler = tool
+            .handler()
+            .clone()
+            .layered(ServeRegisteredTool(registration.clone()));
+        if let Some(entity) = world.spawn_tool(offered, handler.clone(), ToolOptions::default()) {
+            world.entity_mut(entity).insert(HostExternalTool {
+                owner: ExternalToolOwner::Mcp(registration),
+                handler,
             });
             changed = true;
         }
@@ -106,7 +132,7 @@ pub(super) fn tool_names(world: &mut World) -> HashSet<String> {
     let mut query = world.query::<(&ToolDef, &HostExternalTool)>();
     query
         .iter(world)
-        .filter(|(_, owner)| matches!(owner, HostExternalTool::Mcp { .. }))
+        .filter(|(_, owner)| matches!(owner.owner, ExternalToolOwner::Mcp(_)))
         .map(|(definition, _)| definition.0.name.as_str().to_owned())
         .collect()
 }

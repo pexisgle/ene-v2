@@ -5,6 +5,7 @@ pub(super) use super::settings::Desired;
 use super::{
     failures::{FailureKind, FailureReport, McpFailures, prune_failures, record_failure},
     projection::{project_servers, snapshot_tools},
+    registration::{McpRegistration, Receiver},
     settings::{
         ConnectionStamp, DesiredServers, McpSettings, collect_retire_ids, prune_connecting,
         reload_desired_settings,
@@ -28,6 +29,7 @@ const QUEUE: usize = 32;
 pub(super) struct Launch {
     pub(super) stamp: ConnectionStamp,
     pub(super) owner: String,
+    pub(super) receiver: Receiver,
 }
 
 /// Live state returned to connection probes.
@@ -112,6 +114,24 @@ impl Mcp {
     pub(crate) fn check_state(&self, id: &str, stamp: ConnectionStamp) -> CheckState {
         check_state(&self.lock(), id, stamp)
     }
+
+    pub(crate) fn tool_is_current(&self, tool: &McpRegistration) -> bool {
+        self.lock()
+            .servers
+            .0
+            .get(&tool.server)
+            .is_some_and(|server| {
+                server.launch == tool.launch
+                    && !server.connection.is_closed()
+                    && server
+                        .registry
+                        .snapshot()
+                        .get(tool.definition.name.as_str())
+                        .is_some_and(|registered| {
+                            registered.key() == &tool.key && registered.is_live()
+                        })
+            })
+    }
 }
 
 /// Everything the MCP supervisor owns between frames.
@@ -194,6 +214,7 @@ impl McpSupervisor {
         );
         self.connecting.0.extend(spawn_connect_tasks(
             targets,
+            credentials.and_then(|keys| keys.approval_key.as_ref()),
             &self.events.sender,
             wake,
             runtime,
@@ -251,6 +272,7 @@ fn plan_connect_targets(
 
 fn spawn_connect_tasks(
     targets: Vec<(String, Desired)>,
+    approval_key: Option<&[u8; 32]>,
     sender: &mpsc::Sender<Event>,
     wake: Option<&Wake>,
     runtime: &tokio::runtime::Handle,
@@ -262,6 +284,7 @@ fn spawn_connect_tasks(
             let launch = Launch {
                 stamp: want.stamp,
                 owner: registry.owner(),
+                receiver: Receiver::new(&id, &want, approval_key),
             };
             let event_id = id.clone();
             let event_launch = launch.clone();

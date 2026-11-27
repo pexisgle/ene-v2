@@ -1,27 +1,26 @@
 //! Resolving one tool call before its verdict: the saved rules it is judged
 //! against, the pre-tool hooks it must pass, and the `CandidateAction` it names.
 use super::approval::refuse;
+use super::external::{PreparedExternalTool, prepare_external};
 use super::gate::{GateCall, GateContext};
 use crate::host::{
     background::{self, Job},
     client::Client,
     db::Store,
     error::{HostError, Result},
-    providers::Running,
     providers::extensions::run_hooks,
-    resources::{CompanionAgent, HostExternalTool, WorkAgent, WorkTurn},
+    resources::{CompanionAgent, WorkAgent, WorkTurn},
 };
 use bevy_ecs::prelude::*;
-use ene_policy::{
-    CandidateAction, CapabilitySpec, InvocationScope, PluginToolAction, PolicyRule, canonical_json,
-};
+use ene_policy::{CandidateAction, CapabilitySpec, PolicyRule};
 use ene_rpc as w;
 use rig_core::effect::EffectId;
 use rig_ecs::prelude::{
     CallOf, Decider, Decision, Effect, HoldOf, Outcome, SupersededBy, ToolRequest,
 };
+use rig_ecs::tools::CallHandler;
 use serde_json::Value;
-use std::{sync::Arc, task::Poll};
+use std::task::Poll;
 
 /// A work call belongs to its admitted turn, even when the agent is reused.
 pub(super) fn binding_of(
@@ -140,32 +139,21 @@ pub(super) fn collect_pre_tool_hooks(
 type CandidateResolution = (CandidateAction, Option<String>, Option<String>);
 
 pub(super) enum CandidateOutcome {
-    Resolved(Box<CandidateResolution>),
     Search(Box<crate::host::web_search::PreparedSearch>),
-    Plugin(PreparedPluginTool),
+    External(PreparedExternalTool),
     NeedsDeviceClient,
     Refuse(String),
 }
 
-pub(super) fn build_candidate_action(ctx: &GateContext, item: &GateCall) -> CandidateOutcome {
-    if let Some(owner) = ctx.external_tools.get(&item.tool_name) {
-        let tool_name = item.tool_name.clone();
-        let input = item.arguments.clone();
-        return match owner {
-            HostExternalTool::Mcp { server, .. } => CandidateOutcome::Resolved(Box::new((
-                CandidateAction::McpTool {
-                    server_id: server.clone(),
-                    tool_name,
-                    input,
-                },
-                None,
-                None,
-            ))),
-            HostExternalTool::Plugin(plugin) => match prepare_plugin(ctx, plugin, tool_name, input)
-            {
-                Ok(prepared) => CandidateOutcome::Plugin(prepared),
-                Err(error) => CandidateOutcome::Refuse(error.to_string()),
-            },
+pub(super) fn build_candidate_action(
+    ctx: &GateContext,
+    item: &GateCall,
+    pinned: Option<&CallHandler>,
+) -> CandidateOutcome {
+    if let Some(tool) = ctx.external_tools.get(&item.tool_name) {
+        return match prepare_external(ctx, item, tool, pinned) {
+            Ok(prepared) => CandidateOutcome::External(prepared),
+            Err(error) => CandidateOutcome::Refuse(error.to_string()),
         };
     }
     if item.tool_name == crate::host::web_search::NAME {
@@ -184,76 +172,6 @@ pub(super) fn build_candidate_action(ctx: &GateContext, item: &GateCall) -> Cand
         };
     }
     CandidateOutcome::NeedsDeviceClient
-}
-
-#[derive(Component)]
-pub(super) struct PreparedPluginTool {
-    owner: Arc<Running>,
-    pub(super) action: Arc<PluginToolAction>,
-}
-
-impl PreparedPluginTool {
-    pub(super) fn revoked(&self) -> bool {
-        self.owner.revoked()
-    }
-
-    pub(super) fn candidate(&self) -> CandidateAction {
-        CandidateAction::PluginTool(Arc::clone(&self.action))
-    }
-}
-
-fn prepare_plugin(
-    ctx: &GateContext,
-    owner: &Arc<Running>,
-    tool_name: String,
-    input: Value,
-) -> Result<PreparedPluginTool> {
-    if owner.revoked() {
-        return Err(HostError::Conflict(
-            "the tool plugin was replaced or disabled".into(),
-        ));
-    }
-    let revision = owner.package_revision();
-    let plugin_id = owner.plugin_id();
-    let scope = if let Some(key) = ctx
-        .credentials
-        .as_ref()
-        .and_then(|creds| creds.approval_key.as_ref())
-        && let Some(installation) = owner.installation_id()
-    {
-        let canonical = canonical_json(&input);
-        super::scope_tag(
-            key,
-            b"ene-host plugin tool v1\0",
-            [
-                plugin_id.as_bytes(),
-                revision.as_bytes(),
-                installation.as_bytes(),
-                tool_name.as_bytes(),
-                canonical.as_bytes(),
-            ],
-        )
-        .map(|tag| {
-            let label = format!(
-                "{} · {} · {}",
-                plugin_id,
-                tool_name,
-                revision.get(..12).unwrap_or(revision)
-            );
-            InvocationScope::tool(tool_name.clone(), tag, label)
-        })
-    } else {
-        None
-    };
-    Ok(PreparedPluginTool {
-        owner: owner.clone(),
-        action: Arc::new(PluginToolAction {
-            plugin_id: plugin_id.to_owned(),
-            tool_name,
-            input,
-            scope,
-        }),
-    })
 }
 
 pub(super) fn resolve_device_candidate(
@@ -430,9 +348,9 @@ mod hook_tests {
         let call = app.world_mut().spawn(Decision::default()).id();
         let other = app.world_mut().spawn(Decision::default()).id();
         let (reply, response) = tokio::sync::oneshot::channel();
-        let ready = Arc::new(tokio::sync::Notify::new());
+        let ready = std::sync::Arc::new(tokio::sync::Notify::new());
         let wake = Wake::new({
-            let ready = Arc::clone(&ready);
+            let ready = ready.clone();
             move || ready.notify_one()
         });
         let job = background::spawn(&tokio::runtime::Handle::current(), Some(&wake), async {

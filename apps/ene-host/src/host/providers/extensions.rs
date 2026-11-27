@@ -9,7 +9,11 @@ mod hooks;
 pub(crate) use hooks::run_hooks;
 
 use super::{PluginServices, Providers, Running};
-use crate::host::{db::Store, error::HostError, resources::HostExternalTool};
+use crate::host::{
+    db::Store,
+    error::HostError,
+    resources::{ExternalToolOwner, HostExternalTool},
+};
 use bevy_ecs::prelude::*;
 use ene_plugin::{Extension, Operation, PluginToolDefinition, ToolInvokeRequest, ToolInvokeResult};
 use rig_core::{
@@ -185,11 +189,11 @@ pub(crate) fn register_plugin_tools(world: &mut World, tools: PluginTools) {
     let existing: Vec<_> = world
         .query::<(Entity, &ToolDef, &HostExternalTool)>()
         .iter(world)
-        .filter_map(|(entity, definition, owner)| match owner {
-            HostExternalTool::Plugin(owner) => {
+        .filter_map(|(entity, definition, owner)| match &owner.owner {
+            ExternalToolOwner::Plugin(owner) => {
                 Some((entity, definition.0.name.clone(), owner.clone()))
             }
-            HostExternalTool::Mcp { .. } => None,
+            ExternalToolOwner::Mcp(_) => None,
         })
         .collect();
     let mut entries = tools.entries;
@@ -226,10 +230,11 @@ pub(crate) fn register_plugin_tools(world: &mut World, tools: PluginTools) {
             tool,
             store: store.clone(),
         });
-        if let Some(entity) = world.spawn_tool(tool_def, handler, ToolOptions::default()) {
-            world
-                .entity_mut(entity)
-                .insert(HostExternalTool::Plugin(owner));
+        if let Some(entity) = world.spawn_tool(tool_def, handler.clone(), ToolOptions::default()) {
+            world.entity_mut(entity).insert(HostExternalTool {
+                owner: ExternalToolOwner::Plugin(owner),
+                handler,
+            });
             changed = true;
         }
     }

@@ -9,7 +9,9 @@ use std::sync::Arc;
 use strum::{EnumString, IntoStaticStr};
 
 use crate::targets::{ActionTarget, extract_target};
-use crate::{PluginToolAction, WebSearchAction, hard_deny::hard_denied_action};
+use crate::{
+    ExternalToolAction, ExternalToolSource, WebSearchAction, hard_deny::hard_denied_action,
+};
 
 pub(crate) const WEB_SEARCH_TOOL: &str = "web_search";
 
@@ -189,17 +191,8 @@ pub enum CandidateAction {
         /// The arguments as the model sent them, before any unwrapping.
         raw_arguments: Value,
     },
-    /// A tool call routed to an MCP server.
-    McpTool {
-        /// Id of the configured MCP connection.
-        server_id: String,
-        /// The tool the server exposes.
-        tool_name: String,
-        /// Arguments for the tool.
-        input: Value,
-    },
-    /// A tool call routed to a plugin.
-    PluginTool(Arc<PluginToolAction>),
+    /// A call routed to an MCP or plugin tool.
+    ExternalTool(Arc<ExternalToolAction>),
     /// An outbound web search.
     WebSearch(Arc<WebSearchAction>),
 }
@@ -271,31 +264,29 @@ fn resolve_action(action: &CandidateAction) -> ResolvedAction<'_> {
                 default_approval: approval,
             }
         }
-        CandidateAction::McpTool {
-            server_id,
-            tool_name,
-            input,
-        } => ResolvedAction {
-            tool_name: tool_name.as_str(),
-            capability: None,
-            server_id: Some(server_id.as_str()),
-            raw_args: input,
-            target_summary: format!("{tool_name} {}", truncate(&input.to_string(), 200)),
-            default_approval: DefaultActionApproval::NeedsDecision,
-        },
-        CandidateAction::PluginTool(tool) => ResolvedAction {
-            tool_name: &tool.tool_name,
-            capability: Some(&tool.plugin_id),
-            server_id: None,
-            raw_args: &tool.input,
-            target_summary: format!(
-                "plugin:{} {} {}",
-                tool.plugin_id,
-                tool.tool_name,
-                truncate(&tool.input.to_string(), 200)
-            ),
-            default_approval: DefaultActionApproval::NeedsDecision,
-        },
+        CandidateAction::ExternalTool(tool) => {
+            let (capability, server_id, receiver) = match &tool.source {
+                ExternalToolSource::Mcp {
+                    server_id,
+                    receiver,
+                } => (None, Some(server_id.as_str()), receiver.as_str()),
+                ExternalToolSource::Plugin(plugin_id) => {
+                    (Some(plugin_id.as_str()), None, plugin_id.as_str())
+                }
+            };
+            ResolvedAction {
+                tool_name: &tool.tool_name,
+                capability,
+                server_id,
+                raw_args: &tool.input,
+                target_summary: format!(
+                    "{} · {receiver} {}",
+                    tool.tool_name,
+                    truncate(&tool.input.to_string(), 200)
+                ),
+                default_approval: DefaultActionApproval::NeedsDecision,
+            }
+        }
         CandidateAction::WebSearch(search) => ResolvedAction {
             tool_name: WEB_SEARCH_TOOL,
             capability: None,
@@ -330,12 +321,12 @@ pub fn decide_action(rules: &[PolicyRule], action: &CandidateAction) -> Verdict 
         typed_target: &typed_target,
         scope: match action {
             CandidateAction::WebSearch(search) => search.scope.as_ref(),
-            CandidateAction::PluginTool(tool) => tool.scope.as_ref(),
+            CandidateAction::ExternalTool(tool) => tool.scope.as_ref(),
             _ => None,
         },
         scoped_target: matches!(
             action,
-            CandidateAction::WebSearch(_) | CandidateAction::PluginTool(_)
+            CandidateAction::WebSearch(_) | CandidateAction::ExternalTool(_)
         ),
     };
     let mut confirm = false;

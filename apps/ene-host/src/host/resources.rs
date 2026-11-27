@@ -250,11 +250,14 @@ pub(crate) struct WorkTurn(pub(crate) String);
 
 /// Identifies the source of an external tool for permission checks and refreshes.
 #[derive(Component, Clone)]
-pub(crate) enum HostExternalTool {
-    Mcp {
-        server: String,
-        key: rig_core::effect::Key<rig_core::effect::family::Tool>,
-    },
+pub(crate) struct HostExternalTool {
+    pub(crate) owner: ExternalToolOwner,
+    pub(crate) handler: rig_core::serve::ErasedHandler,
+}
+
+#[derive(Clone)]
+pub(crate) enum ExternalToolOwner {
+    Mcp(std::sync::Arc<super::mcp::McpRegistration>),
     Plugin(std::sync::Arc<super::providers::Running>),
 }
 

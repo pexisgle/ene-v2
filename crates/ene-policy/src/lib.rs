@@ -42,5 +42,5 @@ pub use rules::{
     canonicalise, decide_action, decide_capability, hex_digest,
 };
 mod scope;
-pub use scope::{InvocationScope, PluginToolAction, WebSearchAction};
+pub use scope::{ExternalToolAction, ExternalToolSource, InvocationScope, WebSearchAction};
 pub use targets::{ActionTarget, extract_target};

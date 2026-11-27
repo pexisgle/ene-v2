@@ -12,6 +12,27 @@ pub(crate) struct ConnectionStamp {
     pub(crate) credential_generation: u64,
 }
 
+impl ConnectionStamp {
+    pub(crate) fn current(
+        self,
+        store: &Store,
+        keys: Option<&Credentials>,
+        id: &str,
+    ) -> crate::host::db::Result<bool> {
+        Ok(
+            keys.map_or(0, |keys| keys.generation_of(id)) == self.credential_generation
+                && store
+                    .settings_repo()
+                    .connection_with_creation(id)?
+                    .is_some_and(|(row, created)| {
+                        row.enabled
+                            && row.revision == self.revision
+                            && created == self.created_revision
+                    }),
+        )
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct Desired {
     pub(super) stamp: ConnectionStamp,

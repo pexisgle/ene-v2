@@ -159,8 +159,7 @@ pub fn extract_target(action: &CandidateAction) -> ActionTarget {
             }
             extract_common_target(input)
         }
-        CandidateAction::McpTool { input, .. } => extract_common_target_with_dir(input),
-        CandidateAction::PluginTool(tool) => extract_common_target_with_dir(&tool.input),
+        CandidateAction::ExternalTool(tool) => extract_common_target_with_dir(&tool.input),
         CandidateAction::WebSearch(search) => ActionTarget::Url {
             url: search.endpoint.as_str().to_owned(),
             host: search.endpoint.host_str().map(str::to_ascii_lowercase),

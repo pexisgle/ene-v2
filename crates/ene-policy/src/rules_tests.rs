@@ -1,5 +1,6 @@
 use crate::*;
-use serde_json::json;
+use serde_json::{Value, json};
+use std::sync::Arc;
 
 /// These spellings are persisted in SQLite and travel the RPC wire, so
 /// they are pinned: a derive change must not move a single byte.
@@ -194,22 +195,46 @@ fn b19_hard_denied_blocks_system_paths_and_destructive_commands() {
 
     let mcp_sys = decide_action(
         &[allow_all],
-        &CandidateAction::McpTool {
-            server_id: "fs".into(),
-            tool_name: "mcp_fs_write_file".into(),
-            input: json!({"path": "/etc/passwd"}),
-        },
+        &mcp_action(
+            "fs",
+            "mcp_fs_write_file",
+            json!({"path": "/etc/passwd"}),
+            None,
+        ),
     );
     assert!(matches!(mcp_sys, Verdict::Deny { .. }));
 }
 
+fn mcp_action(
+    server_id: &str,
+    tool: &str,
+    input: Value,
+    scope: Option<InvocationScope>,
+) -> CandidateAction {
+    CandidateAction::ExternalTool(Arc::new(ExternalToolAction {
+        source: ExternalToolSource::Mcp {
+            server_id: server_id.to_owned(),
+            receiver: "https://notes.example.test".into(),
+        },
+        tool_name: tool.to_owned(),
+        input,
+        scope,
+    }))
+}
+
 #[test]
 fn b03_b04_mcp_and_web_search_require_gate_and_respect_rules() {
-    let mcp_action = CandidateAction::McpTool {
-        server_id: "notes".into(),
-        tool_name: "mcp_notes_read".into(),
-        input: json!({"path": "/notes/a.md"}),
-    };
+    let arguments = json!({"path": "/notes/a.md"});
+    let mcp_action = mcp_action("notes", "mcp_notes_read", arguments.clone(), None);
+    let old_allow = rule(
+        PolicyEffect::Allow,
+        "mcp_notes_read",
+        &arguments.to_string(),
+    );
+    assert!(matches!(
+        decide_action(&[old_allow], &mcp_action),
+        Verdict::NeedsDecision { .. }
+    ));
     assert!(matches!(
         decide_action(&[], &mcp_action),
         Verdict::NeedsDecision { .. }

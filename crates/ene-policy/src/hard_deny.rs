@@ -104,8 +104,7 @@ fn is_file_mutation_action(action: &CandidateAction) -> bool {
             capability.as_str(),
             "work.write" | "work.edit" | "work.delete" | "device.files"
         ),
-        CandidateAction::McpTool { tool_name, .. } => mutating_tool_name(tool_name),
-        CandidateAction::PluginTool(tool) => mutating_tool_name(&tool.tool_name),
+        CandidateAction::ExternalTool(tool) => mutating_tool_name(&tool.tool_name),
         CandidateAction::WebSearch(_) => false,
     }
 }

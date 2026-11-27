@@ -69,7 +69,14 @@ fn project(
 ) -> bool {
     project_servers(
         world,
-        [(id.to_owned(), collect_server_tools(id, server, catalog))].into(),
+        [(
+            id.to_owned(),
+            (
+                server.launch.clone(),
+                collect_server_tools(id, server, catalog),
+            ),
+        )]
+        .into(),
     )
 }
 
@@ -86,18 +93,21 @@ async fn registry_refresh_replaces_handlers_and_keeps_pinned_calls() {
         launch: Launch {
             stamp: STAMP,
             owner: registry.owner(),
+            receiver: Default::default(),
         },
         registry: registry.clone(),
         label: "notes".into(),
         allowed: Vec::new(),
     };
-    let mut world = World::new();
-    assert!(project(&mut world, "c1", &server, &pinned));
-    let old_entity = tool_entity(&mut world, "mcp_notes_echo").unwrap();
+    let mut harness = crate::host::tests::Harness::new([]);
+    let world = harness.app.world_mut();
+    world.init_resource::<Mcp>();
+    assert!(project(world, "c1", &server, &pinned));
+    let old_entity = tool_entity(world, "mcp_notes_echo").unwrap();
     let refreshed = registry.reconcile_managed_tools(expected.clone(), vec![local_tool("echo", 2)]);
     let current = registry.snapshot();
-    assert!(project(&mut world, "c1", &server, &current));
-    let entity = tool_entity(&mut world, "mcp_notes_echo").unwrap();
+    assert!(project(world, "c1", &server, &current));
+    let entity = tool_entity(world, "mcp_notes_echo").unwrap();
     assert_ne!(old_entity, entity);
     assert!(world.get_entity(old_entity).is_err());
     assert_eq!(
@@ -130,8 +140,8 @@ async fn registry_refresh_replaces_handlers_and_keeps_pinned_calls() {
         current.get("echo").unwrap().key(),
     );
     registry.reconcile_managed_tools(refreshed, Vec::new());
-    assert!(project(&mut world, "c1", &server, &registry.snapshot()));
-    assert!(tool_entity(&mut world, "mcp_notes_echo").is_none());
+    assert!(project(world, "c1", &server, &registry.snapshot()));
+    assert!(tool_entity(world, "mcp_notes_echo").is_none());
     assert!(world.get_entity(entity).is_err());
     let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let probe = alive.clone();
@@ -139,10 +149,10 @@ async fn registry_refresh_replaces_handlers_and_keeps_pinned_calls() {
         local_tool("echo", 4)
             .with_liveness(move || probe.load(std::sync::atomic::Ordering::SeqCst)),
     ]);
-    assert!(project(&mut world, "c1", &server, &registry.snapshot()));
+    assert!(project(world, "c1", &server, &registry.snapshot()));
     alive.store(false, std::sync::atomic::Ordering::SeqCst);
-    assert!(project(&mut world, "c1", &server, &registry.snapshot()));
-    assert!(tool_entity(&mut world, "mcp_notes_echo").is_none());
+    assert!(project(world, "c1", &server, &registry.snapshot()));
+    assert!(tool_entity(world, "mcp_notes_echo").is_none());
     connection.close().await;
     task.abort();
 }
@@ -168,6 +178,7 @@ async fn projection_refuses_collisions_and_retires_only_owned_entities() {
         Launch {
             stamp: STAMP,
             owner: registry.owner(),
+            receiver: Default::default(),
         },
         first.clone(),
         registry.clone(),
@@ -188,6 +199,7 @@ async fn projection_refuses_collisions_and_retires_only_owned_entities() {
         Launch {
             stamp: STAMP,
             owner: other_registry.owner(),
+            receiver: Default::default(),
         },
         second.clone(),
         other_registry,
@@ -222,10 +234,12 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
     let old_launch = Launch {
         stamp: STAMP,
         owner: old_registry.owner(),
+        receiver: Default::default(),
     };
     let new_launch = Launch {
         stamp: STAMP,
         owner: new_registry.owner(),
+        receiver: Default::default(),
     };
     assert_ne!(old_launch, new_launch);
     let mut harness = crate::host::tests::Harness::new([]);
@@ -347,14 +361,49 @@ fn setup_gate_mcp_harness(
             MockStreamEvent::final_response_with_default_usage(),
         ],
     ]);
+    let id = ene_domain::ConnectionId::parse("c1").unwrap();
+    let store = harness.store();
+    let repo = store.settings_repo();
+    let revision = repo.settings_revision().unwrap();
+    repo.update_settings(
+        revision,
+        &[(
+            Connection {
+                id: id.clone(),
+                name: "notes".into(),
+                enabled: true,
+                kind: ConnectionKind::Mcp,
+                credential_state: CredentialState::Absent,
+                revision: 0,
+                last_check: None,
+                config: ConnectionConfig::Mcp(crate::host::settings::McpConnection {
+                    command: "duplex-fixture".into(),
+                    endpoint: Endpoint {
+                        adapter: "mcp".into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+            0,
+        )],
+    )
+    .unwrap();
+    let (row, created_revision) = repo.connection_with_creation(id.as_str()).unwrap().unwrap();
+    let stamp = ConnectionStamp {
+        revision: row.revision,
+        created_revision,
+        credential_generation: 0,
+    };
     let world = harness.app.world_mut();
     world.init_resource::<Mcp>();
     attach_now(
         world,
         "c1",
         Launch {
-            stamp: STAMP,
+            stamp,
             owner: registry.owner(),
+            receiver: Default::default(),
         },
         connection,
         registry,
@@ -455,6 +504,7 @@ async fn an_mcp_tool_runs_through_the_gate() {
         "the model's call reached the MCP server"
     );
     assert_echo_refresh_and_removal(&mut harness, &peer, &listed, &generation).await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     server.abort();
 }
 
@@ -464,7 +514,13 @@ async fn assert_echo_refresh_and_removal(
     listed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     generation: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
 ) {
-    let old_entity = tool_entity(harness.app.world_mut(), "mcp_notes_echo").unwrap();
+    let world = harness.app.world_mut();
+    let old_entity = tool_entity(world, "mcp_notes_echo").unwrap();
+    let pinned = world
+        .get::<HostExternalTool>(old_entity)
+        .unwrap()
+        .handler
+        .clone();
     generation.store(2, std::sync::atomic::Ordering::SeqCst);
     peer.notify_tool_list_changed().await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -484,6 +540,15 @@ async fn assert_echo_refresh_and_removal(
     })
     .await
     .expect("a same-name refresh replaces the schema and entity");
+    let outcome = rig_core::serve::serve_inline(
+        &pinned,
+        rig_core::effect::EffectKind::ToolCall {
+            name: "mcp_notes_echo".into(),
+            args: "{}".into(),
+        },
+    )
+    .await;
+    assert!(matches!(outcome, Err(ref error) if error.kind == rig_core::error::ErrorKind::Denied));
     listed.store(false, std::sync::atomic::Ordering::SeqCst);
     peer.notify_tool_list_changed().await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {

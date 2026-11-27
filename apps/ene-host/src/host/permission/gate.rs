@@ -5,10 +5,11 @@ use super::decision::{
     DECISION_ARGUMENT_CHARS, DecisionInputs, Decisions, Pending, collect_decisions, push_card,
     request_context, start_decision,
 };
+use super::external::PreparedExternalTool;
 use super::resolve::{
-    AgentCapabilityContext, CandidateOutcome, PreToolChecked, PreparedPluginTool, binding_of,
-    build_candidate_action, collect_pre_tool_hooks, count_reply_calls, load_gate_rules,
-    resolve_device_candidate, start_pre_tool_hooks,
+    AgentCapabilityContext, CandidateOutcome, PreToolChecked, binding_of, build_candidate_action,
+    collect_pre_tool_hooks, count_reply_calls, load_gate_rules, resolve_device_candidate,
+    start_pre_tool_hooks,
 };
 use crate::host::{
     db::Store,
@@ -24,7 +25,7 @@ use ene_policy::{
 use ene_rpc as w;
 use ene_store::util::truncate;
 use rig_core::effect::EffectId;
-use rig_ecs::prelude::*;
+use rig_ecs::{prelude::*, tools::CallHandler};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -97,10 +98,6 @@ impl Plugin for GatePlugin {
     }
 }
 
-/// Applies the decision pipeline to every tool call that is about to start.
-/// Internal host tools pass; device capabilities, MCP tools, and web_search
-/// enter `Stage::Gate`, are checked against saved rules and, when needed, held
-/// for Decision API evaluation or user approval.
 pub(super) struct GateCall {
     pub(super) entity: Entity,
     call_id: String,
@@ -172,8 +169,8 @@ fn collect_pending_gate_calls(world: &mut World) -> Vec<GateCall> {
         .filter(|(call, _, _, _)| {
             world.get::<Approved>(*call).is_none()
                 || world
-                    .get::<PreparedPluginTool>(*call)
-                    .is_some_and(PreparedPluginTool::revoked)
+                    .get::<PreparedExternalTool>(*call)
+                    .is_some_and(PreparedExternalTool::revoked)
         })
         .filter(|(call, _, _, _)| {
             world
@@ -206,14 +203,10 @@ fn process_gate_call(
     item: GateCall,
 ) -> std::ops::ControlFlow<()> {
     if world
-        .get::<PreparedPluginTool>(item.entity)
-        .is_some_and(PreparedPluginTool::revoked)
+        .get::<PreparedExternalTool>(item.entity)
+        .is_some_and(PreparedExternalTool::revoked)
     {
-        refuse(
-            world,
-            item.entity,
-            "the tool plugin was replaced or disabled",
-        );
+        refuse(world, item.entity, "the external tool registration changed");
         return std::ops::ControlFlow::Continue(());
     }
     let asked = item
@@ -265,14 +258,14 @@ fn process_gate_call(
             Ok(None) => {}
         }
     }
-    let candidate = match build_candidate_action(ctx, &item) {
-        CandidateOutcome::Resolved(candidate) => Some(*candidate),
+    let candidate = match build_candidate_action(ctx, &item, world.get::<CallHandler>(item.entity))
+    {
         CandidateOutcome::Search(search) => {
             let action = search.candidate();
             world.entity_mut(item.entity).insert(*search);
             Some((action, None, None))
         }
-        CandidateOutcome::Plugin(tool) => {
+        CandidateOutcome::External(tool) => {
             let action = tool.candidate();
             world.entity_mut(item.entity).insert(tool);
             Some((action, None, None))
