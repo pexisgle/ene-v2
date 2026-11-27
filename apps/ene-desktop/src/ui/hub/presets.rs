@@ -6,7 +6,7 @@ use crate::rpc::{
     connections::{SetupConnection, SetupSelection},
 };
 use ene_client_core::{
-    ModelRoleSlot, SAKURA_AI_ENDPOINT as SAKURA_ENDPOINT, SearchAdapter,
+    SAKURA_AI_ENDPOINT as SAKURA_ENDPOINT, SearchAdapter,
     domain::LlmProvider,
     presets::{
         EmbeddingPresetSpec, SttPresetSpec, build_embedding_preset_input, build_llm_provider_input,
@@ -284,13 +284,6 @@ pub(crate) fn add_openai_embedding_preset(hub: &mut Hub, cx: &mut Context<Hub>) 
 }
 
 fn add_embedding_preset(hub: &mut Hub, spec: &EmbeddingPresetSpec<'_>, cx: &mut Context<Hub>) {
-    let should_assign = hub.model.companion().is_some_and(|c| {
-        c.assignments
-            .as_ref()
-            .and_then(|a| a.embedding.as_ref())
-            .is_none_or(|e| e.connection_id.trim().is_empty())
-    });
-    let target = (spec.id.to_owned(), spec.model_id.to_owned());
     let input = {
         let connections = hub
             .model
@@ -299,7 +292,4 @@ fn add_embedding_preset(hub: &mut Hub, spec: &EmbeddingPresetSpec<'_>, cx: &mut 
         build_embedding_preset_input(connections, spec)
     };
     hub.upsert_connection("埋め込み（Embedding）接続の追加", input, cx);
-    if should_assign {
-        hub.assign_model(ModelRoleSlot::Embedding, Some(target), cx);
-    }
 }

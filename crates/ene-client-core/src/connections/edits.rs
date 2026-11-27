@@ -26,20 +26,6 @@ pub struct ConnectionEditSpec<'a> {
     pub options_json: Option<&'a str>,
 }
 
-/// Encodes `(connection_id, model_id)` into a dropdown option key.
-pub fn encode_model_choice(connection_id: &str, model_id: &str) -> String {
-    format!("{connection_id}\u{1f}{model_id}")
-}
-
-/// Decodes a dropdown option key produced by [`encode_model_choice`].
-pub fn decode_model_choice(encoded: &str) -> Option<(String, String)> {
-    let (cid, mid) = encoded.split_once('\u{1f}')?;
-    if cid.is_empty() || mid.is_empty() {
-        return None;
-    }
-    Some((cid.to_owned(), mid.to_owned()))
-}
-
 /// Extracts the initial comma/space-delimited list string for a connection's edit field.
 pub fn extract_kind_list_init(cfg: Option<&ConnectionConfig>) -> String {
     match cfg {

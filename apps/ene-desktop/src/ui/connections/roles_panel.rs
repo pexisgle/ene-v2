@@ -3,10 +3,7 @@ use super::roles_voice::{collect_roles_context, render_voice_role_row, voice_rol
 use crate::ui::ModelRoleSlot;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{DropdownOption, DropdownSpec, dropdown_select};
-use ene_client_core::{
-    connections::{decode_model_choice, encode_model_choice},
-    domain::{Companion, ModelAssignments},
-};
+use ene_client_core::domain::{Companion, ModelAssignment, ModelAssignments};
 use gpui::{AnyElement, Context, FontWeight, div, prelude::*, px};
 
 #[derive(Clone, Copy)]
@@ -125,13 +122,9 @@ fn render_model_role_row(
 
     let dd_key = format!("adv-role:{slot:?}");
     let options = build_slot_model_options(slot, slot_models.iter().chain(harnesses));
-    let current_value = current
-        .as_ref()
-        .map(|m| encode_model_choice(&m.connection_id, &m.model_id))
-        .or_else(|| {
-            (!matches!(slot, ModelRoleSlot::Companion | ModelRoleSlot::Task))
-                .then(|| "__auto__".to_owned())
-        });
+    let current_value = current.map(Some).or_else(|| {
+        (!matches!(slot, ModelRoleSlot::Companion | ModelRoleSlot::Task)).then_some(None)
+    });
     let hub_assign = pane.hub.clone();
 
     div()
@@ -154,11 +147,7 @@ fn render_model_role_row(
                 empty_label: "利用可能なモデルがありません（接続を追加・確認してください）",
             },
             move |picked, _, cx| {
-                if picked == "__auto__" {
-                    hub_assign.update(cx, |hub, cx| hub.assign_model(slot, None, cx));
-                } else if let Some((cid, mid)) = decode_model_choice(&picked) {
-                    hub_assign.update(cx, |hub, cx| hub.assign_model(slot, Some((cid, mid)), cx));
-                }
+                hub_assign.update(cx, |hub, cx| hub.assign_model(slot, picked, cx));
             },
         ))
         .into_any_element()
@@ -181,18 +170,21 @@ fn render_no_companion_roles_hint(theme: &Theme) -> AnyElement {
 fn build_slot_model_options<'a>(
     slot: ModelRoleSlot,
     slot_models: impl Iterator<Item = &'a (String, String, String)>,
-) -> Vec<DropdownOption> {
+) -> Vec<DropdownOption<Option<ModelAssignment>>> {
     let mut options = Vec::new();
     if !matches!(slot, ModelRoleSlot::Companion | ModelRoleSlot::Task) {
         options.push(DropdownOption {
-            value: "__auto__".to_owned(),
+            value: None,
             label: slot.fallback_hint().to_owned(),
             detail: None,
         });
     }
     for (cid, mid, label) in slot_models {
         options.push(DropdownOption {
-            value: encode_model_choice(cid, mid),
+            value: Some(ModelAssignment {
+                connection_id: cid.clone(),
+                model_id: mid.clone(),
+            }),
             label: label.clone(),
             detail: Some(mid.clone()),
         });

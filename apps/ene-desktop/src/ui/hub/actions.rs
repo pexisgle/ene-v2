@@ -5,8 +5,9 @@ use crate::{rpc, state::NoticeKind, update::Command};
 use ene_client_core::{
     ModelRoleSlot,
     domain::{
-        ApprovalDecision, CompanionProfilePatch, CompanionTemplate, MindProfile, NewCompanionSpec,
-        PolicyEffect, PolicyRule, PolicyRulesUpdate, PolicyText, PolicyTextsUpdate,
+        ApprovalDecision, CompanionProfilePatch, CompanionTemplate, MindProfile, ModelAssignment,
+        NewCompanionSpec, PolicyEffect, PolicyRule, PolicyRulesUpdate, PolicyText,
+        PolicyTextsUpdate,
     },
 };
 use gpui::Context;
@@ -412,7 +413,7 @@ impl Hub {
     pub(crate) fn assign_model(
         &mut self,
         slot: ModelRoleSlot,
-        assignment: Option<(String, String)>,
+        assignment: Option<ModelAssignment>,
         cx: &mut Context<Self>,
     ) {
         companions::assign_model(self, slot, assignment, cx);

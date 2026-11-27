@@ -60,8 +60,7 @@ impl ModelRoleSlot {
     /// What the slot falls back to when the operator sets nothing.
     pub fn fallback_hint(self) -> &'static str {
         match self {
-            Self::Companion => "自動（接続先から割当）",
-            Self::Task => "自動（接続先から割当）",
+            Self::Companion | Self::Task => "未設定",
             Self::Perception | Self::Compaction | Self::Consolidation => "自動（会話モデルを使用）",
             Self::Decision => "自動（作業モデルを使用）",
             Self::Embedding => "未設定（キーワード検索のみ）",

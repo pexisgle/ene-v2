@@ -7,7 +7,7 @@ use crate::ui::hub::voice_roles;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{DropdownOption, DropdownSpec, Tone, dropdown_select, pill_button};
-use ene_client_core::connections::{decode_model_choice, encode_model_choice};
+use ene_client_core::domain::ModelAssignment;
 use gpui::{AnyElement, Context, div, prelude::*, px};
 use std::collections::BTreeMap;
 
@@ -62,10 +62,10 @@ pub(super) fn render_voice_role_row(
 ) -> AnyElement {
     let current_text = resolve_voice_label(spec, conn_names);
     let options = build_voice_role_options(spec);
-    let current_value = spec.active.as_ref().map_or_else(
-        || "__off__".to_owned(),
-        |(cid, vid)| encode_model_choice(cid, vid),
-    );
+    let current_value = spec.active.as_ref().map(|(cid, vid)| ModelAssignment {
+        connection_id: cid.clone(),
+        model_id: vid.clone(),
+    });
     let no_choices = spec.choices.is_empty();
     let assign_fn = spec.assign;
     let hub_assign = pane.hub.clone();
@@ -90,13 +90,13 @@ pub(super) fn render_voice_role_row(
                 empty_label: spec.empty_dropdown_label,
             },
             move |picked, _, cx| {
-                if picked == "__off__" {
-                    hub_assign.update(cx, |hub, cx| assign_fn(hub, None, cx));
-                } else if let Some((cid, vid)) = decode_model_choice(&picked) {
-                    hub_assign.update(cx, |hub, cx| {
-                        assign_fn(hub, Some((cid.as_str(), vid.as_str())), cx)
-                    });
-                }
+                let selection = picked.as_ref().map(|assignment| {
+                    (
+                        assignment.connection_id.as_str(),
+                        assignment.model_id.as_str(),
+                    )
+                });
+                hub_assign.update(cx, |hub, cx| assign_fn(hub, selection, cx));
             },
         ))
         .when(no_choices, |this| {
@@ -157,16 +157,19 @@ fn resolve_voice_label(spec: &VoiceRoleSpec, conn_names: &BTreeMap<String, Strin
     )
 }
 
-fn build_voice_role_options(spec: &VoiceRoleSpec) -> Vec<DropdownOption> {
+fn build_voice_role_options(spec: &VoiceRoleSpec) -> Vec<DropdownOption<Option<ModelAssignment>>> {
     let mut options = Vec::with_capacity(spec.choices.len() + 1);
     options.push(DropdownOption {
-        value: "__off__".to_owned(),
+        value: None,
         label: spec.off_label.to_owned(),
         detail: None,
     });
     for (cid, vid, label) in &spec.choices {
         options.push(DropdownOption {
-            value: encode_model_choice(cid, vid),
+            value: Some(ModelAssignment {
+                connection_id: cid.clone(),
+                model_id: vid.clone(),
+            }),
             label: label.clone(),
             detail: Some(vid.clone()),
         });

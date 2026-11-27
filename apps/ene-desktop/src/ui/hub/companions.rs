@@ -131,20 +131,16 @@ pub(super) fn preview_companion(
 pub(super) fn assign_model(
     hub: &mut Hub,
     slot: ModelRoleSlot,
-    assignment: Option<(String, String)>,
+    assignment: Option<ModelAssignment>,
     cx: &mut Context<Hub>,
 ) {
-    let Some(companion) = hub.model.companion().cloned() else {
+    let Some(companion) = hub.model.companion() else {
         return;
     };
-    let assignment = assignment.map(|(connection_id, model_id)| ModelAssignment {
-        connection_id,
-        model_id,
-    });
     rpc::companions::assign_model(
         &hub.rpc,
         hub.model.connections.link_epoch,
-        companion.id,
+        companion.id.clone(),
         companion.revision,
         slot,
         assignment,
