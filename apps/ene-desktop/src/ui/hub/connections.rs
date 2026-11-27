@@ -56,6 +56,30 @@ impl Hub {
         cx.notify();
     }
 
+    pub(crate) fn add_mcp_connection(
+        &mut self,
+        input: ConnectionInput,
+        secret: String,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(settings) = self.model.settings() else {
+            return false;
+        };
+        let id = input.id.clone();
+        let Some(ticket) = rpc::connections::add_mcp_and_check(
+            &self.rpc,
+            self.model.connections.link_epoch,
+            settings.revision,
+            input,
+            secret,
+        ) else {
+            return false;
+        };
+        self.setup.checking_connections.insert(id, ticket);
+        cx.notify();
+        true
+    }
+
     pub(crate) fn set_connection_enabled(
         &mut self,
         connection: &Connection,

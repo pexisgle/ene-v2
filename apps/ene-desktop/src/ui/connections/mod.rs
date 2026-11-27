@@ -52,7 +52,6 @@ struct ExpandedConnection {
 #[derive(Default)]
 struct ConnectionFormState {
     add: AddFlow,
-    pending_mcp: Option<String>,
     expanded: Option<ExpandedConnection>,
     advanced_roles_open: bool,
     auto_probed_connections: HashSet<String>,
@@ -186,18 +185,6 @@ impl ConnectionsPane {
         cx.notify();
     }
 
-    fn consume_pending_mcp_probe(&mut self, connections: &[Connection], cx: &mut Context<Self>) {
-        if let Some(id) = self
-            .form
-            .pending_mcp
-            .take_if(|id| connections.iter().any(|connection| &connection.id == id))
-        {
-            self.clear_mcp_drafts();
-            let hub = self.hub.clone();
-            cx.defer(move |cx| hub.update(cx, |hub, cx| hub.check_connection(id, cx)));
-        }
-    }
-
     fn build_connection_rows(
         &mut self,
         connections: &[Connection],
@@ -235,7 +222,6 @@ impl gpui::Render for ConnectionsPane {
             )
         };
 
-        self.consume_pending_mcp_probe(&connections, cx);
         let adding = !matches!(self.form.add, AddFlow::Closed);
         let add_panel = match self.form.add {
             AddFlow::Closed => None,

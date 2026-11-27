@@ -421,14 +421,11 @@ fn render_mcp_submit(
             input.id = uuid::Uuid::new_v4().to_string();
             let id = input.id.clone();
             let secret = mcp_secret.clone();
-            hub.update(cx, |hub, cx| {
-                hub.upsert_connection("MCP の追加", input, cx);
-                if !secret.is_empty() {
-                    hub.register_secret(&id, &secret, None, cx);
-                }
-            });
+            if !hub.update(cx, |hub, cx| hub.add_mcp_connection(input, secret, cx)) {
+                return;
+            }
             submit.update(cx, |this, cx| {
-                this.form.pending_mcp = Some(id.clone());
+                this.clear_mcp_drafts();
                 this.form.open_editor(id);
                 this.form.add = AddFlow::Closed;
                 this.open_dropdown = None;

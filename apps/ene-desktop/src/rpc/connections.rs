@@ -135,14 +135,7 @@ pub(crate) fn update_settings(
                 timeout: RPC_TIMEOUT + PROBE_TIMEOUT,
             },
             move |host, ticket| async move {
-                let save =
-                    tokio::time::timeout(RPC_TIMEOUT, host.settings.update_settings(request))
-                        .await
-                        .map_err(|_| {
-                            connectrpc::ConnectError::deadline_exceeded(
-                                "the settings save timed out",
-                            )
-                        })??;
+                let save = before_probe(host.settings.update_settings(request)).await?;
                 run_connection_probe(host, named, save.view().revision, ticket).await
             },
         );
@@ -155,6 +148,72 @@ pub(crate) fn update_settings(
         failure,
     );
     None
+}
+
+async fn before_probe<T>(
+    request: impl Future<Output = Result<T, connectrpc::ConnectError>>,
+) -> Result<T, connectrpc::ConnectError> {
+    tokio::time::timeout(RPC_TIMEOUT, request)
+        .await
+        .map_err(|_| {
+            connectrpc::ConnectError::deadline_exceeded("the connection setup timed out")
+        })?
+}
+
+pub(crate) fn add_mcp_and_check(
+    rpc: &RpcDispatcher,
+    epoch: u64,
+    revision: u64,
+    mut input: ConnectionInput,
+    secret: String,
+) -> Option<String> {
+    let id = input.id.clone();
+    let named = id.clone();
+    dispatch_probe(
+        rpc,
+        epoch,
+        id,
+        CallContext {
+            label: "MCP の追加",
+            timeout: 3 * RPC_TIMEOUT + PROBE_TIMEOUT,
+        },
+        move |host, ticket| async move {
+            let mut create = input.clone();
+            create.enabled = secret.is_empty();
+            let saved = before_probe(
+                host.settings
+                    .update_settings(settings_request(revision, vec![create])),
+            )
+            .await?;
+            let mut revision = saved.view().revision;
+            if !secret.is_empty() {
+                input.expected_revision = saved
+                    .view()
+                    .connections
+                    .iter()
+                    .find(|connection| connection.id == named)
+                    .ok_or_else(|| {
+                        connectrpc::ConnectError::not_found("the saved MCP connection is missing")
+                    })?
+                    .revision;
+                before_probe(host.settings.register_credentials(credential_request(
+                    named.clone(),
+                    secret,
+                    Some(revision),
+                )))
+                .await?;
+                input.enabled = true;
+                revision = before_probe(
+                    host.settings
+                        .update_settings(settings_request(revision, vec![input])),
+                )
+                .await?
+                .view()
+                .revision;
+            }
+            run_connection_probe(host, named, revision, ticket).await
+        },
+    )
 }
 
 fn settings_request(revision: u64, inputs: Vec<ConnectionInput>) -> w::UpdateSettingsRequest {
