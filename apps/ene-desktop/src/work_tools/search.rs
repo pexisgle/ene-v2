@@ -91,14 +91,14 @@ impl Workspace {
             if !kind.is_file() {
                 return true;
             }
-            let Ok(bytes) = self.load(entry) else {
-                skipped += 1;
-                return true;
+            let bytes = match self.load_with_budget(entry, &mut remaining_bytes) {
+                Ok(bytes) => bytes,
+                Err(WorkToolError::SearchBudgetExhausted) => return false,
+                Err(_) => {
+                    skipped += 1;
+                    return true;
+                }
             };
-            let Some(budget) = remaining_bytes.checked_sub(bytes.len()) else {
-                return false;
-            };
-            remaining_bytes = budget;
             let Ok(text) = text(&bytes) else { return true };
             text.lines()
                 .enumerate()

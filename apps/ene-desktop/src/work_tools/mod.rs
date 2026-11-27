@@ -21,7 +21,7 @@ const FILE_LIMIT: usize = 4 * 1024 * 1024;
 const IMAGE_LIMIT: usize = 512 * 1024;
 const OUTPUT_LIMIT: usize = 24 * 1024;
 const SCAN_LIMIT: usize = 20_000;
-const GREP_BYTES: usize = 16 * 1024 * 1024;
+const GREP_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RESULTS: usize = 500;
 const COMMAND_TIMEOUT: u64 = 30;
 /// How long `Drop` waits for a killed tool process to be collected.
@@ -58,6 +58,8 @@ pub(crate) enum WorkToolError {
     OldTextNotUnique,
     #[error("file exceeds the 4 MiB limit")]
     FileTooLarge,
+    #[error("the search byte budget is exhausted")]
+    SearchBudgetExhausted,
     #[error("the requested shell is unavailable")]
     ShellUnavailable,
     #[error("command is empty")]

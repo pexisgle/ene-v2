@@ -3,7 +3,6 @@ use super::{
 };
 use ene_domain::json::validate;
 use serde_json::{Value, json};
-#[cfg(unix)]
 use std::path::Path;
 use std::sync::Arc;
 
@@ -167,6 +166,27 @@ async fn read_and_grep_keep_the_first_unreturned_line_and_mark_truncated_text() 
         grep["entries"],
         json!([{"path":"book","line":2,"text":"日".repeat(2048 / 3)}])
     );
+}
+
+#[test]
+fn workspace_search_counts_bytes_and_refuses_an_over_budget_file_before_reading() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("first"), b"word").unwrap();
+    std::fs::write(directory.path().join("longer"), b"longer").unwrap();
+    let workspace = Workspace::open(directory.path()).unwrap();
+    let mut remaining = 8;
+    assert_eq!(
+        workspace
+            .load_with_budget(Path::new("first"), &mut remaining)
+            .unwrap(),
+        b"word"
+    );
+    assert_eq!(remaining, 4);
+    assert!(matches!(
+        workspace.load_with_budget(Path::new("longer"), &mut remaining),
+        Err(WorkToolError::SearchBudgetExhausted)
+    ));
+    assert_eq!(remaining, 4);
 }
 
 #[cfg(unix)]

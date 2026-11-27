@@ -277,6 +277,14 @@ impl Workspace {
     }
 
     pub(super) fn load(&self, path: &Path) -> Result<Vec<u8>, WorkToolError> {
+        self.load_with_budget(path, &mut (FILE_LIMIT as u64 + 1))
+    }
+
+    pub(super) fn load_with_budget(
+        &self,
+        path: &Path,
+        remaining: &mut u64,
+    ) -> Result<Vec<u8>, WorkToolError> {
         // Check before opening so named pipes and device files are not read.
         let metadata = self.dir.metadata(path)?;
         if !metadata.is_file() {
@@ -284,6 +292,9 @@ impl Workspace {
         }
         if metadata.len() > FILE_LIMIT as u64 {
             return Err(WorkToolError::FileTooLarge);
+        }
+        if metadata.len() > *remaining {
+            return Err(WorkToolError::SearchBudgetExhausted);
         }
         // A replacement FIFO between metadata and open must not block before fstat.
         let file = self
@@ -293,9 +304,17 @@ impl Workspace {
             return Err(io::Error::other("path must name a regular file").into());
         }
         let mut bytes = Vec::new();
-        file.take(FILE_LIMIT as u64 + 1).read_to_end(&mut bytes)?;
+        let limit = (FILE_LIMIT as u64 + 1).min(*remaining);
+        let mut reader = file.take(limit);
+        let result = reader.read_to_end(&mut bytes);
+        *remaining -= limit - reader.limit();
+        result?;
         if bytes.len() > FILE_LIMIT {
             return Err(WorkToolError::FileTooLarge);
+        }
+        // A file may have grown after the initial metadata check.
+        if reader.limit() == 0 && reader.get_ref().metadata()?.len() > limit {
+            return Err(WorkToolError::SearchBudgetExhausted);
         }
         Ok(bytes)
     }
