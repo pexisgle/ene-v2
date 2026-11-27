@@ -30,11 +30,13 @@ connectrpc.workspace = true
 directories = "6"
 gpui.workspace = true
 globset = "0.4"
+hex.workspace = true
 process-wrap.workspace = true
 schemars.workspace = true
 scopeguard = { version = "1", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "process", "io-util", "sync", "time"] }

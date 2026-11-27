@@ -65,7 +65,7 @@ impl DeviceBridge {
         let Some(program) = transport.options.renderer.clone() else {
             return Ok(false);
         };
-        match Avatar::spawn(&program) {
+        match Avatar::spawn(&program, &transport.options.id) {
             Ok(avatar) => {
                 self.avatar = Some(avatar);
                 self.sync_avatars(transport).await;

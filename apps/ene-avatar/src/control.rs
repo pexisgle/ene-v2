@@ -4,6 +4,7 @@ use crate::character::{
     AvatarState, Character, Config, ConfigError, Notification, queue_motion, reload,
     validate_config,
 };
+use crate::desktop::Layout;
 use bevy::{
     app::{AppExit, MainScheduleOrder},
     ecs::schedule::ScheduleLabel,
@@ -205,17 +206,7 @@ fn apply_command(
         Command::Set { character, config } => {
             apply_add_or_set(world, false, target, character, config)
         }
-        Command::Update {
-            character,
-            mut config,
-        } => {
-            let previous = target
-                .and_then(|entity| world.get::<Character>(entity))
-                .ok_or(ControlError::UnknownCharacter)?;
-            config.monitor = config.monitor.or_else(|| previous.config.monitor.clone());
-            config.position = config.position.or(previous.config.position);
-            apply_add_or_set(world, false, target, character, config)
-        }
+        Command::Update { character, config } => apply_update(world, target, character, config),
         Command::Motion {
             motion, looping, ..
         } => apply_motion(world, target, motion, looping),
@@ -230,15 +221,7 @@ fn apply_command(
             world.despawn(entity);
             Ok(())
         }
-        Command::Center { monitor, .. } => {
-            let entity = target.ok_or(ControlError::UnknownCharacter)?;
-            let mut character = world
-                .get_mut::<Character>(entity)
-                .ok_or(ControlError::UnknownCharacter)?;
-            character.config.monitor = monitor;
-            character.config.position = None;
-            Ok(())
-        }
+        Command::Center { monitor, .. } => apply_position(world, target, monitor, None),
         Command::Fps { value } => {
             if value > 1000 {
                 return Err(ControlError::InvalidFps);
@@ -253,7 +236,7 @@ fn apply_command(
         } => apply_look_at(world, target, yaw_deg, pitch_deg),
         Command::Place {
             monitor, position, ..
-        } => apply_place(world, target, monitor, position),
+        } => apply_position(world, target, monitor, Some(position)),
         Command::Quit {} => {
             world.write_message(AppExit::Success);
             Ok(())
@@ -262,16 +245,43 @@ fn apply_command(
     applied.map(|()| None)
 }
 
+fn apply_update(
+    world: &mut World,
+    target: Option<Entity>,
+    character: String,
+    mut config: Config,
+) -> Result<(), ControlError> {
+    let entity = target.ok_or(ControlError::UnknownCharacter)?;
+    let previous = world
+        .get::<Character>(entity)
+        .ok_or(ControlError::UnknownCharacter)?;
+    let placement = (config.monitor.clone(), config.position);
+    config.monitor = config.monitor.or_else(|| previous.config.monitor.clone());
+    config.position = config.position.or(previous.config.position);
+    apply_add_or_set(world, false, target, character, config)?;
+    if placement.0.is_some() || placement.1.is_some() {
+        let _recorded = world.try_resource_scope(|world, mut layout: Mut<Layout>| {
+            if let Some(avatar) = world.get::<Character>(entity) {
+                layout.rebind(&avatar.id, placement, &avatar.config);
+            }
+        });
+    }
+    Ok(())
+}
+
 fn apply_add_or_set(
     world: &mut World,
     add: bool,
     target: Option<Entity>,
     character: String,
-    config: Config,
+    mut config: Config,
 ) -> Result<(), ControlError> {
     validate_config(&config)?;
     let entity = match (add, target) {
         (true, None) if !character.is_empty() && character.len() <= 128 => {
+            if let Some(mut layout) = world.get_resource_mut::<Layout>() {
+                layout.restore(&character, &mut config);
+            }
             world.spawn(Character::new(character, config)).id()
         }
         (true, _) => return Err(ControlError::InvalidCharacterId),
@@ -378,26 +388,28 @@ fn apply_look_at(
     Ok(())
 }
 
-fn apply_place(
+fn apply_position(
     world: &mut World,
     target: Option<Entity>,
     monitor: Option<String>,
-    position: [f32; 2],
+    position: Option<[f32; 2]>,
 ) -> Result<(), ControlError> {
-    if position
-        .iter()
-        .any(|v| !v.is_finite() || v.abs() > 1_000_000.)
-    {
+    if position.is_some_and(|point| point.iter().any(|v| !v.is_finite() || v.abs() > 1_000_000.)) {
         return Err(ControlError::InvalidPlace);
     }
     let entity = target.ok_or(ControlError::UnknownCharacter)?;
     let mut character = world
         .get_mut::<Character>(entity)
         .ok_or(ControlError::UnknownCharacter)?;
-    if monitor.is_some() {
+    if position.is_none() || monitor.is_some() {
         character.config.monitor = monitor;
     }
-    character.config.position = Some(position);
+    character.config.position = position;
+    let _recorded = world.try_resource_scope(|world, mut layout: Mut<Layout>| {
+        if let Some(avatar) = world.get::<Character>(entity) {
+            layout.moved(&avatar.id, &avatar.config);
+        }
+    });
     Ok(())
 }
 

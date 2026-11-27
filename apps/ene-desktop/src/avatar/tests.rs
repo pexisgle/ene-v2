@@ -317,17 +317,31 @@ async fn body_placement_and_scale_each_send_one_atomic_update() {
         .expect("the renderer accepts the update");
 
     avatar.set_scale("ene", model, 120.).await.unwrap();
+    let changed_scale = ene_domain::BodyBinding {
+        size_percent: Some(130.),
+        ..body
+    };
+    avatar
+        .show_with_body("ene", model, None, &changed_scale, 100.)
+        .await
+        .unwrap();
     let sent = sent.lock();
     let [
         Command::Update { config: body, .. },
         Command::Update { config: scaled, .. },
+        Command::Update {
+            config: resynced, ..
+        },
     ] = sent.as_slice()
     else {
-        panic!("expected two updates, got {sent:?}");
+        panic!("expected three updates, got {sent:?}");
     };
     assert_eq!(body.monitor.as_deref(), Some("HDMI-1"));
     assert_eq!(body.position, Some([300., 400.]));
     assert_eq!(scaled.monitor, None);
     assert_eq!(scaled.position, None);
     assert!((scaled.size_percent - 120.).abs() < f32::EPSILON);
+    assert_eq!(resynced.monitor, None);
+    assert_eq!(resynced.position, None);
+    assert!((resynced.size_percent - 130.).abs() < f32::EPSILON);
 }

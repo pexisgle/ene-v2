@@ -1,7 +1,9 @@
 use ene_avatar_ipc::{
-    AvatarEvent, AvatarMessage, AvatarStatus, CharacterConfig, Command, RendererFailure, Request,
+    AvatarEvent, AvatarMessage, AvatarStatus, CharacterConfig, Command, LAYOUT_FILE_ENV,
+    RendererFailure, Request,
 };
 use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
     io::{BufRead, BufReader, Write},
@@ -120,12 +122,18 @@ impl Avatar {
 
     /// Spawns the renderer. `program` is the `ene-avatar` binary; the caller
     /// resolves it so a missing binary is an error before any model loads.
-    pub fn spawn(program: &Path) -> Result<Self, AvatarError> {
+    pub fn spawn(program: &Path, client_id: &str) -> Result<Self, AvatarError> {
         let mut command = std::process::Command::new(program);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::inherit())
+            .env_remove(LAYOUT_FILE_ENV);
+        if let Some(dirs) = directories::ProjectDirs::from("", "", "ene") {
+            let filename = format!("{}.json", hex::encode(Sha256::digest(client_id)));
+            let layout = dirs.data_local_dir().join("avatar-layouts").join(filename);
+            command.env(LAYOUT_FILE_ENV, layout);
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

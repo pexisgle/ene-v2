@@ -1,6 +1,8 @@
 //! Desktop output placement, cameras, hit regions, and pointer interaction.
 
+mod layout;
 mod pointer;
+pub(crate) use layout::Layout;
 #[cfg(any(windows, test))]
 pub(crate) use pointer::pointer;
 pub(crate) use pointer::{NativeInput, cancel_pointer};
@@ -13,6 +15,9 @@ use bevy::{
 };
 
 pub fn setup(app: &mut App) {
+    if let Some(layout) = Layout::from_environment() {
+        app.insert_resource(layout);
+    }
     // 1 FPS needs a full second plus scheduling jitter before the stall cap.
     app.insert_resource(Time::<Virtual>::from_max_delta(
         std::time::Duration::from_secs(2),

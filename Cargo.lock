@@ -3992,13 +3992,16 @@ checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 name = "ene-avatar"
 version = "0.1.8"
 dependencies = [
+ "async-channel",
  "bevy",
  "directories",
  "ene-avatar-ipc",
  "ene-vrm",
  "exwlshellev",
  "raw-window-handle",
+ "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "windows 0.62.2",
 ]
@@ -4060,6 +4063,7 @@ dependencies = [
  "ene-voice",
  "globset",
  "gpui-kit",
+ "hex",
  "object",
  "parking_lot 0.13.0",
  "process-wrap",
@@ -4068,6 +4072,7 @@ dependencies = [
  "scopeguard",
  "serde",
  "serde_json",
+ "sha2 0.11.2",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

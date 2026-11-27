@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 /// Maximum JSON line length accepted on stdin by `ene-avatar`.
 pub const MAX_LINE: usize = 65_536;
 
+/// Optional local layout file for the device that owns the renderer process.
+pub const LAYOUT_FILE_ENV: &str = "ENE_AVATAR_LAYOUT_FILE";
+
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CharacterConfig {

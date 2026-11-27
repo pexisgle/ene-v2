@@ -63,7 +63,7 @@ impl Avatar {
         if existing == Some(&next) {
             return Ok(());
         }
-        self.configure(character, next, Some(body)).await
+        self.configure(character, next).await
     }
 
     /// Plays a preset on the displayed model and remembers its resting posture.
@@ -120,14 +120,18 @@ impl Avatar {
         &mut self,
         character: &str,
         next: CharacterConfig,
-        placement: Option<&ene_domain::BodyBinding>,
     ) -> Result<(), AvatarError> {
-        let command = if self.shown.contains_key(character) {
+        let command = if let Some(shown) = self.shown.get(character) {
             Command::Update {
                 character: character.to_owned(),
                 config: CharacterConfig {
-                    monitor: placement.and_then(|body| body.monitor.clone()),
-                    position: placement.and_then(|body| body.position),
+                    monitor: next
+                        .monitor
+                        .clone()
+                        .filter(|name| shown.config.monitor.as_ref() != Some(name)),
+                    position: next
+                        .position
+                        .filter(|position| shown.config.position != Some(*position)),
                     ..next.clone()
                 },
             }
@@ -178,7 +182,7 @@ impl Avatar {
             Some(current) => current.config.with_scale(clamped),
             None => CharacterConfig::for_model(model.to_string_lossy()).with_scale(clamped),
         };
-        self.configure(character, next, None).await
+        self.configure(character, next).await
     }
 
     /// Centers the character on the primary monitor.
@@ -216,17 +220,10 @@ impl Avatar {
     ) -> Result<(), AvatarError> {
         self.call(Command::Place {
             character: character.to_owned(),
-            monitor: monitor.clone(),
+            monitor,
             position,
         })
-        .await?;
-        if let Some(shown) = self.shown.get_mut(character) {
-            if monitor.is_some() {
-                shown.config.monitor = monitor;
-            }
-            shown.config.position = Some(position);
-        }
-        Ok(())
+        .await
     }
 
     /// Queues one mouth amplitude non-blockingly; drops frames when congested.
