@@ -84,15 +84,30 @@ async fn change_credentials<T: Send + 'static>(
     services: &Services,
     operation: impl FnOnce(&HostServices) -> Result<T> + Send + 'static,
 ) -> ServiceResult<T> {
-    let result = services.with_vault(operation).await?;
-    services
-        .change(move |host| {
-            let response = result?;
-            notify_settings(
-                &host.notifier,
-                settings::project(&host.store.settings_repo().settings()?, &host.providers),
-            );
-            Ok(response)
+    let publisher = services.clone();
+    let publication = services
+        .with_vault(move |host| {
+            let result = operation(host);
+            // A request can expire while the admitted vault write is running.
+            // The worker owns the subsequent publication independently of the reply.
+            tokio::spawn(async move {
+                publisher
+                    .change(move |host| {
+                        let response = result?;
+                        notify_settings(
+                            &host.notifier,
+                            settings::project(
+                                &host.store.settings_repo().settings()?,
+                                &host.providers,
+                            ),
+                        );
+                        Ok(response)
+                    })
+                    .await
+            })
         })
+        .await?;
+    publication
         .await
+        .map_err(|_| ConnectError::unavailable("credential publication was interrupted"))?
 }
