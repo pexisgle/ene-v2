@@ -353,7 +353,7 @@ pub(crate) async fn semantic_candidates(
     credentials: Option<&Credentials>,
     companion: &str,
     query: &str,
-    mode: RecallMode,
+    mode: RecallMode<'_>,
 ) -> Vec<RecallCandidate> {
     if query.trim().is_empty() {
         return Vec::new();

@@ -4,6 +4,7 @@ use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 
 /// The scope every companion recalls. A memory's `scope` is either this value
 /// or a companion id, so no other value can widen visibility.
@@ -22,17 +23,25 @@ pub fn in_scope(scope: &str, companion: &str) -> bool {
 /// Why a recall runs. Automatic recall skips what the user asked to forget;
 /// an explicit question about the past may reach everything.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RecallMode {
+pub enum RecallMode<'a> {
     Auto,
+    AutoExcept(&'a HashSet<&'a str>),
     Explicit,
 }
 
-impl RecallMode {
+impl<'a> RecallMode<'a> {
     /// Minimum importance threshold included for this recall mode.
     pub fn minimum_importance(self) -> u8 {
         match self {
-            Self::Auto => 2,
+            Self::Auto | Self::AutoExcept(_) => 2,
             Self::Explicit => 0,
+        }
+    }
+
+    pub fn exclusions(self) -> Option<&'a HashSet<&'a str>> {
+        match self {
+            Self::AutoExcept(ids) => Some(ids),
+            _ => None,
         }
     }
 }

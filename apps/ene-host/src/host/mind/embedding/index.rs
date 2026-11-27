@@ -131,7 +131,7 @@ impl CompactVectorIndex {
         companion: &str,
         space: &str,
         query: &[f32],
-        mode: RecallMode,
+        mode: RecallMode<'_>,
         limit: usize,
     ) -> Vec<RecallCandidate> {
         let Some(current) = self.spaces.get(&(companion.to_owned(), space.to_owned())) else {
@@ -148,7 +148,12 @@ impl CompactVectorIndex {
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, (_, importance))| *importance >= mode.minimum_importance())
+            .filter(|(_, (candidate, importance))| {
+                *importance >= mode.minimum_importance()
+                    && !mode
+                        .exclusions()
+                        .is_some_and(|ids| ids.contains(candidate.id.as_str()))
+            })
             .filter_map(|(index, _)| {
                 let score =
                     dot(query, current.vector(index)?) / (magnitude * current.magnitudes[index]);

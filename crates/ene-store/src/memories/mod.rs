@@ -181,7 +181,7 @@ impl<'a> MemoryRepo<'a> {
         &self,
         companion: &str,
         query: &str,
-        mode: RecallMode,
+        mode: RecallMode<'_>,
         semantic: &[RecallCandidate],
         limit: usize,
     ) -> Result<RecallOutcome> {
@@ -199,13 +199,19 @@ impl<'a> MemoryRepo<'a> {
     fn semantic_memories(
         &self,
         companion: &str,
-        mode: RecallMode,
+        mode: RecallMode<'_>,
         candidates: &[RecallCandidate],
     ) -> Result<Vec<Memory>> {
         let mut unique = HashSet::new();
         let candidates: Vec<_> = candidates
             .iter()
-            .filter(|item| !item.id.is_empty() && unique.insert(*item))
+            .filter(|item| {
+                !item.id.is_empty()
+                    && !mode
+                        .exclusions()
+                        .is_some_and(|ids| ids.contains(item.id.as_str()))
+                    && unique.insert(*item)
+            })
             .take(64)
             .collect();
         if candidates.is_empty() {
@@ -279,7 +285,7 @@ impl<'a> MemoryRepo<'a> {
         &self,
         companion: &str,
         query: &str,
-        mode: RecallMode,
+        mode: RecallMode<'_>,
     ) -> Result<Vec<Memory>> {
         let mut seen = HashSet::new();
         let terms: Vec<_> = ene_mind::recall_terms(query)
@@ -300,9 +306,15 @@ impl<'a> MemoryRepo<'a> {
             &format!(
                 "SELECT {JOINED_COLUMNS} FROM memories m JOIN memories_fts f ON m.rowid = f.rowid \
                  WHERE {VISIBLE} AND m.importance >= ?2 AND memories_fts MATCH ?3 \
+                 AND m.id NOT IN (SELECT value FROM json_each(?4)) \
                  ORDER BY bm25(memories_fts), f.rowid LIMIT 20"
             ),
-            params![companion, mode.minimum_importance(), phrases.join(" OR ")],
+            params![
+                companion,
+                mode.minimum_importance(),
+                phrases.join(" OR "),
+                mode.exclusions().map(to_json).transpose()?
+            ],
             Memory::from_row,
         )
     }
@@ -310,7 +322,7 @@ impl<'a> MemoryRepo<'a> {
     fn short_lexical_candidates(
         &self,
         companion: &str,
-        mode: RecallMode,
+        mode: RecallMode<'_>,
         terms: &[&str],
     ) -> Result<Vec<Memory>> {
         let pattern = |term: &str| {
@@ -332,9 +344,15 @@ impl<'a> MemoryRepo<'a> {
         self.0.fetch_all(
             &format!(
                 "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance >= ?2 \
-                AND {predicate} ORDER BY m.importance DESC, m.rowid DESC LIMIT 20"
+                 AND {predicate} AND m.id NOT IN (SELECT value FROM json_each(?4)) \
+                 ORDER BY m.importance DESC, m.rowid DESC LIMIT 20"
             ),
-            params![companion, mode.minimum_importance(), parameter],
+            params![
+                companion,
+                mode.minimum_importance(),
+                parameter,
+                mode.exclusions().map(to_json).transpose()?
+            ],
             Memory::from_row,
         )
     }

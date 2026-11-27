@@ -484,6 +484,43 @@ fn b14_context_builder_marks_only_complete_memories_that_fit_budget() {
 }
 
 #[test]
+fn pinned_memories_over_the_budget_remain_eligible_for_ranked_recall() {
+    let harness = crate::host::tests::Harness::new([]);
+    let store = harness.store();
+    for index in 0..7 {
+        store
+            .memory_repo()
+            .insert_memory(&ene_mind::MemoryRecord {
+                id: format!("pin-{index}"),
+                scope: harness.companion.clone(),
+                content: format!("Memory {index}. {}", "blue cupboard ".repeat(31)),
+                importance: 10,
+                occurred_at: None,
+                source_context: serde_json::Value::Null,
+            })
+            .unwrap();
+    }
+    let tail = render_tail_full(&TailRenderRequest {
+        store: &store,
+        perception: &Perception::default(),
+        companion: &harness.companion,
+        query: Some("cupboard"),
+        semantic: &[],
+        hook_notes: &[],
+        budget_chars: TAIL_BUDGET_CHARS,
+    })
+    .unwrap()
+    .payload(&store, &harness.companion)
+    .unwrap();
+    let (pinned, ranked) = tail.text.split_once("今の話に関係する記憶:\n").unwrap();
+    assert!(pinned.contains("Memory 6."));
+    assert!(!pinned.contains("Memory 0."));
+    assert!(ranked.contains("Memory 0."));
+    assert_eq!(tail.memories.len(), 7);
+    assert!((0..7).all(|index| tail.text.matches(&format!("Memory {index}.")).count() == 1));
+}
+
+#[test]
 fn a_cached_tail_omits_revoked_and_partial_pinned_memories() {
     use crate::host::tests::Harness;
 

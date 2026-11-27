@@ -12,6 +12,7 @@ use crate::host::{
 use ene_mind::{Memory, MemoryVersion, RecallCandidate, RecallMode};
 use ene_store::util::now;
 use rig_ecs::prelude::{Conversation, MessageId};
+use std::collections::HashSet;
 use std::fmt::Write as _;
 
 #[derive(Debug)]
@@ -173,6 +174,14 @@ impl ContextBuilder {
         }
         selected
     }
+
+    fn finish(self, pinned: Vec<SelectedMemory>, recalled: Vec<SelectedMemory>) -> RenderedTail {
+        RenderedTail {
+            context: self.buf,
+            pinned,
+            recalled,
+        }
+    }
 }
 
 pub(super) struct DynamicTailQuery<'a> {
@@ -189,6 +198,7 @@ pub(super) struct TailRenderRequest<'a> {
     pub(super) perception: &'a Perception,
     pub(super) companion: &'a str,
     pub(super) query: Option<&'a str>,
+    #[cfg(test)]
     pub(super) semantic: &'a [RecallCandidate],
     pub(super) hook_notes: &'a [String],
     pub(super) budget_chars: usize,
@@ -197,20 +207,6 @@ pub(super) struct TailRenderRequest<'a> {
 pub(super) async fn dynamic_tail(
     req: DynamicTailQuery<'_>,
 ) -> crate::host::db::Result<RenderedTail> {
-    let semantic = match req.query {
-        Some(query) => {
-            embedding::semantic_candidates(
-                req.store,
-                req.embeddings,
-                req.credentials,
-                req.companion,
-                query,
-                RecallMode::Auto,
-            )
-            .await
-        }
-        None => Vec::new(),
-    };
     let hook_notes = crate::host::providers::extensions::run_hooks(
         &req.embeddings.providers(),
         req.store,
@@ -221,28 +217,93 @@ pub(super) async fn dynamic_tail(
     )
     .await
     .injected_context;
-    render_tail_full(&TailRenderRequest {
+    let render = TailRenderRequest {
         store: req.store,
         perception: req.perception,
         companion: req.companion,
         query: req.query,
-        semantic: &semantic,
+        #[cfg(test)]
+        semantic: &[],
         hook_notes: &hook_notes,
         budget_chars: TAIL_BUDGET_CHARS,
-    })
+    };
+    let (mut builder, pinned) = prepare_tail(&render)?;
+    let Some(pinned) = pinned else {
+        return Ok(builder.finish(Vec::new(), Vec::new()));
+    };
+    let Some(query) = render.query else {
+        return Ok(builder.finish(pinned, Vec::new()));
+    };
+    let excluded = pinned_ids(&pinned);
+    let mode = RecallMode::AutoExcept(&excluded);
+    let semantic = embedding::semantic_candidates(
+        req.store,
+        req.embeddings,
+        req.credentials,
+        req.companion,
+        query,
+        mode,
+    )
+    .await;
+    let recalled = select_recall(&mut builder, &render, query, mode, &semantic)?;
+    Ok(builder.finish(pinned, recalled))
 }
 
+fn pinned_ids(pinned: &[SelectedMemory]) -> HashSet<&str> {
+    pinned.iter().map(|item| item.version.id.as_str()).collect()
+}
+
+#[cfg(test)]
 pub(super) fn render_tail_full(
     req: &TailRenderRequest<'_>,
 ) -> crate::host::db::Result<RenderedTail> {
+    let (mut builder, pinned) = prepare_tail(req)?;
+    let Some(pinned) = pinned else {
+        return Ok(builder.finish(Vec::new(), Vec::new()));
+    };
+    let recalled = if let Some(query) = req.query {
+        let excluded = pinned_ids(&pinned);
+        select_recall(
+            &mut builder,
+            req,
+            query,
+            RecallMode::AutoExcept(&excluded),
+            req.semantic,
+        )?
+    } else {
+        Vec::new()
+    };
+    Ok(builder.finish(pinned, recalled))
+}
+
+fn select_recall(
+    builder: &mut ContextBuilder,
+    req: &TailRenderRequest<'_>,
+    query: &str,
+    mode: RecallMode<'_>,
+    semantic: &[RecallCandidate],
+) -> crate::host::db::Result<Vec<SelectedMemory>> {
+    let recalled =
+        req.store
+            .memory_repo()
+            .recall_hybrid(req.companion, query, mode, semantic, 6)?;
+    Ok(builder.select(
+        RECALL_HEADER,
+        recalled.items.into_iter().map(|item| item.memory),
+        false,
+    ))
+}
+
+fn prepare_tail(
+    req: &TailRenderRequest<'_>,
+) -> crate::host::db::Result<(ContextBuilder, Option<Vec<SelectedMemory>>)> {
     let &TailRenderRequest {
         store,
         perception,
         companion,
-        query,
-        semantic,
         hook_notes,
         budget_chars,
+        ..
     } = req;
     let mut builder = ContextBuilder::new(budget_chars);
     builder.push_priority(&opening());
@@ -264,7 +325,7 @@ pub(super) fn render_tail_full(
             builder.push_priority(&format!("- {note}\n"));
         }
     }
-    let (pinned, recalled) = if let Some(state) = store.companion_repo().companion(companion)? {
+    let pinned = if let Some(state) = store.companion_repo().companion(companion)? {
         builder.push_priority(&format!(
             "現在の心: 感情={} 関係={} 傾向={} 懸念={}\n",
             state.state.emotion.json,
@@ -272,25 +333,9 @@ pub(super) fn render_tail_full(
             state.state.tendencies.json,
             state.state.concerns.json
         ));
-        let repo = store.memory_repo();
-        let pinned = builder.select(PINNED_HEADER, repo.pinned(companion)?, true);
-        let recalled = if let Some(query) = query {
-            let recalled = repo.recall_hybrid(companion, query, RecallMode::Auto, semantic, 6)?;
-            builder.select(
-                RECALL_HEADER,
-                recalled.items.into_iter().map(|item| item.memory),
-                false,
-            )
-        } else {
-            Vec::new()
-        };
-        (pinned, recalled)
+        Some(builder.select(PINNED_HEADER, store.memory_repo().pinned(companion)?, true))
     } else {
-        (Vec::new(), Vec::new())
+        None
     };
-    Ok(RenderedTail {
-        context: builder.buf,
-        pinned,
-        recalled,
-    })
+    Ok((builder, pinned))
 }
