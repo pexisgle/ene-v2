@@ -294,58 +294,33 @@ pub(super) fn compute_connection_badge(
     needs_key_flag: bool,
     theme: &Theme,
 ) -> RowBadge {
-    let is_unsupported_check = check
-        .is_some_and(|c| !c.healthy && c.failure.as_ref().is_some_and(|f| f.code == "unsupported"));
-    if !conn.enabled {
-        return RowBadge {
-            label: "無効",
-            dot: theme.ink_placeholder,
-            bg: theme.bg_blush,
-            fg: theme.ink_muted,
-        };
-    }
-    if needs_key_flag {
-        return RowBadge {
-            label: "キー登録が必要",
-            dot: theme.amber,
-            bg: theme.amber_soft,
-            fg: theme.amber_fg,
-        };
-    }
-    if is_unsupported_check {
-        return RowBadge {
-            label: "設定済み",
-            dot: theme.mint,
-            bg: theme.mint_soft,
-            fg: theme.mint_fg,
-        };
-    }
-    match check.map(|c| c.healthy) {
-        Some(true) => RowBadge {
-            label: if conn.kind == ConnectionKind::Llm
-                && check.is_some_and(|check| check.checked_model.is_none())
-            {
+    let neutral = (theme.ink_placeholder, theme.bg_blush, theme.ink_muted);
+    let pending = (theme.amber, theme.amber_soft, theme.amber_fg);
+    let ready = (theme.mint, theme.mint_soft, theme.mint_fg);
+    let failed = (theme.danger, theme.danger_soft, theme.danger_fg);
+    let (label, (dot, bg, fg)) = match check {
+        _ if !conn.enabled => ("無効", neutral),
+        _ if needs_key_flag => ("キー登録が必要", pending),
+        Some(check) if check.healthy => {
+            let label = if conn.kind == ConnectionKind::Llm && check.checked_model.is_none() {
                 "モデル一覧取得済み"
             } else {
                 "接続先を確認済み"
-            },
-            dot: theme.mint,
-            bg: theme.mint_soft,
-            fg: theme.mint_fg,
-        },
-        Some(false) => RowBadge {
-            label: "接続エラー",
-            dot: theme.danger,
-            bg: theme.danger_soft,
-            fg: theme.danger_fg,
-        },
-        None => RowBadge {
-            label: "未確認",
-            dot: theme.amber,
-            bg: theme.amber_soft,
-            fg: theme.amber_fg,
-        },
-    }
+            };
+            (label, ready)
+        }
+        Some(check)
+            if check
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.code == "unsupported") =>
+        {
+            ("設定済み", ready)
+        }
+        Some(_) => ("接続エラー", failed),
+        None => ("未確認", pending),
+    };
+    RowBadge { label, dot, bg, fg }
 }
 
 pub(super) fn collect_sakura_conn_ids(conn: &Connection, hub: &Hub) -> Vec<String> {

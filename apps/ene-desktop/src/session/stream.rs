@@ -355,9 +355,7 @@ impl Session {
                 self.sync_avatars().await;
             }
             Some(w::notification::Event::Companion(companion)) => {
-                self.transport
-                    .companions
-                    .insert(companion.id.clone(), (**companion).clone());
+                self.transport.remember_companion(companion);
                 if self.transport.bindings.contains(&companion.id) {
                     self.sync_avatars().await;
                 }
@@ -366,7 +364,7 @@ impl Session {
                 }
             }
             Some(w::notification::Event::CompanionRemoved(companion)) => {
-                self.transport.companions.remove(&companion.id);
+                self.transport.companion_bodies.remove(&companion.id);
                 if self.transport.pending.as_deref() == Some(companion.id.as_str()) {
                     self.transport.pending = None;
                 }

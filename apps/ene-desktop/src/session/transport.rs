@@ -3,6 +3,7 @@
 use super::{Connection, DeviceBridge, Options, Outcome};
 use crate::{avatar, capabilities, host::Host};
 use buffa::view::MessageView;
+use ene_domain::BodyBinding;
 use ene_rpc as w;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -17,8 +18,8 @@ pub(super) struct SessionTransport {
     pub(super) bindings: BTreeSet<String>,
     /// Companion currently focused by the pod / interactive controls.
     pub(super) focused: Option<String>,
-    /// Latest companion records from the host, used to resolve body/model per resident companion.
-    pub(super) companions: BTreeMap<String, w::Companion>,
+    /// Known companion IDs and the only fields the session uses from their records.
+    pub(super) companion_bodies: BTreeMap<String, BodyBinding>,
     /// Whether the next attempt may move the activation. It is set on the first
     /// connect and when the operator picks a companion, so a reconnect never
     /// steals the companion back from another device.
@@ -41,7 +42,7 @@ impl SessionTransport {
             connection,
             bindings: BTreeSet::new(),
             focused: None,
-            companions: BTreeMap::new(),
+            companion_bodies: BTreeMap::new(),
             may_activate: true,
             subscription: String::new(),
             eyes_generation: 0,
@@ -58,11 +59,19 @@ impl SessionTransport {
             .or_else(|| self.bindings.first().map(String::as_str))
     }
 
-    pub(super) fn body_binding_for(&self, companion_id: &str) -> ene_domain::BodyBinding {
-        self.companions
+    pub(super) fn remember_companion(&mut self, companion: &w::Companion) {
+        let body = companion
+            .body
+            .as_option()
+            .and_then(|doc| serde_json::from_str(&doc.json).ok())
+            .unwrap_or_default();
+        self.companion_bodies.insert(companion.id.clone(), body);
+    }
+
+    pub(super) fn body_binding_for(&self, companion_id: &str) -> BodyBinding {
+        self.companion_bodies
             .get(companion_id)
-            .and_then(|companion| companion.body.as_option())
-            .and_then(|doc| serde_json::from_str::<ene_domain::BodyBinding>(&doc.json).ok())
+            .cloned()
             .unwrap_or_default()
     }
 
@@ -126,24 +135,16 @@ impl SessionTransport {
         host: &Host,
         devices: &DeviceBridge,
         body: bool,
-    ) -> Result<w::Client, connectrpc::ConnectError> {
+    ) -> Result<(), connectrpc::ConnectError> {
         // A declaration is an optimistic update, so a restart must send the
         // revision the host already stored or it conflicts with itself.
-        let expected_revision = host
-            .client
-            .list(w::Empty::default())
-            .await?
+        let clients = host.client.list(w::Empty::default()).await?;
+        let expected_revision = clients
             .view()
-            .to_owned_message()
-            .ok()
-            .and_then(|clients| {
-                clients
-                    .items
-                    .iter()
-                    .find(|client| client.id == self.options.id)
-                    .map(|client| client.revision)
-            })
-            .unwrap_or(0);
+            .items
+            .iter()
+            .find(|client| client.id == self.options.id)
+            .map_or(0, |client| client.revision);
         let computer_spec = {
             #[cfg(windows)]
             {
@@ -174,19 +175,16 @@ impl SessionTransport {
                 expected_revision,
                 ..Default::default()
             })
-            .await?
-            .view()
-            .to_owned_message()
-            .map_err(|error| connectrpc::ConnectError::internal(error.to_string()))
+            .await?;
+        Ok(())
     }
 
     /// Installs the host snapshot and the cursor at which it was taken.
     pub(super) fn restore_snapshot(&mut self, snapshot: &w::Snapshot) -> BTreeSet<String> {
-        self.companions = snapshot
-            .companions
-            .iter()
-            .map(|companion| (companion.id.clone(), companion.clone()))
-            .collect();
+        self.companion_bodies.clear();
+        for companion in &snapshot.companions {
+            self.remember_companion(companion);
+        }
         let previous = std::mem::replace(
             &mut self.bindings,
             snapshot
@@ -195,7 +193,7 @@ impl SessionTransport {
                 .filter(|activation| {
                     activation.client_id.as_deref() == Some(self.options.id.as_str())
                 })
-                .filter(|activation| self.companions.contains_key(&activation.companion_id))
+                .filter(|activation| self.companion_bodies.contains_key(&activation.companion_id))
                 .map(|activation| activation.companion_id.clone())
                 .collect(),
         );
@@ -227,7 +225,7 @@ impl SessionTransport {
             // activation intent so a future move away never auto-steals back (B16).
             self.may_activate = false;
             if let Some(target) = self.pending.take() {
-                if !self.bindings.contains(&target) && self.companions.contains_key(&target) {
+                if !self.bindings.contains(&target) && self.companion_bodies.contains_key(&target) {
                     self.activate_one(host, &target)
                         .await
                         .map_err(|error| self.classify(&error))?;
@@ -367,6 +365,11 @@ mod tests {
                 .into_iter()
                 .map(|id| w::Companion {
                     id: id.into(),
+                    body: Some(w::JsonDocument {
+                        json: serde_json::json!({"model": format!("{id}.vrm")}).to_string(),
+                        ..Default::default()
+                    })
+                    .into(),
                     ..Default::default()
                 })
                 .collect(),
@@ -387,6 +390,10 @@ mod tests {
         let first = snapshot("boot-a", 9, "ene", "kai");
         assert_eq!(transport.restore_snapshot(&first), BTreeSet::new());
         assert_eq!(transport.focused_companion_id(), Some("ene"));
+        assert_eq!(
+            transport.body_binding_for("ene").model.as_deref(),
+            Some("ene.vrm")
+        );
         assert_eq!(transport.cursor.as_ref(), first.cursor.as_option());
 
         let replacement = snapshot("boot-b", 1, "kai", "ene");
@@ -396,6 +403,10 @@ mod tests {
         );
         assert_eq!(transport.bindings, BTreeSet::from(["kai".to_owned()]));
         assert_eq!(transport.focused_companion_id(), Some("kai"));
+        assert_eq!(
+            transport.body_binding_for("kai").model.as_deref(),
+            Some("kai.vrm")
+        );
         assert_eq!(transport.cursor.as_ref(), replacement.cursor.as_option());
     }
 }

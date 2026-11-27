@@ -146,24 +146,15 @@ impl TryFrom<wire::PolicyRule> for domain::PolicyRule {
     type Error = domain::DomainError;
 
     fn try_from(value: wire::PolicyRule) -> Result<Self, Self::Error> {
-        use domain::PolicyEffect as Model;
-        use wire::PolicyEffect as Wire;
-        let effect = match value.effect.as_known() {
-            Some(Wire::Allow) => Model::Allow,
-            Some(Wire::Deny) => Model::Deny,
-            Some(Wire::Confirm) => Model::Confirm,
-            Some(Wire::AskLlm) => Model::AskLlm,
-            Some(Wire::Unspecified) | None => {
-                return Err(domain::DomainError::Invalid(
-                    "a policy effect is required".into(),
-                ));
-            }
-        };
         Ok(Self {
             id: value.id,
             tool_name: value.tool_name,
             pattern: value.pattern,
-            effect,
+            effect: value
+                .effect
+                .as_known()
+                .unwrap_or(wire::PolicyEffect::Unspecified)
+                .try_into()?,
             created_at: value.created_at,
         })
     }
@@ -171,19 +162,11 @@ impl TryFrom<wire::PolicyRule> for domain::PolicyRule {
 
 impl From<&domain::PolicyRule> for wire::PolicyRule {
     fn from(value: &domain::PolicyRule) -> Self {
-        use domain::PolicyEffect as Model;
-        use wire::PolicyEffect as Wire;
-        let effect = match value.effect {
-            Model::Allow => Wire::Allow,
-            Model::Deny => Wire::Deny,
-            Model::Confirm => Wire::Confirm,
-            Model::AskLlm => Wire::AskLlm,
-        };
         Self {
             id: value.id.clone(),
             tool_name: value.tool_name.clone(),
             pattern: value.pattern.clone(),
-            effect: effect.into(),
+            effect: wire::PolicyEffect::from(value.effect).into(),
             created_at: value.created_at.clone(),
             ..Default::default()
         }
@@ -213,6 +196,15 @@ macro_rules! state_conversion {
     };
 }
 
+state_conversion!(
+    wire::PolicyEffect,
+    domain::PolicyEffect,
+    "a policy effect is required",
+    Allow,
+    Deny,
+    Confirm,
+    AskLlm,
+);
 state_conversion!(
     wire::ConnectionKind,
     domain::ConnectionKind,

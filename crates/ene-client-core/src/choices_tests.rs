@@ -213,7 +213,18 @@ fn enabled_and_all_choice_collectors_distinguish_enabled_connections() {
         ..Default::default()
     });
 
-    let enabled_models = model.model_choices();
+    let enabled_models = model
+        .all_llm_models()
+        .into_iter()
+        .filter(|(id, _, _)| {
+            model
+                .settings()
+                .unwrap()
+                .connections
+                .iter()
+                .any(|connection| connection.id == *id && connection.enabled)
+        })
+        .collect::<Vec<_>>();
     assert!(
         enabled_models
             .iter()

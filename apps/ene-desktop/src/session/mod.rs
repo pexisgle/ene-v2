@@ -322,10 +322,9 @@ impl Session {
 
         self.transport.subscription.clear();
         self.transport.published_body.clear();
-        let _record = match self.transport.register(&host, &self.devices, false).await {
-            Ok(record) => record,
-            Err(error) => return self.transport.classify(&error),
-        };
+        if let Err(error) = self.transport.register(&host, &self.devices, false).await {
+            return self.transport.classify(&error);
+        }
         self.report_devices().await;
 
         let snapshot = match host.host.get_snapshot(w::Empty::default()).await {

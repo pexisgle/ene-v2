@@ -319,27 +319,6 @@ impl Model {
         list.into_iter().collect()
     }
 
-    /// Every `(connection_id, model_id, display_label)` available across enabled LLM connections.
-    pub fn model_choices(&self) -> Vec<(String, String, String)> {
-        let Some(settings) = self.settings() else {
-            return Vec::new();
-        };
-        let mut choices = Vec::new();
-        for connection in &settings.connections {
-            if connection.kind != ConnectionKind::Llm || !connection.enabled {
-                continue;
-            }
-            for (model_id, label) in self.available_models_for_connection(&connection.id) {
-                choices.push((
-                    connection.id.clone(),
-                    model_id,
-                    format!("{} / {label}", connection.name),
-                ));
-            }
-        }
-        choices
-    }
-
     /// Gathers `(connection, value, label)` choices across every connection of one kind.
     pub fn collect_connection_choices<F: Fn(&Self, &str) -> Vec<(String, String)>>(
         &self,

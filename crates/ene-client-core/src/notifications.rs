@@ -69,96 +69,13 @@ pub(crate) fn merge_notification(
     notification: HostNotification,
     effects: &mut Effects,
 ) {
-    match notification.event {
-        Some(NotificationEvent::CompanionRemoved(id)) => {
+    let Some(event) = notification.event else {
+        return;
+    };
+    match event {
+        NotificationEvent::CompanionRemoved(id) => {
             remove_companion(model, id.as_str(), effects);
         }
-        Some(
-            event @ (NotificationEvent::InitialState(_)
-            | NotificationEvent::Companion(_)
-            | NotificationEvent::SettingsUpdated(_)
-            | NotificationEvent::ClientUpdated(_)
-            | NotificationEvent::ActivationUpdated(_)),
-        ) => merge_snapshot_event(model, event),
-        Some(
-            event @ (NotificationEvent::MessageCreated(_)
-            | NotificationEvent::MessageDelta(_)
-            | NotificationEvent::TurnEvent(_)
-            | NotificationEvent::ResyncRequired { .. }),
-        ) => merge_chat_event(model, event, notification.cursor),
-        Some(
-            event @ (NotificationEvent::ApprovalRequested(_)
-            | NotificationEvent::PolicyRulesUpdated(_)
-            | NotificationEvent::PolicyTextsUpdated(_)),
-        ) => merge_approval_event(model, event, effects),
-        Some(NotificationEvent::WorkStatusChanged {
-            work_id,
-            companion_id,
-            status,
-        }) => {
-            if let Some(snapshot) = model.snapshot.as_mut() {
-                if status == WorkStatus::Active {
-                    snapshot.active_work.insert(work_id, companion_id);
-                } else {
-                    snapshot.active_work.remove(&work_id);
-                }
-            }
-        }
-        Some(NotificationEvent::Generic(event)) => merge_generic_notice(model, &event),
-        Some(NotificationEvent::MindUpdated(companion)) => {
-            effects.mind |= model.companion_id() == Some(companion.as_str())
-                || model.companions.chat.companion_id.as_ref() == Some(&companion);
-        }
-        Some(NotificationEvent::Other) | None => {}
-    }
-}
-
-pub(crate) fn remove_companion(model: &mut Model, companion_id: &str, effects: &mut Effects) {
-    let was_shown = model.companion_id() == Some(companion_id);
-    if let Some(snapshot) = model.snapshot.as_mut() {
-        snapshot
-            .companions
-            .retain(|companion| companion.id != companion_id);
-        snapshot
-            .activations
-            .retain(|activation| activation.companion_id.as_str() != companion_id);
-        if snapshot.active_companion_id.as_deref() == Some(companion_id) {
-            snapshot.active_companion_id = snapshot
-                .activations
-                .iter()
-                .find(|activation| activation.client_id.is_some())
-                .map(|activation| activation.companion_id.to_string());
-        }
-        snapshot
-            .active_work
-            .retain(|_, owner| owner.as_str() != companion_id);
-    }
-    model.companions.minds.remove(companion_id);
-    model
-        .companions
-        .streaming
-        .retain(|(id, _), _| id != companion_id);
-    if model.companions.selected.as_deref() == Some(companion_id) {
-        model.companions.selected = None;
-    }
-    if model
-        .companions
-        .chat
-        .companion_id
-        .as_ref()
-        .map(ene_domain::CompanionId::as_str)
-        == Some(companion_id)
-    {
-        model.companions.chat = Chat::default();
-    }
-    if was_shown && model.companion_id().is_some() {
-        effects.history = true;
-        effects.mind = true;
-    }
-}
-
-fn merge_snapshot_event(model: &mut Model, event: NotificationEvent) {
-    match event {
         NotificationEvent::InitialState(mut snapshot) => {
             snapshot
                 .companions
@@ -203,7 +120,97 @@ fn merge_snapshot_event(model: &mut Model, event: NotificationEvent) {
                 upsert_activation(&mut snapshot.activations, activation);
             }
         }
-        _ => {}
+        event @ (NotificationEvent::MessageCreated(_)
+        | NotificationEvent::MessageDelta(_)
+        | NotificationEvent::TurnEvent(_)
+        | NotificationEvent::ResyncRequired { .. }) => {
+            merge_chat_event(model, event, notification.cursor)
+        }
+        NotificationEvent::ApprovalRequested(requested) => {
+            if let Some(request) = requested
+                && let Some(snapshot) = model.snapshot.as_mut()
+            {
+                upsert_approval(&mut snapshot.pending_approvals, *request);
+            } else {
+                effects.snapshot = true;
+            }
+        }
+        NotificationEvent::PolicyRulesUpdated(rules) => {
+            if let Some(snapshot) = model.snapshot.as_mut() {
+                snapshot.policy_rules = rules;
+            }
+        }
+        NotificationEvent::PolicyTextsUpdated(texts) => {
+            if let Some(snapshot) = model.snapshot.as_mut() {
+                let settings = snapshot.settings.get_or_insert_with(Default::default);
+                settings.policy_texts = texts;
+            }
+        }
+        NotificationEvent::WorkStatusChanged {
+            work_id,
+            companion_id,
+            status,
+        } => {
+            if let Some(snapshot) = model.snapshot.as_mut() {
+                if status == WorkStatus::Active {
+                    snapshot.active_work.insert(work_id, companion_id);
+                } else {
+                    snapshot.active_work.remove(&work_id);
+                }
+            }
+        }
+        NotificationEvent::Generic(event) => merge_generic_notice(model, &event),
+        NotificationEvent::MindUpdated(companion) => {
+            effects.mind |= model.companion_id() == Some(companion.as_str())
+                || model.companions.chat.companion_id.as_ref() == Some(&companion);
+        }
+        NotificationEvent::SettingsUpdated(None)
+        | NotificationEvent::ClientUpdated(None)
+        | NotificationEvent::Other => {}
+    }
+}
+
+pub(crate) fn remove_companion(model: &mut Model, companion_id: &str, effects: &mut Effects) {
+    let was_shown = model.companion_id() == Some(companion_id);
+    if let Some(snapshot) = model.snapshot.as_mut() {
+        snapshot
+            .companions
+            .retain(|companion| companion.id != companion_id);
+        snapshot
+            .activations
+            .retain(|activation| activation.companion_id.as_str() != companion_id);
+        if snapshot.active_companion_id.as_deref() == Some(companion_id) {
+            snapshot.active_companion_id = snapshot
+                .activations
+                .iter()
+                .find(|activation| activation.client_id.is_some())
+                .map(|activation| activation.companion_id.to_string());
+        }
+        snapshot
+            .active_work
+            .retain(|_, owner| owner.as_str() != companion_id);
+    }
+    model.companions.minds.remove(companion_id);
+    model
+        .companions
+        .streaming
+        .retain(|(id, _), _| id != companion_id);
+    if model.companions.selected.as_deref() == Some(companion_id) {
+        model.companions.selected = None;
+    }
+    if model
+        .companions
+        .chat
+        .companion_id
+        .as_ref()
+        .map(ene_domain::CompanionId::as_str)
+        == Some(companion_id)
+    {
+        model.companions.chat = Chat::default();
+    }
+    if was_shown && model.companion_id().is_some() {
+        effects.history = true;
+        effects.mind = true;
     }
 }
 
@@ -271,32 +278,6 @@ fn merge_turn_event(model: &mut Model, turn: TurnEvent) {
     companions.chat.turn = Some(turn);
     if let Some(message) = failed_message {
         model.notice(NoticeKind::Failed, "応答に失敗しました", message);
-    }
-}
-
-fn merge_approval_event(model: &mut Model, event: NotificationEvent, effects: &mut Effects) {
-    match event {
-        NotificationEvent::ApprovalRequested(requested) => {
-            if let Some(request) = requested
-                && let Some(snapshot) = model.snapshot.as_mut()
-            {
-                upsert_approval(&mut snapshot.pending_approvals, *request);
-            } else {
-                effects.snapshot = true;
-            }
-        }
-        NotificationEvent::PolicyRulesUpdated(rules) => {
-            if let Some(snapshot) = model.snapshot.as_mut() {
-                snapshot.policy_rules = rules;
-            }
-        }
-        NotificationEvent::PolicyTextsUpdated(texts) => {
-            if let Some(snapshot) = model.snapshot.as_mut() {
-                let settings = snapshot.settings.get_or_insert_with(Default::default);
-                settings.policy_texts = texts;
-            }
-        }
-        _ => {}
     }
 }
 
