@@ -7,9 +7,9 @@ use super::decision::{
 };
 use super::external::PreparedExternalTool;
 use super::resolve::{
-    AgentCapabilityContext, CandidateOutcome, PreToolChecked, binding_of, build_candidate_action,
-    collect_pre_tool_hooks, count_reply_calls, load_gate_rules, resolve_device_candidate,
-    start_pre_tool_hooks,
+    AgentCapabilityContext, AgentScope, CandidateOutcome, PreToolChecked, binding_of,
+    build_candidate_action, collect_pre_tool_hooks, count_reply_calls, load_gate_rules,
+    resolve_device_candidate, start_pre_tool_hooks,
 };
 use crate::host::{
     db::Store,
@@ -18,9 +18,10 @@ use crate::host::{
     resources::{HostExternalTool, WorkAgent},
 };
 use bevy_ecs::prelude::*;
+use ene_domain::DeviceScope;
 use ene_policy::{
-    Approval, ApprovalStatus, PolicyRule, PolicyText, Verdict, canonicalise, decide_action,
-    is_host_tool,
+    Approval, ApprovalStatus, CapabilitySpec, PolicyRule, PolicyText, Verdict, canonicalise,
+    decide_action, is_host_tool,
 };
 use ene_rpc as w;
 use ene_store::util::truncate;
@@ -57,7 +58,8 @@ pub(crate) enum Approved {
 pub(crate) struct CallBinding {
     pub(crate) client_id: String,
     pub(crate) capability: String,
-    pub(crate) work_run: Option<String>,
+    pub(crate) scope: DeviceScope,
+    pub(crate) spec: Option<CapabilitySpec>,
 }
 
 /// A held tool call and the marker that keeps it from running.
@@ -120,9 +122,7 @@ pub(super) struct GateContext {
 
 struct GateBinding {
     call: GateCall,
-    companion_id: String,
-    work_id: Option<String>,
-    run_id: String,
+    owner: AgentScope,
     bound_client_id: Option<String>,
     bound_capability: Option<String>,
 }
@@ -239,14 +239,12 @@ fn process_gate_call(
             return std::ops::ControlFlow::Break(());
         }
     };
-    let Some((companion_id, work_id, run_id)) =
-        binding_of(world, &ctx.store, item.agent, item.entity)
-    else {
+    let Some(owner) = binding_of(world, &ctx.store, item.agent, item.entity) else {
         return std::ops::ControlFlow::Continue(());
     };
-    tracing::Span::current().record("companion_id", companion_id.as_str());
+    tracing::Span::current().record("companion_id", owner.companion_id.as_str());
     if world.get::<PreToolChecked>(item.entity).is_none() {
-        match start_pre_tool_hooks(ctx, &item, &companion_id) {
+        match start_pre_tool_hooks(ctx, &item, &owner.companion_id) {
             Ok(Some(hook)) => {
                 world.spawn((HoldOf(item.entity), hook));
                 return std::ops::ControlFlow::Continue(());
@@ -263,12 +261,12 @@ fn process_gate_call(
         CandidateOutcome::Search(search) => {
             let action = search.candidate();
             world.entity_mut(item.entity).insert(*search);
-            Some((action, None, None))
+            Some((action, None))
         }
         CandidateOutcome::External(tool) => {
             let action = tool.candidate();
             world.entity_mut(item.entity).insert(tool);
-            Some((action, None, None))
+            Some((action, None))
         }
         CandidateOutcome::NeedsDeviceClient => {
             let agent_ctx = AgentCapabilityContext {
@@ -277,37 +275,26 @@ fn process_gate_call(
                     world.get::<rig_ecs::model::Connection>(item.agent),
                 ),
             };
-            resolve_device_candidate(
-                world,
-                &ctx.store,
-                &companion_id,
-                work_id.as_deref(),
-                &agent_ctx,
-                &item,
-            )
+            resolve_device_candidate(world, &ctx.store, &owner, &agent_ctx, &item)
+                .map(|(action, binding)| (action, Some(binding)))
         }
         CandidateOutcome::Refuse(reason) => {
             refuse(world, item.entity, &reason);
             None
         }
     };
-    let Some((action, bound_client_id, bound_capability)) = candidate else {
+    let Some((action, device)) = candidate else {
         return std::ops::ControlFlow::Continue(());
     };
     let verdict = decide_action(&rules, &action);
-    if let (Some(client_id), Some(capability)) = (bound_client_id.clone(), bound_capability.clone())
-    {
-        world.entity_mut(item.entity).insert(CallBinding {
-            client_id,
-            capability: capability.clone(),
-            work_run: work_id.as_ref().map(|_| run_id.clone()),
-        });
+    let bound_client_id = device.as_ref().map(|binding| binding.client_id.clone());
+    let bound_capability = device.as_ref().map(|binding| binding.capability.clone());
+    if let Some(binding) = device {
+        world.entity_mut(item.entity).insert(binding);
     }
     let binding = GateBinding {
         call: item,
-        companion_id,
-        work_id,
-        run_id,
+        owner,
         bound_client_id,
         bound_capability,
     };
@@ -391,9 +378,9 @@ fn issue_gate_hold(
     let target = external_destination.clone().unwrap_or(target);
     let approval = Approval {
         request_id: uuid::Uuid::new_v4().to_string(),
-        session_id: binding.companion_id.clone(),
-        run_id: binding.run_id.clone(),
-        work_id: binding.work_id.clone(),
+        session_id: binding.owner.companion_id.clone(),
+        run_id: binding.owner.run_id.clone(),
+        work_id: binding.owner.work_id.clone(),
         action_payload_hash: hash,
         tool_name: binding.call.tool_name.clone(),
         normalized_arguments: normalized,

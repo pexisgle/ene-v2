@@ -60,6 +60,9 @@ pub struct Activation {
     pub companion_id: CompanionId,
     /// The bound client, or `None` when no client is active.
     pub client_id: Option<String>,
+    /// Monotonic generation on the host, omitted from the public wire view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
 }
 
 /// Execution lifecycle status of a queued or dispatched device operation.
@@ -98,7 +101,12 @@ impl DeviceStatus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeviceScope {
     /// A companion's assignment to the target client.
-    Companion(CompanionId),
+    Companion {
+        /// Companion that owns the operation.
+        companion_id: CompanionId,
+        /// The accepted binding, absent in older records.
+        activation_generation: Option<u64>,
+    },
     /// A particular instruction run on the work session's bound client.
     Work {
         /// Companion that owns the work session.
@@ -119,10 +127,9 @@ impl DeviceScope {
     /// The addressed companion, when the host recorded it.
     pub fn companion_id(&self) -> Option<&CompanionId> {
         match self {
-            Self::Companion(id)
-            | Self::Work {
-                companion_id: id, ..
-            } => Some(id),
+            Self::Companion { companion_id, .. } | Self::Work { companion_id, .. } => {
+                Some(companion_id)
+            }
             Self::Legacy { .. } => None,
         }
     }
@@ -132,7 +139,7 @@ impl DeviceScope {
         match self {
             Self::Work { work_id, .. } => Some(work_id),
             Self::Legacy { work_id } => work_id.as_deref(),
-            Self::Companion(_) => None,
+            Self::Companion { .. } => None,
         }
     }
 

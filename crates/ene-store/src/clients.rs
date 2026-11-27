@@ -1,13 +1,16 @@
 //! Clients, their declared capabilities, the active client per companion and
 //! bound device operations.
 
+mod device_row;
+
 use crate::row::{FromRow, row_fields};
 use crate::{
-    Store, StoreError, corrupt, enum_name_column,
+    Store, StoreError,
     error::Result,
-    id_column, json_column, optional_json_column, to_json,
+    id_column, json_column, to_json,
     util::{now, validate_id},
 };
+use device_row::OPERATION_COLUMNS;
 use ene_domain::{
     Activation, Client, CompanionId, DeviceOperation, DeviceScope, DeviceStatus, Failure,
     SubscriptionId,
@@ -34,55 +37,14 @@ impl FromRow for Client {
     }
 }
 
-const OPERATION_COLUMNS: &str = "operation_id, client_id, capability, input, \
-     companion_id, work_id, run_id, status, output, failure, created_at, updated_at, \
-     dispatch_subscription";
-
 row_fields!(
     Activation,
     ACTIVATION_COLUMNS {
         companion_id => id_column("stored companion id is invalid"),
         client_id,
+        generation,
     }
 );
-
-impl FromRow for DeviceOperation {
-    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
-        let status = enum_name_column(row, "status", "unknown device status")?;
-        let has_companion = row.get::<_, Option<String>>("companion_id")?.is_some();
-        let work_id = row.get("work_id")?;
-        let run_id = row.get("run_id")?;
-        let scope = match (has_companion, work_id, run_id) {
-            (false, work_id, None) => DeviceScope::Legacy { work_id },
-            (true, None, None) => {
-                DeviceScope::Companion(id_column(row, "companion_id", "invalid device owner")?)
-            }
-            (true, Some(work_id), Some(run_id)) => DeviceScope::Work {
-                companion_id: id_column(row, "companion_id", "invalid device owner")?,
-                work_id,
-                run_id,
-            },
-            _ => {
-                return Err(corrupt(
-                    row.as_ref().column_index("run_id")?,
-                    "invalid device scope",
-                ));
-            }
-        };
-        Ok(DeviceOperation {
-            id: row.get("operation_id")?,
-            client_id: row.get("client_id")?,
-            capability: row.get("capability")?,
-            input: json_column(row, "input", "stored operation JSON is corrupt")?,
-            scope,
-            status,
-            output: optional_json_column(row, "output", "stored operation JSON is corrupt")?,
-            failure: optional_json_column(row, "failure", "stored operation JSON is corrupt")?,
-            created_at: row.get("created_at")?,
-            updated_at: row.get("updated_at")?,
-        })
-    }
-}
 
 /// Everything a client declares on registration, with the revision it saw.
 #[derive(Clone, Copy, Debug)]
@@ -251,7 +213,7 @@ impl<'a> ClientRepo<'a> {
     }
 
     /// Moves or releases the active client. The latest write wins: a companion
-    /// has exactly one active client row, with no generation to compare.
+    /// gets a new generation only when the selected client actually changes.
     pub fn activate(&self, companion: &str, client: Option<&str>) -> Result<Activation> {
         self.0
             .fetch(
@@ -259,6 +221,7 @@ impl<'a> ClientRepo<'a> {
                     "INSERT INTO activations (companion_id, client_id, updated_at) \
                      VALUES (?1, ?2, ?3) \
                      ON CONFLICT(companion_id) DO UPDATE SET client_id = excluded.client_id, \
+                     generation = generation + (activations.client_id IS NOT excluded.client_id), \
                      updated_at = excluded.updated_at RETURNING {ACTIVATION_COLUMNS}"
                 ),
                 params![companion, client, now()],
@@ -287,13 +250,24 @@ impl<'a> ClientRepo<'a> {
         let companion = operation.scope.companion_id().ok_or_else(|| {
             StoreError::Invalid("a new device operation requires a recorded owner".into())
         })?;
+        let activation_generation = match &operation.scope {
+            DeviceScope::Companion {
+                activation_generation,
+                ..
+            } => Some(activation_generation.ok_or_else(|| {
+                StoreError::Invalid(
+                    "a new companion operation requires its activation generation".into(),
+                )
+            })?),
+            _ => None,
+        };
         let stamp = now();
         self.0
             .conn()
             .prepare_cached(
                 "INSERT INTO device_operations (operation_id, client_id, \
-                 capability, input, companion_id, work_id, run_id, status, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                 capability, input, companion_id, work_id, run_id, status, created_at, updated_at, activation_generation) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)",
             )?
             .execute(params![
                 operation.id,
@@ -305,6 +279,7 @@ impl<'a> ClientRepo<'a> {
                 operation.scope.run_id(),
                 operation.status.as_str(),
                 stamp,
+                activation_generation,
             ])?;
         Ok(())
     }
@@ -473,13 +448,14 @@ impl<'a> ClientRepo<'a> {
         self.0
             .conn()
             .prepare_cached(
-                "INSERT OR REPLACE INTO activations (companion_id, client_id, updated_at) \
-                 VALUES (?1, ?2, ?3)",
+                "INSERT OR REPLACE INTO activations (companion_id, client_id, updated_at, generation) \
+                 VALUES (?1, ?2, ?3, ?4)",
             )?
             .execute(params![
                 activation.companion_id.as_str(),
                 activation.client_id,
                 now(),
+                activation.generation,
             ])?;
         Ok(())
     }

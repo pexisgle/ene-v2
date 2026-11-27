@@ -28,7 +28,7 @@ use rusqlite_migration::{HookResult, M, Migrations};
 pub const BASELINE_VERSION: i64 = 6;
 
 /// Latest database schema version managed by [`ladder_steps`].
-pub const VERSION: i64 = 23;
+pub const VERSION: i64 = 24;
 
 /// Every version this host applies above the baseline, in order. The position
 /// in this table is the version, so adding a row is the only way to add a
@@ -155,6 +155,11 @@ const STEPS_ABOVE_BASELINE: &[(&str, &str)] = &[
         "DROP INDEX idx_device_pending_run;
          CREATE INDEX idx_device_active_run ON device_operations(run_id)
           WHERE status IN ('pending','dispatched');",
+    ),
+    (
+        "0024_device_activation_generation",
+        "ALTER TABLE activations ADD COLUMN generation INTEGER NOT NULL DEFAULT 1;
+         ALTER TABLE device_operations ADD COLUMN activation_generation INTEGER;",
     ),
 ];
 

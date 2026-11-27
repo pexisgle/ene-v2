@@ -596,62 +596,51 @@ fn the_head_cannot_resolve_another_companions_approval() {
 }
 
 #[test]
-fn a_moved_client_keeps_a_held_approval_and_serves_the_new_active_client() {
-    let mut harness = Harness::new([
-        vec![
-            MockStreamEvent::tool_call(
+fn a_held_approval_cannot_follow_a_companion_to_another_binding() {
+    for returns_to_original in [false, true] {
+        let mut harness = Harness::new([
+            tool_turn(
                 "call-1",
                 "device_request",
-                serde_json::json!({"capability": "device.files", "input": {"path": "/tmp/a"}}),
+                serde_json::json!({"capability": "device.files", "input": {"path": "fixture.txt"}}),
             ),
-            MockStreamEvent::final_response_with_default_usage(),
-        ],
-        text_turn("書いたよ"),
-    ]);
-    for id in ["c1", "c2"] {
-        register(harness.app.world_mut(), id, files_capability());
+            text_turn("操作の結果を確認しました"),
+        ]);
+        for id in ["c1", "c2"] {
+            register(harness.app.world_mut(), id, files_capability());
+        }
+        activate(harness.app.world_mut(), &harness.companion, "c1");
+        harness.accept("key-1", "ファイルに書いて").unwrap();
+        let request = pending_approval(&mut harness);
+        activate(harness.app.world_mut(), &harness.companion, "c2");
+        if returns_to_original {
+            activate(harness.app.world_mut(), &harness.companion, "c1");
+        }
+        let store = harness.store();
+        let approval = || {
+            store
+                .approval_repo()
+                .approval(&request.request_id)
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(approval().status, permission::ApprovalStatus::Pending);
+        let result = permission::submit(
+            harness.app.world_mut(),
+            &request.request_id,
+            permission::ApprovalDecision::Approve,
+        );
+        assert!(matches!(result, Err(crate::host::HostError::Conflict(_))));
+        assert_eq!(approval().status, permission::ApprovalStatus::Expired);
+        assert_eq!(approval().client_id.as_deref(), Some("c1"));
+        harness.run_until_text("操作の結果を確認しました");
+        for client in ["c1", "c2"] {
+            assert_eq!(
+                store.client_repo().outstanding_operations(client).unwrap(),
+                [] as [ene_domain::DeviceOperation; 0]
+            );
+        }
     }
-    activate(harness.app.world_mut(), &harness.companion, "c1");
-    harness.accept("key-1", "ファイルに書いて").unwrap();
-    let request = pending_approval(&mut harness);
-    // The head moves while the card is pending: the hold survives the move.
-    activate(harness.app.world_mut(), &harness.companion, "c2");
-    assert_eq!(
-        harness
-            .store()
-            .approval_repo()
-            .approval(&request.request_id)
-            .unwrap()
-            .unwrap()
-            .status,
-        permission::ApprovalStatus::Pending,
-        "a move does not expire the card"
-    );
-    permission::submit(
-        harness.app.world_mut(),
-        &request.request_id,
-        permission::ApprovalDecision::Approve,
-    )
-    .unwrap();
-    // The approved operation runs on the head's active client, and the client
-    // the call was accepted for receives nothing.
-    harness.run_until(|world| {
-        !world
-            .resource::<Store>()
-            .client_repo()
-            .outstanding_operations("c2")
-            .unwrap()
-            .is_empty()
-    });
-    assert_eq!(
-        harness
-            .store()
-            .client_repo()
-            .outstanding_operations("c1")
-            .unwrap(),
-        [] as [ene_domain::DeviceOperation; 0]
-    );
-    harness.run_until_text("書いたよ");
 }
 #[test]
 fn moving_the_active_client_moves_the_published_tools() {

@@ -5,6 +5,7 @@ use super::{
     gate::{Approvals, Approved, CallBinding},
 };
 use crate::host::{
+    client::device_dispatch::scope_is_live,
     db::Store,
     error::{HostError, Result},
     notify::Notifier,
@@ -49,32 +50,6 @@ fn release(world: &mut World, request: &str) {
     }
 }
 
-/// The client an approval is bound to.
-fn bound_client(store: &Store, approval: &Approval) -> Result<Option<String>> {
-    let work = store.work_repo();
-    let run;
-    let work_id = match approval.work_id.as_deref().filter(|id| !id.is_empty()) {
-        Some(id) => id,
-        None if approval.run_id.is_empty() => {
-            return Ok(store
-                .client_repo()
-                .activation(&approval.session_id)?
-                .and_then(|activation| activation.client_id));
-        }
-        None => {
-            let Some(saved) = work.run(&approval.run_id)? else {
-                return Ok(None);
-            };
-            run = saved;
-            &run.work_id
-        }
-    };
-    Ok(work
-        .work_session(work_id)?
-        .filter(|session| session.companion_id.as_str() == approval.session_id)
-        .and_then(|session| session.client_id))
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum ApprovalRequest<'a> {
     Operator(&'a str),
@@ -111,8 +86,8 @@ pub(crate) fn submit(
 }
 
 enum BoundClientCheck {
-    Allowed(Option<String>),
-    Denied(String),
+    Allowed,
+    Rejected(ApprovalStatus, String),
     RequiresUser,
 }
 
@@ -125,30 +100,39 @@ fn validate_bound_approval_client(
     automated: bool,
 ) -> Result<BoundClientCheck> {
     let Some(binding) = binding else {
-        return Ok(BoundClientCheck::Allowed(None));
+        return Ok(BoundClientCheck::Allowed);
     };
-    let target_id = bound_client(store, approval)?.unwrap_or_else(|| binding.client_id.clone());
-    let client = store
-        .client_repo()
-        .client(&target_id)?
-        .ok_or_else(|| HostError::Conflict("the bound client is not registered".into()))?;
+    let expired =
+        |message: &str| BoundClientCheck::Rejected(ApprovalStatus::Expired, message.into());
+    if approval.client_id.as_deref() != Some(binding.client_id.as_str())
+        || !scope_is_live(store, &binding.scope, &binding.client_id)?
+    {
+        return Ok(expired("the original device binding is no longer active"));
+    }
+    let Some(client) = store.client_repo().client(&binding.client_id)? else {
+        return Ok(expired("the bound client is not registered"));
+    };
+    let spec = client.spec(&binding.capability);
+    if spec != binding.spec.as_ref() {
+        return Ok(expired("the bound capability declaration changed"));
+    }
     if !client.is_granted(&binding.capability) {
         return Err(HostError::Conflict(format!(
-            "capability `{}` is no longer granted on `{target_id}`",
-            binding.capability
+            "capability {} is no longer granted on {}",
+            binding.capability, binding.client_id
         )));
     }
     let verdict = decide_capability(
         &store.policy_repo().policy_rules()?,
-        client.spec(&binding.capability),
+        spec,
         &binding.capability,
         tool_name,
         raw_arguments,
     );
     Ok(match verdict {
-        Verdict::Deny { reason } => BoundClientCheck::Denied(reason),
+        Verdict::Deny { reason } => BoundClientCheck::Rejected(ApprovalStatus::Denied, reason),
         Verdict::HumanRequired { .. } if automated => BoundClientCheck::RequiresUser,
-        _ => BoundClientCheck::Allowed(Some(target_id)),
+        _ => BoundClientCheck::Allowed,
     })
 }
 
@@ -269,23 +253,25 @@ fn approve_call(
         }
     };
     let binding = world.get::<CallBinding>(call);
-    let rebound =
-        match validate_bound_approval_client(store, approval, binding, name, arguments, automated)?
-        {
-            BoundClientCheck::Allowed(client) => client,
-            BoundClientCheck::Denied(reason) => {
-                let denied = repo.resolve_approval(request_id, ApprovalStatus::Denied)?;
-                release(world, request_id);
-                refuse(world, call, &reason);
-                notify_resolved(&mut world.resource_mut::<Notifier>(), &denied);
-                return Err(HostError::Permission(reason));
-            }
-            BoundClientCheck::RequiresUser => {
-                return Err(HostError::Permission(
-                    "this operation now requires user confirmation".into(),
-                ));
-            }
-        };
+    match validate_bound_approval_client(store, approval, binding, name, arguments, automated)? {
+        BoundClientCheck::Allowed => {}
+        BoundClientCheck::Rejected(status, reason) => {
+            let resolved = repo.resolve_approval(request_id, status)?;
+            release(world, request_id);
+            refuse(world, call, &reason);
+            notify_resolved(&mut world.resource_mut::<Notifier>(), &resolved);
+            return Err(if status == ApprovalStatus::Expired {
+                HostError::Conflict(reason)
+            } else {
+                HostError::Permission(reason)
+            });
+        }
+        BoundClientCheck::RequiresUser => {
+            return Err(HostError::Permission(
+                "this operation now requires user confirmation".into(),
+            ));
+        }
+    }
     let grant = if automated {
         let policy = store.policy_repo();
         Approved::Decision {
@@ -295,17 +281,8 @@ fn approve_call(
     } else {
         Approved::Human
     };
-    let resolved = repo.resolve_approval_with_client(
-        request_id,
-        ApprovalStatus::Approved,
-        rebound.as_deref(),
-    )?;
+    let resolved = repo.resolve_approval(request_id, ApprovalStatus::Approved)?;
     release(world, request_id);
-    if let Some(target) = rebound
-        && let Some(mut binding) = world.get_mut::<CallBinding>(call)
-    {
-        binding.client_id = target;
-    }
     world.entity_mut(call).insert(grant);
     Ok((resolved, scoped_rule))
 }

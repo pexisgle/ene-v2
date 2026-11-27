@@ -2,7 +2,7 @@
 //! against, the pre-tool hooks it must pass, and the `CandidateAction` it names.
 use super::approval::refuse;
 use super::external::{PreparedExternalTool, prepare_external};
-use super::gate::{GateCall, GateContext};
+use super::gate::{CallBinding, GateCall, GateContext};
 use crate::host::{
     background::{self, Job},
     client::Client,
@@ -12,6 +12,7 @@ use crate::host::{
     resources::{CompanionAgent, WorkAgent, WorkTurn},
 };
 use bevy_ecs::prelude::*;
+use ene_domain::{CompanionId, DeviceScope};
 use ene_policy::{CandidateAction, CapabilitySpec, PolicyRule};
 use ene_rpc as w;
 use rig_core::effect::EffectId;
@@ -23,27 +24,71 @@ use serde_json::Value;
 use std::task::Poll;
 
 /// A work call belongs to its admitted turn, even when the agent is reused.
+#[derive(Default)]
+pub(super) struct AgentScope {
+    pub(super) companion_id: String,
+    pub(super) work_id: Option<String>,
+    pub(super) run_id: String,
+}
+
+impl AgentScope {
+    fn device_target(&self, store: &Store) -> Result<Option<(String, DeviceScope)>> {
+        let companion_id = CompanionId::parse(&self.companion_id)?;
+        let repo = store.client_repo();
+        if let Some(work_id) = &self.work_id {
+            return Ok(repo
+                .target(companion_id.as_str(), Some(work_id))?
+                .map(|client| {
+                    (
+                        client,
+                        DeviceScope::Work {
+                            companion_id,
+                            work_id: work_id.clone(),
+                            run_id: self.run_id.clone(),
+                        },
+                    )
+                }));
+        }
+        Ok(repo
+            .activation(companion_id.as_str())?
+            .and_then(|activation| {
+                activation.client_id.map(|client| {
+                    (
+                        client,
+                        DeviceScope::Companion {
+                            companion_id,
+                            activation_generation: activation.generation,
+                        },
+                    )
+                })
+            }))
+    }
+}
+
 pub(super) fn binding_of(
     world: &mut World,
     store: &Store,
     agent: Entity,
     call: Entity,
-) -> Option<(String, Option<String>, String)> {
+) -> Option<AgentScope> {
     if let Some(companion) = world.get::<CompanionAgent>(agent) {
-        return Some((companion.companion_id.clone(), None, String::new()));
+        return Some(AgentScope {
+            companion_id: companion.companion_id.clone(),
+            ..Default::default()
+        });
     }
     let Some(work) = world.get::<WorkAgent>(agent) else {
-        return Some((String::new(), None, String::new()));
+        return Some(AgentScope::default());
     };
     let run = world
         .get::<CallOf>(call)
         .and_then(|of| world.get::<WorkTurn>(of.0));
     match store.work_repo().active_run(&work.work_id) {
-        Ok(Some(active)) if run.is_some_and(|bound| bound.0 == active.run_id) => Some((
-            work.companion_id.clone(),
-            Some(work.work_id.clone()),
-            active.run_id,
-        )),
+        Ok(Some(active)) if run.is_some_and(|bound| bound.0 == active.run_id) => Some(AgentScope {
+            companion_id: work.companion_id.clone(),
+            work_id: Some(work.work_id.clone()),
+            run_id: active.run_id,
+        }),
         Err(error) if error.is_storage() => {
             crate::host::fail(world, &error.to_string());
             None
@@ -136,8 +181,6 @@ pub(super) fn collect_pre_tool_hooks(
     }
 }
 
-type CandidateResolution = (CandidateAction, Option<String>, Option<String>);
-
 pub(super) enum CandidateOutcome {
     Search(Box<crate::host::web_search::PreparedSearch>),
     External(PreparedExternalTool),
@@ -177,13 +220,12 @@ pub(super) fn build_candidate_action(
 pub(super) fn resolve_device_candidate(
     world: &mut World,
     store: &Store,
-    companion_id: &str,
-    work_id: Option<&str>,
+    owner: &AgentScope,
     agent_ctx: &AgentCapabilityContext,
     item: &GateCall,
-) -> Option<CandidateResolution> {
-    let client_id = match store.client_repo().target(companion_id, work_id) {
-        Ok(Some(client_id)) => client_id,
+) -> Option<(CandidateAction, CallBinding)> {
+    let (client_id, scope) = match owner.device_target(store) {
+        Ok(Some(target)) => target,
         Ok(None) => {
             refuse(
                 world,
@@ -273,13 +315,17 @@ pub(super) fn resolve_device_candidate(
     Some((
         CandidateAction::DeviceCapability {
             capability: capability.clone(),
-            spec: spec.map(Box::new),
+            spec: spec.clone().map(Box::new),
             tool_name: item.tool_name.clone(),
             input,
             raw_arguments: item.arguments.clone(),
         },
-        Some(client_id),
-        Some(capability),
+        CallBinding {
+            client_id,
+            capability,
+            scope,
+            spec,
+        },
     ))
 }
 

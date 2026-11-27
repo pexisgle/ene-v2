@@ -64,17 +64,18 @@ pub(crate) fn complete(
             "the result belongs to another device stream".into(),
         ));
     }
-    let delivery = if current.is_some() && scope_is_live(&store, &operation)? {
-        prepare_computer_use(
-            world.get_resource::<ComputerUse>(),
-            &store,
-            Some(hub),
-            &operation,
-            result,
-        )
-    } else {
-        ComputerUseCheck::MarkUncertain
-    };
+    let delivery =
+        if current.is_some() && scope_is_live(&store, &operation.scope, &operation.client_id)? {
+            prepare_computer_use(
+                world.get_resource::<ComputerUse>(),
+                &store,
+                Some(hub),
+                &operation,
+                result,
+            )
+        } else {
+            ComputerUseCheck::MarkUncertain
+        };
     let computer = match delivery {
         ComputerUseCheck::Skip => None,
         ComputerUseCheck::Ready(pending) => Some(pending),

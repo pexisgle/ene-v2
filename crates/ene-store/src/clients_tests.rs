@@ -10,7 +10,10 @@ fn operations_are_idempotent_and_bound_to_one_client() {
         client_id: "c1".into(),
         capability: "body.motion".into(),
         input: serde_json::json!({"motion": "nod"}),
-        scope: DeviceScope::Companion(ene_domain::CompanionId::parse("ene").unwrap()),
+        scope: DeviceScope::Companion {
+            companion_id: CompanionId::parse("ene").unwrap(),
+            activation_generation: Some(1),
+        },
         status: DeviceStatus::Pending,
         output: None,
         failure: None,

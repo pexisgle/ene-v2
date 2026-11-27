@@ -67,6 +67,7 @@ fn removing_a_companion_updates_the_live_view_and_selects_the_remaining_one() {
             .map(|id| Activation {
                 companion_id: CompanionId::parse(id).unwrap(),
                 client_id: Some("desk".into()),
+                generation: None,
             })
             .collect(),
         clients: vec![ClientInfo {
@@ -513,14 +514,17 @@ fn f01_r03_resident_companions_queries_multiple_activations_on_one_client() {
         Activation {
             companion_id: ene_domain::CompanionId::parse("ene").unwrap(),
             client_id: Some("desk-a".into()),
+            generation: None,
         },
         Activation {
             companion_id: ene_domain::CompanionId::parse("miku").unwrap(),
             client_id: Some("desk-a".into()),
+            generation: None,
         },
         Activation {
             companion_id: ene_domain::CompanionId::parse("kai").unwrap(),
             client_id: Some("desk-b".into()),
+            generation: None,
         },
     ];
     model.snapshot = Some(snap);

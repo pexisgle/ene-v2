@@ -364,7 +364,10 @@ mod tests {
             client_id: client.into(),
             capability: "device.files".into(),
             input: serde_json::json!({}),
-            scope: DeviceScope::Companion(CompanionId::parse("ene")?),
+            scope: DeviceScope::Companion {
+                companion_id: CompanionId::parse("ene")?,
+                activation_generation: Some(1),
+            },
             status,
             output: None,
             failure: None,

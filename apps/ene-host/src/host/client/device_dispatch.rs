@@ -14,11 +14,11 @@ use crate::host::{
     error::HostError,
     notify::Notifier,
     permission::{self, CallBinding},
-    resources::{CompanionAgent, DeviceHub, WorkAgent},
+    resources::{DeviceHub, WorkAgent},
     wire,
 };
 use bevy_ecs::prelude::*;
-use ene_domain::{Client, CompanionId, DeviceScope, Failure};
+use ene_domain::{Client, DeviceScope, Failure};
 use ene_rpc as w;
 use ene_store::util::now;
 use rig_ecs::model::Connection;
@@ -34,8 +34,7 @@ pub(crate) enum Invocation<'a> {
 /// tool answer. The answer reports the status dispatch reached: `dispatched`
 /// when the client stream accepted the operation, `pending` when no live
 /// stream has it yet. It never reports completion.
-/// The operation goes to the client the gate bound the call to; a client that
-/// moved since then does not void it.
+/// The operation belongs to the exact device and scope accepted by the gate.
 pub(crate) fn accept(
     world: &mut World,
     call: Entity,
@@ -47,43 +46,16 @@ pub(crate) fn accept(
     let binding = world
         .get::<CallBinding>(call)
         .ok_or_else(|| HostError::Internal(("a device call without a binding").into()))?;
-    let scope = agent_scope(world, agent)?;
-    validate_scope(binding, &scope)?;
+    if !scope_is_live(store, &binding.scope, &binding.client_id)? {
+        return Err(HostError::Conflict(
+            "the operation's device binding changed".into(),
+        ));
+    }
     let client = store
         .client_repo()
         .client(&binding.client_id)?
         .ok_or_else(|| HostError::Conflict(("the bound client is no longer registered").into()))?;
-    if !client
-        .capabilities
-        .iter()
-        .any(|name| name == &binding.capability)
-    {
-        return Err(HostError::Conflict(
-            ("the capability is no longer declared").into(),
-        ));
-    }
-    if !client.is_granted(&binding.capability) {
-        return Err(HostError::Conflict(
-            ("the capability is no longer granted").into(),
-        ));
-    }
-    let spec = match invocation {
-        Invocation::Request(capability) if capability == binding.capability => {
-            client.spec(capability)
-        }
-        Invocation::Alias(name) => Some(
-            tool_spec_for(&client, name)
-                .filter(|spec| spec.name == binding.capability)
-                .ok_or_else(|| {
-                    HostError::Conflict("the bound capability no longer names this tool".into())
-                })?,
-        ),
-        _ => {
-            return Err(HostError::Conflict(
-                "the capability no longer matches the accepted operation".into(),
-            ));
-        }
-    };
+    let spec = admitted_spec(&client, binding, invocation)?;
     if let Some(spec) = spec {
         super::validate_input(spec, &input)?;
     }
@@ -102,7 +74,8 @@ pub(crate) fn accept(
         let work = world.get::<WorkAgent>(agent).ok_or_else(|| {
             HostError::Permission(("Computer Use requires a work session").into())
         })?;
-        let run = scope
+        let run = binding
+            .scope
             .run_id()
             .ok_or_else(|| HostError::Internal(("Computer Use has no bound run").into()))?;
         if spec.is_none() || !computer::model_supported(world.get::<Connection>(agent)) {
@@ -132,7 +105,7 @@ pub(crate) fn accept(
         client_id: binding.client_id.clone(),
         capability: binding.capability.clone(),
         input,
-        scope,
+        scope: binding.scope.clone(),
         status: DeviceStatus::Pending,
         output: None,
         failure: None,
@@ -165,6 +138,50 @@ pub(crate) fn accept(
     Ok((operation_id, answer))
 }
 
+fn admitted_spec<'a>(
+    client: &'a Client,
+    binding: &CallBinding,
+    invocation: Invocation<'_>,
+) -> Result<Option<&'a ene_policy::CapabilitySpec>> {
+    if !client
+        .capabilities
+        .iter()
+        .any(|name| name == &binding.capability)
+    {
+        return Err(HostError::Conflict(
+            ("the capability is no longer declared").into(),
+        ));
+    }
+    if !client.is_granted(&binding.capability) {
+        return Err(HostError::Conflict(
+            ("the capability is no longer granted").into(),
+        ));
+    }
+    let spec = match invocation {
+        Invocation::Request(capability) if capability == binding.capability => {
+            client.spec(capability)
+        }
+        Invocation::Alias(name) => Some(
+            tool_spec_for(client, name)
+                .filter(|spec| spec.name == binding.capability)
+                .ok_or_else(|| {
+                    HostError::Conflict("the bound capability no longer names this tool".into())
+                })?,
+        ),
+        _ => {
+            return Err(HostError::Conflict(
+                "the capability no longer matches the accepted operation".into(),
+            ));
+        }
+    };
+    if spec != binding.spec.as_ref() {
+        return Err(HostError::Conflict(
+            "the capability declaration changed".into(),
+        ));
+    }
+    Ok(spec)
+}
+
 /// Dispatches an authorized host-initiated capability operation (such as an
 /// `Extension::Character` expression/motion action) directly to `client_id`
 /// when the client has declared and been granted `capability`.
@@ -185,13 +202,21 @@ pub(crate) fn dispatch_direct(
             "capability `{capability}` is not granted on `{client_id}`"
         )));
     }
+    let activation = store
+        .client_repo()
+        .activation(companion_id)?
+        .filter(|activation| activation.client_id.as_deref() == Some(client_id))
+        .ok_or_else(|| HostError::Conflict("the operation's device binding changed".into()))?;
     let operation_id = uuid::Uuid::new_v4().to_string();
     let operation = DeviceOperation {
         id: operation_id.clone(),
         client_id: client_id.to_owned(),
         capability: capability.to_owned(),
         input,
-        scope: DeviceScope::Companion(CompanionId::parse(companion_id)?),
+        scope: DeviceScope::Companion {
+            companion_id: activation.companion_id,
+            activation_generation: activation.generation,
+        },
         status: DeviceStatus::Pending,
         output: None,
         failure: None,
@@ -201,40 +226,6 @@ pub(crate) fn dispatch_direct(
     store.client_repo().insert_operation(&operation)?;
     let _reply = dispatch(ctx, &operation, None)?;
     Ok(operation_id)
-}
-
-fn agent_scope(world: &World, agent: Entity) -> Result<DeviceScope> {
-    if let Some(companion) = world.get::<CompanionAgent>(agent) {
-        return Ok(DeviceScope::Companion(CompanionId::parse(
-            &companion.companion_id,
-        )?));
-    }
-    let work = world
-        .get::<WorkAgent>(agent)
-        .ok_or_else(|| HostError::Internal("a device call without an agent".into()))?;
-    Ok(DeviceScope::Work {
-        companion_id: CompanionId::parse(&work.companion_id)?,
-        work_id: work.work_id.clone(),
-        run_id: work.run_id.clone(),
-    })
-}
-
-fn validate_scope(binding: &CallBinding, scope: &DeviceScope) -> Result<()> {
-    if scope.run_id() != binding.work_run.as_deref() {
-        return Err(HostError::Conflict(
-            "the accepted operation belongs to a different work run".into(),
-        ));
-    }
-    if binding
-        .capability
-        .starts_with(super::WORKSPACE_CAPABILITY_PREFIX)
-        && scope.run_id().is_none()
-    {
-        return Err(HostError::Permission(
-            "workspace capabilities require a work session".into(),
-        ));
-    }
-    Ok(())
 }
 
 pub(crate) struct DeviceDispatchContext<'a> {
@@ -283,13 +274,20 @@ fn dispatch(
     Ok(DeviceStatus::Dispatched)
 }
 
-pub(super) fn scope_is_live(store: &Store, operation: &DeviceOperation) -> Result<bool> {
-    let target = Some(operation.client_id.as_str());
-    Ok(match &operation.scope {
-        DeviceScope::Companion(id) => store
+pub(crate) fn scope_is_live(store: &Store, scope: &DeviceScope, client: &str) -> Result<bool> {
+    let target = Some(client);
+    Ok(match scope {
+        DeviceScope::Companion {
+            companion_id,
+            activation_generation,
+        } => store
             .client_repo()
-            .activation(id.as_str())?
-            .is_some_and(|activation| activation.client_id.as_deref() == target),
+            .activation(companion_id.as_str())?
+            .is_some_and(|activation| {
+                activation.client_id.as_deref() == target
+                    && activation_generation.is_some()
+                    && activation.generation == *activation_generation
+            }),
         DeviceScope::Work {
             companion_id,
             work_id,
@@ -356,7 +354,7 @@ pub(crate) fn resend(
     for operation in pending {
         if operation.capability == w::COMPUTER_USE {
             reject(&operation.id, None);
-        } else if scope_is_live(ctx.store, &operation)?
+        } else if scope_is_live(ctx.store, &operation.scope, &operation.client_id)?
             && capability_still_authorized(&rules, declaration.as_ref(), &operation)
         {
             let _status = dispatch(ctx, &operation, None)?;
@@ -389,7 +387,10 @@ mod tests {
             client_id: "desk".into(),
             capability: "body.motion".into(),
             input: json!({"motion": "nod"}),
-            scope: DeviceScope::Companion(CompanionId::parse("ene").unwrap()),
+            scope: DeviceScope::Companion {
+                companion_id: ene_domain::CompanionId::parse("ene").unwrap(),
+                activation_generation: Some(1),
+            },
             status: DeviceStatus::Pending,
             output: None,
             failure: None,

@@ -295,6 +295,7 @@ impl TryFrom<wire::Activation> for domain::Activation {
         Ok(Self {
             companion_id: domain::CompanionId::parse(value.companion_id)?,
             client_id: value.client_id,
+            generation: None,
         })
     }
 }

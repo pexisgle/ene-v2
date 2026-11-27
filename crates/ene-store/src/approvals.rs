@@ -90,24 +90,14 @@ impl<'a> ApprovalRepo<'a> {
     /// Resolves a pending approval. Resolving it twice is a conflict, never a
     /// second execution.
     pub fn resolve_approval(&self, request_id: &str, status: ApprovalStatus) -> Result<Approval> {
-        self.resolve_approval_with_client(request_id, status, None)
-    }
-
-    pub fn resolve_approval_with_client(
-        &self,
-        request_id: &str,
-        status: ApprovalStatus,
-        client_id: Option<&str>,
-    ) -> Result<Approval> {
         let resolved = now();
         self.0
             .fetch(
                 &format!(
-                    "UPDATE approval_requests SET status = ?2, resolved_at = ?3, \
-                     client_id = COALESCE(?4, client_id) \
+                    "UPDATE approval_requests SET status = ?2, resolved_at = ?3 \
                      WHERE request_id = ?1 AND status IN ('pending','evaluating') RETURNING {COLUMNS}"
                 ),
-                params![request_id, status.as_str(), resolved, client_id],
+                params![request_id, status.as_str(), resolved],
                 Approval::from_row,
             )?
             .ok_or_else(|| StoreError::Conflict("approval is missing or no longer pending".into()))
