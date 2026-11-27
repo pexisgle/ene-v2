@@ -81,7 +81,9 @@ impl ConnectionResource {
             Self::ChatModel => first_draft(),
             Self::Speaker => first_draft().or_else(|| configured_voicevox_speaker(endpoint)),
             Self::Voice => first_draft().or_else(first_choice),
-            Self::TranscriptionModel => configured_stt_model(endpoint).or_else(first_choice),
+            Self::TranscriptionModel => first_draft()
+                .or_else(|| configured_stt_model(endpoint))
+                .or_else(first_choice),
             Self::EmbeddingModel => nonempty(draft).map(str::to_owned).or_else(first_choice),
         }
     }
@@ -283,16 +285,6 @@ pub fn build_connection_model_input(conn: &Connection, model_id: &str) -> Connec
     input
 }
 
-/// Builds a `ConnectionInput` updating the embedding model ID and default dimensions.
-pub fn build_embedding_model_input(conn: &Connection, model_id: &str) -> ConnectionInput {
-    let mut input = conn.to_input();
-    if let Some(ConnectionConfig::Embedding(emb)) = input.config.as_mut() {
-        emb.model_id = model_id.to_owned();
-        emb.dimensions = ene_catalog::default_embedding_dimensions(model_id);
-    }
-    input
-}
-
 /// Builds a `ConnectionInput` toggling `enabled` while keeping existing configuration intact.
 pub fn build_connection_enabled_input(conn: &Connection, enabled: bool) -> ConnectionInput {
     let mut input = conn.to_input();
@@ -337,9 +329,15 @@ mod tests {
         assert_eq!(resource, ConnectionResource::TranscriptionModel);
         assert_eq!(
             resource
-                .selected("ja, en", stt.endpoint(), Some("fetched-model"))
+                .selected("", stt.endpoint(), Some("fetched-model"))
                 .as_deref(),
             Some("stored-model")
+        );
+        assert_eq!(
+            resource
+                .selected("draft-model", stt.endpoint(), None)
+                .as_deref(),
+            Some("draft-model")
         );
     }
 
@@ -611,7 +609,17 @@ mod tests {
             })),
             ..Default::default()
         };
-        let input = build_embedding_model_input(&conn, "multilingual-e5-large");
+        let input = apply_connection_edits(
+            &conn,
+            &ConnectionEditSpec {
+                name: "Embedding",
+                endpoint_url: "https://api.openai.com/v1",
+                process: None,
+                list_raw: "multilingual-e5-large",
+                dimensions_raw: None,
+                options_json: None,
+            },
+        );
         let Some(ConnectionConfig::Embedding(emb)) = input.config.as_ref() else {
             panic!("expected Embedding config");
         };

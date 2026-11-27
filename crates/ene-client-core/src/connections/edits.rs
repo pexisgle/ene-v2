@@ -1,5 +1,6 @@
 //! Domain connection form editing and custom connection builder helpers.
 
+use super::configured_stt_model;
 use super::options::{Speaker, SpeechOptions};
 use crate::domain::{
     AcpConnection, Connection, ConnectionConfig, ConnectionEndpoint, ConnectionInput,
@@ -17,7 +18,7 @@ pub struct ConnectionEditSpec<'a> {
     pub endpoint_url: &'a str,
     /// Command and arguments, for a process-backed connection.
     pub process: Option<(&'a str, &'a [String])>,
-    /// Comma-separated model or voice ids as typed.
+    /// The selected resource, or the comma-separated list for a list field.
     pub list_raw: &'a str,
     /// Embedding width as typed, for an embedding connection.
     pub dimensions_raw: Option<&'a str>,
@@ -44,7 +45,9 @@ pub fn extract_kind_list_init(cfg: Option<&ConnectionConfig>) -> String {
     match cfg {
         Some(ConnectionConfig::Llm(c)) => c.model_ids.join(", "),
         Some(ConnectionConfig::Tts(c)) => c.voice_ids.join(", "),
-        Some(ConnectionConfig::Stt(c)) => c.language_hints.join(", "),
+        Some(ConnectionConfig::Stt(c)) => {
+            configured_stt_model(c.endpoint.as_ref()).unwrap_or_default()
+        }
         Some(ConnectionConfig::Embedding(c)) => c.model_id.clone(),
         Some(ConnectionConfig::Mcp(c)) => c.allowed_tools.join(", "),
         Some(ConnectionConfig::Acp(c)) => c.args.join(" "),
@@ -120,14 +123,13 @@ fn apply_tts_edits(tts: &mut TtsConnection, spec: &ConnectionEditSpec<'_>) {
 
 fn apply_stt_edits(stt: &mut SttConnection, spec: &ConnectionEditSpec<'_>) {
     let mut ep = updated_endpoint(stt.endpoint.as_ref(), spec.endpoint_url, spec.options_json);
-    let hints = split_comma(spec.list_raw);
-    if let Some(first_lang) = hints.first() {
+    let model = spec.list_raw.trim();
+    if !model.is_empty() {
         let mut opts = SpeechOptions::parse(&ep.options);
-        opts.language = Some(first_lang.clone());
+        opts.model = Some(model.to_owned());
         ep.options = opts.json();
     }
     stt.endpoint = Some(ep);
-    stt.language_hints = hints;
 }
 
 fn default_embedding_model(endpoint: &ConnectionEndpoint) -> &'static str {
@@ -146,12 +148,13 @@ fn apply_embedding_edits(emb: &mut EmbeddingConnection, spec: &ConnectionEditSpe
         ep.adapter = "openai".to_owned();
     }
     let model_id = spec.list_raw.trim();
-    emb.model_id = if model_id.is_empty() {
+    let model_id = if model_id.is_empty() {
         default_embedding_model(&ep)
     } else {
         model_id
-    }
-    .to_owned();
+    };
+    let model_changed = emb.model_id != model_id;
+    emb.model_id = model_id.to_owned();
     emb.endpoint = Some(ep);
     let parsed_dim = spec
         .dimensions_raw
@@ -159,7 +162,7 @@ fn apply_embedding_edits(emb: &mut EmbeddingConnection, spec: &ConnectionEditSpe
         .filter(|&d| d > 0);
     if let Some(dims) = parsed_dim {
         emb.dimensions = dims;
-    } else if emb.dimensions == 0 {
+    } else if emb.dimensions == 0 || model_changed {
         emb.dimensions = ene_catalog::default_embedding_dimensions(&emb.model_id);
     }
 }
@@ -308,6 +311,45 @@ pub fn build_custom_connection_input(
 mod tests {
     use super::*;
     use crate::connections::mcp::parse_process_args;
+
+    #[test]
+    fn selecting_a_transcription_model_preserves_the_saved_language_hints() {
+        let endpoint = ConnectionEndpoint {
+            adapter: "openai".into(),
+            options: r#"{"model":"old","language":"ja","custom":true}"#.into(),
+            ..Default::default()
+        };
+        let conn = Connection {
+            kind: ConnectionKind::Stt,
+            config: Some(ConnectionConfig::Stt(SttConnection {
+                endpoint: Some(endpoint),
+                language_hints: vec!["ja".into(), "en".into()],
+            })),
+            ..Default::default()
+        };
+        assert_eq!(extract_kind_list_init(conn.config.as_ref()), "old");
+        let input = apply_connection_edits(
+            &conn,
+            &ConnectionEditSpec {
+                name: "Transcription",
+                endpoint_url: "",
+                process: None,
+                list_raw: "new",
+                dimensions_raw: None,
+                options_json: None,
+            },
+        );
+        let Some(ConnectionConfig::Stt(stt)) = input.config else {
+            panic!("expected STT")
+        };
+        assert_eq!(stt.language_hints, ["ja", "en"]);
+        let options: serde_json::Value =
+            serde_json::from_str(&stt.endpoint.unwrap().options).unwrap();
+        assert_eq!(
+            options,
+            serde_json::json!({"model":"new","language":"ja","custom":true})
+        );
+    }
 
     #[test]
     fn changes_to_other_search_fields_preserve_a_connection_without_a_cap() {

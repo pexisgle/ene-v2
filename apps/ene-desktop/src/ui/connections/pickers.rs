@@ -73,11 +73,10 @@ pub(super) fn render_resource_picker(
     let pane_entity = cx.entity();
     let toggle = pane_entity.clone();
     let toggle_key = key.clone();
-    let hub = pane.hub.clone();
-    let refresh_hub = hub.clone();
+    let refresh_hub = pane.hub.clone();
     let id = id.to_owned();
     let refresh_id = id.clone();
-    let list_d = (resource != ConnectionResource::TranscriptionModel).then(|| list_d.clone());
+    let list_d = list_d.clone();
     let dim_d = dim_d.cloned();
 
     div()
@@ -113,17 +112,12 @@ pub(super) fn render_resource_picker(
             theme,
             move |_, cx| toggle_pane_dropdown(&toggle, &toggle_key, cx),
             move |picked, _, cx| {
-                if let Some(draft) = &list_d {
-                    draft.update(cx, |draft, cx| draft.set(picked.clone(), cx));
-                }
+                list_d.update(cx, |draft, cx| draft.set(picked.clone(), cx));
                 if let Some(dimensions) = &dim_d {
                     dimensions.update(cx, |draft, cx| {
                         draft.set(default_embedding_dimensions(&picked).to_string(), cx)
                     });
                 }
-                hub.update(cx, |hub, cx| {
-                    hub.select_connection_resource(&id, resource, &picked, cx)
-                });
                 close_pane_dropdown(&pane_entity, cx);
             },
         ))

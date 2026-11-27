@@ -3,10 +3,8 @@
 use super::{Hub, presets, voice_roles};
 use crate::rpc;
 use ene_client_core::{
-    ModelRoleSlot, SearchAdapter,
-    connections::{
-        ConnectionResource, build_connection_enabled_input, build_embedding_model_input,
-    },
+    SearchAdapter,
+    connections::build_connection_enabled_input,
     domain::{Connection, ConnectionInput, ConnectionKind, LlmProvider},
 };
 use gpui::Context;
@@ -145,27 +143,6 @@ impl Hub {
         }
     }
 
-    pub(crate) fn select_connection_resource(
-        &mut self,
-        id: &str,
-        resource: ConnectionResource,
-        value: &str,
-        cx: &mut Context<Self>,
-    ) {
-        match resource {
-            ConnectionResource::ChatModel => {
-                voice_roles::select_connection_model(self, id, value, cx)
-            }
-            ConnectionResource::Speaker | ConnectionResource::Voice => {
-                voice_roles::select_tts_voice(self, id, value, cx)
-            }
-            ConnectionResource::TranscriptionModel => {
-                voice_roles::select_stt_model(self, id, value, cx)
-            }
-            ConnectionResource::EmbeddingModel => self.select_embedding_model(id, value, cx),
-        }
-    }
-
     /// Assigns the active STT connection and model atomically across all STT connections.
     pub(crate) fn assign_stt_model(
         &mut self,
@@ -183,44 +160,6 @@ impl Hub {
         cx: &mut Context<Self>,
     ) {
         voice_roles::assign_tts_voice(self, selection, cx);
-    }
-
-    fn select_embedding_model(
-        &mut self,
-        connection_id: &str,
-        model_id: &str,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(conn) = self.model.settings().and_then(|s| {
-            s.connections
-                .iter()
-                .find(|c| c.id == connection_id)
-                .cloned()
-        }) else {
-            return;
-        };
-        let model_clean = model_id.trim();
-        if model_clean.is_empty() {
-            return;
-        }
-        self.upsert_connection(
-            "埋め込みモデルの変更",
-            build_embedding_model_input(&conn, model_clean),
-            cx,
-        );
-        if let Some(comp) = self.model.companion()
-            && comp
-                .assignments
-                .as_ref()
-                .and_then(|a| a.embedding.as_ref())
-                .is_some_and(|a| a.connection_id == connection_id)
-        {
-            self.assign_model(
-                ModelRoleSlot::Embedding,
-                Some((connection_id.to_owned(), model_clean.to_owned())),
-                cx,
-            );
-        }
     }
 
     pub(crate) fn register_secret(
