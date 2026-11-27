@@ -43,6 +43,7 @@ pub(super) struct StreamLoopState {
     device: DeviceStream,
     work: WorkspaceCalls,
     pub(super) publication: super::transport::DevicePublication,
+    pub(super) activation: tokio::task::JoinSet<()>,
     subscription: NotificationStream,
     pub(super) output: Option<AudioOutStream>,
     pub(super) mic_send: Option<MicSendHalf>,
@@ -177,6 +178,7 @@ impl Session {
             device,
             work: WorkspaceCalls::new(),
             publication: super::transport::DevicePublication::default(),
+            activation: tokio::task::JoinSet::new(),
             subscription,
             output,
             mic_send,
@@ -412,6 +414,7 @@ impl Session {
         self.transport
             .focused
             .get_or_insert_with(|| activation.companion_id.clone());
+        self.transport.may_activate = false;
         self.sync_avatars().await;
         self.transport.bindings.len() == 1
     }

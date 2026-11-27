@@ -4,9 +4,10 @@
 //! spans three inherent `impl` files; each takes the session it acts on.
 
 use super::stream::StreamLoopState;
+use super::transport::change_activation;
 use super::{Session, Step};
 use crate::update::Update;
-use crate::{host::Host, perception::Sensor, update::Command};
+use crate::{host::Host, update::Command};
 use ene_rpc as w;
 
 /// Handles one window command.
@@ -17,12 +18,14 @@ pub(super) async fn command(
     command: Command,
 ) -> Step {
     match command {
-        Command::Serve(companion_id) => cmd_serve(session, host, companion_id).await,
+        Command::Serve(companion_id) => {
+            request_activation(session, host, stream, companion_id, Activation::Follow)
+        }
         Command::ActivateCompanion(companion_id) => {
-            cmd_activate_companion(session, host, companion_id).await
+            request_activation(session, host, stream, companion_id, Activation::Keep)
         }
         Command::ReleaseCompanion(companion_id) => {
-            cmd_release_companion(session, host, companion_id).await
+            request_activation(session, host, stream, companion_id, Activation::Release)
         }
         Command::StopPlayback => {
             session.audio.stop_playback();
@@ -91,85 +94,60 @@ pub(super) async fn command(
     }
 }
 
-async fn cmd_serve(session: &mut Session, host: &Host, companion_id: String) -> Step {
-    let was_empty = session.transport.bindings.is_empty();
-    session.transport.focused = Some(companion_id.clone());
-    if !session.transport.bindings.contains(&companion_id) {
-        match session.transport.activate_one(host, &companion_id).await {
-            Ok(()) => {
-                session.transport.bindings.insert(companion_id);
-                session.transport.may_activate = false;
-                session.sync_avatars().await;
-                if was_empty {
-                    return Step::Restart;
-                }
-            }
-            Err(error) => {
-                super::notify_ui(
-                    &session.updates,
-                    Update::Failed {
-                        context: "コンパニオンの有効化",
-                        message: error.to_string(),
-                    },
-                );
-            }
-        }
-    }
-    Step::Continue
+#[derive(Clone, Copy)]
+enum Activation {
+    Follow,
+    Keep,
+    Release,
 }
 
-async fn cmd_activate_companion(session: &mut Session, host: &Host, companion_id: String) -> Step {
-    let was_empty = session.transport.bindings.is_empty();
-    if !session.transport.bindings.contains(&companion_id) {
-        match session.transport.activate_one(host, &companion_id).await {
-            Ok(()) => {
-                session.transport.bindings.insert(companion_id.clone());
-                if session.transport.focused.is_none() {
-                    session.transport.focused = Some(companion_id);
-                }
-                session.transport.may_activate = false;
-                session.sync_avatars().await;
-                if was_empty {
-                    return Step::Restart;
-                }
-            }
-            Err(error) => {
-                super::notify_ui(
-                    &session.updates,
-                    Update::Failed {
-                        context: "コンパニオンの常駐",
-                        message: error.to_string(),
-                    },
-                );
-            }
-        }
+fn request_activation(
+    session: &mut Session,
+    host: &Host,
+    stream: &mut StreamLoopState,
+    companion_id: String,
+    change: Activation,
+) -> Step {
+    if matches!(change, Activation::Follow) {
+        session.transport.focused = Some(companion_id.clone());
     }
-    Step::Continue
-}
-
-async fn cmd_release_companion(session: &mut Session, host: &Host, companion_id: String) -> Step {
-    if let Err(error) = session.transport.release_one(host, &companion_id).await {
+    let release = matches!(change, Activation::Release);
+    if !release && session.transport.bindings.contains(&companion_id) {
+        return Step::Continue;
+    }
+    let context = match change {
+        Activation::Follow => "コンパニオンの有効化",
+        Activation::Keep => "コンパニオンの常駐",
+        Activation::Release => "コンパニオンの常駐解除",
+    };
+    if let Some(Err(error)) = stream.activation.try_join_next() {
+        tracing::warn!(%error, "the activation request stopped");
+    }
+    if !stream.activation.is_empty() {
         super::notify_ui(
             &session.updates,
             Update::Failed {
-                context: "コンパニオンの常駐解除",
-                message: error.to_string(),
+                context,
+                message: "処理中の切り替えが完了してから、もう一度操作してください。".into(),
             },
         );
         return Step::Continue;
     }
-    session.transport.bindings.remove(&companion_id);
-    session.audio.clear_speaking_if(&companion_id);
-    if session.transport.focused.as_deref() == Some(companion_id.as_str()) {
-        session.transport.focused = session.transport.bindings.first().cloned();
-    }
-    session.sync_avatars().await;
-    if session.transport.bindings.is_empty() {
-        session.devices.sensor = Sensor::default();
-        Step::Restart
-    } else {
-        Step::Continue
-    }
+    let client = (!release).then(|| session.transport.options.id.clone());
+    let host = host.clone();
+    let updates = session.updates.clone();
+    stream.activation.spawn(async move {
+        if let Err(error) = change_activation(&host, &companion_id, client.as_deref()).await {
+            super::notify_ui(
+                &updates,
+                Update::Failed {
+                    context,
+                    message: error.to_string(),
+                },
+            );
+        }
+    });
+    Step::Continue
 }
 
 async fn cmd_set_avatar_scale(session: &mut Session, scale: f32) -> Step {

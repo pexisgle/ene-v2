@@ -5,7 +5,6 @@ use crate::{
     avatar, capabilities,
     host::{Host, HostTarget, unary_options},
 };
-use buffa::view::MessageView;
 use connectrpc::ConnectError;
 use ene_domain::BodyBinding;
 use ene_rpc as w;
@@ -269,7 +268,7 @@ impl SessionTransport {
             self.may_activate = false;
             if let Some(target) = self.pending.take() {
                 if !self.bindings.contains(&target) && self.companion_bodies.contains_key(&target) {
-                    self.activate_one(host, &target)
+                    change_activation(host, &target, Some(&self.options.id))
                         .await
                         .map_err(|error| self.classify(&error))?;
                     self.bindings.insert(target.clone());
@@ -305,7 +304,7 @@ impl SessionTransport {
             tracing::info!("another client is the active device for {wanted}");
             return Ok(previous != self.bindings);
         }
-        match self.activate_one(host, &wanted).await {
+        match change_activation(host, &wanted, Some(&self.options.id)).await {
             Ok(()) => {
                 self.bindings.insert(wanted.clone());
                 self.focused = Some(wanted);
@@ -315,55 +314,6 @@ impl SessionTransport {
             }
             Err(error) => Err(self.classify(&error)),
         }
-    }
-
-    /// Activates `companion_id` onto this client without releasing other
-    /// companions already resident here.
-    pub(super) async fn activate_one(
-        &self,
-        host: &Host,
-        companion_id: &str,
-    ) -> Result<(), connectrpc::ConnectError> {
-        let activation = host
-            .client
-            .activate_with_options(
-                w::ActivationRequest {
-                    companion_id: companion_id.to_owned(),
-                    client_id: self.options.id.clone(),
-                    release: false,
-                    ..Default::default()
-                },
-                unary_options(),
-            )
-            .await?
-            .view()
-            .to_owned_message()
-            .map_err(|error| connectrpc::ConnectError::internal(error.to_string()))?;
-        tracing::info!(
-            companion = %activation.companion_id,
-            "the client is an active device"
-        );
-        Ok(())
-    }
-
-    /// Releases `companion_id` from this client.
-    pub(super) async fn release_one(
-        &self,
-        host: &Host,
-        companion_id: &str,
-    ) -> Result<(), connectrpc::ConnectError> {
-        host.client
-            .activate_with_options(
-                w::ActivationRequest {
-                    companion_id: companion_id.to_owned(),
-                    client_id: String::new(),
-                    release: true,
-                    ..Default::default()
-                },
-                unary_options(),
-            )
-            .await?;
-        Ok(())
     }
 
     /// Turns an RPC error into what the window must show.
@@ -392,6 +342,25 @@ impl SessionTransport {
     pub(super) fn advance_eyes_generation(&mut self) {
         self.eyes_generation = self.eyes_generation.saturating_add(1);
     }
+}
+
+pub(super) async fn change_activation(
+    host: &Host,
+    companion_id: &str,
+    client: Option<&str>,
+) -> Result<(), ConnectError> {
+    host.client
+        .activate_with_options(
+            w::ActivationRequest {
+                companion_id: companion_id.to_owned(),
+                client_id: client.unwrap_or_default().to_owned(),
+                release: client.is_none(),
+                ..Default::default()
+            },
+            unary_options(),
+        )
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]
