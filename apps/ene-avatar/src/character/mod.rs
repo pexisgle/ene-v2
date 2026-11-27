@@ -1,7 +1,7 @@
 mod motion;
 
 pub use motion::notify_finished;
-use motion::{FadingMotion, Pending, advance_fades, motion_change};
+use motion::{FadingMotion, MotionFailure, Pending, advance_fades, motion_change};
 
 use crate::desktop::Output;
 use bevy::{
@@ -229,10 +229,19 @@ pub fn cancel_motion(world: &mut World, entity: Entity) {
     if let Some(pending) = world
         .get_mut::<Character>(entity)
         .and_then(|mut c| c.pending.take())
-        && let Some(outcome) = pending.superseded()
+        && let Some(outcome) = pending.rejected(MotionFailure::Superseded)
     {
         world.write_message(outcome);
     }
+}
+
+pub fn cancel_motions(world: &mut World) {
+    let pending: Vec<_> = world
+        .query::<&mut Character>()
+        .iter_mut(world)
+        .filter_map(|mut actor| actor.pending.take()?.rejected(MotionFailure::ShuttingDown))
+        .collect();
+    world.write_message_batch(pending);
 }
 
 #[derive(bevy::ecs::system::SystemParam)]

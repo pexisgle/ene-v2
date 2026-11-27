@@ -1,7 +1,9 @@
 mod actor;
 mod snapshot;
 
-use crate::character::{Character, ConfigError, MotionOutcome, Notification, cancel_motion};
+use crate::character::{
+    Character, ConfigError, MotionOutcome, Notification, cancel_motion, cancel_motions,
+};
 use actor::{
     apply_add_or_set, apply_expression, apply_lip_sync, apply_look_at, apply_motion,
     apply_position, apply_update,
@@ -161,11 +163,15 @@ fn requests(world: &mut World, avatars: &mut QueryState<(Entity, &mut Character)
             Ok(request) => request,
             Err(mpsc::TryRecvError::Empty) => break,
             Err(mpsc::TryRecvError::Disconnected) => {
+                cancel_motions(world);
                 world.write_message(AppExit::Success);
                 break;
             }
         };
         let id = request.as_ref().ok().and_then(|request| request.id);
+        let quitting = request
+            .as_ref()
+            .is_ok_and(|request| matches!(request.command, Command::Quit {}));
         let result = match request.and_then(|request| apply_command(world, avatars, request)) {
             Ok(Disposition::Deferred) => continue,
             Ok(Disposition::Reply(value)) => Ok(value),
@@ -173,7 +179,7 @@ fn requests(world: &mut World, avatars: &mut QueryState<(Entity, &mut Character)
         };
         // A one-way notification has no id and must not answer, or the client
         // would have to drain replies it never asked for.
-        if !send_command_reply(world, id, result) {
+        if !send_command_reply(world, id, result) || quitting {
             return;
         }
     }
@@ -253,6 +259,7 @@ fn apply_command(
             monitor, position, ..
         } => apply_position(world, target, monitor, Some(position)),
         Command::Quit {} => {
+            cancel_motions(world);
             world.write_message(AppExit::Success);
             Ok(())
         }

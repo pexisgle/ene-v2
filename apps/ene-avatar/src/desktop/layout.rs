@@ -29,7 +29,7 @@ impl From<&Config> for Location {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct Saved {
     binding: Location,
     local: Location,
@@ -104,15 +104,15 @@ impl Layout {
         applied: &Config,
     ) {
         if let Some(saved) = self.layouts.get_mut(character) {
-            let before = saved.binding.clone();
-            if update.0.is_some() {
-                saved.binding.monitor = update.0;
-            }
-            if update.1.is_some() {
-                saved.binding.position = update.1;
-            }
-            if saved.binding != before {
-                saved.local = Location::from(applied);
+            let next = Saved {
+                binding: Location {
+                    monitor: update.0.or_else(|| saved.binding.monitor.clone()),
+                    position: update.1.or(saved.binding.position),
+                },
+                local: Location::from(applied),
+            };
+            if *saved != next {
+                *saved = next;
                 self.queue_save();
             }
         }

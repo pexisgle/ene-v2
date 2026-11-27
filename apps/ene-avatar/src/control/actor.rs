@@ -95,7 +95,7 @@ pub(super) fn apply_motion(
         ..old.config.clone()
     };
     validate_config(&config)?;
-    if matches!(old.state, AvatarState::Loading | AvatarState::Error(_)) {
+    if matches!(old.state, AvatarState::Error(_)) {
         old.config = config;
         reload(world, entity, request);
     } else {

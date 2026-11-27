@@ -35,6 +35,8 @@ pub(crate) enum MotionFailure {
     Asset,
     #[error("a newer operation superseded this motion")]
     Superseded,
+    #[error("the renderer is shutting down")]
+    ShuttingDown,
 }
 
 #[derive(Message)]
@@ -61,14 +63,14 @@ impl Pending {
         })
     }
 
-    pub(super) fn superseded(&self) -> Option<MotionOutcome> {
+    pub(super) fn rejected(&self, reason: MotionFailure) -> Option<MotionOutcome> {
         let request = match self {
             Self::Initial(request) => Some(*request),
             Self::Change(change) => change.request,
         }?;
         Some(MotionOutcome {
             request,
-            result: Err(MotionFailure::Superseded),
+            result: Err(reason),
         })
     }
 }
@@ -183,14 +185,16 @@ impl MotionChange {
         if matches!(c.state, AvatarState::Error(_)) {
             return Some(Err(MotionFailure::Asset));
         }
+        if let ClipChange::Loading(clip) = &self.phase
+            && let Some(error) = load_error(server, clip.id().untyped(), false)
+        {
+            warn!(character = %c.id, %error, "the motion did not load");
+            return Some(Err(MotionFailure::Asset));
+        }
         let (mut player, handle) = roots.get_mut(c.root?).ok()?;
         let playing = match &self.phase {
             ClipChange::Rest => None,
             ClipChange::Loading(clip) => {
-                if let Some(error) = load_error(server, clip.id().untyped(), false) {
-                    warn!(character = %c.id, %error, "the motion did not load");
-                    return Some(Err(MotionFailure::Asset));
-                }
                 if !server.is_loaded_with_dependencies(clip.id()) {
                     return None;
                 }
