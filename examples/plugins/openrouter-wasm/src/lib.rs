@@ -53,13 +53,13 @@ mod guest {
             return Err(extism_pdk::Error::msg("HTTP failure"));
         }
         if chunk.handle.len() > 1024
-            || chunk.headers.len() > 64
+            || chunk.headers.len() > MAX_HTTP_HEADER_FIELDS
             || chunk
                 .headers
                 .iter()
                 .map(|(key, value)| key.len().saturating_add(value.len()))
                 .sum::<usize>()
-                > 64 * 1024
+                > MAX_HTTP_HEADER_BYTES
         {
             return Err(extism_pdk::Error::msg("HTTP metadata limit"));
         }

@@ -17,8 +17,6 @@ pub const MAX_HTTP_BODY: usize = 16 * 1024 * 1024;
 /// Raw bytes of one brokered HTTP reply chunk. Base64 inflates by 4/3, so this
 /// keeps the encoded chunk under [`MAX_CHUNK`] with room for its envelope.
 pub const MAX_HTTP_CHUNK: usize = 64 * 1024;
-/// The most reply headers the broker copies into a chunk.
-pub const MAX_HTTP_HEADERS: usize = 8 * 1024;
 /// How long one brokered HTTP exchange may take, end to end.
 pub const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Aggregate event budget for one invocation, including provider streams.

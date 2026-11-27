@@ -1,6 +1,5 @@
 //! Header ownership at the broker boundary.
-use crate::limits::MAX_HTTP_HEADERS;
-use ene_plugin::Failure;
+use ene_plugin::{Failure, MAX_HTTP_HEADER_BYTES, MAX_HTTP_HEADER_FIELDS};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::collections::BTreeMap;
 
@@ -40,7 +39,9 @@ pub(super) fn copy_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
             continue;
         };
         total += name.as_str().len() + value.len();
-        if total > MAX_HTTP_HEADERS {
+        if total > MAX_HTTP_HEADER_BYTES
+            || (copied.len() == MAX_HTTP_HEADER_FIELDS && !copied.contains_key(name.as_str()))
+        {
             break;
         }
         copied.insert(name.as_str().to_owned(), value.to_owned());

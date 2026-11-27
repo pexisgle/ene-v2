@@ -25,7 +25,7 @@ pub use harness::{
     ToolCallUpdate, ToolCallUpdateFields, ToolKind, text_block,
 };
 pub use hook::{HookDecision, HookEvent};
-pub use http::{HttpChunk, HttpRequest};
+pub use http::{HttpChunk, HttpRequest, MAX_HTTP_HEADER_BYTES, MAX_HTTP_HEADER_FIELDS};
 pub use llm::LlmCapabilities;
 pub use tool::{PluginToolDefinition, ToolInvokeRequest, ToolInvokeResult};
 pub use wire::{Event, Operation, ServiceRequest};

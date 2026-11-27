@@ -27,8 +27,9 @@ use std::{
     },
     time::Duration,
 };
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio::time::{Instant, timeout_at};
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use url::Url;
 
 /// What the host lets one provider do over HTTP.
@@ -67,15 +68,21 @@ struct Open {
 }
 
 struct Streaming {
-    body: BodyDataStream<Limited<reqwest::Body>>,
+    body: mpsc::Receiver<Bytes>,
+    transport: AbortOnDropHandle<Result<(), Failure>>,
     deadline: Instant,
+}
+
+struct Reply {
+    stop: CancellationToken,
+    body: AsyncMutex<Open>,
 }
 
 /// The process's HTTP path for plugins.
 pub struct HttpBroker {
     grants: Arc<dyn HttpGrants>,
     client: reqwest::Client,
-    open: Mutex<HashMap<String, Open>>,
+    open: Mutex<HashMap<String, Arc<Reply>>>,
     next: Arc<AtomicU64>,
     lifetime: CancellationToken,
     /// How long one exchange may take, end to end.
@@ -206,11 +213,13 @@ impl HttpBroker {
             stream: None,
         };
         let body = Limited::new(reqwest::Body::from(response), MAX_HTTP_BODY);
+        let stop = self.lifetime.child_token();
         let headers = if request.stream {
-            entry.stream = Some(Streaming {
-                body: body.into_data_stream(),
+            entry.stream = Some(stream_reply(
+                body.into_data_stream(),
                 deadline,
-            });
+                stop.clone(),
+            ));
             std::mem::take(&mut entry.headers)
         } else {
             entry.pending = timeout_at(deadline, body.collect())
@@ -220,7 +229,13 @@ impl HttpBroker {
                 .to_bytes();
             BTreeMap::new()
         };
-        self.open.lock().insert(handle.clone(), entry);
+        self.open.lock().insert(
+            handle.clone(),
+            Arc::new(Reply {
+                stop,
+                body: AsyncMutex::new(entry),
+            }),
+        );
         Ok(HttpChunk {
             handle,
             status,
@@ -238,51 +253,106 @@ impl HttpBroker {
     }
 
     async fn read_reply(&self, handle: &str) -> Result<HttpChunk, Failure> {
-        let mut entry = self
+        let reply = self
             .open
             .lock()
-            .remove(handle)
+            .get(handle)
+            .cloned()
             .ok_or_else(|| Failure::new("unknown_handle"))?;
-        if let Some(stream) = &mut entry.stream {
+        let mut entry = reply
+            .body
+            .try_lock()
+            .map_err(|_| Failure::new("unknown_handle"))?;
+        let on_drop = reply.stop.drop_guard_ref();
+        let result = tokio::select! {
+            biased;
+            () = reply.stop.cancelled() => Err(Failure::new("unknown_handle")),
+            result = entry.next_chunk(handle) => result,
+        };
+        let result = if on_drop.disarm().is_cancelled() {
+            Err(Failure::new("unknown_handle"))
+        } else {
+            result
+        };
+        if result.as_ref().map_or(true, |chunk| chunk.done) {
+            self.open.lock().remove(handle);
+        }
+        result
+    }
+
+    /// Drops the reply and interrupts an in-flight read. Closing an already
+    /// closed or fully read response remains successful.
+    pub fn close(&self, handle: &str) -> Result<(), Failure> {
+        if let Some(reply) = self.open.lock().remove(handle) {
+            reply.stop.cancel();
+        }
+        Ok(())
+    }
+}
+
+impl Open {
+    async fn next_chunk(&mut self, handle: &str) -> Result<HttpChunk, Failure> {
+        if let Some(stream) = &mut self.stream {
             if Instant::now() >= stream.deadline {
                 return Err(Failure::new("http_timeout"));
             }
-            if entry.pending.is_empty() {
-                let next = timeout_at(stream.deadline, stream.body.next())
-                    .await
-                    .map_err(|_| Failure::new("http_timeout"))?
-                    .transpose()
-                    .map_err(|error| body_error(error.as_ref()))?;
-                if let Some(bytes) = next {
-                    entry.pending = bytes;
+            if self.pending.is_empty() {
+                if let Some(bytes) = stream.body.recv().await {
+                    if Instant::now() >= stream.deadline {
+                        return Err(Failure::new("http_timeout"));
+                    }
+                    self.pending = bytes;
                 } else {
-                    entry.stream = None;
+                    (&mut stream.transport)
+                        .await
+                        .map_err(|_| Failure::new("http_failed"))??;
+                    self.stream = None;
                 }
             }
         }
-        let bytes = entry
+        let bytes = self
             .pending
-            .split_to(entry.pending.len().min(MAX_HTTP_CHUNK));
-        let done = entry.stream.is_none() && entry.pending.is_empty();
-        let chunk = HttpChunk {
+            .split_to(self.pending.len().min(MAX_HTTP_CHUNK));
+        Ok(HttpChunk {
             handle: handle.to_owned(),
-            status: entry.status,
-            headers: std::mem::take(&mut entry.headers),
+            status: self.status,
+            headers: std::mem::take(&mut self.headers),
             data_base64: STANDARD.encode(bytes),
-            done,
-        };
-        if !done {
-            self.open.lock().insert(handle.to_owned(), entry);
-        }
-        Ok(chunk)
+            done: self.stream.is_none() && self.pending.is_empty(),
+        })
     }
+}
 
-    /// Drops `handle` without reading the rest. Closing a handle whose body was
-    /// already read to its end succeeds: the end state is the same, so a guest
-    /// may close unconditionally.
-    pub fn close(&self, handle: &str) -> Result<(), Failure> {
-        self.open.lock().remove(handle);
-        Ok(())
+fn stream_reply(
+    mut body: BodyDataStream<Limited<reqwest::Body>>,
+    deadline: Instant,
+    stop: CancellationToken,
+) -> Streaming {
+    let (send, receive) = mpsc::channel(1);
+    let transport = AbortOnDropHandle::new(tokio::spawn(async move {
+        let transfer = async {
+            while let Some(bytes) = body
+                .next()
+                .await
+                .transpose()
+                .map_err(|error| body_error(error.as_ref()))?
+            {
+                if send.send(bytes).await.is_err() {
+                    break;
+                }
+            }
+            Ok(())
+        };
+        tokio::select! {
+            biased;
+            () = stop.cancelled() => Err(Failure::new("unknown_handle")),
+            result = timeout_at(deadline, transfer) => result.map_err(|_| Failure::new("http_timeout"))?,
+        }
+    }));
+    Streaming {
+        body: receive,
+        transport,
+        deadline,
     }
 }
 
@@ -483,6 +553,77 @@ mod tests {
             "unknown_handle"
         );
         server.abort();
+    }
+
+    async fn held_reply() -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let peer = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut tail = [0; 4];
+            while &tail != b"\r\n\r\n" {
+                tail.rotate_left(1);
+                tail[3] = socket.read_u8().await.unwrap();
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")
+                .await
+                .unwrap();
+            assert_eq!(socket.read(&mut [0]).await.unwrap(), 0);
+        });
+        (origin, peer)
+    }
+
+    #[tokio::test]
+    async fn a_stream_deadline_closes_the_peer_without_a_reader() {
+        let (origin, peer) = held_reply().await;
+        let broker =
+            HttpBroker::with_deadline(Arc::new(Allow(origin.clone())), Duration::from_millis(300))
+                .unwrap();
+        let mut call = request(origin);
+        call.stream = true;
+        let reply = broker.open("provider", call).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), peer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            broker.read(&reply.handle).await.unwrap_err().code,
+            "http_timeout"
+        );
+        assert!(broker.open.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn closing_or_abandoning_a_read_retires_the_reply() {
+        for close in [true, false] {
+            let (origin, peer) = held_reply().await;
+            let broker = HttpBroker::new(Arc::new(Allow(origin.clone()))).unwrap();
+            let mut call = request(origin);
+            call.stream = true;
+            let reply = broker.open("provider", call).await.unwrap();
+            let mut read = Box::pin(broker.read(&reply.handle));
+            assert!(futures_util::poll!(&mut read).is_pending());
+            if close {
+                broker.close(&reply.handle).unwrap();
+                let result = tokio::time::timeout(Duration::from_secs(3), read)
+                    .await
+                    .unwrap();
+                assert_eq!(result.unwrap_err().code, "unknown_handle");
+            } else {
+                drop(read);
+            }
+            tokio::time::timeout(Duration::from_secs(3), peer)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                broker.read(&reply.handle).await.unwrap_err().code,
+                "unknown_handle"
+            );
+            assert!(broker.open.lock().is_empty());
+        }
     }
 
     #[tokio::test]

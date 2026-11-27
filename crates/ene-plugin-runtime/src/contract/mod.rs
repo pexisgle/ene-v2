@@ -1,10 +1,7 @@
 //! Checks extension semantics independently of the execution backend.
 mod harness;
 
-use crate::{
-    Error, Result,
-    limits::{MAX_HTTP_HEADERS, MAX_STREAM_EVENTS},
-};
+use crate::{Error, Result, limits::MAX_STREAM_EVENTS};
 use ene_plugin::*;
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -60,13 +57,13 @@ impl Events {
             match event {
                 Event::Http { chunk } => {
                     if chunk.handle.len() > 1024
-                        || chunk.headers.len() > 64
+                        || chunk.headers.len() > MAX_HTTP_HEADER_FIELDS
                         || chunk
                             .headers
                             .iter()
                             .map(|(key, value)| key.len().saturating_add(value.len()))
                             .sum::<usize>()
-                            > MAX_HTTP_HEADERS
+                            > MAX_HTTP_HEADER_BYTES
                         || chunk.data_base64.len() > crate::limits::MAX_CHUNK
                     {
                         return Err(Error::Protocol);
