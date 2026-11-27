@@ -4061,6 +4061,7 @@ dependencies = [
  "ene-plugin-runtime",
  "ene-rpc",
  "ene-voice",
+ "futures-util",
  "globset",
  "gpui-kit",
  "hex",

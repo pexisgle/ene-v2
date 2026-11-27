@@ -4,7 +4,6 @@
 use super::client::{Avatar, AvatarError, ModelState, ShownCharacter, WriteItem, lip_sync_line};
 use super::presets::{idle_return_preset, is_looping_motion, is_persistent_idle, motion};
 use ene_avatar_ipc::{AvatarEvent, CharacterConfig, Command};
-use std::sync::atomic::Ordering;
 use std::{collections::BTreeSet, path::Path};
 use tokio::sync::mpsc;
 
@@ -231,16 +230,10 @@ impl Avatar {
         if !self.is_healthy() {
             return Err(AvatarError::Unhealthy);
         }
-        let Some(write_tx) = &self.write_tx else {
-            return Err(AvatarError::InputClosed);
-        };
         let line = lip_sync_line(character, rms)?;
-        match write_tx.try_send(WriteItem::OneWay(line)) {
+        match self.write_tx.try_send(WriteItem::OneWay(line)) {
             Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => Ok(()),
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                self.healthy.store(false, Ordering::Release);
-                Err(AvatarError::InputClosed)
-            }
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(AvatarError::InputClosed),
         }
     }
 

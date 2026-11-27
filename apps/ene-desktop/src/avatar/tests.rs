@@ -1,18 +1,14 @@
-use super::client::{PendingReplies, TestRenderer, WriteItem, lip_sync_line, read_loop};
+use super::client::{TestRenderer, WriteItem, lip_sync_line, serve_io};
 use super::presets::{LOOPING_MOTIONS, idle_return_preset, is_looping_motion, normalize_path};
 use super::*;
 use ene_avatar_ipc::{AvatarEvent, AvatarMessage, AvatarStatus, CharacterConfig, Command, Request};
 use parking_lot::Mutex;
 use serde_json::Value;
-use std::{
-    collections::HashMap,
-    path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+use std::{collections::HashMap, path::Path, sync::Arc};
+use tokio::{
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    sync::{mpsc, oneshot},
 };
-use tokio::sync::{mpsc, oneshot};
 
 #[test]
 fn a_reply_and_a_notification_are_distinguished() {
@@ -152,9 +148,25 @@ fn scaling_keeps_motion_and_placement_fields() {
     assert_eq!(min_scaled.size_percent, 50.0);
 }
 
-#[test]
-fn b09_read_loop_resolves_pending_and_preserves_all_event_kinds() {
-    let input = concat!(
+#[tokio::test]
+async fn b09_renderer_resolves_replies_and_preserves_events_until_eof() {
+    let (stdin, mut to_renderer) = tokio::io::duplex(4_096);
+    let (stdout, mut from_renderer) = tokio::io::duplex(4_096);
+    let (commands, requests) = mpsc::channel(2);
+    let (events, mut notices) = mpsc::channel(8);
+    let worker = tokio::spawn(serve_io(stdin, stdout, requests, events));
+    let request = |id, reply| WriteItem::Request {
+        id,
+        reply,
+        line: "test\n".into(),
+    };
+
+    let (reply, first) = oneshot::channel();
+    commands.send(request(7, reply)).await.unwrap();
+    let mut line = [0; 5];
+    to_renderer.read_exact(&mut line).await.unwrap();
+    assert_eq!(&line, b"test\n");
+    let output = concat!(
         r#"{"event":"click","character":"ene"}"#,
         "\n",
         r#"{"event":"state","character":"ene","status":"ready"}"#,
@@ -162,40 +174,30 @@ fn b09_read_loop_resolves_pending_and_preserves_all_event_kinds() {
         r#"{"event":"finished","character":"ene"}"#,
         "\n",
         r#"{"id":7,"ok":{"status":"done"}}"#,
-        "\n"
+        "\n",
     );
-    let (events_tx, mut events_rx) = mpsc::unbounded_channel();
-    let pending: PendingReplies = Arc::new(Mutex::new(HashMap::new()));
-    let (reply_tx, mut reply_rx) = oneshot::channel();
-    pending.lock().insert(7, reply_tx);
-    let (waiter_tx, mut waiter_rx) = oneshot::channel();
-    pending.lock().insert(8, waiter_tx);
+    from_renderer.write_all(output.as_bytes()).await.unwrap();
+    first.await.unwrap().unwrap();
+    assert!(matches!(
+        notices.recv().await,
+        Some(AvatarEvent::Click { .. })
+    ));
+    assert!(matches!(
+        notices.recv().await,
+        Some(AvatarEvent::State { .. })
+    ));
+    assert!(matches!(
+        notices.recv().await,
+        Some(AvatarEvent::Finished { .. })
+    ));
 
-    let healthy = AtomicBool::new(true);
-    read_loop(
-        input.as_bytes(),
-        &events_tx,
-        &Arc::clone(&pending),
-        &healthy,
-    );
-    assert!(
-        !healthy.load(Ordering::Acquire),
-        "a reader that reached EOF must mark the renderer unhealthy"
-    );
-
-    let mut events = Vec::new();
-    while let Ok(ev) = events_rx.try_recv() {
-        events.push(ev);
-    }
-    assert_eq!(events.len(), 3);
-    assert!(matches!(events[0], AvatarEvent::Click { .. }));
-    assert!(matches!(events[1], AvatarEvent::State { .. }));
-    assert!(matches!(events[2], AvatarEvent::Finished { .. }));
-    reply_rx.try_recv().unwrap().unwrap();
-    assert!(
-        waiter_rx.try_recv().unwrap().is_err(),
-        "EOF must wake unfinished pending waiters"
-    );
+    let (reply, second) = oneshot::channel();
+    commands.send(request(8, reply)).await.unwrap();
+    to_renderer.read_exact(&mut line).await.unwrap();
+    drop(from_renderer);
+    assert!(matches!(second.await.unwrap(), Err(AvatarError::Exited)));
+    worker.await.unwrap();
+    assert!(commands.is_closed());
 }
 
 #[test]
@@ -234,29 +236,22 @@ fn bundled_ene_model_resolves_workspace_asset() {
     }
 }
 
-/// Answers requests from a test `Avatar` on a background thread and records
+/// Answers requests from a test `Avatar` and records
 /// every command the client actually sent, so a test asserts on the wire.
 fn fake_renderer(renderer: TestRenderer) -> Arc<Mutex<Vec<Command>>> {
-    let TestRenderer {
-        mut requests,
-        pending,
-        ..
-    } = renderer;
+    let TestRenderer { mut requests, .. } = renderer;
     let sent = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&sent);
-    std::thread::spawn(move || {
-        while let Some(item) = requests.blocking_recv() {
-            let WriteItem::Request { id, line } = item else {
+    tokio::spawn(async move {
+        while let Some(item) = requests.recv().await {
+            let WriteItem::Request { reply, line, .. } = item else {
                 continue;
             };
             let Ok(request) = serde_json::from_str::<Request>(&line) else {
                 break;
             };
             recorded.lock().push(request.command.clone());
-            let waiter = pending.lock().remove(&id);
-            if let Some(tx) = waiter {
-                let _replied = tx.send(Ok(()));
-            }
+            let _replied = reply.send(Ok(()));
         }
     });
     sent
@@ -269,7 +264,7 @@ fn recovery_replaces_the_previous_renderer_error() {
     assert!(avatar.is_ready("ene"));
     renderer
         .events
-        .send(AvatarEvent::State {
+        .try_send(AvatarEvent::State {
             character: "ene".into(),
             status: AvatarStatus::Error,
             error: Some("model missing".into()),
@@ -283,7 +278,7 @@ fn recovery_replaces_the_previous_renderer_error() {
     for (status, ready) in [(AvatarStatus::Loading, false), (AvatarStatus::Ready, true)] {
         renderer
             .events
-            .send(AvatarEvent::State {
+            .try_send(AvatarEvent::State {
                 character: "ene".into(),
                 status,
                 error: None,

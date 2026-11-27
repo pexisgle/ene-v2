@@ -2,25 +2,28 @@ use ene_avatar_ipc::{
     AvatarEvent, AvatarMessage, AvatarStatus, CharacterConfig, Command, LAYOUT_FILE_ENV,
     RendererFailure, Request,
 };
-use parking_lot::Mutex;
+use futures_util::StreamExt as _;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
-    io::{BufRead, BufReader, Write},
     path::Path,
-    process::{Child, ChildStdin, Stdio},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    thread,
+    process::Stdio,
     time::{Duration, Instant},
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt as _},
+    process::Command as Process,
+    sync::{mpsc, oneshot},
+};
+use tokio_util::{
+    codec::{FramedRead, LinesCodec},
+    task::AbortOnDropHandle,
+};
 
 pub const AVATAR_CALL_TIMEOUT: Duration = Duration::from_secs(5);
 const AVATAR_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_EVENT_QUEUE: usize = 256;
+const MAX_RENDERER_LINE: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum AvatarError {
@@ -69,11 +72,12 @@ pub(super) fn lip_sync_line(character: &str, rms: f32) -> Result<String, AvatarE
     .encode_line()?)
 }
 
+type Reply = oneshot::Sender<Result<(), AvatarError>>;
+
 pub(super) enum WriteItem {
-    Request { id: u64, line: String },
+    Request { id: u64, line: String, reply: Reply },
     OneWay(String),
 }
-pub(super) type PendingReplies = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<(), AvatarError>>>>>;
 
 pub(super) enum ModelState {
     Loading,
@@ -100,35 +104,32 @@ impl ShownCharacter {
     }
 }
 
-/// The renderer process and non-blocking async channels to its stdio workers.
+/// Owns one renderer subprocess and its bounded JSON Lines connection.
 pub struct Avatar {
-    child: Option<Child>,
+    #[cfg(windows)]
+    pid: u32,
     started: Instant,
-    pub(super) write_tx: Option<mpsc::Sender<WriteItem>>,
-    events_rx: mpsc::UnboundedReceiver<AvatarEvent>,
-    pending: PendingReplies,
+    worker: Option<AbortOnDropHandle<()>>,
+    pub(super) write_tx: mpsc::Sender<WriteItem>,
+    events_rx: mpsc::Receiver<AvatarEvent>,
     pub(super) events: VecDeque<AvatarEvent>,
     next_id: u64,
-    /// Shared with both stdio workers, so a renderer that dies while idle is
-    /// reported unhealthy before the next call notices.
-    pub(super) healthy: Arc<AtomicBool>,
     pub(super) shown: HashMap<String, ShownCharacter>,
 }
 
 impl Avatar {
     #[cfg(windows)]
     pub(crate) fn pid(&self) -> u32 {
-        self.child.as_ref().map_or(0, Child::id)
+        self.pid
     }
 
-    /// Spawns the renderer. `program` is the `ene-avatar` binary; the caller
-    /// resolves it so a missing binary is an error before any model loads.
     pub fn spawn(program: &Path, client_id: &str) -> Result<Self, AvatarError> {
-        let mut command = std::process::Command::new(program);
+        let mut command = Process::new(program);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
+            .kill_on_drop(true)
             .env_remove(LAYOUT_FILE_ENV);
         if let Some(dirs) = directories::ProjectDirs::from("", "", "ene") {
             let filename = format!("{}.json", hex::encode(Sha256::digest(client_id)));
@@ -136,42 +137,36 @@ impl Avatar {
             command.env(LAYOUT_FILE_ENV, layout);
         }
         #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            command.creation_flags(CREATE_NO_WINDOW);
-        }
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         let mut child = command.spawn().map_err(|error| AvatarError::Spawn {
             path: program.display().to_string(),
             error: error.to_string(),
         })?;
+        #[cfg(windows)]
+        let pid = child.id().unwrap_or_default();
         let stdin = child.stdin.take().ok_or(AvatarError::NoStdin)?;
         let stdout = child.stdout.take().ok_or(AvatarError::NoStdout)?;
-        let (write_tx, write_rx) = mpsc::channel(64);
-        let (events_tx, events_rx) = mpsc::unbounded_channel();
-        let pending: PendingReplies = Arc::new(Mutex::new(HashMap::new()));
-        let healthy = Arc::new(AtomicBool::new(true));
-        let writer_pending = Arc::clone(&pending);
-        let writer_healthy = Arc::clone(&healthy);
-        thread::spawn(move || write_loop(stdin, write_rx, &writer_pending, &writer_healthy));
-        let reader_pending = Arc::clone(&pending);
-        let reader_healthy = Arc::clone(&healthy);
-        thread::spawn(move || read_loop(stdout, &events_tx, &reader_pending, &reader_healthy));
+        let (write_tx, requests) = mpsc::channel(64);
+        let (events, events_rx) = mpsc::channel(MAX_EVENT_QUEUE);
+        let worker = AbortOnDropHandle::new(tokio::spawn(async move {
+            serve_io(stdin, stdout, requests, events).await;
+            let _exited = child.wait().await;
+        }));
         Ok(Self {
-            child: Some(child),
+            #[cfg(windows)]
+            pid,
             started: Instant::now(),
-            write_tx: Some(write_tx),
+            worker: Some(worker),
+            write_tx,
             events_rx,
-            pending,
             events: VecDeque::new(),
             next_id: 1,
-            healthy,
             shown: HashMap::new(),
         })
     }
 
     pub fn is_healthy(&self) -> bool {
-        self.healthy.load(Ordering::Acquire)
+        !self.write_tx.is_closed()
     }
 
     pub fn uptime(&self) -> Duration {
@@ -205,8 +200,7 @@ impl Avatar {
         }
     }
 
-    /// Sends one command and awaits its reply with a bounded timeout so a stalled
-    /// renderer never freezes the Tokio thread.
+    /// The timeout covers queueing, pipe writes and the renderer reply.
     pub(super) async fn call(&mut self, command: Command) -> Result<(), AvatarError> {
         if !self.is_healthy() {
             return Err(AvatarError::Unhealthy);
@@ -218,33 +212,19 @@ impl Avatar {
             command,
         }
         .encode_line()?;
-        let Some(write_tx) = self.write_tx.clone() else {
-            return Err(AvatarError::InputClosed);
+        let (reply, answer) = oneshot::channel();
+        let exchange = async {
+            self.write_tx
+                .send(WriteItem::Request { id, line, reply })
+                .await
+                .map_err(|_| AvatarError::InputClosed)?;
+            answer.await.map_err(|_| AvatarError::Exited)?
         };
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.pending.lock().insert(id, reply_tx);
-        if write_tx
-            .send(WriteItem::Request { id, line })
-            .await
-            .is_err()
-        {
-            self.pending.lock().remove(&id);
-            self.healthy.store(false, Ordering::Release);
-            return Err(AvatarError::InputClosed);
-        }
-        match tokio::time::timeout(AVATAR_CALL_TIMEOUT, reply_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => {
-                self.healthy.store(false, Ordering::Release);
-                Err(AvatarError::Exited)
-            }
+        match tokio::time::timeout(AVATAR_CALL_TIMEOUT, exchange).await {
+            Ok(result) => result,
             Err(_) => {
-                self.pending.lock().remove(&id);
-                self.healthy.store(false, Ordering::Release);
-                if let Some(child) = self.child.as_mut()
-                    && let Err(error) = child.kill()
-                {
-                    tracing::debug!(%error, "the avatar child could not be killed");
+                if let Some(worker) = &self.worker {
+                    worker.abort();
                 }
                 Err(AvatarError::Timeout)
             }
@@ -257,177 +237,122 @@ impl Avatar {
         self.events.drain(..).collect()
     }
 
-    /// Sends `quit` without waiting indefinitely; kills the child if it does
-    /// not exit within the bounded shutdown budget.
-    pub fn shutdown(mut self) {
-        if let Some(write_tx) = self.write_tx.take()
-            && let Ok(line) = (Request {
-                id: Some(self.next_id),
-                command: Command::Quit {},
-            })
-            .encode_line()
+    /// Requests graceful shutdown, then cancels the child owner on timeout.
+    pub async fn shutdown(mut self) {
+        if let Ok(line) = (Request {
+            id: None,
+            command: Command::Quit {},
+        })
+        .encode_line()
         {
-            let _queued = write_tx.try_send(WriteItem::OneWay(line));
+            let _queued = self.write_tx.try_send(WriteItem::OneWay(line));
         }
-        // Taking the child marks it reaped, so `Drop` cannot kill a pid that
-        // the OS may already have reused.
-        let Some(mut child) = self.child.take() else {
-            return;
-        };
-        let deadline = std::time::Instant::now() + AVATAR_SHUTDOWN_TIMEOUT;
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) if std::time::Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(15));
-                }
-                _ => {
-                    reap(&mut child);
-                    return;
-                }
-            }
+        if let Some(mut worker) = self.worker.take() {
+            let _exited = tokio::time::timeout(AVATAR_SHUTDOWN_TIMEOUT, &mut worker).await;
         }
     }
 }
 
-/// Channels a test uses to stand in for the renderer process. Constructed by
-/// `Avatar::for_test`, driven by the test module.
 #[cfg(test)]
 pub(super) struct TestRenderer {
     pub(super) requests: mpsc::Receiver<WriteItem>,
-    pub(super) pending: PendingReplies,
-    pub(super) events: mpsc::UnboundedSender<AvatarEvent>,
+    pub(super) events: mpsc::Sender<AvatarEvent>,
 }
 
 #[cfg(test)]
 impl Avatar {
-    /// Builds an `Avatar` with no child process, so a test can answer its own
-    /// requests and publish its own events.
     pub(super) fn for_test(shown: HashMap<String, CharacterConfig>) -> (Self, TestRenderer) {
         let (write_tx, requests) = mpsc::channel(64);
-        let (events, events_rx) = mpsc::unbounded_channel();
-        let pending: PendingReplies = Arc::new(Mutex::new(HashMap::new()));
+        let (events, events_rx) = mpsc::channel(MAX_EVENT_QUEUE);
         let avatar = Self {
-            child: None,
+            #[cfg(windows)]
+            pid: 0,
             started: Instant::now(),
-            write_tx: Some(write_tx),
+            worker: None,
+            write_tx,
             events_rx,
-            pending: Arc::clone(&pending),
             events: VecDeque::new(),
             next_id: 1,
-            healthy: Arc::new(AtomicBool::new(true)),
             shown: shown
                 .into_iter()
                 .map(|(id, config)| (id, ShownCharacter::new(config, ModelState::Ready)))
                 .collect(),
         };
-        (
-            avatar,
-            TestRenderer {
-                requests,
-                pending,
-                events,
-            },
-        )
+        (avatar, TestRenderer { requests, events })
     }
 }
 
-/// Kills a still-running renderer and reaps it. Errors are debug-only because
-/// a renderer that already exited makes both calls fail harmlessly.
-fn reap(child: &mut Child) {
-    if let Err(error) = child.kill() {
-        tracing::debug!(%error, "the avatar child could not be killed");
-    }
-    if let Err(error) = child.wait() {
-        tracing::debug!(%error, "the avatar child could not be reaped");
-    }
-}
+type InFlight = Option<(u64, Reply)>;
 
-impl Drop for Avatar {
-    fn drop(&mut self) {
-        self.write_tx.take();
-        if let Some(mut child) = self.child.take() {
-            reap(&mut child);
+pub(super) async fn serve_io(
+    stdin: impl AsyncWrite + Unpin,
+    stdout: impl AsyncRead + Unpin,
+    requests: mpsc::Receiver<WriteItem>,
+    events: mpsc::Sender<AvatarEvent>,
+) {
+    let mut pending = None;
+    if let Err(error) = exchange(stdin, stdout, requests, events, &mut pending).await {
+        tracing::debug!(%error, "the avatar renderer disconnected");
+        if let Some((_, reply)) = pending {
+            let _replied = reply.send(Err(error));
         }
     }
 }
 
-/// Runs the writer until the pipe closes, then marks the renderer unhealthy. A
-/// stdio worker only returns when its pipe is gone, so no later call can
-/// succeed.
-fn write_loop(
-    mut stdin: ChildStdin,
-    mut rx: mpsc::Receiver<WriteItem>,
-    pending: &PendingReplies,
-    healthy: &AtomicBool,
-) {
-    while let Some(item) = rx.blocking_recv() {
-        let (id, line) = match item {
-            WriteItem::Request { id, line } => (Some(id), line),
-            WriteItem::OneWay(line) => (None, line),
-        };
-        if let Err(error) = stdin
-            .write_all(line.as_bytes())
-            .and_then(|()| stdin.flush())
-        {
-            let reason = AvatarError::WriteFailed(error.to_string());
-            if let Some(id) = id
-                && let Some(tx) = pending.lock().remove(&id)
-            {
-                let _replied = tx.send(Err(reason));
-            }
-            break;
-        }
-    }
-    healthy.store(false, Ordering::Release);
-}
-
-/// Reads renderer output until stdin closes, then marks the renderer
-/// unhealthy, so one that dies while idle is reported before the next call
-/// notices the closed pipe.
-pub(super) fn read_loop(
-    stdout: impl std::io::Read,
-    events_tx: &mpsc::UnboundedSender<AvatarEvent>,
-    pending: &PendingReplies,
-    healthy: &AtomicBool,
-) {
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    let mut fail_reason = AvatarError::Exited;
+async fn exchange(
+    mut stdin: impl AsyncWrite + Unpin,
+    stdout: impl AsyncRead + Unpin,
+    mut requests: mpsc::Receiver<WriteItem>,
+    events: mpsc::Sender<AvatarEvent>,
+    pending: &mut InFlight,
+) -> Result<(), AvatarError> {
+    let mut lines = FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_RENDERER_LINE));
     loop {
-        line.clear();
-        let (id, reply) = match reader.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => match serde_json::from_str::<AvatarMessage>(&line) {
-                Ok(AvatarMessage::Reply { id, .. }) => (id, Ok(())),
-                Ok(AvatarMessage::ErrorReply { id, error }) => {
-                    (id, Err(AvatarError::Renderer(error)))
-                }
-                Ok(AvatarMessage::Fatal(RendererFailure::Error { error })) => {
-                    fail_reason = AvatarError::Renderer(error);
-                    break;
-                }
-                Ok(AvatarMessage::Event(event)) => {
-                    let _emitted = events_tx.send(event);
-                    continue;
-                }
-                Err(error) => {
-                    fail_reason = AvatarError::InvalidJson(error.to_string());
-                    break;
-                }
-            },
-            Err(error) => {
-                fail_reason = AvatarError::OutputFailed(error.to_string());
-                break;
+        tokio::select! {
+            line = lines.next() => {
+                let line = line.ok_or(AvatarError::Exited)?
+                    .map_err(|error| AvatarError::OutputFailed(error.to_string()))?;
+                let message = serde_json::from_str(&line)
+                    .map_err(|error| AvatarError::InvalidJson(error.to_string()))?;
+                deliver(message, pending, &events)?;
             }
-        };
-        if let Some(tx) = pending.lock().remove(&id) {
-            let _discarded = tx.send(reply);
+            request = requests.recv(), if pending.is_none() => {
+                let line = match request {
+                    Some(WriteItem::Request { id, line, reply }) => {
+                        *pending = Some((id, reply));
+                        line
+                    }
+                    Some(WriteItem::OneWay(line)) => line,
+                    None => return Ok(()),
+                };
+                stdin.write_all(line.as_bytes()).await
+                    .map_err(|error| AvatarError::WriteFailed(error.to_string()))?;
+            }
         }
     }
-    let waiters: Vec<_> = pending.lock().drain().map(|(_, tx)| tx).collect();
-    for tx in waiters {
-        let _replied = tx.send(Err(fail_reason.clone()));
+}
+
+fn deliver(
+    message: AvatarMessage,
+    pending: &mut InFlight,
+    events: &mpsc::Sender<AvatarEvent>,
+) -> Result<(), AvatarError> {
+    let (id, result) = match message {
+        AvatarMessage::Reply { id, .. } => (id, Ok(())),
+        AvatarMessage::ErrorReply { id, error } => (id, Err(AvatarError::Renderer(error))),
+        AvatarMessage::Fatal(RendererFailure::Error { error }) => {
+            return Err(AvatarError::Renderer(error));
+        }
+        AvatarMessage::Event(event) => {
+            return events
+                .try_send(event)
+                .map_err(|error| AvatarError::OutputFailed(error.to_string()));
+        }
+    };
+    if pending.as_ref().is_some_and(|(waiting, _)| *waiting == id)
+        && let Some((_, reply)) = pending.take()
+    {
+        let _replied = reply.send(result);
     }
-    healthy.store(false, Ordering::Release);
+    Ok(())
 }

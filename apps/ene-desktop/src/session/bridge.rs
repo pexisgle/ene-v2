@@ -146,7 +146,7 @@ impl DeviceBridge {
             changed
         } else {
             self.renderer_retry.failed(avatar.uptime());
-            avatar.shutdown();
+            avatar.shutdown().await;
             true
         }
     }
@@ -374,7 +374,7 @@ impl DeviceBridge {
     /// for, so they get a bounded chance to finish first.
     pub(super) async fn shutdown(&mut self) {
         if let Some(avatar) = self.avatar.take() {
-            avatar.shutdown();
+            avatar.shutdown().await;
         }
         // The set is moved out so the mutex guard is not held across an await.
         let mut background = std::mem::take(&mut *self.background.lock());
