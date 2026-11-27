@@ -22,8 +22,7 @@ use ene_rpc as w;
 use rig_ecs::prelude::*;
 use serde_json::{Value, json};
 
-/// Records a client's result and answers the waiting tool call. The result is
-/// matched to its operation by id; the client id it carries is the record.
+/// Records a result from the client to which the operation was dispatched.
 pub(crate) fn complete(
     world: &mut World,
     result: &w::DeviceOperationResult,
@@ -32,13 +31,18 @@ pub(crate) fn complete(
     let Some(operation) = store.client_repo().operation(&result.operation_id)? else {
         return Err(HostError::NotFound(("device operation not found").into()));
     };
-    if operation.capability == w::COMPUTER_USE && operation.client_id != result.client_id {
+    if operation.client_id != result.client_id {
         return Err(HostError::Permission(
             ("the result belongs to another client").into(),
         ));
     }
     if operation.status.is_terminal() {
         return Ok(wire::device_state(&operation));
+    }
+    if operation.status != super::DeviceStatus::Dispatched {
+        return Err(HostError::Conflict(
+            "the operation has not been dispatched".into(),
+        ));
     }
     let computer = match prepare_computer_use(
         world.get_resource::<ComputerUse>(),

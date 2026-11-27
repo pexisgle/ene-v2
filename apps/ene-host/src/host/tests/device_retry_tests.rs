@@ -34,6 +34,7 @@ fn queued_work_reconnect_checks_the_original_run_and_current_grants() {
         harness.run_until(|_| !repo.outstanding_operations("desk").unwrap().is_empty());
         let queued = repo.outstanding_operations("desk").unwrap().remove(0);
         assert_eq!(queued.status, DeviceStatus::Pending);
+        assert_rejected_result(&mut harness, &queued.id, "desk", DeviceStatus::Pending);
         assert_eq!(
             queued.scope,
             DeviceScope::Work {
@@ -86,6 +87,12 @@ fn queued_work_reconnect_checks_the_original_run_and_current_grants() {
                 repo.operation(&queued.id).unwrap().unwrap().status,
                 DeviceStatus::Dispatched
             );
+            assert_rejected_result(
+                &mut harness,
+                &queued.id,
+                "other-client",
+                DeviceStatus::Dispatched,
+            );
         } else {
             assert!(
                 stream.try_recv().is_err(),
@@ -102,4 +109,35 @@ fn queued_work_reconnect_checks_the_original_run_and_current_grants() {
             assert_eq!(rejected, [] as [String; 0]);
         }
     }
+}
+
+fn assert_rejected_result(
+    harness: &mut Harness,
+    operation_id: &str,
+    client_id: &str,
+    expected: DeviceStatus,
+) {
+    let result = w::DeviceOperationResult {
+        client_id: client_id.into(),
+        operation_id: operation_id.into(),
+        success: true,
+        output: "{}".into(),
+        ..Default::default()
+    };
+    let error = device::complete(harness.app.world_mut(), &result).unwrap_err();
+    match expected {
+        DeviceStatus::Pending => assert!(matches!(error, crate::host::HostError::Conflict(_))),
+        DeviceStatus::Dispatched => assert!(matches!(error, crate::host::HostError::Permission(_))),
+        _ => panic!("fixture expected an unfinished operation"),
+    }
+    assert_eq!(
+        harness
+            .store()
+            .client_repo()
+            .operation(operation_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        expected
+    );
 }

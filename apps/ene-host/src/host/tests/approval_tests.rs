@@ -750,6 +750,11 @@ fn a_capability_tool_call_is_dispatched_after_gate_approval() {
             ..files_capability()
         },
     );
+    let (_, mut stream) = harness
+        .app
+        .world()
+        .resource::<DeviceHub>()
+        .register(&ClientId::parse("c1").unwrap());
     activate(harness.app.world_mut(), &harness.companion, "c1");
     harness.accept("key-1", "ファイルに書いて").unwrap();
     let request = pending_approval(&mut harness);
@@ -794,6 +799,10 @@ fn a_capability_tool_call_is_dispatched_after_gate_approval() {
         .clone();
     assert_eq!(operation.capability, "device.files");
     assert_eq!(operation.client_id, "c1");
+    let Some(w::device_event::Event::Operation(sent)) = stream.try_recv().unwrap().event else {
+        panic!("the approved operation must reach the client stream");
+    };
+    assert_eq!(sent.operation_id, operation.id);
     device::complete(
         harness.app.world_mut(),
         &w::DeviceOperationResult {
