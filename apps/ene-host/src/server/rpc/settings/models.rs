@@ -1,12 +1,11 @@
 //! Settings service.
 
 use super::super::Services;
-use super::connections::validate_settings_revision;
 use super::{model_item, notify_settings, parse_connection_id};
-use crate::host::error::HostError;
 use crate::host::model;
 use crate::host::settings;
 use crate::host::settings::CredentialState;
+use crate::host::{HostServices, error::Result};
 
 use connectrpc::ConnectError;
 use connectrpc::RequestContext;
@@ -58,25 +57,14 @@ pub(super) async fn register_credentials(
         .filter(|secret| !secret.is_empty())
         .ok_or_else(|| ConnectError::invalid_argument("secret is required"))?
         .to_owned();
-    services
-        .change(move |services| {
-            let store = &services.store;
-            let repo = store.settings_repo();
-            validate_settings_revision(&repo, expected)?;
-            if repo.connection(id.as_str())?.is_none() {
-                return Err(HostError::NotFound("connection not found".into()));
-            }
-            model::save_secret(&services.credentials, id.as_str(), &secret)?;
-            notify_settings(
-                &services.notifier,
-                settings::project(&repo.settings()?, &services.providers),
-            );
-            Ok(w::CredentialResult {
-                credential_state: CredentialState::Registered.as_str().into(),
-                ..Default::default()
-            })
+    change_credentials(services, move |host| {
+        model::save_secret(&host.credentials, id.as_str(), &secret, expected)?;
+        Ok(w::CredentialResult {
+            credential_state: CredentialState::Registered.as_str().into(),
+            ..Default::default()
         })
-        .await
+    })
+    .await
 }
 
 pub(super) async fn revoke_credentials(
@@ -85,15 +73,26 @@ pub(super) async fn revoke_credentials(
     request: ServiceRequest<'_, w::Id>,
 ) -> ServiceResult<w::Empty> {
     let id = parse_connection_id(request.id)?;
+    change_credentials(services, move |host| {
+        model::delete_secret(&host.credentials, id.as_str())?;
+        Ok(w::Empty::default())
+    })
+    .await
+}
+
+async fn change_credentials<T: Send + 'static>(
+    services: &Services,
+    operation: impl FnOnce(&HostServices) -> Result<T> + Send + 'static,
+) -> ServiceResult<T> {
+    let result = services.with_vault(operation).await?;
     services
-        .change(move |services| {
-            let store = &services.store;
-            model::delete_secret(&services.credentials, id.as_str())?;
+        .change(move |host| {
+            let response = result?;
             notify_settings(
-                &services.notifier,
-                settings::project(&store.settings_repo().settings()?, &services.providers),
+                &host.notifier,
+                settings::project(&host.store.settings_repo().settings()?, &host.providers),
             );
-            Ok(w::Empty::default())
+            Ok(response)
         })
         .await
 }

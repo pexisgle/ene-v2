@@ -594,6 +594,7 @@ mod tests {
                     app.world().resource::<host::model::Credentials>(),
                     "llm-preview",
                     "test-key",
+                    None,
                 )
             })
             .await

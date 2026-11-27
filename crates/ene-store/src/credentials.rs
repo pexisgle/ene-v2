@@ -84,14 +84,29 @@ impl<'a> CredentialRepo<'a> {
     }
 
     /// Revokes access by detaching the active slot before any vault operation.
-    pub fn revoke(&self, connection: &ConnectionId) -> Result<()> {
+    pub fn revoke(
+        &self,
+        connection: &ConnectionId,
+        revision: u64,
+        created_revision: u64,
+    ) -> Result<()> {
         self.0.write_tx(|tx| {
             let changed = tx.execute(
-                "UPDATE connections SET credential_state = ?2, updated_at = ?3, last_check = NULL
-                 WHERE id = ?1",
-                params![connection.as_str(), CredentialState::Absent.as_str(), now()],
+                "UPDATE connections SET credential_state = ?4, updated_at = ?5, last_check = NULL
+                 WHERE id = ?1 AND revision = ?2 AND created_revision = ?3",
+                params![
+                    connection.as_str(),
+                    revision,
+                    created_revision,
+                    CredentialState::Absent.as_str(),
+                    now()
+                ],
             )?;
-            require_found(changed, "connection not found")?;
+            if changed != 1 {
+                return Err(StoreError::Conflict(
+                    "the credential receiver changed".into(),
+                ));
+            }
             tx.execute(
                 "UPDATE credential_slots SET connection_id = NULL WHERE connection_id = ?1",
                 [connection.as_str()],

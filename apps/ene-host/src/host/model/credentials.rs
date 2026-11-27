@@ -6,10 +6,11 @@
 //! credential is available independently for an unregistered provider endpoint.
 use crate::host::db::{Result, Store};
 use crate::host::error::HostError;
-use crate::host::settings::{Connection, ConnectionConfig, CredentialState, environment_secret};
+use crate::host::settings::{
+    Connection, ConnectionConfig, CredentialState, environment_secret, validate_settings_revision,
+};
 #[cfg(target_os = "macos")]
 use apple_native_keyring_store::keychain::Store as PlatformVault;
-use ene_domain::ConnectionId;
 use ene_store::credentials::VaultSlot;
 use keyring_core::api::CredentialStoreApi as _;
 use once_cell::sync::OnceCell;
@@ -239,7 +240,12 @@ fn vault_error(error: &keyring_core::Error) -> HostError {
 }
 
 /// Stores a secret in the keyring (or only in memory for a session-only host).
-pub(crate) fn save_secret(credentials: &Credentials, connection: &str, secret: &str) -> Result<()> {
+pub(crate) fn save_secret(
+    credentials: &Credentials,
+    connection: &str,
+    secret: &str,
+    expected_settings_revision: Option<u64>,
+) -> Result<()> {
     if secret.is_empty() || secret.chars().count() > 8_192 {
         return Err(HostError::Invalid(
             ("credential must be 1-8192 characters").into(),
@@ -261,7 +267,12 @@ pub(crate) fn save_secret(credentials: &Credentials, connection: &str, secret: &
             "credential store is not initialized".into(),
         ));
     };
-    let outcome = write_and_publish(credentials, vault, connection, secret);
+    let settings = vault.store.settings_repo();
+    let (connection, created) = settings
+        .connection_with_creation(connection)?
+        .ok_or_else(|| HostError::NotFound("connection not found".into()))?;
+    validate_settings_revision(&settings, expected_settings_revision)?;
+    let outcome = write_and_publish(credentials, vault, &connection, created, secret);
     credentials.recover_detached();
     outcome
 }
@@ -269,15 +280,11 @@ pub(crate) fn save_secret(credentials: &Credentials, connection: &str, secret: &
 fn write_and_publish(
     credentials: &Credentials,
     vault: &ManagedVault,
-    connection: &str,
+    connection: &Connection,
+    created: u64,
     secret: &str,
 ) -> Result<()> {
     let _guard = vault.mutations.lock();
-    let (connection, created) = vault
-        .store
-        .settings_repo()
-        .connection_with_creation(connection)?
-        .ok_or_else(|| HostError::NotFound("connection not found".into()))?;
     let repo = vault.store.credential_repo();
     let slot = repo.stage(credentials.session_only())?;
     if slot.session_only {
@@ -302,11 +309,16 @@ fn write_and_publish(
 
 pub(crate) fn delete_secret(credentials: &Credentials, connection: &str) -> Result<()> {
     if let Some(vault) = &credentials.vault {
+        let (current, created) = vault
+            .store
+            .settings_repo()
+            .connection_with_creation(connection)?
+            .ok_or_else(|| HostError::NotFound("connection not found".into()))?;
         let _guard = vault.mutations.lock();
         vault
             .store
             .credential_repo()
-            .revoke(&ConnectionId::parse(connection)?)?;
+            .revoke(&current.id, current.revision, created)?;
     }
     credentials.forget(connection);
     credentials.recover_detached();

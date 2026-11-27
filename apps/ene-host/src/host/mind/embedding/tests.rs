@@ -128,6 +128,7 @@ fn spawn_credential_rotation_server(
                     &endpoint_credentials,
                     "credential-embedding",
                     "backfill-new-key",
+                    None,
                 )
                 .unwrap(),
                 7 => {
@@ -216,7 +217,9 @@ async fn embedding_credentials_rotate_and_revoke_across_clones() {
     let revision = store.settings_repo().settings_revision().unwrap();
     for secret in [Some("old-key"), Some("new-key"), None] {
         match secret {
-            Some(secret) => model::save_secret(&writer, "credential-embedding", secret).unwrap(),
+            Some(secret) => {
+                model::save_secret(&writer, "credential-embedding", secret, None).unwrap()
+            }
             None => model::delete_secret(&writer, "credential-embedding").unwrap(),
         }
         store

@@ -2,6 +2,7 @@
 //! host-side built-in and plugin provider catalog helpers.
 
 use super::model::agent_platform;
+use crate::host::error::{HostError, Result};
 use crate::host::providers::Providers;
 use ene_catalog::SearchAdapter;
 pub(crate) use ene_catalog::{SAKURA_AI_API_KEY_ENV, SAKURA_AI_ENDPOINT};
@@ -15,6 +16,20 @@ pub(crate) use ene_domain::settings::{
 };
 use ene_plugin::{Extension, provider::AuthProfile};
 use ene_rpc as w;
+
+pub(crate) fn validate_settings_revision(
+    repo: &ene_store::settings::SettingsRepo<'_>,
+    expected: Option<u64>,
+) -> Result<()> {
+    if let Some(expected) = expected
+        && repo.settings_revision()? != expected
+    {
+        return Err(HostError::Conflict(
+            "settings changed since the connection was shown".into(),
+        ));
+    }
+    Ok(())
+}
 
 /// The credential status clients can display without opening the platform store.
 pub(crate) fn project(

@@ -465,7 +465,7 @@ fn session_secrets_are_shared_by_clones_but_isolated_between_instances() {
     assert_eq!(first.secret(connection).unwrap(), None);
     assert_eq!(second.secret(connection).unwrap(), None);
 
-    save_secret(&first, connection, "first-secret").unwrap();
+    save_secret(&first, connection, "first-secret", None).unwrap();
     assert_eq!(
         first.secret(connection).unwrap().as_deref(),
         Some("first-secret")
@@ -477,7 +477,7 @@ fn session_secrets_are_shared_by_clones_but_isolated_between_instances() {
     assert_eq!(second.secret(connection).unwrap(), None);
     assert_eq!(second_clone.secret(connection).unwrap(), None);
 
-    save_secret(&second_clone, connection, "second-secret").unwrap();
+    save_secret(&second_clone, connection, "second-secret", None).unwrap();
     assert_eq!(
         second.secret(connection).unwrap().as_deref(),
         Some("second-secret")

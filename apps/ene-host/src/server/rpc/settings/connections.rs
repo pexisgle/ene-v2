@@ -29,7 +29,6 @@ pub(super) async fn delete_connection(
             let store = &dependencies.store;
             let (settings, companions) = store.settings_repo().delete_connection(&id, revision)?;
             dependencies.credentials.forget(id.as_str());
-            dependencies.credentials.recover_detached();
             let view = settings::project(&settings, &dependencies.providers);
             notify_settings(&dependencies.notifier, view.clone());
             for companion in companions {
@@ -40,6 +39,9 @@ pub(super) async fn delete_connection(
             }
             Ok(view)
         })
+        .await?;
+    services
+        .with_vault(|host| host.credentials.recover_detached())
         .await?;
     let has_voicevox = services
         .runtime
@@ -75,7 +77,7 @@ pub(super) async fn check_connection(
         .runtime
         .read_kernel(move |kernel| {
             let repo = dependencies.store.settings_repo();
-            validate_settings_revision(&repo, expected)?;
+            settings::validate_settings_revision(&repo, expected)?;
             let (connection, created) = repo
                 .connection_with_creation(id.as_str())?
                 .ok_or_else(|| HostError::NotFound(("connection not found").into()))?;
@@ -193,20 +195,6 @@ fn combine_llm_checks(
         resources: check.resources.clone(),
         ..previous
     }
-}
-
-pub(super) fn validate_settings_revision(
-    repo: &ene_store::settings::SettingsRepo<'_>,
-    expected: Option<u64>,
-) -> crate::host::error::Result<()> {
-    if let Some(expected) = expected
-        && repo.settings_revision()? != expected
-    {
-        return Err(HostError::Conflict(
-            "settings changed since the connection was shown".into(),
-        ));
-    }
-    Ok(())
 }
 
 pub(super) async fn list_pending_approvals(

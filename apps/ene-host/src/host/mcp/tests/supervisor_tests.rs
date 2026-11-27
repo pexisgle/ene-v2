@@ -797,7 +797,7 @@ async fn f24_http_mcp_sends_auth_header_and_custom_headers_and_recovers_after_cr
     // Registering the secret bumps Credentials::generation() without touching settings.revision,
     // automatically clearing ConfigHold and authenticating with Bearer + X-Tenant.
     let creds = harness.app.world().resource::<Credentials>().clone();
-    crate::host::model::save_secret(&creds, "mcp-auth", "mcp-token").unwrap();
+    crate::host::model::save_secret(&creds, "mcp-auth", "mcp-token", None).unwrap();
     harness
         .store()
         .settings_repo()

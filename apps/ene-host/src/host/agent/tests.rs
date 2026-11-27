@@ -107,7 +107,7 @@ async fn connected_assignments_observe_cloned_credential_mutations() {
     for expected in ["old-key", "new-key", "absent", "direct-key", "absent"] {
         match expected {
             "old-key" | "new-key" => {
-                model::save_secret(&writer, "credential-model", expected).unwrap()
+                model::save_secret(&writer, "credential-model", expected, None).unwrap()
             }
             "direct-key" => writer.remember("credential-model", expected.into()),
             _ => model::delete_secret(&writer, "credential-model").unwrap(),

@@ -46,6 +46,7 @@ pub(super) struct Services {
     pub(super) runtime: Runtime,
     pub(super) shutdown: CancellationToken,
     store_reads: Arc<Semaphore>,
+    vault_operations: Arc<Semaphore>,
 }
 
 impl Services {
@@ -54,6 +55,7 @@ impl Services {
             runtime,
             shutdown,
             store_reads: Arc::new(Semaphore::new(1)),
+            vault_operations: Arc::new(Semaphore::new(1)),
         }
     }
 
@@ -103,6 +105,29 @@ impl Services {
                 .await
                 .map_err(ConnectError::from)?,
         )
+    }
+
+    /// Keeps native vault waits off the kernel lane and bounds blocking workers.
+    pub(super) async fn with_vault<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&HostServices) -> T + Send + 'static,
+    ) -> Result<T, ConnectError> {
+        self.runtime.ready().map_err(ConnectError::from)?;
+        let permit = self
+            .vault_operations
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ConnectError::unavailable("credential store is closed"))?;
+        self.runtime.ready().map_err(ConnectError::from)?;
+        let services = self.runtime.services().clone();
+        let span = tracing::Span::current();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            span.in_scope(|| operation(&services))
+        })
+        .await
+        .map_err(|_| ConnectError::unavailable("credential store operation was interrupted"))
     }
 
     /// One lane owns RPC reads of the shared synchronous SQLite connection.
