@@ -1,7 +1,7 @@
 //! Editable connection options and the supported subset of adapter schemas.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Number;
+use serde_json::{Number, Value};
 use std::collections::BTreeMap;
 
 /// Endpoint options for Google Agent Platform.
@@ -44,7 +44,7 @@ pub struct FieldSchema {
     /// The shape declared for this field.
     pub kind: SchemaType,
     #[serde(rename = "enum", default)]
-    choices: Option<Vec<FormValue>>,
+    choices: Option<Vec<Value>>,
 }
 
 impl FieldSchema {
@@ -52,7 +52,7 @@ impl FieldSchema {
     pub fn choices(&self) -> Option<impl Iterator<Item = &str>> {
         self.choices
             .as_ref()
-            .map(|values| values.iter().filter_map(FormValue::as_text))
+            .map(|values| values.iter().filter_map(Value::as_str))
     }
 }
 
@@ -97,55 +97,26 @@ pub enum FieldKind {
     Text,
 }
 
-/// Settings keyed by their schema property name.
-pub type Options = BTreeMap<String, FormValue>;
-
-/// An option value in the adapter settings.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(untagged)]
-pub enum FormValue {
-    /// Text or an enum choice.
-    Text(String),
-    /// A toggle value.
-    Boolean(bool),
-    /// A number or integer.
-    Number(Number),
-    /// Adapter extensions may contain nested or otherwise non-editable values.
-    Other(serde_json::Value),
-}
-
-impl FormValue {
-    /// Reads a textual setting.
-    pub fn as_text(&self) -> Option<&str> {
-        match self {
-            Self::Text(text) => Some(text),
-            _ => None,
-        }
-    }
-
-    /// Reads a toggle setting.
-    pub fn as_bool(&self) -> Option<bool> {
-        match self {
-            Self::Boolean(value) => Some(*value),
-            _ => None,
-        }
-    }
-
-    /// Formats the current value for a text control.
-    pub fn draft_text(&self) -> String {
-        self.as_text()
-            .map_or_else(|| serde_json::json!(self).to_string(), str::to_owned)
-    }
-
-    /// Parses scalar draft text according to the field schema.
-    pub fn from_draft(kind: FieldKind, text: &str) -> Self {
-        let number = match kind {
-            FieldKind::Integer => text.parse::<i64>().ok().map(Number::from),
-            FieldKind::Number => text.parse::<f64>().ok().and_then(Number::from_f64),
+impl FieldKind {
+    /// Parses a draft using the numeric field kind, keeping invalid input for validation.
+    pub fn draft_value(self, text: &str) -> Value {
+        let number = match self {
+            Self::Integer => text.parse::<i64>().ok().map(Number::from),
+            Self::Number => text.parse::<f64>().ok().and_then(Number::from_f64),
             _ => None,
         };
-        number.map_or_else(|| Self::Text(text.to_owned()), Self::Number)
+        number.map_or_else(|| Value::String(text.to_owned()), Value::Number)
     }
+}
+
+/// Settings keyed by their schema property name.
+pub type Options = BTreeMap<String, Value>;
+
+/// Formats the current value for a text control.
+pub fn draft_text(value: &Value) -> String {
+    value
+        .as_str()
+        .map_or_else(|| value.to_string(), str::to_owned)
 }
 
 #[cfg(test)]
@@ -163,7 +134,7 @@ mod tests {
                 .unwrap();
         options.insert(
             "count".to_owned(),
-            FormValue::from_draft(schema.properties["count"].kind.scalar(), "42"),
+            schema.properties["count"].kind.scalar().draft_value("42"),
         );
         assert_eq!(
             schema.properties["variant"]

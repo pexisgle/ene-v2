@@ -167,14 +167,7 @@ pub(super) async fn probe_openai_speech(
     providers: &Providers,
 ) -> settings::Check {
     let checked_at = now();
-    let base = settings::endpoint_of(connection, providers).unwrap_or_else(|| {
-        connection
-            .endpoint()
-            .endpoint
-            .trim()
-            .trim_end_matches('/')
-            .to_owned()
-    });
+    let base = settings::endpoint_of(connection, providers).unwrap_or_default();
     let Ok(parsed) = Url::parse(&base) else {
         return failed(checked_at, "接続先URLが正しくありません");
     };

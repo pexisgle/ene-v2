@@ -4,10 +4,11 @@ use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button, toggle_switch};
 use ene_client_core::{
-    connections::form::{AgentPlatformOptions, FieldKind, FormValue, Options, OptionsSchema},
+    connections::form::{AgentPlatformOptions, FieldKind, Options, OptionsSchema, draft_text},
     domain::ConnectionEndpoint,
 };
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
+use serde_json::Value;
 
 pub(super) fn render_agent_platform_options(
     pane: &mut ConnectionsPane,
@@ -66,53 +67,21 @@ pub(super) fn render_options_schema(
     for (key, prop) in schema.properties {
         let prop_type = prop.kind.scalar();
         let current_val = opts.get(&key).cloned();
-        let d_key = format!("conn:{id}:r{rev}:opt:{key}");
-
-        if let Some(choices) = prop.choices() {
-            let control = render_schema_enum_field(
-                pane,
-                SchemaFieldCtx {
-                    id,
-                    key: &key,
-                    d_key,
-                    current_val: current_val.as_ref(),
-                    opts: &mut opts,
-                },
-                choices,
-                theme,
-                cx,
-            );
-            controls.push(control);
+        let field = SchemaFieldCtx {
+            id,
+            key: &key,
+            d_key: format!("conn:{id}:r{rev}:opt:{key}"),
+            current_val: current_val.as_ref(),
+            opts: &mut opts,
+        };
+        let control = if let Some(choices) = prop.choices() {
+            render_schema_enum_field(pane, field, choices, theme, cx)
         } else if matches!(prop_type, FieldKind::Boolean) {
-            let control = render_schema_bool_field(
-                pane,
-                SchemaFieldCtx {
-                    id,
-                    key: &key,
-                    d_key,
-                    current_val: current_val.as_ref(),
-                    opts: &mut opts,
-                },
-                theme,
-                cx,
-            );
-            controls.push(control);
+            render_schema_bool_field(pane, field, theme, cx)
         } else {
-            let control = render_schema_scalar_field(
-                pane,
-                SchemaFieldCtx {
-                    id,
-                    key: &key,
-                    d_key,
-                    current_val: current_val.as_ref(),
-                    opts: &mut opts,
-                },
-                prop_type,
-                theme,
-                cx,
-            );
-            controls.push(control);
-        }
+            render_schema_scalar_field(pane, field, prop_type, theme, cx)
+        };
+        controls.push(control);
     }
 
     let serialized = (!opts.is_empty()).then(|| serde_json::json!(opts).to_string());
@@ -143,13 +112,13 @@ fn render_schema_enum_field<'a>(
 ) -> AnyElement {
     let init = ctx
         .current_val
-        .and_then(FormValue::as_text)
+        .and_then(Value::as_str)
         .map_or_default(str::to_owned);
     let d = pane.drafts.draft(cx, ctx.d_key, "", Some(&init), theme);
     let active_val = d.read(cx).text().to_owned();
     if !active_val.is_empty() {
         ctx.opts
-            .insert(ctx.key.to_owned(), FormValue::Text(active_val.clone()));
+            .insert(ctx.key.to_owned(), Value::String(active_val.clone()));
     }
     let chips: Vec<AnyElement> = choices
         .map(|s| {
@@ -198,12 +167,11 @@ fn render_schema_bool_field(
 ) -> AnyElement {
     let init = ctx
         .current_val
-        .and_then(FormValue::as_bool)
+        .and_then(Value::as_bool)
         .map_or("false", |b| if b { "true" } else { "false" });
     let d = pane.drafts.draft(cx, ctx.d_key, "", Some(init), theme);
     let checked = d.read(cx).text() == "true";
-    ctx.opts
-        .insert(ctx.key.to_owned(), FormValue::Boolean(checked));
+    ctx.opts.insert(ctx.key.to_owned(), Value::Bool(checked));
     let target_d = d.clone();
     div()
         .flex()
@@ -238,12 +206,12 @@ fn render_schema_scalar_field(
     theme: &Theme,
     cx: &mut Context<ConnectionsPane>,
 ) -> AnyElement {
-    let init = ctx.current_val.map(FormValue::draft_text);
+    let init = ctx.current_val.map(draft_text);
     let d = pane.drafts.draft(cx, ctx.d_key, "", init.as_deref(), theme);
     let txt = d.read(cx).text().trim().to_owned();
     if !txt.is_empty() {
         ctx.opts
-            .insert(ctx.key.to_owned(), FormValue::from_draft(prop_type, &txt));
+            .insert(ctx.key.to_owned(), prop_type.draft_value(&txt));
     }
     div()
         .flex()
@@ -264,6 +232,6 @@ struct SchemaFieldCtx<'a> {
     id: &'a str,
     key: &'a str,
     d_key: String,
-    current_val: Option<&'a FormValue>,
+    current_val: Option<&'a Value>,
     opts: &'a mut Options,
 }

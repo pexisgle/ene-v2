@@ -83,12 +83,7 @@ pub(crate) fn load_models(rpc: &RpcDispatcher, epoch: u64, connection_ids: Vec<S
             },
             move |models| Update::Models {
                 connection_id: id,
-                models: models
-                    .into_owned()
-                    .items
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
+                models: models.view().items.iter().map(Into::into).collect(),
             },
             failure,
         );
@@ -225,18 +220,18 @@ pub(crate) fn quick_connect_llm(rpc: &RpcDispatcher, epoch: u64, req: QuickConne
             let probe = host
                 .settings
                 .check_connection(check_request(req.id.clone()))
-                .await?
-                .into_owned();
-            let check = probe.check.into_option().unwrap_or_default();
+                .await?;
+            let check = &probe.view().check;
             Ok(Update::SetupFinished {
                 ok: check.healthy,
                 connection_id: Some(req.id),
-                models: check.resources,
+                models: check.resources.iter().copied().map(str::to_owned).collect(),
                 error: check
                     .failure
-                    .into_option()
+                    .as_option()
                     .map(|failure| failure.message)
-                    .filter(|message| !message.trim().is_empty()),
+                    .filter(|message| !message.trim().is_empty())
+                    .map(str::to_owned),
             })
         }
         .await;

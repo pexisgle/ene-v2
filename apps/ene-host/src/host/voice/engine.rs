@@ -38,14 +38,7 @@ fn load_connection_secret(
 fn resolve_base(connection: &Connection, providers: Option<&Providers>) -> String {
     let fallback = Providers::none();
     let providers = providers.unwrap_or(&fallback);
-    crate::host::settings::endpoint_of(connection, providers).unwrap_or_else(|| {
-        connection
-            .endpoint()
-            .endpoint
-            .trim()
-            .trim_end_matches('/')
-            .to_owned()
-    })
+    crate::host::settings::endpoint_of(connection, providers).unwrap_or_default()
 }
 
 pub(crate) struct VoiceEngineContext<'a> {

@@ -181,9 +181,12 @@ from_fields! {
     }
 }
 
-from_fields! {
-    w::Model => domain::ModelInfo {
-        id, name,
+impl From<&w::ModelView<'_>> for domain::ModelInfo {
+    fn from(value: &w::ModelView<'_>) -> Self {
+        Self {
+            id: value.id.to_owned(),
+            name: value.name.to_owned(),
+        }
     }
 }
 
