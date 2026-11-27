@@ -95,6 +95,7 @@ fn queued_work_reconnect_checks_the_original_run_and_current_grants() {
                 DeviceStatus::Dispatched,
             );
             assert!(hub.unregister(&client_id, subscription));
+            let (_replacement, _new_stream) = hub.register(&client_id);
             let late = device::complete(
                 harness.app.world_mut(),
                 &w::DeviceOperationResult {

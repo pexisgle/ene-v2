@@ -788,6 +788,7 @@ message DeviceOperationResult {
   bool success = 3;
   string output = 4; // output_schema に適合する JSON object text
   optional Failure failure = 5;
+  optional string subscription_id = 6; // DeviceOperation で受け取った購読世代
 }
 message DeviceOperationState {
   string operation_id = 1;

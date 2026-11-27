@@ -261,17 +261,20 @@ fn a_confirm_capability_is_gated_and_delivered_to_the_bound_client() {
     assert!(subscription.matches_wire(&operation.subscription_id));
     assert_eq!(operation.capability, "device.files");
     // The client's result answers the waiting tool call.
-    let complete = device::complete(
-        harness.app.world_mut(),
-        &w::DeviceOperationResult {
-            client_id: "c1".into(),
-            operation_id: operation.operation_id.clone(),
-            success: true,
-            output: r#"{"ok":true}"#.into(),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let mut result = w::DeviceOperationResult {
+        client_id: "c1".into(),
+        operation_id: operation.operation_id.clone(),
+        success: true,
+        output: r#"{"ok":true}"#.into(),
+        subscription_id: Some(uuid::Uuid::new_v4().to_string()),
+        ..Default::default()
+    };
+    assert!(matches!(
+        device::complete(harness.app.world_mut(), &result),
+        Err(crate::host::HostError::Conflict(_))
+    ));
+    result.subscription_id = Some(operation.subscription_id);
+    let complete = device::complete(harness.app.world_mut(), &result).unwrap();
     assert_eq!(complete.status, w::DeviceOperationStatus::Completed);
     harness.run_until_text("書いたよ");
 }

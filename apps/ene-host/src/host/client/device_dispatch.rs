@@ -263,7 +263,7 @@ fn dispatch(
     if !ctx
         .store
         .client_repo()
-        .mark_operation_dispatched(&operation.id)?
+        .mark_operation_dispatched(&operation.id, subscription)?
     {
         return Err(HostError::Conflict(
             "the device operation is no longer pending".into(),
@@ -283,7 +283,7 @@ fn dispatch(
     Ok(DeviceStatus::Dispatched)
 }
 
-fn scope_is_live(store: &Store, operation: &DeviceOperation) -> Result<bool> {
+pub(super) fn scope_is_live(store: &Store, operation: &DeviceOperation) -> Result<bool> {
     let target = Some(operation.client_id.as_str());
     Ok(match &operation.scope {
         DeviceScope::Companion(id) => store

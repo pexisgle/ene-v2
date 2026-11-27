@@ -253,6 +253,7 @@ impl Session {
             success,
             output,
             failure: failure.into(),
+            subscription_id: Some(operation.subscription_id.clone()),
             ..Default::default()
         }
     }

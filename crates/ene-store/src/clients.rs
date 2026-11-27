@@ -8,12 +8,16 @@ use crate::{
     id_column, json_column, optional_json_column, to_json,
     util::{now, validate_id},
 };
-use ene_domain::{Activation, Client, DeviceOperation, DeviceScope, DeviceStatus, Failure};
+use ene_domain::{
+    Activation, Client, CompanionId, DeviceOperation, DeviceScope, DeviceStatus, Failure,
+    SubscriptionId,
+};
 use ene_policy::CapabilitySpec;
 use rusqlite::{OptionalExtension, Row, params};
 
 const CLIENT_COLUMNS: &str =
     "id, name, platform, capabilities, capability_specs, revision, last_seen";
+const INVALID_CLIENT_JSON: &str = "stored client JSON is corrupt";
 
 impl FromRow for Client {
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
@@ -21,12 +25,8 @@ impl FromRow for Client {
             id: row.get("id")?,
             name: row.get("name")?,
             platform: row.get("platform")?,
-            capabilities: json_column(row, "capabilities", "stored client JSON is corrupt")?,
-            capability_specs: json_column(
-                row,
-                "capability_specs",
-                "stored client JSON is corrupt",
-            )?,
+            capabilities: json_column(row, "capabilities", INVALID_CLIENT_JSON)?,
+            capability_specs: json_column(row, "capability_specs", INVALID_CLIENT_JSON)?,
             revision: row.get("revision")?,
             last_seen: row.get("last_seen")?,
             granted_capabilities: Vec::new(),
@@ -35,7 +35,8 @@ impl FromRow for Client {
 }
 
 const OPERATION_COLUMNS: &str = "operation_id, client_id, capability, input, \
-     companion_id, work_id, run_id, status, output, failure, created_at, updated_at";
+     companion_id, work_id, run_id, status, output, failure, created_at, updated_at, \
+     dispatch_subscription";
 
 row_fields!(
     Activation,
@@ -309,23 +310,42 @@ impl<'a> ClientRepo<'a> {
     }
 
     pub fn operation(&self, id: &str) -> Result<Option<DeviceOperation>> {
+        Ok(self
+            .operation_with_subscription(id)?
+            .map(|(operation, _)| operation))
+    }
+
+    /// Reads an operation and the exact stream selected by its durable claim.
+    pub fn operation_with_subscription(
+        &self,
+        id: &str,
+    ) -> Result<Option<(DeviceOperation, Option<String>)>> {
         self.0.fetch(
             &format!("SELECT {OPERATION_COLUMNS} FROM device_operations WHERE operation_id = ?1"),
             [id],
-            DeviceOperation::from_row,
+            |row| {
+                Ok((
+                    DeviceOperation::from_row(row)?,
+                    row.get("dispatch_subscription")?,
+                ))
+            },
         )
     }
 
     /// Claims a pending operation before it is made visible on a device stream.
-    pub fn mark_operation_dispatched(&self, id: &str) -> Result<bool> {
+    pub fn mark_operation_dispatched(
+        &self,
+        id: &str,
+        subscription: SubscriptionId,
+    ) -> Result<bool> {
         Ok(self
             .0
             .conn()
             .prepare_cached(
-                "UPDATE device_operations SET status = 'dispatched', updated_at = ?2 \
+                "UPDATE device_operations SET status = 'dispatched', dispatch_subscription = ?2, updated_at = ?3 \
              WHERE operation_id = ?1 AND status = 'pending'",
             )?
-            .execute(params![id, now()])?
+            .execute(params![id, subscription.to_string(), now()])?
             != 0)
     }
 
@@ -348,12 +368,6 @@ impl<'a> ClientRepo<'a> {
         id: &str,
         outcome: std::result::Result<&serde_json::Value, &Failure>,
     ) -> Result<Option<DeviceOperation>> {
-        let Some(operation) = self.operation(id)? else {
-            return Ok(None);
-        };
-        if operation.status.is_terminal() {
-            return Ok(Some(operation));
-        }
         let (status, output, failure) = match outcome {
             Ok(output) => (DeviceStatus::Completed, Some(to_json(output)?), None),
             Err(failure) => (DeviceStatus::Failed, None, Some(to_json(failure)?)),
@@ -407,29 +421,20 @@ impl<'a> ClientRepo<'a> {
 
     /// The companion a client is currently the active client of, if any.
     pub fn activation_for_client(&self, client: &str) -> Result<Option<String>> {
-        Ok(self
-            .active_companions_for_client(client)?
-            .into_iter()
-            .next())
+        self.0.fetch(
+            "SELECT companion_id FROM activations WHERE client_id = ?1 ORDER BY companion_id LIMIT 1",
+            [client],
+            active_companion,
+        )
     }
 
     /// All companions currently resident (active) on `client`.
     pub fn active_companions_for_client(&self, client: &str) -> Result<Vec<String>> {
-        self.0
-            .fetch_all(
-                &format!(
-                    "SELECT {ACTIVATION_COLUMNS} FROM activations \
-                     WHERE client_id = ?1 ORDER BY companion_id"
-                ),
-                [client],
-                Activation::from_row,
-            )
-            .map(|items| {
-                items
-                    .into_iter()
-                    .map(|a| a.companion_id.as_str().to_owned())
-                    .collect()
-            })
+        self.0.fetch_all(
+            "SELECT companion_id FROM activations WHERE client_id = ?1 ORDER BY companion_id",
+            [client],
+            active_companion,
+        )
     }
 
     /// Restores a client row exactly as it was, for rolling back a declaration
@@ -486,6 +491,11 @@ impl<'a> ClientRepo<'a> {
             .execute([companion])?;
         Ok(())
     }
+}
+
+fn active_companion(row: &Row<'_>) -> rusqlite::Result<String> {
+    id_column::<CompanionId>(row, "companion_id", "stored companion id is invalid")
+        .map(|id| id.to_string())
 }
 
 #[cfg(test)]

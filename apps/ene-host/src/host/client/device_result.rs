@@ -8,6 +8,7 @@ use super::{
     DeviceOperation,
     computer::{self, ComputerUse},
     device::{get_state, uncertain},
+    device_dispatch::scope_is_live,
 };
 use crate::host::{
     db::{Result, Store},
@@ -28,7 +29,10 @@ pub(crate) fn complete(
     result: &w::DeviceOperationResult,
 ) -> Result<w::DeviceOperationState> {
     let store = world.resource::<Store>().clone();
-    let Some(operation) = store.client_repo().operation(&result.operation_id)? else {
+    let Some((operation, subscription)) = store
+        .client_repo()
+        .operation_with_subscription(&result.operation_id)?
+    else {
         return Err(HostError::NotFound(("device operation not found").into()));
     };
     if operation.client_id != result.client_id {
@@ -45,7 +49,22 @@ pub(crate) fn complete(
         ));
     }
     let hub = world.resource::<DeviceHub>();
-    let delivery = if hub.connected(&operation.client_id) {
+    let current = hub.subscription(&operation.client_id).filter(|current| {
+        subscription
+            .as_deref()
+            .is_some_and(|saved| current.matches_wire(saved))
+    });
+    if let Some(current) = current
+        && result
+            .subscription_id
+            .as_deref()
+            .is_some_and(|reported| !current.matches_wire(reported))
+    {
+        return Err(HostError::Conflict(
+            "the result belongs to another device stream".into(),
+        ));
+    }
+    let delivery = if current.is_some() && scope_is_live(&store, &operation)? {
         prepare_computer_use(
             world.get_resource::<ComputerUse>(),
             &store,
