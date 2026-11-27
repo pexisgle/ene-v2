@@ -170,10 +170,7 @@ mod tests {
 
         let state = tempfile::tempdir().unwrap();
         let runtime = Runtime::start(state.path()).await.unwrap();
-        let service = Services {
-            runtime: runtime.clone(),
-            shutdown: tokio_util::sync::CancellationToken::new(),
-        };
+        let service = Services::new(runtime.clone(), tokio_util::sync::CancellationToken::new());
         for (id, code) in [
             ("bad id", ErrorCode::InvalidArgument),
             ("missing", ErrorCode::NotFound),
@@ -325,10 +322,7 @@ mod tests {
                 expected_revision: 0,
             })
             .unwrap();
-        let service = Services {
-            runtime: runtime.clone(),
-            shutdown: tokio_util::sync::CancellationToken::new(),
-        };
+        let service = Services::new(runtime.clone(), tokio_util::sync::CancellationToken::new());
         let rpc = StreamMessage::from_message(&w::Id {
             id: "desk".into(),
             ..Default::default()

@@ -128,10 +128,7 @@ mod tests {
             Ok(())
         });
         blocked.await.unwrap();
-        let service = Services {
-            runtime: runtime.clone(),
-            shutdown: CancellationToken::new(),
-        };
+        let service = Services::new(runtime.clone(), CancellationToken::new());
         {
             let message = StreamMessage::from_message(&w::HistoryRequest {
                 companion_id: companion,

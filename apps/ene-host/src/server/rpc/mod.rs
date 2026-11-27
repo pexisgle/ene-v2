@@ -16,7 +16,8 @@ use ene_domain::ClientId;
 use ene_rpc as w;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
+use tokio::sync::Semaphore;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tower_http::{
     catch_panic::CatchPanicLayer,
     limit::RequestBodyLimitLayer,
@@ -44,12 +45,16 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(300);
 pub(super) struct Services {
     pub(super) runtime: Runtime,
     pub(super) shutdown: CancellationToken,
+    store_reads: Arc<Semaphore>,
 }
 
 impl Services {
-    /// The store, held by the runtime, for operations that never need the world.
-    pub(super) fn store(&self) -> crate::host::db::Store {
-        self.runtime.store()
+    fn new(runtime: Runtime, shutdown: CancellationToken) -> Self {
+        Self {
+            runtime,
+            shutdown,
+            store_reads: Arc::new(Semaphore::new(1)),
+        }
     }
 
     pub(super) async fn call<T: Send + 'static>(
@@ -100,19 +105,42 @@ impl Services {
         )
     }
 
-    /// Runs an operation that touches only the store, off the ECS thread.
-    ///
-    /// The actor thread also drives every queued command and the ready check,
-    /// so a handler that only reads SQLite has no reason to queue behind it.
-    /// Readiness is still checked first, because a host that has failed must
-    /// not answer reads either.
+    /// One lane owns RPC reads of the shared synchronous SQLite connection.
+    /// Waiters occupy neither a runtime worker nor a blocking thread.
     pub(super) async fn with_store<T: Send + 'static>(
         &self,
         operation: impl FnOnce(crate::host::db::Store) -> crate::host::error::Result<T> + Send + 'static,
     ) -> ServiceResult<T> {
         self.runtime.ready().map_err(ConnectError::from)?;
-        let store = self.store();
-        Response::ok(operation(store).map_err(ConnectError::from)?)
+        let read = async {
+            let permit = tokio::time::timeout(
+                Duration::from_secs(5),
+                self.store_reads.clone().acquire_owned(),
+            )
+            .await
+            .map_err(|_| ConnectError::resource_exhausted("state reads are busy"))?
+            .map_err(|_| ConnectError::unavailable("state reads are closed"))?;
+            let runtime = self.runtime.clone();
+            let span = tracing::Span::current();
+            let task = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let _span = span.enter();
+                runtime.ready()?;
+                let result = operation(runtime.store())?;
+                runtime.ready()?;
+                Ok::<_, HostError>(result)
+            }));
+            let result = task
+                .await
+                .map_err(|_| ConnectError::internal("state read task failed"))?
+                .map_err(ConnectError::from)?;
+            Response::ok(result)
+        };
+        tokio::select! {
+            biased;
+            () = self.shutdown.cancelled() => Err(ConnectError::unavailable("host is shutting down")),
+            response = read => response,
+        }
     }
 }
 
@@ -166,7 +194,7 @@ pub(super) fn router(
     guard: auth::Guard,
     shutdown: CancellationToken,
 ) -> axum::Router {
-    let services = Arc::new(Services { runtime, shutdown });
+    let services = Arc::new(Services::new(runtime, shutdown));
     let connect = w::HostServiceExt::register(services.clone(), Router::new());
     let connect = w::ChatServiceExt::register(services.clone(), connect);
     let connect = w::SettingsServiceExt::register(services.clone(), connect);
@@ -233,4 +261,68 @@ fn request_span(request: &http::Request<axum::body::Body>) -> tracing::Span {
         );
     }
     DefaultMakeSpan::new().make_span(request)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn sqlite_wait_does_not_block_liveness_or_start_queued_reads_after_shutdown() {
+        let state = tempfile::tempdir().unwrap();
+        let runtime = Runtime::start(state.path()).await.unwrap();
+        let shutdown = CancellationToken::new();
+        let services = Services::new(runtime.clone(), shutdown.clone());
+        let store = runtime.store();
+        let (locked, lock_held) = oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _connection = store.conn();
+            locked.send(()).unwrap();
+            let _released = released.recv_timeout(Duration::from_secs(2));
+        });
+        lock_held.await.unwrap();
+        let (started, read_started) = oneshot::channel();
+        let first = services.clone();
+        let blocked = tokio::spawn(async move {
+            first
+                .with_store(move |store| {
+                    started.send(()).unwrap();
+                    store.settings_repo().settings()?;
+                    Ok(())
+                })
+                .await
+        });
+        read_started.await.unwrap();
+        assert_eq!(healthz().await, http::StatusCode::OK);
+        assert!(
+            !blocked.is_finished(),
+            "the runtime must make progress while SQLite waits"
+        );
+
+        let (started, queued_started) = oneshot::channel();
+        let queued = tokio::spawn(async move {
+            services
+                .with_store(move |_| {
+                    started.send(()).unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        shutdown.cancel();
+        assert_eq!(
+            blocked.await.unwrap().err().unwrap().code,
+            connectrpc::ErrorCode::Unavailable
+        );
+        assert_eq!(
+            queued.await.unwrap().err().unwrap().code,
+            connectrpc::ErrorCode::Unavailable
+        );
+        assert!(queued_started.await.is_err());
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        runtime.shutdown().await.unwrap();
+    }
 }

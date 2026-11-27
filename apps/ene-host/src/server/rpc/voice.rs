@@ -585,10 +585,7 @@ mod tests {
             chunk("", 24_000, quiet.clone(), false),
             StreamMessage::from_message(&w::AudioInputChunk::default()),
         ];
-        let service = Services {
-            runtime: runtime.clone(),
-            shutdown: tokio_util::sync::CancellationToken::new(),
-        };
+        let service = Services::new(runtime.clone(), tokio_util::sync::CancellationToken::new());
         let response = service
             .stream_audio_input(
                 RequestContext::new(http::HeaderMap::new()),
@@ -816,10 +813,7 @@ mod tests {
             }),
             StreamMessage::from_message(&w::AudioInputChunk::default()),
         ];
-        let service = Services {
-            runtime: runtime.clone(),
-            shutdown: tokio_util::sync::CancellationToken::new(),
-        };
+        let service = Services::new(runtime.clone(), tokio_util::sync::CancellationToken::new());
         let response = service
             .stream_audio_input(
                 RequestContext::new(http::HeaderMap::new()),

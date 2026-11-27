@@ -334,10 +334,7 @@ mod tests {
             .await
             .unwrap();
         let shutdown = CancellationToken::new();
-        let service = Services {
-            runtime: runtime.clone(),
-            shutdown: shutdown.clone(),
-        };
+        let service = Services::new(runtime.clone(), shutdown.clone());
         let mut stream = {
             let message = StreamMessage::from_message(&w::SubscribeRequest {
                 client_id: "c1".into(),
@@ -417,10 +414,7 @@ mod tests {
             .await
             .unwrap();
         let shutdown = CancellationToken::new();
-        let service = Services {
-            runtime: runtime.clone(),
-            shutdown: shutdown.clone(),
-        };
+        let service = Services::new(runtime.clone(), shutdown.clone());
 
         let export_msg = StreamMessage::from_message(&w::Id {
             id: "ene".into(),
@@ -580,10 +574,7 @@ mod tests {
             .await
             .unwrap();
         let shutdown = CancellationToken::new();
-        let service = Services {
-            runtime: runtime.clone(),
-            shutdown: shutdown.clone(),
-        };
+        let service = Services::new(runtime.clone(), shutdown.clone());
         let req = StreamMessage::from_message(&w::PreviewCompanionRequest {
             name: "テスト相棒".into(),
             mind: "短く元気にあいさつするテスト用の相棒。".into(),
