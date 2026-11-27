@@ -5,8 +5,11 @@ use crate::{
     schema::{self, Expression, Expressions},
 };
 use bevy::{
-    animation::AnimatedBy, ecs::entity::MapEntities, mesh::morph::MorphWeights,
-    platform::collections::HashMap, prelude::*,
+    animation::AnimatedBy,
+    ecs::entity::MapEntities,
+    mesh::morph::MorphWeights,
+    platform::collections::{HashMap, HashSet},
+    prelude::*,
 };
 
 mod material;
@@ -43,6 +46,7 @@ pub(crate) struct Binds {
     pub(crate) bindings: Vec<ExpressionBinding>,
     #[entities]
     pub(crate) morphs: Vec<MorphTarget>,
+    material_slots: HashSet<usize>,
 }
 
 impl Binds {
@@ -52,25 +56,27 @@ impl Binds {
             .find(|binding| &binding.name == name)
             .map(|binding| binding.target)
     }
+}
 
-    fn materials(&self) -> impl Iterator<Item = usize> + '_ {
-        self.bindings.iter().flat_map(|binding| {
-            binding
-                .definition
+fn material_slots(bindings: &[ExpressionBinding]) -> HashSet<usize> {
+    bindings
+        .iter()
+        .flat_map(|binding| {
+            let expression = &binding.definition;
+            expression
                 .material_color_binds
                 .iter()
                 .flatten()
                 .map(|bind| schema::index(bind.material))
                 .chain(
-                    binding
-                        .definition
+                    expression
                         .texture_transform_binds
                         .iter()
                         .flatten()
                         .map(|bind| schema::index(bind.material)),
                 )
         })
-    }
+        .collect()
 }
 
 /// Expression weights a client sets directly, one entry per expression name.
@@ -256,6 +262,7 @@ pub(crate) fn attach(
         }
     }
     world.entity_mut(root).insert(Binds {
+        material_slots: material_slots(&bindings),
         bindings,
         morphs: morphs.into_values().collect(),
     });

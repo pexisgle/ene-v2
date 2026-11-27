@@ -309,15 +309,22 @@ impl Stepper {
     }
 }
 
+#[derive(Default)]
+struct StepScratch {
+    clock: Stepper,
+    bounds: Vec<(Segment3d, f32)>,
+}
+
 fn simulate(
     time: Res<Time>,
-    mut stepper: Local<Stepper>,
+    mut scratch: Local<StepScratch>,
     mut rigs: Query<(Entity, &mut SpringRig)>,
     props: Query<&SpringJointProps>,
     parents: Query<&ChildOf>,
     mut transforms: ParamSet<(TransformHelper, Query<&mut Transform>)>,
 ) {
-    let steps = stepper.advance(time.into_inner().delta());
+    let steps = scratch.clock.advance(time.into_inner().delta());
+    let bounds = &mut scratch.bounds;
     for (root, mut rig) in &mut rigs {
         if rig.paused || steps == 0 {
             // A system earlier this frame may have overwritten a joint pose
@@ -340,26 +347,23 @@ fn simulate(
             for chain in chains.iter_mut() {
                 // A collider or center may be driven by a joint updated above,
                 // so resolve them again for each step.
-                let bounds: Vec<(Segment3d, f32)> = chain
-                    .colliders
-                    .iter()
-                    .filter_map(|&index| {
-                        let collider = &definitions[index];
-                        let global = transforms
-                            .p0()
-                            .compute_global_transform(collider.entity)
-                            .ok()?;
-                        Some((
-                            Segment3d::from(
-                                collider
-                                    .segment
-                                    .vertices
-                                    .map(|point| global.transform_point(point)),
-                            ),
-                            collider.radius * global.scale().abs().max_element(),
-                        ))
-                    })
-                    .collect();
+                bounds.clear();
+                bounds.extend(chain.colliders.iter().filter_map(|&index| {
+                    let collider = &definitions[index];
+                    let global = transforms
+                        .p0()
+                        .compute_global_transform(collider.entity)
+                        .ok()?;
+                    Some((
+                        Segment3d::from(
+                            collider
+                                .segment
+                                .vertices
+                                .map(|point| global.transform_point(point)),
+                        ),
+                        collider.radius * global.scale().abs().max_element(),
+                    ))
+                }));
                 let center = chain
                     .center
                     .and_then(|entity| transforms.p0().compute_global_transform(entity).ok())
@@ -397,7 +401,7 @@ fn simulate(
                             - head)
                             .normalize_or_zero()
                             * length;
-                    for (segment, radius) in &bounds {
+                    for (segment, radius) in bounds.iter() {
                         push_out(
                             &mut next,
                             head,
@@ -544,24 +548,21 @@ mod tests {
     }
 
     #[test]
-    fn fixed_clock_candidate_preserves_cap_and_remainder_but_needs_manual_consumption() {
+    fn spring_stepper_caps_long_frames_and_preserves_the_fractional_remainder() {
         let mut timer = Stepper::default();
-        let mut fixed = Time::<bevy::time::Fixed>::from_duration(STEP_PERIOD);
-        for frame in [
-            STEP_PERIOD / 2,
-            STEP_PERIOD / 2,
-            Duration::from_nanos(1),
-            Duration::from_secs(10),
-            STEP_PERIOD - Duration::from_nanos(1),
-            STEP_PERIOD * 2,
-            Duration::ZERO,
+        let half = STEP_PERIOD / 2;
+        let remainder = Duration::from_nanos(1);
+        for (frame, steps, elapsed) in [
+            (half, 0, half),
+            (STEP_PERIOD - half, 1, Duration::ZERO),
+            (remainder, 0, remainder),
+            (Duration::from_secs(10), MAX_STEPS as usize, remainder),
+            (STEP_PERIOD - remainder, 1, Duration::ZERO),
+            (STEP_PERIOD * 2, 2, Duration::ZERO),
+            (Duration::ZERO, 0, Duration::ZERO),
         ] {
-            fixed.accumulate_overstep(frame.min(STEP_PERIOD * MAX_STEPS));
-            let steps = (fixed.overstep().as_nanos() / fixed.timestep().as_nanos()) as u32;
-            fixed.discard_overstep(STEP_PERIOD * steps);
-            assert_eq!(timer.advance(frame), steps as usize);
-            assert_eq!(timer.0.elapsed(), fixed.overstep());
-            assert!(steps <= MAX_STEPS);
+            assert_eq!(timer.advance(frame), steps);
+            assert_eq!(timer.0.elapsed(), elapsed);
         }
     }
 

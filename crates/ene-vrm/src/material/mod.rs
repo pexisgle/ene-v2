@@ -738,6 +738,12 @@ mod tests {
         };
         let mut app = gpu_app(ClearColor(Color::NONE));
         let (body_material, outline_material) = build_smoke_materials(&mut app);
+        let world_outline_material = {
+            let mut materials = app.world_mut().resource_mut::<Assets<MToonMaterial>>();
+            let mut outline = materials.get(&outline_material).unwrap().clone();
+            outline.extension.outline = Some(schema::OutlineMode::WorldCoordinates);
+            materials.add(outline)
+        };
         let mesh = build_smoke_mesh(&mut app);
         let joint = app.world_mut().spawn(Transform::default()).id();
         let inverse_bindposes = app
@@ -760,19 +766,20 @@ mod tests {
                 morph.clone(),
             ))
             .id();
-        let outline = app
-            .world_mut()
-            .spawn((
-                Mesh3d(mesh),
-                MeshMaterial3d(outline_material),
-                Visibility::Visible,
-                NoFrustumCulling,
-                Transform::IDENTITY,
-                ChildOf(body),
-                skin,
-                morph,
-            ))
-            .id();
+        let outlines = [outline_material, world_outline_material].map(|material| {
+            app.world_mut()
+                .spawn((
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(material),
+                    Visibility::Visible,
+                    NoFrustumCulling,
+                    Transform::IDENTITY,
+                    ChildOf(body),
+                    skin.clone(),
+                    morph.clone(),
+                ))
+                .id()
+        });
 
         let target =
             app.world_mut()
@@ -808,6 +815,6 @@ mod tests {
                 pipeline.state
             );
         }
-        assert_specialized_pipelines_ok(&app, &[body, outline]);
+        assert_specialized_pipelines_ok(&app, &[body, outlines[0], outlines[1]]);
     }
 }
