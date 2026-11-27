@@ -1,15 +1,16 @@
+mod snapshot;
+
 use crate::character::{
     AvatarState, Character, Config, ConfigError, Notification, queue_motion, reload,
     validate_config,
 };
-use crate::desktop::Output;
 use bevy::{
     app::{AppExit, MainScheduleOrder},
     ecs::schedule::ScheduleLabel,
     prelude::*,
 };
-use ene_avatar_ipc::{Command, MAX_LINE, Request};
-use serde_json::{Value, json};
+use ene_avatar_ipc::{AvatarMessage, Command, MAX_LINE, RendererSnapshot, Request};
+use snapshot::snapshot;
 use std::{
     io::{BufRead, Read, Write},
     sync::mpsc::{self, Receiver, SyncSender},
@@ -18,7 +19,7 @@ use std::{
 
 #[derive(Resource)]
 pub struct Control {
-    pub output: SyncSender<Value>,
+    pub output: SyncSender<AvatarMessage>,
     pub fps: u32,
     #[cfg(target_os = "linux")]
     pub wake_tx: exwlshellev::calloop::channel::Sender<()>,
@@ -98,7 +99,7 @@ fn read_request(input: &mut impl BufRead) -> (Result<Request, ControlError>, boo
 
 pub fn setup(app: &mut App) {
     let (input_tx, input) = mpsc::sync_channel(64);
-    let (output, output_rx) = mpsc::sync_channel::<Value>(64);
+    let (output, output_rx) = mpsc::sync_channel::<AvatarMessage>(64);
     let (done, output_done) = mpsc::channel();
     #[cfg(target_os = "linux")]
     let (wake_tx, wake_rx) = exwlshellev::calloop::channel::channel();
@@ -195,9 +196,9 @@ fn apply_command(
     world: &mut World,
     avatars: &mut QueryState<(Entity, &mut Character)>,
     command: Command,
-) -> Result<Value, ControlError> {
+) -> Result<Option<RendererSnapshot>, ControlError> {
     let target = find_target_entity(world, avatars, &command);
-    match command {
+    let applied = match command {
         Command::Add { character, config } => {
             apply_add_or_set(world, true, target, character, config)
         }
@@ -218,13 +219,16 @@ fn apply_command(
         Command::Motion {
             motion, looping, ..
         } => apply_motion(world, target, motion, looping),
-        Command::Get {} => world
-            .run_system_cached(snapshot)
-            .map_err(|error| ControlError::System(error.to_string())),
+        Command::Get {} => {
+            return world
+                .run_system_cached(snapshot)
+                .map(Some)
+                .map_err(|error| ControlError::System(error.to_string()));
+        }
         Command::Remove { .. } => {
             let entity = target.ok_or(ControlError::UnknownCharacter)?;
             world.despawn(entity);
-            Ok(Value::Null)
+            Ok(())
         }
         Command::Center { monitor, .. } => {
             let entity = target.ok_or(ControlError::UnknownCharacter)?;
@@ -233,14 +237,14 @@ fn apply_command(
                 .ok_or(ControlError::UnknownCharacter)?;
             character.config.monitor = monitor;
             character.config.position = None;
-            Ok(Value::Null)
+            Ok(())
         }
         Command::Fps { value } => {
             if value > 1000 {
                 return Err(ControlError::InvalidFps);
             }
             world.resource_mut::<Control>().fps = value;
-            Ok(Value::Null)
+            Ok(())
         }
         Command::Expression { name, .. } => apply_expression(world, target, name),
         Command::LipSync { rms, .. } => apply_lip_sync(world, target, rms),
@@ -252,9 +256,10 @@ fn apply_command(
         } => apply_place(world, target, monitor, position),
         Command::Quit {} => {
             world.write_message(AppExit::Success);
-            Ok(Value::Null)
+            Ok(())
         }
-    }
+    };
+    applied.map(|()| None)
 }
 
 fn apply_add_or_set(
@@ -263,7 +268,7 @@ fn apply_add_or_set(
     target: Option<Entity>,
     character: String,
     config: Config,
-) -> Result<Value, ControlError> {
+) -> Result<(), ControlError> {
     validate_config(&config)?;
     let entity = match (add, target) {
         (true, None) if !character.is_empty() && character.len() <= 128 => {
@@ -285,13 +290,13 @@ fn apply_add_or_set(
                 if previous != old.config.motion {
                     queue_motion(world, entity);
                 }
-                return Ok(Value::Null);
+                return Ok(());
             }
             entity
         }
     };
     reload(world, entity);
-    Ok(Value::Null)
+    Ok(())
 }
 
 fn apply_motion(
@@ -299,7 +304,7 @@ fn apply_motion(
     target: Option<Entity>,
     motion: Option<String>,
     looping: bool,
-) -> Result<Value, ControlError> {
+) -> Result<(), ControlError> {
     let entity = target.ok_or(ControlError::UnknownCharacter)?;
     let mut old = world
         .get_mut::<Character>(entity)
@@ -317,14 +322,14 @@ fn apply_motion(
     } else {
         queue_motion(world, entity);
     }
-    Ok(Value::Null)
+    Ok(())
 }
 
 fn apply_expression(
     world: &mut World,
     target: Option<Entity>,
     name: Option<String>,
-) -> Result<Value, ControlError> {
+) -> Result<(), ControlError> {
     let entity = target.ok_or(ControlError::UnknownCharacter)?;
     let mut character = world
         .get_mut::<Character>(entity)
@@ -334,14 +339,10 @@ fn apply_expression(
         Some(_) => return Err(ControlError::InvalidExpressionName),
         None => None,
     };
-    Ok(Value::Null)
+    Ok(())
 }
 
-fn apply_lip_sync(
-    world: &mut World,
-    target: Option<Entity>,
-    rms: f32,
-) -> Result<Value, ControlError> {
+fn apply_lip_sync(world: &mut World, target: Option<Entity>, rms: f32) -> Result<(), ControlError> {
     if !rms.is_finite() {
         return Err(ControlError::InvalidLipSync);
     }
@@ -350,7 +351,7 @@ fn apply_lip_sync(
         .get_mut::<Character>(entity)
         .ok_or(ControlError::UnknownCharacter)?;
     character.lip = rms.clamp(0., 1.);
-    Ok(Value::Null)
+    Ok(())
 }
 
 fn apply_look_at(
@@ -358,7 +359,7 @@ fn apply_look_at(
     target: Option<Entity>,
     yaw_deg: Option<f32>,
     pitch_deg: Option<f32>,
-) -> Result<Value, ControlError> {
+) -> Result<(), ControlError> {
     let entity = target.ok_or(ControlError::UnknownCharacter)?;
     let mut character = world
         .get_mut::<Character>(entity)
@@ -374,7 +375,7 @@ fn apply_look_at(
             character.gaze = Some((yaw, pitch));
         }
     }
-    Ok(Value::Null)
+    Ok(())
 }
 
 fn apply_place(
@@ -382,7 +383,7 @@ fn apply_place(
     target: Option<Entity>,
     monitor: Option<String>,
     position: [f32; 2],
-) -> Result<Value, ControlError> {
+) -> Result<(), ControlError> {
     if position
         .iter()
         .any(|v| !v.is_finite() || v.abs() > 1_000_000.)
@@ -397,19 +398,22 @@ fn apply_place(
         character.config.monitor = monitor;
     }
     character.config.position = Some(position);
-    Ok(Value::Null)
+    Ok(())
 }
 
 fn send_command_reply(
     world: &mut World,
     id: Option<u64>,
-    result: Result<Value, ControlError>,
+    result: Result<Option<RendererSnapshot>, ControlError>,
 ) -> bool {
     match id {
         Some(id) => {
             let response = match result {
-                Ok(value) => json!({"id":id, "ok":value}),
-                Err(error) => json!({"id":id, "error":error.to_string()}),
+                Ok(ok) => AvatarMessage::Reply { id, ok },
+                Err(error) => AvatarMessage::ErrorReply {
+                    id,
+                    error: error.to_string(),
+                },
             };
             if let Err(error) = world.resource::<Control>().output.try_send(response) {
                 error!("renderer output unavailable: {error}");
@@ -426,43 +430,10 @@ fn send_command_reply(
     true
 }
 
-fn snapshot(
-    views: Query<&Character>,
-    outputs: Query<&Output>,
-    players: Query<&AnimationPlayer>,
-    control: Res<Control>,
-) -> Value {
-    let mut characters = Vec::new();
-    for character in &views {
-        let config = &character.config;
-        let animation_times: Vec<_> = character
-            .root
-            .and_then(|root| players.get(root).ok())
-            .into_iter()
-            .flat_map(AnimationPlayer::playing_animations)
-            .map(|(_, animation)| animation.seek_time())
-            .collect();
-        let output = crate::desktop::pick_output(config, outputs.iter());
-        let mut resolved = config.clone();
-        resolved.monitor = output.map(|output| output.name.clone());
-        resolved.position = crate::desktop::resolved_position(config, output).map(|p| p.to_array());
-        let mut actor = character.state.json();
-        actor["character"] = json!(character.id);
-        actor["config"] = json!(resolved);
-        actor["expression"] = json!(character.expression);
-        actor["lip"] = json!(character.lip);
-        actor["lip_level"] = json!(character.lip_level);
-        actor["expression_weight"] = json!(character.expression_weight);
-        actor["animation_times"] = json!(animation_times);
-        characters.push(actor);
-    }
-    let monitors: Vec<_> = outputs.iter().map(|o| json!({"name":o.name,"origin":o.origin.to_array(),"size":o.size.to_array(),"units_per_logical_pixel":o.units_per_logical_pixel})).collect();
-    json!({"characters":characters, "monitors":monitors, "fps":control.into_inner().fps})
-}
-
-fn write_output(mut writer: impl Write, output: Receiver<Value>) -> std::io::Result<()> {
+fn write_output(mut writer: impl Write, output: Receiver<AvatarMessage>) -> std::io::Result<()> {
     for message in output {
-        writeln!(writer, "{message}")?;
+        serde_json::to_writer(&mut writer, &message)?;
+        writer.write_all(b"\n")?;
         writer.flush()?;
     }
     Ok(())
@@ -476,7 +447,7 @@ fn publish(
 ) {
     let output = &control.into_inner().output;
     for Notification(event) in events.drain() {
-        if let Err(error) = output.try_send(event) {
+        if let Err(error) = output.try_send(AvatarMessage::Event(event)) {
             error!("renderer output unavailable: {error}");
             exit.write(AppExit::error());
             break;
@@ -487,11 +458,13 @@ fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::desktop::Output;
+    use serde_json::{Value, json};
 
     struct Harness {
         app: App,
         input: SyncSender<Result<Request, ControlError>>,
-        output: Receiver<Value>,
+        output: Receiver<AvatarMessage>,
     }
 
     impl Harness {
@@ -551,7 +524,10 @@ mod tests {
                     .unwrap();
             }
             self.app.update();
-            self.output.try_iter().collect()
+            self.output
+                .try_iter()
+                .map(|message| serde_json::to_value(message).unwrap())
+                .collect()
         }
     }
 
@@ -637,7 +613,7 @@ mod tests {
                         .world()
                         .resource::<Control>()
                         .output
-                        .try_send(Value::Null)
+                        .try_send(AvatarMessage::Reply { id: 0, ok: None })
                         .unwrap();
                 }
             }
@@ -654,7 +630,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(64);
         let (done, completion) = mpsc::channel();
         app.insert_non_send(completion).set_runner(move |_| {
-            tx.send(json!({"id":1,"ok":null})).unwrap();
+            tx.send(AvatarMessage::Reply { id: 1, ok: None }).unwrap();
             AppExit::Success
         });
         let writer = std::thread::spawn(move || {
@@ -668,7 +644,7 @@ mod tests {
             json!({"id":1,"ok":null})
         );
         let (tx, rx) = mpsc::sync_channel(1);
-        tx.send(Value::Null).unwrap();
+        tx.send(AvatarMessage::Reply { id: 1, ok: None }).unwrap();
         drop(tx);
         assert!(write_output(std::io::Cursor::new(&mut [][..]), rx).is_err());
     }

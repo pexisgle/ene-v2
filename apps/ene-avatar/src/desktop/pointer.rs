@@ -18,7 +18,7 @@ use bevy::{
     prelude::*,
     window::WindowRef,
 };
-use serde_json::json;
+use ene_avatar_ipc::AvatarEvent;
 use std::collections::VecDeque;
 
 #[derive(Resource, Default)]
@@ -338,9 +338,9 @@ fn publish_clicks(
             && let Ok(character) = characters.get(click.entity)
             && character.state == AvatarState::Ready
         {
-            notifications.write(Notification(
-                json!({"event":"click", "character":character.id}),
-            ));
+            notifications.write(Notification(AvatarEvent::Click {
+                character: character.id.clone(),
+            }));
         }
     }
 }

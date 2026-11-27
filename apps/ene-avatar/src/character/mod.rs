@@ -13,8 +13,8 @@ use bevy::{
     prelude::*,
     world_serialization::WorldInstanceReady,
 };
+use ene_avatar_ipc::{AvatarEvent, AvatarStatus};
 use ene_vrm::{ExpressionWeights, GazeOverride, SpringRig, Vrm, VrmSystems};
-use serde_json::{Value, json};
 
 #[derive(Component, Default)]
 #[require(Transform, Visibility)]
@@ -53,14 +53,13 @@ pub enum AvatarState {
 }
 
 impl AvatarState {
-    pub fn json(&self) -> Value {
-        let (status, error) = match self {
-            Self::Loading => ("loading", None),
-            Self::Ready => ("ready", None),
-            Self::Suspended => ("suspended", None),
-            Self::Error(error) => ("error", Some(error)),
-        };
-        json!({"status":status, "error":error})
+    pub fn status(&self) -> (AvatarStatus, Option<String>) {
+        match self {
+            Self::Loading => (AvatarStatus::Loading, None),
+            Self::Ready => (AvatarStatus::Ready, None),
+            Self::Suspended => (AvatarStatus::Suspended, None),
+            Self::Error(error) => (AvatarStatus::Error, Some(error.clone())),
+        }
     }
 }
 
@@ -100,7 +99,7 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
 }
 
 #[derive(Message)]
-pub struct Notification(pub Value);
+pub struct Notification(pub AvatarEvent);
 
 impl Character {
     pub fn new(id: String, config: Config) -> Self {
@@ -112,10 +111,12 @@ impl Character {
     }
 
     fn notification(&self) -> Notification {
-        let mut event = self.state.json();
-        event["event"] = "state".into();
-        event["character"] = self.id.clone().into();
-        Notification(event)
+        let (status, error) = self.state.status();
+        Notification(AvatarEvent::State {
+            character: self.id.clone(),
+            status,
+            error,
+        })
     }
 }
 

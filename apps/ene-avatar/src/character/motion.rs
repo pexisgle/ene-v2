@@ -3,7 +3,7 @@
 
 use super::{AvatarState, Character, Notification};
 use bevy::{animation::graph::AnimationNodeType, asset::LoadState, prelude::*};
-use serde_json::json;
+use ene_avatar_ipc::AvatarEvent;
 
 const MOTION_FADE_SECS: f32 = 0.3;
 
@@ -171,7 +171,9 @@ pub fn notify_finished(
             && animation.is_finished()
             && animation.just_completed()
         {
-            events.write(Notification(json!({"event":"finished", "character":c.id})));
+            events.write(Notification(AvatarEvent::Finished {
+                character: c.id.clone(),
+            }));
         }
     }
 }

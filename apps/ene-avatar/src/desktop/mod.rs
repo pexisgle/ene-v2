@@ -532,7 +532,7 @@ mod tests {
         app.world_mut()
             .resource_mut::<Messages<Notification>>()
             .drain()
-            .map(|notification| notification.0)
+            .map(|notification| serde_json::to_value(notification.0).unwrap())
             .collect()
     }
 

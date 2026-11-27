@@ -21,10 +21,7 @@ fn a_reply_and_a_notification_are_distinguished() {
     assert!(matches!(reply, AvatarMessage::Reply { id: 1, .. }));
     let failed: AvatarMessage =
         serde_json::from_str(r#"{"id":2,"error":"unknown character"}"#).unwrap();
-    assert!(matches!(
-        failed,
-        AvatarMessage::Reply { error: Some(_), .. }
-    ));
+    assert!(matches!(failed, AvatarMessage::ErrorReply { id: 2, .. }));
     let event: AvatarMessage =
         serde_json::from_str(r#"{"event":"state","character":"ene","status":"ready"}"#).unwrap();
     assert!(matches!(event, AvatarMessage::Event(_)));
@@ -195,10 +192,7 @@ fn b09_read_loop_resolves_pending_and_preserves_all_event_kinds() {
     assert!(matches!(events[0], AvatarEvent::Click { .. }));
     assert!(matches!(events[1], AvatarEvent::State { .. }));
     assert!(matches!(events[2], AvatarEvent::Finished { .. }));
-    assert_eq!(
-        reply_rx.try_recv().unwrap().unwrap(),
-        serde_json::json!({"status":"done"})
-    );
+    reply_rx.try_recv().unwrap().unwrap();
     assert!(
         waiter_rx.try_recv().unwrap().is_err(),
         "EOF must wake unfinished pending waiters"
@@ -243,10 +237,7 @@ fn bundled_ene_model_resolves_workspace_asset() {
 
 /// Answers requests from a test `Avatar` on a background thread and records
 /// every command the client actually sent, so a test asserts on the wire.
-fn fake_renderer(
-    renderer: TestRenderer,
-    mut respond: impl FnMut(&Command) -> Value + Send + 'static,
-) -> Arc<Mutex<Vec<Command>>> {
+fn fake_renderer(renderer: TestRenderer) -> Arc<Mutex<Vec<Command>>> {
     let TestRenderer {
         mut requests,
         pending,
@@ -263,10 +254,9 @@ fn fake_renderer(
                 break;
             };
             recorded.lock().push(request.command.clone());
-            let reply = respond(&request.command);
             let waiter = pending.lock().remove(&id);
             if let Some(tx) = waiter {
-                let _replied = tx.send(Ok(reply));
+                let _replied = tx.send(Ok(()));
             }
         }
     });
@@ -312,7 +302,7 @@ async fn body_placement_and_scale_each_send_one_atomic_update() {
     shown.monitor = Some("DP-1".into());
     shown.position = Some([10., 20.]);
     let (mut avatar, renderer) = Avatar::for_test(HashMap::from([("ene".to_owned(), shown)]));
-    let sent = fake_renderer(renderer, |_| Value::Null);
+    let sent = fake_renderer(renderer);
 
     let body = ene_domain::BodyBinding {
         monitor: Some("HDMI-1".into()),

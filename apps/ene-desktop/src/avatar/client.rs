@@ -1,6 +1,7 @@
-use ene_avatar_ipc::{AvatarEvent, AvatarMessage, AvatarStatus, CharacterConfig, Command, Request};
+use ene_avatar_ipc::{
+    AvatarEvent, AvatarMessage, AvatarStatus, CharacterConfig, Command, RendererFailure, Request,
+};
 use parking_lot::Mutex;
-use serde_json::Value;
 use std::{
     collections::{HashMap, VecDeque},
     io::{BufRead, BufReader, Write},
@@ -70,8 +71,7 @@ pub(super) enum WriteItem {
     Request { id: u64, line: String },
     OneWay(String),
 }
-pub(super) type PendingReplies =
-    Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, AvatarError>>>>>;
+pub(super) type PendingReplies = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<(), AvatarError>>>>>;
 
 /// The renderer process and non-blocking async channels to its stdio workers.
 pub struct Avatar {
@@ -158,7 +158,7 @@ impl Avatar {
 
     /// Sends one command and awaits its reply with a bounded timeout so a stalled
     /// renderer never freezes the Tokio thread.
-    pub(super) async fn call(&mut self, command: Command) -> Result<Value, AvatarError> {
+    pub(super) async fn call(&mut self, command: Command) -> Result<(), AvatarError> {
         if !self.is_healthy() {
             return Err(AvatarError::Unhealthy);
         }
@@ -420,19 +420,20 @@ pub(super) fn read_loop(
     let mut fail_reason = AvatarError::Exited;
     loop {
         line.clear();
-        match reader.read_line(&mut line) {
+        let (id, reply) = match reader.read_line(&mut line) {
             Ok(0) => break,
             Ok(_) => match serde_json::from_str::<AvatarMessage>(&line) {
-                Ok(AvatarMessage::Reply { id, ok, error }) => {
-                    if let Some(tx) = pending.lock().remove(&id) {
-                        let _discarded = tx.send(match error {
-                            Some(error) => Err(AvatarError::Renderer(error)),
-                            None => Ok(ok),
-                        });
-                    }
+                Ok(AvatarMessage::Reply { id, .. }) => (id, Ok(())),
+                Ok(AvatarMessage::ErrorReply { id, error }) => {
+                    (id, Err(AvatarError::Renderer(error)))
+                }
+                Ok(AvatarMessage::Fatal(RendererFailure::Error { error })) => {
+                    fail_reason = AvatarError::Renderer(error);
+                    break;
                 }
                 Ok(AvatarMessage::Event(event)) => {
                     let _emitted = events_tx.send(event);
+                    continue;
                 }
                 Err(error) => {
                     fail_reason = AvatarError::InvalidJson(error.to_string());
@@ -443,6 +444,9 @@ pub(super) fn read_loop(
                 fail_reason = AvatarError::OutputFailed(error.to_string());
                 break;
             }
+        };
+        if let Some(tx) = pending.lock().remove(&id) {
+            let _discarded = tx.send(reply);
         }
     }
     let waiters: Vec<_> = pending.lock().drain().map(|(_, tx)| tx).collect();
