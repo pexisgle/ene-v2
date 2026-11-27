@@ -37,23 +37,42 @@ pub(super) struct Space {
     entries: Vec<(RecallCandidate, u8)>,
     vectors: Vec<f32>,
     magnitudes: Vec<f64>,
-    by_id: HashMap<String, usize>,
 }
 
 impl Space {
-    fn matches(&self, rows: &[(RecallCandidate, u8)]) -> bool {
-        self.entries.as_slice() == rows
+    fn refresh_importance(&mut self, rows: &[(RecallCandidate, u8)]) -> bool {
+        if self.entries == rows {
+            return true;
+        }
+        if self.entries.len() != rows.len()
+            || self
+                .entries
+                .iter()
+                .zip(rows)
+                .any(|((cached, _), (current, _))| cached != current)
+        {
+            return false;
+        }
+        for ((_, importance), (_, current)) in self.entries.iter_mut().zip(rows) {
+            *importance = *current;
+        }
+        true
     }
 
-    pub(super) fn push(&mut self, candidate: &RecallCandidate, importance: u8, vector: &[f32]) {
+    pub(super) fn push(
+        &mut self,
+        candidate: RecallCandidate,
+        importance: u8,
+        vector: &[f32],
+        magnitude: f64,
+    ) {
         if self.dimensions != 0 && vector.len() != self.dimensions {
             return;
         }
         self.dimensions = vector.len();
-        self.by_id.insert(candidate.id.clone(), self.entries.len());
-        self.entries.push((candidate.clone(), importance));
+        self.entries.push((candidate, importance));
         self.vectors.extend_from_slice(vector);
-        self.magnitudes.push(dot(vector, vector).sqrt());
+        self.magnitudes.push(magnitude);
     }
 
     fn vector(&self, index: usize) -> Option<&[f32]> {
@@ -62,13 +81,6 @@ impl Space {
         }
         self.vectors
             .get(index * self.dimensions..(index + 1) * self.dimensions)
-    }
-
-    fn vector_for(&self, candidate: &RecallCandidate) -> Option<&[f32]> {
-        let index = *self.by_id.get(&candidate.id)?;
-        (&self.entries[index].0 == candidate)
-            .then(|| self.vector(index))
-            .flatten()
     }
 }
 
@@ -93,22 +105,30 @@ impl CompactVectorIndex {
         let key = (companion.to_owned(), space.to_owned());
         if self
             .spaces
-            .get(&key)
-            .is_some_and(|current| current.matches(&rows))
+            .get_mut(&key)
+            .is_some_and(|current| current.refresh_importance(&rows))
         {
             return Ok(());
         }
         let previous = self.spaces.remove(&key);
+        let mut reusable = HashMap::new();
+        if let Some(previous) = &previous {
+            for (index, (candidate, _)) in previous.entries.iter().enumerate() {
+                if let Some(vector) = previous.vector(index) {
+                    reusable.insert(candidate, (vector, previous.magnitudes[index]));
+                }
+            }
+        }
         let mut next = Space {
             dimensions,
             ..Space::default()
         };
-        for (candidate, importance) in &rows {
-            if let Some(vector) = previous.as_ref().and_then(|old| old.vector_for(candidate)) {
-                next.push(candidate, *importance, vector);
+        for (candidate, importance) in rows {
+            if let Some(&(vector, magnitude)) = reusable.get(&candidate) {
+                next.push(candidate, importance, vector, magnitude);
                 continue;
             }
-            let Some(bytes) = store.memory_repo().embedding_blob(candidate, space)? else {
+            let Some(bytes) = store.memory_repo().embedding_blob(&candidate, space)? else {
                 continue;
             };
             let vector = decode(&bytes)?;
@@ -117,7 +137,8 @@ impl CompactVectorIndex {
                     ("stored embedding dimensions do not match its length").into(),
                 ));
             }
-            next.push(candidate, *importance, &vector);
+            let magnitude = dot(&vector, &vector).sqrt();
+            next.push(candidate, importance, &vector, magnitude);
         }
         self.spaces.insert(key, next);
         Ok(())

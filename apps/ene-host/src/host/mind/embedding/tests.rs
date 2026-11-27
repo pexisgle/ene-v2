@@ -47,7 +47,7 @@ fn borrowed_cosine_matches_rig_scores_and_ranks() {
                 id: candidate.to_string(),
                 content_revision: 1,
             };
-            space.push(&candidate, 3, &vector);
+            space.push(candidate.clone(), 3, &vector, dot(&vector, &vector).sqrt());
             if old.is_finite() {
                 expected.push((candidate, old.clamp(-1.0, 1.0)));
             }
