@@ -1,20 +1,13 @@
-//! MCP connection supervisor: settings/credential diffing, backoff, auth
-//! injection, stdio environment/cwd application, and background connection
-//! lifecycle management.
-pub(super) use super::settings::Desired;
+//! Reconciles the desired MCP settings with one live phase per connection.
 use super::{
-    failures::{FailureKind, McpFailures, prune_failures, record_failure},
     projection::{project_servers, snapshot_tools},
     registration::{McpRegistration, Receiver},
-    settings::{
-        ConnectionStamp, DesiredServers, McpSettings, collect_retire_ids, prune_connecting,
-        reload_desired_settings,
-    },
+    settings::{ConnectionStamp, DesiredServers, McpSettings, reload_desired_settings},
     startup,
 };
 use crate::host::{db::Store, model::Credentials, resources::HostRuntime};
 use bevy_ecs::prelude::*;
-use ene_work::mcp::ConnectFailure;
+use ene_work::mcp::{ConnectFailure, backoff_delay};
 use rig_agent::tool::server::{ToolServer, ToolServerHandle};
 use rig_ecs::prelude::*;
 use rig_rmcp::McpConnection;
@@ -25,8 +18,7 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 
-/// How many connect results may queue before a producer waits. A connect
-/// happens once per server, so this is a bound, not a throughput target.
+/// Bound completed handshakes waiting for adoption by the host actor.
 const QUEUE: usize = 32;
 const STABLE_CONNECTION: Duration = Duration::from_secs(60);
 
@@ -44,28 +36,60 @@ pub(crate) enum CheckState {
     Connecting,
 }
 
-/// One connected server and the tool entities it owns.
+pub(super) struct Slot {
+    pub(super) launch: Launch,
+    pub(super) attempts: u32,
+    pub(super) phase: Phase,
+}
+
+pub(super) enum Phase {
+    Opening {
+        _task: AbortOnDropHandle<()>,
+    },
+    Running(Server),
+    Failed {
+        failure: ConnectFailure,
+        retry: Option<Retry>,
+    },
+}
+
+pub(super) struct Retry {
+    at: Instant,
+    _timer: Option<AbortOnDropHandle<()>>,
+}
+
+impl Slot {
+    fn fail(
+        &mut self,
+        failure: ConnectFailure,
+        wake: Option<&Wake>,
+        runtime: &tokio::runtime::Handle,
+    ) {
+        let retry = if matches!(failure, ConnectFailure::Configuration(_)) {
+            self.attempts = 0;
+            None
+        } else {
+            self.attempts = self.attempts.saturating_add(1);
+            let at = Instant::now() + backoff_delay(self.attempts);
+            let timer = wake.cloned().map(|wake| {
+                AbortOnDropHandle::new(runtime.spawn(async move {
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
+                    wake.wake();
+                }))
+            });
+            Some(Retry { at, _timer: timer })
+        };
+        self.phase = Phase::Failed { failure, retry };
+    }
+}
+
 pub(super) struct Server {
     pub(super) connection: McpConnection,
-    pub(super) launch: Launch,
     pub(super) receiver: Receiver,
     pub(super) registry: ToolServerHandle,
     pub(super) connected_at: Instant,
     pub(super) label: String,
     pub(super) allowed: Vec<String>,
-}
-
-/// The servers that are up right now, keyed by connection id.
-#[derive(Default)]
-pub(crate) struct McpServers(pub(super) HashMap<String, Server>);
-
-/// Connection ids a connect task is running for.
-#[derive(Default)]
-pub(super) struct Connecting(pub(super) HashMap<String, Pending>);
-
-pub(super) struct Pending {
-    pub(super) launch: Launch,
-    pub(super) _task: AbortOnDropHandle<()>,
 }
 
 pub(super) enum Event {
@@ -83,10 +107,17 @@ pub(super) enum Event {
     },
 }
 
-/// The event channel the connect tasks report on.
-pub(super) struct EventChannel {
-    pub(super) sender: mpsc::Sender<Event>,
-    pub(super) receiver: mpsc::Receiver<Event>,
+impl Event {
+    fn retire(self, runtime: &tokio::runtime::Handle) {
+        if let Self::Connected { connection, .. } = self {
+            close_connection(connection, runtime);
+        }
+    }
+}
+
+struct EventChannel {
+    sender: mpsc::Sender<Event>,
+    receiver: mpsc::Receiver<Event>,
 }
 
 impl Default for EventChannel {
@@ -101,68 +132,69 @@ impl Default for EventChannel {
 pub(crate) struct Mcp(std::sync::Arc<parking_lot::Mutex<McpSupervisor>>);
 
 impl Mcp {
-    pub(crate) fn lock(&self) -> parking_lot::MutexGuard<'_, McpSupervisor> {
+    pub(super) fn lock(&self) -> parking_lot::MutexGuard<'_, McpSupervisor> {
         self.0.lock()
     }
 
     pub(crate) fn request_reconnect(&self, id: &str, stamp: ConnectionStamp) {
         let mut supervisor = self.lock();
-        if supervisor
-            .servers
-            .0
-            .get(id)
-            .is_some_and(|server| server.launch.stamp == stamp && server.connection.is_closed())
-        {
-            supervisor.servers.0.remove(id);
-        }
-        if supervisor
-            .failures
-            .0
-            .get(id)
-            .is_some_and(|failure| failure.stamp == stamp)
-        {
-            supervisor.failures.0.remove(id);
+        let Some(slot) = supervisor
+            .slots
+            .get_mut(id)
+            .filter(|slot| slot.launch.stamp == stamp)
+        else {
+            return;
+        };
+        match &slot.phase {
+            Phase::Failed { .. } => {
+                supervisor.slots.remove(id);
+            }
+            Phase::Running(server) if server.connection.is_closed() => {
+                supervisor.slots.remove(id);
+            }
+            _ => slot.attempts = 0,
         }
     }
 
     pub(crate) fn check_state(&self, id: &str, stamp: ConnectionStamp) -> CheckState {
-        check_state(&self.lock(), id, stamp)
+        let supervisor = self.lock();
+        match supervisor
+            .slots
+            .get(id)
+            .filter(|slot| slot.launch.stamp == stamp)
+            .map(|slot| &slot.phase)
+        {
+            Some(Phase::Running(server)) if !server.connection.is_closed() => {
+                let mut names: Vec<_> = server
+                    .registry
+                    .snapshot()
+                    .names()
+                    .map(str::to_owned)
+                    .collect();
+                names.sort_unstable();
+                CheckState::Connected(names)
+            }
+            Some(Phase::Failed { failure, .. }) => CheckState::Failed(failure.reason().to_owned()),
+            _ => CheckState::Connecting,
+        }
     }
 
     pub(crate) fn tool_is_current(&self, tool: &McpRegistration) -> bool {
-        self.lock()
-            .servers
-            .0
-            .get(&tool.server)
-            .is_some_and(|server| {
-                server.launch == tool.launch
-                    && !server.connection.is_closed()
-                    && server
-                        .registry
-                        .snapshot()
+        self.lock().slots.get(&tool.server).is_some_and(|slot| {
+            slot.launch == tool.launch
+                && matches!(&slot.phase, Phase::Running(server)
+                    if !server.connection.is_closed() && server.registry.snapshot()
                         .get(tool.definition.name.as_str())
-                        .is_some_and(|registered| {
-                            registered.key() == &tool.key && registered.is_live()
-                        })
-            })
+                        .is_some_and(|registered| registered.key() == &tool.key && registered.is_live()))
+        })
     }
 }
 
-/// Everything the MCP supervisor owns between frames.
-///
-/// The server map, the
-/// in-flight connects, the backoff bookkeeping, the event channel and the
-/// settings snapshot all live here, so nothing else in the host can observe
-/// them in an inconsistent combination.
 #[derive(Default)]
-pub(crate) struct McpSupervisor {
-    pub(super) servers: McpServers,
-    pub(super) connecting: Connecting,
-    pub(super) failures: McpFailures,
-    pub(super) events: EventChannel,
-    pub(super) settings: McpSettings,
-    /// The wake handle retry timers poke. Set once at startup.
-    pub(super) wake: Option<Wake>,
+pub(super) struct McpSupervisor {
+    pub(super) slots: HashMap<String, Slot>,
+    events: EventChannel,
+    settings: McpSettings,
 }
 
 /// Reconcile transports first, then publish their tool registries to Rig.
@@ -177,7 +209,7 @@ pub(super) fn sync(world: &mut World) {
             .is_some_and(|state| state.ready().is_err())
         {
             supervisor.close(runtime);
-            Some(Ok(snapshot_tools(&supervisor.servers)))
+            Some(Ok(HashMap::new()))
         } else {
             runtime.map(|runtime| {
                 supervisor.reconcile(
@@ -186,7 +218,7 @@ pub(super) fn sync(world: &mut World) {
                     world.get_resource::<Wake>(),
                     runtime,
                 )?;
-                Ok(snapshot_tools(&supervisor.servers))
+                Ok(snapshot_tools(&supervisor.slots))
             })
         }
     };
@@ -209,110 +241,56 @@ impl McpSupervisor {
     ) -> crate::host::db::Result<()> {
         reload_desired_settings(&mut self.settings, store, credentials)?;
         let wanted = self.settings.desired.clone();
-        prune_connecting(&mut self.connecting, &wanted);
-        prune_failures(&mut self.failures, &wanted);
         while let Ok(event) = self.events.receiver.try_recv() {
-            accept_event(self, &wanted, event, runtime);
+            self.accept_event(&wanted, event, wake, runtime);
         }
-        for id in collect_retire_ids(&self.servers, &wanted) {
-            if let Some(server) = self.servers.0.remove(&id) {
-                if server.connection.is_closed()
-                    && wanted
-                        .get(&id)
-                        .is_some_and(|want| want.stamp == server.launch.stamp)
-                {
+        self.slots.retain(|id, slot| {
+            let current = wanted
+                .get(id)
+                .is_some_and(|want| want.stamp == slot.launch.stamp);
+            if let Phase::Running(server) = &slot.phase
+                && (!current || server.connection.is_closed())
+            {
+                close_connection(server.connection.clone(), runtime);
+                if current {
                     if server.connected_at.elapsed() >= STABLE_CONNECTION {
-                        self.failures.0.remove(&id);
+                        slot.attempts = 0;
                     }
-                    record_failure(
-                        &mut self.failures,
-                        id,
-                        server.launch.stamp,
+                    slot.fail(
                         ConnectFailure::Transient("the MCP server disconnected".into()),
-                        self.wake.clone(),
+                        wake,
                         runtime,
                     );
                 }
-                close_connection(server.connection, runtime);
             }
-        }
-        let targets = plan_connect_targets(
-            &self.servers,
-            &self.connecting,
-            &self.failures,
-            &wanted,
-            Instant::now(),
-        );
-        self.connecting.0.extend(spawn_connect_tasks(
-            targets,
-            store,
-            credentials,
-            &self.events.sender,
-            wake,
-            runtime,
-        ));
+            current
+        });
+        self.start_connections(&wanted, store, credentials, wake, runtime);
         Ok(())
     }
 
-    fn close(&mut self, runtime: Option<&tokio::runtime::Handle>) {
-        self.connecting.0.clear();
-        self.failures.0.clear();
-        for (_, server) in self.servers.0.drain() {
-            if let Some(runtime) = runtime {
-                close_connection(server.connection, runtime);
-            }
-        }
-        if let Some(runtime) = runtime {
-            while let Ok(event) = self.events.receiver.try_recv() {
-                if let Event::Connected { connection, .. } = event {
-                    close_connection(connection, runtime);
-                }
-            }
-        }
-    }
-}
-
-pub(super) fn close_connection(connection: McpConnection, runtime: &tokio::runtime::Handle) {
-    runtime.spawn(async move { connection.close().await });
-}
-
-fn plan_connect_targets(
-    servers: &McpServers,
-    connecting: &Connecting,
-    failures: &McpFailures,
-    wanted: &DesiredServers,
-    now: Instant,
-) -> Vec<(String, Desired)> {
-    wanted
-        .iter()
-        .filter(|(id, _)| {
-            if servers.0.contains_key(*id) || connecting.0.contains_key(*id) {
-                return false;
-            }
-            if let Some(failure) = failures.0.get(*id) {
-                match &failure.kind {
-                    FailureKind::ConfigHold => return false,
-                    FailureKind::Transient { next_retry, .. } if now < *next_retry => return false,
-                    FailureKind::Transient { .. } => {}
-                }
-            }
-            true
-        })
-        .map(|(id, want)| (id.clone(), want.clone()))
-        .collect()
-}
-
-fn spawn_connect_tasks(
-    targets: Vec<(String, Desired)>,
-    store: &Store,
-    credentials: Option<&Credentials>,
-    sender: &mpsc::Sender<Event>,
-    wake: Option<&Wake>,
-    runtime: &tokio::runtime::Handle,
-) -> Vec<(String, Pending)> {
-    targets
-        .into_iter()
-        .map(|(id, want)| {
+    fn start_connections(
+        &mut self,
+        wanted: &DesiredServers,
+        store: &Store,
+        credentials: Option<&Credentials>,
+        wake: Option<&Wake>,
+        runtime: &tokio::runtime::Handle,
+    ) {
+        let now = Instant::now();
+        for (id, want) in wanted {
+            let attempts = match self.slots.get(id) {
+                Some(Slot {
+                    phase:
+                        Phase::Failed {
+                            retry: Some(retry), ..
+                        },
+                    attempts,
+                    ..
+                }) if now >= retry.at => *attempts,
+                Some(_) => continue,
+                None => 0,
+            };
             let registry = ToolServer::new().run();
             let launch = Launch {
                 stamp: want.stamp,
@@ -320,7 +298,8 @@ fn spawn_connect_tasks(
             };
             let event_id = id.clone();
             let event_launch = launch.clone();
-            let sender = sender.clone();
+            let want = want.clone();
+            let sender = self.events.sender.clone();
             let credentials = credentials.cloned();
             let store = store.clone();
             let wake = wake.cloned();
@@ -360,105 +339,79 @@ fn spawn_connect_tasks(
                     }
                 }
             }));
-            (
-                id,
-                Pending {
+            self.slots.insert(
+                id.clone(),
+                Slot {
                     launch,
-                    _task: AbortOnDropHandle::new(task),
+                    attempts,
+                    phase: Phase::Opening {
+                        _task: AbortOnDropHandle::new(task),
+                    },
                 },
-            )
-        })
-        .collect()
-}
-
-pub(super) fn accept_event(
-    supervisor: &mut McpSupervisor,
-    wanted: &DesiredServers,
-    event: Event,
-    runtime: &tokio::runtime::Handle,
-) {
-    let (id, launch) = match &event {
-        Event::Connected { id, launch, .. } | Event::Failed { id, launch, .. } => (id, launch),
-    };
-    let want = wanted.get(id).filter(|want| want.stamp == launch.stamp);
-    let current = supervisor
-        .connecting
-        .0
-        .get(id)
-        .is_some_and(|pending| &pending.launch == launch);
-    let Some(want) = want.filter(|_| current) else {
-        if let Event::Connected { connection, .. } = event {
-            close_connection(connection, runtime);
+            );
         }
-        return;
-    };
-    supervisor.connecting.0.remove(id);
-    match event {
-        Event::Connected {
-            id,
-            launch,
-            connection,
-            receiver,
-            registry,
-        } => {
-            let previous = supervisor.servers.0.insert(
-                id,
-                Server {
+    }
+
+    pub(super) fn accept_event(
+        &mut self,
+        wanted: &DesiredServers,
+        event: Event,
+        wake: Option<&Wake>,
+        runtime: &tokio::runtime::Handle,
+    ) {
+        let (id, launch) = match &event {
+            Event::Connected { id, launch, .. } | Event::Failed { id, launch, .. } => (id, launch),
+        };
+        let Some((slot, want)) =
+            self.slots
+                .get_mut(id)
+                .zip(wanted.get(id))
+                .filter(|(slot, want)| {
+                    slot.launch == *launch
+                        && want.stamp == launch.stamp
+                        && matches!(slot.phase, Phase::Opening { .. })
+                })
+        else {
+            event.retire(runtime);
+            return;
+        };
+        match event {
+            Event::Connected {
+                connection,
+                receiver,
+                registry,
+                ..
+            } => {
+                slot.phase = Phase::Running(Server {
                     connection,
-                    launch,
                     receiver,
                     registry,
                     connected_at: Instant::now(),
                     label: want.name.clone(),
                     allowed: want.config.allowed_tools.clone(),
-                },
-            );
-            if let Some(previous) = previous {
-                close_connection(previous.connection, runtime);
+                });
+            }
+            Event::Failed { id, failure, .. } => {
+                tracing::warn!(connection = %id, reason = failure.reason(), "the MCP server did not connect");
+                slot.fail(failure, wake, runtime);
             }
         }
-        Event::Failed {
-            id,
-            launch,
-            failure,
-        } => {
-            tracing::warn!(connection = %id, reason = failure.reason(), "the MCP server did not connect");
-            record_failure(
-                &mut supervisor.failures,
-                id,
-                launch.stamp,
-                failure,
-                supervisor.wake.clone(),
-                runtime,
-            );
+    }
+
+    fn close(&mut self, runtime: Option<&tokio::runtime::Handle>) {
+        for (_, slot) in self.slots.drain() {
+            if let (Some(runtime), Phase::Running(server)) = (runtime, slot.phase) {
+                close_connection(server.connection, runtime);
+            }
+        }
+        while let Ok(event) = self.events.receiver.try_recv() {
+            if let Some(runtime) = runtime {
+                event.retire(runtime);
+            }
         }
     }
 }
 
-/// Inspects the current MCP state for a specific configuration and credential generation.
-fn check_state(supervisor: &McpSupervisor, id: &str, stamp: ConnectionStamp) -> CheckState {
-    if let Some(server) = supervisor.servers.0.get(id)
-        && server.launch.stamp == stamp
-        && !server.connection.is_closed()
-    {
-        let mut names: Vec<_> = server
-            .registry
-            .snapshot()
-            .names()
-            .map(str::to_owned)
-            .collect();
-        names.sort_unstable();
-        return CheckState::Connected(names);
-    }
-    if let Some(failure) = supervisor.failures.0.get(id)
-        && failure.stamp == stamp
-        && !supervisor
-            .connecting
-            .0
-            .get(id)
-            .is_some_and(|pending| pending.launch.stamp == stamp)
-    {
-        return CheckState::Failed(failure.failure.reason().to_owned());
-    }
-    CheckState::Connecting
+pub(super) fn close_connection(connection: McpConnection, runtime: &tokio::runtime::Handle) {
+    runtime.spawn(async move { connection.close().await });
 }

@@ -10,7 +10,6 @@
 //!
 //! A server that is disabled, deleted, re-configured or disconnected loses its
 //! tools: the connection closes and the tool entities despawn.
-mod failures;
 mod projection;
 mod registration;
 mod settings;

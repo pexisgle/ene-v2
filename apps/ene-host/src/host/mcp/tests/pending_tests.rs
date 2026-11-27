@@ -3,7 +3,7 @@
 use super::*;
 use crate::host::{
     db::Store,
-    mcp::supervisor::{Event, accept_event, sync},
+    mcp::supervisor::{Event, sync},
     resources::HostRuntime,
     settings::{Connection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint},
 };
@@ -119,10 +119,8 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
         world.init_resource::<Mcp>();
         sync(&mut world);
         peer.started().await;
-        assert!(world.resource::<Mcp>().lock().servers.0.is_empty());
-        let old_launch = world.resource::<Mcp>().lock().connecting.0[row.id.as_str()]
-            .launch
-            .clone();
+        let mcp = world.resource::<Mcp>().clone();
+        let old_launch = opening_launch(&mcp, row.id.as_str());
         let mut replacement = PendingPeer::new(root.path(), "replacement.pid");
         match action {
             "disable" => {
@@ -158,6 +156,7 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
                 assert!(world.resource::<HostState>().fail("test failure"));
             }
             "world drop" => {
+                drop(mcp);
                 drop(world);
                 peer.stopped(action).await;
                 continue;
@@ -169,11 +168,8 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
             replacement.started().await;
         }
         peer.stopped(action).await;
-        assert!(world.resource::<Mcp>().lock().servers.0.is_empty());
         if matches!(action, "revision" | "recreate") {
-            let new_launch = world.resource::<Mcp>().lock().connecting.0[row.id.as_str()]
-                .launch
-                .clone();
+            let new_launch = opening_launch(&mcp, row.id.as_str());
             assert_ne!(old_launch, new_launch);
             if action == "recreate" {
                 assert!(old_launch.stamp.revision < new_launch.stamp.revision);
@@ -199,14 +195,12 @@ async fn pending_launch_invalidation_reaps_never_initialized_children() {
             sync(&mut world);
             replacement.stopped("replacement shutdown").await;
         }
-        assert!(world.resource::<Mcp>().lock().connecting.0.is_empty());
+        assert!(mcp.lock().slots.is_empty());
     }
 }
 
 fn assert_late_failure_ignored(mcp: &Mcp, id: &str, old_launch: Launch, new_launch: &Launch) {
-    let mut supervisor = std::mem::take(&mut *mcp.lock());
-    accept_event(
-        &mut supervisor,
+    mcp.lock().accept_event(
         &[(
             id.to_owned(),
             Desired {
@@ -220,8 +214,15 @@ fn assert_late_failure_ignored(mcp: &Mcp, id: &str, old_launch: Launch, new_laun
             launch: old_launch,
             failure: ene_work::mcp::ConnectFailure::Transient("late failure".into()),
         },
+        None,
         &tokio::runtime::Handle::current(),
     );
-    *mcp.lock() = supervisor;
-    assert_eq!(mcp.lock().connecting.0[id].launch, *new_launch);
+    assert_eq!(opening_launch(mcp, id), *new_launch);
+}
+
+fn opening_launch(mcp: &Mcp, id: &str) -> Launch {
+    let supervisor = mcp.lock();
+    let slot = &supervisor.slots[id];
+    assert!(matches!(slot.phase, Phase::Opening { .. }));
+    slot.launch.clone()
 }

@@ -19,11 +19,9 @@ use tokio_util::task::AbortOnDropHandle;
 /// Asserts the pending connect for `c1` still carries `launch`.
 fn assert_pending_launch(supervisor: &McpSupervisor, launch: &Launch) {
     assert_eq!(
-        supervisor
-            .connecting
-            .0
-            .get("c1")
-            .map(|pending| &pending.launch),
+        supervisor.slots.get("c1").and_then(|slot| {
+            matches!(slot.phase, Phase::Opening { .. }).then_some(&slot.launch)
+        }),
         Some(launch)
     );
 }
@@ -36,36 +34,43 @@ fn attach_now(
     registry: rig_agent::tool::server::ToolServerHandle,
     want: &Desired,
 ) {
-    let previous = world.resource::<Mcp>().lock().servers.0.insert(
+    let previous = world.resource::<Mcp>().lock().slots.insert(
         id.to_owned(),
-        Server {
+        Slot {
             launch,
-            receiver: Default::default(),
-            connection,
-            registry,
-            connected_at: std::time::Instant::now(),
-            label: want.name.clone(),
-            allowed: want.config.allowed_tools.clone(),
+            attempts: 0,
+            phase: Phase::Running(Server {
+                receiver: Default::default(),
+                connection,
+                registry,
+                connected_at: std::time::Instant::now(),
+                label: want.name.clone(),
+                allowed: want.config.allowed_tools.clone(),
+            }),
         },
     );
     assert!(previous.is_none());
 }
 
 fn retire_one_now(world: &mut World, id: &str) {
-    let server = world.resource::<Mcp>().lock().servers.0.remove(id).unwrap();
+    let slot = world.resource::<Mcp>().lock().slots.remove(id).unwrap();
+    let Phase::Running(server) = slot.phase else {
+        panic!("the test server was not running");
+    };
     close_connection(server.connection, &world.resource::<HostRuntime>().0);
     project_servers_now(world);
 }
 
 fn project_servers_now(world: &mut World) {
     let mcp = world.resource::<Mcp>().clone();
-    let snapshot = snapshot_tools(&mcp.lock().servers);
+    let snapshot = snapshot_tools(&mcp.lock().slots);
     project_servers(world, snapshot);
 }
 
 fn project(
     world: &mut World,
     id: &str,
+    launch: &Launch,
     server: &Server,
     catalog: &rig_agent::tool::ToolCatalog,
 ) -> bool {
@@ -74,7 +79,7 @@ fn project(
         [(
             id.to_owned(),
             (
-                server.launch.clone(),
+                launch.clone(),
                 server.receiver.clone(),
                 collect_server_tools(id, server, catalog),
             ),
@@ -91,12 +96,12 @@ async fn registry_refresh_replaces_handlers_and_keeps_pinned_calls() {
     let (connection, registry, _, task) = connect_echo(echo).await;
     let expected = registry.add_managed_tools(vec![local_tool("echo", 1)]);
     let pinned = registry.snapshot();
+    let launch = Launch {
+        stamp: STAMP,
+        owner: registry.owner(),
+    };
     let server = Server {
         connection: connection.clone(),
-        launch: Launch {
-            stamp: STAMP,
-            owner: registry.owner(),
-        },
         registry: registry.clone(),
         receiver: Default::default(),
         connected_at: std::time::Instant::now(),
@@ -106,11 +111,11 @@ async fn registry_refresh_replaces_handlers_and_keeps_pinned_calls() {
     let mut harness = crate::host::tests::Harness::new([]);
     let world = harness.app.world_mut();
     world.init_resource::<Mcp>();
-    assert!(project(world, "c1", &server, &pinned));
+    assert!(project(world, "c1", &launch, &server, &pinned));
     let old_entity = tool_entity(world, "mcp_notes_echo").unwrap();
     let refreshed = registry.reconcile_managed_tools(expected.clone(), vec![local_tool("echo", 2)]);
     let current = registry.snapshot();
-    assert!(project(world, "c1", &server, &current));
+    assert!(project(world, "c1", &launch, &server, &current));
     let entity = tool_entity(world, "mcp_notes_echo").unwrap();
     assert_ne!(old_entity, entity);
     assert!(world.get_entity(old_entity).is_err());
@@ -144,7 +149,7 @@ async fn registry_refresh_replaces_handlers_and_keeps_pinned_calls() {
         current.get("echo").unwrap().key(),
     );
     registry.reconcile_managed_tools(refreshed, Vec::new());
-    assert!(project(world, "c1", &server, &registry.snapshot()));
+    assert!(project(world, "c1", &launch, &server, &registry.snapshot()));
     assert!(tool_entity(world, "mcp_notes_echo").is_none());
     assert!(world.get_entity(entity).is_err());
     let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -153,9 +158,9 @@ async fn registry_refresh_replaces_handlers_and_keeps_pinned_calls() {
         local_tool("echo", 4)
             .with_liveness(move || probe.load(std::sync::atomic::Ordering::SeqCst)),
     ]);
-    assert!(project(world, "c1", &server, &registry.snapshot()));
+    assert!(project(world, "c1", &launch, &server, &registry.snapshot()));
     alive.store(false, std::sync::atomic::Ordering::SeqCst);
-    assert!(project(world, "c1", &server, &registry.snapshot()));
+    assert!(project(world, "c1", &launch, &server, &registry.snapshot()));
     assert!(tool_entity(world, "mcp_notes_echo").is_none());
     connection.close().await;
     task.abort();
@@ -248,54 +253,58 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
 
     let runtime = tokio::runtime::Handle::current();
     world.insert_resource(HostRuntime(runtime.clone()));
-    let mut supervisor = std::mem::take(&mut *world.resource::<Mcp>().lock());
-    supervisor.connecting.0.insert(
-        "c1".into(),
-        Pending {
-            launch: new_launch.clone(),
-            _task: AbortOnDropHandle::new(runtime.spawn(std::future::pending())),
-        },
-    );
+    let mcp = world.resource::<Mcp>().clone();
     let wanted = DesiredServers::from([("c1".into(), want("notes"))]);
-    accept_event(
-        &mut supervisor,
-        &wanted,
-        Event::Failed {
-            id: "c1".into(),
-            launch: old_launch.clone(),
-            failure: ene_work::mcp::ConnectFailure::Transient("old failure".into()),
-        },
-        &runtime,
-    );
-    assert_pending_launch(&supervisor, &new_launch);
-    let mut changed_revision = wanted.clone();
-    changed_revision.get_mut("c1").unwrap().stamp.revision += 1;
-    accept_event(
-        &mut supervisor,
-        &changed_revision,
-        Event::Failed {
-            id: "c1".into(),
-            launch: new_launch.clone(),
-            failure: ene_work::mcp::ConnectFailure::Transient("obsolete revision".into()),
-        },
-        &runtime,
-    );
-    assert_pending_launch(&supervisor, &new_launch);
-    accept_event(
-        &mut supervisor,
-        &wanted,
-        Event::Connected {
-            id: "c1".into(),
-            launch: new_launch,
-            connection: new.clone(),
-            receiver: Default::default(),
-            registry: new_registry,
-        },
-        &runtime,
-    );
-    // accept_event worked on the local copy; publish it before projecting.
-    *world.resource::<Mcp>().lock() = std::mem::take(&mut supervisor);
-    assert!(world.resource::<Mcp>().lock().connecting.0.is_empty());
+    {
+        let mut supervisor = mcp.lock();
+        supervisor.slots.insert(
+            "c1".into(),
+            Slot {
+                launch: new_launch.clone(),
+                attempts: 0,
+                phase: Phase::Opening {
+                    _task: AbortOnDropHandle::new(runtime.spawn(std::future::pending())),
+                },
+            },
+        );
+        supervisor.accept_event(
+            &wanted,
+            Event::Failed {
+                id: "c1".into(),
+                launch: old_launch.clone(),
+                failure: ene_work::mcp::ConnectFailure::Transient("old failure".into()),
+            },
+            None,
+            &runtime,
+        );
+        assert_pending_launch(&supervisor, &new_launch);
+        let mut changed_revision = wanted.clone();
+        changed_revision.get_mut("c1").unwrap().stamp.revision += 1;
+        supervisor.accept_event(
+            &changed_revision,
+            Event::Failed {
+                id: "c1".into(),
+                launch: new_launch.clone(),
+                failure: ene_work::mcp::ConnectFailure::Transient("obsolete revision".into()),
+            },
+            None,
+            &runtime,
+        );
+        assert_pending_launch(&supervisor, &new_launch);
+        supervisor.accept_event(
+            &wanted,
+            Event::Connected {
+                id: "c1".into(),
+                launch: new_launch,
+                connection: new.clone(),
+                receiver: Default::default(),
+                registry: new_registry,
+            },
+            None,
+            &runtime,
+        );
+        assert!(matches!(supervisor.slots["c1"].phase, Phase::Running(_)));
+    }
     project_servers_now(world);
     let current = tool_entity(world, "mcp_notes_echo").unwrap();
     old_generation.store(99, std::sync::atomic::Ordering::SeqCst);
@@ -310,8 +319,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
     })
     .await
     .expect("the old launch processed its late notification");
-    accept_event(
-        &mut supervisor,
+    mcp.lock().accept_event(
         &wanted,
         Event::Connected {
             id: "c1".into(),
@@ -320,6 +328,7 @@ async fn stale_launch_results_and_notifications_cannot_change_the_new_owner() {
             receiver: Default::default(),
             registry: old_registry.clone(),
         },
+        None,
         &runtime,
     );
     old_registry.add_managed_tools(vec![local_tool("late", 99)]);
@@ -646,15 +655,14 @@ async fn b17_mcp_backoff_prevents_tight_retry_and_recovers_on_reconnect_request(
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             sync(harness.app.world_mut());
-            if harness
-                .app
-                .world()
-                .resource::<Mcp>()
-                .lock()
-                .failures
-                .0
-                .contains_key("mcp-backoff")
-            {
+            if matches!(
+                harness
+                    .app
+                    .world()
+                    .resource::<Mcp>()
+                    .check_state("mcp-backoff", STAMP),
+                CheckState::Failed(_)
+            ) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;

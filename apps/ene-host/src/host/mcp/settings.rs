@@ -1,5 +1,4 @@
 //! The enabled MCP connection configurations the supervisor reconciles.
-use super::supervisor::{Connecting, McpServers};
 use crate::host::{db::Store, model::Credentials};
 use ene_domain::settings::{ConnectionConfig, CredentialState, McpConnection};
 use std::{collections::BTreeMap, sync::Arc};
@@ -94,26 +93,4 @@ fn desired(
             ))
         })
         .collect())
-}
-
-pub(super) fn prune_connecting(connecting: &mut Connecting, wanted: &DesiredServers) {
-    connecting.0.retain(|id, pending| {
-        wanted
-            .get(id)
-            .is_some_and(|want| want.stamp == pending.launch.stamp)
-    });
-}
-
-pub(super) fn collect_retire_ids(servers: &McpServers, wanted: &DesiredServers) -> Vec<String> {
-    servers
-        .0
-        .iter()
-        .filter(|(id, server)| {
-            server.connection.is_closed()
-                || !wanted
-                    .get(*id)
-                    .is_some_and(|want| want.stamp == server.launch.stamp)
-        })
-        .map(|(id, _)| id.clone())
-        .collect()
 }

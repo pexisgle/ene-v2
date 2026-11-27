@@ -3,7 +3,7 @@ mod pending_tests;
 mod supervisor_tests;
 
 use super::*;
-use super::{startup::open, supervisor::*};
+use super::{settings::Desired, startup::open, supervisor::*};
 use crate::host::resources::{ExternalToolOwner, HostExternalTool};
 use rig_agent::tool::server::{ToolServer, ToolServerHandle};
 use rig_core::message::ToolName;

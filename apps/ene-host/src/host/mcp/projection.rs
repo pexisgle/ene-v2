@@ -1,7 +1,7 @@
 //! ECS tool projection for connected MCP servers.
 use super::{
     registration::{McpRegistration, Receiver, ServeRegisteredTool},
-    supervisor::{Launch, Mcp, McpServers, Server},
+    supervisor::{Launch, Mcp, Phase, Server, Slot},
 };
 use crate::host::{
     db::Store,
@@ -18,19 +18,21 @@ use std::{collections::HashMap, sync::Arc};
 type ServerTools = HashMap<ToolName, (Arc<ToolDefinition>, RegisteredTool)>;
 pub(super) type ToolSnapshot = HashMap<String, (Launch, Receiver, ServerTools)>;
 
-pub(super) fn snapshot_tools(servers: &McpServers) -> ToolSnapshot {
-    servers
-        .0
+pub(super) fn snapshot_tools(slots: &HashMap<String, Slot>) -> ToolSnapshot {
+    slots
         .iter()
-        .map(|(id, server)| {
-            (
+        .filter_map(|(id, slot)| {
+            let Phase::Running(server) = &slot.phase else {
+                return None;
+            };
+            Some((
                 id.clone(),
                 (
-                    server.launch.clone(),
+                    slot.launch.clone(),
                     server.receiver.clone(),
                     collect_server_tools(id, server, &server.registry.snapshot()),
                 ),
-            )
+            ))
         })
         .collect()
 }
