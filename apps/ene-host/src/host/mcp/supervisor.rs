@@ -18,13 +18,17 @@ use ene_work::mcp::ConnectFailure;
 use rig_agent::tool::server::{ToolServer, ToolServerHandle};
 use rig_ecs::prelude::*;
 use rig_rmcp::McpConnection;
-use std::{collections::HashMap, time::Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 
 /// How many connect results may queue before a producer waits. A connect
 /// happens once per server, so this is a bound, not a throughput target.
 const QUEUE: usize = 32;
+const STABLE_CONNECTION: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Launch {
@@ -46,6 +50,7 @@ pub(super) struct Server {
     pub(super) launch: Launch,
     pub(super) receiver: Receiver,
     pub(super) registry: ToolServerHandle,
+    pub(super) connected_at: Instant,
     pub(super) label: String,
     pub(super) allowed: Vec<String>,
 }
@@ -102,6 +107,14 @@ impl Mcp {
 
     pub(crate) fn request_reconnect(&self, id: &str, stamp: ConnectionStamp) {
         let mut supervisor = self.lock();
+        if supervisor
+            .servers
+            .0
+            .get(id)
+            .is_some_and(|server| server.launch.stamp == stamp && server.connection.is_closed())
+        {
+            supervisor.servers.0.remove(id);
+        }
         if supervisor
             .failures
             .0
@@ -203,6 +216,23 @@ impl McpSupervisor {
         }
         for id in collect_retire_ids(&self.servers, &wanted) {
             if let Some(server) = self.servers.0.remove(&id) {
+                if server.connection.is_closed()
+                    && wanted
+                        .get(&id)
+                        .is_some_and(|want| want.stamp == server.launch.stamp)
+                {
+                    if server.connected_at.elapsed() >= STABLE_CONNECTION {
+                        self.failures.0.remove(&id);
+                    }
+                    record_failure(
+                        &mut self.failures,
+                        id,
+                        server.launch.stamp,
+                        ConnectFailure::Transient("the MCP server disconnected".into()),
+                        self.wake.clone(),
+                        runtime,
+                    );
+                }
                 close_connection(server.connection, runtime);
             }
         }
@@ -371,7 +401,6 @@ pub(super) fn accept_event(
             receiver,
             registry,
         } => {
-            supervisor.failures.0.remove(&id);
             let previous = supervisor.servers.0.insert(
                 id,
                 Server {
@@ -379,6 +408,7 @@ pub(super) fn accept_event(
                     launch,
                     receiver,
                     registry,
+                    connected_at: Instant::now(),
                     label: want.name.clone(),
                     allowed: want.config.allowed_tools.clone(),
                 },

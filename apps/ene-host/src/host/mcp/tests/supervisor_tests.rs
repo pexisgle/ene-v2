@@ -43,6 +43,7 @@ fn attach_now(
             receiver: Default::default(),
             connection,
             registry,
+            connected_at: std::time::Instant::now(),
             label: want.name.clone(),
             allowed: want.config.allowed_tools.clone(),
         },
@@ -98,6 +99,7 @@ async fn registry_refresh_replaces_handlers_and_keeps_pinned_calls() {
         },
         registry: registry.clone(),
         receiver: Default::default(),
+        connected_at: std::time::Instant::now(),
         label: "notes".into(),
         allowed: Vec::new(),
     };
