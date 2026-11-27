@@ -695,6 +695,54 @@ fn stale_consolidation_cannot_recreate_forgotten_text_or_use_revoked_context() {
 }
 
 #[test]
+fn consolidation_does_not_share_a_private_correction_or_a_revoked_duplicate() {
+    let store = store();
+    companion_row(&store);
+    let repo = store.memory_repo();
+    let private = repo
+        .insert_memory(&new_memory("the old private answer", 7))
+        .unwrap();
+    let mut other = new_memory("a previously shared fact", 7);
+    other.scope = "shared".into();
+    repo.insert_memory(&other).unwrap();
+    repo.control_memory(&other.id, MemoryActionKind::Unshare, "other")
+        .unwrap();
+    let context = repo
+        .consolidation_context("ene", "private answer", &[], 5)
+        .unwrap();
+    let facts = [
+        Fact {
+            content: "the corrected private answer".into(),
+            scope: Some(SHARED_SCOPE.into()),
+            supersedes: Some(private.id),
+            ..Fact::default()
+        },
+        Fact {
+            content: other.content,
+            scope: Some(SHARED_SCOPE.into()),
+            ..Fact::default()
+        },
+    ];
+    let commit = repo.consolidate(&batch(7, context), &facts).unwrap();
+    assert_eq!(commit.inserted, 1);
+    assert_eq!(
+        repo.list_memories("unrelated", None, 5).unwrap().0,
+        [] as [Memory; 0]
+    );
+    let (entries, _) = repo.list_memories("ene", None, 5).unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|memory| memory.content.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([
+            "the corrected private answer",
+            "the old private answer"
+        ])
+    );
+}
+
+#[test]
 fn injected_memory_ids_survive_a_restart() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("host.sqlite3");

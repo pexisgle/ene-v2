@@ -12,7 +12,7 @@ pub struct Turn {
     pub text: String,
 }
 
-/// An existing memory the extraction model may merge into or supersede. The
+/// An existing memory the extraction model may correct. The
 /// revision is the CAS expectation captured before the model ran.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryContext {
@@ -93,7 +93,7 @@ pub struct Extraction {
 pub const EXTRACTION_SYSTEM_PROMPT: &str = "あなたはコンパニオンの経験記憶を整理する抽出器です。\
 会話から長期記憶として残す価値のある事実だけを抽出します。\
 推測・願望・ロールプレイ上の虚構を事実として保存してはいけません。\
-既存記憶と同一の事実は新規作成せず、supersedes に既存IDを指定します。\
+既存記憶と同一の事実は出力しません。会話で誤りの訂正を確認したときだけ、訂正後の事実と supersedes に既存IDを指定します。\
 importance 1以下（忘却済み）の既存記憶を高重要度で復活させてはいけません。\
 cited_memory_ids には、提示された「注入済み記憶ID」に含まれるIDだけを書きます。\
 心境や成長が実際に動いた場合だけ state に、現在の心の該当部分を更新した完全な形で書きます。\

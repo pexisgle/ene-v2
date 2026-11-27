@@ -4,8 +4,8 @@
 use super::ops::update_mind_state;
 use super::{
     Batch, COLUMNS, Commit, Fact, Memory, MemoryContext, MemoryRecord, MemoryRepo, Result,
-    SHARED_SCOPE, VISIBLE, add_edge, cite_visible_memory, insert_row, now, truncate,
-    validate_citations,
+    SHARED_SCOPE, VISIBLE, add_edge, cite_visible_memory, insert_row, now, read_memory_tx,
+    supersede_tx, truncate, validate_citations,
 };
 use crate::StoreError;
 use crate::row::FromRow;
@@ -203,29 +203,30 @@ fn apply_consolidated_fact(
         );
         return Ok(());
     }
-    let merge = fact
-        .supersedes
-        .as_deref()
-        .and_then(|id| expected.get(id).copied().map(|rev| (id, rev)));
-    if let Some((id, revision)) = merge {
-        let rows = transaction
-            .prepare_cached(
-                "UPDATE memories SET content = ?3, importance = ?4, \
-                 content_revision = content_revision + 1, \
-                 memory_revision = memory_revision + 1, last_accessed_at = ?5 \
-                 WHERE id = ?1 AND memory_revision = ?2",
-            )?
-            .execute(params![id, revision, content, importance, stamp])?;
-        if rows == 0 {
+    let mut shared = fact.scope.as_deref() == Some(SHARED_SCOPE);
+    if let Some(old_id) = fact.supersedes.as_deref() {
+        let Some(&version) = expected.get(old_id) else {
+            return Ok(());
+        };
+        let Some(old) =
+            read_memory_tx(transaction, old_id)?.filter(|memory| memory.memory_revision == version)
+        else {
             return Err(StoreError::Conflict(
                 "memory changed while consolidation was running".into(),
             ));
-        }
-        commit.updated += 1;
+        };
+        shared &= old.scope == SHARED_SCOPE;
+    }
+    if transaction
+        .prepare_cached(&format!(
+            "SELECT 1 FROM memories m WHERE ({VISIBLE} OR ?3) AND m.content = ?2 LIMIT 1",
+        ))?
+        .exists(params![batch.companion_id, content, shared])?
+    {
         return Ok(());
     }
     let id = uuid::Uuid::new_v4().to_string();
-    let scope = if fact.scope.as_deref() == Some(SHARED_SCOPE) {
+    let scope = if shared {
         SHARED_SCOPE.to_owned()
     } else {
         batch.companion_id.clone()
@@ -246,6 +247,10 @@ fn apply_consolidated_fact(
         stamp,
     )?;
     add_edge(transaction, &batch.companion_id, "remembers", &id, stamp)?;
+    if let Some(old_id) = &fact.supersedes {
+        supersede_tx(transaction, &batch.companion_id, &id, old_id, stamp)?;
+        commit.updated += 1;
+    }
     commit.inserted += 1;
     Ok(())
 }

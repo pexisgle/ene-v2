@@ -403,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pass_merges_cites_and_writes_the_edges() {
+    fn a_pass_keeps_the_corrected_record_and_its_citation() {
         let store = store();
         store
             .companion_repo()
@@ -423,10 +423,22 @@ mod tests {
             ..Fact::default()
         }];
         let commit = store.memory_repo().consolidate(&batch, &facts).unwrap();
-        assert_eq!((commit.inserted, commit.updated), (0, 1));
-        let updated = store.memory_repo().memory("m2").unwrap().unwrap();
-        assert_eq!(updated.content, "A prefers coffee");
-        assert_eq!(updated.importance, 7);
+        assert_eq!((commit.inserted, commit.updated), (1, 1));
+        let repo = store.memory_repo();
+        let old = repo.memory("m2").unwrap().unwrap();
+        assert_eq!(old.content, "coffee");
+        assert_eq!(old.importance, 2);
+        let (entries, _) = repo.list_memories("ene", None, 9).unwrap();
+        let corrected = entries
+            .iter()
+            .find(|entry| entry.content == "A prefers coffee")
+            .unwrap();
+        assert_eq!(corrected.importance, 7);
+        assert!(
+            repo.memory_edges(&corrected.id)
+                .unwrap()
+                .contains(&("supersedes".into(), "m2".into()))
+        );
         assert!(
             store
                 .memory_repo()
@@ -634,11 +646,9 @@ mod tests {
         ExtractionServer { base, task }
     }
 
-    /// The normal path: the pass retrieves a non-empty context, the model
-    /// supersedes the existing memory, and the commit stamps the window. An
-    /// empty context would insert a second row instead.
+    /// The retrieved context supplies the exact record the extraction corrects.
     #[tokio::test]
-    async fn the_pass_commits_the_context_it_retrieved_and_updates_the_memory() {
+    async fn the_pass_preserves_the_record_it_retrieved_when_saving_a_correction() {
         let server = serve_extraction(serde_json::json!({ "facts": fact() })).await;
         let setup = setup(&server.base);
         let existing = setup
@@ -658,22 +668,21 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(summary.through_message_id, newest(&conversation));
-        let updated = setup
-            .store
-            .memory_repo()
-            .memory(&existing.id)
-            .unwrap()
+        let repo = setup.store.memory_repo();
+        let retired = repo.memory(&existing.id).unwrap().unwrap();
+        assert_eq!(retired.content, existing.content);
+        assert_eq!(retired.importance, 2);
+        let (memories, _) = repo.list_memories("ene", None, 5).unwrap();
+        let corrected = memories
+            .iter()
+            .find(|memory| memory.content == "紅茶の店は新宿にある")
             .unwrap();
-        assert_eq!(updated.content, "紅茶の店は新宿にある");
-        assert_eq!(updated.importance, 7);
-        let count: i64 = setup
-            .store
-            .conn()
-            .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(
-            count, 1,
-            "the superseded memory is updated, not inserted again"
+        assert_eq!(corrected.importance, 7);
+        assert_eq!(memories.len(), 2);
+        assert!(
+            repo.memory_edges(&corrected.id)
+                .unwrap()
+                .contains(&("supersedes".into(), existing.id))
         );
         server.task.abort();
     }
