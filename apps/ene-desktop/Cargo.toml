@@ -16,6 +16,7 @@ parking_lot.workspace = true
 ene-avatar-ipc.workspace = true
 ene-client-core.workspace = true
 ene-domain.workspace = true
+ene-keyring.workspace = true
 ene-platform-os.workspace = true
 ene-plugin.workspace = true
 ene-plugin-runtime.workspace = true
@@ -39,6 +40,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
+io-lifetimes = "3"
+private-fs = "0.2.1"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "process", "io-util", "sync", "time"] }
 tokio-util = { workspace = true, features = ["codec"] }

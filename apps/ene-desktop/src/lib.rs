@@ -180,7 +180,7 @@ pub use avatar::{bundled_ene_model, default_model, default_renderer};
 pub use capabilities::default_allowed_capabilities;
 pub use ene_client_core::{Command, Link, Model, Update, state, update};
 pub use ene_platform_os::{Tray, TrayAction, TrayHandle, TrayState};
-pub use host::{Connect, Discovery, Host};
+pub use host::{Connect, Discovery, Host, HostTarget, RemoteProfile};
 pub use session::{Connection, Options, Session, persistent_client_id};
 pub use ui::{
     CompanionPod, Desktop, EmbeddedAssets, HistoryReset, Hub, HubInit, PodMode, SettingsSection,

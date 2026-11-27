@@ -1,6 +1,6 @@
 //! Command-line options shared by the window and session.
 use clap::{Parser, ValueEnum};
-use ene_desktop::{Options, SettingsSection, default_renderer};
+use ene_desktop::{HostTarget, Options, SettingsSection, default_renderer};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -50,10 +50,6 @@ impl DesktopArgs {
                 .map_or_else(ene_desktop::persistent_client_id, str::to_owned),
             name: self.client_name.clone(),
             platform: std::env::consts::OS.into(),
-            explicit_connection: self
-                .connection
-                .as_ref()
-                .is_some_and(|path| !path.is_empty()),
             renderer: self
                 .renderer
                 .as_deref()
@@ -66,7 +62,22 @@ impl DesktopArgs {
         }
     }
 
-    pub(super) fn discovery_path(&self) -> Result<PathBuf, DesktopInitError> {
+    pub(super) fn host_target(&self) -> Result<HostTarget, DesktopInitError> {
+        let explicit = self
+            .connection
+            .as_ref()
+            .is_some_and(|path| !path.is_empty());
+        if !explicit
+            && !self.local_host
+            && let Some(target) = HostTarget::saved_remote()
+        {
+            return Ok(target);
+        }
+        self.discovery_path()
+            .map(|path| HostTarget::Discovery { path, explicit })
+    }
+
+    fn discovery_path(&self) -> Result<PathBuf, DesktopInitError> {
         if let Some(path) = self.connection.as_deref().filter(|path| !path.is_empty()) {
             return Ok(path.into());
         }

@@ -19,8 +19,8 @@ use args::DesktopInitError;
 use args::{DesktopArgs, OpenAt};
 use clap::Parser as _;
 use ene_desktop::{
-    Command, Connection, EmbeddedAssets, Hub, Options, PodMode, Session, Tray, TrayAction,
-    TrayState, bind_actions, open_pod_window,
+    Command, Connection, EmbeddedAssets, HostTarget, Hub, Options, PodMode, Session, Tray,
+    TrayAction, TrayState, bind_actions, open_pod_window,
 };
 use gpui::{App, AppContext as _};
 use parking_lot::RwLock;
@@ -53,13 +53,22 @@ fn main() {
     init_tracing();
     install_panic_hook();
 
-    let local_host = detect_local_host(&args);
-    let path = args.discovery_path().unwrap_or_else(|reason| {
+    let target = args.host_target().unwrap_or_else(|reason| {
         // Without a runtime directory there is no host to find, so the
         // window could only repeat this sentence.
         tracing::error!(%reason, "could not resolve host discovery path");
         std::process::exit(1);
     });
+    let shown = target.label();
+    let local_host = matches!(
+        &target,
+        HostTarget::Discovery {
+            explicit: false,
+            ..
+        }
+    )
+    .then(|| detect_local_host(&args))
+    .flatten();
 
     let local_host_child = spawn_local_host(local_host.as_deref());
     #[cfg(windows)]
@@ -75,7 +84,7 @@ fn main() {
     let connection: Connection = Arc::new(RwLock::new(None));
     let options = args.options();
     let session_runtime = start_session_runtime(
-        path.clone(),
+        target,
         options.clone(),
         connection.clone(),
         updates_tx.clone(),
@@ -99,7 +108,7 @@ fn main() {
         tray_handle,
         tray_rx,
         handle: session_runtime.handle.clone(),
-        shown: path.display().to_string(),
+        shown,
         shutdown_rx,
         #[cfg(windows)]
         history_reset_ui: history_reset.clone(),
@@ -160,13 +169,7 @@ fn install_panic_hook() {
 }
 
 fn detect_local_host(args: &DesktopArgs) -> Option<PathBuf> {
-    if args
-        .connection
-        .as_ref()
-        .is_some_and(|path| !path.is_empty())
-        || args.connect_only
-        || !(args.local_host || cfg!(windows))
-    {
+    if args.connect_only || !(args.local_host || cfg!(windows)) {
         return None;
     }
     let host = std::env::current_exe()
@@ -192,7 +195,7 @@ fn spawn_local_host(local_host: Option<&std::path::Path>) -> Option<std::process
 }
 
 fn start_session_runtime(
-    path: PathBuf,
+    target: HostTarget,
     options: Options,
     connection: Connection,
     updates_tx: UnboundedSender<ene_desktop::Update>,
@@ -201,7 +204,7 @@ fn start_session_runtime(
     let (ready, handle) = std::sync::mpsc::sync_channel(1);
     let worker = std::thread::Builder::new()
         .name("ene-session".into())
-        .spawn(move || run_session(path, options, connection, updates_tx, commands_rx, &ready))
+        .spawn(move || run_session(target, options, connection, updates_tx, commands_rx, &ready))
         .unwrap_or_else(|error| {
             tracing::error!(%error, "the session thread did not start");
             std::process::exit(1);
@@ -216,7 +219,7 @@ fn start_session_runtime(
 // Starts the async session on its owner thread while GPUI owns the main thread.
 #[tokio::main(flavor = "current_thread")]
 async fn run_session(
-    path: PathBuf,
+    target: HostTarget,
     options: Options,
     connection: Connection,
     updates: UnboundedSender<ene_desktop::Update>,
@@ -224,7 +227,7 @@ async fn run_session(
     ready: &std::sync::mpsc::SyncSender<tokio::runtime::Handle>,
 ) {
     if ready.send(tokio::runtime::Handle::current()).is_ok() {
-        let session = Session::new(path, options, connection, updates, commands).await;
+        let session = Session::new(target, options, connection, updates, commands).await;
         Box::pin(session.run()).await;
     }
 }

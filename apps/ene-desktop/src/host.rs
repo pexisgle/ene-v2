@@ -7,6 +7,9 @@
 //! `https://<host>/rpc` ingress and Bearer token validated by
 //! [`ene_rpc::connect_remote`]; plaintext remote URLs are always rejected.
 
+pub(crate) mod remote;
+pub use remote::RemoteProfile;
+
 use connectrpc::client::CallOptions;
 use ene_rpc as w;
 use serde::{Deserialize, Serialize};
@@ -35,64 +38,70 @@ impl std::fmt::Debug for Discovery {
     }
 }
 
-/// Selected host target: local discovery file or explicit remote HTTPS host.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
+/// The discovery source selected for this desktop session.
+#[derive(Debug)]
 pub enum HostTarget {
-    Local { path: PathBuf },
-    Remote { endpoint: String, token: String },
+    Discovery {
+        path: PathBuf,
+        explicit: bool,
+    },
+    Remote {
+        profile: RemoteProfile,
+        connected: Option<Box<Host>>,
+    },
+    Unavailable {
+        reason: String,
+    },
 }
 
 impl HostTarget {
-    /// Validates a remote HTTPS `/rpc` ingress URL.
-    pub fn validate_remote_endpoint(endpoint: &str) -> Result<(), Connect> {
-        ene_rpc::validate_remote_endpoint(endpoint)
-            .map(|_| ())
-            .map_err(|error| Connect::Invalid(error.to_string()))
+    pub fn saved_remote() -> Option<Self> {
+        match RemoteProfile::read() {
+            Ok(Some(profile)) => Some(Self::Remote {
+                profile,
+                connected: None,
+            }),
+            Ok(None) | Err(Connect::MissingConfigDir) => None,
+            Err(error) => Some(Self::Unavailable {
+                reason: error.to_string(),
+            }),
+        }
     }
 
-    /// Reads a persisted remote target (`remote_host.json`), returning `Ok(None)`
-    /// when not configured.
-    pub fn read_remote(path: &Path) -> Result<Option<Self>, Connect> {
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(Connect::Unavailable(format!("{}: {error}", path.display()))),
-        };
-        let discovery: Discovery = serde_json::from_slice(&bytes)
-            .map_err(|error| Connect::Invalid(format!("{}: {error}", path.display())))?;
-        ene_rpc::validate_remote_endpoint(&discovery.endpoint)
-            .map_err(|error| Connect::Invalid(error.to_string()))?;
-        Ok(Some(Self::Remote {
-            endpoint: discovery.endpoint,
-            token: discovery.token,
-        }))
+    pub fn label(&self) -> String {
+        match self {
+            Self::Discovery { path, .. } => path.display().to_string(),
+            Self::Remote { profile, .. } => profile.endpoint.clone(),
+            Self::Unavailable { .. } => "遠隔ホスト".into(),
+        }
     }
 
-    /// Validates and persists a remote HTTPS target (`remote_host.json`).
-    pub fn write_remote(path: &Path, endpoint: &str, token: &str) -> Result<(), Connect> {
-        ene_rpc::validate_remote_endpoint(endpoint)
-            .map_err(|error| Connect::Invalid(error.to_string()))?;
-        if token.is_empty() || token.bytes().any(|b| !(0x21..=0x7e).contains(&b)) {
-            return Err(Connect::Invalid("invalid Bearer token".into()));
+    pub(crate) async fn connect(&mut self) -> Result<Host, Connect> {
+        match self {
+            Self::Discovery { path, explicit } => {
+                let discovery = Discovery::read(path)?;
+                if *explicit {
+                    Host::connect_explicit(&discovery)
+                } else {
+                    Host::connect(&discovery)
+                }
+            }
+            Self::Remote { profile, connected } => {
+                if let Some(host) = connected {
+                    return Ok(host.as_ref().clone());
+                }
+                let profile = profile.clone();
+                let host = tokio::task::spawn_blocking(move || {
+                    let token = profile.with_token()?;
+                    Host::connect_remote(&profile.endpoint, &token)
+                })
+                .await
+                .map_err(|error| Connect::Unavailable(error.to_string()))??;
+                *connected = Some(Box::new(host.clone()));
+                Ok(host)
+            }
+            Self::Unavailable { reason } => Err(Connect::Invalid(reason.clone())),
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| Connect::Unavailable(format!("{}: {error}", parent.display())))?;
-        }
-        let body = serde_json::to_vec_pretty(&Discovery {
-            endpoint: endpoint.to_owned(),
-            token: token.to_owned(),
-        })
-        .map_err(|error| Connect::Invalid(error.to_string()))?;
-        std::fs::write(path, body)
-            .map_err(|error| Connect::Unavailable(format!("{}: {error}", path.display())))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _discarded = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-        }
-        Ok(())
     }
 }
 
@@ -193,13 +202,8 @@ impl Host {
         Ok(Self::from_parts(transport, config))
     }
 
-    /// Connects according to a local or remote [`HostTarget`].
-    // Exercised by unit tests and reserved for remote ingress UI; remove once wired to UI.
-    pub fn connect_target(target: &HostTarget) -> Result<Self, Connect> {
-        match target {
-            HostTarget::Local { path } => Self::connect(&Discovery::read(path)?),
-            HostTarget::Remote { endpoint, token } => Self::connect_remote(endpoint, token),
-        }
+    pub(crate) fn endpoint(&self) -> String {
+        self.host.config().base_uri().to_string()
     }
 }
 
@@ -228,34 +232,15 @@ mod tests {
     }
 
     #[test]
-    fn f10_remote_host_target_enforces_https_and_roundtrips_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("remote_host.json");
-        assert!(HostTarget::read_remote(&path).unwrap().is_none());
-
-        assert!(matches!(
-            HostTarget::write_remote(&path, "http://ene.example.com/rpc", "tok"),
-            Err(Connect::Invalid(_))
-        ));
-        assert!(matches!(
-            Host::connect_remote("http://ene.example.com/rpc", "tok"),
-            Err(Connect::Invalid(_))
-        ));
-
-        HostTarget::write_remote(&path, "https://ene.example.com/rpc", "remote-bearer-token")
-            .unwrap();
-        let loaded = HostTarget::read_remote(&path).unwrap().unwrap();
-        assert_eq!(
-            loaded,
-            HostTarget::Remote {
-                endpoint: "https://ene.example.com/rpc".into(),
-                token: "remote-bearer-token".into(),
-            }
-        );
-        assert!(Host::connect_target(&loaded).is_ok());
-        let fields = Discovery::read(&path).unwrap();
-        assert!(Host::connect(&fields).is_err());
-        assert!(Host::connect_explicit(&fields).is_ok());
-        assert!(!format!("{fields:?}").contains(&fields.token));
+    fn f10_explicit_discovery_enforces_https_for_remote_hosts() {
+        let mut discovery = Discovery {
+            endpoint: "http://ene.example.com/rpc".into(),
+            token: "synthetic-remote-bearer".into(),
+        };
+        assert!(Host::connect_explicit(&discovery).is_err());
+        discovery.endpoint = "https://ene.example.com/rpc".into();
+        assert!(Host::connect(&discovery).is_err());
+        assert!(Host::connect_explicit(&discovery).is_ok());
+        assert!(!format!("{discovery:?}").contains(&discovery.token));
     }
 }

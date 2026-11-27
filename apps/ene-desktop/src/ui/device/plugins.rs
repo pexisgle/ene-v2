@@ -1,12 +1,12 @@
-//! Wasm plugin management and remote HTTPS host target UI sections for `この端末`.
+//! Wasm plugin management UI section for `この端末`.
 
-use super::{DevicePane, DeviceSnapshot, row_frame};
+use super::{DevicePane, DeviceSnapshot};
 use crate::ui::{
     Hub,
     icons::Icon,
     studio::labeled_field,
     theme::Theme,
-    widgets::{ButtonStyle, Tone, pill_button, status_pill},
+    widgets::{ButtonStyle, Tone, pill_button},
 };
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
@@ -149,173 +149,6 @@ fn render_add_plugin_panel(
                         pane_close.update(cx, |this, cx| {
                             this.form.adding_plugin_open = false;
                             cx.notify();
-                        });
-                    },
-                )),
-        )
-        .into_any_element()
-}
-
-pub(super) fn render_remote_host_section(
-    pane: &mut DevicePane,
-    theme: &Theme,
-    cx: &mut Context<DevicePane>,
-) -> (AnyElement, AnyElement) {
-    let current_remote = Hub::current_remote_host();
-    let remote_open = pane.form.remote_host_open;
-    let pane_remote_toggle = cx.entity();
-    let remote_heading = div()
-        .w_full()
-        .flex()
-        .flex_col()
-        .gap(px(4.))
-        .child(
-            div()
-                .text_size(px(18.))
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme.ink)
-                .child("ホスト接続先"),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme.ink_muted)
-                .child("既定はローカルホスト（自動検出）です。Tailscale Serve や HTTPS リバースプロキシ経由で遠隔ホストへ接続することもできます。"),
-        )
-        .into_any_element();
-
-    let form =
-        remote_open.then(|| render_remote_host_form(pane, current_remote.as_deref(), theme, cx));
-    let remote_card = div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
-        .flex()
-        .flex_col()
-        .child(row_frame(
-            false,
-            "接続モード",
-            Some(match &current_remote {
-                Some(ep) => status_pill(
-                    format!("遠隔 HTTPS ({ep})"),
-                    Some(theme.mint),
-                    theme.mint_soft,
-                    theme.mint_fg,
-                ),
-                None => status_pill(
-                    "ローカル（自動検出）",
-                    Some(theme.mint),
-                    theme.mint_soft,
-                    theme.mint_fg,
-                ),
-            }),
-            pill_button(
-                "dev-remote-toggle",
-                if remote_open {
-                    "閉じる"
-                } else {
-                    "遠隔設定"
-                },
-                ButtonStyle::new(if remote_open { Tone::Soft } else { Tone::Ghost }),
-                theme,
-                move |_, cx| {
-                    pane_remote_toggle.update(cx, |this, cx| {
-                        this.form.remote_host_open = !this.form.remote_host_open;
-                        cx.notify();
-                    });
-                },
-            ),
-            theme,
-        ))
-        .when_some(form, gpui::ParentElement::child)
-        .into_any_element();
-
-    (remote_heading, remote_card)
-}
-
-fn render_remote_host_form(
-    pane: &mut DevicePane,
-    current_remote: Option<&str>,
-    theme: &Theme,
-    cx: &mut Context<DevicePane>,
-) -> AnyElement {
-    let remote_ep_d = pane.drafts.draft(
-        cx,
-        "remote:endpoint",
-        "https://ene.example.com/rpc",
-        current_remote,
-        theme,
-    );
-    let remote_tok_d =
-        pane.drafts
-            .masked_draft(cx, "remote:token", "Owner Bearer トークン", true, theme);
-    let ep_val = remote_ep_d.read(cx).text().trim().to_owned();
-    let tok_val = remote_tok_d.read(cx).text().trim().to_owned();
-    let ep_validation = (!ep_val.is_empty())
-        .then(|| {
-            crate::host::HostTarget::validate_remote_endpoint(&ep_val)
-                .err()
-                .map(|e| e.to_string())
-        })
-        .flatten();
-    let can_save_remote = !ep_val.is_empty() && !tok_val.is_empty() && ep_validation.is_none();
-    let hub_save_remote = pane.hub.clone();
-    let hub_clear_remote = pane.hub.clone();
-    let tok_clear = remote_tok_d.clone();
-    let ep_clear = remote_ep_d.clone();
-    let has_current = current_remote.is_some();
-
-    div()
-        .w_full()
-        .border_t_1()
-        .border_color(theme.border)
-        .p(px(16.))
-        .flex()
-        .flex_col()
-        .gap(px(10.))
-        .child(labeled_field(
-            "遠隔エンドポイント（HTTPS /rpc 必須）",
-            remote_ep_d,
-            theme,
-        ))
-        .child(labeled_field("認証トークン（Bearer）", remote_tok_d, theme))
-        .when_some(ep_validation, |this, err| {
-            this.child(div().text_xs().text_color(theme.danger_fg).child(err))
-        })
-        .child(
-            div()
-                .w_full()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap(px(8.))
-                .child(pill_button(
-                    "dev-remote-clear",
-                    "ローカルに戻す",
-                    Tone::Ghost.enabled(has_current),
-                    theme,
-                    move |_, cx| {
-                        hub_clear_remote.update(cx, super::super::hub::Hub::clear_remote_host);
-                        ep_clear.update(cx, crate::input::Draft::clear);
-                        tok_clear.update(cx, crate::input::Draft::clear);
-                    },
-                ))
-                .child(pill_button(
-                    "dev-remote-save",
-                    "遠隔接続先を保存",
-                    Tone::Primary.icon(Icon::Check).enabled(can_save_remote),
-                    theme,
-                    move |_, cx| {
-                        let ep = ep_val.clone();
-                        let tok = tok_val.clone();
-                        hub_save_remote.update(cx, |h, cx| {
-                            ene_domain::warn_if_err(
-                                h.save_remote_host(&ep, &tok, cx),
-                                "remote host save",
-                            );
                         });
                     },
                 )),

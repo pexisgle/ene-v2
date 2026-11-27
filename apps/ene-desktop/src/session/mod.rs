@@ -36,7 +36,7 @@ use self::{
 };
 use crate::{
     avatar,
-    host::{Connect, Discovery, Host},
+    host::{Connect, Host, HostTarget},
     perception::Sensor,
     state::{Device, Devices, Link},
     update::{Command, Update},
@@ -116,8 +116,6 @@ pub struct Options {
     pub name: String,
     /// The platform string, for the host's list.
     pub platform: String,
-    /// Whether the operator explicitly supplied the discovery file.
-    pub explicit_connection: bool,
     /// The `ene-avatar` binary, or `None` to run without a renderer.
     pub renderer: Option<PathBuf>,
     /// The VRM model to show.
@@ -130,7 +128,6 @@ impl Default for Options {
             id: "desktop".into(),
             name: "Desktop".into(),
             platform: std::env::consts::OS.into(),
-            explicit_connection: false,
             renderer: None,
             model: avatar::default_model(),
         }
@@ -167,7 +164,7 @@ pub struct Session {
 impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session")
-            .field("path", &self.transport.path)
+            .field("target", &self.transport.target)
             .field("focused", &self.transport.focused)
             .field("subscription", &self.transport.subscription)
             .finish_non_exhaustive()
@@ -186,14 +183,14 @@ pub(crate) fn notify_ui(tx: &UnboundedSender<Update>, update: Update) {
 
 impl Session {
     pub async fn new(
-        path: PathBuf,
+        target: HostTarget,
         options: Options,
         connection: Connection,
         updates: UnboundedSender<Update>,
         commands: UnboundedReceiver<Command>,
     ) -> Self {
         let devices = DeviceBridge::new().await;
-        let transport = SessionTransport::new(path, options, connection);
+        let transport = SessionTransport::new(target, options, connection);
         Self {
             transport,
             audio: AudioPipeline::new(),
@@ -290,40 +287,25 @@ impl Session {
     /// One connection attempt: read discovery, register, bind, serve.
     async fn attempt(&mut self) -> Outcome {
         self.transport.set_connection(None);
-        let discovery = match Discovery::read(&self.transport.path) {
-            Ok(discovery) => discovery,
+        let host = match self.transport.target.connect().await {
+            Ok(host) => host,
             Err(Connect::Missing(path)) => {
                 self.report_phase(ConnectionPhase::AwaitingDiscovery { path })
                     .await;
                 return Outcome::Dropped("接続情報がまだありません".into());
             }
-            Err(Connect::Invalid(reason)) => {
+            Err(error) => {
+                let reason = error.to_string();
                 self.report_phase(ConnectionPhase::Unusable {
                     reason: reason.clone(),
                 })
                 .await;
                 return Outcome::Dropped(reason);
             }
-            Err(error) => return Outcome::Dropped(error.to_string()),
-        };
-        let connected = if self.transport.options.explicit_connection {
-            Host::connect_explicit(&discovery)
-        } else {
-            Host::connect(&discovery)
-        };
-        let host = match connected {
-            Ok(host) => host,
-            Err(error) => {
-                self.report_phase(ConnectionPhase::Unusable {
-                    reason: error.to_string(),
-                })
-                .await;
-                return Outcome::Dropped(error.to_string());
-            }
         };
         self.transport.set_connection(Some(host.clone()));
         self.report_phase(ConnectionPhase::Connecting {
-            endpoint: discovery.endpoint.clone(),
+            endpoint: host.endpoint(),
             attempt: 1,
         })
         .await;

@@ -1,11 +1,7 @@
 //! Chat, audio, device, approval, policy, plugin, remote-host, and companion actions on [`Hub`].
 
 use super::{Hub, windows};
-use crate::{
-    rpc,
-    state::{Notice, NoticeKind},
-    update::Command,
-};
+use crate::{rpc, state::Notice, update::Command};
 use ene_client_core::domain::{
     ApprovalDecision, PolicyEffect, PolicyRule, PolicyRulesUpdate, PolicyText, PolicyTextsUpdate,
 };
@@ -291,49 +287,6 @@ impl Hub {
 
     pub(crate) fn remove_plugin(&mut self, plugin_id: String, cx: &mut Context<Self>) {
         rpc::policy::remove_plugin(&self.rpc, self.model.connections.link_epoch, plugin_id);
-        cx.notify();
-    }
-
-    pub(crate) fn remote_host_config_path() -> Option<std::path::PathBuf> {
-        directories::ProjectDirs::from("", "", "ene")
-            .map(|dirs| dirs.config_dir().join("remote_host.json"))
-    }
-
-    pub(crate) fn current_remote_host() -> Option<String> {
-        let path = Self::remote_host_config_path()?;
-        match crate::host::HostTarget::read_remote(&path) {
-            Ok(Some(crate::host::HostTarget::Remote { endpoint, .. })) => Some(endpoint),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn save_remote_host(
-        &mut self,
-        endpoint: &str,
-        token: &str,
-        cx: &mut Context<Self>,
-    ) -> Result<(), crate::host::Connect> {
-        let path = Self::remote_host_config_path().ok_or(crate::host::Connect::MissingConfigDir)?;
-        crate::host::HostTarget::write_remote(&path, endpoint.trim(), token.trim())?;
-        self.model.notice(
-            NoticeKind::Failed,
-            "遠隔ホスト設定を保存しました",
-            format!(
-                "{} を保存しました。アプリ再起動時に遠隔 HTTPS ホストへ接続できます。",
-                endpoint.trim()
-            ),
-        );
-        cx.notify();
-        Ok(())
-    }
-
-    pub(crate) fn clear_remote_host(&mut self, cx: &mut Context<Self>) {
-        if let Some(path) = Self::remote_host_config_path()
-            && path.exists()
-            && let Err(error) = std::fs::remove_file(&path)
-        {
-            tracing::warn!(%error, "the remote host config could not be removed");
-        }
         cx.notify();
     }
 

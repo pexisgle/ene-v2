@@ -3,7 +3,7 @@
 use super::{Connection, DeviceBridge, Options, Outcome};
 use crate::{
     avatar, capabilities,
-    host::{Host, unary_options},
+    host::{Host, HostTarget, unary_options},
 };
 use buffa::view::MessageView;
 use connectrpc::ConnectError;
@@ -105,7 +105,7 @@ async fn register_client(
 }
 
 pub(super) struct SessionTransport {
-    pub(super) path: PathBuf,
+    pub(super) target: HostTarget,
     pub(super) options: Options,
     pub(super) connection: Connection,
     /// Companions currently resident (activated) on this client, keyed by companion ID.
@@ -129,9 +129,9 @@ pub(super) struct SessionTransport {
 }
 
 impl SessionTransport {
-    pub(super) fn new(path: PathBuf, options: Options, connection: Connection) -> Self {
+    pub(super) fn new(target: HostTarget, options: Options, connection: Connection) -> Self {
         Self {
-            path,
+            target,
             options,
             connection,
             bindings: BTreeSet::new(),
@@ -400,8 +400,14 @@ mod tests {
 
     #[test]
     fn a_replacement_snapshot_changes_residents_and_cursor_together() {
-        let mut transport =
-            SessionTransport::new(PathBuf::new(), Options::default(), Connection::default());
+        let mut transport = SessionTransport::new(
+            HostTarget::Discovery {
+                path: PathBuf::new(),
+                explicit: false,
+            },
+            Options::default(),
+            Connection::default(),
+        );
         let snapshot = |epoch: &str, seq, resident: &str, other: &str| w::Snapshot {
             active_companion_id: Some(resident.into()),
             cursor: Some(w::Cursor {

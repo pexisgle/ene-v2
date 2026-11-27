@@ -4,6 +4,7 @@
 mod hardware;
 mod plugins;
 mod policy;
+mod remote;
 
 use super::icons::Icon;
 use super::theme::Theme;
@@ -30,6 +31,7 @@ pub(super) struct DeviceFormState {
     pub(super) adding_policy_text_open: bool,
     pub(super) adding_plugin_open: bool,
     pub(super) remote_host_open: bool,
+    remote_status: remote::RemoteStatus,
     pub(super) skip_confirm_armed: bool,
 }
 
@@ -44,6 +46,7 @@ impl Default for DeviceFormState {
             adding_policy_text_open: false,
             adding_plugin_open: false,
             remote_host_open: false,
+            remote_status: remote::RemoteStatus::default(),
             skip_confirm_armed: false,
         }
     }
@@ -166,7 +169,7 @@ impl gpui::Render for DevicePane {
             policy::render_policy_texts_section(self, &snap, &theme, cx);
         let (plugins_heading, add_plugin_panel, plugins_card) =
             plugins::render_plugins_section(self, &snap, &theme, cx);
-        let (remote_heading, remote_card) = plugins::render_remote_host_section(self, &theme, cx);
+        let (remote_heading, remote_card) = remote::render_remote_host_section(self, &theme, cx);
         let reset_history = render_history_reset_card(snap.live, &theme, cx);
 
         div()
