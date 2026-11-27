@@ -75,33 +75,12 @@ impl RunTracker {
     }
 }
 
-/// `SendWork` idempotency receipts held in memory while a work agent is absent.
-#[derive(Debug, Default)]
-pub struct WorkReceipts {
-    entries: HashMap<String, (Vec<u8>, String)>,
-}
-
-impl WorkReceipts {
-    pub fn get(&self, work_id: &str, request_key: &str) -> Option<(Vec<u8>, String)> {
-        self.entries
-            .get(&format!("{work_id}:{request_key}"))
-            .cloned()
-    }
-
-    pub fn put(&mut self, work_id: &str, request_key: &str, hash: &[u8], request_id: &str) {
-        self.entries.insert(
-            format!("{work_id}:{request_key}"),
-            (hash.to_vec(), request_id.to_owned()),
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn tracker_warns_once_per_stall_until_touched_and_receipts_round_trip() {
+    fn tracker_warns_once_per_stall_until_touched() {
         let mut tracker = RunTracker::default();
         tracker.begin("r1");
         let later = Instant::now() + Duration::from_secs(100);
@@ -121,13 +100,5 @@ mod tests {
             tracker.stalled(later, STALL_TIMEOUT),
             [] as [std::string::String; 0]
         );
-
-        let mut receipts = WorkReceipts::default();
-        receipts.put("w1", "k1", &[1, 2, 3], "req-1");
-        assert_eq!(
-            receipts.get("w1", "k1"),
-            Some((vec![1, 2, 3], "req-1".into()))
-        );
-        assert_eq!(receipts.get("w1", "other"), None);
     }
 }

@@ -50,6 +50,14 @@ fn stored_run_state(state: RunState) -> &'static str {
 #[derive(Clone, Copy, Debug)]
 pub struct WorkRepo<'a>(&'a Store);
 
+/// The idempotency receipt of one accepted input.
+#[derive(Clone, Copy, Debug)]
+pub struct WorkInputReceipt<'a> {
+    pub request_key: &'a str,
+    pub payload_hash: &'a [u8],
+    pub request_id: &'a str,
+}
+
 impl<'a> WorkRepo<'a> {
     pub(crate) fn new(store: &'a Store) -> Self {
         Self(store)
@@ -169,11 +177,33 @@ impl<'a> WorkRepo<'a> {
         )
     }
 
-    pub fn insert_run(&self, run: &Run, executor: &RunExecutor) -> Result<()> {
+    pub fn input_receipt(&self, work_id: &str, key: &str) -> Result<Option<(Vec<u8>, String)>> {
+        self.0.fetch(
+            "SELECT payload_hash, request_id FROM work_input_receipts WHERE work_id = ?1 AND request_key = ?2",
+            [work_id, key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+    }
+
+    pub fn record_input(&self, work_id: &str, receipt: WorkInputReceipt<'_>) -> Result<()> {
+        insert_input(&self.0.conn(), work_id, receipt)
+    }
+
+    pub fn insert_run(
+        &self,
+        run: &Run,
+        executor: &RunExecutor,
+        receipt: Option<WorkInputReceipt<'_>>,
+    ) -> Result<()> {
         let stamp = now();
-        self.0
-            .conn()
-            .prepare_cached(
+        self.0.write_tx(|transaction| {
+            if open_state(run.state) {
+                let changed = transaction.prepare_cached(
+                    "UPDATE work_sessions SET status = 'active', updated_at = ?2 WHERE id = ?1 AND status <> 'closed'",
+                )?.execute(params![run.work_id, stamp])?;
+                require_found(changed, "no open work session")?;
+            }
+            transaction.prepare_cached(
                 "INSERT INTO work_runs (run_id, work_id, instruction, state, failure, started_at, updated_at, executor)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
             )?
@@ -187,7 +217,11 @@ impl<'a> WorkRepo<'a> {
                 stamp,
                 to_json(executor)?,
             ])?;
-        Ok(())
+            if let Some(receipt) = receipt {
+                insert_input(transaction, &run.work_id, receipt)?;
+            }
+            Ok(())
+        })
     }
 
     pub fn update_run(&self, run: &Run) -> Result<()> {
@@ -217,4 +251,15 @@ impl<'a> WorkRepo<'a> {
             Ok(())
         })
     }
+}
+
+fn insert_input(
+    connection: &rusqlite::Connection,
+    work_id: &str,
+    receipt: WorkInputReceipt<'_>,
+) -> Result<()> {
+    connection.prepare_cached(
+        "INSERT INTO work_input_receipts (work_id, request_key, payload_hash, request_id) VALUES (?1, ?2, ?3, ?4)",
+    )?.execute(params![work_id, receipt.request_key, receipt.payload_hash, receipt.request_id])?;
+    Ok(())
 }

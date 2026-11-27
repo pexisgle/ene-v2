@@ -25,7 +25,7 @@ fn run(store: &Store, run_id: &str, state: RunState) {
     let run = new_run(run_id.into(), "w1", "do it", state);
     store
         .work_repo()
-        .insert_run(&run, &RunExecutor::Rig)
+        .insert_run(&run, &RunExecutor::Rig, None)
         .unwrap();
 }
 

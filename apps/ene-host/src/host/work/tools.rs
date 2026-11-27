@@ -138,7 +138,7 @@ fn start(world: &mut World, agent: Entity, args: StartArgs) -> Result<String> {
                 ("the work session is already running").into(),
             ));
         }
-        let run = super::start_run(world, &session, &args.instruction)?;
+        let run = super::start_run(world, &session, &args.instruction, None)?;
         return Ok(json!({"work_id": resolved_id, "run_id": run.run_id}).to_string());
     }
     let session = super::start(
@@ -320,6 +320,7 @@ mod tests {
             .insert_run(
                 &new_run("run-b".into(), "w1", "do it", RunState::Running),
                 &ene_domain::RunExecutor::Rig,
+                None,
             )
             .unwrap();
         let mut world = World::new();

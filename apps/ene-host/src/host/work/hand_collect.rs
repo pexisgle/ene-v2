@@ -84,7 +84,7 @@ pub(crate) fn collect(world: &mut World) {
     *world.resource_mut::<Hands>() = hands;
     for (session, text) in parked {
         let work_id = session.id.clone();
-        if let Err(error) = super::start_run(world, &session, &text) {
+        if let Err(error) = super::start_run(world, &session, &text, None) {
             tracing::warn!(work = %work_id, "parked input could not start a run: {error}");
         }
     }

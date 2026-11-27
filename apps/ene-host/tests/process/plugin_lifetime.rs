@@ -207,6 +207,19 @@ async fn unavailable_executor_is_not_recovered_as_rig(
         .unwrap();
     let work_id = work.start_work(start).await.unwrap().view().id.to_owned();
     pending_request(&work, &work_id).await;
+    let input = w::SendWorkRequest {
+        work_id: work_id.clone(),
+        request_key: "follow-up-before-restart".into(),
+        text: "Use the alternate sample".into(),
+        ..Default::default()
+    };
+    let accepted = work
+        .send_work(input.clone())
+        .await
+        .unwrap()
+        .view()
+        .request_id
+        .to_owned();
     child.signal(9).unwrap();
     let exit = tokio::time::timeout(Duration::from_secs(5), child.wait())
         .await
@@ -224,6 +237,16 @@ async fn unavailable_executor_is_not_recovered_as_rig(
     let (endpoint, token) = discovery(runtime).await;
     let (transport, config) = w::connect(&endpoint, &token).unwrap();
     let work = w::WorkServiceClient::new(transport, config);
+    let retry = work.send_work(input.clone()).await.unwrap();
+    assert_eq!(retry.view().request_id, accepted);
+    let conflict = work
+        .send_work(w::SendWorkRequest {
+            text: "Different input".into(),
+            ..input
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.code, connectrpc::ErrorCode::AlreadyExists);
     let detail = work
         .get_work(w::WorkRequest {
             work_id,
@@ -231,6 +254,7 @@ async fn unavailable_executor_is_not_recovered_as_rig(
         })
         .await
         .unwrap();
+    assert_eq!(detail.view().runs.iter().count(), 1);
     let run = detail.view().runs.iter().next().unwrap();
     assert_eq!(run.state.as_known(), Some(w::RunStatus::RUN_STATUS_FAILED));
     assert!(run.pending_request_id.is_none());

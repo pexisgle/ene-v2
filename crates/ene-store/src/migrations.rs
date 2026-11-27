@@ -28,7 +28,7 @@ use rusqlite_migration::{HookResult, M, Migrations};
 pub const BASELINE_VERSION: i64 = 6;
 
 /// Latest database schema version managed by [`ladder_steps`].
-pub const VERSION: i64 = 16;
+pub const VERSION: i64 = 17;
 
 /// Every version this host applies above the baseline, in order. The position
 /// in this table is the version, so adding a row is the only way to add a
@@ -108,6 +108,16 @@ const STEPS_ABOVE_BASELINE: &[(&str, &str)] = &[
     (
         "0016_pin_plugin_package_revision",
         "ALTER TABLE plugin_entries ADD COLUMN revision TEXT;",
+    ),
+    (
+        "0017_durable_work_input_receipts",
+        "CREATE TABLE work_input_receipts (
+            work_id TEXT NOT NULL REFERENCES work_sessions(id) ON DELETE CASCADE,
+            request_key TEXT NOT NULL,
+            payload_hash BLOB NOT NULL CHECK(length(payload_hash) = 32),
+            request_id TEXT NOT NULL,
+            PRIMARY KEY (work_id, request_key)
+        ) WITHOUT ROWID;",
     ),
 ];
 

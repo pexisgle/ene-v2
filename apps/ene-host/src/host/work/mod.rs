@@ -9,6 +9,7 @@ mod hand;
 mod hand_collect;
 #[cfg(test)]
 mod hand_tests;
+mod input;
 mod lifecycle;
 mod notify;
 mod reads;
@@ -26,9 +27,8 @@ use super::{
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
-use ene_store::util::now;
+use ene_store::work::WorkInputReceipt;
 use rig_ecs::prelude::*;
-use serde_json::json;
 
 #[cfg(test)]
 use crate::host::agent::WorkReports;
@@ -40,6 +40,7 @@ use std::time::Instant;
 use ene_domain::RunExecutor;
 pub(crate) use ene_domain::{Run, RunState, WorkSession, WorkStatus};
 pub(crate) use ene_work::{STALL_TIMEOUT, new_run};
+pub(crate) use input::send;
 pub(crate) use lifecycle::restore;
 use lifecycle::{agent_of, bind_work_agent, detect_stalls, ensure, retire};
 use notify::{inform, notify_finished, notify_run, notify_status};
@@ -64,25 +65,6 @@ impl std::ops::DerefMut for Runs {
     }
 }
 
-/// `SendWork` receipts used while the session agent is not in the world; its
-/// log holds the canonical copy.
-#[derive(Resource, Default)]
-struct Receipts(ene_work::WorkReceipts);
-
-impl std::ops::Deref for Receipts {
-    type Target = ene_work::WorkReceipts;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for Receipts {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
 pub(crate) struct WorkPlugin;
 
 impl Plugin for WorkPlugin {
@@ -90,7 +72,6 @@ impl Plugin for WorkPlugin {
         tools::register(app);
         skills::register(app);
         app.init_resource::<Runs>()
-            .init_resource::<Receipts>()
             .init_resource::<hand::Hands>()
             .add_systems(
                 Update,
@@ -136,7 +117,7 @@ pub(crate) fn start(world: &mut World, request: &w::StartWorkRequest) -> Result<
         updated_at: String::new(),
     };
     store.work_repo().insert_work_session(&session)?;
-    if let Err(error) = start_run(world, &session, &request.instruction) {
+    if let Err(error) = start_run(world, &session, &request.instruction, None) {
         let _written = store
             .work_repo()
             .set_work_status(&session.id, WorkStatus::Closed);
@@ -151,6 +132,7 @@ pub(crate) fn start_run(
     world: &mut World,
     session: &WorkSession,
     instruction: &str,
+    receipt: Option<WorkInputReceipt<'_>>,
 ) -> Result<Run> {
     let store = world.resource::<Store>().clone();
     if session.status == WorkStatus::Closed {
@@ -180,10 +162,7 @@ pub(crate) fn start_run(
         instruction,
         RunState::Running,
     );
-    store.work_repo().insert_run(&run, &executor)?;
-    store
-        .work_repo()
-        .set_work_status(&session.id, WorkStatus::Active)?;
+    store.work_repo().insert_run(&run, &executor, receipt)?;
     // The backend pick: a task assignment onto an installed harness plugin
     // runs the session on the plugin hand; anything else keeps the rig agent.
     let failure = match harness {
@@ -219,16 +198,16 @@ pub(crate) fn start_run(
         }
     };
     if let Some(error) = failure {
-        ene_domain::warn_if_err(fail_run(&store, &run, &error), "failed run record");
-        let _written = store
+        let failed = fail_run(&store, &run, &error)?;
+        store
             .work_repo()
-            .set_work_status(&session.id, WorkStatus::Idle);
-        if let Ok(Some(session)) = store.work_repo().work_session(&session.id) {
-            let mut notifier = world.resource_mut::<Notifier>();
-            notify_status(&mut notifier, &session);
-            if let Ok(Some(failed)) = store.work_repo().run(&run.run_id) {
-                notify_finished(&mut notifier, &session, &failed);
-            }
+            .set_work_status(&session.id, WorkStatus::Idle)?;
+        let session = require_session(&store, &session.id)?;
+        let mut notifier = world.resource_mut::<Notifier>();
+        notify_status(&mut notifier, &session);
+        notify_finished(&mut notifier, &session, &failed);
+        if receipt.is_some() {
+            return Ok(failed);
         }
         return Err(error);
     }
@@ -248,11 +227,12 @@ pub(crate) fn start_run(
     Ok(run)
 }
 
-fn fail_run(store: &Store, run: &Run, error: &HostError) -> Result<()> {
+fn fail_run(store: &Store, run: &Run, error: &HostError) -> Result<Run> {
     let mut failed = run.clone();
     failed.state = RunState::Failed;
     failed.failure = Some(Failure::new(error.code(), error.to_string()));
-    Ok(store.work_repo().update_run(&failed)?)
+    store.work_repo().update_run(&failed)?;
+    Ok(failed)
 }
 
 /// The client a new work session is commissioned from: the one the request
@@ -279,144 +259,6 @@ fn binding_for(store: &Store, request: &w::StartWorkRequest) -> Result<Option<St
         ));
     }
     Ok(activation.client_id)
-}
-
-pub(crate) fn send(world: &mut World, request: &w::SendWorkRequest) -> Result<w::WorkAcceptance> {
-    let store = world.resource::<Store>().clone();
-    let session = require_session(&store, &request.work_id)?;
-    if session.status == WorkStatus::Closed {
-        return Err(HostError::Conflict(("work session is closed").into()));
-    }
-    let hash = ene_store::util::digest(format!("{}:{}", request.work_id, request.text).as_bytes());
-    let agent = agent_of(world, &request.work_id);
-    if !request.request_key.is_empty()
-        && let Some((stored, request_id)) = receipt(
-            agent.and_then(|entity| world.get::<Conversation>(entity)),
-            world.get_resource::<Receipts>(),
-            &request.work_id,
-            &request.request_key,
-        )
-    {
-        if stored != hash {
-            return Err(HostError::AlreadyExists(
-                ("this request key already accepted different content").into(),
-            ));
-        }
-        return Ok(w::WorkAcceptance {
-            request_id,
-            ..Default::default()
-        });
-    }
-    let request_id = uuid::Uuid::new_v4().to_string();
-    if let Some(run) = store.work_repo().active_run(&request.work_id)? {
-        // A plugin hand parks mid-run input and delivers it as the next
-        // prompt turn; the rig agent takes it inside its turn.
-        if hand::owns(world.resource::<hand::Hands>(), &request.work_id) {
-            hand::steer(
-                &mut world.resource_mut::<hand::Hands>(),
-                &request.work_id,
-                &request.text,
-            );
-            world.resource_mut::<Runs>().touch(&run.run_id);
-            return accepted(world, &store, request, &hash, request_id);
-        }
-        let Some(agent) = agent else {
-            return Err(HostError::Unavailable(
-                ("the work agent is not running").into(),
-            ));
-        };
-        bind_work_agent(world.get_mut::<WorkAgent>(agent), &run.run_id);
-        world.trigger(Deliver::new(
-            agent,
-            request.text.clone(),
-            DeliveryMode::Queue,
-        ));
-        world.resource_mut::<Runs>().touch(&run.run_id);
-        return accepted(world, &store, request, &hash, request_id);
-    }
-    let run = start_run(world, &session, &request.text)?;
-    world.resource_mut::<Runs>().touch(&run.run_id);
-    accepted(world, &store, request, &hash, request_id)
-}
-
-fn accepted(
-    world: &mut World,
-    store: &Store,
-    request: &w::SendWorkRequest,
-    hash: &[u8],
-    request_id: String,
-) -> Result<w::WorkAcceptance> {
-    if !request.request_key.is_empty() {
-        let agent = agent_of(world, &request.work_id);
-        record_conversation_receipt(
-            agent.and_then(|entity| world.get_mut::<Conversation>(entity)),
-            &request.request_key,
-            hash,
-            &request_id,
-        );
-        world.resource_mut::<Receipts>().put(
-            &request.work_id,
-            &request.request_key,
-            hash,
-            &request_id,
-        );
-    }
-    if let Ok(Some(session)) = store.work_repo().work_session(&request.work_id) {
-        notify_status(&mut world.resource_mut::<Notifier>(), &session);
-    }
-    Ok(w::WorkAcceptance {
-        request_id,
-        ..Default::default()
-    })
-}
-
-fn receipt(
-    conversation: Option<&Conversation>,
-    receipts: Option<&Receipts>,
-    work_id: &str,
-    request_key: &str,
-) -> Option<(Vec<u8>, String)> {
-    if let Some(conversation) = conversation {
-        for (_, aside) in conversation
-            .asides()
-            .filter(|(_, aside)| aside.kind == "ene.work_accepted")
-        {
-            if aside.value.get("request_key").and_then(|key| key.as_str()) != Some(request_key) {
-                continue;
-            }
-            let hash = aside
-                .value
-                .get("hash")?
-                .as_array()?
-                .iter()
-                .filter_map(serde_json::Value::as_u64)
-                .map(|byte| byte as u8)
-                .collect();
-            let request_id = aside.value.get("request_id")?.as_str()?;
-            return Some((hash, request_id.to_owned()));
-        }
-    }
-    receipts.and_then(|receipts| receipts.get(work_id, request_key))
-}
-
-fn record_conversation_receipt(
-    conversation: Option<Mut<Conversation>>,
-    request_key: &str,
-    hash: &[u8],
-    request_id: &str,
-) {
-    if let Some(mut conversation) = conversation {
-        conversation.add_aside(rig_core::conversation::Aside::new(
-            "ene.work_accepted",
-            rig_core::conversation::Author::plugin("ene-host"),
-            json!({
-                "request_key": request_key,
-                "request_id": request_id,
-                "hash": hash,
-                "accepted_at": now(),
-            }),
-        ));
-    }
 }
 
 /// Stops the open run of a session. The stop is final at once: the work agent
