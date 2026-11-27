@@ -185,45 +185,19 @@ impl<'a> MemoryRepo<'a> {
         if query.trim().is_empty() || limit == 0 {
             return Ok(RecallOutcome::default());
         }
-        let lexical = recall::lexical_candidates(self.0, companion, query, mode)?;
-        let semantic = self.semantic_memories(companion, mode, semantic)?;
+        let (lexical, semantic) = {
+            // Recall lanes must read visibility and row versions from the same snapshot.
+            let connection = self.0.conn();
+            let snapshot = connection.unchecked_transaction()?;
+            (
+                recall::lexical_candidates(&snapshot, companion, query, mode)?,
+                recall::semantic_memories(&snapshot, companion, mode, semantic)?,
+            )
+        };
         Ok(RecallOutcome {
             semantic: !semantic.is_empty(),
             items: ene_mind::rank_recall([lexical, semantic], epoch(&now()).unwrap_or(0), limit),
         })
-    }
-
-    fn semantic_memories(
-        &self,
-        companion: &str,
-        mode: RecallMode<'_>,
-        candidates: &[RecallCandidate],
-    ) -> Result<Vec<Memory>> {
-        let mut unique = HashSet::new();
-        let candidates: Vec<_> = candidates
-            .iter()
-            .filter(|item| {
-                !item.id.is_empty()
-                    && !mode
-                        .exclusions()
-                        .is_some_and(|ids| ids.contains(item.id.as_str()))
-                    && unique.insert(*item)
-            })
-            .take(64)
-            .collect();
-        if candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-        self.0.fetch_all(
-            &format!(
-                "SELECT {JOINED_COLUMNS} FROM json_each(?3) AS candidate CROSS JOIN memories m \
-                 WHERE m.id = candidate.value ->> '$.id' \
-                 AND m.content_revision = candidate.value ->> '$.content_revision' \
-                 AND {VISIBLE} AND m.importance >= ?2 ORDER BY candidate.key"
-            ),
-            params![companion, mode.minimum_importance(), to_json(&candidates)?],
-            Memory::from_row,
-        )
     }
 
     pub fn pinned(&self, companion: &str) -> Result<Vec<Memory>> {

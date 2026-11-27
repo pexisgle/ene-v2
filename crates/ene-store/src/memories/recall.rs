@@ -1,14 +1,14 @@
 use super::{COLUMNS, JOINED_COLUMNS, VISIBLE};
-use crate::{Store, error::Result, row::FromRow, to_json};
-use ene_mind::{Memory, RecallMode, recall_terms};
+use crate::{error::Result, row::FromRow, to_json};
+use ene_mind::{Memory, RecallCandidate, RecallMode, recall_terms};
 use itertools::Itertools as _;
-use rusqlite::params;
+use rusqlite::{Connection, params};
 
 const CANDIDATES: usize = 20;
 const ELIGIBLE: &str = "m.importance >= ?2 AND m.id NOT IN (SELECT value FROM json_each(?4))";
 
 pub(super) fn lexical_candidates(
-    store: &Store,
+    connection: &Connection,
     companion: &str,
     query: &str,
     mode: RecallMode<'_>,
@@ -20,12 +20,6 @@ pub(super) fn lexical_candidates(
         return Ok(Vec::new());
     }
     let excluded = mode.exclusions().map(to_json).transpose()?;
-    let connection = store.conn();
-    // Mixed queries must read both lists from the same SQLite snapshot.
-    let snapshot = (!long.is_empty() && !short.is_empty())
-        .then(|| connection.unchecked_transaction())
-        .transpose()?;
-    let connection = snapshot.as_deref().unwrap_or(&connection);
     let read = |sql: &str, terms: &str| -> rusqlite::Result<Vec<Memory>> {
         connection
             .prepare_cached(sql)?
@@ -65,6 +59,39 @@ pub(super) fn lexical_candidates(
         .unique_by(|memory| memory.id.clone())
         .take(CANDIDATES)
         .collect())
+}
+
+pub(super) fn semantic_memories(
+    connection: &Connection,
+    companion: &str,
+    mode: RecallMode<'_>,
+    candidates: &[RecallCandidate],
+) -> Result<Vec<Memory>> {
+    let candidates = candidates
+        .iter()
+        .filter(|item| {
+            !item.id.is_empty()
+                && !mode
+                    .exclusions()
+                    .is_some_and(|ids| ids.contains(item.id.as_str()))
+        })
+        .unique()
+        .take(64)
+        .collect_vec();
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection.prepare_cached(&format!(
+        "SELECT {JOINED_COLUMNS} FROM json_each(?3) AS candidate CROSS JOIN memories m \
+         WHERE m.id = candidate.value ->> '$.id' \
+         AND m.content_revision = candidate.value ->> '$.content_revision' \
+         AND {VISIBLE} AND m.importance >= ?2 ORDER BY candidate.key"
+    ))?;
+    let rows = statement.query_map(
+        params![companion, mode.minimum_importance(), to_json(&candidates)?],
+        Memory::from_row,
+    )?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 fn short_query(terms: &[&str]) -> Result<(String, String)> {

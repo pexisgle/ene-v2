@@ -1,5 +1,5 @@
 use super::*;
-use crate::memories::recall::lexical_candidates;
+use crate::memories::recall::{lexical_candidates, semantic_memories};
 
 #[test]
 fn hybrid_recall_fuses_and_forgetting_excludes_auto_but_keeps_explicit() {
@@ -86,10 +86,45 @@ fn semantic_retrieval_restores_only_current_revisions_in_candidate_order() {
         (&corrected).into(),
     ];
     assert_eq!(
-        repo.semantic_memories("ene", RecallMode::Auto, &candidates)
-            .unwrap(),
+        semantic_memories(&store.conn(), "ene", RecallMode::Auto, &candidates).unwrap(),
         [second, corrected]
     );
+}
+
+#[test]
+fn recall_lanes_stay_on_the_supplied_snapshot_during_a_scope_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("host.sqlite3")).unwrap();
+    let writer = store.open_secondary().unwrap();
+    let mut record = new_memory("fixture recall marker", 5);
+    record.scope = SHARED_SCOPE.into();
+    let memory = store.memory_repo().insert_memory(&record).unwrap();
+    let candidates = [RecallCandidate::from(&memory)];
+
+    {
+        let connection = store.conn();
+        let snapshot = connection.unchecked_transaction().unwrap();
+        assert_eq!(
+            lexical_candidates(&snapshot, "other", "marker", RecallMode::Auto)
+                .unwrap()
+                .as_slice(),
+            std::slice::from_ref(&memory)
+        );
+        writer
+            .memory_repo()
+            .control_memory(&memory.id, MemoryActionKind::Unshare, "ene")
+            .unwrap();
+        assert_eq!(
+            semantic_memories(&snapshot, "other", RecallMode::Auto, &candidates).unwrap(),
+            [memory]
+        );
+    }
+
+    let fresh = store
+        .memory_repo()
+        .recall_hybrid("other", "marker", RecallMode::Auto, &candidates, 5)
+        .unwrap();
+    assert!(fresh.items.is_empty() && !fresh.semantic);
 }
 
 #[test]
@@ -112,7 +147,7 @@ fn lexical_recall_handles_short_terms_and_literal_wildcards() {
         ("！", 0),
     ] {
         assert_eq!(
-            lexical_candidates(&store, "ene", query, RecallMode::Auto)
+            lexical_candidates(&store.conn(), "ene", query, RecallMode::Auto)
                 .unwrap()
                 .len(),
             count,
@@ -120,11 +155,11 @@ fn lexical_recall_handles_short_terms_and_literal_wildcards() {
         );
     }
     assert_eq!(
-        lexical_candidates(&store, "ene", "_%", RecallMode::Auto).unwrap(),
+        lexical_candidates(&store.conn(), "ene", "_%", RecallMode::Auto).unwrap(),
         [ai]
     );
     assert_eq!(
-        lexical_candidates(&store, "ene", "東京都", RecallMode::Auto).unwrap(),
+        lexical_candidates(&store.conn(), "ene", "東京都", RecallMode::Auto).unwrap(),
         [dog]
     );
 }
@@ -144,7 +179,7 @@ fn lexical_ties_and_repeated_query_terms_keep_the_same_top_twenty() {
         "frequent ".repeat(200) + "marker",
     ] {
         assert_eq!(
-            lexical_candidates(&store, "ene", &query, RecallMode::Auto).unwrap(),
+            lexical_candidates(&store.conn(), "ene", &query, RecallMode::Auto).unwrap(),
             rows[..20]
         );
     }
@@ -177,7 +212,7 @@ fn short_recall_combines_private_and_shared_top_candidates_after_filtering() {
         expected.truncate(20);
         assert_eq!(
             lexical_candidates(
-                &store,
+                &store.conn(),
                 companion,
                 "犬 ai",
                 RecallMode::AutoExcept(&excluded)
