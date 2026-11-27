@@ -20,6 +20,10 @@ enum Editor {
 
 pub struct SubmitDraft;
 
+pub(crate) fn single_line(text: &str) -> String {
+    text.replace(['\r', '\n'], " ")
+}
+
 pub struct Draft {
     editor: Option<Editor>,
     content: SharedString,
@@ -98,7 +102,7 @@ impl Draft {
         let content = if self.multiline {
             text.replace("\r\n", "\n").replace('\r', "\n")
         } else {
-            text.replace(['\r', '\n'], " ")
+            single_line(&text)
         };
         self.content = content.into();
         self.invalidate(cx);

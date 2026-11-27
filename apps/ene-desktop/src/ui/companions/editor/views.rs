@@ -231,18 +231,7 @@ pub(super) fn render_companion_footer(
                     theme,
                     move |_, cx| {
                         hub_save.update(cx, |hub, cx| {
-                            companion_actions::update_companion_profile(
-                                hub,
-                                CompanionProfilePatch {
-                                    companion_id: patch.companion_id.clone(),
-                                    name: patch.name.clone(),
-                                    persona: patch.persona.clone(),
-                                    mind: patch.mind.clone(),
-                                    body: patch.body.clone(),
-                                    voice: patch.voice.clone(),
-                                },
-                                cx,
-                            );
+                            companion_actions::update_companion_profile(hub, patch.clone(), cx);
                         });
                     },
                 )),

@@ -4,8 +4,8 @@
 
 use super::super::CompanionsPane;
 use crate::{
-    input::Draft,
-    ui::{theme::Theme, widgets::DropdownOption},
+    input::{Draft, single_line},
+    ui::theme::Theme,
 };
 use ene_client_core::domain::{BodyBinding, Companion, MindView, VoiceBinding};
 use gpui::{Context, Entity};
@@ -24,7 +24,6 @@ pub(super) struct CompanionEditorDrafts {
     pub(super) mind_d: Entity<Draft>,
     pub(super) persona_d: Entity<Draft>,
     pub(super) body_model_d: Entity<Draft>,
-    pub(super) voice_key_d: Entity<Draft>,
     pub(super) voice_d: Entity<Draft>,
     pub(super) voice_speed_d: Entity<Draft>,
     pub(super) voice_pitch_d: Entity<Draft>,
@@ -35,36 +34,14 @@ pub(super) fn init_companion_editor_drafts(
     pane: &mut CompanionsPane,
     comp: &Companion,
     current_body: &BodyBinding,
+    current_voice: &VoiceBinding,
     theme: &Theme,
     cx: &mut Context<CompanionsPane>,
 ) -> CompanionEditorDrafts {
     let id = &comp.id;
     let rev = comp.revision;
-    let mut current_voice = comp
-        .voice
-        .as_ref()
-        .and_then(|doc| serde_json::from_str::<VoiceBinding>(&doc.json).ok())
-        .unwrap_or_default();
-    if current_voice
-        .voice_id
-        .as_deref()
-        .is_none_or(|v| v.trim().is_empty())
-    {
-        current_voice.voice_id = comp.voice_identifier.clone();
-    }
-    let initial_voice_key = match (
-        current_voice
-            .connection_id
-            .as_deref()
-            .filter(|s| !s.is_empty()),
-        current_voice.voice_id.as_deref().filter(|s| !s.is_empty()),
-    ) {
-        (Some(cid), Some(vid)) => format!("{cid}\0{vid}"),
-        (None, Some(vid)) => format!("\0{vid}"),
-        _ => String::new(),
-    };
-    let initial_speed = current_voice.speed.map(|v| format!("{v:.2}"));
-    let initial_pitch = current_voice.pitch.map(|v| format!("{v:.2}"));
+    let initial_speed = current_voice.speed.map(|v| v.to_string());
+    let initial_pitch = current_voice.pitch.map(|v| v.to_string());
 
     CompanionEditorDrafts {
         name_d: pane.drafts.draft(
@@ -93,13 +70,6 @@ pub(super) fn init_companion_editor_drafts(
             format!("comp:{id}:r{rev}:body-model"),
             "VRM モデル（例: ENE.vrm / Seed-san.vrm / .vrm パス）",
             current_body.model.as_deref(),
-            theme,
-        ),
-        voice_key_d: pane.drafts.draft(
-            cx,
-            format!("comp:{id}:r{rev}:voice-key"),
-            "",
-            Some(&initial_voice_key),
             theme,
         ),
         voice_d: pane.drafts.draft(
@@ -133,42 +103,42 @@ pub(super) fn init_companion_editor_drafts(
     }
 }
 
-pub(super) fn build_voice_options(
-    tts_voices: &[(String, String, String, String)],
-) -> Vec<DropdownOption> {
-    let mut voice_options = vec![DropdownOption {
-        value: String::new(),
-        label: "接続の既定を使用".to_owned(),
-        detail: None,
-    }];
-    for (cid, vid, label, conn_name) in tts_voices {
-        voice_options.push(DropdownOption {
-            value: format!("{cid}\0{vid}"),
-            label: label.clone(),
-            detail: Some(format!("{conn_name} / ID: {vid}")),
-        });
-    }
-    voice_options
+pub(super) fn displayed_voice(companion: &Companion) -> VoiceBinding {
+    let mut voice = companion
+        .voice
+        .as_ref()
+        .and_then(|doc| serde_json::from_str::<VoiceBinding>(&doc.json).ok())
+        .unwrap_or_default();
+    voice.connection_id = voice.connection_id.as_deref().and_then(trimmed);
+    let displayed = |text: &str| trimmed(&single_line(text));
+    voice.voice_id = voice
+        .voice_id
+        .as_deref()
+        .and_then(displayed)
+        .or_else(|| companion.voice_identifier.as_deref().and_then(displayed));
+    voice.style = voice.style.as_deref().and_then(displayed);
+    voice
 }
 
 pub(super) fn format_selected_voice_label(
     tts_voices: &[(String, String, String, String)],
     picked_conn_id: Option<&str>,
     picked_voice_id: Option<&str>,
-) -> Option<String> {
+) -> String {
     match (picked_conn_id, picked_voice_id) {
-        (None, None) => Some("接続の既定を使用".to_owned()),
+        (None, None) => "接続の既定を使用".to_owned(),
         (Some(cid), Some(vid)) => tts_voices
             .iter()
             .find(|(c, v, _, _)| c == cid && v == vid)
-            .map(|(_, v, label, cname)| format!("{label} ({cname} / ID: {v})"))
-            .or_else(|| Some(format!("{cid} / {vid}"))),
-        (None, Some(vid)) => tts_voices
-            .iter()
-            .find(|(_, v, _, _)| v == vid)
-            .map(|(_, v, label, cname)| format!("{label} ({cname} / ID: {v})"))
-            .or_else(|| Some(vid.to_owned())),
-        (Some(cid), None) => Some(cid.to_owned()),
+            .map_or_else(
+                || format!("{cid} / {vid}"),
+                |(_, v, label, name)| format!("{label} ({name} / ID: {v})"),
+            ),
+        (None, Some(vid)) => tts_voices.iter().find(|(_, v, _, _)| v == vid).map_or_else(
+            || vid.to_owned(),
+            |(_, v, label, name)| format!("{label} ({name} / ID: {v})"),
+        ),
+        (Some(cid), None) => cid.to_owned(),
     }
 }
 
@@ -183,6 +153,10 @@ pub(super) fn parse_finite_f32(draft: &Entity<Draft>, cx: &gpui::App) -> Option<
 }
 
 pub(super) fn non_empty_trimmed(draft: &Entity<Draft>, cx: &gpui::App) -> Option<String> {
-    let s = draft.read(cx).text().trim().to_owned();
-    (!s.is_empty()).then_some(s)
+    trimmed(draft.read(cx).text())
+}
+
+fn trimmed(text: &str) -> Option<String> {
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
 }

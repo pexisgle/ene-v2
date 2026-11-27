@@ -12,6 +12,7 @@ pub use buttons::{
     ButtonStyle, CircleButtonStyle, Tone, circle_icon_button, floating_orb_button, pill_button,
     toggle_switch,
 };
+pub(crate) use dropdown::ChoiceValue;
 pub use dropdown::{DropdownOption, DropdownSpec, dropdown_select};
 pub(super) use notice::notice_strip;
 pub use pills::{companion_badge, disclosure_row, kind_pill, status_pill, window_drag_area};

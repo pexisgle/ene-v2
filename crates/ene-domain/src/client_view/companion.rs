@@ -211,6 +211,8 @@ pub struct TurnEvent {
 pub struct CompanionProfilePatch {
     /// The companion being edited.
     pub companion_id: String,
+    /// The profile revision shown by the editor.
+    pub revision: u64,
     /// New display name.
     pub name: String,
     /// New free-text persona.
@@ -219,8 +221,8 @@ pub struct CompanionProfilePatch {
     pub mind: String,
     /// New avatar binding.
     pub body: BodyBinding,
-    /// New voice binding.
-    pub voice: VoiceBinding,
+    /// New voice binding, when the voice controls changed.
+    pub voice: Option<VoiceBinding>,
 }
 
 /// Inputs collected when creating a new companion from the studio.

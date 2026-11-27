@@ -15,6 +15,7 @@ use super::{DraftStore, Hub};
 use ene_client_core::domain::{
     Companion, CompanionTemplate, ConnectionKind, MindView, ModelAssignment,
 };
+use ene_domain::{CompanionId, ConnectionId};
 use gpui::{AnyElement, Context, Entity, FontWeight, Subscription, div, prelude::*, px};
 use std::collections::BTreeMap;
 
@@ -27,6 +28,7 @@ pub(super) struct CompanionFormState {
     pub(super) expanded_companion_id: Option<String>,
     pub(super) mind_disclosure_open: bool,
     pub(super) delete_armed_companion: Option<String>,
+    voice_connections: BTreeMap<CompanionId, (u64, Option<ConnectionId>)>,
 }
 
 /// Companion management chapter rendered as an independent GPUI pane entity.
@@ -297,46 +299,10 @@ fn render_empty_companions_row(
         .into_any_element()
 }
 
-pub(super) fn parse_voice_selection(
-    raw_key: &str,
-    manual_fallback: &str,
-) -> (Option<String>, Option<String>) {
-    let trimmed = raw_key.trim();
-    if let Some((cid, vid)) = trimmed.split_once('\0') {
-        let conn = (!cid.trim().is_empty()).then(|| cid.trim().to_owned());
-        let voice = (!vid.trim().is_empty()).then(|| vid.trim().to_owned());
-        return (conn, voice);
-    }
-    let fallback = manual_fallback.trim();
-    if fallback.is_empty() {
-        (None, None)
-    } else {
-        (None, Some(fallback.to_owned()))
-    }
-}
-
 pub(super) fn split_pipe(raw: &str) -> Vec<String> {
     raw.split('|')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn b11_parse_voice_selection_preserves_connection_and_duplicate_voice_id() {
-        assert_eq!(
-            parse_voice_selection("tts-b\0shared-id", ""),
-            (Some("tts-b".into()), Some("shared-id".into()))
-        );
-        assert_eq!(
-            parse_voice_selection("", "manual-3"),
-            (None, Some("manual-3".into()))
-        );
-        assert_eq!(parse_voice_selection("", ""), (None, None));
-    }
 }

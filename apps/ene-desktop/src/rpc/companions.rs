@@ -70,22 +70,25 @@ pub(crate) fn update_companion_profile(
     companion: Companion,
     patch: CompanionProfilePatch,
 ) {
-    let voice_identifier = patch.voice.voice_id.clone().unwrap_or_default();
     let body_doc = binding_document("ene.body.v1", &patch.body);
-    let voice_doc = binding_document("ene.voice.v1", &patch.voice);
+    let voice_doc = patch
+        .voice
+        .as_ref()
+        .and_then(|voice| binding_document("ene.voice.v1", voice));
+    let voice_identifier = patch.voice.map(|voice| voice.voice_id.unwrap_or_default());
     update_companion(
         rpc,
         epoch,
         "コンパニオンの保存",
         w::UpdateCompanionRequest {
             id: companion.id,
-            revision: companion.revision,
+            revision: patch.revision,
             name: (!patch.name.is_empty() && patch.name != companion.name).then_some(patch.name),
             persona: Some(patch.persona),
             mind: (patch.mind != companion.mind).then_some(patch.mind),
             body: body_doc.into(),
             voice: voice_doc.into(),
-            voice_identifier: Some(voice_identifier),
+            voice_identifier,
             ..Default::default()
         },
     );
