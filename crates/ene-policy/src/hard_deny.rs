@@ -104,16 +104,17 @@ fn is_file_mutation_action(action: &CandidateAction) -> bool {
             capability.as_str(),
             "work.write" | "work.edit" | "work.delete" | "device.files"
         ),
-        CandidateAction::McpTool { tool_name, .. }
-        | CandidateAction::PluginTool { tool_name, .. } => {
-            let lower = tool_name.to_ascii_lowercase();
-            lower.contains("write")
-                || lower.contains("edit")
-                || lower.contains("delete")
-                || lower.contains("remove")
-        }
+        CandidateAction::McpTool { tool_name, .. } => mutating_tool_name(tool_name),
+        CandidateAction::PluginTool(tool) => mutating_tool_name(&tool.tool_name),
         CandidateAction::WebSearch(_) => false,
     }
+}
+
+fn mutating_tool_name(tool_name: &str) -> bool {
+    let lower = tool_name.to_ascii_lowercase();
+    ["write", "edit", "delete", "remove"]
+        .iter()
+        .any(|name| lower.contains(name))
 }
 
 fn denied_system_path(path: &str) -> Option<String> {

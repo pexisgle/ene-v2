@@ -253,9 +253,9 @@ fn b03_b04_mcp_and_web_search_require_gate_and_respect_rules() {
 fn a_saved_search_approval_requires_the_host_authenticated_scope() {
     let endpoint = "https://search.example:8443/query";
     let arguments = json!({"query": "test"});
-    let original = SearchScope::new([3; 32], "Search example · test".into());
+    let original = InvocationScope::search([3; 32], "Search example · test".into());
     let allow = original.allow_rule();
-    assert_eq!(allow.search_label(), Some("Search example · test"));
+    assert_eq!(allow.scope_label(), Some("Search example · test"));
     let search = |scope| {
         CandidateAction::WebSearch(std::sync::Arc::new(WebSearchAction {
             endpoint: endpoint.parse().unwrap(),
@@ -266,7 +266,7 @@ fn a_saved_search_approval_requires_the_host_authenticated_scope() {
         }))
     };
     let valid = search(Some(original));
-    let tag = allow.search_reference().unwrap();
+    let tag = allow.scope_reference().unwrap();
     assert!(!allow.pattern.contains(tag));
     let v1 = PolicyRule {
         pattern: format!("search_hmac_v1:{tag}\nSearch example · test"),
@@ -307,7 +307,7 @@ fn a_saved_search_approval_requires_the_host_authenticated_scope() {
     ));
     for changed in [
         search(None),
-        search(Some(SearchScope::new(
+        search(Some(InvocationScope::search(
             [4; 32],
             "Search example · test".into(),
         ))),

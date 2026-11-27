@@ -6,15 +6,14 @@ use super::decision::{
     request_context, start_decision,
 };
 use super::resolve::{
-    AgentCapabilityContext, CandidateOutcome, PreToolChecked, binding_of, build_candidate_action,
-    collect_pre_tool_hooks, count_reply_calls, load_gate_rules, resolve_device_candidate,
-    start_pre_tool_hooks,
+    AgentCapabilityContext, CandidateOutcome, PreToolChecked, PreparedPluginTool, binding_of,
+    build_candidate_action, collect_pre_tool_hooks, count_reply_calls, load_gate_rules,
+    resolve_device_candidate, start_pre_tool_hooks,
 };
 use crate::host::{
     db::Store,
     error::Result,
     notify::Notifier,
-    providers::extensions::PluginToolOwner,
     resources::{HostExternalTool, WorkAgent},
 };
 use bevy_ecs::prelude::*;
@@ -173,8 +172,8 @@ fn collect_pending_gate_calls(world: &mut World) -> Vec<GateCall> {
         .filter(|(call, _, _, _)| {
             world.get::<Approved>(*call).is_none()
                 || world
-                    .get::<PluginToolOwner>(*call)
-                    .is_some_and(|owner| owner.running.revoked())
+                    .get::<PreparedPluginTool>(*call)
+                    .is_some_and(PreparedPluginTool::revoked)
         })
         .filter(|(call, _, _, _)| {
             world
@@ -207,8 +206,8 @@ fn process_gate_call(
     item: GateCall,
 ) -> std::ops::ControlFlow<()> {
     if world
-        .get::<PluginToolOwner>(item.entity)
-        .is_some_and(|owner| owner.running.revoked())
+        .get::<PreparedPluginTool>(item.entity)
+        .is_some_and(PreparedPluginTool::revoked)
     {
         refuse(
             world,
@@ -266,22 +265,16 @@ fn process_gate_call(
             Ok(None) => {}
         }
     }
-    if let Some(HostExternalTool::Plugin(owner)) = ctx.external_tools.get(&item.tool_name) {
-        if owner.running.revoked() {
-            refuse(
-                world,
-                item.entity,
-                "the tool plugin was replaced or disabled",
-            );
-            return std::ops::ControlFlow::Continue(());
-        }
-        world.entity_mut(item.entity).insert(owner.clone());
-    }
     let candidate = match build_candidate_action(ctx, &item) {
         CandidateOutcome::Resolved(candidate) => Some(*candidate),
         CandidateOutcome::Search(search) => {
             let action = search.candidate();
             world.entity_mut(item.entity).insert(*search);
+            Some((action, None, None))
+        }
+        CandidateOutcome::Plugin(tool) => {
+            let action = tool.candidate();
+            world.entity_mut(item.entity).insert(tool);
             Some((action, None, None))
         }
         CandidateOutcome::NeedsDeviceClient => {

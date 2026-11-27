@@ -38,9 +38,9 @@ pub type Result<T> = std::result::Result<T, DomainError>;
 pub use risk::RiskLevel;
 pub use rules::{
     Approval, ApprovalDecision, ApprovalStatus, CandidateAction, MAX_POLICY_TEXT_CHARS,
-    PolicyEffect, PolicyRule, PolicyText, SearchApprovalSummary, Verdict, WebSearchAction,
-    canonical_json, canonicalise, decide_action, decide_capability, hex_digest,
+    PolicyEffect, PolicyRule, PolicyText, SearchApprovalSummary, Verdict, canonical_json,
+    canonicalise, decide_action, decide_capability, hex_digest,
 };
-mod search_scope;
-pub use search_scope::SearchScope;
+mod scope;
+pub use scope::{InvocationScope, PluginToolAction, WebSearchAction};
 pub use targets::{ActionTarget, extract_target};

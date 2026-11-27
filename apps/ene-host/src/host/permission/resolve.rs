@@ -7,17 +7,21 @@ use crate::host::{
     client::Client,
     db::Store,
     error::{HostError, Result},
+    providers::extensions::PluginToolOwner,
     providers::extensions::run_hooks,
     resources::{CompanionAgent, HostExternalTool, WorkAgent, WorkTurn},
 };
 use bevy_ecs::prelude::*;
-use ene_policy::{CandidateAction, CapabilitySpec, PolicyRule};
+use ene_policy::{
+    CandidateAction, CapabilitySpec, InvocationScope, PluginToolAction, PolicyRule, canonical_json,
+};
 use ene_rpc as w;
 use rig_core::effect::EffectId;
 use rig_ecs::prelude::{
     CallOf, Decider, Decision, Effect, HoldOf, Outcome, SupersededBy, ToolRequest,
 };
 use serde_json::Value;
+use std::sync::Arc;
 use tokio::sync::oneshot::{self, error::TryRecvError};
 
 /// A work call belongs to its admitted turn, even when the agent is reused.
@@ -147,6 +151,7 @@ type CandidateResolution = (CandidateAction, Option<String>, Option<String>);
 pub(super) enum CandidateOutcome {
     Resolved(Box<CandidateResolution>),
     Search(Box<crate::host::web_search::PreparedSearch>),
+    Plugin(PreparedPluginTool),
     NeedsDeviceClient,
     Refuse(String),
 }
@@ -155,19 +160,22 @@ pub(super) fn build_candidate_action(ctx: &GateContext, item: &GateCall) -> Cand
     if let Some(owner) = ctx.external_tools.get(&item.tool_name) {
         let tool_name = item.tool_name.clone();
         let input = item.arguments.clone();
-        let action = match owner {
-            HostExternalTool::Mcp { server, .. } => CandidateAction::McpTool {
-                server_id: server.clone(),
-                tool_name,
-                input,
-            },
-            HostExternalTool::Plugin(plugin) => CandidateAction::PluginTool {
-                plugin_id: plugin.plugin_id.clone(),
-                tool_name,
-                input,
+        return match owner {
+            HostExternalTool::Mcp { server, .. } => CandidateOutcome::Resolved(Box::new((
+                CandidateAction::McpTool {
+                    server_id: server.clone(),
+                    tool_name,
+                    input,
+                },
+                None,
+                None,
+            ))),
+            HostExternalTool::Plugin(plugin) => match prepare_plugin(ctx, plugin, tool_name, input)
+            {
+                Ok(prepared) => CandidateOutcome::Plugin(prepared),
+                Err(error) => CandidateOutcome::Refuse(error.to_string()),
             },
         };
-        return CandidateOutcome::Resolved(Box::new((action, None, None)));
     }
     if item.tool_name == crate::host::web_search::NAME {
         let providers = ctx.providers.clone().unwrap_or_default();
@@ -185,6 +193,78 @@ pub(super) fn build_candidate_action(ctx: &GateContext, item: &GateCall) -> Cand
         };
     }
     CandidateOutcome::NeedsDeviceClient
+}
+
+#[derive(Component)]
+pub(super) struct PreparedPluginTool {
+    owner: PluginToolOwner,
+    pub(super) action: Arc<PluginToolAction>,
+}
+
+impl PreparedPluginTool {
+    pub(super) fn revoked(&self) -> bool {
+        self.owner.running.revoked()
+    }
+
+    pub(super) fn candidate(&self) -> CandidateAction {
+        CandidateAction::PluginTool(Arc::clone(&self.action))
+    }
+}
+
+fn prepare_plugin(
+    ctx: &GateContext,
+    owner: &PluginToolOwner,
+    tool_name: String,
+    input: Value,
+) -> Result<PreparedPluginTool> {
+    if owner.running.revoked() {
+        return Err(HostError::Conflict(
+            "the tool plugin was replaced or disabled".into(),
+        ));
+    }
+    let revision = owner.running.package_revision();
+    let scope = if let Some(key) = ctx
+        .credentials
+        .as_ref()
+        .and_then(|creds| creds.approval_key.as_ref())
+        && let Some(installation) = ctx
+            .store
+            .plugin_repo()
+            .installation_id(&owner.plugin_id, revision)?
+    {
+        let canonical = canonical_json(&input);
+        super::scope_tag(
+            key,
+            b"ene-host plugin tool v1\0",
+            [
+                owner.plugin_id.as_bytes(),
+                revision.as_bytes(),
+                installation.as_bytes(),
+                tool_name.as_bytes(),
+                canonical.as_bytes(),
+            ],
+        )
+        .map(|tag| {
+            let label = format!(
+                "{} · {} · {}",
+                owner.plugin_id,
+                tool_name,
+                revision.get(..12).unwrap_or(revision)
+            );
+            InvocationScope::tool(tool_name.clone(), tag, label)
+        })
+    } else {
+        None
+    };
+    Ok(PreparedPluginTool {
+        owner: owner.clone(),
+        action: Arc::new(PluginToolAction {
+            plugin_id: owner.plugin_id.clone(),
+            tool_name,
+            input,
+            scope,
+        }),
+    })
 }
 
 pub(super) fn resolve_device_candidate(

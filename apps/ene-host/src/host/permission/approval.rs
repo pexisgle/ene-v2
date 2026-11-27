@@ -2,18 +2,18 @@
 use super::{
     decision::Decisions,
     gate::{Approvals, Approved, CallBinding},
+    resolve::PreparedPluginTool,
 };
 use crate::host::{
     db::Store,
     error::{HostError, Result},
     notify::Notifier,
-    providers::extensions::PluginToolOwner,
     web_search::{self, PreparedSearch, SearchConfigError},
 };
 use bevy_ecs::prelude::*;
 use ene_policy::{
-    Approval, ApprovalDecision, ApprovalStatus, PolicyEffect, PolicyRule, Verdict, canonicalise,
-    decide_action, decide_capability, hex_digest,
+    Approval, ApprovalDecision, ApprovalStatus, CandidateAction, InvocationScope, PolicyEffect,
+    PolicyRule, Verdict, canonicalise, decide_action, decide_capability, hex_digest,
 };
 use ene_rpc as w;
 use rig_ecs::prelude::*;
@@ -157,12 +157,13 @@ fn persist_always_allow_rule(
     notifier: &mut Notifier,
     approval: &Approval,
     scoped: Option<PolicyRule>,
+    requires_scope: bool,
 ) -> Result<()> {
     let rule = match scoped {
         Some(rule) => rule,
-        None if approval.tool_name == web_search::NAME => {
+        None if requires_scope => {
             return Err(HostError::Unavailable(
-                "search approval key is unavailable".into(),
+                "the external approval scope is unavailable".into(),
             ));
         }
         None => PolicyRule {
@@ -207,16 +208,19 @@ fn revalidate_search(
             SearchConfigError::Settings(error) => error.into(),
             _ => changed(),
         })?;
-    let verdict = decide_action(&store.policy_repo().policy_rules()?, &search.candidate());
+    revalidate_action(store, &search.candidate(), search.action.scope.as_ref())
+}
+
+fn revalidate_action(
+    store: &Store,
+    action: &CandidateAction,
+    scope: Option<&InvocationScope>,
+) -> Result<(Verdict, Option<PolicyRule>)> {
+    let verdict = decide_action(&store.policy_repo().policy_rules()?, action);
     if let Verdict::Deny { reason } = verdict {
         return Err(HostError::Permission(reason));
     }
-    let saved = search
-        .action
-        .scope
-        .as_ref()
-        .map(ene_policy::SearchScope::allow_rule);
-    Ok((verdict, saved))
+    Ok((verdict, scope.map(InvocationScope::allow_rule)))
 }
 
 fn approve_call(
@@ -230,13 +234,14 @@ fn approve_call(
     let name = approval.tool_name.as_str();
     let repo = store.approval_repo();
     let request_id = &approval.request_id;
-    let verdict = if world
-        .get::<PluginToolOwner>(call)
-        .is_some_and(|owner| owner.running.revoked())
-    {
-        Err(HostError::Conflict(
-            "the tool plugin was replaced or disabled".into(),
-        ))
+    let verdict = if let Some(tool) = world.get::<PreparedPluginTool>(call) {
+        if tool.revoked() {
+            Err(HostError::Conflict(
+                "the tool plugin was replaced or disabled".into(),
+            ))
+        } else {
+            revalidate_action(store, &tool.candidate(), tool.action.scope.as_ref())
+        }
     } else if name == web_search::NAME {
         let fallback = crate::host::providers::Providers::default();
         revalidate_search(
@@ -397,11 +402,14 @@ pub(crate) fn submit_with_outcome(
         runs.touch(&approval.run_id);
     }
     let rule = if matches!(decision, ApprovalDecision::AlwaysApprove) {
+        let requires_scope = approval.tool_name == web_search::NAME
+            || world.get::<PreparedPluginTool>(hold.call).is_some();
         match persist_always_allow_rule(
             &store,
             &mut world.resource_mut::<Notifier>(),
             &approval,
             scoped_rule,
+            requires_scope,
         ) {
             Ok(()) => RuleSave::Saved,
             Err(error) => {
@@ -438,7 +446,7 @@ fn notify_resolved(notifier: &mut Notifier, approval: &Approval) {
 /// A stopped turn takes its held calls with it; the approval must not become reusable.
 pub(super) fn expire_orphaned_approvals(
     mut approvals: ResMut<Approvals>,
-    mut calls: Query<(Option<&PluginToolOwner>, Option<&mut Decision>)>,
+    mut calls: Query<(Option<&PreparedPluginTool>, Option<&mut Decision>)>,
     store: Res<Store>,
     mut notifier: ResMut<Notifier>,
     mut decisions: ResMut<Decisions>,
@@ -447,7 +455,7 @@ pub(super) fn expire_orphaned_approvals(
     let repo = store.into_inner().approval_repo();
     approvals.by_request.retain(|request, hold| {
         if let Ok((owner, decision)) = calls.get_mut(hold.call) {
-            if owner.is_none_or(|owner| !owner.running.revoked()) {
+            if owner.is_none_or(|owner| !owner.revoked()) {
                 return true;
             }
             if let Some(mut decision) = decision {

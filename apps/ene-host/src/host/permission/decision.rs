@@ -150,7 +150,7 @@ pub(super) fn decision_prompt(inputs: &DecisionInputs) -> String {
     let rules: Vec<_> = inputs
         .rules
         .iter()
-        .filter(|rule| rule.search_label().is_none())
+        .filter(|rule| rule.scope_label().is_none())
         .take(DECISION_LIST)
         .collect();
     if rules.is_empty() {

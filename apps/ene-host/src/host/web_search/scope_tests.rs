@@ -92,7 +92,7 @@ fn persisted_search_rules_follow_effective_requests_and_accounts() {
     };
     let saved = prepared.scope.as_ref().unwrap().allow_rule();
     assert_eq!(
-        saved.search_label(),
+        saved.scope_label(),
         Some("Exa · Research account · \"ene\" · 3 · https://search.example/lookup")
     );
     assert!(matches!(
@@ -258,7 +258,7 @@ async fn always_allow_saves_one_rule_while_confirm_still_controls_dispatch() {
             assert_eq!(
                 rules
                     .iter()
-                    .filter(|rule| rule.search_label().is_some())
+                    .filter(|rule| rule.scope_label().is_some())
                     .count(),
                 1
             );

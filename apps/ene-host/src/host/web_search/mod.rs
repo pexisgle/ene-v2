@@ -21,9 +21,8 @@ use adapter::{contains_credential, parse_adapter_results, read_http_error, send_
 use bevy_ecs::prelude::Component;
 use ene_catalog::SearchAdapter;
 use ene_domain::{ConnectionId, SearchSelection};
-use ene_policy::{CandidateAction, SearchApprovalSummary, SearchScope, WebSearchAction};
+use ene_policy::{CandidateAction, InvocationScope, SearchApprovalSummary, WebSearchAction};
 use ene_store::util;
-use hmac::{Hmac, KeyInit, Mac};
 use rig_core::tool::{ToolErrorKind, ToolExecutionError};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
@@ -120,23 +119,22 @@ impl SearchBinding {
         label: String,
         query: &str,
         limit: usize,
-    ) -> Option<SearchScope> {
-        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key).ok()?;
-        mac.update(b"ene-host web_search v1\0");
+    ) -> Option<InvocationScope> {
         let provider = self.adapter.provider();
-        for field in [
-            self.connection.as_str().as_bytes(),
-            &self.created_revision.to_be_bytes(),
-            provider.adapter_id.as_bytes(),
-            self.endpoint.as_str().as_bytes(),
-            self.secret.as_deref().unwrap_or_default().as_bytes(),
-            query.as_bytes(),
-            &(limit as u64).to_be_bytes(),
-        ] {
-            mac.update(&(field.len() as u64).to_be_bytes());
-            mac.update(field);
-        }
-        Some(SearchScope::new(mac.finalize().into_bytes().into(), label))
+        let tag = super::permission::scope_tag(
+            key,
+            b"ene-host web_search v1\0",
+            [
+                self.connection.as_str().as_bytes(),
+                &self.created_revision.to_be_bytes(),
+                provider.adapter_id.as_bytes(),
+                self.endpoint.as_str().as_bytes(),
+                self.secret.as_deref().unwrap_or_default().as_bytes(),
+                query.as_bytes(),
+                &(limit as u64).to_be_bytes(),
+            ],
+        )?;
+        Some(InvocationScope::search(tag, label))
     }
 
     pub(crate) fn current(

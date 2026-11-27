@@ -127,6 +127,16 @@ impl<'a> PluginRepo<'a> {
         )
     }
 
+    /// Identifies the enabled installation that supplied an exact package.
+    pub fn installation_id(&self, plugin_id: &str, revision: &str) -> Result<Option<String>> {
+        self.0.fetch(
+            "SELECT installation_id FROM plugin_entries
+             WHERE plugin_id = ?1 AND revision = ?2 AND enabled = 1 AND installation_id <> ''",
+            params![plugin_id, revision],
+            |row| row.get(0),
+        )
+    }
+
     pub fn install_plugin_entry(
         &self,
         plugin_id: &str,
@@ -137,9 +147,11 @@ impl<'a> PluginRepo<'a> {
     ) -> Result<PluginEntry> {
         self.0.fetch(
             &format!(
-                "INSERT INTO plugin_entries ({ENTRY_COLUMNS}) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?6)
+                "INSERT INTO plugin_entries ({ENTRY_COLUMNS}, installation_id)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?6, lower(hex(randomblob(16))))
                  ON CONFLICT(plugin_id) DO UPDATE SET name = excluded.name, version = excluded.version,
-                 path = excluded.path, enabled = 1, updated_at = excluded.updated_at, revision = excluded.revision
+                 path = excluded.path, enabled = 1, updated_at = excluded.updated_at,
+                 revision = excluded.revision, installation_id = excluded.installation_id
                  RETURNING {ENTRY_COLUMNS}"
             ),
             params![plugin_id, name, version, path, now(), revision],

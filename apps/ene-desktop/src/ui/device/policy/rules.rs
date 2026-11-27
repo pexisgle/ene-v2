@@ -37,8 +37,8 @@ pub(super) fn render_policy_rule_row(
         PolicyEffect::Confirm => ("確認", theme.amber, theme.amber_soft, theme.amber_fg),
     };
     let armed = pane.form.delete_armed_policy.as_deref() == Some(rule.id.as_str());
-    let label = rule.search_label().unwrap_or(&rule.pattern);
-    let reference = rule.search_reference().map(|tag| {
+    let label = rule.scope_label().unwrap_or(&rule.pattern);
+    let reference = rule.scope_reference().map(|tag| {
         if armed {
             tag
         } else {

@@ -25,3 +25,19 @@ pub(crate) use ene_policy::{
 pub(crate) use gate::{
     Approvals, Approved, CallBinding, GatePlugin, issue_hold, notify_approval_card,
 };
+/// Authenticates an effective invocation without exposing its credentials or arguments.
+pub(crate) fn scope_tag<'a>(
+    key: &[u8; 32],
+    domain: &[u8],
+    fields: impl IntoIterator<Item = &'a [u8]>,
+) -> Option<[u8; 32]> {
+    use hmac::{Hmac, KeyInit, Mac};
+
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key).ok()?;
+    mac.update(domain);
+    for field in fields {
+        mac.update(&(field.len() as u64).to_be_bytes());
+        mac.update(field);
+    }
+    Some(mac.finalize().into_bytes().into())
+}

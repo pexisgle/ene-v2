@@ -32,7 +32,7 @@ pub(crate) struct HookOutcome {
 }
 
 /// A discovered tool can only execute on the admission that supplied its schema.
-#[derive(Clone, Component)]
+#[derive(Clone)]
 pub(crate) struct PluginToolOwner {
     pub(crate) plugin_id: String,
     pub(crate) running: Arc<Running>,

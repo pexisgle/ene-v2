@@ -8,8 +8,8 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use strum::{EnumString, IntoStaticStr};
 
-use crate::hard_deny::hard_denied_action;
 use crate::targets::{ActionTarget, extract_target};
+use crate::{PluginToolAction, WebSearchAction, hard_deny::hard_denied_action};
 
 pub(crate) const WEB_SEARCH_TOOL: &str = "web_search";
 
@@ -199,31 +199,9 @@ pub enum CandidateAction {
         input: Value,
     },
     /// A tool call routed to a plugin.
-    PluginTool {
-        /// Id of the plugin providing the tool.
-        plugin_id: String,
-        /// The tool the plugin exposes.
-        tool_name: String,
-        /// Arguments for the tool.
-        input: Value,
-    },
+    PluginTool(Arc<PluginToolAction>),
     /// An outbound web search.
     WebSearch(Arc<WebSearchAction>),
-}
-
-/// The effective query and destination, with literal arguments for older rules.
-#[derive(Clone, Debug)]
-pub struct WebSearchAction {
-    /// The validated endpoint.
-    pub endpoint: url::Url,
-    /// The query as sent.
-    pub query: String,
-    /// The number of results requested after applying the connection cap.
-    pub limit: usize,
-    /// Original invocation for legacy exact rules and the approval hash.
-    pub raw_arguments: Value,
-    /// The host-authenticated identity of the effective invocation.
-    pub scope: Option<crate::SearchScope>,
 }
 
 /// RFC 8785 (JCS) canonical JSON.
@@ -305,18 +283,16 @@ fn resolve_action(action: &CandidateAction) -> ResolvedAction<'_> {
             target_summary: format!("{tool_name} {}", truncate(&input.to_string(), 200)),
             default_approval: DefaultActionApproval::NeedsDecision,
         },
-        CandidateAction::PluginTool {
-            plugin_id,
-            tool_name,
-            input,
-        } => ResolvedAction {
-            tool_name: tool_name.as_str(),
-            capability: Some(plugin_id.as_str()),
+        CandidateAction::PluginTool(tool) => ResolvedAction {
+            tool_name: &tool.tool_name,
+            capability: Some(&tool.plugin_id),
             server_id: None,
-            raw_args: input,
+            raw_args: &tool.input,
             target_summary: format!(
-                "plugin:{plugin_id}/{tool_name} {}",
-                truncate(&input.to_string(), 180)
+                "plugin:{} {} {}",
+                tool.plugin_id,
+                tool.tool_name,
+                truncate(&tool.input.to_string(), 200)
             ),
             default_approval: DefaultActionApproval::NeedsDecision,
         },
@@ -352,10 +328,15 @@ pub fn decide_action(rules: &[PolicyRule], action: &CandidateAction) -> Verdict 
         raw_arguments: resolved.raw_args,
         raw_hash_hex: &raw_hash_hex,
         typed_target: &typed_target,
-        search_scope: match action {
+        scope: match action {
             CandidateAction::WebSearch(search) => search.scope.as_ref(),
+            CandidateAction::PluginTool(tool) => tool.scope.as_ref(),
             _ => None,
         },
+        scoped_target: matches!(
+            action,
+            CandidateAction::WebSearch(_) | CandidateAction::PluginTool(_)
+        ),
     };
     let mut confirm = false;
     let mut ask_llm = false;
@@ -428,7 +409,8 @@ struct ActionMatch<'a> {
     raw_arguments: &'a Value,
     raw_hash_hex: &'a str,
     typed_target: &'a ActionTarget,
-    search_scope: Option<&'a crate::SearchScope>,
+    scope: Option<&'a crate::InvocationScope>,
+    scoped_target: bool,
 }
 
 fn matches_action(rule: &PolicyRule, action: &ActionMatch<'_>) -> bool {
@@ -449,13 +431,11 @@ fn matches_action(rule: &PolicyRule, action: &ActionMatch<'_>) -> bool {
     if rule.pattern == "*" {
         return true;
     }
-    if let Some((tag, _)) = rule.search_scope() {
-        return action.tool_name == WEB_SEARCH_TOOL
-            && action.search_scope.is_some_and(|scope| scope.matches(tag));
+    if let Some((kind, tag, _)) = rule.scope_parts() {
+        return action.scope.is_some_and(|scope| scope.matches(kind, tag));
     }
-    // Legacy exact search allows did not bind the effective route and account.
-    let argument_allow_is_unscoped =
-        action.tool_name == WEB_SEARCH_TOOL && rule.effect == PolicyEffect::Allow;
+    // Legacy argument-only allows did not bind the external receiver.
+    let argument_allow_is_unscoped = action.scoped_target && rule.effect == PolicyEffect::Allow;
     if let Some(expected_hex) = rule.pattern.strip_prefix("exact_sha256:") {
         return !argument_allow_is_unscoped && expected_hex == action.raw_hash_hex;
     }
