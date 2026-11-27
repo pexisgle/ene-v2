@@ -152,8 +152,10 @@ impl SessionTransport {
                 None
             }
         };
-        let mut declaration = capabilities::Declaration::probe(body);
-        declaration.eyes &= devices.eyes_enabled;
+        let declaration = capabilities::Declaration::probe(
+            body,
+            devices.eyes_state() == crate::state::EyesState::Available,
+        );
         let mut specs = declaration.specs();
         if let Some(workspace) = &devices.workspace {
             specs.extend(workspace.specs());

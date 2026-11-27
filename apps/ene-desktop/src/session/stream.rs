@@ -380,7 +380,7 @@ impl Session {
                 restart = self.release_binding(&companion.id).await;
             }
             Some(w::notification::Event::Generic(event)) if event.kind == "perception_status" => {
-                if self.devices.eyes_enabled
+                if self.devices.eyes_state() == crate::state::EyesState::Available
                     && let Some(payload) = event.payload.as_option()
                     && let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload.json)
                     && value["subscription_id"].as_str()

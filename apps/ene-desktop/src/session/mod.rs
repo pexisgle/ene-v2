@@ -204,7 +204,7 @@ impl Session {
     pub async fn run(mut self) {
         notify_ui(
             &self.updates,
-            Update::EyesEnabled(self.devices.eyes_enabled),
+            Update::EyesChanged(self.devices.eyes_state()),
         );
         #[cfg(windows)]
         notify_ui(

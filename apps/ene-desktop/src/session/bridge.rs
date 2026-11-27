@@ -6,7 +6,7 @@ use crate::{
     avatar::{self, Avatar},
     host::Host,
     perception::{self, NotifyOn, Report, Sensor},
-    state::Device,
+    state::{Device, EyesState},
     update::Update,
     work_tools::Workspace,
 };
@@ -26,7 +26,7 @@ pub(super) struct DeviceBridge {
     /// Current avatar display scale percentage.
     pub(super) avatar_scale: f32,
     pub(super) sensor: Sensor,
-    pub(super) eyes_enabled: bool,
+    eyes: Eyes,
     #[cfg(windows)]
     pub(super) computer_enabled: bool,
     #[cfg(windows)]
@@ -45,6 +45,22 @@ pub(super) struct DeviceBridge {
 struct RendererRetry {
     not_before: tokio::time::Instant,
     delay: ExponentialBackoff,
+}
+
+enum Eyes {
+    Off,
+    Unavailable,
+    Available(perception::Observer),
+}
+
+impl Eyes {
+    fn requested(enabled: bool) -> Self {
+        if enabled {
+            perception::Observer::open().map_or(Self::Unavailable, Self::Available)
+        } else {
+            Self::Off
+        }
+    }
 }
 
 impl RendererRetry {
@@ -72,7 +88,7 @@ impl DeviceBridge {
             renderer_retry: RendererRetry::new(),
             avatar_scale: 100.,
             sensor: Sensor::default(),
-            eyes_enabled: perception::enabled(),
+            eyes: Eyes::requested(perception::enabled()),
             #[cfg(windows)]
             computer_enabled: perception::preference_enabled(crate::computer::PREFERENCE),
             #[cfg(windows)]
@@ -219,10 +235,10 @@ impl DeviceBridge {
 
     pub(super) fn set_eyes_enabled(&mut self, enabled: bool, updates: &UnboundedSender<Update>) {
         match perception::save_enabled(enabled) {
-            Ok(()) => self.eyes_enabled = enabled,
+            Ok(()) => self.eyes = Eyes::requested(enabled),
             Err(error) => {
                 if !enabled {
-                    self.eyes_enabled = false;
+                    self.eyes = Eyes::Off;
                 }
                 super::notify_ui(
                     updates,
@@ -233,10 +249,18 @@ impl DeviceBridge {
                 );
             }
         }
-        if !self.eyes_enabled {
+        if !matches!(self.eyes, Eyes::Available(_)) {
             self.sensor = Sensor::default();
         }
-        super::notify_ui(updates, Update::EyesEnabled(self.eyes_enabled));
+        super::notify_ui(updates, Update::EyesChanged(self.eyes_state()));
+    }
+
+    pub(super) fn eyes_state(&self) -> EyesState {
+        match self.eyes {
+            Eyes::Off => EyesState::Off,
+            Eyes::Unavailable => EyesState::Unavailable,
+            Eyes::Available(_) => EyesState::Available,
+        }
     }
 
     #[cfg(windows)]
@@ -274,11 +298,10 @@ impl DeviceBridge {
         observations: &mut tokio::task::JoinSet<()>,
     ) {
         use w::perception_event::Event;
-        if !self.eyes_enabled
-            || transport.bindings.is_empty()
-            || transport.subscription.is_empty()
-            || !perception::supported()
-        {
+        let Eyes::Available(observer) = &mut self.eyes else {
+            return;
+        };
+        if transport.bindings.is_empty() || transport.subscription.is_empty() {
             return;
         }
         #[cfg(windows)]
@@ -305,7 +328,7 @@ impl DeviceBridge {
         }
         events.extend(
             self.sensor
-                .observe(perception::observe(), periodic)
+                .observe(observer.observe(), periodic)
                 .into_iter()
                 .map(perception_report_event),
         );

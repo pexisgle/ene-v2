@@ -115,7 +115,7 @@ pub struct Declaration {
 
 impl Declaration {
     /// What this machine can do with its currently displayed avatar.
-    pub fn probe(avatar_ready: bool) -> Self {
+    pub fn probe(avatar_ready: bool, eyes: bool) -> Self {
         let motions = if avatar_ready {
             crate::avatar::MOTIONS
                 .iter()
@@ -134,7 +134,7 @@ impl Declaration {
         Self {
             motions,
             expressions,
-            eyes: crate::perception::supported(),
+            eyes,
         }
     }
 
@@ -395,17 +395,14 @@ mod tests {
     /// A machine that cannot show a motion must not claim it can.
     #[test]
     fn no_motion_is_declared_without_a_renderer() {
-        let names = names(&Declaration::probe(false).specs());
+        let names = names(&Declaration::probe(false, false).specs());
         assert!(!names.iter().any(|name| name.starts_with("body.")));
-        assert_eq!(
-            names.iter().any(|name| name == "eye.watch"),
-            crate::perception::supported()
-        );
+        assert!(!names.iter().any(|name| name == "eye.watch"));
     }
 
     #[test]
     fn the_bundled_ene_declares_the_selected_presets() {
-        let declaration = Declaration::probe(true);
+        let declaration = Declaration::probe(true, false);
         assert!(
             declaration
                 .motions

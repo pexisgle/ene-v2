@@ -80,7 +80,7 @@ pub(super) struct DeviceSnapshot {
     pub(super) output_muted: bool,
     pub(super) mic_configured: bool,
     pub(super) output_configured: bool,
-    pub(super) eyes_enabled: bool,
+    pub(super) eyes: crate::state::EyesState,
     pub(super) eyes_status: Option<String>,
     pub(super) avatar_scale: f32,
     pub(super) rules: Vec<PolicyRule>,
@@ -118,7 +118,7 @@ impl DeviceSnapshot {
             output_muted: hub.model.audio.output_muted,
             mic_configured: hub.has_audio_connection(ConnectionKind::Stt),
             output_configured: hub.has_audio_connection(ConnectionKind::Tts),
-            eyes_enabled: hub.model.perception.eyes_enabled,
+            eyes: hub.model.perception.eyes,
             eyes_status: hub.model.perception.eyes_status.clone(),
             avatar_scale: hub.model.perception.avatar_scale,
             rules: hub

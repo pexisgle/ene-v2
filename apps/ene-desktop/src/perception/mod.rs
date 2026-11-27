@@ -48,34 +48,39 @@ pub(crate) fn save_preference(name: &str, enabled: bool) -> io::Result<()> {
     Ok(())
 }
 
-/// Whether this platform can report the foreground window at all.
-///
-/// A platform without the hook declares no `eye.watch`, so the host never
-/// publishes a tool this client cannot honour.
-pub fn supported() -> bool {
-    #[cfg(windows)]
-    {
-        true
-    }
+pub(crate) struct Observer {
     #[cfg(target_os = "linux")]
-    {
-        ene_platform_os::observation_supported()
-    }
-    #[cfg(not(any(windows, target_os = "linux")))]
-    {
-        false
-    }
+    source: ene_platform_os::Observer,
 }
 
-/// Samples the current foreground window and idle time.
-#[cfg(any(windows, target_os = "linux"))]
-pub fn observe() -> Observation {
-    ene_platform_os::observe()
-}
+impl Observer {
+    pub(crate) fn open() -> Option<Self> {
+        #[cfg(windows)]
+        {
+            Some(Self {})
+        }
+        #[cfg(target_os = "linux")]
+        {
+            ene_platform_os::Observer::open().map(|source| Self { source })
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        {
+            None
+        }
+    }
 
-/// A platform without a window hook reports no window, and says so by
-/// returning `None` rather than inventing one.
-#[cfg(not(any(windows, target_os = "linux")))]
-pub fn observe() -> Observation {
-    Observation::default()
+    pub(crate) fn observe(&mut self) -> Observation {
+        #[cfg(windows)]
+        {
+            ene_platform_os::observe()
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.source.observe()
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        {
+            Observation::default()
+        }
+    }
 }

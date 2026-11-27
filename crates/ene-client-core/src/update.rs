@@ -169,8 +169,8 @@ pub enum Update {
         /// Whether the audio output is muted.
         output_muted: bool,
     },
-    /// Whether screen perception is now on.
-    EyesEnabled(bool),
+    /// The local Eyes preference and native observation availability changed.
+    EyesChanged(crate::state::EyesState),
     /// The perception status line, when the host reported one.
     EyesStatus(Option<String>),
     /// Enables or disables Windows desktop input for this client.

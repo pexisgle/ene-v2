@@ -31,7 +31,7 @@ pub use input::{Desktop, Point, Rect};
 #[cfg(windows)]
 pub use observe::observe;
 #[cfg(target_os = "linux")]
-pub use observe_linux::{observe, supported as observation_supported};
+pub use observe_linux::Observer;
 pub use observe_types::{Observation, ObservedWindow, Window};
 pub use tray::{Tray, TrayAction, TrayHandle, TrayMode, TraySection, TrayState};
 #[cfg(windows)]

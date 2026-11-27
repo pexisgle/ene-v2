@@ -150,7 +150,7 @@ fn apply_domain_update(model: &mut Model, update: Update, effects: &mut Effects)
         | Update::Capture { .. }
         | Update::Spoke
         | Update::SpokeFailed { .. } => apply_audio_update(&mut model.audio, update),
-        Update::EyesEnabled(_) | Update::EyesStatus(_) | Update::AvatarScaleChanged(_) => {
+        Update::EyesChanged(_) | Update::EyesStatus(_) | Update::AvatarScaleChanged(_) => {
             apply_perception_update(&mut model.perception, update);
         }
         #[cfg(windows)]
@@ -329,8 +329,8 @@ fn apply_transcription(audio: &mut AudioState, text: String, is_final: bool, is_
 
 fn apply_perception_update(perception: &mut PerceptionState, update: Update) {
     match update {
-        Update::EyesEnabled(enabled) => {
-            perception.eyes_enabled = enabled;
+        Update::EyesChanged(eyes) => {
+            perception.eyes = eyes;
             perception.eyes_status = None;
         }
         Update::EyesStatus(status) => perception.eyes_status = status,

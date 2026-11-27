@@ -414,7 +414,7 @@ impl Session {
 
     /// Applies or clears a watch rule.
     fn watch(&mut self, watch: Watch) -> Result<OperationOutput, OperationError> {
-        if !self.devices.eyes_enabled {
+        if self.devices.eyes_state() != crate::state::EyesState::Available {
             return Err(OperationError::EyesDisabled);
         }
         let enabled = watch.enabled;

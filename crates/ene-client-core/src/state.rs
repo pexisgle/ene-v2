@@ -293,8 +293,8 @@ impl Default for AudioState {
 /// Perception (eyes / computer use) and avatar visual state.
 #[derive(Debug)]
 pub struct PerceptionState {
-    /// Whether screen perception is on.
-    pub eyes_enabled: bool,
+    /// Local consent and the availability of its observer.
+    pub eyes: EyesState,
     /// Whether the host may drive the desktop.
     #[cfg(windows)]
     pub computer_use_enabled: bool,
@@ -307,12 +307,30 @@ pub struct PerceptionState {
 impl Default for PerceptionState {
     fn default() -> Self {
         Self {
-            eyes_enabled: false,
+            eyes: EyesState::Off,
             #[cfg(windows)]
             computer_use_enabled: false,
             eyes_status: None,
             avatar_scale: 100.0,
         }
+    }
+}
+
+/// The desktop's local opt-in and native observation availability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EyesState {
+    /// The user has not enabled observation on this device.
+    Off,
+    /// The user opted in but the native observer could not start.
+    Unavailable,
+    /// A native observer is available to this device.
+    Available,
+}
+
+impl EyesState {
+    /// Whether the local preference permits observation.
+    pub fn enabled(self) -> bool {
+        self != Self::Off
     }
 }
 

@@ -150,14 +150,17 @@ fn render_output_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Theme) ->
 }
 
 fn render_eyes_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Theme) -> AnyElement {
-    let eyes_supported = crate::perception::supported();
+    use crate::state::EyesState;
+
+    let eyes_supported = cfg!(any(windows, target_os = "linux"));
     let eyes_label = match (
-        snap.eyes_enabled,
+        snap.eyes,
         snap.live && snap.is_active_client,
         snap.eyes_status.as_deref(),
     ) {
         _ if !eyes_supported => "この環境では取得不可",
-        (false, _, _) => "オフ",
+        (EyesState::Off, _, _) => "オフ",
+        (EyesState::Unavailable, _, _) => "この環境では取得不可",
         (_, false, _) => "担当端末になるまで待機",
         (_, _, Some("unavailable")) => "目のモデルに接続できません",
         (_, _, Some("image")) if cfg!(windows) => "画面と活動を評価",
@@ -165,7 +168,7 @@ fn render_eyes_row(pane: &DevicePane, snap: &DeviceSnapshot, theme: &Theme) -> A
         _ => "モデル確認中",
     };
     let hub_eyes = pane.hub.clone();
-    let enabled = snap.eyes_enabled;
+    let enabled = snap.eyes.enabled();
     row_frame(
         true,
         "目",

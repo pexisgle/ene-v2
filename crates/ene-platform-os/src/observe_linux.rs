@@ -2,8 +2,7 @@ mod protocol;
 
 use self::protocol::{parse_wm_class, wayland_state_is_activated};
 use crate::{Observation, ObservedWindow, Window};
-use parking_lot::Mutex;
-use std::{collections::HashMap, sync::LazyLock, time::Instant};
+use std::{collections::HashMap, time::Instant};
 use wayland_client::backend::{ObjectId, WaylandError};
 use wayland_client::{
     Connection as WaylandConnection, Dispatch, EventQueue, Proxy, QueueHandle, delegate_noop,
@@ -26,42 +25,36 @@ use x11rb::{
 
 const _: () = assert!(zwlr_foreign_toplevel_handle_v1::State::Activated as u32 == 2);
 
-static BACKEND: LazyLock<Mutex<LinuxBackend>> = LazyLock::new(|| Mutex::new(init()));
+/// Owns the native registration for one opted-in desktop observer.
+pub struct Observer(LinuxBackend);
+
+impl std::fmt::Debug for Observer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Observer").finish_non_exhaustive()
+    }
+}
 
 enum LinuxBackend {
     Wayland(Box<WaylandBackend>),
     X11(Box<X11Backend>),
-    Unsupported,
 }
 
-pub fn supported() -> bool {
-    let backend = BACKEND.lock();
-    !matches!(*backend, LinuxBackend::Unsupported)
-}
+impl Observer {
+    pub fn open() -> Option<Self> {
+        // XWayland cannot observe native Wayland surfaces.
+        if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty()) {
+            return WaylandBackend::connect()
+                .map(|backend| Self(LinuxBackend::Wayland(Box::new(backend))));
+        }
+        X11Backend::connect().map(|backend| Self(LinuxBackend::X11(Box::new(backend))))
+    }
 
-pub fn observe() -> Observation {
-    let mut backend = BACKEND.lock();
-    match &mut *backend {
-        LinuxBackend::Wayland(wayland) => wayland.observe(),
-        LinuxBackend::X11(x11) => x11.observe(),
-        LinuxBackend::Unsupported => Observation::default(),
+    pub fn observe(&mut self) -> Observation {
+        match &mut self.0 {
+            LinuxBackend::Wayland(wayland) => wayland.observe(),
+            LinuxBackend::X11(x11) => x11.observe(),
+        }
     }
-}
-
-fn init() -> LinuxBackend {
-    // Under Wayland, never fall back to XWayland's `_NET_ACTIVE_WINDOW`:
-    // it cannot observe native Wayland surfaces.
-    if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|val| !val.is_empty()) {
-        return WaylandBackend::connect().map_or(LinuxBackend::Unsupported, |backend| {
-            LinuxBackend::Wayland(Box::new(backend))
-        });
-    }
-    if std::env::var_os("DISPLAY").is_some_and(|val| !val.is_empty()) {
-        return X11Backend::connect().map_or(LinuxBackend::Unsupported, |backend| {
-            LinuxBackend::X11(Box::new(backend))
-        });
-    }
-    LinuxBackend::Unsupported
 }
 
 #[derive(Clone, Default)]
