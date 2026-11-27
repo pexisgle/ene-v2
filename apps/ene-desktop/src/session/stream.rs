@@ -63,9 +63,7 @@ impl Session {
             self.devices.computer_frame = None;
         }
         super::notify_ui(&self.updates, Update::EyesStatus(None));
-        if self.transport.options.renderer.is_some() && self.devices.avatar.is_none() {
-            self.open_avatar().await;
-        }
+        self.open_avatar().await;
         let device = match host
             .client
             .device_stream(w::Id {
@@ -144,6 +142,7 @@ impl Session {
                 if self.transport.published_body != self.devices.body_available(&self.transport) {
                     self.transport.sync_capabilities(host, &self.devices).await;
                 }
+                self.open_avatar().await;
                 // Fire-and-forget reports are only reaped here; without this
                 // the set grew for the life of the session.
                 self.devices.reap_background();

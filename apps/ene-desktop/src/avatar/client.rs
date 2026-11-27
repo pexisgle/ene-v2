@@ -14,7 +14,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -103,6 +103,7 @@ impl ShownCharacter {
 /// The renderer process and non-blocking async channels to its stdio workers.
 pub struct Avatar {
     child: Option<Child>,
+    started: Instant,
     pub(super) write_tx: Option<mpsc::Sender<WriteItem>>,
     events_rx: mpsc::UnboundedReceiver<AvatarEvent>,
     pending: PendingReplies,
@@ -158,6 +159,7 @@ impl Avatar {
         thread::spawn(move || read_loop(stdout, &events_tx, &reader_pending, &reader_healthy));
         Ok(Self {
             child: Some(child),
+            started: Instant::now(),
             write_tx: Some(write_tx),
             events_rx,
             pending,
@@ -170,6 +172,10 @@ impl Avatar {
 
     pub fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Acquire)
+    }
+
+    pub fn uptime(&self) -> Duration {
+        self.started.elapsed()
     }
 
     fn push_event(&mut self, event: AvatarEvent) {
@@ -303,6 +309,7 @@ impl Avatar {
         let pending: PendingReplies = Arc::new(Mutex::new(HashMap::new()));
         let avatar = Self {
             child: None,
+            started: Instant::now(),
             write_tx: Some(write_tx),
             events_rx,
             pending: Arc::clone(&pending),

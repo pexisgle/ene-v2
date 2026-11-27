@@ -1,7 +1,7 @@
 //! Avatar renderer, OS perception sensor, computer use, workspace, and plugin bridge.
 
 use super::transport::SessionTransport;
-use super::{BACKGROUND_DRAIN_TIMEOUT, SAMPLE, SCREEN_SAMPLE};
+use super::{BACKGROUND_DRAIN_TIMEOUT, MAX_RETRY, RECONNECT_BACKOFF, SAMPLE, SCREEN_SAMPLE};
 use crate::{
     avatar::{self, Avatar},
     host::Host,
@@ -10,6 +10,7 @@ use crate::{
     update::Update,
     work_tools::Workspace,
 };
+use backon::{BackoffBuilder as _, ExponentialBackoff};
 use ene_avatar_ipc::{AvatarEvent, AvatarStatus};
 use ene_rpc as w;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -17,6 +18,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 pub(super) struct DeviceBridge {
     pub(super) avatar: Option<Avatar>,
+    renderer_retry: RendererRetry,
     /// Current avatar display scale percentage.
     pub(super) avatar_scale: f32,
     pub(super) sensor: Sensor,
@@ -36,12 +38,34 @@ pub(super) struct DeviceBridge {
     pub(super) last_avatar_interaction: HashMap<String, std::time::Instant>,
 }
 
+struct RendererRetry {
+    not_before: tokio::time::Instant,
+    delay: ExponentialBackoff,
+}
+
+impl RendererRetry {
+    fn new() -> Self {
+        Self {
+            not_before: tokio::time::Instant::now(),
+            delay: RECONNECT_BACKOFF.build(),
+        }
+    }
+
+    fn failed(&mut self, uptime: Duration) {
+        if uptime >= Duration::from_secs(30) {
+            self.delay = RECONNECT_BACKOFF.build();
+        }
+        self.not_before = tokio::time::Instant::now() + self.delay.next().unwrap_or(MAX_RETRY);
+    }
+}
+
 impl DeviceBridge {
     pub(super) async fn new() -> Self {
         let workspace = Workspace::probe().map(Arc::new);
         let client_plugins = Arc::new(crate::plugins::ClientPlugins::probe_default().await);
         Self {
             avatar: None,
+            renderer_retry: RendererRetry::new(),
             avatar_scale: 100.,
             sensor: Sensor::default(),
             eyes_enabled: perception::enabled(),
@@ -62,16 +86,23 @@ impl DeviceBridge {
         &mut self,
         transport: &SessionTransport,
     ) -> Result<bool, Device> {
-        let Some(program) = transport.options.renderer.clone() else {
+        if self.avatar.is_some()
+            || transport.bindings.is_empty()
+            || tokio::time::Instant::now() < self.renderer_retry.not_before
+        {
+            return Ok(false);
+        }
+        let Some(program) = transport.options.renderer.as_deref() else {
             return Ok(false);
         };
-        match Avatar::spawn(&program, &transport.options.id) {
+        match Avatar::spawn(program, &transport.options.id) {
             Ok(avatar) => {
                 self.avatar = Some(avatar);
                 self.sync_avatars(transport).await;
                 Ok(true)
             }
             Err(error) => {
+                self.renderer_retry.failed(Duration::ZERO);
                 tracing::warn!("the renderer did not start: {error}");
                 Err(Device::Unavailable(error.to_string()))
             }
@@ -114,6 +145,7 @@ impl DeviceBridge {
             self.avatar = Some(avatar);
             changed
         } else {
+            self.renderer_retry.failed(avatar.uptime());
             avatar.shutdown();
             true
         }
