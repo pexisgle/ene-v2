@@ -14,7 +14,6 @@ use crate::host::{
 };
 use bevy_ecs::prelude::*;
 use ene_mind::{RecallCandidate, RecallMode};
-use ene_store::util::now;
 use rig_ecs::prelude::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -87,8 +86,21 @@ pub(crate) fn register(app: &mut App) {
         "mind_read",
         "Read one memory with its provenance. This counts as using it.",
         ToolOptions::default(),
-        run_tool(|world, agent, _, args: ReadArgs| {
-            read(world.resource(), &companion_of_any(world, agent)?, &args)
+        run_tool(|world, agent, call, args: ReadArgs| {
+            let (turn, agent_id) = world
+                .get::<CallOf>(call)
+                .and_then(|of| world.get::<Turn>(of.0))
+                .zip(world.get::<AgentId>(agent))
+                .ok_or_else(|| {
+                    HostError::Internal("memory read has no conversation turn".into())
+                })?;
+            let citation = format!("{}:{}", agent_id.0, turn.start.get());
+            read(
+                world.resource(),
+                &companion_of_any(world, agent)?,
+                &args,
+                &citation,
+            )
         }),
     )
     .add_open_tool::<UpdateArgs, _>(
@@ -236,20 +248,10 @@ fn recall_result(
     Ok(json!({"items": items, "semantic": outcome.semantic}).to_string())
 }
 
-fn read(store: &Store, companion: &str, args: &ReadArgs) -> Result<String> {
-    let memory = store
+fn read(store: &Store, companion: &str, args: &ReadArgs, turn: &str) -> Result<String> {
+    let (memory, relations) = store
         .memory_repo()
-        .memory(&args.id)?
-        .ok_or_else(|| HostError::NotFound(("memory not found").into()))?;
-    if !memory.visible_to(companion) {
-        return Err(HostError::Permission(
-            ("this memory belongs to another companion").into(),
-        ));
-    }
-    // Reading with the tool is an explicit use, so the recall recency moves.
-    store
-        .memory_repo()
-        .cite_memory(&args.id, &format!("{companion}:{}", now()), false)?;
+        .read_and_cite(companion, &args.id, turn)?;
     if memory.scope != companion {
         // A shared memory exposes the facts only: its private origin, emotion
         // and relations stay with the companion that recorded it
@@ -263,7 +265,6 @@ fn read(store: &Store, companion: &str, args: &ReadArgs) -> Result<String> {
         })
         .to_string());
     }
-    let relations = store.memory_repo().memory_edges(&args.id)?;
     Ok(detail(&memory, &relations).to_string())
 }
 

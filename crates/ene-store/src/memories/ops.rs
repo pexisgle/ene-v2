@@ -171,14 +171,7 @@ impl<'a> MemoryRepo<'a> {
     }
 
     pub fn memory_edges(&self, id: &str) -> Result<Vec<(String, String)>> {
-        let connection = self.0.conn();
-        let mut statement = connection.prepare_cached(
-            "SELECT relation, to_id FROM memory_edges WHERE from_id = ?1 \
-             UNION ALL SELECT relation, from_id FROM memory_edges WHERE to_id = ?1",
-        )?;
-        let rows = statement.query_map([id], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        memory_edges(&self.0.conn(), id)
     }
 
     /// Memories whose vector is absent or stale for `space` and visible to `companion`.
@@ -240,6 +233,19 @@ impl<'a> MemoryRepo<'a> {
             ])?;
         Ok(inserted != 0)
     }
+}
+
+pub(super) fn memory_edges(
+    connection: &rusqlite::Connection,
+    id: &str,
+) -> Result<Vec<(String, String)>> {
+    let mut statement = connection.prepare_cached(
+        "SELECT relation, to_id FROM memory_edges WHERE from_id = ?1 \
+         UNION ALL SELECT relation, from_id FROM memory_edges WHERE to_id = ?1",
+    )?;
+    let rows = statement.query_map([id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 fn forget_memory_tx(

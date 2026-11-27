@@ -41,6 +41,33 @@ const JOINED_COLUMNS: &str = "m.rowid, m.id, m.scope, m.content, m.importance, \
 
 pub(super) const VISIBLE: &str = "(m.scope = ?1 OR m.scope = 'shared')";
 
+fn load_memory(connection: &rusqlite::Connection, id: &str) -> Result<Option<Memory>> {
+    Ok(connection
+        .prepare_cached(&format!("SELECT {COLUMNS} FROM memories WHERE id = ?1"))?
+        .query_row([id], Memory::from_row)
+        .optional()?)
+}
+
+fn cite_visible_memory(
+    transaction: &rusqlite::Transaction<'_>,
+    companion: &str,
+    id: &str,
+    relation: &str,
+    turn_id: &str,
+    stamp: &str,
+) -> Result<bool> {
+    let updated = transaction
+        .prepare_cached(&format!(
+            "UPDATE memories AS m SET last_accessed_at = ?3 WHERE {VISIBLE} AND m.id = ?2"
+        ))?
+        .execute(params![companion, id, stamp])?
+        != 0;
+    if updated {
+        add_edge(transaction, id, relation, turn_id, stamp)?;
+    }
+    Ok(updated)
+}
+
 pub(super) struct StoredMemory {
     pub(super) scope: String,
     pub(super) content: String,
@@ -126,12 +153,7 @@ impl<'a> MemoryRepo<'a> {
     }
 
     pub fn memory(&self, id: &str) -> Result<Option<Memory>> {
-        let connection = self.0.conn();
-        let memory = connection
-            .prepare_cached(&format!("SELECT {COLUMNS} FROM memories WHERE id = ?1"))?
-            .query_row([id], Memory::from_row)
-            .optional()?;
-        Ok(memory)
+        load_memory(&self.0.conn(), id)
     }
 
     pub fn control_memory(
@@ -168,27 +190,29 @@ impl<'a> MemoryRepo<'a> {
         updated.ok_or_else(|| StoreError::Conflict("memory changed since it was read".into()))
     }
 
-    pub fn cite_memory(&self, id: &str, turn_id: &str, estimated: bool) -> Result<()> {
-        let connection = self.0.conn();
-        connection
-            .prepare_cached("UPDATE memories SET last_accessed_at = ?2 WHERE id = ?1")?
-            .execute(params![id, now()])?;
-        connection
-            .prepare_cached(
-                "INSERT OR IGNORE INTO memory_edges (from_id, relation, to_id, created_at) \
-                 VALUES (?1, ?2, ?3, ?4)",
-            )?
-            .execute(params![
-                id,
-                if estimated {
-                    "estimated_cited_in"
-                } else {
-                    "cited_in"
-                },
-                turn_id,
-                now()
-            ])?;
-        Ok(())
+    pub fn read_and_cite(
+        &self,
+        companion: &str,
+        id: &str,
+        turn_id: &str,
+    ) -> Result<(Memory, Vec<(String, String)>)> {
+        self.0.write_tx(|transaction| {
+            let mut memory = load_memory(transaction, id)?
+                .ok_or_else(|| StoreError::NotFound("memory not found".into()))?;
+            let stamp = now();
+            if !cite_visible_memory(transaction, companion, id, "cited_in", turn_id, &stamp)? {
+                return Err(StoreError::Permission(
+                    "this memory belongs to another companion".into(),
+                ));
+            }
+            memory.last_accessed_at = Some(stamp);
+            let edges = if memory.scope == companion {
+                ops::memory_edges(transaction, id)?
+            } else {
+                Vec::new()
+            };
+            Ok((memory, edges))
+        })
     }
 
     pub fn recall_hybrid(
@@ -383,10 +407,11 @@ impl<'a> MemoryRepo<'a> {
         through: u64,
     ) -> Result<Vec<String>> {
         let connection = self.0.conn();
-        let mut statement = connection.prepare_cached(
-            "SELECT turn_id, memory_id FROM memory_injections \
-             WHERE companion_id = ?1 ORDER BY rowid",
-        )?;
+        let mut statement = connection.prepare_cached(&format!(
+            "SELECT i.turn_id, i.memory_id FROM memory_injections i \
+             JOIN memories m ON m.id = i.memory_id \
+             WHERE i.companion_id = ?1 AND {VISIBLE} ORDER BY i.rowid"
+        ))?;
         let rows = statement.query_map([companion], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;

@@ -639,6 +639,17 @@ fn injected_memory_ids_survive_a_restart() {
     {
         let store = Store::open(&path).unwrap();
         let repo = store.memory_repo();
+        for (id, scope) in [
+            ("m1", "ene"),
+            ("m2", "shared"),
+            ("m3", "ene"),
+            ("m9", "other"),
+        ] {
+            let mut memory = new_memory(id, 4);
+            memory.id = id.into();
+            memory.scope = scope.into();
+            repo.insert_memory(&memory).unwrap();
+        }
         repo.record_injections("ene", "5", &["m1".into(), "m2".into()])
             .unwrap();
         repo.record_injections("ene", "7", &["m3".into()]).unwrap();
@@ -662,5 +673,77 @@ fn injected_memory_ids_survive_a_restart() {
     assert_eq!(
         repo.injected_between("other", None, 5).unwrap(),
         vec!["m9".to_owned()]
+    );
+}
+
+#[test]
+fn a_failed_citation_never_advances_the_memory_access_time() {
+    let store = store();
+    let repo = store.memory_repo();
+    let memory = repo.insert_memory(&new_memory("test read", 4)).unwrap();
+    store
+        .conn()
+        .execute_batch(
+            "CREATE TEMP TRIGGER fail_citation BEFORE INSERT ON memory_edges BEGIN
+           SELECT RAISE(ABORT, 'citation fixture failure');
+         END;",
+        )
+        .unwrap();
+    assert!(repo.read_and_cite("ene", &memory.id, "head:5").is_err());
+    assert_eq!(
+        repo.memory(&memory.id).unwrap().unwrap().last_accessed_at,
+        None
+    );
+    store
+        .conn()
+        .execute_batch("DROP TRIGGER fail_citation")
+        .unwrap();
+    assert!(matches!(
+        repo.read_and_cite("other", &memory.id, "other:1"),
+        Err(StoreError::Permission(_))
+    ));
+    let (read, edges) = repo.read_and_cite("ene", &memory.id, "head:5").unwrap();
+    assert!(read.last_accessed_at.is_some());
+    assert_eq!(edges, [("cited_in".into(), "head:5".into())]);
+}
+
+#[test]
+fn a_memory_unshared_after_injection_cannot_be_cited_by_consolidation() {
+    let store = store();
+    let repo = store.memory_repo();
+    let mut input = new_memory("shared note", 5);
+    input.scope = SHARED_SCOPE.into();
+    let memory = repo.insert_memory(&input).unwrap();
+    repo.record_injections("ene", "5", std::slice::from_ref(&memory.id))
+        .unwrap();
+    let mut consolidation = batch(7, Vec::new());
+    consolidation.injected = repo.injected_between("ene", None, 7).unwrap();
+    assert_eq!(consolidation.injected, std::slice::from_ref(&memory.id));
+    repo.control_memory(&memory.id, MemoryActionKind::Unshare, "owner")
+        .unwrap();
+    assert_eq!(
+        repo.injected_between("ene", None, 7).unwrap(),
+        [] as [String; 0]
+    );
+    let fact = Fact {
+        content: "a fact derived from the old note".into(),
+        cited_memory_ids: vec![memory.id.clone()],
+        ..Fact::default()
+    };
+    assert!(matches!(
+        repo.consolidate(&consolidation, &[fact]),
+        Err(StoreError::Conflict(_))
+    ));
+    assert_eq!(
+        repo.list_memories("ene", None, 10).unwrap().0,
+        [] as [Memory; 0]
+    );
+    assert_eq!(
+        repo.memory(&memory.id).unwrap().unwrap().last_accessed_at,
+        None
+    );
+    assert_eq!(
+        repo.memory_edges(&memory.id).unwrap(),
+        [] as [(String, String); 0]
     );
 }

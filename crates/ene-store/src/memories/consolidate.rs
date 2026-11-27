@@ -3,8 +3,8 @@
 
 use super::{
     Batch, COLUMNS, Commit, Fact, Memory, MemoryContext, MemoryRecord, MemoryRepo, Result,
-    SHARED_SCOPE, VISIBLE, add_edge, insert_row, now, read_memory_tx, supersede_tx, truncate,
-    validate_citations,
+    SHARED_SCOPE, VISIBLE, add_edge, cite_visible_memory, insert_row, now, read_memory_tx,
+    supersede_tx, truncate, validate_citations,
 };
 use crate::StoreError;
 use crate::row::FromRow;
@@ -90,7 +90,7 @@ impl<'a> MemoryRepo<'a> {
         for fact in facts {
             apply_consolidated_fact(&transaction, batch, fact, &expected, &stamp, &mut commit)?;
         }
-        record_consolidation_citations(&transaction, &accepted, batch.through, &stamp)?;
+        record_consolidation_citations(&transaction, batch, &accepted, &stamp)?;
         transaction.commit()?;
         Ok(commit)
     }
@@ -208,22 +208,23 @@ fn apply_consolidated_fact(
 
 fn record_consolidation_citations(
     transaction: &rusqlite::Transaction<'_>,
+    batch: &Batch,
     accepted: &[String],
-    through: u64,
     stamp: &str,
 ) -> Result<()> {
+    let turn = batch.through.to_string();
     for id in accepted {
-        let rows = transaction
-            .prepare_cached("UPDATE memories SET last_accessed_at = ?2 WHERE id = ?1")?
-            .execute(params![id, stamp])?;
-        if rows > 0 {
-            add_edge(
-                transaction,
-                id,
-                "estimated_cited_in",
-                &through.to_string(),
-                stamp,
-            )?;
+        if !cite_visible_memory(
+            transaction,
+            &batch.companion_id,
+            id,
+            "estimated_cited_in",
+            &turn,
+            stamp,
+        )? {
+            return Err(StoreError::Conflict(
+                "a cited memory left scope during consolidation".into(),
+            ));
         }
     }
     Ok(())
