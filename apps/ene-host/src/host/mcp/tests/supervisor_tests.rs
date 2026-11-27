@@ -783,6 +783,14 @@ async fn f24_http_mcp_sends_auth_header_and_custom_headers_and_recovers_after_cr
     // automatically clearing ConfigHold and authenticating with Bearer + X-Tenant.
     let creds = harness.app.world().resource::<Credentials>().clone();
     crate::host::model::save_secret(&creds, "mcp-auth", "mcp-token").unwrap();
+    harness
+        .store()
+        .settings_repo()
+        .set_credential_state(
+            &ene_domain::ConnectionId::parse("mcp-auth").unwrap(),
+            CredentialState::Registered,
+        )
+        .unwrap();
     let stamp = ConnectionStamp {
         credential_generation: creds.generation_of("mcp-auth"),
         ..STAMP

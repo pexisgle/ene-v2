@@ -80,19 +80,22 @@ fn desired(
                 return None;
             };
             let id = connection.id.as_str();
-            let secret = credentials
-                .map_or(Ok(None), |keys| keys.secret(id))
-                .map_err(|_| {
-                    ConnectFailure::Transient("MCP credential store could not be read".into())
-                })
-                .and_then(|key| {
-                    if key.is_none() && connection.credential_state == CredentialState::Registered {
-                        return Err(ConnectFailure::Configuration(
-                            "the registered MCP credential is unavailable".into(),
-                        ));
-                    }
-                    Ok(key)
-                });
+            let secret = if connection.credential_state == CredentialState::Registered {
+                credentials
+                    .map_or(Ok(None), |keys| keys.secret(id))
+                    .map_err(|_| {
+                        ConnectFailure::Transient("MCP credential store could not be read".into())
+                    })
+                    .and_then(|secret| {
+                        secret.map(Some).ok_or_else(|| {
+                            ConnectFailure::Configuration(
+                                "the registered MCP credential is unavailable".into(),
+                            )
+                        })
+                    })
+            } else {
+                Ok(None)
+            };
             Some((
                 id.to_owned(),
                 Desired {

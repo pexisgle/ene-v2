@@ -50,6 +50,19 @@ const COLUMNS: &str = "id, name, enabled, kind, config, credential_state, last_c
 #[derive(Clone, Copy, Debug)]
 pub struct SettingsRepo<'a>(&'a Store);
 
+fn changes_mcp_credential_receiver(
+    current: &ConnectionConfig,
+    proposed: &ConnectionConfig,
+) -> bool {
+    match (current, proposed) {
+        (ConnectionConfig::Mcp(current), ConnectionConfig::Mcp(proposed)) => {
+            !current.same_credential_receiver(proposed)
+        }
+        (ConnectionConfig::Mcp(_), _) | (_, ConnectionConfig::Mcp(_)) => true,
+        _ => false,
+    }
+}
+
 impl<'a> SettingsRepo<'a> {
     pub(crate) fn new(store: &'a Store) -> Self {
         Self(store)
@@ -184,6 +197,14 @@ impl<'a> SettingsRepo<'a> {
                         )));
                     }
                 };
+                if existing.is_some_and(|previous| {
+                    previous.credential_state == CredentialState::Registered
+                        && changes_mcp_credential_receiver(&previous.config, &input.config)
+                }) {
+                    return Err(StoreError::Conflict(
+                        "remove the registered credential before changing the MCP receiver".into(),
+                    ));
+                }
                 let reset_check = existing.is_some_and(|previous| {
                     input.kind != previous.kind
                         || (input.kind == ConnectionKind::Mcp

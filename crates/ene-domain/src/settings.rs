@@ -3,10 +3,11 @@
 use crate::{ConnectionId, Failure, error::DomainError, json};
 use ene_catalog::{GOOGLE_AGENT_PLATFORM, GOOGLE_AGENT_PLATFORM_ENDPOINT};
 use ene_policy::PolicyText;
-use http::header::{HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use strum::{EnumString, IntoStaticStr};
+
+mod mcp;
 
 /// Supported categories of configured external connections.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, EnumString, IntoStaticStr)]
@@ -158,7 +159,7 @@ connection_bodies! {
         env: BTreeMap<String, String> = "Environment variables added to `command`.",
         headers: BTreeMap<String, String> = "HTTP headers sent to a remote server.",
         auth_header: String = "Header name the stored secret is sent in.",
-        secret_env_var: String = "Environment variable holding the secret, read at connect time.",
+        secret_env_var: String = "Environment variable receiving the registered secret when starting a stdio server.",
     },
     Acp(AcpConnection) = "An external Agent Client Protocol agent." {
         command: String = "Executable launched for the agent.",
@@ -167,16 +168,6 @@ connection_bodies! {
     Search(SearchConnection) = "A web search backend." {
         max_results: u32 = "Result cap per query, at most 20.",
     },
-}
-
-fn is_valid_env_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_alphabetic() || first == '_')
-        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        && name.len() <= 128
 }
 
 fn is_valid_google_resource(value: &str) -> bool {
@@ -292,59 +283,12 @@ impl ConnectionConfig {
                     ));
                 }
             }
-            Self::Mcp(config) => validate_mcp(config)?,
+            Self::Mcp(config) => mcp::validate_mcp(config)?,
             Self::Search(config) => validate_search(config)?,
             Self::Tts(_) | Self::Stt(_) | Self::Acp(_) => {}
         }
         Ok(())
     }
-}
-
-fn validate_mcp(config: &McpConnection) -> Result<(), DomainError> {
-    if config.command.trim().is_empty() && config.endpoint.endpoint.trim().is_empty() {
-        return Err(DomainError::Invalid(
-            "MCP connections need a command or an endpoint".into(),
-        ));
-    }
-    if config.cwd.chars().count() > 2_048 || config.cwd.contains('\0') {
-        return Err(DomainError::Invalid(
-            "MCP working directory is invalid".into(),
-        ));
-    }
-    if config.env.len() > 64 || config.headers.len() > 64 {
-        return Err(DomainError::Invalid(
-            "too many MCP environment variables or headers".into(),
-        ));
-    }
-    for (key, value) in &config.env {
-        if key.trim().is_empty() || key.contains(['=', '\0', '\r', '\n']) || value.contains('\0') {
-            return Err(DomainError::Invalid(
-                "MCP environment variable entry is invalid".into(),
-            ));
-        }
-    }
-    for (name, value) in &config.headers {
-        let trimmed = name.trim();
-        if trimmed.is_empty()
-            || HeaderName::from_bytes(trimmed.as_bytes()).is_err()
-            || HeaderValue::from_str(value).is_err()
-        {
-            return Err(DomainError::Invalid(format!("invalid MCP header `{name}`")));
-        }
-    }
-    let auth_header = config.auth_header.trim();
-    if !auth_header.is_empty() && HeaderName::from_bytes(auth_header.as_bytes()).is_err() {
-        return Err(DomainError::Invalid(
-            "MCP auth_header must be a valid HTTP header name".into(),
-        ));
-    }
-    let secret_env_var = config.secret_env_var.trim();
-    if !secret_env_var.is_empty() && !is_valid_env_name(secret_env_var) {
-        return Err(DomainError::Invalid(
-            "MCP secret_env_var must be a valid environment variable name".into(),
-        ));
-    }
-    Ok(())
 }
 
 fn validate_search(config: &SearchConnection) -> Result<(), DomainError> {
