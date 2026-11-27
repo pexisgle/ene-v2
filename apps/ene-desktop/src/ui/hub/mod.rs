@@ -220,6 +220,9 @@ impl Hub {
         if effects.mind || selected_now {
             self.load_mind(cx);
         }
+        if effects.plugins {
+            self.load_plugins(cx);
+        }
         if self.live() && self.model.connections.providers.is_none() {
             self.load_providers(cx);
         }

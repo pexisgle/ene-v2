@@ -219,6 +219,8 @@ pub enum Update {
     },
     /// Installed host plugins from `SettingsService.ListPlugins` (`F12`).
     Plugins(Vec<PluginInfo>),
+    /// A plugin mutation committed and its registry view needs refreshing.
+    PluginsChanged,
 }
 
 /// A newer response can replace an older one for the same view resource.

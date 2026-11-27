@@ -734,6 +734,35 @@ fn scoped_model_lists_replace_only_the_same_connections_older_reply() {
     model.apply(scoped(4, "a", "newer"));
     assert_eq!(model.connections.models["a"][0].id, "newer");
 }
+
+#[test]
+fn a_plugin_mutation_refreshes_even_after_a_newer_list_reply() {
+    let mut model = with_chat();
+    assert!(
+        model
+            .apply(Update::Link(Box::new(Link::Live {
+                version: "1".into()
+            })))
+            .plugins
+    );
+    let epoch = model.connections.link_epoch;
+    let scoped = |seq, update| Update::Scoped {
+        epoch,
+        seq,
+        inner: Box::new(update),
+    };
+    model.apply(scoped(2, Update::Plugins(Vec::new())));
+    assert!(model.apply(scoped(1, Update::PluginsChanged)).plugins);
+
+    let current = crate::domain::PluginInfo {
+        id: "current".into(),
+        ..Default::default()
+    };
+    model.apply(scoped(3, Update::Plugins(vec![current.clone()])));
+    model.apply(scoped(2, Update::Plugins(Vec::new())));
+    assert_eq!(model.connections.plugins, [current]);
+}
+
 #[test]
 fn dismissing_a_notice_uses_the_rendered_identity_after_the_list_moves() {
     let mut model = Model::new("conn.json".into());

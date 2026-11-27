@@ -142,6 +142,8 @@ pub struct Effects {
     pub snapshot: bool,
     /// The mind view needs refetching.
     pub mind: bool,
+    /// The plugin registry view needs refetching.
+    pub plugins: bool,
 }
 
 /// Connection lifecycle, provider catalog, model cache, and device status.

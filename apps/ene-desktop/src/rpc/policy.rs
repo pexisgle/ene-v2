@@ -1,11 +1,9 @@
 //! Approval resolution, policy rules/texts, and host plugin management RPCs.
 
-use super::{RPC_TIMEOUT, RpcDispatcher, failure, remaining_options};
-use crate::{host::Host, update::Update};
+use super::{RpcDispatcher, failure};
+use crate::update::Update;
 use ene_client_core::domain::{ApprovalDecision, PolicyRulesUpdate, PolicyTextsUpdate};
 use ene_rpc as w;
-use std::future::Future;
-use tokio::time::Instant;
 
 pub(crate) fn load_plugins(rpc: &RpcDispatcher, epoch: u64) {
     rpc.call(
@@ -83,14 +81,14 @@ pub(crate) fn update_policy_texts(
 }
 
 pub(crate) fn install_plugin(rpc: &RpcDispatcher, epoch: u64, source_path: String) {
-    change_plugins(
-        rpc,
+    rpc.call(
         epoch,
         "プラグインの導入",
         request!(settings.install_plugin(w::InstallPluginRequest {
             source_path,
             ..Default::default()
         })),
+        |_| Update::PluginsChanged,
     );
 }
 
@@ -100,8 +98,7 @@ pub(crate) fn set_plugin_enabled(
     plugin_id: String,
     enabled: bool,
 ) {
-    change_plugins(
-        rpc,
+    rpc.call(
         epoch,
         "プラグイン状態の更新",
         request!(settings.set_plugin_enabled(w::SetPluginEnabledRequest {
@@ -109,43 +106,19 @@ pub(crate) fn set_plugin_enabled(
             enabled,
             ..Default::default()
         })),
+        |_| Update::PluginsChanged,
     );
 }
 
 pub(crate) fn remove_plugin(rpc: &RpcDispatcher, epoch: u64, plugin_id: String) {
-    change_plugins(
-        rpc,
+    rpc.call(
         epoch,
         "プラグインの削除",
         request!(settings.remove_plugin(w::RemovePluginRequest {
             plugin_id,
             ..Default::default()
         })),
-    );
-}
-
-fn change_plugins<T, F>(
-    rpc: &RpcDispatcher,
-    epoch: u64,
-    context: &'static str,
-    run: impl FnOnce(Host) -> F,
-) where
-    F: Future<Output = Result<T, connectrpc::ConnectError>> + Send + 'static,
-{
-    rpc.call(
-        epoch,
-        context,
-        |host| {
-            let change = run(host.clone());
-            async move {
-                let deadline = Instant::now() + RPC_TIMEOUT;
-                change.await?;
-                host.settings
-                    .list_plugins_with_options(w::Empty::default(), remaining_options(deadline)?)
-                    .await
-            }
-        },
-        |response| plugins_update(response.view()),
+        |_| Update::PluginsChanged,
     );
 }
 

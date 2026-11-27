@@ -83,6 +83,7 @@ impl Model {
                 ..
             } => self.notice(notice.kind, notice.context, notice.message),
             Update::Plugins(plugins) => self.connections.plugins = plugins,
+            Update::PluginsChanged => effects.plugins = true,
             other => apply_domain_update(self, other, &mut effects),
         }
         effects
@@ -118,6 +119,7 @@ fn apply_link(model: &mut Model, link: Link, effects: &mut Effects) {
     if appeared {
         effects.history = true;
         effects.snapshot = model.snapshot().is_none();
+        effects.plugins = true;
     }
 }
 
