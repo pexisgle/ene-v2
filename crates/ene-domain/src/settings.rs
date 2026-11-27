@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use strum::{EnumString, IntoStaticStr};
 
 mod mcp;
+pub use mcp::is_npx_command;
 
 /// Supported categories of configured external connections.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, EnumString, IntoStaticStr)]

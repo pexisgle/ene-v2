@@ -3,6 +3,18 @@ use super::McpConnection;
 use crate::error::DomainError;
 use http::header::{HeaderName, HeaderValue};
 
+/// Recognizes an npx executable or standard wrapper, with or without a path.
+pub fn is_npx_command(command: &str) -> bool {
+    let base = command
+        .trim()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default();
+    ["npx", "npx.cmd", "npx.ps1", "npx.exe"]
+        .into_iter()
+        .any(|candidate| base.eq_ignore_ascii_case(candidate))
+}
+
 impl McpConnection {
     /// Whether both configurations would use a credential for the same receiver.
     pub fn same_credential_receiver(&self, other: &Self) -> bool {

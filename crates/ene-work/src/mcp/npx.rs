@@ -4,6 +4,7 @@
 use super::{stdio::owned_command, transport::ConnectFailure};
 #[cfg(windows)]
 use ene_domain::settings::McpConnection;
+pub use ene_domain::settings::is_npx_command;
 #[cfg(windows)]
 use std::{
     collections::BTreeMap,
@@ -18,19 +19,6 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE_OUTPUT_LIMIT: u64 = 64 * 1024;
 #[cfg(windows)]
 const NPX_DIRECT_BOOTSTRAP_JS: &str = include_str!("npx_bootstrap.js");
-
-/// Returns true when `command` refers to `npx` (bare name or path, with or
-/// without a Windows wrapper extension).
-pub fn is_npx_command(command: &str) -> bool {
-    let base = command_basename(command.trim());
-    ["npx", "npx.cmd", "npx.ps1", "npx.exe"]
-        .iter()
-        .any(|candidate| base.eq_ignore_ascii_case(candidate))
-}
-
-fn command_basename(command: &str) -> &str {
-    command.rsplit(['/', '\\']).next().unwrap_or(command)
-}
 
 #[cfg(windows)]
 #[derive(Debug, PartialEq, Eq)]
@@ -48,6 +36,12 @@ enum NpxLaunch {
 pub(crate) async fn build_command(
     want: &McpConnection,
 ) -> Result<tokio::process::Command, ConnectFailure> {
+    let cwd = want.cwd.trim();
+    if !cwd.is_empty() && !Path::new(cwd).is_dir() {
+        return Err(ConnectFailure::Configuration(
+            "the MCP working directory does not exist".into(),
+        ));
+    }
     let path_var = effective_env(&want.env, "PATH");
     let appdata = effective_env(&want.env, "APPDATA");
     let path_dirs: Vec<PathBuf> = path_var
@@ -58,7 +52,7 @@ pub(crate) async fn build_command(
         want.command.trim(),
         &path_dirs,
         appdata.as_deref().map(Path::new),
-        want.cwd.trim(),
+        cwd,
         &want.env,
     )
     .await?;
@@ -100,43 +94,23 @@ async fn resolve_launch(
     cwd: &str,
     env: &BTreeMap<String, String>,
 ) -> Result<NpxLaunch, ConnectFailure> {
-    let trimmed = raw_command.trim();
-    let explicit_path = Path::new(trimmed);
-    let explicit_dir = explicit_path
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty());
-
-    if explicit_dir.is_some()
-        && explicit_path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-    {
-        return if explicit_path.is_file() {
-            Ok(NpxLaunch::DirectExecutable(explicit_path.to_path_buf()))
-        } else {
-            Err(ConnectFailure::Configuration(
-                "the specified npx executable was not found".into(),
-            ))
-        };
+    let path = Path::new(raw_command.trim());
+    if path.parent().is_some_and(|dir| !dir.as_os_str().is_empty()) {
+        return resolve_explicit(path, cwd, path_dirs);
     }
 
     let mut npx_dirs: Vec<PathBuf> = Vec::new();
-    if let Some(dir) = explicit_dir {
-        push_unique_dir(&mut npx_dirs, dir.to_path_buf());
-    }
     for dir in path_dirs {
         if has_any_file(dir, &["npx.cmd", "npx.ps1", "npx.exe", "npx"]) {
             push_unique_dir(&mut npx_dirs, dir.clone());
         }
     }
 
-    let mut node_exe = find_node_exe(explicit_dir, &npx_dirs, path_dirs);
+    let mut node_exe = find_file_in_dirs(&npx_dirs, "node.exe")
+        .or_else(|| find_file_in_dirs(path_dirs, "node.exe"));
 
     if let Some(ref mut node) = node_exe {
         let mut candidate_dirs: Vec<PathBuf> = Vec::new();
-        if let Some(dir) = explicit_dir {
-            push_unique_dir(&mut candidate_dirs, dir.to_path_buf());
-        }
         if let Some(dir) = node.parent() {
             push_unique_dir(&mut candidate_dirs, dir.to_path_buf());
         }
@@ -187,14 +161,6 @@ async fn resolve_launch(
         return Ok(NpxLaunch::DirectExecutable(npx_exe));
     }
 
-    if explicit_dir.is_some()
-        && explicit_path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd"))
-        && explicit_path.is_file()
-    {
-        return Ok(NpxLaunch::DirectExecutable(explicit_path.to_path_buf()));
-    }
     if let Some(npx_cmd) = find_file_in_dirs(path_dirs, "npx.cmd") {
         return Ok(NpxLaunch::DirectExecutable(npx_cmd));
     }
@@ -208,6 +174,50 @@ async fn resolve_launch(
         "node.exe (and npx) was not found on PATH".to_owned()
     };
     Err(ConnectFailure::Configuration(reason))
+}
+
+#[cfg(windows)]
+fn resolve_explicit(
+    path: &Path,
+    cwd: &str,
+    path_dirs: &[PathBuf],
+) -> Result<NpxLaunch, ConnectFailure> {
+    let missing =
+        || ConnectFailure::Configuration("the specified npx launcher was not found".into());
+    let path = std::path::absolute(Path::new(cwd).join(path)).map_err(|_| missing())?;
+    let parent = path.parent().ok_or_else(missing)?;
+    let program = if path.extension().is_some() {
+        path.is_file().then(|| path.clone())
+    } else {
+        ["exe", "cmd", "ps1"]
+            .into_iter()
+            .map(|extension| path.with_extension(extension))
+            .find(|file| file.is_file())
+    }
+    .ok_or_else(missing)?;
+    let extension = program.extension().unwrap_or_default();
+    if extension.eq_ignore_ascii_case("exe") {
+        return Ok(NpxLaunch::DirectExecutable(program));
+    }
+    let npx_cli_js = npm_npx_cli_in(parent);
+    let node = parent.join("node.exe");
+    if npx_cli_js.is_file()
+        && let Some(node_exe) = node
+            .is_file()
+            .then_some(node)
+            .or_else(|| find_file_in_dirs(path_dirs, "node.exe"))
+    {
+        return Ok(NpxLaunch::NodeCli {
+            node_exe,
+            npx_cli_js,
+        });
+    }
+    if extension.eq_ignore_ascii_case("cmd") {
+        return Ok(NpxLaunch::DirectExecutable(program));
+    }
+    Err(ConnectFailure::Configuration(
+        "the specified npx PowerShell wrapper has no adjacent npm installation".into(),
+    ))
 }
 
 #[cfg(windows)]
@@ -230,24 +240,6 @@ fn find_file_in_dirs(dirs: &[PathBuf], file_name: &str) -> Option<PathBuf> {
     dirs.iter()
         .map(|dir| dir.join(file_name))
         .find(|candidate| candidate.is_file())
-}
-
-#[cfg(windows)]
-fn find_node_exe(
-    explicit_dir: Option<&Path>,
-    npx_dirs: &[PathBuf],
-    path_dirs: &[PathBuf],
-) -> Option<PathBuf> {
-    if let Some(dir) = explicit_dir {
-        let candidate = dir.join("node.exe");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    if let Some(found) = find_file_in_dirs(npx_dirs, "node.exe") {
-        return Some(found);
-    }
-    find_file_in_dirs(path_dirs, "node.exe")
 }
 
 #[cfg(windows)]

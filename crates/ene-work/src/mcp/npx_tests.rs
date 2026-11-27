@@ -95,6 +95,7 @@ mod windows_tests {
         touch(&custom_cli);
 
         let explicit_cmd = custom_dir.join("npx.ps1");
+        touch(&explicit_cmd);
         let launch = resolve_launch(
             explicit_cmd.to_str().unwrap(),
             std::slice::from_ref(&path_node_dir),
@@ -108,8 +109,35 @@ mod windows_tests {
             launch,
             NpxLaunch::NodeCli {
                 node_exe: custom_node,
-                npx_cli_js: custom_cli,
+                npx_cli_js: custom_cli.clone(),
             }
+        );
+        fs::remove_file(&custom_cli).unwrap();
+        let other_installation = std::slice::from_ref(&path_node_dir);
+        assert!(matches!(
+            resolve_launch(
+                explicit_cmd.to_str().unwrap(),
+                other_installation,
+                None,
+                "",
+                &BTreeMap::new()
+            )
+            .await,
+            Err(ConnectFailure::Configuration(_))
+        ));
+        let custom_wrapper = custom_dir.join("npx.cmd");
+        touch(&custom_wrapper);
+        assert_eq!(
+            resolve_launch(
+                r"custom-node\npx.cmd",
+                other_installation,
+                None,
+                root.path().to_str().unwrap(),
+                &BTreeMap::new()
+            )
+            .await
+            .unwrap(),
+            NpxLaunch::DirectExecutable(custom_wrapper)
         );
 
         let bare_node_dir = root.path().join("bare-node");

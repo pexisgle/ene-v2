@@ -3,7 +3,7 @@
 use crate::domain::{
     ConnectionConfig, ConnectionEndpoint, ConnectionInput, ConnectionKind, McpConnection,
 };
-
+use ene_domain::settings::is_npx_command;
 use std::collections::BTreeMap;
 
 /// Advanced MCP server fields captured separately from the primary target input.
@@ -175,17 +175,20 @@ pub fn mcp_npx_target(input: &str) -> McpTargetResult {
     if input.is_empty() {
         return Ok(None);
     }
-    let (name, mut args) = if input.starts_with('{') {
+    let (name, command, mut args) = if input.starts_with('{') {
         npx_from_json(input)?
     } else {
-        let args = split_args(input)?;
-        let args = match args.as_slice() {
-            [command, tail @ ..] if is_npx(command) || is_cmd(command) => {
-                npx_args(command, tail)?.to_vec()
-            }
-            _ => args,
+        let mut args = split_args(input)?;
+        let (command, args) = if args
+            .first()
+            .is_some_and(|arg| is_npx_command(arg) || is_cmd(arg))
+        {
+            let command = args.remove(0);
+            npx_launch(command, args)?
+        } else {
+            ("npx".into(), args)
         };
-        (None, args)
+        (None, command, args)
     };
     let package = args
         .iter()
@@ -210,39 +213,41 @@ pub fn mcp_npx_target(input: &str) -> McpTargetResult {
     {
         args.insert(0, "-y".into());
     }
-    Ok(Some(mcp_process_target("npx", args, &name)))
-}
-
-fn is_npx(command: &str) -> bool {
-    ["npx", "npx.cmd", "npx.exe", "npx.ps1"]
-        .iter()
-        .any(|program| command.eq_ignore_ascii_case(program))
+    Ok(Some(mcp_process_target(&command, args, &name)))
 }
 
 fn is_cmd(command: &str) -> bool {
     command.eq_ignore_ascii_case("cmd") || command.eq_ignore_ascii_case("cmd.exe")
 }
 
-fn npx_args<'a>(command: &str, args: &'a [String]) -> Result<&'a [String], &'static str> {
-    if is_npx(command) {
-        return Ok(args);
-    }
-    if is_cmd(command) {
-        let flags = args
-            .iter()
-            .take_while(|arg| arg.eq_ignore_ascii_case("/d") || arg.eq_ignore_ascii_case("/s"))
-            .count();
-        if let [run, launcher, tail @ ..] = &args[flags..]
-            && run.eq_ignore_ascii_case("/c")
-            && is_npx(launcher)
+fn npx_launch(
+    mut command: String,
+    mut args: Vec<String>,
+) -> Result<(String, Vec<String>), &'static str> {
+    let invalid = "npx、または Windows 向けの cmd /c npx を指定してください。";
+    if is_cmd(&command) {
+        let mut rest = args
+            .into_iter()
+            .skip_while(|arg| arg.eq_ignore_ascii_case("/d") || arg.eq_ignore_ascii_case("/s"));
+        if !rest
+            .next()
+            .is_some_and(|arg| arg.eq_ignore_ascii_case("/c"))
         {
-            return Ok(tail);
+            return Err(invalid);
         }
+        command = rest.next().ok_or(invalid)?;
+        args = rest.collect();
     }
-    Err("npx、または Windows 向けの cmd /c npx を指定してください。")
+    if !is_npx_command(&command) {
+        return Err(invalid);
+    }
+    if !command.contains(['/', '\\']) {
+        command = "npx".into();
+    }
+    Ok((command, args))
 }
 
-fn npx_from_json(input: &str) -> Result<(Option<String>, Vec<String>), &'static str> {
+fn npx_from_json(input: &str) -> Result<(Option<String>, String, Vec<String>), &'static str> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Config {
@@ -250,26 +255,29 @@ fn npx_from_json(input: &str) -> Result<(Option<String>, Vec<String>), &'static 
         #[serde(default)]
         args: Vec<String>,
         #[serde(default)]
-        env: std::collections::BTreeMap<String, String>,
+        env: BTreeMap<String, String>,
         cwd: Option<String>,
         #[serde(rename = "type")]
         transport: Option<String>,
     }
-    let value: serde_json::Value =
+    let mut value: serde_json::Value =
         serde_json::from_str(input).map_err(|_| "MCP の JSON 設定を確認してください。")?;
-    let (name, config) =
-        if let Some(servers) = value.get("mcpServers").or_else(|| value.get("servers")) {
-            let servers = servers
-                .as_object()
-                .filter(|servers| servers.len() == 1)
+    let nested = value.as_object_mut().and_then(|value| {
+        value
+            .remove("mcpServers")
+            .or_else(|| value.remove("servers"))
+    });
+    let (name, config) = match nested {
+        Some(serde_json::Value::Object(servers)) if servers.len() == 1 => {
+            let (name, config) = servers
+                .into_iter()
+                .next()
                 .ok_or("JSON にはサーバーを1つだけ指定してください。")?;
-            let Some((name, config)) = servers.iter().next() else {
-                return Err("JSON にはサーバーを1つだけ指定してください。");
-            };
-            (Some(name.clone()), config.clone())
-        } else {
-            (None, value)
-        };
+            (Some(name), config)
+        }
+        Some(_) => return Err("JSON にはサーバーを1つだけ指定してください。"),
+        None => (None, value),
+    };
     let config: Config = serde_json::from_value(config)
         .map_err(|_| "JSON の command と args を確認してください。")?;
     if config
@@ -284,7 +292,8 @@ fn npx_from_json(input: &str) -> Result<(Option<String>, Vec<String>), &'static 
             "env や cwd を指定するサーバーは、ホストの実行環境を設定してからコマンドを登録してください。",
         );
     }
-    Ok((name, npx_args(&config.command, &config.args)?.to_vec()))
+    let (command, args) = npx_launch(config.command, config.args)?;
+    Ok((name, command, args))
 }
 
 /// Splits arguments without a shell. Backslashes stay literal for Windows paths.
@@ -403,6 +412,19 @@ mod tests {
         assert_eq!(config.args, ["-y", "pkg"]);
         assert!(mcp_npx_target("cmd /c echo hello").is_err());
         assert!(mcp_npx_target("cmd /k npx pkg").is_err());
+    }
+
+    #[test]
+    fn npx_import_preserves_explicit_installations_and_literal_arguments() {
+        for input in [
+            r#""C:\My Tools\npx.cmd" -y pkg "a b""#,
+            r#"cmd /D /c "C:\My Tools\npx.cmd" pkg "a b""#,
+            r#"{"mcpServers":{"fixture":{"command":"C:\\My Tools\\npx.cmd","args":["pkg","a b"]}}}"#,
+        ] {
+            let (config, _) = mcp_npx_target(input).unwrap().unwrap();
+            assert_eq!(config.command, r"C:\My Tools\npx.cmd");
+            assert_eq!(config.args, ["-y", "pkg", "a b"]);
+        }
     }
 
     #[test]
