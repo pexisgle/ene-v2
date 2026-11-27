@@ -3,6 +3,7 @@
 
 mod consolidate;
 mod ops;
+mod recall;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -287,74 +288,7 @@ impl<'a> MemoryRepo<'a> {
         query: &str,
         mode: RecallMode<'_>,
     ) -> Result<Vec<Memory>> {
-        let mut seen = HashSet::new();
-        let terms: Vec<_> = ene_mind::recall_terms(query)
-            .filter(|term| seen.insert(*term))
-            .collect();
-        if terms.is_empty() {
-            return Ok(Vec::new());
-        }
-        let phrases = terms
-            .iter()
-            .filter(|term| term.chars().nth(2).is_some())
-            .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-            .collect::<Vec<_>>();
-        if phrases.is_empty() {
-            return self.short_lexical_candidates(companion, mode, &terms);
-        }
-        self.0.fetch_all(
-            &format!(
-                "SELECT {JOINED_COLUMNS} FROM memories m JOIN memories_fts f ON m.rowid = f.rowid \
-                 WHERE {VISIBLE} AND m.importance >= ?2 AND memories_fts MATCH ?3 \
-                 AND m.id NOT IN (SELECT value FROM json_each(?4)) \
-                 ORDER BY bm25(memories_fts), f.rowid LIMIT 20"
-            ),
-            params![
-                companion,
-                mode.minimum_importance(),
-                phrases.join(" OR "),
-                mode.exclusions().map(to_json).transpose()?
-            ],
-            Memory::from_row,
-        )
-    }
-
-    fn short_lexical_candidates(
-        &self,
-        companion: &str,
-        mode: RecallMode<'_>,
-        terms: &[&str],
-    ) -> Result<Vec<Memory>> {
-        let pattern = |term: &str| {
-            format!(
-                "%{}%",
-                term.replace('\\', "\\\\")
-                    .replace('%', "\\%")
-                    .replace('_', "\\_")
-            )
-        };
-        let (predicate, parameter) = if let [term] = terms {
-            ("m.content LIKE ?3 ESCAPE '\\'", pattern(term))
-        } else {
-            (
-                "EXISTS (SELECT 1 FROM json_each(?3) term WHERE m.content LIKE term.value ESCAPE '\\')",
-                to_json(&terms.iter().map(|term| pattern(term)).collect::<Vec<_>>())?,
-            )
-        };
-        self.0.fetch_all(
-            &format!(
-                "SELECT {COLUMNS} FROM memories m WHERE {VISIBLE} AND m.importance >= ?2 \
-                 AND {predicate} AND m.id NOT IN (SELECT value FROM json_each(?4)) \
-                 ORDER BY m.importance DESC, m.rowid DESC LIMIT 20"
-            ),
-            params![
-                companion,
-                mode.minimum_importance(),
-                parameter,
-                mode.exclusions().map(to_json).transpose()?
-            ],
-            Memory::from_row,
-        )
+        recall::lexical_candidates(self.0, companion, query, mode)
     }
 
     pub fn current_revisions<'b>(

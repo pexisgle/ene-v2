@@ -4314,6 +4314,7 @@ dependencies = [
  "ene-domain",
  "ene-mind",
  "ene-policy",
+ "itertools 0.15.0",
  "jiff 1.0.3",
  "parking_lot 0.13.0",
  "rusqlite",

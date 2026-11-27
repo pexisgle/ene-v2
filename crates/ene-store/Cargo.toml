@@ -15,6 +15,7 @@ ene-catalog.workspace = true
 ene-domain.workspace = true
 ene-mind.workspace = true
 ene-policy.workspace = true
+itertools = "0.15"
 jiff.workspace = true
 rusqlite.workspace = true
 rusqlite-migration.workspace = true
