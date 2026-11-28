@@ -25,6 +25,36 @@ fn mutation(
     .into()
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires an unlocked, isolated Linux Secret Service"]
+async fn host_restarts_after_using_the_native_credential_store() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let account = crate::actor::id();
+    let (host, running) = start(root.path()).await?;
+    host.call({
+        let account = account.clone();
+        let secret = Some("fixture-secret".into());
+        move |actor| Box::pin(actor.models.write_credential(account, secret))
+    })
+    .await?;
+    host.shutdown.cancel();
+    running.await?;
+
+    let (host, running) = start(root.path()).await?;
+    let value = tokio::task::spawn_blocking({
+        let account = account.clone();
+        move || crate::keyring::entry(&account)?.get_password()
+    })
+    .await??;
+    host.call(move |actor| Box::pin(actor.models.write_credential(account, None)))
+        .await?;
+    host.shutdown.cancel();
+    running.await?;
+    assert_eq!(value, "fixture-secret");
+    Ok(())
+}
+
 #[tokio::test]
 async fn accepted_chat_is_replayed_after_restart() -> Result<()> {
     let root = tempfile::tempdir()?;

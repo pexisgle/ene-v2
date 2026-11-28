@@ -1,6 +1,5 @@
 use crate::{
     error::{ApiError, invalid},
-    keyring::Keyring,
     plugin_provider::PluginProvider,
     store,
 };
@@ -26,7 +25,6 @@ pub(crate) struct Models {
     http: reqwest::Client,
     db: sqlx::SqlitePool,
     pub vectors: crate::vectors::Vectors,
-    keyring: Arc<Keyring>,
 }
 
 #[derive(Clone)]
@@ -47,7 +45,6 @@ impl Models {
                 .no_proxy()
                 .timeout(Duration::from_secs(90))
                 .build()?,
-            keyring: Arc::new(Keyring::new()),
         })
     }
 
@@ -79,11 +76,9 @@ impl Models {
                 ErrorCode::Unauthenticated,
                 "credential does not match its provider",
             ))?;
-        let keyring = self.keyring.clone();
-        let secret = tokio::task::spawn_blocking(move || {
-            keyring.entry("ene-host", &account)?.get_password()
-        })
-        .await??;
+        let secret =
+            tokio::task::spawn_blocking(move || crate::keyring::entry(&account)?.get_password())
+                .await??;
         Ok(Some(secret))
     }
 
@@ -92,9 +87,8 @@ impl Models {
         account: String,
         secret: Option<String>,
     ) -> Result<()> {
-        let keyring = self.keyring.clone();
         tokio::task::spawn_blocking(move || {
-            let entry = keyring.entry("ene-host", &account)?;
+            let entry = crate::keyring::entry(&account)?;
             if let Some(secret) = secret {
                 entry.set_password(&secret)?;
             } else if let Err(error) = entry.delete_credential()
@@ -400,13 +394,19 @@ pub(crate) fn truncate(text: &str, limit: usize) -> &str {
 }
 
 fn provider_error(error: ProviderError) -> anyhow::Error {
-    match error {
-        ProviderError::InvalidAuthentication(_) => {
+    let status = match error {
+        ProviderError::InvalidAuthentication(_) => Some(http::StatusCode::UNAUTHORIZED),
+        ProviderError::ProviderResponse(response) => response.status,
+        _ => None,
+    };
+    match status {
+        Some(http::StatusCode::UNAUTHORIZED) => {
             ApiError(ErrorCode::Unauthenticated, "provider rejected credentials").into()
         }
-        ProviderError::ProviderResponse(ref response)
-            if response.status == Some(http::StatusCode::TOO_MANY_REQUESTS) =>
-        {
+        Some(http::StatusCode::FORBIDDEN) => {
+            ApiError(ErrorCode::PermissionDenied, "provider denied access").into()
+        }
+        Some(http::StatusCode::TOO_MANY_REQUESTS) => {
             ApiError(ErrorCode::ResourceExhausted, "provider rate limit reached").into()
         }
         _ => ApiError(ErrorCode::Unavailable, "configured provider unavailable").into(),

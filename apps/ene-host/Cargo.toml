@@ -32,7 +32,6 @@ ignore = "0.4"
 jsonschema.workspace = true
 jiff.workspace = true
 keyring-core = "1"
-once_cell = "1"
 parking_lot.workspace = true
 private-fs = "0.2.1"
 process-wrap.workspace = true

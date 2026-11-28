@@ -3954,7 +3954,6 @@ dependencies = [
  "jiff 1.0.3",
  "jsonschema",
  "keyring-core",
- "once_cell",
  "parking_lot 0.13.0",
  "private-fs",
  "process-wrap",
