@@ -4,11 +4,11 @@ mod rules;
 mod texts;
 
 use super::{
-    DevicePane, SKIP_TOOL_CONFIRMATION_ID, is_file_confirmation_rule, row_frame,
-    tool_confirmation_request,
+    DevicePane, SKIP_TOOL_CONFIRMATION_ID, is_file_confirmation_rule, row_frame, section_intro,
+    section_title, settings_card, tool_confirmation_request,
 };
 use crate::ui::{theme::Theme, widgets::disclosure_row};
-use gpui::{AnyElement, Context, FontWeight, div, prelude::*, px};
+use gpui::{AnyElement, Context, div, prelude::*, px};
 
 use rules::*;
 use texts::*;
@@ -20,12 +20,7 @@ pub(super) fn render_policy_rules_section(
     theme: &Theme,
     cx: &mut Context<DevicePane>,
 ) -> (AnyElement, AnyElement, AnyElement, Option<AnyElement>) {
-    let policy_heading = div()
-        .text_size(px(18.))
-        .font_weight(FontWeight::BOLD)
-        .text_color(theme.ink)
-        .child("許可ルール")
-        .into_any_element();
+    let policy_heading = section_title("許可ルール", theme).into_any_element();
 
     let skip_tool_confirmation = rules
         .iter()
@@ -60,12 +55,7 @@ pub(super) fn render_policy_rules_section(
         theme,
         cx,
     );
-    let policy_card = div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
+    let policy_card = settings_card(theme)
         .flex()
         .flex_col()
         .child(confirm_row)
@@ -98,24 +88,12 @@ pub(super) fn render_policy_texts_section(
     theme: &Theme,
     cx: &mut Context<DevicePane>,
 ) -> (AnyElement, AnyElement, AnyElement, Option<AnyElement>) {
-    let heading = div()
-        .flex()
-        .flex_col()
-        .gap(px(4.))
-        .child(
-            div()
-                .text_size(px(18.))
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme.ink)
-                .child("自由文ポリシー（AI 補助判定の基準）"),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme.ink_muted)
-                .child("構造化ルールで未決の操作を Decision モデルが評価する際の参考基準（各 500 文字以内）です。強制的な禁止や毎回確認には上の構造化ルールを使ってください。"),
-        )
-        .into_any_element();
+    let heading = section_intro(
+        "自由文ポリシー（AI 補助判定の基準）",
+        "構造化ルールで未決の操作を Decision モデルが評価する際の参考基準（各 500 文字以内）です。強制的な禁止や毎回確認には上の構造化ルールを使ってください。",
+        theme,
+    )
+    .into_any_element();
 
     let text_items: Vec<AnyElement> = texts
         .iter()
@@ -129,12 +107,7 @@ pub(super) fn render_policy_texts_section(
         })
         .collect();
 
-    let policy_text_card = div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
+    let policy_text_card = settings_card(theme)
         .when(text_items.is_empty(), |card| {
             card.child(
                 div()

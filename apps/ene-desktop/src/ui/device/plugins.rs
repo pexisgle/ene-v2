@@ -1,6 +1,6 @@
 //! Wasm plugin management UI section for `この端末`.
 
-use super::DevicePane;
+use super::{DevicePane, section_intro, settings_card, settings_form};
 use crate::ui::{
     Hub,
     icons::Icon,
@@ -27,25 +27,11 @@ pub(super) fn render_plugins_section(
         .items_center()
         .justify_between()
         .gap(px(10.))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .child(
-                    div()
-                        .text_size(px(18.))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(theme.ink)
-                        .child("プラグイン管理"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.ink_muted)
-                        .child("ホスト上の Wasm プラグインパッケージ（manifest.json）を導入・有効化・削除します。"),
-                ),
-        )
+        .child(section_intro(
+            "プラグイン管理",
+            "ホスト上の Wasm プラグインパッケージ（manifest.json）を導入・有効化・削除します。",
+            theme,
+        ))
         .child(
             div()
                 .flex_none()
@@ -53,16 +39,34 @@ pub(super) fn render_plugins_section(
                 .flex_row()
                 .items_center()
                 .gap(px(6.))
-                .child(pill_button("dev-plugins-refresh", "更新", Tone::Ghost.icon(Icon::RefreshCw).enabled(live), theme, {
+                .child(pill_button(
+                    "dev-plugins-refresh",
+                    "更新",
+                    Tone::Ghost.icon(Icon::RefreshCw).enabled(live),
+                    theme,
+                    {
                         let hub = pane.hub.clone();
                         move |_, cx| hub.update(cx, super::super::hub::Hub::load_plugins)
-                    }))
-                .child(pill_button("dev-plugins-toggle-add", if adding_plugin { "閉じる" } else { "追加" }, ButtonStyle::new(if adding_plugin { Tone::Ghost } else { Tone::Primary }).maybe_icon((!adding_plugin).then_some(Icon::Plus)).enabled(live), theme, move |_, cx| {
+                    },
+                ))
+                .child(pill_button(
+                    "dev-plugins-toggle-add",
+                    if adding_plugin { "閉じる" } else { "追加" },
+                    ButtonStyle::new(if adding_plugin {
+                        Tone::Ghost
+                    } else {
+                        Tone::Primary
+                    })
+                    .maybe_icon((!adding_plugin).then_some(Icon::Plus))
+                    .enabled(live),
+                    theme,
+                    move |_, cx| {
                         pane_add_plugin.update(cx, |this, cx| {
                             this.form.adding_plugin_open = !this.form.adding_plugin_open;
                             cx.notify();
                         });
-                    })),
+                    },
+                )),
         )
         .into_any_element();
 
@@ -91,16 +95,7 @@ fn render_add_plugin_panel(
     let hub_install = pane.hub.clone();
     let pane_close = cx.entity();
 
-    div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
-        .p(px(16.))
-        .flex()
-        .flex_col()
-        .gap(px(10.))
+    settings_form(theme)
         .child(labeled_field("パッケージフォルダ", plugin_path_d, theme))
         .child(
             div()
@@ -163,12 +158,7 @@ fn render_plugins_card(
     live: bool,
     theme: &Theme,
 ) -> AnyElement {
-    div()
-        .w_full()
-        .rounded(crate::ui::theme::radius::surface())
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.bg_surface)
+    settings_card(theme)
         .px(px(16.))
         .py(px(12.))
         .flex()

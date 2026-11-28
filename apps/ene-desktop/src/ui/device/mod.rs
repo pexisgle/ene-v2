@@ -169,18 +169,52 @@ fn render_device_header(tray_resident: bool, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+fn settings_card(theme: &Theme) -> gpui::Div {
+    div()
+        .w_full()
+        .bg(theme.bg_surface)
+        .border_1()
+        .border_color(theme.border)
+        .rounded(crate::ui::theme::radius::surface())
+}
+
+fn settings_form(theme: &Theme) -> gpui::Div {
+    settings_card(theme)
+        .p(px(16.))
+        .flex()
+        .flex_col()
+        .gap(px(10.))
+}
+
+fn section_title(title: &'static str, theme: &Theme) -> gpui::Div {
+    div()
+        .text_size(px(18.))
+        .font_weight(FontWeight::BOLD)
+        .text_color(theme.ink)
+        .child(title)
+}
+
+fn section_intro(title: &'static str, description: &'static str, theme: &Theme) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(section_title(title, theme))
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.ink_muted)
+                .child(description),
+        )
+}
+
 fn render_history_reset_card(
     live: bool,
     theme: &Theme,
     cx: &mut Context<DevicePane>,
 ) -> Option<AnyElement> {
     cx.try_global::<super::HistoryReset>().cloned().map(|reset| {
-        div()
-            .w_full()
-            .bg(theme.bg_surface)
-            .border_1()
-            .border_color(theme.border)
-            .rounded(crate::ui::theme::radius::surface())
+        settings_card(theme)
             .child(row_frame(
                 false,
                 "会話・作業の履歴と記憶",

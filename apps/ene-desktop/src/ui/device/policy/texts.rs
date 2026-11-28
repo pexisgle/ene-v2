@@ -2,7 +2,7 @@
 
 //! Structured policy rules and free-text policy management for `この端末`.
 
-use super::DevicePane;
+use super::{super::settings_form, DevicePane};
 use crate::ui::{
     icons::Icon,
     studio::labeled_field,
@@ -221,16 +221,7 @@ pub(super) fn render_add_policy_text_panel(
     let hub_add = pane.hub.clone();
     let pane_clear = cx.entity();
     let draft_clear = new_d.clone();
-    div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
-        .p(px(16.))
-        .flex()
-        .flex_col()
-        .gap(px(10.))
+    settings_form(theme)
         .child(labeled_field("ポリシー文（500 文字以内）", new_d, theme))
         .child(
             div()

@@ -1,6 +1,6 @@
 //! Remote host preference controls and asynchronous saves.
 
-use super::{DevicePane, row_frame};
+use super::{DevicePane, row_frame, section_intro, settings_card};
 use crate::{
     host::remote::{RemoteEdit, RemoteProfile},
     input::Draft,
@@ -11,7 +11,7 @@ use crate::{
         widgets::{ButtonStyle, Tone, pill_button, status_pill},
     },
 };
-use gpui::{AnyElement, Context, Entity, FontWeight, div, prelude::*, px};
+use gpui::{AnyElement, Context, Entity, div, prelude::*, px};
 
 #[derive(Debug, Default)]
 pub(super) enum RemoteStatus {
@@ -45,25 +45,13 @@ pub(super) fn render_remote_host_section(
     let has_current = matches!(saved, Some(Ok(Some(_)) | Err(_)));
     let remote_open = pane.form.remote_host_open;
     let pane_remote_toggle = cx.entity();
-    let remote_heading = div()
-        .w_full()
-        .flex()
-        .flex_col()
-        .gap(px(4.))
-        .child(
-            div()
-                .text_size(px(18.))
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme.ink)
-                .child("ホスト接続先"),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme.ink_muted)
-                .child("既定はローカルホスト（自動検出）です。Tailscale Serve や HTTPS リバースプロキシ経由で遠隔ホストへ接続することもできます。"),
-        )
-        .into_any_element();
+    let remote_heading = section_intro(
+        "ホスト接続先",
+        "既定はローカルホスト（自動検出）です。Tailscale Serve や HTTPS リバースプロキシ経由で遠隔ホストへ接続することもできます。",
+        theme,
+    )
+    .w_full()
+    .into_any_element();
 
     let status = match saved {
         Some(Ok(Some(profile))) => format!("遠隔 HTTPS ({})", profile.endpoint),
@@ -77,12 +65,7 @@ pub(super) fn render_remote_host_section(
     };
     let form = (remote_open && saved.is_some())
         .then(|| render_remote_host_form(pane, endpoint.as_deref(), has_current, theme, cx));
-    let remote_card = div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
+    let remote_card = settings_card(theme)
         .flex()
         .flex_col()
         .child(row_frame(

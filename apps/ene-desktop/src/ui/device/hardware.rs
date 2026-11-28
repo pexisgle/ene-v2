@@ -1,6 +1,6 @@
 //! Hardware, audio, perception, pod window, avatar, and capability status card for `この端末`.
 
-use super::{DevicePane, device_pill, row_frame};
+use super::{DevicePane, device_pill, row_frame, settings_card};
 use crate::{
     state::{Device, Link},
     ui::{
@@ -25,12 +25,7 @@ pub(super) fn render_device_status_card(
         .model
         .snapshot()
         .and_then(|snapshot| snapshot.clients.iter().find(|c| c.id == hub.options.id));
-    let card = div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
+    let card = settings_card(theme)
         .flex()
         .flex_col()
         .child(render_active_client_row(pane, hub, live, theme))
