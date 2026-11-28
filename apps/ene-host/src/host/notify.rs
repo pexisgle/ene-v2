@@ -40,9 +40,8 @@ pub(crate) struct Notifier {
 }
 
 struct Outbox {
-    epoch: String,
-    sequence: u64,
-    outbox: Vec<w::Notification>,
+    cursor: w::Cursor,
+    pending: Vec<w::Notification>,
     history: VecDeque<Arc<w::Notification>>,
 }
 
@@ -50,9 +49,11 @@ impl Notifier {
     pub(crate) fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(Outbox {
-                epoch: Uuid::new_v4().to_string(),
-                sequence: 0,
-                outbox: Vec::new(),
+                cursor: w::Cursor {
+                    epoch: Uuid::new_v4().to_string(),
+                    ..Default::default()
+                },
+                pending: Vec::new(),
                 history: VecDeque::new(),
             })),
             events: broadcast::channel(CAPACITY).0,
@@ -60,12 +61,7 @@ impl Notifier {
     }
 
     pub(crate) fn cursor(&self) -> w::Cursor {
-        let state = self.state.lock();
-        w::Cursor {
-            epoch: state.epoch.clone(),
-            seq: state.sequence,
-            ..Default::default()
-        }
+        self.state.lock().cursor.clone()
     }
 
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<Arc<w::Notification>> {
@@ -80,7 +76,7 @@ impl Notifier {
         event: w::notification::Event,
     ) {
         let kind = kind_of(&event);
-        self.state.lock().outbox.push(w::Notification {
+        self.state.lock().pending.push(w::Notification {
             kind: kind.into(),
             emitted_at: if matches!(kind, "turn" | "work" | "approval") {
                 ene_store::util::now()
@@ -102,7 +98,7 @@ impl Notifier {
         action: &str,
         detail: &serde_json::Value,
     ) {
-        self.state.lock().outbox.push(w::Notification {
+        self.state.lock().pending.push(w::Notification {
             kind: DIAGNOSTIC.into(),
             emitted_at: ene_store::util::now(),
             companion_id: Some(companion.to_owned()),
@@ -129,20 +125,18 @@ impl Notifier {
     }
 
     pub(crate) fn flush(&self) {
-        let mut state = self.state.lock();
-        let outbox = std::mem::take(&mut state.outbox);
-        for mut event in outbox {
-            state.sequence += 1;
-            event.cursor = Some(w::Cursor {
-                epoch: state.epoch.clone(),
-                seq: state.sequence,
-                ..Default::default()
-            })
-            .into();
+        let Outbox {
+            cursor,
+            pending,
+            history,
+        } = &mut *self.state.lock();
+        for mut event in pending.drain(..) {
+            cursor.seq += 1;
+            event.cursor = Some(cursor.clone()).into();
             let event = Arc::new(event);
-            state.history.push_back(Arc::clone(&event));
-            if state.history.len() > REPLAY {
-                state.history.pop_front();
+            history.push_back(Arc::clone(&event));
+            if history.len() > REPLAY {
+                history.pop_front();
             }
             if self.events.send(event).is_err() {
                 tracing::debug!("no live notification subscriber");
@@ -154,43 +148,32 @@ impl Notifier {
     /// event it needs has been dropped. `None` asks the caller to resnapshot.
     pub(crate) fn replay(&self, cursor: &w::Cursor) -> Option<Vec<Arc<w::Notification>>> {
         let state = self.state.lock();
-        if cursor.epoch != state.epoch || cursor.seq > state.sequence {
+        if cursor.epoch != state.cursor.epoch || cursor.seq > state.cursor.seq {
             return None;
         }
-        let first_needed = cursor.seq + 1;
-        if first_needed > state.sequence {
+        if cursor.seq == state.cursor.seq {
             return Some(Vec::new());
         }
-        let oldest = state.history.front().and_then(|event| seq_of(event));
-        if oldest.is_none_or(|oldest| oldest > first_needed) {
+        if seq_of(state.history.front()?)? > cursor.seq + 1 {
             return None;
         }
-        Some(
-            state
-                .history
-                .iter()
-                .filter(|event| seq_of(event).is_some_and(|seq| seq >= first_needed))
-                .cloned()
-                .collect(),
-        )
+        let start = state
+            .history
+            .partition_point(|event| seq_of(event).is_some_and(|seq| seq <= cursor.seq));
+        Some(state.history.range(start..).cloned().collect())
     }
 
     pub(crate) fn clear(&self) {
-        self.state.lock().outbox.clear();
+        self.state.lock().pending.clear();
     }
 
     /// Reports a fatal host failure to every subscriber.
     pub(crate) fn fail(&self, reason: &str) {
         let mut state = self.state.lock();
-        state.outbox.clear();
-        state.sequence += 1;
+        state.pending.clear();
+        state.cursor.seq += 1;
         let event = w::Notification {
-            cursor: Some(w::Cursor {
-                epoch: state.epoch.clone(),
-                seq: state.sequence,
-                ..Default::default()
-            })
-            .into(),
+            cursor: Some(state.cursor.clone()).into(),
             kind: "host_storage_failed".into(),
             event: Some(generic(
                 "host_storage_failed",
@@ -275,5 +258,14 @@ mod tests {
         let mut ahead = current.clone();
         ahead.seq = 99;
         assert!(notifier.replay(&ahead).is_none());
+
+        for _ in 0..REPLAY {
+            notifier.push(None, None, event("later"));
+        }
+        notifier.flush();
+        assert!(notifier.replay(&after_one).is_none());
+        let replay = notifier.replay(&current).expect("first retained event");
+        assert_eq!(replay.len(), REPLAY);
+        assert_eq!(replay[0].cursor.as_option().unwrap().seq, current.seq + 1);
     }
 }
