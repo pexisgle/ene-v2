@@ -9,6 +9,7 @@ use crate::ui::widgets::{
 };
 use crate::ui::{Hub, SettingsSection};
 use ene_client_core::domain::Companion;
+use gpui::component::StyledExt as _;
 use gpui::{
     AnyElement, Context, Entity, MouseButton, MouseDownEvent, SharedString, div, prelude::*, px,
 };
@@ -55,8 +56,7 @@ pub(super) fn render_capsule_dock(
     div()
         .w_full()
         .flex_none()
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(6.))
         .children(unsent_rows)
         .when(too_long, |this| {
@@ -72,9 +72,7 @@ pub(super) fn render_capsule_dock(
             div()
                 .relative()
                 .w_full()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .gap(px(8.))
                 .child(render_input_capsule(pod, can_send, &theme, cx))
                 .child(trigger)
@@ -102,9 +100,7 @@ fn render_input_capsule(
         .border_color(theme.border_float)
         .shadow(theme.float_shadow())
         .px(px(6.))
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .gap(px(4.))
         .child(
             div()
@@ -170,16 +166,14 @@ pub(super) fn render_roster_popover(
         .shadow(theme.float_shadow())
         .rounded(crate::ui::theme::radius::orb())
         .p(px(8.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(4.))
         .child(
             div()
                 .id("pod-roster-scroll")
                 .max_h(px(230.))
                 .overflow_y_scroll()
-                .flex()
-                .flex_col()
+                .v_flex()
                 .gap(px(4.))
                 .children(rows),
         )
@@ -210,16 +204,13 @@ fn render_unsent_rows(
                 .bg(theme.danger_soft)
                 .px(px(12.))
                 .py(px(6.))
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .gap(px(8.))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .flex()
-                        .flex_col()
+                        .v_flex()
                         .gap(px(2.))
                         .child(
                             div()
@@ -304,9 +295,7 @@ fn render_roster_row(
                 cx.notify();
             }),
         )
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .gap(px(8.))
         .child(companion_badge(
             &comp.name,
@@ -319,8 +308,7 @@ fn render_roster_row(
             div()
                 .flex_1()
                 .min_w_0()
-                .flex()
-                .flex_col()
+                .v_flex()
                 .child(
                     div()
                         .text_xs()

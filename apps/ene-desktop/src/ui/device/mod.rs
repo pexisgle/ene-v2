@@ -1,6 +1,8 @@
 //! `この端末` chapter in `SettingsStudio`: active client handoff, mic/speaker toggles,
 //! 3D avatar scale & re-center, capability tags, plugins, remote host, and policy rules.
 
+use crate::ui::widgets::surface_card;
+use gpui::component::StyledExt as _;
 mod hardware;
 mod plugins;
 mod policy;
@@ -121,8 +123,7 @@ impl gpui::Render for DevicePane {
 
         div()
             .w_full()
-            .flex()
-            .flex_col()
+            .v_flex()
             .gap(px(16.))
             .child(header)
             .child(device_card)
@@ -145,9 +146,7 @@ impl gpui::Render for DevicePane {
 
 fn render_device_header(tray_resident: bool, theme: &Theme) -> AnyElement {
     div()
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(12.))
         .child(
@@ -169,21 +168,8 @@ fn render_device_header(tray_resident: bool, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-fn settings_card(theme: &Theme) -> gpui::Div {
-    div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
-}
-
 fn settings_form(theme: &Theme) -> gpui::Div {
-    settings_card(theme)
-        .p(px(16.))
-        .flex()
-        .flex_col()
-        .gap(px(10.))
+    surface_card(theme).p(px(16.)).v_flex().gap(px(10.))
 }
 
 fn section_title(title: &'static str, theme: &Theme) -> gpui::Div {
@@ -196,8 +182,7 @@ fn section_title(title: &'static str, theme: &Theme) -> gpui::Div {
 
 fn section_intro(title: &'static str, description: &'static str, theme: &Theme) -> gpui::Div {
     div()
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(4.))
         .child(section_title(title, theme))
         .child(
@@ -214,7 +199,7 @@ fn render_history_reset_card(
     cx: &mut Context<DevicePane>,
 ) -> Option<AnyElement> {
     cx.try_global::<super::HistoryReset>().cloned().map(|reset| {
-        settings_card(theme)
+        surface_card(theme)
             .child(row_frame(
                 false,
                 "会話・作業の履歴と記憶",
@@ -266,16 +251,12 @@ pub(super) fn row_frame(
         })
         .px(px(16.))
         .py(px(14.))
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(12.))
         .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .gap(px(10.))
                 .child(
                     div()

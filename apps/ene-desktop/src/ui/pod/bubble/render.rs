@@ -12,6 +12,7 @@ use crate::ui::theme::Theme;
 use crate::ui::widgets::{Tone, pill_button, status_pill, window_drag_area};
 use ene_client_core::domain::RiskLevel;
 use ene_client_core::domain::{ApprovalDecision, MessageRole, TurnStatus};
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Entity, SharedString, div, prelude::*, px};
 
 pub(super) fn compute_badge_label(
@@ -55,9 +56,7 @@ pub(super) fn render_drag_strip(expanded_chat: bool, theme: &Theme) -> gpui::Div
         div()
             .w_full()
             .h(if expanded_chat { px(18.) } else { px(10.) })
-            .flex()
-            .flex_row()
-            .items_center()
+            .h_flex()
             .justify_end(),
         false,
     )
@@ -86,9 +85,7 @@ pub(super) fn render_bubble_badge(badge_label: String, theme: &Theme) -> gpui::D
             .text_color(theme.accent_fg)
             .text_xs()
             .font_weight(gpui::FontWeight::BOLD)
-            .flex()
-            .flex_row()
-            .items_center()
+            .h_flex()
             .gap(px(5.))
             .child(icon(Icon::Sparkles, 12., theme.accent_fg))
             .child(badge_label),
@@ -99,9 +96,7 @@ pub(super) fn render_bubble_badge(badge_label: String, theme: &Theme) -> gpui::D
 pub(super) fn render_tail_dot(theme: &Theme) -> gpui::Div {
     div()
         .w_full()
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .pr(px(12.))
         .child(window_drag_area(div().flex_1().h(px(12.)), false))
         .child(
@@ -127,16 +122,12 @@ pub(super) fn render_approval_header(
         RiskLevel::Low => ("読み取りのみ", theme.bg_blush, theme.ink_muted),
     };
     div()
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(8.))
         .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .gap(px(6.))
                 .child(status_pill(label, None, soft, fg))
                 .child(
@@ -183,8 +174,7 @@ pub(super) fn render_approval_actions(
     let hub_b = hub.clone();
     let hub_c = hub.clone();
     div()
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(6.))
         .pt(px(2.))
         // Deny and approve are the decision. "Always allow" is not next to
@@ -219,24 +209,17 @@ pub(super) fn render_approval_actions(
                     },
                 )),
         )
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.))
-                .child(pill_button(
-                    SharedString::from(format!("pod-always-{request_id}")),
-                    "次回から常に許可",
-                    Tone::Ghost,
-                    theme,
-                    move |_, cx| {
-                        hub_b.update(cx, |hub, cx| {
-                            hub.resolve_approval(&req_id_b, ApprovalDecision::AlwaysApprove, cx);
-                        });
-                    },
-                )),
-        )
+        .child(div().h_flex().gap(px(6.)).child(pill_button(
+            SharedString::from(format!("pod-always-{request_id}")),
+            "次回から常に許可",
+            Tone::Ghost,
+            theme,
+            move |_, cx| {
+                hub_b.update(cx, |hub, cx| {
+                    hub.resolve_approval(&req_id_b, ApprovalDecision::AlwaysApprove, cx);
+                });
+            },
+        )))
 }
 
 pub(super) fn failed_turn_message(model: &Model) -> Option<String> {
@@ -334,8 +317,7 @@ pub(super) fn render_message_bubble(
     };
     div()
         .w_full()
-        .flex()
-        .flex_col()
+        .v_flex()
         .when(is_user, gpui::Styled::items_end)
         .when(!is_user, gpui::Styled::items_start)
         .child(
@@ -354,8 +336,7 @@ pub(super) fn render_message_bubble(
                         .bg(theme.bg_blush)
                         .text_color(theme.ink)
                 })
-                .flex()
-                .flex_col()
+                .v_flex()
                 .gap(px(6.))
                 .child(div().text_sm().child(text)),
         )
@@ -379,9 +360,7 @@ pub(super) fn render_live_stt_badge(label: String, theme: &Theme) -> gpui::Div {
         .bg(theme.mint_soft)
         .px(px(10.))
         .py(px(5.))
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .gap(px(6.))
         .child(icon(Icon::Mic, 12., theme.mint_fg))
         .child(

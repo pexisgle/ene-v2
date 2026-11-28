@@ -8,6 +8,7 @@ use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{DropdownSpec, Tone, pill_button};
 use ene_client_core::domain::ModelAssignment;
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Context, div, prelude::*, px};
 
 type VoiceAssignFn = fn(&mut Hub, Option<(&str, &str)>, &mut Context<Hub>);
@@ -146,9 +147,7 @@ fn render_missing_role_hint(
 ) -> gpui::Div {
     let pane_add = cx.entity();
     div()
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(8.))
         .child(div().text_xs().text_color(theme.ink_muted).child(hint))

@@ -6,6 +6,7 @@ use crate::ui::{
     widgets::{Tone, pill_button},
 };
 use ene_domain::settings::MODEL_CHECK_PROMPT;
+use gpui::component::StyledExt as _;
 use gpui::{App, Div, Entity, SharedString, div, prelude::*, px};
 
 pub(crate) fn model_checks(
@@ -65,8 +66,7 @@ pub(crate) fn model_checks(
     }
     Some(
         div()
-            .flex()
-            .flex_col()
+            .v_flex()
             .gap(px(4.))
             .child(
                 div()

@@ -1,6 +1,7 @@
 //! Hardware, audio, perception, pod window, avatar, and capability status card for `この端末`.
 
-use super::{DevicePane, device_pill, row_frame, settings_card};
+use super::{DevicePane, device_pill, row_frame};
+use crate::ui::widgets::surface_card;
 use crate::{
     state::{Device, Link},
     ui::{
@@ -13,6 +14,7 @@ use crate::{
 #[cfg(windows)]
 use ene_client_core::domain::ClientInfo;
 use ene_client_core::domain::ConnectionKind;
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
 pub(super) fn render_device_status_card(
@@ -25,9 +27,8 @@ pub(super) fn render_device_status_card(
         .model
         .snapshot()
         .and_then(|snapshot| snapshot.clients.iter().find(|c| c.id == hub.options.id));
-    let card = settings_card(theme)
-        .flex()
-        .flex_col()
+    let card = surface_card(theme)
+        .v_flex()
         .child(render_active_client_row(pane, hub, live, theme))
         .child(render_audio_row(pane, hub, AudioControl::Microphone, theme))
         .child(render_audio_row(pane, hub, AudioControl::Speaker, theme))
@@ -290,21 +291,16 @@ fn render_avatar_controls_row(pane: &DevicePane, hub: &Hub, theme: &Theme) -> An
         .border_color(theme.border)
         .px(px(16.))
         .py(px(14.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(10.))
         .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .justify_between()
                 .gap(px(12.))
                 .child(
                     div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
+                        .h_flex()
                         .gap(px(10.))
                         .child(
                             div()
@@ -329,9 +325,7 @@ fn render_avatar_controls_row(pane: &DevicePane, hub: &Hub, theme: &Theme) -> An
         )
         .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .justify_between()
                 .gap(px(10.))
                 .child(
@@ -372,8 +366,7 @@ fn render_capabilities_row(client_caps: &[String], theme: &Theme) -> AnyElement 
         .border_color(theme.border)
         .px(px(16.))
         .py(px(14.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(8.))
         .child(
             div()

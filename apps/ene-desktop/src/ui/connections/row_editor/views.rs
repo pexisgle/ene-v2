@@ -15,6 +15,7 @@ use ene_client_core::{
     domain::{Connection, ConnectionCheck, ConnectionKind},
 };
 use ene_domain::CredentialState;
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 
 use super::form::*;
@@ -83,8 +84,7 @@ pub(super) fn render_connection_editor(
         .border_color(theme.border)
         .px(px(16.))
         .py(px(16.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(12.))
         .when(conn.kind != ConnectionKind::Search, |this| {
             this.child(render_enable_row(conn, live, &pane.hub, theme))
@@ -176,8 +176,7 @@ pub(super) fn render_credentials_strip(
         .rounded(crate::ui::theme::radius::medium())
         .bg(theme.bg_blush)
         .p(px(12.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(8.))
         .child(render_cred_strip_header(cred_label, has_cred, theme))
         .child(render_cred_secret_row(
@@ -202,8 +201,7 @@ pub(super) fn render_schema_box(schema_controls: Vec<AnyElement>, theme: &Theme)
         .rounded(crate::ui::theme::radius::medium())
         .bg(theme.bg_blush)
         .p(px(12.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(10.))
         .children(schema_controls)
 }
@@ -280,9 +278,7 @@ pub(super) fn render_enable_row(
     let conn_toggle = conn.clone();
     let hub_toggle = hub.clone();
     div()
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .child(
             div()

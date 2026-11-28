@@ -11,6 +11,7 @@ use crate::ui::theme::Theme;
 use crate::ui::widgets::{ButtonStyle, DropdownSpec, Tone, dropdown_select, pill_button};
 use crate::ui::{GOOGLE_AGENT_PLATFORM, Hub, SettingsSection};
 use ene_client_core::domain::LlmProvider;
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, App, Context, Entity, SharedString, div, prelude::*, px};
 
 pub(super) fn collect_setup_choices(pod: &CompanionPod, cx: &App) -> SetupChoices {
@@ -145,9 +146,7 @@ pub(super) fn append_setup_voice_section(
 
     body.child(
         div()
-            .flex()
-            .flex_row()
-            .items_center()
+            .h_flex()
             .justify_between()
             .gap(px(8.))
             .child(
@@ -195,8 +194,7 @@ pub(super) fn append_setup_voice_section(
 pub(super) fn render_providers_loading(hub: &Entity<Hub>, theme: &Theme) -> AnyElement {
     let hub = hub.clone();
     div()
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(8.))
         .child("接続先を読み込んでいます…")
         .child(pill_button(
@@ -284,9 +282,7 @@ pub(super) fn render_connection_header(
 ) -> gpui::Div {
     let hub_open = hub.clone();
     div()
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(8.))
         .child(

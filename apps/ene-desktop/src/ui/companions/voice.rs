@@ -6,9 +6,11 @@ use crate::state::{AudioState, Device, Devices};
 use crate::ui::icons::Icon;
 use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
+use crate::ui::widgets::surface_card;
 use crate::ui::widgets::{Tone, pill_button, status_pill};
 use crate::ui::{DraftStore, Hub, SettingsSection};
 use ene_client_core::domain::ConnectionKind;
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Context, Entity, FontWeight, Subscription, div, prelude::*, px};
 
 pub(super) struct VoiceSnapshot {
@@ -70,8 +72,7 @@ impl gpui::Render for VoicePane {
 
         div()
             .w_full()
-            .flex()
-            .flex_col()
+            .v_flex()
             .gap(px(16.))
             .child(render_voice_header(&theme))
             .child(render_section_heading("声を聞き取る（STT）", &theme))
@@ -85,8 +86,7 @@ impl gpui::Render for VoicePane {
 
 fn render_voice_header(theme: &Theme) -> gpui::Div {
     div()
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(4.))
         .child(
             div()
@@ -148,9 +148,7 @@ pub(super) fn render_connection_missing_pill(
 ) -> AnyElement {
     let hub = hub.clone();
     div()
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .gap(px(8.))
         .child(status_pill(label, None, theme.amber_soft, theme.amber_fg))
         .child(pill_button(
@@ -186,29 +184,19 @@ fn render_tts_card(
     let output_muted = snap.audio.output_muted;
     let report = snap.audio.speech_report.clone();
 
-    div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
+    surface_card(theme)
         .p(px(16.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(10.))
         .child(labeled_field("読み上げる文", draft, theme))
         .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .justify_between()
                 .gap(px(10.))
                 .child(
                     div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
+                        .h_flex()
                         .flex_wrap()
                         .gap(px(6.))
                         .child(tts_state)
@@ -216,9 +204,7 @@ fn render_tts_card(
                 )
                 .child(
                     div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
+                        .h_flex()
                         .gap(px(6.))
                         .child(pill_button(
                             "voice-out-toggle",

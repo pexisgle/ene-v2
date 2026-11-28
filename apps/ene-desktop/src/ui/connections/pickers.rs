@@ -7,6 +7,7 @@ use crate::ui::widgets::{
     DropdownOption, DropdownSpec, Tone, dropdown_select, kind_pill, pill_button,
 };
 use ene_client_core::{connections::ConnectionResource, domain::ConnectionEndpoint};
+use gpui::component::StyledExt as _;
 use gpui::{App, Context, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
 
 pub(super) struct PickerInput<'a> {
@@ -71,8 +72,7 @@ pub(super) fn render_resource_picker(
     div()
         .w_full()
         .min_w_0()
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(6.))
         .child(picker_header(
             &labels,

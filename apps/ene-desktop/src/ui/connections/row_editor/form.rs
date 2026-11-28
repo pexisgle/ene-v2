@@ -13,6 +13,7 @@ use ene_client_core::{
     connections::{extract_kind_list_init, parse_process_args},
     domain::{Connection, ConnectionCheck, ConnectionConfig, ConnectionEndpoint, ConnectionKind},
 };
+use gpui::component::StyledExt as _;
 use gpui::{Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 
 pub(crate) struct RowBadge {
@@ -181,9 +182,7 @@ pub(super) fn render_cred_strip_header(
     theme: &Theme,
 ) -> gpui::Div {
     div()
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .child(
             div()

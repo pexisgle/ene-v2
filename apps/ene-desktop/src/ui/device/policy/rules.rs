@@ -10,6 +10,7 @@ use crate::ui::{
     widgets::{ButtonStyle, Tone, pill_button, status_pill},
 };
 use ene_client_core::domain::{PolicyEffect, PolicyRule};
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
 pub(super) fn render_policy_rule_row(
@@ -53,9 +54,7 @@ pub(super) fn render_policy_rule_row(
 
     let trailing = if armed {
         div()
-            .flex()
-            .flex_row()
-            .items_center()
+            .h_flex()
             .gap(px(6.))
             .child(pill_button(
                 SharedString::from(format!("pol-cancel-{}", rule.id)),
@@ -99,18 +98,14 @@ pub(super) fn render_policy_rule_row(
         .border_color(theme.border)
         .px(px(16.))
         .py(px(12.))
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(10.))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .gap(px(10.))
                 .child(status_pill(eff_text, Some(dot), bg, fg))
                 .child(
@@ -124,8 +119,7 @@ pub(super) fn render_policy_rule_row(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .flex()
-                        .flex_col()
+                        .v_flex()
                         .text_xs()
                         .text_color(theme.ink_muted)
                         .child(
@@ -362,9 +356,7 @@ pub(super) fn render_add_policy_panel(
         .child(
             div()
                 .w_full()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .justify_between()
                 .flex_wrap()
                 .gap(px(8.))

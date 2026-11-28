@@ -2,6 +2,7 @@
 //!
 //! `render` draws the element tree and `text` prepares the replies.
 
+use gpui::component::StyledExt as _;
 mod render;
 mod text;
 
@@ -78,8 +79,7 @@ impl CompanionPod {
             .px(px(16.))
             .pt(px(12.))
             .pb(px(12.))
-            .flex()
-            .flex_col()
+            .v_flex()
             .gap(px(6.))
             .child(render_drag_strip(expanded_chat, &theme))
             .when_some(notice, gpui::ParentElement::child)
@@ -90,8 +90,7 @@ impl CompanionPod {
             .w_full()
             .when(expanded, |this| this.flex_1().min_h_0())
             .pt(px(14.))
-            .flex()
-            .flex_col()
+            .v_flex()
             .gap(px(4.))
             .child(bubble)
             .child(render_tail_dot(&theme))
@@ -111,8 +110,7 @@ impl CompanionPod {
         };
         let hub_settings = self.hub.clone();
         div()
-            .flex()
-            .flex_col()
+            .v_flex()
             .gap(px(8.))
             .child(
                 div()
@@ -168,8 +166,7 @@ impl CompanionPod {
         );
 
         div()
-            .flex()
-            .flex_col()
+            .v_flex()
             .gap(px(8.))
             .child(render_approval_header(&what, total_pending, risk, theme))
             .when_some(
@@ -190,8 +187,7 @@ impl CompanionPod {
                 // the decision should not be buried under it.
                 this.child(
                     div()
-                        .flex()
-                        .flex_col()
+                        .v_flex()
                         .gap(px(4.))
                         .child(pill_button(
                             SharedString::from(format!(
@@ -277,8 +273,7 @@ impl CompanionPod {
         let transcription = hub.model.audio.transcription.clone();
 
         div()
-            .flex()
-            .flex_col()
+            .v_flex()
             .gap(px(8.))
             .child(
                 div()
@@ -363,8 +358,7 @@ impl CompanionPod {
         div()
             .flex_1()
             .min_h_0()
-            .flex()
-            .flex_col()
+            .v_flex()
             .gap(px(8.))
             .child(
                 div()
@@ -373,8 +367,7 @@ impl CompanionPod {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
-                    .flex()
-                    .flex_col()
+                    .v_flex()
                     .gap(px(8.))
                     .children(rows),
             )

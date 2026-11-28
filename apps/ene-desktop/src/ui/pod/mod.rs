@@ -1,6 +1,7 @@
 //! Minimal frameless floating companion window: speech bubble, inline approval,
 //! first-run onboarding, collapsible history, capsule composer and controls menu.
 
+use gpui::component::StyledExt as _;
 mod bubble;
 mod controls;
 mod menu;
@@ -368,8 +369,7 @@ impl Render for CompanionPod {
             })
             .text_color(theme.ink)
             .p(px(14.))
-            .flex()
-            .flex_col()
+            .v_flex()
             .justify_end()
             .gap(px(10.))
             .child(self.render_bubble_stage(cx))

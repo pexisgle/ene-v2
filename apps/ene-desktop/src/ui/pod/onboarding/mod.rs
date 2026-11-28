@@ -4,6 +4,7 @@
 //! module so neither the setup form nor the provider chrome crowds the
 //! other out of the file-length budget.
 
+use gpui::component::StyledExt as _;
 mod setup;
 mod views;
 
@@ -91,8 +92,7 @@ pub(super) fn render_connection_onboarding(
     let subtitle = onboarding_subtitle(is_agent_platform, needs_key, &name);
 
     div()
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(8.))
         .child(render_connection_header(&pod.hub, !pending, theme))
         .child(div().text_sm().child(subtitle))
@@ -152,7 +152,7 @@ pub(super) fn render_model_voice_onboarding(
             None => companions_empty && !staged,
         });
 
-    let mut body = div().flex().flex_col().gap(px(8.)).child(
+    let mut body = div().v_flex().gap(px(8.)).child(
         div()
             .font_weight(gpui::FontWeight::BOLD)
             .child("使うモデルと音声を選択"),

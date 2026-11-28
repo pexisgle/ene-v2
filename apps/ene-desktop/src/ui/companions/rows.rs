@@ -4,8 +4,10 @@
 use super::{CompanionsPane, CompanionsSnapshot, editor};
 use crate::ui::hub::chat;
 use crate::ui::theme::Theme;
+use crate::ui::widgets::surface_card;
 use crate::ui::widgets::{ButtonStyle, Tone, companion_badge, pill_button, status_pill};
 use ene_client_core::domain::Companion;
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
 struct RowStatus {
@@ -60,14 +62,8 @@ impl CompanionsPane {
             )
         });
 
-        div()
-            .w_full()
-            .bg(theme.bg_surface)
-            .border_1()
-            .border_color(theme.border)
-            .rounded(crate::ui::theme::radius::surface())
-            .flex()
-            .flex_col()
+        surface_card(theme)
+            .v_flex()
             .child(row_header)
             .when_some(editor, gpui::ParentElement::child)
             .into_any_element()
@@ -90,9 +86,7 @@ impl CompanionsPane {
         let identity = div()
             .flex_1()
             .min_w_0()
-            .flex()
-            .flex_row()
-            .items_center()
+            .h_flex()
             .gap(px(12.))
             .child(companion_badge(
                 &comp.name,
@@ -105,8 +99,7 @@ impl CompanionsPane {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .flex()
-                    .flex_col()
+                    .v_flex()
                     .gap(px(2.))
                     .child(
                         div()
@@ -129,9 +122,7 @@ impl CompanionsPane {
         div()
             .h(px(62.))
             .px(px(16.))
-            .flex()
-            .flex_row()
-            .items_center()
+            .h_flex()
             .justify_between()
             .gap(px(12.))
             .child(identity)
@@ -162,9 +153,7 @@ impl CompanionsPane {
 
         div()
             .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
+            .h_flex()
             .gap(px(6.))
             .child(pill_button(
                 SharedString::from(format!("comp-res-{id}")),

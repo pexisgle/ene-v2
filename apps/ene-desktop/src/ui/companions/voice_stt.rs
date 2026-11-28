@@ -7,7 +7,9 @@ use crate::state::Device;
 use crate::ui::Hub;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
+use crate::ui::widgets::surface_card;
 use crate::ui::widgets::{Tone, pill_button, status_pill};
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Entity, FontWeight, div, prelude::*, px};
 
 fn meter(level: f32, theme: &Theme) -> AnyElement {
@@ -45,9 +47,7 @@ fn stage_row(
         })
         .px(px(16.))
         .py(px(12.))
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(12.))
         .child(
@@ -72,14 +72,8 @@ pub(super) fn render_stt_card(snap: &VoiceSnapshot, hub: &Entity<Hub>, theme: &T
         .filter(|text| !text.trim().is_empty())
         .unwrap_or_else(|| "—".into());
 
-    div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
-        .flex()
-        .flex_col()
+    surface_card(theme)
+        .v_flex()
         .child(render_stt_mic_row(snap, mic_ready, hub, theme))
         .child(stage_row(
             "マイク入力レベル",
@@ -147,9 +141,7 @@ fn render_stt_mic_row(
     stage_row(
         "マイク",
         div()
-            .flex()
-            .flex_row()
-            .items_center()
+            .h_flex()
             .gap(px(10.))
             .child(device_mute_pill(&snap.devices.input, mic_muted, theme))
             .child(pill_button(
@@ -230,9 +222,7 @@ fn render_capture_mode_controls(
     let hub_ptt_toggle = hub.clone();
     let hub_ptt_cancel = hub.clone();
     div()
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .flex_wrap()
         .gap(px(6.))
         .child(pill_button(
@@ -296,9 +286,7 @@ fn render_recognized_header(recognized: &[String], hub: &Entity<Hub>, theme: &Th
         .border_color(theme.border)
         .px(px(16.))
         .py(px(10.))
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(8.))
         .child(

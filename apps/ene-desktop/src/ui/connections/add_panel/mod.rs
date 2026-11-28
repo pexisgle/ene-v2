@@ -1,3 +1,5 @@
+use crate::ui::widgets::surface_card;
+use gpui::component::StyledExt as _;
 mod chips;
 
 use super::{AddFlow, ConnectionsPane};
@@ -34,15 +36,9 @@ pub(super) fn render_add_connection_panel(
     let pane_entity = cx.entity();
     let custom_open = custom_section.is_some();
 
-    div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
+    surface_card(theme)
         .p(px(16.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(12.))
         .when(!llm_chips.is_empty(), |this| {
             this.child(render_chip_section("AIプロバイダを追加", llm_chips, theme))
@@ -113,8 +109,7 @@ fn render_custom_connection_section(
     let pane_done = cx.entity();
 
     div()
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(10.))
         .child(
             div()
@@ -169,8 +164,7 @@ fn render_custom_connection_section(
 
 fn render_chip_section(title: &'static str, chips: Vec<AnyElement>, theme: &Theme) -> gpui::Div {
     div()
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(6.))
         .child(
             div()

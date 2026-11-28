@@ -1,6 +1,8 @@
 //! Companions chapter in `SettingsStudio`: 3-field quick creation, 62px bordered rows,
 //! 1-level hairline-divided editor, and collapsed `MindProfile` disclosure.
 
+use crate::ui::widgets::surface_card;
+use gpui::component::StyledExt as _;
 mod create;
 mod editor;
 mod rows;
@@ -174,13 +176,12 @@ impl gpui::Render for CompanionsPane {
 
         div()
             .w_full()
-            .flex()
-            .flex_col()
+            .v_flex()
             .gap(px(16.))
             .child(header)
             .when_some(import_panel, gpui::ParentElement::child)
             .when_some(create_panel, gpui::ParentElement::child)
-            .child(div().w_full().flex().flex_col().gap(px(10.)).children(rows))
+            .child(div().w_full().v_flex().gap(px(10.)).children(rows))
     }
 }
 
@@ -194,9 +195,7 @@ fn render_companions_header(
     let pane_toggle_create = cx.entity();
     let pane_toggle_import = cx.entity();
     div()
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(12.))
         .child(
@@ -208,9 +207,7 @@ fn render_companions_header(
         )
         .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .gap(px(8.))
                 .child(pill_button(
                     "comp-toggle-import",
@@ -260,17 +257,10 @@ fn render_empty_companions_row(
     theme: &Theme,
     cx: &mut Context<CompanionsPane>,
 ) -> AnyElement {
-    div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
+    surface_card(theme)
         .px(px(16.))
         .py(px(18.))
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .child(
             div()

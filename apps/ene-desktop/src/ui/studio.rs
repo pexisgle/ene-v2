@@ -10,6 +10,7 @@ use super::widgets::{
     CircleButtonStyle, Tone, circle_icon_button, navigation_button, notice_strip, window_drag_area,
 };
 use super::{Hub, SettingsSection};
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*, px};
 
 /// Settings window managing companions, connections and local device permissions.
@@ -56,9 +57,7 @@ impl SettingsStudio {
             .border_b_1()
             .border_color(theme.border_title)
             .px(px(14.))
-            .flex()
-            .flex_row()
-            .items_center()
+            .h_flex()
             .justify_between()
             .gap(px(8.))
             .child(
@@ -73,9 +72,7 @@ impl SettingsStudio {
             .child(
                 div()
                     .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
+                    .h_flex()
                     .gap(px(6.))
                     .child(circle_icon_button(
                         "studio-win-min",
@@ -111,8 +108,7 @@ impl SettingsStudio {
             .border_r_1()
             .border_color(theme.border_title)
             .p(px(12.))
-            .flex()
-            .flex_col()
+            .v_flex()
             .gap(px(4.))
             .children(SettingsSection::ALL.into_iter().map(|section| {
                 let hub = self.hub.clone();
@@ -140,8 +136,7 @@ impl SettingsStudio {
                 .flex_none()
                 .px(px(28.))
                 .pt(px(16.))
-                .flex()
-                .flex_col()
+                .v_flex()
                 .gap(px(6.))
                 .children(
                     notices
@@ -188,8 +183,7 @@ impl Render for SettingsStudio {
                 f.fallbacks = Some(ui_font_fallbacks());
                 f
             })
-            .flex()
-            .flex_col()
+            .v_flex()
             .child(self.render_titlebar(&theme))
             .child(
                 div()
@@ -204,8 +198,7 @@ impl Render for SettingsStudio {
                             .min_w_0()
                             .min_h_0()
                             .bg(theme.bg_surface)
-                            .flex()
-                            .flex_col()
+                            .v_flex()
                             .when_some(notice_block, gpui::ParentElement::child)
                             .child(
                                 div()
@@ -236,8 +229,7 @@ pub(crate) fn labeled_field(
     div()
         .w_full()
         .min_w_0()
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(4.))
         .child(
             div()

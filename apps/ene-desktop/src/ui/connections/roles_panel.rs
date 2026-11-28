@@ -2,8 +2,10 @@ use super::ConnectionsPane;
 use super::roles_voice::render_voice_roles;
 use crate::ui::hub::companions as companion_actions;
 use crate::ui::theme::Theme;
+use crate::ui::widgets::surface_card;
 use crate::ui::widgets::{DropdownOption, DropdownSpec, dropdown_select};
 use ene_client_core::domain::{Companion, ModelAssignment, ModelAssignments, ModelRole};
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, App, Context, FontWeight, Window, div, prelude::*, px};
 
 #[derive(Clone, Copy)]
@@ -55,15 +57,9 @@ pub(super) fn render_advanced_roles_panel(
 
     rows.extend(render_voice_roles(pane, live, theme, cx));
 
-    div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
+    surface_card(theme)
         .p(px(16.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(12.))
         .children(rows)
         .into_any_element()
@@ -178,12 +174,7 @@ fn every_role_has_a_label_and_fallback_hint() {
 }
 
 fn render_no_companion_roles_hint(theme: &Theme) -> AnyElement {
-    div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
+    surface_card(theme)
         .p(px(16.))
         .text_xs()
         .text_color(theme.ink_muted)
@@ -229,8 +220,7 @@ pub(super) fn render_role_row(
         .when(separated, |this| {
             this.border_t_1().border_color(theme.border).pt(px(12.))
         })
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(6.))
         .child(heading)
         .child(dropdown_select(spec, on_select))
@@ -240,9 +230,7 @@ pub(super) fn render_role_row(
 
 fn render_role_row_header(title: &str, current_text: &str, theme: &Theme) -> gpui::Div {
     div()
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(8.))
         .child(

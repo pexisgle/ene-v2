@@ -8,6 +8,7 @@ use crate::ui::theme::Theme;
 use crate::ui::widgets::{ButtonStyle, Tone, pill_button};
 use crate::ui::{PodMode, SettingsSection};
 use ene_client_core::domain::ConnectionKind;
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Context, MouseDownEvent, Window, div, prelude::*, px};
 
 #[derive(Clone, Copy)]
@@ -52,8 +53,7 @@ pub(super) fn render_controls(
         .bg(theme.bg_surface)
         .shadow(theme.float_shadow())
         .p(px(10.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(6.))
         .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
             this.controls_open = false;

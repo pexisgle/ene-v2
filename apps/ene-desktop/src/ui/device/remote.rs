@@ -1,6 +1,7 @@
 //! Remote host preference controls and asynchronous saves.
 
-use super::{DevicePane, row_frame, section_intro, settings_card};
+use super::{DevicePane, row_frame, section_intro};
+use crate::ui::widgets::surface_card;
 use crate::{
     host::remote::{RemoteEdit, RemoteProfile},
     input::Draft,
@@ -11,6 +12,7 @@ use crate::{
         widgets::{ButtonStyle, Tone, pill_button, status_pill},
     },
 };
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Context, Entity, div, prelude::*, px};
 
 #[derive(Debug, Default)]
@@ -65,9 +67,8 @@ pub(super) fn render_remote_host_section(
     };
     let form = (remote_open && saved.is_some())
         .then(|| render_remote_host_form(pane, endpoint.as_deref(), has_current, theme, cx));
-    let remote_card = settings_card(theme)
-        .flex()
-        .flex_col()
+    let remote_card = surface_card(theme)
+        .v_flex()
         .child(row_frame(
             false,
             "次回起動時の接続先",
@@ -145,8 +146,7 @@ fn render_remote_host_form(
         .border_t_1()
         .border_color(theme.border)
         .p(px(16.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(10.))
         .child(labeled_field(
             "遠隔エンドポイント（HTTPS /rpc 必須）",
@@ -163,9 +163,7 @@ fn render_remote_host_form(
         .child(
             div()
                 .w_full()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .justify_between()
                 .gap(px(8.))
                 .child(pill_button(

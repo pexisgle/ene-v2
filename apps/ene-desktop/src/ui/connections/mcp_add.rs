@@ -5,6 +5,7 @@ use super::{
 use crate::ui::icons::Icon;
 use crate::ui::studio::labeled_field;
 use crate::ui::theme::Theme;
+use crate::ui::widgets::surface_card;
 use crate::ui::widgets::{Tone, disclosure_row, pill_button};
 use ene_client_core::{
     connections::{
@@ -13,6 +14,7 @@ use ene_client_core::{
     },
     domain::{ConnectionInput, ConnectionKind},
 };
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Context, FontWeight, div, prelude::*, px};
 
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
@@ -53,15 +55,9 @@ pub(super) fn render_mcp_add(
     let connection = build_mcp_connection_input(target, extra_cfg, chosen_name);
     let enabled = live && error.is_none() && connection.is_some();
 
-    div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
+    surface_card(theme)
         .p(px(16.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(10.))
         .child(render_mcp_add_header(theme, cx))
         .child(render_mcp_mode_chips(mode, theme, cx))
@@ -144,8 +140,7 @@ fn render_mcp_mode_fields(
             );
             let target = mcp_local_target(cmd.read(cx).text().trim(), args.read(cx).text().trim());
             let el = div()
-                .flex()
-                .flex_col()
+                .v_flex()
                 .gap(px(10.))
                 .child(labeled_field("実行ファイル", cmd, theme))
                 .child(labeled_field(
@@ -187,8 +182,7 @@ fn render_mcp_advanced_section(
         .rounded(crate::ui::theme::radius::medium())
         .bg(theme.bg_blush)
         .p(px(12.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(8.));
     let fields = McpFields::new(&mut pane.drafts, "add:mcp:", mode, None, theme, cx);
     let result = fields.read(cx);

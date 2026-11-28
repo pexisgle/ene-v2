@@ -2,10 +2,12 @@ use super::{ConnectionsPane, add_panel::build_search_preset_chips};
 use crate::ui::hub::presets;
 use crate::ui::icons::Icon;
 use crate::ui::theme::Theme;
+use crate::ui::widgets::surface_card;
 use crate::ui::widgets::{Tone, pill_button, status_pill};
 use crate::ui::{Hub, search_adapter_requires_key};
 use ene_client_core::domain::{Connection, ConnectionKind};
 use ene_domain::SearchSelection;
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 
 pub(super) fn render_web_search_card(
@@ -26,15 +28,9 @@ pub(super) fn render_web_search_card(
             .filter(|connection| connection.enabled),
     );
 
-    div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
+    surface_card(theme)
         .p(px(16.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(10.))
         .child(render_search_card_header(selection, theme))
         .when_some(
@@ -86,13 +82,11 @@ fn render_search_card_header(selection: SearchSelection<&Connection>, theme: &Th
         ),
     };
     div()
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(8.))
         .child(
-            div().flex().flex_row().items_center().gap(px(8.)).child(
+            div().h_flex().gap(px(8.)).child(
                 div()
                     .text_sm()
                     .font_weight(FontWeight::BOLD)
@@ -165,8 +159,7 @@ fn render_search_switcher(
     ));
     Some(
         div()
-            .flex()
-            .flex_col()
+            .v_flex()
             .gap(px(6.))
             .child(
                 div()

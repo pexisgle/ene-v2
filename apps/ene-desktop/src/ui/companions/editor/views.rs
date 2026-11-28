@@ -15,6 +15,7 @@ use crate::{
     },
 };
 use ene_client_core::domain::MindProfile;
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 
 use super::form::*;
@@ -103,8 +104,7 @@ pub(super) fn render_mind_section(
         .rounded(crate::ui::theme::radius::medium())
         .bg(theme.bg_blush)
         .p(px(12.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(10.))
         .child(labeled_field("性格の側面", facets_d, theme))
         .child(labeled_field("セリフ例", examples_d, theme))
@@ -153,9 +153,7 @@ pub(super) fn render_companion_footer(
 
     let delete_controls = if armed {
         div()
-            .flex()
-            .flex_row()
-            .items_center()
+            .h_flex()
             .gap(px(6.))
             .child(
                 div()
@@ -201,17 +199,13 @@ pub(super) fn render_companion_footer(
 
     div()
         .pt(px(4.))
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(10.))
         .child(delete_controls)
         .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .gap(px(8.))
                 .child(pill_button(
                     SharedString::from(format!("comp-export-{id}")),
@@ -248,14 +242,11 @@ pub(super) fn render_body_model_field(
     let model_d_default = body_model_d.clone();
     div()
         .w_full()
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(6.))
         .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .justify_between()
                 .gap(px(8.))
                 .child(
@@ -267,9 +258,7 @@ pub(super) fn render_body_model_field(
                 )
                 .child(
                     div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
+                        .h_flex()
                         .gap(px(6.))
                         .child(pill_button(
                             SharedString::from(format!("comp-model-default-{id}")),
@@ -317,8 +306,7 @@ pub(super) fn render_exported_template_box(id: &str, json: &str, theme: &Theme) 
         .rounded(crate::ui::theme::radius::medium())
         .bg(theme.bg_blush)
         .p(px(10.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(4.))
         .child(
             div()

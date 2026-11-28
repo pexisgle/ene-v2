@@ -1,6 +1,7 @@
 //! Wasm plugin management UI section for `この端末`.
 
-use super::{DevicePane, section_intro, settings_card, settings_form};
+use super::{DevicePane, section_intro, settings_form};
+use crate::ui::widgets::surface_card;
 use crate::ui::{
     Hub,
     icons::Icon,
@@ -9,6 +10,7 @@ use crate::ui::{
     widgets::{ButtonStyle, Tone, pill_button},
 };
 use ene_client_core::domain::PluginInfo;
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
 pub(super) fn render_plugins_section(
@@ -22,9 +24,7 @@ pub(super) fn render_plugins_section(
     let pane_add_plugin = cx.entity();
     let plugins_heading = div()
         .w_full()
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(10.))
         .child(section_intro(
@@ -35,9 +35,7 @@ pub(super) fn render_plugins_section(
         .child(
             div()
                 .flex_none()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .gap(px(6.))
                 .child(pill_button(
                     "dev-plugins-refresh",
@@ -100,9 +98,7 @@ fn render_add_plugin_panel(
         .child(
             div()
                 .w_full()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .justify_between()
                 .gap(px(8.))
                 .child(pill_button(
@@ -158,11 +154,10 @@ fn render_plugins_card(
     live: bool,
     theme: &Theme,
 ) -> AnyElement {
-    settings_card(theme)
+    surface_card(theme)
         .px(px(16.))
         .py(px(12.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(8.))
         .when(plugins.is_empty(), |card| {
             card.child(
@@ -185,17 +180,14 @@ fn render_plugins_card(
             };
             div()
                 .w_full()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .justify_between()
                 .gap(px(8.))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .flex()
-                        .flex_col()
+                        .v_flex()
                         .child(
                             div()
                                 .text_sm()

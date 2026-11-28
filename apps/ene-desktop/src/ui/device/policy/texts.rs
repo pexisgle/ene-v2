@@ -10,6 +10,7 @@ use crate::ui::{
     widgets::{Tone, pill_button},
 };
 use ene_client_core::domain::PolicyText;
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Context, SharedString, div, prelude::*, px};
 
 pub(super) fn render_policy_text_editor(
@@ -41,15 +42,12 @@ pub(super) fn render_policy_text_editor(
         })
         .px(px(16.))
         .py(px(12.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(8.))
         .child(edit_d)
         .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .justify_between()
                 .child(
                     div()
@@ -119,9 +117,7 @@ pub(super) fn render_policy_text_row(
 
     let trailing = if armed {
         div()
-            .flex()
-            .flex_row()
-            .items_center()
+            .h_flex()
             .gap(px(6.))
             .child(pill_button(
                 SharedString::from(format!("poltxt-cancel-{}", item.id)),
@@ -147,9 +143,7 @@ pub(super) fn render_policy_text_row(
             .into_any_element()
     } else {
         div()
-            .flex()
-            .flex_row()
-            .items_center()
+            .h_flex()
             .gap(px(6.))
             .child(pill_button(
                 SharedString::from(format!("poltxt-edit-{}", item.id)),
@@ -185,9 +179,7 @@ pub(super) fn render_policy_text_row(
         })
         .px(px(16.))
         .py(px(11.))
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(10.))
         .child(
@@ -225,9 +217,7 @@ pub(super) fn render_add_policy_text_panel(
         .child(labeled_field("ポリシー文（500 文字以内）", new_d, theme))
         .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .justify_between()
                 .child(
                     div()

@@ -1,4 +1,6 @@
 //! Connection rows and the inline editor.
+use crate::ui::widgets::surface_card;
+use gpui::component::StyledExt as _;
 pub(super) mod form;
 pub(super) mod views;
 
@@ -44,14 +46,8 @@ pub(super) fn render_connection_row(
     );
     let detail = expanded.then(|| render_connection_editor(pane, conn, check, live, theme, cx));
 
-    div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
-        .flex()
-        .flex_col()
+    surface_card(theme)
+        .v_flex()
         .child(header)
         .when_some(disclosure, |row, text| {
             row.child(
@@ -121,18 +117,14 @@ fn render_row_header(
     div()
         .h(px(62.))
         .px(px(16.))
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(12.))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .gap(px(10.))
                 .child(
                     div()
@@ -154,9 +146,7 @@ fn render_row_header(
         .child(
             div()
                 .flex_none()
-                .flex()
-                .flex_row()
-                .items_center()
+                .h_flex()
                 .gap(px(8.))
                 .when(kind != ConnectionKind::Llm, |row| {
                     row.child(pill_button(

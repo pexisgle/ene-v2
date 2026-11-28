@@ -2,6 +2,7 @@
 
 use super::{CompanionsPane, CompanionsSnapshot};
 use crate::ui::hub::companions as companion_actions;
+use crate::ui::widgets::surface_card;
 use crate::{
     input::Draft,
     ui::{
@@ -13,6 +14,7 @@ use crate::{
     },
 };
 use ene_client_core::domain::CompanionTemplate;
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 
 pub(super) fn render_import_panel(
@@ -52,21 +54,14 @@ pub(super) fn render_import_panel(
         })
         .collect();
 
-    div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
+    surface_card(theme)
         .p(px(16.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(12.))
         .when(!starter_buttons.is_empty(), |this| {
             this.child(
                 div()
-                    .flex()
-                    .flex_col()
+                    .v_flex()
                     .gap(px(6.))
                     .child(
                         div()
@@ -169,22 +164,14 @@ pub(super) fn render_create_panel(
         cx,
     );
 
-    div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
+    surface_card(theme)
         .p(px(16.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(12.))
         .when(!template_chips.is_empty(), |this| {
             this.child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
+                    .h_flex()
                     .flex_wrap()
                     .gap(px(6.))
                     .child(
@@ -370,9 +357,7 @@ fn render_missing_model_banner(hub: Entity<crate::ui::Hub>, theme: &Theme) -> An
         .bg(theme.amber_soft)
         .px(px(12.))
         .py(px(8.))
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(8.))
         .child(

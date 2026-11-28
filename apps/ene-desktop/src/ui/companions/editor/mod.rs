@@ -2,6 +2,7 @@
 //!
 //! Per-companion profile, VRM model, voice binding and mind profile.
 
+use gpui::component::StyledExt as _;
 mod form;
 mod views;
 mod voice_view;
@@ -89,8 +90,7 @@ pub(super) fn render_companion_editor(
         .border_color(theme.border)
         .px(px(16.))
         .py(px(16.))
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(12.))
         .child(labeled_field("名前", drafts.name_d, theme))
         .child(labeled_field("人格の核", drafts.mind_d, theme))

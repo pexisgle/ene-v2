@@ -1,11 +1,13 @@
 //! Device policy: saved rules and free-text policies.
 
+use crate::ui::widgets::surface_card;
+use gpui::component::StyledExt as _;
 mod rules;
 mod texts;
 
 use super::{
     DevicePane, SKIP_TOOL_CONFIRMATION_ID, is_file_confirmation_rule, row_frame, section_intro,
-    section_title, settings_card, tool_confirmation_request,
+    section_title, tool_confirmation_request,
 };
 use crate::ui::{theme::Theme, widgets::disclosure_row};
 use gpui::{AnyElement, Context, div, prelude::*, px};
@@ -55,9 +57,8 @@ pub(super) fn render_policy_rules_section(
         theme,
         cx,
     );
-    let policy_card = settings_card(theme)
-        .flex()
-        .flex_col()
+    let policy_card = surface_card(theme)
+        .v_flex()
         .child(confirm_row)
         .children(rule_items)
         .into_any_element();
@@ -107,7 +108,7 @@ pub(super) fn render_policy_texts_section(
         })
         .collect();
 
-    let policy_text_card = settings_card(theme)
+    let policy_text_card = surface_card(theme)
         .when(text_items.is_empty(), |card| {
             card.child(
                 div()

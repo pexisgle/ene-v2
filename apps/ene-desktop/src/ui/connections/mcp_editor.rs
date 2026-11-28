@@ -10,6 +10,7 @@ use ene_client_core::{
     connections::{split_comma, toggle_comma_item},
     domain::{Connection, ConnectionCheck, ConnectionConfig, ConnectionKind},
 };
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 
 pub(super) fn process_command_draft(
@@ -118,8 +119,7 @@ pub(super) fn render_mcp_tools_strip(
             .rounded(crate::ui::theme::radius::medium())
             .bg(theme.bg_blush)
             .p(px(12.))
-            .flex()
-            .flex_col()
+            .v_flex()
             .gap(px(8.))
             .child(
                 div()

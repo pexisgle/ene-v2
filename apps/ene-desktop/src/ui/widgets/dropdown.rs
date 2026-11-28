@@ -1,6 +1,7 @@
 //! Application choices rendered by GPUI Kit's searchable select.
 
 use ene_client_core::domain::ModelAssignment;
+use gpui::component::StyledExt as _;
 use gpui::component::{
     IndexPath,
     searchable_list::{SearchableListItem, SearchableVec},
@@ -58,8 +59,7 @@ impl<V: ChoiceValue> SearchableListItem for DropdownOption<V> {
 
     fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
         div()
-            .flex()
-            .flex_col()
+            .v_flex()
             .min_w_0()
             .child(div().truncate().child(self.title()))
             .when_some(self.detail.clone(), |row, detail| {

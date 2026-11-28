@@ -8,6 +8,7 @@ use crate::ui::theme::Theme;
 use crate::ui::widgets::{DropdownOption, Tone, pill_button};
 use crate::ui::{Hub, NewCompanionSpec};
 use ene_client_core::domain::{Connection, ConnectionConfig, ConnectionKind, LlmProvider};
+use gpui::component::StyledExt as _;
 use gpui::{Entity, div, prelude::*, px};
 
 pub(super) struct ConnectSubmitSpec {
@@ -115,9 +116,7 @@ pub(super) fn render_launch_voicevox_row(
 ) -> gpui::Div {
     let hub_voicevox = hub.clone();
     div()
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(8.))
         .child(

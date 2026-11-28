@@ -2,6 +2,8 @@
 //! 1-level hairline expansion, dynamic `options_schema`, MCP tool selector,
 //! and bottom collapsed disclosure for model-role & voice slot overrides.
 
+use crate::ui::widgets::surface_card;
+use gpui::component::StyledExt as _;
 mod add_panel;
 pub(crate) mod mcp_add;
 mod mcp_editor;
@@ -234,20 +236,18 @@ impl gpui::Render for ConnectionsPane {
 
         div()
             .w_full()
-            .flex()
-            .flex_col()
+            .v_flex()
             .gap(px(16.))
             .child(render_connections_header(adding, &theme, cx))
             .when_some(add_panel, gpui::ParentElement::child)
             .child(search_card)
             .when(!rows.is_empty(), |this| {
-                this.child(div().w_full().flex().flex_col().gap(px(10.)).children(rows))
+                this.child(div().w_full().v_flex().gap(px(10.)).children(rows))
             })
             .child(
                 div()
                     .pt(px(4.))
-                    .flex()
-                    .flex_col()
+                    .v_flex()
                     .gap(px(8.))
                     .child(render_advanced_roles_toggle(adv_open, &theme, cx))
                     .when_some(adv_panel, gpui::ParentElement::child),
@@ -263,9 +263,7 @@ fn render_connections_header(
     let pane_add = cx.entity();
     let pane_mcp = cx.entity();
     div()
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(12.))
         .child(
@@ -317,12 +315,7 @@ fn render_connections_header(
 }
 
 fn render_empty_connections_notice(theme: &Theme) -> AnyElement {
-    div()
-        .w_full()
-        .bg(theme.bg_surface)
-        .border_1()
-        .border_color(theme.border)
-        .rounded(crate::ui::theme::radius::surface())
+    surface_card(theme)
         .px(px(16.))
         .py(px(18.))
         .text_xs()

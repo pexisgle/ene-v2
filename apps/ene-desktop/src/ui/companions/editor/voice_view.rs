@@ -16,6 +16,7 @@ use crate::ui::{
     widgets::{ChoiceValue, DropdownOption, DropdownSpec, Tone, dropdown_select, pill_button},
 };
 use ene_domain::{CompanionId, ConnectionId, VoiceBinding};
+use gpui::component::StyledExt as _;
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, div, prelude::*, px};
 
 use super::form::*;
@@ -89,8 +90,7 @@ pub(super) fn render_voice_selector(
     div()
         .w_full()
         .min_w_0()
-        .flex()
-        .flex_col()
+        .v_flex()
         .gap(px(6.))
         .child(render_voice_header_row(
             id,
@@ -167,9 +167,7 @@ pub(super) fn render_voice_header_row(
     let hub_refresh_voice = hub.clone();
     let refresh_tts_ids = ctx.tts_conn_ids.to_vec();
     div()
-        .flex()
-        .flex_row()
-        .items_center()
+        .h_flex()
         .justify_between()
         .gap(px(8.))
         .child(
