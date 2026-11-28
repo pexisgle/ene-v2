@@ -1,11 +1,7 @@
 use super::{windows_input::input, windows_outputs::outputs};
 use crate::{
     control,
-    desktop::{self, HitMask, HitRegions, Output},
-};
-use ::windows::Win32::{
-    Foundation::{HWND, POINT},
-    UI::WindowsAndMessaging::*,
+    desktop::{self, HitRegions, Output},
 };
 use bevy::{
     camera::visibility::VisibilitySystems,
@@ -83,21 +79,17 @@ fn read_monitors(
 
 fn hit_test(
     capture: Res<PointerCaptureMap>,
-    mut windows: Query<(&Output, &HitRegions, &HitMask, &mut CursorOptions)>,
+    mut windows: Query<(&Output, &HitRegions, &mut CursorOptions)>,
 ) {
     let Some(point) = cursor_position() else {
         return;
     };
     let captured = capture.into_inner().is_captured(&PointerId::Mouse);
-    for (output, regions, mask, mut cursor) in &mut windows {
+    for (output, regions, mut cursor) in &mut windows {
         let local = (point - output.origin) / output.units_per_logical_pixel;
         // shortcut: input switching follows rendering FPS; keep it here unless measured lag is unacceptable.
-        let hit = captured
-            || if !mask.is_empty() {
-                mask.contains_local(local)
-            } else {
-                regions.0.iter().any(|(_, r)| r.contains(local))
-            };
+        let hit =
+            captured || regions.contains_cell(output.size / output.units_per_logical_pixel, local);
         if cursor.hit_test != hit {
             cursor.hit_test = hit;
         }
@@ -105,28 +97,15 @@ fn hit_test(
 }
 
 fn cursor_position() -> Option<Vec2> {
-    let mut point = POINT::default();
-    // SAFETY: `point` is a valid, properly aligned `POINT` for the duration of
-    // the call and `GetCursorPos` only writes to it.
-    unsafe { GetCursorPos(&mut point) }.ok()?;
-    Some(Vec2::new(point.x as f32, point.y as f32))
+    let (x, y) = ene_platform_os::windows::cursor_position()?;
+    Some(Vec2::new(x as f32, y as f32))
 }
 
 // Winit rewrites styles in Last, so restore non-activation afterwards.
 fn window_styles(windows: Query<&RawHandleWrapper, With<Output>>, _main_thread: NonSendMarker) {
     for handle in &windows {
         if let raw_window_handle::RawWindowHandle::Win32(handle) = handle.get_window_handle() {
-            let hwnd = HWND(handle.hwnd.get() as *mut _);
-            // SAFETY: `hwnd` came from a live `RawWindowHandle`, so it stays a
-            // valid window handle while the window is alive.
-            let flags = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
-            let needed = flags | WS_EX_NOACTIVATE.0;
-            if needed != flags {
-                // SAFETY: as above; `hwnd` is still the live window handle.
-                unsafe {
-                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, needed as isize);
-                }
-            }
+            ene_platform_os::windows::set_non_activating(handle.hwnd);
         }
     }
 }
@@ -139,21 +118,11 @@ fn cancel_lost_capture(
     if !capture.into_inner().is_captured(&PointerId::Mouse) {
         return;
     }
-    let mut info = GUITHREADINFO {
-        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-        ..Default::default()
-    };
     let captured = handles.iter().any(|handle| {
         let raw_window_handle::RawWindowHandle::Win32(handle) = handle.get_window_handle() else {
             return false;
         };
-        let hwnd = HWND(handle.hwnd.get() as *mut _);
-        // SAFETY: `hwnd` came from a live `RawWindowHandle`, so it is a valid
-        // window handle for the duration of the call.
-        let thread = unsafe { GetWindowThreadProcessId(hwnd, None) };
-        // SAFETY: `info` is a valid `GUITHREADINFO` sized by its `cbSize` above
-        // and outlives the call.
-        unsafe { GetGUIThreadInfo(thread, &mut info) }.is_ok() && info.hwndCapture == hwnd
+        ene_platform_os::windows::has_pointer_capture(handle.hwnd)
     });
     if !captured {
         commands.queue(|world: &mut World| {

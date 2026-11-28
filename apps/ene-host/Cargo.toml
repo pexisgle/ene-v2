@@ -1,98 +1,78 @@
 [package]
 name = "ene-host"
-description = "Host application, agent execution and authenticated provider communication"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
-[lints]
-workspace = true
-
 [dependencies]
-clap.workspace = true
+anyhow = "1"
+agent-client-protocol = "5.6.1"
 async-stream.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["http2"] }
 base64.workspace = true
-bevy_ecs.workspace = true
+buffa.workspace = true
 bytes.workspace = true
+cap-fs-ext.workspace = true
+cap-std.workspace = true
+clap.workspace = true
 connectrpc = { workspace = true, features = ["axum"] }
-crossbeam-channel = "0.5"
+croner.workspace = true
 directories = "6"
-ene-rpc.workspace = true
-ene-catalog.workspace = true
+ene-core.workspace = true
 ene-domain.workspace = true
-ene-mind.workspace = true
-ene-policy.workspace = true
 ene-plugin.workspace = true
 ene-plugin-runtime.workspace = true
-ene-store.workspace = true
-ene-voice.workspace = true
-ene-work.workspace = true
+ene-rpc.workspace = true
 futures-util.workspace = true
 getrandom = "0.4"
-hashlink.workspace = true
+hex.workspace = true
 http.workspace = true
 http-body-util.workspace = true
-# `hyper` is used directly for `hyper::body::Frame`; the version is left
-# to `axum`, which pins it, so a patch bump does not need editing here.
-hyper = { version = "1", features = ["client", "server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
 io-lifetimes = "3"
-image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
-itertools = "0.15"
+ignore = "0.4"
+jsonschema.workspace = true
 jiff.workspace = true
-keyring = { version = "4", default-features = false, features = ["v1"] }
+keyring-core = "1"
+parking_lot.workspace = true
 private-fs = "0.2.1"
+process-wrap.workspace = true
 reqwest.workspace = true
 rig-core.workspace = true
-rig-agent.workspace = true
-rig-ecs.workspace = true
-rig-memory.workspace = true
-rig-rmcp.workspace = true
 rig-reqwest.workspace = true
-schemars.workspace = true
+rig-memory = "0.47.1"
+rmcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-strum.workspace = true
-# Replaces `std::sync::Mutex`: no poisoning, so a panic while a lock was
-# held cannot turn every later access into an error.
-parking_lot.workspace = true
+serde_json_canonicalizer.workspace = true
+sha2.workspace = true
+sqlx = { version = "0.9.1", default-features = false, features = ["sqlite", "runtime-tokio", "derive", "migrate", "json", "macros"] }
 subtle = "2"
-thiserror.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "io-util", "process"] }
-tokio-util = { workspace = true, features = ["rt", "compat", "codec"] }
-# Request tracing, a body ceiling, a response deadline and panic isolation for
-# the Connect surface; `TraceLayer` emits the same `tracing` spans the RPC
-# handlers already use.
-tower-http = { version = "0.7", features = ["trace", "timeout", "limit", "catch-panic"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "io-util", "process", "fs"] }
+tokio-util = { workspace = true, features = ["compat"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url.workspace = true
+thiserror = "2"
+wav-codec = "0.1.0"
 uuid.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-native-keyring-store = "1"
+
 [dev-dependencies]
-bevy_time.workspace = true
-ene-rpc = { workspace = true, features = ["client"] }
-process-wrap.workspace = true
-# `span-locations` lets the architecture test read the line span of a parsed
-# item; without it `Span::start`/`end` are unavailable outside a proc macro.
+regex = "1"
+syn = { version = "2", features = ["full"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
-regex.workspace = true
-rig-core = { workspace = true, features = ["test-utils"] }
-# Parses each workspace file so the architecture test can blank `#[cfg(test)]`
-# spans by real syntax instead of counting braces.
-syn = { version = "3", features = ["full", "parsing", "printing", "extra-traits"] }
-tempfile.workspace = true
-# `start_paused` lets the decision-timeout test fire the 15s deadline
-# without waiting it out.
 tokio = { workspace = true, features = ["test-util"] }
-tower = { version = "0.5", features = ["util"] }
+ene-rpc = { workspace = true, features = ["client"] }
+tempfile = "3"
 
-[target.'cfg(unix)'.dependencies]
-rustix.workspace = true
-
-# `hyper-util` is reached only through `axum::serve`'s h2c handling, never named
-# in this crate's source, so machete cannot see it. Keep the ignore.
-[package.metadata.cargo-machete]
-ignored = ["hyper-util"]
+[lints]
+workspace = true

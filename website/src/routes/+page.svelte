@@ -5,10 +5,7 @@
     NAV_ITEMS,
     SITE_META,
     TASK_EXAMPLES,
-    type FlowStepId,
   } from "#lib/site-content.ts";
-
-  let selectedFlow = $state<FlowStepId>("talk");
 </script>
 
 <svelte:head>
@@ -192,7 +189,7 @@
             name="flow"
             value={step.id}
             id="flow-{step.id}"
-            bind:group={selectedFlow}
+            checked={step.id === "talk"}
           />
           <label for="flow-{step.id}">{step.tabLabel}</label>
         {/each}

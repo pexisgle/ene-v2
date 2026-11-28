@@ -62,9 +62,6 @@ fn vertex(vertex_no_morph: Vertex) -> VertexOutput {
     @if(VERTEX_POSITIONS) {
         out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));
     }
-    @if(VERTEX_POSITIONS) {
-        out.position = position_world_to_clip(out.world_position.xyz);
-    }
 
     @if(VERTEX_UVS_A) {
         out.uv = vertex.uv;
@@ -81,10 +78,6 @@ fn vertex(vertex_no_morph: Vertex) -> VertexOutput {
             // See https://github.com/gfx-rs/naga/issues/2416
             vertex_no_morph.instance_index
         );
-    }
-
-    @if(VERTEX_COLORS) {
-        out.color = vertex.color;
     }
 
     @if(VERTEX_OUTPUT_INSTANCE_INDEX) {
@@ -128,10 +121,11 @@ fn vertex(vertex_no_morph: Vertex) -> VertexOutput {
     }
     @if(SCREEN_SPACE_OUTLINE) {
         // Screen width is a fraction of viewport height, independent of distance.
-        width *= 2. * abs(out.position.w) / abs(view.clip_from_view[1][1]);
+        let clip = position_world_to_clip(out.world_position.xyz);
+        width *= 2. * abs(clip.w) / abs(view.clip_from_view[1][1]);
     }
     @if(!SCREEN_SPACE_OUTLINE) {
-        let world = mesh_functions::get_world_from_local(vertex_no_morph.instance_index);
+        let world = mesh_world_from_local;
         width *= max(length(world[0]), max(length(world[1]), length(world[2])));
     }
     out.world_position = vec4(out.world_position.xyz + normalize(out.world_normal) * width, 1.);

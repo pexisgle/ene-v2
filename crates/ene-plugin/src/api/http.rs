@@ -2,6 +2,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Maximum number of response header fields in a brokered HTTP chunk.
+pub const MAX_HTTP_HEADER_FIELDS: usize = 64;
+/// Maximum combined name and value bytes in the response header fields.
+pub const MAX_HTTP_HEADER_BYTES: usize = 8 * 1024;
+
 /// One HTTP exchange the broker performs for the plugin.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

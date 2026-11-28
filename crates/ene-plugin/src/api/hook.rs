@@ -1,73 +1,63 @@
-//! Lifecycle hook events and decisions (`F18`).
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
-/// A lifecycle moment the host reports to a hook plugin.
+/// A lifecycle notification sent to an enabled host plugin.
 #[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HookEvent {
-    /// A turn is about to start.
-    PreTurn {
-        /// The companion the turn belongs to.
-        companion_id: String,
-        /// What the person said, when the host passes it.
-        #[serde(default)]
-        query: Option<String>,
+    /// An opted-in sensor report before model evaluation.
+    Perception {
+        /// The device's observation.
+        observation: String,
+        /// The device's interpretation, if available.
+        interpretation: String,
     },
-    /// A turn has finished.
-    PostTurn {
-        /// The companion the turn belongs to.
+    /// Speech has been admitted for synthesis.
+    PreSpeech {
+        /// Companion owning the utterance.
         companion_id: String,
-        /// What the companion replied, when the host passes it.
-        #[serde(default)]
-        reply: Option<String>,
     },
-    /// A tool is about to run.
+    /// The host finished producing audio for the utterance.
+    PostSpeech {
+        /// Companion owning the utterance.
+        companion_id: String,
+    },
+    /// A work tool was requested.
     PreTool {
-        /// The companion the turn belongs to.
+        /// Companion owning the work.
         companion_id: String,
-        /// The tool being called.
+        /// Registered tool name.
         tool_name: String,
-        /// The arguments the tool would receive.
-        arguments: Value,
     },
-    /// A tool has returned.
+    /// A work tool returned or was refused.
     PostTool {
-        /// The companion the turn belongs to.
+        /// Companion owning the work.
         companion_id: String,
-        /// The tool that ran.
+        /// Registered tool name.
         tool_name: String,
-        /// Whether the call failed.
+        /// Whether the invocation failed or was refused.
         is_error: bool,
-    },
-    /// A session opened.
-    SessionStart {
-        /// The companion the session belongs to.
-        companion_id: String,
-    },
-    /// A session closed.
-    SessionEnd {
-        /// The companion the session belongs to.
-        companion_id: String,
     },
 }
 
-/// What a hook plugin wants the host to do next.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Changes accepted only at the corresponding perception or speech boundary.
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HookDecision {
-    /// Let the host carry on unchanged.
+    /// Finish observing the notification.
     #[default]
     Continue,
-    /// Stop what the host was about to do.
-    Block {
-        /// Why it was blocked, shown to the operator.
-        reason: String,
+    /// Drop selected fields before model evaluation.
+    MaskPerception {
+        /// Drop the observation field.
+        observation: bool,
+        /// Drop the interpretation field.
+        interpretation: bool,
     },
-    /// Add text to what the model sees.
-    InjectContext {
-        /// The text to add.
-        text: String,
+    /// Adjust the speaking rate for the utterance.
+    TuneSpeech {
+        /// Rate multiplier between 0.5 and 2.
+        speed: f32,
     },
 }

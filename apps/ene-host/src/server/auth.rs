@@ -10,7 +10,7 @@ use subtle::ConstantTimeEq;
 use url::Host;
 
 /// What the middleware compares a request against.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct Guard {
     token: String,
     /// Authorities trusted besides loopback, from `ENE_HOST_ALLOWED_HOSTS`.
@@ -25,10 +25,6 @@ impl Guard {
             token,
             allowed: authority_list(allowed_hosts),
         }
-    }
-
-    pub(super) fn allowed(&self) -> &[ValidatedAuthority] {
-        &self.allowed
     }
 }
 

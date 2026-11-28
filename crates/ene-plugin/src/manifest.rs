@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// Shared compatibility version for manifests, extension APIs.
-pub const CONTRACT_VERSION: u32 = 8;
+pub const CONTRACT_VERSION: u32 = 9;
 
 /// Where an entrypoint runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -33,9 +33,11 @@ pub enum Extension {
     Stt,
     /// Avatar expressions, motions and speech.
     Character,
+    /// Interpret local observations on an opted-in desktop.
+    Perception,
     /// Task harness sessions.
     Harness,
-    /// Lifecycle hooks that may block or add context.
+    /// Lifecycle hooks for observation, perception masking and speech tuning.
     Hook,
     /// Tools the plugin offers the model.
     Tool,

@@ -22,3 +22,14 @@ pub(crate) use vrm_spec::{
 pub(crate) fn index<T>(index: gltf::json::Index<T>) -> usize {
     index.value()
 }
+
+/// Every VRM extension this loader uses requires the same spec version.
+pub(crate) fn require_v1(version: &str, extension: &str) -> std::io::Result<()> {
+    if version == "1.0" {
+        Ok(())
+    } else {
+        Err(crate::loader::invalid(format!(
+            "{extension} requires specVersion 1.0"
+        )))
+    }
+}

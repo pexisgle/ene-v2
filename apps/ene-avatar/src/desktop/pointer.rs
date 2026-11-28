@@ -1,6 +1,6 @@
 //! Ordered native input through Bevy picking over the desktop hit regions.
 
-use super::{HitRegions, Output, bounds, desktop_position};
+use super::{HitRegions, Layout, Output, bounds, desktop_position};
 use crate::character::{AvatarState, Character, Notification};
 use bevy::{
     camera::NormalizedRenderTarget,
@@ -18,7 +18,7 @@ use bevy::{
     prelude::*,
     window::WindowRef,
 };
-use serde_json::json;
+use ene_core::avatar::AvatarEvent;
 use std::collections::VecDeque;
 
 #[derive(Resource, Default)]
@@ -72,7 +72,7 @@ pub(super) fn setup(app: &mut App) {
             pointer_events,
             capture_press,
             place_drag,
-            publish_clicks,
+            publish_gestures,
         )
             .chain(),
     )
@@ -322,15 +322,25 @@ fn place_drag(
     }
 }
 
-fn publish_clicks(
+fn publish_gestures(
     mut clicks: MessageReader<PointerClick>,
     mut ends: MessageReader<PointerDragEnd>,
     characters: Query<&Character>,
+    mut layout: Option<ResMut<Layout>>,
     mut notifications: MessageWriter<Notification>,
 ) {
-    let dragged = ends.read().any(|event| {
+    let mut dragged = false;
+    for end in ends.read().filter(|event| {
         event.pointer.id == PointerId::Mouse && event.button == PointerButton::Primary
-    });
+    }) {
+        dragged = true;
+        if let Some(store) = layout.as_deref_mut()
+            && let Ok(character) = characters.get(end.entity)
+            && character.state == AvatarState::Ready
+        {
+            store.moved(&character.id, &character.config);
+        }
+    }
     for click in clicks.read().filter(|event| {
         event.pointer.id == PointerId::Mouse && event.button == PointerButton::Primary
     }) {
@@ -338,9 +348,9 @@ fn publish_clicks(
             && let Ok(character) = characters.get(click.entity)
             && character.state == AvatarState::Ready
         {
-            notifications.write(Notification(
-                json!({"event":"click", "character":character.id}),
-            ));
+            notifications.write(Notification(AvatarEvent::Click {
+                character: character.id.clone(),
+            }));
         }
     }
 }

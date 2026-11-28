@@ -1,57 +1,68 @@
 [package]
 name = "ene-desktop"
-description = "Desktop client: GUI, host connection, avatar control, perception and audio"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
-[lints]
-workspace = true
-
 [dependencies]
-clap.workspace = true
-backon.workspace = true
+anyhow = "1"
+buffa.workspace = true
+base64.workspace = true
+cap-std.workspace = true
+cap-fs-ext.workspace = true
+cap-tempfile = "4.0.3"
+globset = "0.4"
+hex.workspace = true
 parking_lot.workspace = true
-ene-avatar-ipc.workspace = true
-ene-client-core.workspace = true
+regex = "1"
+schemars = "1"
+thiserror = "2"
+clap.workspace = true
+connectrpc.workspace = true
+cpal = "0.18"
+directories = "6"
+private-fs = "0.2.1"
+ene-core.workspace = true
 ene-domain.workspace = true
 ene-platform-os.workspace = true
 ene-plugin.workspace = true
 ene-plugin-runtime.workspace = true
-ene-rpc = { workspace = true, features = ["client", "client-tls"] }
-ene-voice.workspace = true
-base64.workspace = true
-buffa.workspace = true
-cap-std.workspace = true
-cap-fs-ext.workspace = true
-cap-tempfile = "4.0.3"
-connectrpc.workspace = true
-directories = "6"
+ene-rpc = { workspace = true, features = ["client-tls"] }
+enigo = "0.6"
 gpui.workspace = true
-globset = "0.4"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 process-wrap.workspace = true
-schemars.workspace = true
-scopeguard = { version = "1", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "process", "io-util", "fs"] }
 tempfile.workspace = true
-thiserror.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "process", "io-util", "sync", "time"] }
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["codec", "rt"] }
 tracing.workspace = true
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-cpal = "0.18"
-earshot = "1.2.2"
-regex = "1"
+tracing-subscriber = "0.3"
 uuid.workspace = true
 
-[dev-dependencies]
-gpui = { workspace = true, features = ["test-support"] }
+[lints]
+workspace = true
 
-# Workspace::open finds bash with which on every non-Windows platform.
-[target.'cfg(not(windows))'.dependencies]
-which.workspace = true
+[build-dependencies]
+embed-resource = "3"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13.13", default-features = false, features = ["screenshot", "async-io"] }
+ksni = "0.3.8"
+rustix.workspace = true
+url.workspace = true
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+x11rb = { version = "0.14", features = ["screensaver"] }
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = { version = "0.27", default-features = false }
+winit = { version = "0.30.13", default-features = false }
+xcap = { version = "0.9.10", default-features = false }

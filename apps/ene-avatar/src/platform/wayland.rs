@@ -90,7 +90,10 @@ fn layer_state(app: &mut App) -> Result<WindowState<()>, AppExit> {
     {
         Ok(state) => Ok(state),
         Err(error) => {
-            let _reported = app.world().resource::<Control>().output.try_send(serde_json::json!({"event":"error","error":format!("Wayland layer-shell and xdg-output are required: {error}")}));
+            let message = ene_core::avatar::AvatarMessage::Fatal {
+                error: format!("Wayland layer-shell and xdg-output are required: {error}"),
+            };
+            let _reported = app.world().resource::<Control>().output.try_send(message);
             Err(AppExit::error())
         }
     }
@@ -480,7 +483,7 @@ mod tests {
         app.world_mut()
             .resource_mut::<Messages<Notification>>()
             .drain()
-            .map(|notification| notification.0)
+            .map(|notification| serde_json::to_value(notification.0).unwrap())
             .collect()
     }
 

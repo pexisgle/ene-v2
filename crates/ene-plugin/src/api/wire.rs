@@ -47,6 +47,15 @@ pub enum Operation {
         /// What happened.
         event: CharacterEvent,
     },
+    /// Interpret the current foreground window in a client-side sensor.
+    Observe {
+        /// Application identifier from the native window system.
+        application: String,
+        /// Foreground window title, supplied to the local guest only.
+        title: String,
+        /// Whether the operating system last reported a person at the desktop.
+        idle: Option<bool>,
+    },
     /// Advance the task harness for one turn.
     Harness {
         /// The harness input for this step.
@@ -75,6 +84,7 @@ impl Operation {
             Self::Synthesize { .. } => Extension::Tts,
             Self::Transcribe { .. } => Extension::Stt,
             Self::Character { .. } => Extension::Character,
+            Self::Observe { .. } => Extension::Perception,
             Self::Harness { .. } => Extension::Harness,
             Self::Hook { .. } => Extension::Hook,
             Self::ListTools | Self::InvokeTool { .. } => Extension::Tool,

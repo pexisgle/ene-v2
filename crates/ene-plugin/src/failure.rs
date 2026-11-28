@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A host-facing failure: the plugin's own error code plus a readable message.
-#[derive(Clone, Debug, Serialize, Deserialize, thiserror::Error)]
-#[error("{code}: {message}")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Failure {
     /// Stable machine-readable code the host branches on.
@@ -10,6 +9,14 @@ pub struct Failure {
     /// Short human-readable message carrying no secret.
     pub message: String,
 }
+impl std::fmt::Display for Failure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for Failure {}
+
 impl Failure {
     /// Creates a failure whose message is the code, for a code that speaks for itself.
     pub fn new(code: &str) -> Self {

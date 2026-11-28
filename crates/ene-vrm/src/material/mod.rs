@@ -360,9 +360,7 @@ mod tests {
         let mut app = gpu_app(ClearColor(Color::NONE));
         app.init_resource::<Capture>();
         let color = Color::linear_rgb(0.25, 0.5, 0.75);
-        let toon =
-            schema::Toon::compile(serde_json::from_value(json!({"specVersion":"1.0"})).unwrap())
-                .unwrap();
+        let toon = schema::Toon::compile(&json!({"specVersion":"1.0"})).unwrap();
         let material = app
             .world_mut()
             .resource_mut::<Assets<MToonMaterial>>()
@@ -531,17 +529,14 @@ mod tests {
             ([-0.6f32, 0.4], std::f32::consts::FRAC_PI_3, [0.7f32, 0.1]),
             ([0., -0.75], std::f32::consts::FRAC_PI_2, [0.9, 0.2]),
         ] {
-            let toon = schema::Toon::compile(
-                serde_json::from_value(json!({
-                    "specVersion":"1.0", "shadeColorFactor":[0,0,0],
-                    "shadingShiftFactor":-2, "shadingToonyFactor":0,
-                    "shadingShiftTexture":{"index":0,"scale":2,"texCoord":0,
-                        "extensions":{"KHR_texture_transform":{
-                            "texCoord":1,"scale":scale,"rotation":rotation,"offset":offset
-                        }}}
-                }))
-                .unwrap(),
-            )
+            let toon = schema::Toon::compile(&json!({
+                "specVersion":"1.0", "shadeColorFactor":[0,0,0],
+                "shadingShiftFactor":-2, "shadingToonyFactor":0,
+                "shadingShiftTexture":{"index":0,"scale":2,"texCoord":0,
+                    "extensions":{"KHR_texture_transform":{
+                        "texCoord":1,"scale":scale,"rotation":rotation,"offset":offset
+                    }}}
+            }))
             .unwrap();
             let material =
                 app.world_mut()
@@ -664,17 +659,14 @@ mod tests {
                 RenderAssetUsages::default(),
             ));
         let converted = HashMap::from([((0usize, TextureSpace::Linear), mask_image)]);
-        let toon = schema::Toon::compile(
-            serde_json::from_value(json!({
-                "specVersion":"1.0",
-                "shadeMultiplyTexture":{"index":0,"texCoord":1},
-                "uvAnimationMaskTexture":{"index":0,"texCoord":1},
-                "outlineWidthMode":"screenCoordinates",
-                "outlineWidthFactor":0.01,
-                "outlineWidthMultiplyTexture":{"index":0,"texCoord":1}
-            }))
-            .unwrap(),
-        )
+        let toon = schema::Toon::compile(&json!({
+            "specVersion":"1.0",
+            "shadeMultiplyTexture":{"index":0,"texCoord":1},
+            "uvAnimationMaskTexture":{"index":0,"texCoord":1},
+            "outlineWidthMode":"screenCoordinates",
+            "outlineWidthFactor":0.01,
+            "outlineWidthMultiplyTexture":{"index":0,"texCoord":1}
+        }))
         .unwrap();
         let body_material =
             app.world_mut()
@@ -746,6 +738,12 @@ mod tests {
         };
         let mut app = gpu_app(ClearColor(Color::NONE));
         let (body_material, outline_material) = build_smoke_materials(&mut app);
+        let world_outline_material = {
+            let mut materials = app.world_mut().resource_mut::<Assets<MToonMaterial>>();
+            let mut outline = materials.get(&outline_material).unwrap().clone();
+            outline.extension.outline = Some(schema::OutlineMode::WorldCoordinates);
+            materials.add(outline)
+        };
         let mesh = build_smoke_mesh(&mut app);
         let joint = app.world_mut().spawn(Transform::default()).id();
         let inverse_bindposes = app
@@ -768,19 +766,20 @@ mod tests {
                 morph.clone(),
             ))
             .id();
-        let outline = app
-            .world_mut()
-            .spawn((
-                Mesh3d(mesh),
-                MeshMaterial3d(outline_material),
-                Visibility::Visible,
-                NoFrustumCulling,
-                Transform::IDENTITY,
-                ChildOf(body),
-                skin,
-                morph,
-            ))
-            .id();
+        let outlines = [outline_material, world_outline_material].map(|material| {
+            app.world_mut()
+                .spawn((
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(material),
+                    Visibility::Visible,
+                    NoFrustumCulling,
+                    Transform::IDENTITY,
+                    ChildOf(body),
+                    skin.clone(),
+                    morph.clone(),
+                ))
+                .id()
+        });
 
         let target =
             app.world_mut()
@@ -816,6 +815,6 @@ mod tests {
                 pipeline.state
             );
         }
-        assert_specialized_pipelines_ok(&app, &[body, outline]);
+        assert_specialized_pipelines_ok(&app, &[body, outlines[0], outlines[1]]);
     }
 }

@@ -1,5 +1,6 @@
 mod motion;
 
+use anyhow::Result;
 pub use motion::notify_finished;
 use motion::{FadingMotion, Pending, advance_fades, motion_change};
 
@@ -13,8 +14,8 @@ use bevy::{
     prelude::*,
     world_serialization::WorldInstanceReady,
 };
+use ene_core::avatar::{AvatarEvent, AvatarStatus};
 use ene_vrm::{ExpressionWeights, GazeOverride, SpringRig, Vrm, VrmSystems};
-use serde_json::{Value, json};
 
 #[derive(Component, Default)]
 #[require(Transform, Visibility)]
@@ -25,6 +26,7 @@ pub struct Character {
     pub root: Option<Entity>,
     model: Handle<Gltf>,
     motion: Option<Handle<AnimationClip>>,
+    motion_request: Option<u64>,
     /// A motion the renderer is waiting to load before it fades to it.
     pending: Option<Pending>,
     /// The playback node for the latest motion, separate from fading clips.
@@ -53,40 +55,28 @@ pub enum AvatarState {
 }
 
 impl AvatarState {
-    pub fn json(&self) -> Value {
-        let (status, error) = match self {
-            Self::Loading => ("loading", None),
-            Self::Ready => ("ready", None),
-            Self::Suspended => ("suspended", None),
-            Self::Error(error) => ("error", Some(error)),
-        };
-        json!({"status":status, "error":error})
+    pub fn status(&self) -> (AvatarStatus, Option<String>) {
+        match self {
+            Self::Loading => (AvatarStatus::Loading, None),
+            Self::Ready => (AvatarStatus::Ready, None),
+            Self::Suspended => (AvatarStatus::Suspended, None),
+            Self::Error(error) => (AvatarStatus::Error, Some(error.clone())),
+        }
     }
 }
 
-pub use ene_avatar_ipc::CharacterConfig as Config;
+pub use ene_core::avatar::CharacterConfig as Config;
 
-#[derive(Debug, thiserror::Error)]
-pub enum ConfigError {
-    #[error("{0}")]
-    AssetPath(String),
-    #[error("invalid size or position")]
-    InvalidSizeOrPosition,
-    #[error("expected .vrm or .vrma path")]
-    InvalidExtension,
-}
-
-pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
+pub fn validate_config(config: &Config) -> Result<()> {
     for path in std::iter::once(&config.model).chain(config.motion.iter()) {
-        bevy::asset::AssetPath::try_parse(path)
-            .map_err(|error| ConfigError::AssetPath(error.to_string()))?;
+        bevy::asset::AssetPath::try_parse(path)?;
     }
     if !(50. ..=200.).contains(&config.size_percent)
         || config
             .position
             .is_some_and(|p| p.iter().any(|v| !v.is_finite() || v.abs() > 1_000_000.))
     {
-        return Err(ConfigError::InvalidSizeOrPosition);
+        return Err(anyhow::anyhow!("invalid size or position"));
     }
     if !config.model.ends_with(".vrm")
         || config
@@ -94,13 +84,13 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
             .as_ref()
             .is_some_and(|path| !path.ends_with(".vrma"))
     {
-        return Err(ConfigError::InvalidExtension);
+        return Err(anyhow::anyhow!("expected .vrm or .vrma path"));
     }
     Ok(())
 }
 
 #[derive(Message)]
-pub struct Notification(pub Value);
+pub struct Notification(pub AvatarEvent);
 
 impl Character {
     pub fn new(id: String, config: Config) -> Self {
@@ -112,15 +102,20 @@ impl Character {
     }
 
     fn notification(&self) -> Notification {
-        let mut event = self.state.json();
-        event["event"] = "state".into();
-        event["character"] = self.id.clone().into();
-        Notification(event)
+        let (status, error) = self.state.status();
+        Notification(AvatarEvent::State {
+            character: self.id.clone(),
+            status,
+            error,
+        })
     }
 }
 
+pub(crate) use motion::MotionOutcome;
+
 pub fn setup(app: &mut App) {
     app.add_message::<Notification>()
+        .add_message::<MotionOutcome>()
         .add_observer(|event: On<WorldInstanceReady>, params: SceneReadyParams| {
             scene_ready(event.entity, params);
         })
@@ -151,7 +146,8 @@ pub fn setup(app: &mut App) {
         );
 }
 
-pub fn reload(world: &mut World, entity: Entity) {
+pub fn reload(world: &mut World, entity: Entity, request: Option<u64>) {
+    cancel_motion(world, entity);
     let Some(character) = world.get::<Character>(entity) else {
         return;
     };
@@ -188,7 +184,8 @@ pub fn reload(world: &mut World, entity: Entity) {
     };
     character.model = model;
     character.motion = motion;
-    character.pending = None;
+    character.motion_request = request;
+    character.pending = request.map(Pending::Initial);
     character.main = None;
     character.fading.clear();
     character.root = None;
@@ -206,20 +203,43 @@ fn load_motion(server: &AssetServer, path: &str) -> Handle<AnimationClip> {
         .load(GltfAssetLabel::Animation(0).from_asset(path.to_owned()))
 }
 
-pub fn queue_motion(world: &mut World, entity: Entity) {
-    let Some(path) = world
-        .get::<Character>(entity)
-        .and_then(|character| character.config.motion.as_deref())
-    else {
-        if let Some(mut character) = world.get_mut::<Character>(entity) {
-            character.pending = Some(Pending::Rest);
-        }
-        return;
-    };
-    let pending = Pending::Fade(load_motion(world.resource::<AssetServer>(), path));
+pub fn queue_motion(
+    world: &mut World,
+    entity: Entity,
+    path: Option<String>,
+    looping: bool,
+    request: Option<u64>,
+) {
+    cancel_motion(world, entity);
+    let pending = Pending::change(world.resource::<AssetServer>(), path, looping, request);
     if let Some(mut character) = world.get_mut::<Character>(entity) {
         character.pending = Some(pending);
     }
+}
+
+pub fn cancel_motion(world: &mut World, entity: Entity) {
+    if let Some(pending) = world
+        .get_mut::<Character>(entity)
+        .and_then(|mut c| c.pending.take())
+        && let Some(outcome) =
+            pending.rejected(anyhow::anyhow!("a newer operation superseded this motion"))
+    {
+        world.write_message(outcome);
+    }
+}
+
+pub fn cancel_motions(world: &mut World) {
+    let pending: Vec<_> = world
+        .query::<&mut Character>()
+        .iter_mut(world)
+        .filter_map(|mut actor| {
+            actor
+                .pending
+                .take()?
+                .rejected(anyhow::anyhow!("the renderer is shutting down"))
+        })
+        .collect();
+    world.write_message_batch(pending);
 }
 
 #[derive(bevy::ecs::system::SystemParam)]
@@ -439,6 +459,8 @@ mod tests {
         let second = clips.add(AnimationClip::default());
         let (mut graph, a) = AnimationGraph::from_clip(first.clone());
         let b = graph.add_clip(second, 1., graph.root);
+        let mut graphs = Assets::<AnimationGraph>::default();
+        let graph = graphs.add(graph);
         let mut player = AnimationPlayer::default();
         let mut character = Character {
             state: AvatarState::Ready,
@@ -454,7 +476,8 @@ mod tests {
         let prior_b = *player.animation(b).unwrap();
         assert!(prior_a.weight() > 0. && prior_b.weight() > 0.);
 
-        let a_replay = motion_node(&mut graph, &player, &first);
+        let (a_replay, rebuild) = motion_node(&mut graphs, &graph, &player, &first).unwrap();
+        assert!(rebuild);
         assert_ne!(a_replay, a);
         character.play_motion(&mut player, a_replay);
         character.advance_fades(&mut player, 0.);
@@ -475,6 +498,19 @@ mod tests {
         character.advance_fades(&mut player, 0.1);
         assert_eq!(player.playing_animations().count(), 1);
         assert_eq!(player.animation(a_replay).unwrap().weight(), 1.);
-        assert_eq!(motion_node(&mut graph, &player, &first), a);
+        assert_eq!(
+            motion_node(&mut graphs, &graph, &player, &first),
+            Some((a, false))
+        );
+
+        for _ in 0..70 {
+            let next = clips.add(AnimationClip::default());
+            let (node, rebuild) = motion_node(&mut graphs, &graph, &player, &next).unwrap();
+            assert!(rebuild);
+            character.play_motion(&mut player, node);
+            character.advance_fades(&mut player, 0.31);
+            assert_eq!(player.playing_animations().count(), 1);
+            assert_eq!(graphs.get(&graph).unwrap().nodes().count(), 4);
+        }
     }
 }

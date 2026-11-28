@@ -1,6 +1,8 @@
 //! Desktop output placement, cameras, hit regions, and pointer interaction.
 
+mod layout;
 mod pointer;
+pub(crate) use layout::Layout;
 #[cfg(any(windows, test))]
 pub(crate) use pointer::pointer;
 pub(crate) use pointer::{NativeInput, cancel_pointer};
@@ -13,6 +15,9 @@ use bevy::{
 };
 
 pub fn setup(app: &mut App) {
+    if let Some(layout) = Layout::from_environment() {
+        app.insert_resource(layout);
+    }
     // 1 FPS needs a full second plus scheduling jitter before the stall cap.
     app.insert_resource(Time::<Virtual>::from_max_delta(
         std::time::Duration::from_secs(2),
@@ -40,7 +45,7 @@ fn sync_virtual_time(outputs: Query<&Output>, mut time: ResMut<Time<Virtual>>) {
 }
 
 #[derive(Component, Clone, PartialEq)]
-#[require(HitRegions, HitMask, Transform, Visibility)]
+#[require(HitRegions, Transform, Visibility)]
 pub struct Output {
     pub name: String,
     pub origin: Vec2,
@@ -173,137 +178,37 @@ fn depth_range(avatars: Query<&Transform, With<Character>>, mut cameras: CameraD
 #[derive(Component, Default)]
 pub struct HitRegions(pub Vec<(Entity, Rect)>);
 
-/// Coarse-pixel occupancy bitmask for click-through hit testing on one output.
-/// Transparent gaps between sub-meshes or transparent alpha pixels remain
-/// click-through (`false`) while opaque cells intercept pointer events (`true`).
-#[derive(Component, Clone, Debug, Default, PartialEq)]
-pub struct HitMask {
-    cell_px: f32,
-    cols: usize,
-    rows: usize,
-    bits: Vec<u64>,
-    occupied: usize,
-}
-
-impl HitMask {
-    pub const DEFAULT_CELL_PX: f32 = 4.0;
-
-    fn allocate(cols: usize, rows: usize, cell_px: f32) -> Self {
-        let total = cols.saturating_mul(rows);
-        let words = total.div_ceil(64);
-        Self {
-            cell_px: cell_px.max(1.0),
-            cols,
-            rows,
-            bits: vec![0; words],
-            occupied: 0,
+#[cfg(any(windows, test))]
+impl HitRegions {
+    /// Tests the Windows cursor's four-logical-pixel cell against projected
+    /// mesh bounds. The empty-grid case keeps precise region hit testing.
+    pub(crate) fn contains_cell(&self, logical_size: Vec2, point: Vec2) -> bool {
+        let exact = || self.0.iter().any(|(_, rect)| rect.contains(point));
+        if !logical_size.is_finite() || !logical_size.cmpgt(Vec2::ZERO).all() {
+            return exact();
         }
-    }
 
-    fn set(&mut self, col: usize, row: usize) {
-        if col >= self.cols || row >= self.rows {
-            return;
-        }
-        let idx = row * self.cols + col;
-        let word = idx / 64;
-        let mask = 1u64 << (idx % 64);
-        if (self.bits[word] & mask) == 0 {
-            self.bits[word] |= mask;
-            self.occupied += 1;
-        }
-    }
-
-    /// Rebuilds the occupancy mask from per-sub-mesh logical hit rects on one output.
-    pub fn rebuild_from_regions(&mut self, logical_size: Vec2, regions: &[(Entity, Rect)]) {
-        if !logical_size.is_finite()
-            || logical_size.x <= 0.
-            || logical_size.y <= 0.
-            || regions.is_empty()
-        {
-            *self = Self::default();
-            return;
-        }
-        let cell = Self::DEFAULT_CELL_PX;
-        let cols = (logical_size.x / cell).ceil().clamp(1., 4096.) as usize;
-        let rows = (logical_size.y / cell).ceil().clamp(1., 4096.) as usize;
-        let mut next = Self::allocate(cols, rows, cell);
-        for &(_, rect) in regions {
-            let min_c = ((rect.min.x / cell).floor() as isize).clamp(0, cols as isize) as usize;
-            let max_c = ((rect.max.x / cell).ceil() as isize).clamp(0, cols as isize) as usize;
-            let min_r = ((rect.min.y / cell).floor() as isize).clamp(0, rows as isize) as usize;
-            let max_r = ((rect.max.y / cell).ceil() as isize).clamp(0, rows as isize) as usize;
-            for r in min_r..max_r {
-                for c in min_c..max_c {
-                    next.set(c, r);
+        let cell = (point / 4.).floor();
+        let limit = (logical_size / 4.)
+            .ceil()
+            .clamp(Vec2::ONE, Vec2::splat(4096.));
+        let mut occupied = false;
+        for (_, rect) in &self.0 {
+            let start = (rect.min / 4.).floor().clamp(Vec2::ZERO, limit);
+            let end = (rect.max / 4.).ceil().clamp(Vec2::ZERO, limit);
+            if start.cmplt(end).all() {
+                occupied = true;
+                if cell.cmpge(start).all() && cell.cmplt(end).all() {
+                    return true;
                 }
             }
         }
-        *self = next;
-    }
-
-    /// Builds a pixel-accurate coarse occupancy mask directly from an RGBA8 alpha buffer.
-    #[cfg(test)]
-    pub fn from_alpha_buffer(
-        width: u32,
-        height: u32,
-        cell_px: f32,
-        rgba: &[u8],
-        alpha_threshold: u8,
-    ) -> Self {
-        let cell = cell_px.max(1.0);
-        if width == 0 || height == 0 || rgba.len() < (width as usize * height as usize * 4) {
-            return Self::default();
-        }
-        let cols = ((width as f32) / cell).ceil().clamp(1., 4096.) as usize;
-        let rows = ((height as f32) / cell).ceil().clamp(1., 4096.) as usize;
-        let mut mask = Self::allocate(cols, rows, cell);
-        let stride = width as usize;
-        for y in 0..height as usize {
-            let row = ((y as f32) / cell) as usize;
-            for x in 0..stride {
-                let alpha = rgba[(y * stride + x) * 4 + 3];
-                if alpha >= alpha_threshold {
-                    let col = ((x as f32) / cell) as usize;
-                    mask.set(col, row);
-                }
-            }
-        }
-        mask
-    }
-
-    /// Returns `true` when no cell is occupied.
-    // Hit-testing queries live here for cross-platform parity, but only Windows calls them at runtime;
-    // remove this allow once non-Windows window hit-testing consumes HitMask.
-    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
-    pub fn is_empty(&self) -> bool {
-        self.occupied == 0
-    }
-
-    /// Tests whether a local logical pixel coordinate hits an occupied cell.
-    // Hit-testing queries live here for cross-platform parity, but only Windows calls them at runtime;
-    // remove this allow once non-Windows window hit-testing consumes HitMask.
-    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
-    pub fn contains_local(&self, local: Vec2) -> bool {
-        if self.occupied == 0
-            || !local.is_finite()
-            || local.x < 0.
-            || local.y < 0.
-            || self.cell_px <= 0.
-        {
-            return false;
-        }
-        let col = (local.x / self.cell_px).floor() as usize;
-        let row = (local.y / self.cell_px).floor() as usize;
-        if col >= self.cols || row >= self.rows {
-            return false;
-        }
-        let idx = row * self.cols + col;
-        (self.bits[idx / 64] & (1u64 << (idx % 64))) != 0
+        !occupied && exact()
     }
 }
 
 fn regions(
-    mut outputs: Query<(&Output, &mut Camera, &mut HitRegions, &mut HitMask)>,
+    mut outputs: Query<(&Output, &mut Camera, &mut HitRegions)>,
     avatars: Query<(Entity, &Character)>,
     parents: Query<&ChildOf>,
     meshes: Query<(Entity, &Aabb, &GlobalTransform, &InheritedVisibility), With<Mesh3d>>,
@@ -328,7 +233,7 @@ fn regions(
                 Some((owner, Vec2::new(center.x, -center.y), half.truncate()))
             }),
     );
-    for (output, mut camera, mut regions, mut mask) in &mut outputs {
+    for (output, mut camera, mut regions) in &mut outputs {
         let had = !regions.0.is_empty();
         next.clear();
         let limit = output.size / output.units_per_logical_pixel;
@@ -345,7 +250,6 @@ fn regions(
         let active = had || !next.is_empty();
         if regions.0 != *next {
             std::mem::swap(&mut regions.0, &mut next);
-            mask.rebuild_from_regions(limit, &regions.0);
         }
         if camera.is_active != active {
             camera.is_active = active;
@@ -532,7 +436,7 @@ mod tests {
         app.world_mut()
             .resource_mut::<Messages<Notification>>()
             .drain()
-            .map(|notification| notification.0)
+            .map(|notification| serde_json::to_value(notification.0).unwrap())
             .collect()
     }
 
@@ -847,54 +751,32 @@ mod tests {
     }
 
     #[test]
-    fn f15_hit_mask_passes_through_transparent_gaps_and_hits_opaque_cells() {
-        // 1. Alpha-buffer mask with two opaque islands separated by a transparent gap (e.g. torso & raised arm).
-        let (w, h) = (32u32, 32u32);
-        let mut rgba = vec![0u8; (w * h * 4) as usize];
-        for y in 4..12 {
-            for x in 4..12 {
-                rgba[((y * w + x) * 4 + 3) as usize] = 255;
-            }
+    fn projected_mesh_regions_keep_windows_cell_edges_and_gaps() {
+        let regions = HitRegions(vec![
+            (
+                Entity::from_bits(1),
+                Rect::from_corners(Vec2::new(21., 21.), Vec2::new(59., 119.)),
+            ),
+            (
+                Entity::from_bits(2),
+                Rect::from_corners(Vec2::new(200., 40.), Vec2::new(260., 140.)),
+            ),
+        ]);
+        let size = Vec2::new(400., 300.);
+        for (point, expected) in [
+            (Vec2::new(40., 60.), true),
+            (Vec2::new(220., 80.), true),
+            (Vec2::new(20., 20.), true),
+            (Vec2::new(59.9, 119.9), true),
+            (Vec2::new(60., 120.), false),
+            (Vec2::new(120., 70.), false),
+            (Vec2::new(-1., 70.), false),
+            (Vec2::new(f32::NAN, 80.), false),
+        ] {
+            assert_eq!(regions.contains_cell(size, point), expected, "{point:?}");
         }
-        for y in 4..12 {
-            for x in 20..28 {
-                rgba[((y * w + x) * 4 + 3) as usize] = 200;
-            }
-        }
-        let alpha_mask = HitMask::from_alpha_buffer(w, h, 4.0, &rgba, 32);
-        assert!(!alpha_mask.is_empty());
-        assert!(alpha_mask.contains_local(Vec2::new(6.0, 6.0)));
-        assert!(alpha_mask.contains_local(Vec2::new(22.0, 6.0)));
-        assert!(
-            !alpha_mask.contains_local(Vec2::new(15.0, 6.0)),
-            "gap between islands must remain click-through"
-        );
-        assert!(!alpha_mask.contains_local(Vec2::new(30.0, 30.0)));
-        assert!(!alpha_mask.contains_local(Vec2::new(-1.0, 6.0)));
-
-        // 2. Per-output sub-mesh region rebuild across two characters/parts leaves gaps click-through.
-        let mut region_mask = HitMask::default();
-        let e1 = Entity::from_bits(1);
-        let e2 = Entity::from_bits(2);
-        region_mask.rebuild_from_regions(
-            Vec2::new(400.0, 300.0),
-            &[
-                (
-                    e1,
-                    Rect::from_corners(Vec2::new(20.0, 20.0), Vec2::new(60.0, 120.0)),
-                ),
-                (
-                    e2,
-                    Rect::from_corners(Vec2::new(200.0, 40.0), Vec2::new(260.0, 140.0)),
-                ),
-            ],
-        );
-        assert!(region_mask.contains_local(Vec2::new(40.0, 60.0)));
-        assert!(region_mask.contains_local(Vec2::new(220.0, 80.0)));
-        assert!(!region_mask.contains_local(Vec2::new(120.0, 70.0)));
-        // Clearing regions produces an empty click-through mask.
-        region_mask.rebuild_from_regions(Vec2::new(400.0, 300.0), &[]);
-        assert!(region_mask.is_empty());
-        assert!(!region_mask.contains_local(Vec2::new(40.0, 60.0)));
+        assert!(!HitRegions::default().contains_cell(size, Vec2::new(40., 60.)));
+        assert!(regions.contains_cell(Vec2::ZERO, Vec2::new(40., 60.)));
+        assert!(!regions.contains_cell(Vec2::ZERO, Vec2::new(20., 20.)));
     }
 }

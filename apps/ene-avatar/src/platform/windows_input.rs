@@ -174,9 +174,9 @@ mod tests {
                 .collect();
             assert_eq!(
                 clicks,
-                vec![
-                    serde_json::json!({"event":"click", "character":if cached { "a" } else { "b" }})
-                ]
+                vec![ene_core::avatar::AvatarEvent::Click {
+                    character: if cached { "a" } else { "b" }.into(),
+                }]
             );
         }
     }

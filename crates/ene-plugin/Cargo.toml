@@ -12,9 +12,12 @@ workspace = true
 agent-client-protocol-schema.workspace = true
 serde.workspace = true
 # `default-features = false` keeps the guest build free of std-only machinery.
-thiserror = { version = "2", default-features = false }
 serde_json.workspace = true
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 # The Wasm plugin tests exercise this guest SDK against the host runtime.
 extism-pdk = { version = "1.4.1", default-features = false }
+
+[[example]]
+name = "reference"
+crate-type = ["cdylib"]

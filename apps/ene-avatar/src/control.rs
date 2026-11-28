@@ -1,15 +1,19 @@
-use crate::character::{
-    AvatarState, Character, Config, ConfigError, Notification, queue_motion, reload,
-    validate_config,
+mod actor;
+mod snapshot;
+
+use crate::character::{Character, MotionOutcome, Notification, cancel_motion, cancel_motions};
+use actor::{
+    apply_add_or_set, apply_expression, apply_lip_sync, apply_look_at, apply_motion,
+    apply_position, apply_update,
 };
-use crate::desktop::Output;
+use anyhow::Result;
 use bevy::{
     app::{AppExit, MainScheduleOrder},
     ecs::schedule::ScheduleLabel,
     prelude::*,
 };
-use ene_avatar_ipc::{Command, MAX_LINE, Request};
-use serde_json::{Value, json};
+use ene_core::avatar::{AvatarMessage, Command, MAX_LINE, RendererSnapshot, Request};
+use snapshot::snapshot;
 use std::{
     io::{BufRead, Read, Write},
     sync::mpsc::{self, Receiver, SyncSender},
@@ -18,7 +22,7 @@ use std::{
 
 #[derive(Resource)]
 pub struct Control {
-    pub output: SyncSender<Value>,
+    pub output: SyncSender<AvatarMessage>,
     pub fps: u32,
     #[cfg(target_os = "linux")]
     pub wake_tx: exwlshellev::calloop::channel::Sender<()>,
@@ -45,36 +49,13 @@ pub fn run(mut app: App) -> AppExit {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-enum ControlError {
-    #[error(transparent)]
-    Config(#[from] ConfigError),
-    #[error(transparent)]
-    Json(#[from] serde_json::Error),
-    #[error("input line exceeds 64 KiB")]
-    InputTooLong,
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error("{0}")]
-    System(String),
-    #[error("unknown character")]
-    UnknownCharacter,
-    #[error("FPS must be 0..=1000")]
-    InvalidFps,
-    #[error("invalid or duplicate character id")]
-    InvalidCharacterId,
-    #[error("invalid expression name")]
-    InvalidExpressionName,
-    #[error("lip_sync requires a finite amplitude")]
-    InvalidLipSync,
-    #[error("look_at requires finite angles within yaw [-90, 90] and pitch [-60, 60]")]
-    InvalidLookAt,
-    #[error("place requires finite logical coordinates")]
-    InvalidPlace,
+enum Disposition {
+    Reply(Option<RendererSnapshot>),
+    Deferred,
 }
 
 /// Reads one bounded JSON line. The flag marks EOF, an overlong line, or an unreadable stream.
-fn read_request(input: &mut impl BufRead) -> (Result<Request, ControlError>, bool) {
+fn read_request(input: &mut impl BufRead) -> (Result<Request>, bool) {
     let mut line = String::new();
     match (&mut *input)
         .take((MAX_LINE + 1) as u64)
@@ -87,18 +68,15 @@ fn read_request(input: &mut impl BufRead) -> (Result<Request, ControlError>, boo
             }),
             true,
         ),
-        Ok(n) if n <= MAX_LINE => (
-            serde_json::from_str(&line).map_err(ControlError::from),
-            false,
-        ),
-        Ok(_) => (Err(ControlError::InputTooLong), true),
-        Err(error) => (Err(ControlError::Io(error)), true),
+        Ok(n) if n <= MAX_LINE => (serde_json::from_str(&line).map_err(Into::into), false),
+        Ok(_) => (Err(anyhow::anyhow!("input line exceeds 64 KiB")), true),
+        Err(error) => (Err(error.into()), true),
     }
 }
 
 pub fn setup(app: &mut App) {
     let (input_tx, input) = mpsc::sync_channel(64);
-    let (output, output_rx) = mpsc::sync_channel::<Value>(64);
+    let (output, output_rx) = mpsc::sync_channel::<AvatarMessage>(64);
     let (done, output_done) = mpsc::channel();
     #[cfg(target_os = "linux")]
     let (wake_tx, wake_rx) = exwlshellev::calloop::channel::channel();
@@ -146,22 +124,27 @@ pub fn setup(app: &mut App) {
 /// and no artificial one-request-per-frame throttle is needed.
 fn requests(world: &mut World, avatars: &mut QueryState<(Entity, &mut Character)>) {
     for _ in 0..64 {
-        let request = match world
-            .non_send::<Receiver<Result<Request, ControlError>>>()
-            .try_recv()
-        {
+        let request = match world.non_send::<Receiver<Result<Request>>>().try_recv() {
             Ok(request) => request,
             Err(mpsc::TryRecvError::Empty) => break,
             Err(mpsc::TryRecvError::Disconnected) => {
+                cancel_motions(world);
                 world.write_message(AppExit::Success);
                 break;
             }
         };
         let id = request.as_ref().ok().and_then(|request| request.id);
-        let result = request.and_then(|request| apply_command(world, avatars, request.command));
+        let quitting = request
+            .as_ref()
+            .is_ok_and(|request| matches!(request.command, Command::Quit {}));
+        let result = match request.and_then(|request| apply_command(world, avatars, request)) {
+            Ok(Disposition::Deferred) => continue,
+            Ok(Disposition::Reply(value)) => Ok(value),
+            Err(error) => Err(error),
+        };
         // A one-way notification has no id and must not answer, or the client
         // would have to drain replies it never asked for.
-        if !send_command_reply(world, id, result) {
+        if !send_command_reply(world, id, result) || quitting {
             return;
         }
     }
@@ -175,12 +158,14 @@ fn find_target_entity(
     let target_name = match command {
         Command::Add { character, .. }
         | Command::Set { character, .. }
+        | Command::Update { character, .. }
         | Command::Motion { character, .. }
         | Command::Remove { character }
         | Command::Center { character, .. }
         | Command::Expression { character, .. }
         | Command::LipSync { character, .. }
         | Command::LookAt { character, .. }
+        | Command::Resize { character, .. }
         | Command::Place { character, .. } => character.as_str(),
         _ => return None,
     };
@@ -193,42 +178,54 @@ fn find_target_entity(
 fn apply_command(
     world: &mut World,
     avatars: &mut QueryState<(Entity, &mut Character)>,
-    command: Command,
-) -> Result<Value, ControlError> {
+    request: Request,
+) -> Result<Disposition> {
+    let Request { id, command } = request;
     let target = find_target_entity(world, avatars, &command);
-    match command {
+    let applied = match command {
         Command::Add { character, config } => {
             apply_add_or_set(world, true, target, character, config)
         }
         Command::Set { character, config } => {
             apply_add_or_set(world, false, target, character, config)
         }
+        Command::Update { character, config } => apply_update(world, target, character, config),
         Command::Motion {
             motion, looping, ..
-        } => apply_motion(world, target, motion, looping),
-        Command::Get {} => world
-            .run_system_cached(snapshot)
-            .map_err(|error| ControlError::System(error.to_string())),
-        Command::Remove { .. } => {
-            let entity = target.ok_or(ControlError::UnknownCharacter)?;
-            world.despawn(entity);
-            Ok(Value::Null)
+        } => {
+            apply_motion(world, target, motion, looping, id)?;
+            return Ok(Disposition::Deferred);
         }
-        Command::Center { monitor, .. } => {
-            let entity = target.ok_or(ControlError::UnknownCharacter)?;
+        Command::Get {} => {
+            return world
+                .run_system_cached(snapshot)
+                .map(|value| Disposition::Reply(Some(value)))
+                .map_err(|error| anyhow::anyhow!("{error}"));
+        }
+        Command::Remove { .. } => {
+            let entity = target.ok_or(anyhow::anyhow!("unknown character"))?;
+            cancel_motion(world, entity);
+            world.despawn(entity);
+            Ok(())
+        }
+        Command::Center { monitor, .. } => apply_position(world, target, monitor, None),
+        Command::Resize { size_percent, .. } => {
+            anyhow::ensure!(
+                (50.0..=200.0).contains(&size_percent),
+                "invalid avatar scale"
+            );
             let mut character = world
-                .get_mut::<Character>(entity)
-                .ok_or(ControlError::UnknownCharacter)?;
-            character.config.monitor = monitor;
-            character.config.position = None;
-            Ok(Value::Null)
+                .get_mut::<Character>(target.ok_or_else(|| anyhow::anyhow!("unknown character"))?)
+                .ok_or_else(|| anyhow::anyhow!("unknown character"))?;
+            character.config.size_percent = size_percent;
+            Ok(())
         }
         Command::Fps { value } => {
             if value > 1000 {
-                return Err(ControlError::InvalidFps);
+                return Err(anyhow::anyhow!("FPS must be 0..=1000"));
             }
             world.resource_mut::<Control>().fps = value;
-            Ok(Value::Null)
+            Ok(())
         }
         Command::Expression { name, .. } => apply_expression(world, target, name),
         Command::LipSync { rms, .. } => apply_lip_sync(world, target, rms),
@@ -237,169 +234,28 @@ fn apply_command(
         } => apply_look_at(world, target, yaw_deg, pitch_deg),
         Command::Place {
             monitor, position, ..
-        } => apply_place(world, target, monitor, position),
+        } => apply_position(world, target, monitor, Some(position)),
         Command::Quit {} => {
+            cancel_motions(world);
             world.write_message(AppExit::Success);
-            Ok(Value::Null)
-        }
-    }
-}
-
-fn apply_add_or_set(
-    world: &mut World,
-    add: bool,
-    target: Option<Entity>,
-    character: String,
-    config: Config,
-) -> Result<Value, ControlError> {
-    validate_config(&config)?;
-    let entity = match (add, target) {
-        (true, None) if !character.is_empty() && character.len() <= 128 => {
-            world.spawn(Character::new(character, config)).id()
-        }
-        (true, _) => return Err(ControlError::InvalidCharacterId),
-        (false, None) => return Err(ControlError::UnknownCharacter),
-        (false, Some(entity)) => {
-            let mut old = world
-                .get_mut::<Character>(entity)
-                .ok_or(ControlError::UnknownCharacter)?;
-            let rebuild =
-                matches!(old.state, AvatarState::Error(_)) || old.config.model != config.model;
-            let previous = old.config.motion.clone();
-            old.config = config;
-            if !rebuild {
-                // The model is staying: fade to the new clip
-                // instead of despawning and reloading it.
-                if previous != old.config.motion {
-                    queue_motion(world, entity);
-                }
-                return Ok(Value::Null);
-            }
-            entity
+            Ok(())
         }
     };
-    reload(world, entity);
-    Ok(Value::Null)
-}
-
-fn apply_motion(
-    world: &mut World,
-    target: Option<Entity>,
-    motion: Option<String>,
-    looping: bool,
-) -> Result<Value, ControlError> {
-    let entity = target.ok_or(ControlError::UnknownCharacter)?;
-    let mut old = world
-        .get_mut::<Character>(entity)
-        .ok_or(ControlError::UnknownCharacter)?;
-    let config = Config {
-        motion,
-        looping,
-        ..old.config.clone()
-    };
-    validate_config(&config)?;
-    old.config = config;
-    let should_reload = matches!(old.state, AvatarState::Error(_));
-    if should_reload {
-        reload(world, entity);
-    } else {
-        queue_motion(world, entity);
-    }
-    Ok(Value::Null)
-}
-
-fn apply_expression(
-    world: &mut World,
-    target: Option<Entity>,
-    name: Option<String>,
-) -> Result<Value, ControlError> {
-    let entity = target.ok_or(ControlError::UnknownCharacter)?;
-    let mut character = world
-        .get_mut::<Character>(entity)
-        .ok_or(ControlError::UnknownCharacter)?;
-    character.expression = match name {
-        Some(name) if !name.trim().is_empty() && name.len() <= 64 => Some(name),
-        Some(_) => return Err(ControlError::InvalidExpressionName),
-        None => None,
-    };
-    Ok(Value::Null)
-}
-
-fn apply_lip_sync(
-    world: &mut World,
-    target: Option<Entity>,
-    rms: f32,
-) -> Result<Value, ControlError> {
-    if !rms.is_finite() {
-        return Err(ControlError::InvalidLipSync);
-    }
-    let entity = target.ok_or(ControlError::UnknownCharacter)?;
-    let mut character = world
-        .get_mut::<Character>(entity)
-        .ok_or(ControlError::UnknownCharacter)?;
-    character.lip = rms.clamp(0., 1.);
-    Ok(Value::Null)
-}
-
-fn apply_look_at(
-    world: &mut World,
-    target: Option<Entity>,
-    yaw_deg: Option<f32>,
-    pitch_deg: Option<f32>,
-) -> Result<Value, ControlError> {
-    let entity = target.ok_or(ControlError::UnknownCharacter)?;
-    let mut character = world
-        .get_mut::<Character>(entity)
-        .ok_or(ControlError::UnknownCharacter)?;
-    match (yaw_deg, pitch_deg) {
-        (None, None) => character.gaze = None,
-        (yaw, pitch) => {
-            let yaw = yaw.unwrap_or(0.);
-            let pitch = pitch.unwrap_or(0.);
-            if !yaw.is_finite() || !pitch.is_finite() || yaw.abs() > 90. || pitch.abs() > 60. {
-                return Err(ControlError::InvalidLookAt);
-            }
-            character.gaze = Some((yaw, pitch));
-        }
-    }
-    Ok(Value::Null)
-}
-
-fn apply_place(
-    world: &mut World,
-    target: Option<Entity>,
-    monitor: Option<String>,
-    position: [f32; 2],
-) -> Result<Value, ControlError> {
-    if position
-        .iter()
-        .any(|v| !v.is_finite() || v.abs() > 1_000_000.)
-    {
-        return Err(ControlError::InvalidPlace);
-    }
-    let entity = target.ok_or(ControlError::UnknownCharacter)?;
-    let mut character = world
-        .get_mut::<Character>(entity)
-        .ok_or(ControlError::UnknownCharacter)?;
-    if monitor.is_some() {
-        character.config.monitor = monitor;
-    }
-    character.config.position = Some(position);
-    Ok(Value::Null)
+    applied.map(|()| Disposition::Reply(None))
 }
 
 fn send_command_reply(
     world: &mut World,
     id: Option<u64>,
-    result: Result<Value, ControlError>,
+    result: Result<Option<RendererSnapshot>>,
 ) -> bool {
     match id {
         Some(id) => {
-            let response = match result {
-                Ok(value) => json!({"id":id, "ok":value}),
-                Err(error) => json!({"id":id, "error":error.to_string()}),
-            };
-            if let Err(error) = world.resource::<Control>().output.try_send(response) {
+            if let Err(error) = world
+                .resource::<Control>()
+                .output
+                .try_send(reply(id, result))
+            {
                 error!("renderer output unavailable: {error}");
                 world.write_message(AppExit::error());
                 return false;
@@ -414,43 +270,23 @@ fn send_command_reply(
     true
 }
 
-fn snapshot(
-    views: Query<&Character>,
-    outputs: Query<&Output>,
-    players: Query<&AnimationPlayer>,
-    control: Res<Control>,
-) -> Value {
-    let mut characters = Vec::new();
-    for character in &views {
-        let config = &character.config;
-        let animation_times: Vec<_> = character
-            .root
-            .and_then(|root| players.get(root).ok())
-            .into_iter()
-            .flat_map(AnimationPlayer::playing_animations)
-            .map(|(_, animation)| animation.seek_time())
-            .collect();
-        let output = crate::desktop::pick_output(config, outputs.iter());
-        let mut resolved = config.clone();
-        resolved.monitor = output.map(|output| output.name.clone());
-        resolved.position = crate::desktop::resolved_position(config, output).map(|p| p.to_array());
-        let mut actor = character.state.json();
-        actor["character"] = json!(character.id);
-        actor["config"] = json!(resolved);
-        actor["expression"] = json!(character.expression);
-        actor["lip"] = json!(character.lip);
-        actor["lip_level"] = json!(character.lip_level);
-        actor["expression_weight"] = json!(character.expression_weight);
-        actor["animation_times"] = json!(animation_times);
-        characters.push(actor);
+fn reply(
+    id: u64,
+    result: Result<Option<RendererSnapshot>, impl std::fmt::Display>,
+) -> AvatarMessage {
+    match result {
+        Ok(ok) => AvatarMessage::Reply { id, ok },
+        Err(error) => AvatarMessage::ErrorReply {
+            id,
+            error: error.to_string(),
+        },
     }
-    let monitors: Vec<_> = outputs.iter().map(|o| json!({"name":o.name,"origin":o.origin.to_array(),"size":o.size.to_array(),"units_per_logical_pixel":o.units_per_logical_pixel})).collect();
-    json!({"characters":characters, "monitors":monitors, "fps":control.into_inner().fps})
 }
 
-fn write_output(mut writer: impl Write, output: Receiver<Value>) -> std::io::Result<()> {
+fn write_output(mut writer: impl Write, output: Receiver<AvatarMessage>) -> std::io::Result<()> {
     for message in output {
-        writeln!(writer, "{message}")?;
+        serde_json::to_writer(&mut writer, &message)?;
+        writer.write_all(b"\n")?;
         writer.flush()?;
     }
     Ok(())
@@ -460,11 +296,18 @@ fn write_output(mut writer: impl Write, output: Receiver<Value>) -> std::io::Res
 fn publish(
     control: Res<Control>,
     mut events: ResMut<Messages<Notification>>,
+    mut motions: ResMut<Messages<MotionOutcome>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let output = &control.into_inner().output;
-    for Notification(event) in events.drain() {
-        if let Err(error) = output.try_send(event) {
+    let replies = motions
+        .drain()
+        .map(|motion| reply(motion.request, motion.result.map(|()| None)));
+    let events = events
+        .drain()
+        .map(|Notification(event)| AvatarMessage::Event(event));
+    for message in replies.chain(events) {
+        if let Err(error) = output.try_send(message) {
             error!("renderer output unavailable: {error}");
             exit.write(AppExit::error());
             break;
@@ -475,11 +318,13 @@ fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::desktop::Output;
+    use serde_json::{Value, json};
 
     struct Harness {
         app: App,
-        input: SyncSender<Result<Request, ControlError>>,
-        output: Receiver<Value>,
+        input: SyncSender<Result<Request>>,
+        output: Receiver<AvatarMessage>,
     }
 
     impl Harness {
@@ -535,11 +380,14 @@ mod tests {
         fn batch(&mut self, commands: &[Value]) -> Vec<Value> {
             for command in commands {
                 self.input
-                    .send(serde_json::from_value(command.clone()).map_err(ControlError::from))
+                    .send(serde_json::from_value(command.clone()).map_err(Into::into))
                     .unwrap();
             }
             self.app.update();
-            self.output.try_iter().collect()
+            self.output
+                .try_iter()
+                .map(|message| serde_json::to_value(message).unwrap())
+                .collect()
         }
     }
 
@@ -596,6 +444,24 @@ mod tests {
     }
 
     #[test]
+    fn updating_size_keeps_the_last_renderer_placement() {
+        let replies = Harness::new().batch(&[
+            json!({"id":1,"op":"add","character":"a","config":{"model":"a.vrm"}}),
+            json!({"id":2,"op":"place","character":"a","monitor":"screen","position":[10.,20.]}),
+            json!({"id":3,"op":"update","character":"a","config":{"model":"a.vrm","size_percent":120.}}),
+            json!({"id":4,"op":"get"}),
+            json!({"id":5,"op":"update","character":"a","config":{"model":"a.vrm","position":[30.,40.]}}),
+            json!({"id":6,"op":"get"}),
+        ]);
+        let resized = &replies[3]["ok"]["characters"][0]["config"];
+        assert_eq!(resized["position"], json!([10., 20.]));
+        assert_eq!(resized["size_percent"], json!(120.));
+        let moved = &replies[5]["ok"]["characters"][0]["config"];
+        assert_eq!(moved["position"], json!([30., 40.]));
+        assert_eq!(moved["monitor"], "screen");
+    }
+
+    #[test]
     fn output_failures_exit_and_shutdown_drains_replies() {
         for disconnected in [false, true] {
             let mut h = Harness::new();
@@ -607,7 +473,7 @@ mod tests {
                         .world()
                         .resource::<Control>()
                         .output
-                        .try_send(Value::Null)
+                        .try_send(AvatarMessage::Reply { id: 0, ok: None })
                         .unwrap();
                 }
             }
@@ -624,7 +490,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(64);
         let (done, completion) = mpsc::channel();
         app.insert_non_send(completion).set_runner(move |_| {
-            tx.send(json!({"id":1,"ok":null})).unwrap();
+            tx.send(AvatarMessage::Reply { id: 1, ok: None }).unwrap();
             AppExit::Success
         });
         let writer = std::thread::spawn(move || {
@@ -635,10 +501,10 @@ mod tests {
         assert_eq!(run(app), AppExit::Success);
         assert_eq!(
             serde_json::from_slice::<Value>(&writer.join().unwrap()).unwrap(),
-            json!({"id":1,"ok":null})
+            json!({"type":"reply","id":1,"ok":null})
         );
         let (tx, rx) = mpsc::sync_channel(1);
-        tx.send(Value::Null).unwrap();
+        tx.send(AvatarMessage::Reply { id: 1, ok: None }).unwrap();
         drop(tx);
         assert!(write_output(std::io::Cursor::new(&mut [][..]), rx).is_err());
     }
@@ -673,7 +539,7 @@ mod tests {
             .iter()
             .filter(|message| message.get("id").is_some())
             .collect();
-        assert_eq!(replies[0], &json!({"id":3,"ok":null}));
+        assert_eq!(replies[0], &json!({"type":"reply","id":3,"ok":null}));
         let actor = &replies[1]["ok"]["characters"][0];
         assert_eq!(actor["expression"], Value::Null);
         // The renderer clamps what a client sends.

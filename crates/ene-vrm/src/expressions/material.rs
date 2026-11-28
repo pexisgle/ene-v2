@@ -89,23 +89,25 @@ pub(super) fn initialize_materials<M: bevy::pbr::Material + Clone>(
     mut materials: ResMut<Assets<M>>,
 ) {
     for (root, binds, pending, requested) in &roots {
-        if !binds.is_added() && !requested && !pending {
+        if binds.material_slots.is_empty() || (!binds.is_added() && !requested && !pending) {
             continue;
         }
-        let affected: std::collections::HashSet<_> = binds.materials().collect();
         let targets = {
             let meshes = meshes.p0();
             std::iter::once(root)
                 .chain(children.iter_descendants(root))
                 .filter_map(|entity| {
                     let (slot, handle, base_uv, emission) = meshes.get(entity).ok()?;
-                    affected.contains(&slot.0).then(|| MaterialTarget {
-                        entity,
-                        slot: slot.0,
-                        original: handle.0.clone(),
-                        uv: base_uv.map_or_else(UvTransform::default, |uv| uv.0),
-                        emission: emission.map_or(1., |strength| strength.0),
-                    })
+                    binds
+                        .material_slots
+                        .contains(&slot.0)
+                        .then(|| MaterialTarget {
+                            entity,
+                            slot: slot.0,
+                            original: handle.0.clone(),
+                            uv: base_uv.map_or_else(UvTransform::default, |uv| uv.0),
+                            emission: emission.map_or(1., |strength| strength.0),
+                        })
                 })
                 .collect::<Vec<_>>()
         };

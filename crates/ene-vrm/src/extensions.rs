@@ -16,6 +16,7 @@ use bevy::{
     platform::collections::HashMap,
     prelude::*,
 };
+use schema::require_v1;
 use serde::Deserialize;
 use std::sync::Arc;
 use vrm_spec::{
@@ -25,14 +26,6 @@ use vrm_spec::{
 
 pub(crate) const VRMC_NODE_CONSTRAINT: &str = "VRMC_node_constraint";
 
-/// Every VRM 1.0 extension this loader reads requires the same version.
-fn require_v1(version: &str, extension: &str) -> std::io::Result<()> {
-    if version == "1.0" {
-        Ok(())
-    } else {
-        Err(invalid(format!("{extension} requires specVersion 1.0")))
-    }
-}
 pub(crate) fn extension<T: serde::de::DeserializeOwned>(
     value: Option<&serde_json::Value>,
     name: &str,
@@ -188,19 +181,7 @@ impl GltfExtensionHandler for VrmExtensions {
                 let Some(value) = material.extension_value(VRMC_MATERIALS_MTOON) else {
                     continue;
                 };
-                if let Some(shift) = value
-                    .get("shadingShiftTexture")
-                    .filter(|shift| !shift.is_null())
-                {
-                    gltf::json::texture::Info::deserialize(shift).map_err(invalid)?;
-                }
-                let authored =
-                    vrm_spec::vrmc_materials_mtoon_1_0::VrmcMaterialsMtoonSchema::deserialize(
-                        value,
-                    )
-                    .map_err(invalid)?;
-                require_v1(&authored.spec_version, "VRMC_materials_mtoon")?;
-                let toon = schema::Toon::compile(authored).map_err(invalid)?;
+                let toon = schema::Toon::compile(value)?;
                 if let Some(index) = material.index() {
                     self.materials.insert(index, toon);
                 }
