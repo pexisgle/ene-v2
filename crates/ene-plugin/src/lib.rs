@@ -29,7 +29,3 @@ pub use provider::{FieldSource, LlmProviderCapabilities, Model, ModelMetadata, S
 mod sdk;
 #[cfg(target_family = "wasm")]
 pub use sdk::*;
-
-#[cfg(all(feature = "runtime", not(target_family = "wasm")))]
-#[allow(missing_docs)]
-pub mod plugin_runtime;

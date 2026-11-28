@@ -1,3 +1,6 @@
+use crate::device::DeviceCommands as _;
+use ene_rpc::ProviderKind;
+
 use crate::{
     actor::{Actor, Host, id},
     error::invalid,
@@ -13,24 +16,43 @@ use rig_core::{
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-impl Actor {
-    pub(crate) fn stop_speech(&mut self) {
-        self.speech.cancel();
-        self.speech = self.host.shutdown.child_token();
-        let _no_receivers = self.audio.send(w::AudioOutput {
-            generation: self.activation.generation,
-            stop: true,
-            ..Default::default()
-        });
+pub(crate) trait VoiceCommands {
+    fn stop_speech(&mut self, companion: &str);
+    async fn speech_queue(
+        &mut self,
+        companion_id: &str,
+    ) -> Result<Option<tokio::sync::mpsc::Sender<String>>>;
+    async fn speak_if_configured(&mut self, companion: &str, text: String) -> Result<()>;
+    async fn speak(&mut self, request: w::SpeakRequest) -> Result<w::Empty>;
+}
+
+impl VoiceCommands for Actor {
+    fn stop_speech(&mut self, companion: &str) {
+        if let Some(previous) = self.speech.remove(companion) {
+            previous.cancel();
+            if let Some(active) = self.activations.get(companion) {
+                let _no_receivers = self.audio.send(w::AudioOutput {
+                    generation: active.generation,
+                    companion_id: companion.into(),
+                    stop: true,
+                    ..Default::default()
+                });
+            }
+        }
     }
 
-    pub(crate) async fn speech_queue(
+    async fn speech_queue(
         &mut self,
         companion_id: &str,
     ) -> Result<Option<tokio::sync::mpsc::Sender<String>>> {
-        if self.activation.device_id.is_empty() || self.audio.receiver_count() == 0 {
+        let Some(active) = self.activations.get(companion_id) else {
+            return Ok(None);
+        };
+        if self.audio.receiver_count() == 0 || !self.devices.contains_key(active.device_id.as_str())
+        {
             return Ok(None);
         }
+        let generation = active.generation;
         let companion = self.companion(companion_id).await?;
         let Ok((selection, connection)) = self.selection(&companion, Role::Synthesis).await else {
             return Ok(None);
@@ -41,13 +63,10 @@ impl Actor {
                 .await?
                 .map_or_else(String::new, |character| character.voice)
         };
-        if voice.is_empty() {
-            return Ok(None);
-        }
-        self.stop_speech();
-        let cancel = self.speech.clone();
+        self.stop_speech(companion_id);
+        let cancel = self.host.shutdown.child_token();
+        self.speech.insert(companion_id.into(), cancel.clone());
         let audio = self.audio.clone();
-        let generation = self.activation.generation;
         let models = self.models.clone();
         let companion_id = companion_id.to_owned();
         let db = self.db.clone();
@@ -120,18 +139,14 @@ impl Actor {
         Ok(Some(out))
     }
 
-    pub(crate) async fn speak_if_configured(
-        &mut self,
-        companion: &str,
-        text: String,
-    ) -> Result<()> {
+    async fn speak_if_configured(&mut self, companion: &str, text: String) -> Result<()> {
         if let Some(queue) = self.speech_queue(companion).await? {
             let _closed = queue.try_send(text);
         }
         Ok(())
     }
 
-    pub(crate) async fn speak(&mut self, request: w::SpeakRequest) -> Result<w::Empty> {
+    async fn speak(&mut self, request: w::SpeakRequest) -> Result<w::Empty> {
         let key = store::key(request.mutation.as_option())?;
         let hash = store::fingerprint(&("speak", &request))?;
         let mut db = self.db.acquire().await?;
@@ -141,25 +156,40 @@ impl Actor {
         if request.text.trim().is_empty() || request.text.len() > 4096 {
             return Err(invalid("invalid speech text"));
         }
-        self.companion(&request.companion_id).await?;
+        let speech = self
+            .speech_queue(&request.companion_id)
+            .await?
+            .ok_or_else(|| invalid("speech requires an active device and a synthesis model"))?;
+        speech.try_send(request.text)?;
         let reply = w::Empty::default();
         store::acknowledge(&mut db, &key.request_key, &hash, &reply).await?;
-        drop(db);
-        self.speak_if_configured(&request.companion_id, request.text)
-            .await?;
         Ok(reply)
     }
 }
 
-impl Host {
-    pub(crate) async fn transcribe(
-        &self,
-        device: String,
-        generation: u64,
-        rate: u32,
-        pcm: Vec<u8>,
-        request_key: String,
-    ) -> Result<w::Transcription> {
+pub(crate) struct AudioCapture {
+    pub device: String,
+    pub generation: u64,
+    pub rate: u32,
+    pub pcm: Vec<u8>,
+    pub request_key: String,
+    pub diagnostic: bool,
+}
+
+pub(crate) trait VoiceCapture {
+    async fn transcribe(&self, capture: AudioCapture) -> Result<w::Transcription>;
+}
+
+impl VoiceCapture for Host {
+    async fn transcribe(&self, capture: AudioCapture) -> Result<w::Transcription> {
+        let AudioCapture {
+            device,
+            generation,
+            rate,
+            pcm,
+            request_key,
+            diagnostic,
+        } = capture;
         ensure!(
             (8000..=192_000).contains(&rate)
                 && !pcm.is_empty()
@@ -174,10 +204,18 @@ impl Host {
                     Box::pin(async move {
                         actor.active(&device, generation)?;
                         let mut db = actor.db.acquire().await?;
-                        let companions: Vec<w::Companion> =
+                        let mut companions: Vec<w::Companion> =
                             store::list(&mut db, "companion").await?;
+                        companions.retain(|companion| {
+                            actor
+                                .activations
+                                .get(companion.id.as_str())
+                                .is_some_and(|active| active.device_id == device)
+                        });
+                        let binding_id = &actor.active(&device, generation)?.companion_id;
                         let selected = companions
                             .iter()
+                            .filter(|companion| !diagnostic || &companion.id == binding_id)
                             .find(|companion| {
                                 companion
                                     .models
@@ -202,11 +240,31 @@ impl Host {
         if text.trim().is_empty() {
             return Ok(w::Transcription::default());
         }
+        if diagnostic {
+            self.call(move |actor| {
+                Box::pin(async move {
+                    actor.active(&device, generation)?;
+                    Ok(())
+                })
+            })
+            .await?;
+            return Ok(w::Transcription {
+                text,
+                ..Default::default()
+            });
+        }
         let transcript = text.clone();
         let receipt = self
             .call(move |actor| {
                 Box::pin(async move {
                     actor.active(&device, generation)?;
+                    let mut companions = companions;
+                    companions.retain(|companion| {
+                        actor
+                            .activations
+                            .get(companion.id.as_str())
+                            .is_some_and(|active| active.device_id == device)
+                    });
                     actor.send_group(companions, text, &request_key).await
                 })
             })
@@ -219,14 +277,25 @@ impl Host {
     }
 }
 
-async fn synthesize(
+pub(crate) async fn synthesize(
     model: &Model,
     text: &str,
     voice: String,
     speed: f32,
     cancel: &CancellationToken,
 ) -> Result<(Vec<u8>, u32)> {
-    if let Some(plugin) = &model.plugin {
+    if let Some(engine) = model.voicevox() {
+        let style = if voice.trim().is_empty() {
+            &model.selection.model
+        } else {
+            &voice
+        };
+        return tokio::select! {
+            () = cancel.cancelled() => Err(crate::error::denied("speech cancelled")),
+            result = engine.synthesize(&model.connection, text, style, speed) => result,
+        };
+    }
+    if let Some(plugin) = model.plugin() {
         let (_, events) = plugin
             .invoke(
                 ene_plugin::Operation::Synthesize {
@@ -274,25 +343,62 @@ async fn synthesize(
         );
         return Ok((pcm, rate));
     }
+    if let Some(provider) = model.gemini() {
+        let voice = if voice.trim().is_empty() {
+            "Kore"
+        } else {
+            voice.trim()
+        };
+        let request = AudioGenerationRequestBuilder::new(text, voice).build();
+        let response = tokio::select! {
+            () = cancel.cancelled() => return Err(crate::error::denied("speech cancelled")),
+            result = provider.audio_generation(&model.selection.model).call(request) => result.map_err(crate::model::provider_error)?,
+        };
+        return crate::voicevox::decode_wav(&response.audio);
+    }
+    let is_sakura = model.connection.kind == ProviderKind::OpenaiCompatible
+        && model.connection.adapter == "sakura";
+    let fallback = if is_sakura { "normal" } else { "alloy" };
+    let voice = if voice.trim().is_empty() {
+        fallback
+    } else {
+        voice.trim()
+    };
+    let (name, voice) = if is_sakura {
+        voice
+            .split_once('/')
+            .unwrap_or((&model.selection.model, voice))
+    } else {
+        (&*model.selection.model, voice)
+    };
+    let format = if is_sakura { "wav" } else { "pcm" };
     let request = AudioGenerationRequestBuilder::new(text, voice)
-        .speed(speed)
-        .additional_params(json!({"response_format":"pcm"}))
-        .build();
-    let response = model
-        .client
-        .audio_generation(&model.selection.model)
-        .call(request)
-        .await?;
-    Ok((response.audio, 24_000))
+        .additional_params(json!({"response_format":format}));
+    let request = if is_sakura {
+        request
+    } else {
+        request.speed(speed)
+    }
+    .build();
+    let provider = model.openai()?;
+    let response = tokio::select! {
+        () = cancel.cancelled() => return Err(crate::error::denied("speech cancelled")),
+        result = provider.audio_generation(name).call(request) => result.map_err(crate::model::provider_error)?,
+    };
+    if response.audio.starts_with(b"RIFF") {
+        crate::voicevox::decode_wav(&response.audio)
+    } else {
+        Ok((response.audio, 24_000))
+    }
 }
 
-async fn transcribe(
+pub(crate) async fn transcribe(
     model: &Model,
     rate: u32,
     pcm: Vec<u8>,
     cancel: &CancellationToken,
 ) -> Result<String> {
-    if let Some(plugin) = &model.plugin {
+    if let Some(plugin) = model.plugin() {
         let (reply, events) = plugin
             .invoke(
                 ene_plugin::Operation::Transcribe {
@@ -323,12 +429,19 @@ async fn transcribe(
     let request = TranscriptionRequestBuilder::new(wav(rate, &pcm))
         .filename(Some("input.wav".into()))
         .build();
-    Ok(model
-        .client
-        .transcription(&model.selection.model)
-        .call(request)
-        .await?
-        .text)
+    let transcript = if let Some(provider) = model.gemini() {
+        provider.transcription(&model.selection.model).erase()
+    } else {
+        model
+            .openai()?
+            .transcription(&model.selection.model)
+            .erase()
+    };
+    let reply = tokio::select! {
+        () = cancel.cancelled() => return Err(crate::error::denied("transcription cancelled")),
+        result = transcript.call(request) => result.map_err(crate::model::provider_error)?,
+    };
+    Ok(reply.text)
 }
 
 fn wav(rate: u32, pcm: &[u8]) -> Vec<u8> {

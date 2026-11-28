@@ -19,6 +19,7 @@ pub(crate) struct Onboarding {
     model: Entity<InputState>,
     connection_id: String,
     busy: bool,
+    preset: crate::provider_choices::Preset,
 }
 
 impl Onboarding {
@@ -34,7 +35,21 @@ impl Onboarding {
             model: cx.new(|cx| InputState::new(window, cx).placeholder("モデル ID")),
             connection_id: id(),
             busy: false,
+            preset: *crate::provider_choices::CHAT
+                .last()
+                .expect("custom provider preset"),
         }
+    }
+
+    pub(crate) fn select_preset(
+        &mut self,
+        preset: crate::provider_choices::Preset,
+        window: &mut GpuiWindow,
+        cx: &mut Context<Window>,
+    ) {
+        self.preset = preset;
+        self.endpoint
+            .update(cx, |input, cx| input.set_value(preset.endpoint, window, cx));
     }
 
     pub(crate) fn idle(&mut self) {
@@ -55,7 +70,11 @@ impl Onboarding {
                 connection.enabled
                     && matches!(
                         connection.kind.as_known(),
-                        Some(w::ProviderKind::OpenaiCompatible | w::ProviderKind::Plugin)
+                        Some(
+                            w::ProviderKind::OpenaiCompatible
+                                | w::ProviderKind::Plugin
+                                | w::ProviderKind::Native
+                        )
                     )
             })
             .find(|connection| connection.id == self.connection_id)
@@ -64,7 +83,11 @@ impl Onboarding {
                     connection.enabled
                         && matches!(
                             connection.kind.as_known(),
-                            Some(w::ProviderKind::OpenaiCompatible | w::ProviderKind::Plugin)
+                            Some(
+                                w::ProviderKind::OpenaiCompatible
+                                    | w::ProviderKind::Plugin
+                                    | w::ProviderKind::Native
+                            )
                         )
                 })
             })
@@ -73,6 +96,7 @@ impl Onboarding {
         let secret = self.secret.clone();
         let busy = self.busy;
         let connection_id = self.connection_id.clone();
+        let preset = self.preset;
         let form = div()
             .flex()
             .flex_col()
@@ -88,7 +112,19 @@ impl Onboarding {
                     .text_sm()
                     .child("対話・作業・安全判定の文脈が、登録した接続先に送信されます。"),
             )
-            .when(selected.is_none(), |form| form.child(Input::new(&endpoint)))
+            .when(selected.is_none(), |form| {
+                form.child(div().flex().flex_wrap().gap_2().children(
+                    crate::provider_choices::CHAT.iter().copied().map(|preset| {
+                        Button::new(preset.label)
+                            .label(preset.label)
+                            .when(self.preset.label == preset.label, Button::primary)
+                            .on_click(cx.listener(move |owner, _, window, cx| {
+                                owner.setup_preset(preset, window, cx)
+                            }))
+                    }),
+                ))
+                .child(Input::new(&endpoint))
+            })
             .when_some(selected.as_ref(), |form, connection| {
                 form.child(div().text_sm().child(connection.endpoint.clone()))
             })
@@ -109,8 +145,9 @@ impl Onboarding {
                             let connection = selected.clone().unwrap_or_else(|| w::Connection {
                                 id: connection_id.clone(),
                                 enabled: true,
-                                kind: w::ProviderKind::OpenaiCompatible.into(),
-                                name: "OpenAI 互換".into(),
+                                kind: preset.kind.into(),
+                                adapter: preset.adapter.into(),
+                                name: preset.label.into(),
                                 endpoint: value(&endpoint, cx),
                                 send_data: vec!["対話・作業・安全判定の文脈".into()],
                                 ..Default::default()

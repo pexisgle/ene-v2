@@ -1,3 +1,11 @@
+use crate::character::CharacterPackages as _;
+use crate::configuration::ConfigurationCommands as _;
+use crate::device::DeviceCommands as _;
+use crate::memory::MemoryCommands as _;
+use crate::voice::VoiceCapture as _;
+use crate::voice::VoiceCommands as _;
+use crate::work::WorkCommands as _;
+
 use super::auth;
 use crate::{actor::Host, error::rpc, mcp::Mcp, store};
 use anyhow::Result;
@@ -47,6 +55,8 @@ macro_rules! unary {
         }
     };
 }
+
+mod settings;
 
 #[allow(refining_impl_trait)]
 impl w::HostService for Api {
@@ -206,118 +216,6 @@ impl w::ChatService for Api {
 }
 
 #[allow(refining_impl_trait)]
-impl w::SettingsService for Api {
-    unary!(get, w::Empty, w::Settings, |actor, _req| actor
-        .settings()
-        .await);
-    unary!(
-        put_connection,
-        w::ConnectionChange,
-        w::Connection,
-        |actor, req| actor.put_connection(req).await
-    );
-    unary!(
-        delete_connection,
-        w::DeleteRequest,
-        w::Empty,
-        |actor, req| actor.delete_record("connection", req).await
-    );
-    unary!(
-        set_credential,
-        w::CredentialChange,
-        w::Empty,
-        |actor, req| actor.set_credential(req).await
-    );
-    unary!(put_policy, w::PolicyChange, w::Policy, |actor, req| actor
-        .put_policy(req)
-        .await);
-    unary!(delete_rule, w::DeleteRequest, w::Empty, |actor, req| actor
-        .delete_record("rule", req)
-        .await);
-    unary!(answer, w::ApprovalAnswer, w::Empty, |actor, req| actor
-        .answer(req)
-        .await);
-    unary!(put_plugin, w::PluginChange, w::Plugin, |actor, req| actor
-        .put_plugin(req)
-        .await);
-    unary!(delete_plugin, w::DeleteRequest, w::Empty, |actor, req| {
-        actor.delete_record("plugin", req).await
-    });
-    unary!(audit_history, w::AuditQuery, w::Audit, |actor, req| {
-        Ok(w::Audit {
-            items: store::audit_history(&actor.db, req.before, req.limit).await?,
-            ..Default::default()
-        })
-    });
-
-    async fn models(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::Id>,
-    ) -> ServiceResult<w::ModelList> {
-        let id = request.to_owned_message().id;
-        let (models, connection) = self
-            .0
-            .call(move |actor| {
-                Box::pin(async move { Ok((actor.models.clone(), actor.connection(&id).await?)) })
-            })
-            .await
-            .map_err(rpc)?;
-        let model = models
-            .model(w::ModelSelection::default(), connection)
-            .await
-            .map_err(rpc)?;
-        let ids = model.models().await.map_err(rpc)?;
-        Response::ok(w::ModelList {
-            ids,
-            ..Default::default()
-        })
-    }
-
-    async fn probe(
-        &self,
-        _: RequestContext,
-        request: ServiceRequest<'_, w::ProbeRequest>,
-    ) -> ServiceResult<w::Empty> {
-        let request = request.to_owned_message();
-        let (models, connection) = self
-            .0
-            .call(move |actor| {
-                Box::pin(async move {
-                    Ok((
-                        actor.models.clone(),
-                        actor.connection(&request.connection_id).await?,
-                    ))
-                })
-            })
-            .await
-            .map_err(rpc)?;
-        if matches!(
-            connection.kind.as_known(),
-            Some(w::ProviderKind::McpHttp | w::ProviderKind::McpStdio)
-        ) {
-            let cancel = self.0.shutdown.child_token();
-            let _guard = cancel.clone().drop_guard();
-            let mcp = Mcp::open(connection, &models, &cancel).await.map_err(rpc)?;
-            mcp.service
-                .list_all_tools()
-                .await
-                .map_err(|_| ConnectError::unavailable("configured MCP unavailable"))?;
-        } else if let Some(selection) = request.model.into_option() {
-            let model = models.model(selection, connection).await.map_err(rpc)?;
-            model.text("Reply briefly.", "OK").await.map_err(rpc)?;
-        } else {
-            let model = models
-                .model(w::ModelSelection::default(), connection)
-                .await
-                .map_err(rpc)?;
-            model.models().await.map_err(rpc)?;
-        }
-        Response::ok(w::Empty::default())
-    }
-}
-
-#[allow(refining_impl_trait)]
 impl w::WorkService for Api {
     unary!(list, w::Empty, w::WorkList, |actor, _req| {
         let mut db = actor.db.acquire().await?;
@@ -361,15 +259,19 @@ impl w::ClientService for Api {
     ) -> ServiceResult<ServiceStream<w::DeviceOperation>> {
         let request = request.to_owned_message();
         let generation = request.generation;
+        let device_id = request.device_id.clone();
         let host = self.0.clone();
         let (pending, mut rx) = host
             .call(move |actor| {
                 Box::pin(async move {
-                    actor.active(&request.device_id, generation)?;
+                    actor.require_device(&request.device_id, generation)?;
                     let pending = actor
                         .device_ops
                         .values()
-                        .filter(|op| op.device == request.device_id)
+                        .filter(|op| {
+                            op.device == request.device_id
+                                && (generation == 0 || op.operation.generation == generation)
+                        })
                         .map(|op| op.operation.clone())
                         .collect::<Vec<_>>();
                     Ok((pending, actor.operations.subscribe()))
@@ -380,7 +282,9 @@ impl w::ClientService for Api {
         let stream: ServiceStream<w::DeviceOperation> = Box::pin(async_stream::try_stream! {
             for value in pending { yield value; }
             while let Some(value) = receive(&host, &mut rx).await? {
-                if value.generation == generation { yield value; } else { break; }
+                if value.device_id == device_id && (generation == 0 || value.generation == generation) {
+                    yield value;
+                }
             }
         });
         Response::ok(stream)
@@ -401,7 +305,7 @@ impl w::VoiceService for Api {
         let host = self.0.clone();
         let stream: ServiceStream<w::Transcription> = Box::pin(async_stream::try_stream! {
             let mut buffer = Vec::new();
-            let mut binding = None::<(String, u64, u32)>;
+            let mut binding = None::<(String, u64, u32, bool)>;
             loop {
                 let item = tokio::select! {
                     () = host.shutdown.cancelled() => break,
@@ -413,13 +317,13 @@ impl w::VoiceService for Api {
                     let device = chunk.device_id.clone();
                     let generation = chunk.generation;
                     host.call(move |actor| Box::pin(async move {
-                        actor.active(&device, generation)?;
-                        actor.stop_speech();
+                        let companion = actor.active(&device, generation)?.companion_id.clone();
+                        actor.stop_speech(&companion);
                         Ok(())
                     })).await.map_err(rpc)?;
                 }
                 if !chunk.pcm.is_empty() {
-                    let current = (chunk.device_id.clone(), chunk.generation, chunk.sample_rate);
+                    let current = (chunk.device_id.clone(), chunk.generation, chunk.sample_rate, chunk.diagnostic);
                     if binding.as_ref().is_some_and(|previous| previous != &current) {
                         Err(ConnectError::aborted("audio source changed"))?;
                     }
@@ -429,11 +333,13 @@ impl w::VoiceService for Api {
                     }
                     buffer.extend(&chunk.pcm);
                 }
-                if chunk.commit && let Some((device, generation, rate)) = binding.take() {
-                    if device != chunk.device_id || generation != chunk.generation || chunk.request_key.is_empty() {
+                if chunk.commit && let Some((device, generation, rate, diagnostic)) = binding.take() {
+                    if device != chunk.device_id || generation != chunk.generation || chunk.request_key.is_empty() || diagnostic != chunk.diagnostic {
                         Err(ConnectError::aborted("audio commit does not match its source"))?;
                     }
-                    yield host.transcribe(device, generation, rate, std::mem::take(&mut buffer), chunk.request_key).await.map_err(rpc)?;
+                    yield host.transcribe(crate::voice::AudioCapture {
+                        device, generation, rate, pcm: std::mem::take(&mut buffer), request_key: chunk.request_key, diagnostic,
+                    }).await.map_err(rpc)?;
                 }
             }
         });
@@ -447,11 +353,12 @@ impl w::VoiceService for Api {
     ) -> ServiceResult<ServiceStream<w::AudioOutput>> {
         let request = request.to_owned_message();
         let generation = request.generation;
+        let device_id = request.device_id.clone();
         let host = self.0.clone();
         let mut rx = host
             .call(move |actor| {
                 Box::pin(async move {
-                    actor.active(&request.device_id, generation)?;
+                    actor.require_device(&request.device_id, generation)?;
                     Ok(actor.audio.subscribe())
                 })
             })
@@ -459,13 +366,13 @@ impl w::VoiceService for Api {
             .map_err(rpc)?;
         let stream: ServiceStream<w::AudioOutput> = Box::pin(async_stream::try_stream! {
             while let Some(value) = receive(&host, &mut rx).await? {
-                if value.generation != generation { break; }
-                let stop = value.stop;
-                yield value;
-                if stop {
-                    let active = host.call(move |actor| Box::pin(async move { Ok(actor.activation.generation == generation) })).await.map_err(rpc)?;
-                    if !active { break; }
-                }
+                if generation != 0 && value.generation != generation { continue; }
+                let device = device_id.clone();
+                let binding = value.generation;
+                let active = host.call(move |actor| Box::pin(async move {
+                    Ok(actor.active(&device, binding).is_ok())
+                })).await.map_err(rpc)?;
+                if active { yield value; }
             }
         });
         Response::ok(stream)

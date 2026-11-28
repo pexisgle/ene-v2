@@ -20,8 +20,8 @@ anyhow = "1"
 raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.dependencies]
+ene-platform-os.workspace = true
 bevy = { workspace = true, features = ["bevy_winit", "statically-linked-dxc"] }
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 exwlshellev = "0.20.1"

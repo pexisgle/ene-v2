@@ -1,3 +1,10 @@
+mod dialogue;
+
+pub(crate) use dialogue::policy_tool;
+
+use crate::configuration::ConfigurationCommands as _;
+use crate::device::DeviceCommands as _;
+
 use crate::{
     actor::{Actor, Host, id},
     chat::Dialogue,
@@ -43,7 +50,7 @@ impl Host {
         let run = operation.run.clone();
         let input = self
             .call(move |actor| {
-                Box::pin(async move { actor.gate_input(&companion, &run, &candidate).await })
+                Box::pin(async move { gate_input(actor, &companion, &run, &candidate).await })
             })
             .await?;
         let judged = if input.stage == Gate::Assess {
@@ -121,31 +128,48 @@ impl Host {
     }
 }
 
-impl Actor {
-    async fn gate_input(
-        &self,
-        companion: &str,
-        run: &str,
-        action: &Action,
-    ) -> Result<AssessmentInput> {
-        self.check_operation(companion, run, action)?;
-        let settings = self.settings().await?;
-        let policy = settings.policy.into_option().unwrap_or_default();
-        let stage = evaluate(action, &policy, &settings.rules)?;
-        let assessment = if stage == Gate::Assess {
-            let companion = self.companion(companion).await?;
-            self.selection(&companion, Role::Policy).await.ok()
-        } else {
-            None
-        };
-        Ok(AssessmentInput {
-            stage,
-            models: self.models.clone(),
-            policy,
-            assessment,
-        })
-    }
+pub(crate) trait ApprovalCommands {
+    async fn approval_stage(
+        &mut self,
+        operation: Operation,
+        action: Action,
+        previous: i64,
+        assessed: bool,
+    ) -> Result<(Option<oneshot::Receiver<bool>>, i64)>;
+    async fn answer(&mut self, request: w::ApprovalAnswer) -> Result<w::Empty>;
+    async fn answer_from(
+        &mut self,
+        request: w::ApprovalAnswer,
+        source: &'static str,
+    ) -> Result<w::Empty>;
+    fn check_operation(&self, companion: &str, run: &str, action: &Action) -> Result<()>;
+}
 
+async fn gate_input(
+    actor: &Actor,
+    companion: &str,
+    run: &str,
+    action: &Action,
+) -> Result<AssessmentInput> {
+    actor.check_operation(companion, run, action)?;
+    let settings = actor.settings().await?;
+    let policy = settings.policy.into_option().unwrap_or_default();
+    let stage = evaluate(action, &policy, &settings.rules)?;
+    let assessment = if stage == Gate::Assess {
+        let companion = actor.companion(companion).await?;
+        actor.selection(&companion, Role::Policy).await.ok()
+    } else {
+        None
+    };
+    Ok(AssessmentInput {
+        stage,
+        models: actor.models.clone(),
+        policy,
+        assessment,
+    })
+}
+
+impl ApprovalCommands for Actor {
     async fn approval_stage(
         &mut self,
         operation: Operation,
@@ -221,7 +245,7 @@ impl Actor {
         }
     }
 
-    pub(crate) async fn answer(&mut self, request: w::ApprovalAnswer) -> Result<w::Empty> {
+    async fn answer(&mut self, request: w::ApprovalAnswer) -> Result<w::Empty> {
         self.answer_from(request, "card").await
     }
 
@@ -303,130 +327,7 @@ impl Actor {
         Ok(response)
     }
 
-    pub(crate) async fn policy_tool(
-        &mut self,
-        dialogue: &Dialogue,
-        args: &Map<String, Value>,
-    ) -> Result<String> {
-        let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default();
-        let cards: Vec<_> = self
-            .approvals
-            .values()
-            .filter(|pending| pending.card.companion_id == dialogue.companion)
-            .collect();
-        if text("action") == "list" {
-            return Ok(serde_json::to_string(
-                &cards.iter().map(|card| &card.card).collect::<Vec<_>>(),
-            )?);
-        }
-        let direct = dialogue
-            .direct
-            .as_deref()
-            .ok_or_else(|| denied("approval requires a direct user message"))?;
-        let quote = text("quote").trim();
-        if quote.is_empty() || !direct.contains(quote) {
-            return Err(denied("approval lacks a direct quotation"));
-        }
-        if text("action") == "add_text"
-            && quote == direct.trim()
-            && (quote.starts_with("ポリシーに追加:")
-                || quote.starts_with("Policy:")
-                || quote.trim_end_matches('。').ends_with("していいよ")
-                || quote.trim_end_matches('。').ends_with("して構いません"))
-        {
-            let mut policy = self
-                .settings()
-                .await?
-                .policy
-                .into_option()
-                .unwrap_or_default();
-            let addition = quote
-                .strip_prefix("ポリシーに追加:")
-                .or_else(|| quote.strip_prefix("Policy:"))
-                .unwrap_or(quote);
-            if addition.trim().is_empty() {
-                return Err(invalid("missing policy text"));
-            }
-            let revision = policy.revision;
-            policy.text.push('\n');
-            policy.text.push_str(addition.trim());
-            self.put_policy(w::PolicyChange {
-                mutation: Some(w::Mutation {
-                    request_key: id(),
-                    revision,
-                    ..Default::default()
-                })
-                .into(),
-                policy: Some(policy).into(),
-                ..Default::default()
-            })
-            .await?;
-            let mut db = self.db.acquire().await?;
-            store::audit(&mut db, "policy", "updated", "dialogue").await?;
-            self.emit(Payload::Notice(Box::new(w::Notice {
-                companion_id: dialogue.companion.clone(),
-                text: "自由文ポリシーを更新しました。".into(),
-                ..Default::default()
-            })));
-            return Ok("Policy updated.".into());
-        }
-        let action = text("action");
-        let normalized = direct
-            .trim()
-            .trim_end_matches(['。', '!', '！', '.'])
-            .to_lowercase();
-        let direct_choice = match normalized.as_str() {
-            "承認" | "いいよ" | "いいよ、進めて" | "進めて" | "approve" | "yes" | "go ahead" => {
-                Choice::Allow
-            }
-            "拒否" | "やめて" | "deny" | "no" => Choice::Deny,
-            _ => {
-                let (prefix, target) = normalized
-                    .split_once(' ')
-                    .ok_or_else(|| denied("approval was not explicit"))?;
-                if target != text("id") {
-                    return Err(denied("approval target is ambiguous"));
-                }
-                match prefix {
-                    "approve" | "承認" => Choice::Allow,
-                    "deny" | "拒否" => Choice::Deny,
-                    _ => return Err(denied("approval was not explicit")),
-                }
-            }
-        };
-        if (action == "allow" && direct_choice != Choice::Allow)
-            || (action == "deny" && direct_choice != Choice::Deny)
-            || !matches!(action, "allow" | "deny")
-        {
-            return Err(denied("approval choice differs from direct input"));
-        }
-        let pending = cards
-            .iter()
-            .find(|pending| {
-                pending.card.id == text("id")
-                    && (cards.len() == 1 || normalized.contains(&pending.card.id))
-            })
-            .ok_or_else(|| denied("approval target is ambiguous"))?;
-        self.answer_from(
-            w::ApprovalAnswer {
-                mutation: crate::chat::mutation(),
-                id: pending.card.id.clone(),
-                digest: pending.card.digest.clone(),
-                choice: direct_choice.into(),
-                ..Default::default()
-            },
-            "dialogue",
-        )
-        .await?;
-        Ok("Approval recorded.".into())
-    }
-
-    pub(crate) fn check_operation(
-        &self,
-        companion: &str,
-        run: &str,
-        action: &Action,
-    ) -> Result<()> {
+    fn check_operation(&self, companion: &str, run: &str, action: &Action) -> Result<()> {
         if !run.is_empty()
             && !self.work.values().any(|work| {
                 work.session.companion_id == companion
@@ -439,7 +340,9 @@ impl Actor {
             return Err(denied("work run is no longer active"));
         }
         if let Some((device, generation)) = &action.target().device
-            && (*device != self.activation.device_id || *generation != self.activation.generation)
+            && self
+                .active(device, *generation)
+                .map_or(true, |active| active.companion_id != companion)
         {
             return Err(conflict("device activation changed"));
         }

@@ -1,6 +1,7 @@
 mod access;
 mod api;
 mod auth;
+mod history;
 
 use crate::{actor::Actor, config::HostArgs};
 use anyhow::{Result, ensure};
@@ -22,10 +23,17 @@ pub async fn run(args: HostArgs) -> Result<()> {
     );
     let (state, runtime) = args.paths()?;
     let access = access::Access::acquire(&state, &runtime)?;
+    if args.reset_history {
+        history::request(&state)?;
+    }
+    history::reset_pending(&state).await?;
+    if args.reset_history {
+        return Ok(());
+    }
     for name in ["conversations", "avatars"] {
         std::fs::create_dir_all(state.join(name))?;
     }
-    let (host, actor) = Actor::start(state).await?;
+    let (host, actor) = Actor::start(state.clone()).await?;
     let result = async {
         let listener = tokio::net::TcpListener::bind(args.bind).await?;
         let address = listener.local_addr()?;
@@ -35,8 +43,10 @@ pub async fn run(args: HostArgs) -> Result<()> {
         let shutdown = host.shutdown.clone();
         axum::serve(listener, api::router(host.clone(), guard))
             .with_graceful_shutdown(async move {
-                shutdown_signal().await;
-                shutdown.cancel();
+                tokio::select! {
+                    () = shutdown_signal() => shutdown.cancel(),
+                    () = shutdown.cancelled() => {},
+                }
             })
             .await?;
         Ok(())
@@ -44,6 +54,7 @@ pub async fn run(args: HostArgs) -> Result<()> {
     .await;
     host.shutdown.cancel();
     actor.await?;
+    history::reset_pending(&state).await?;
     result
 }
 

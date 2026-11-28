@@ -6,6 +6,8 @@ use std::{net::SocketAddr, path::PathBuf};
 #[derive(Debug, Parser)]
 #[command(version, about = "Serve the authenticated ene API")]
 pub struct HostArgs {
+    #[arg(long, help = "Clear learned history while the host is stopped")]
+    pub(crate) reset_history: bool,
     #[arg(long, env = "ENE_HOST_STATE_DIR")]
     state_dir: Option<PathBuf>,
     #[arg(long, env = "ENE_HOST_RUNTIME_DIR")]

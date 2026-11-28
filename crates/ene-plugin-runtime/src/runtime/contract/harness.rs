@@ -1,6 +1,6 @@
 //! ACP-shaped harness event validation.
-use crate::plugin_runtime::{Result, limits::MAX_CHUNK};
-use crate::{
+use crate::runtime::{Result, limits::MAX_CHUNK};
+use ene_plugin::{
     ContentBlock, HarnessEvent, PermissionOption, Plan, SessionUpdate, ToolCall, ToolCallContent,
     ToolCallLocation, ToolCallUpdate,
 };
@@ -187,8 +187,8 @@ fn bounded(value: &str, limit: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin_runtime::contract::Events;
-    use crate::{
+    use crate::runtime::contract::Events;
+    use ene_plugin::{
         ContentChunk, HarnessInput, Operation, PermissionOptionKind, StopReason, ToolCall,
         ToolCallLocation, ToolCallStatus, ToolCallUpdateFields, text_block,
     };
@@ -212,7 +212,7 @@ mod tests {
     }
 
     fn accept(events: &mut Events, event: HarnessEvent) -> Result<()> {
-        events.accept(&crate::Event::Harness { event })
+        events.accept(&ene_plugin::Event::Harness { event })
     }
 
     #[test]

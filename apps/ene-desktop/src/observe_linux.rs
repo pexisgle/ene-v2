@@ -1,7 +1,7 @@
 mod protocol;
 
 use self::protocol::{parse_wm_class, wayland_state_is_activated};
-use crate::observe_types::{Observation, ObservedWindow, Window};
+use ene_platform_os::{Observation, ObservedWindow, Window};
 use std::{collections::HashMap, time::Instant};
 use wayland_client::backend::{ObjectId, WaylandError};
 use wayland_client::{

@@ -1,5 +1,5 @@
 //! Portable package paths and identifiers.
-use crate::plugin_runtime::Result;
+use crate::runtime::Result;
 use std::collections::BTreeMap;
 
 /// Portable package paths use forward slashes, never native device paths.

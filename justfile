@@ -33,3 +33,7 @@ run-desktop:
 
 run-avatar:
     cargo run --release --locked -p ene-avatar
+
+[windows]
+run-avatar:
+    set "WGPU_DX12_PRESENTATION_SYSTEM=Visual" && cargo run --release --locked -p ene-avatar

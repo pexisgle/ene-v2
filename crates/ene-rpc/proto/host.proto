@@ -24,7 +24,7 @@ message Snapshot {
   repeated Companion companions = 3;
   repeated Approval approvals = 4;
   repeated Device devices = 5;
-  Activation activation = 6;
+  repeated Activation activations = 6;
   repeated WorkSession work = 7;
 }
 message SubscribeRequest {
@@ -211,6 +211,9 @@ enum ProviderKind {
   PROVIDER_KIND_MCP_HTTP = 2;
   PROVIDER_KIND_MCP_STDIO = 3;
   PROVIDER_KIND_PLUGIN = 4;
+  PROVIDER_KIND_NATIVE = 5;
+  PROVIDER_KIND_VOICEVOX = 6;
+  PROVIDER_KIND_SEARCH = 7;
 }
 message Connection {
   string id = 1;
@@ -227,6 +230,12 @@ message Connection {
   bool enabled = 12;
   optional string credential_env = 13;
   string options_json = 14;
+  McpToolScope mcp_tools = 15;
+  string adapter = 16;
+}
+message McpToolScope {
+  bool all = 1;
+  repeated string names = 2;
 }
 message ModelSelection {
   enum Role {
@@ -266,6 +275,7 @@ message ModelList {
 message ProbeRequest {
   string connection_id = 1;
   ModelSelection model = 2;
+  string voice = 3;
 }
 message Policy {
   int64 revision = 1;
@@ -367,6 +377,7 @@ message AudioInput {
   bool commit = 5;
   bool interrupt = 6;
   string request_key = 7;
+  bool diagnostic = 8;
 }
 message Transcription {
   string text = 1;
@@ -394,6 +405,7 @@ message SpeakRequest {
 message Capability {
   string name = 1;
   string schema_json = 2;
+  string description = 3;
 }
 message Device {
   string id = 1;
@@ -408,10 +420,13 @@ message DeviceChange {
 message ActivationRequest {
   Mutation mutation = 1;
   string device_id = 2;
+  string companion_id = 3;
+  bool only_if_unassigned = 4;
 }
 message Activation {
   string device_id = 1;
   uint64 generation = 2;
+  string companion_id = 3;
 }
 message Perception {
   string device_id = 1;
@@ -421,6 +436,7 @@ message Perception {
 }
 message DeviceOperation {
   string id = 1;
+  string device_id = 7;
   string capability = 2;
   string arguments_json = 3;
   uint64 generation = 4;
@@ -471,10 +487,12 @@ service ChatService {
 
 service SettingsService {
   rpc Get(Empty) returns (Settings);
+  rpc ResetHistory(Empty) returns (Empty);
   rpc PutConnection(ConnectionChange) returns (Connection);
   rpc DeleteConnection(DeleteRequest) returns (Empty);
   rpc SetCredential(CredentialChange) returns (Empty);
   rpc Models(Id) returns (ModelList);
+  rpc McpTools(Id) returns (ModelList);
   rpc Probe(ProbeRequest) returns (Empty);
   rpc PutPolicy(PolicyChange) returns (Policy);
   rpc DeleteRule(DeleteRequest) returns (Empty);

@@ -1,3 +1,8 @@
+use crate::device::DeviceCommands as _;
+use crate::memory::MemoryCommands as _;
+use crate::schedule::ScheduleCommands as _;
+use crate::work::WorkCommands as _;
+
 use crate::{
     error::{ApiError, missing},
     journal::Journal,
@@ -6,6 +11,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use connectrpc::ErrorCode;
+use ene_domain::{ClientId, CompanionId};
 use ene_rpc::{self as w, event::Payload, model_selection::Role};
 use futures_util::future::BoxFuture;
 use sqlx::SqlitePool;
@@ -69,14 +75,13 @@ pub(crate) struct Actor {
     pub reports: VecDeque<(String, String)>,
     pub cursor: w::Cursor,
     pub events: broadcast::Sender<w::Event>,
-    pub activation: w::Activation,
+    pub activations: BTreeMap<CompanionId, w::Activation>,
     pub audio: broadcast::Sender<w::AudioOutput>,
-    pub speech: CancellationToken,
-    pub devices: HashMap<String, w::Device>,
+    pub speech: HashMap<String, CancellationToken>,
+    pub devices: HashMap<ClientId, w::Device>,
     pub device_ops: HashMap<String, crate::device::Dispatch>,
     pub operations: broadcast::Sender<w::DeviceOperation>,
-    pub observation: Option<(String, String)>,
-    pub observation_digest: Option<String>,
+    pub observations: HashMap<String, crate::device::Observation>,
     pub eye_generation: u64,
     pub device_grants: Vec<String>,
 }
@@ -109,17 +114,16 @@ impl Actor {
                 ..Default::default()
             },
             events: broadcast::channel(256).0,
-            activation: w::Activation::default(),
+            activations: BTreeMap::new(),
             audio: broadcast::channel(64).0,
-            speech: shutdown.child_token(),
+            speech: HashMap::new(),
             devices: HashMap::new(),
             device_ops: HashMap::new(),
             operations: broadcast::channel(64).0,
-            observation: None,
-            observation_digest: None,
+            observations: HashMap::new(),
             eye_generation: 0,
             device_grants: std::env::var("ENE_HOST_DEVICE_CAPABILITIES")
-                .unwrap_or_else(|_| "body.motion,body.expression,desktop.input".into())
+                .unwrap_or_else(|_| "body.motion,body.expression,desktop.input,work.read,work.write,work.edit,work.grep,work.find,work.ls".into())
                 .split(',')
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
@@ -198,7 +202,12 @@ impl Actor {
             store::put(&mut tx, "companion", &companion.id, 0, &companion).await?;
             tx.commit().await?;
         }
+        let activations: Vec<w::Activation> = store::list(&mut db, "activation").await?;
         drop(db);
+        for active in activations {
+            self.activations
+                .insert(CompanionId::try_from(active.companion_id.clone())?, active);
+        }
         for companion in companions {
             self.journal(&companion.id).await?;
             self.restore_summary(&companion.id).await?;
@@ -250,6 +259,9 @@ impl Actor {
                 "model role has no provider",
             ))?;
         let connection = self.connection(&selection.connection_id).await?;
+        if !connection.enabled {
+            return Err(ApiError(ErrorCode::FailedPrecondition, "provider disabled").into());
+        }
         Ok((selection, connection))
     }
 
@@ -273,12 +285,15 @@ impl Actor {
                 .values()
                 .filter(|pending| {
                     pending.card.device_id.is_empty()
-                        || pending.card.device_id == self.activation.device_id
+                        || self
+                            .activations
+                            .get(pending.card.companion_id.as_str())
+                            .is_some_and(|active| active.device_id == pending.card.device_id)
                 })
                 .map(|pending| pending.card.clone())
                 .collect(),
             devices: self.devices.values().cloned().collect(),
-            activation: Some(self.activation.clone()).into(),
+            activations: self.activations.values().cloned().collect(),
             work: store::list(&mut db, "work").await?,
             ..Default::default()
         })

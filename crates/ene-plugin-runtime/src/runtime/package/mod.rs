@@ -7,8 +7,8 @@ pub use paths::identifier;
 use paths::{portable_name, relative};
 use read::{Stamp, open_root, read, unchanged};
 
-use crate::plugin_runtime::{Result, limits::MAX_CODE};
-use crate::*;
+use crate::runtime::{Result, limits::MAX_CODE};
+use ene_plugin::*;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -229,7 +229,7 @@ mod tests {
     fn fixture(dir: &Path) {
         directory(dir);
         write_file(&dir.join("main.wasm"), b"return {}");
-        write_file(&dir.join("manifest.json"), serde_json::json!({"contract_version":crate::CONTRACT_VERSION,"id":"sample","name":"Sample","version":"1","entrypoints":[{"id":"behavior","target":"host","file":"main.wasm","provides":["character"]}]}).to_string().as_bytes());
+        write_file(&dir.join("manifest.json"), serde_json::json!({"contract_version":ene_plugin::CONTRACT_VERSION,"id":"sample","name":"Sample","version":"1","entrypoints":[{"id":"behavior","target":"host","file":"main.wasm","provides":["character"]}]}).to_string().as_bytes());
     }
     #[test]
     fn a_provider_serves_any_modality_and_names_them_when_it_serves_several() {
@@ -241,7 +241,7 @@ mod tests {
             write_file(
                 &root.join("manifest.json"),
                 serde_json::json!({
-                    "contract_version": crate::CONTRACT_VERSION,
+                    "contract_version": ene_plugin::CONTRACT_VERSION,
                     "id": "provider", "name": "P", "version": "1",
                     "entrypoints": [{
                         "id": "main", "target": "host", "file": "main.wasm",
@@ -282,7 +282,7 @@ mod tests {
         write_file(
             &root.join("manifest.json"),
             serde_json::json!({
-                "contract_version": crate::CONTRACT_VERSION,
+                "contract_version": ene_plugin::CONTRACT_VERSION,
                 "id": "provider", "name": "P", "version": "1",
                 "entrypoints": [{
                     "id": "main", "target": "host", "file": "main.wasm",
@@ -304,7 +304,7 @@ mod tests {
             write_file(
                 &root.join("manifest.json"),
                 serde_json::json!({
-                    "contract_version": crate::CONTRACT_VERSION,
+                    "contract_version": ene_plugin::CONTRACT_VERSION,
                     "id": "acp", "name": "ACP", "version": "1",
                     "entrypoints": [entry]
                 })
@@ -417,7 +417,7 @@ mod tests {
         for field in ["contract_version", "runtime", "code_files"] {
             let mut manifest = current.clone();
             match field {
-                "contract_version" => manifest[field] = (crate::CONTRACT_VERSION - 1).into(),
+                "contract_version" => manifest[field] = (ene_plugin::CONTRACT_VERSION - 1).into(),
                 "runtime" => manifest["entrypoints"][0][field] = "extism".into(),
                 _ => manifest[field] = serde_json::json!(["main.wasm"]),
             }

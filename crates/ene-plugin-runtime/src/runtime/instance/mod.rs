@@ -6,8 +6,8 @@ mod lifecycle_tests;
 
 pub use invocation::{DenyServices, Services};
 
-use crate::plugin_runtime::{Package, Result, contract::Events, limits::*};
-use crate::*;
+use crate::runtime::{Package, Result, contract::Events, limits::*};
+use ene_plugin::*;
 use invocation::{Cancellation, Invocation, SLOTS, host_functions};
 use json::BoundedJson;
 use parking_lot::Mutex;

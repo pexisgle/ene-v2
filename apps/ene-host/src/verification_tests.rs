@@ -1,3 +1,11 @@
+use crate::approval::ApprovalCommands as _;
+use crate::configuration::ConfigurationCommands as _;
+use crate::device::DeviceCommands as _;
+use crate::memory::MemoryCommands as _;
+use crate::voice::VoiceCapture as _;
+use crate::voice::VoiceCommands as _;
+use crate::work::WorkCommands as _;
+
 use crate::{
     actor::{Actor, Host},
     approval::Operation,
@@ -353,6 +361,7 @@ async fn dialogue_uses_streamed_reply_and_keeps_dynamic_text_out_of_the_journal(
                     .await?;
                 let active = actor
                     .activate(w::ActivationRequest {
+                        companion_id: "ene".into(),
                         mutation: mutation("dialogue-active", 0),
                         device_id: "fixture-desktop".into(),
                         ..Default::default()
@@ -373,7 +382,14 @@ async fn dialogue_uses_streamed_reply_and_keeps_dynamic_text_out_of_the_journal(
         .await?;
     tokio::time::timeout(std::time::Duration::from_secs(4), async {
         while !host
-            .call(|actor| Box::pin(async { Ok(actor.observation.is_some()) }))
+            .call(|actor| {
+                Box::pin(async {
+                    Ok(actor
+                        .observations
+                        .get("ene")
+                        .is_some_and(|current| current.value.is_some()))
+                })
+            })
             .await?
         {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -426,7 +442,12 @@ async fn dialogue_uses_streamed_reply_and_keeps_dynamic_text_out_of_the_journal(
                     ..Default::default()
                 })
                 .await?;
-            assert!(actor.observation.is_none());
+            assert!(
+                actor
+                    .observations
+                    .get("ene")
+                    .is_none_or(|current| current.value.is_none())
+            );
             Ok(())
         })
     })
@@ -495,6 +516,7 @@ async fn screen_capture_reaches_the_work_model_as_a_private_tool_image() -> Resu
             }).into(), ..Default::default()
         }).await?;
         let active = actor.activate(w::ActivationRequest {
+                        companion_id: "ene".into(),
             mutation: mutation("activate", 0), device_id: "test-display".into(), ..Default::default()
         }).await?;
         Ok((actor.events.subscribe(), actor.operations.subscribe(), active.generation))
@@ -678,6 +700,7 @@ async fn voice_provider_transcribes_input_and_streams_pcm_to_the_active_device()
                     .await?;
                 let active = actor
                     .activate(w::ActivationRequest {
+                        companion_id: "ene".into(),
                         mutation: mutation("voice-activate", 0),
                         device_id: "test-audio".into(),
                         ..Default::default()
@@ -688,24 +711,26 @@ async fn voice_provider_transcribes_input_and_streams_pcm_to_the_active_device()
         })
         .await?;
     let input = host
-        .transcribe(
-            "test-audio".into(),
+        .transcribe(crate::voice::AudioCapture {
+            device: "test-audio".into(),
             generation,
-            16_000,
-            vec![1, 0, 2, 0],
-            "test-mic".into(),
-        )
+            rate: 16_000,
+            pcm: vec![1, 0, 2, 0],
+            request_key: "test-mic".into(),
+            diagnostic: false,
+        })
         .await?;
     assert_eq!(input.text, "The microphone fixture");
     assert!(!input.id.is_empty());
     assert!(
-        host.transcribe(
-            "test-audio".into(),
-            generation + 1,
-            16_000,
-            vec![1, 0, 2, 0],
-            "stale-mic".into()
-        )
+        host.transcribe(crate::voice::AudioCapture {
+            device: "test-audio".into(),
+            generation: generation + 1,
+            rate: 16_000,
+            pcm: vec![1, 0, 2, 0],
+            request_key: "stale-mic".into(),
+            diagnostic: false,
+        })
         .await
         .is_err()
     );
@@ -739,3 +764,6 @@ async fn voice_provider_transcribes_input_and_streams_pcm_to_the_active_device()
     fixture.abort();
     Ok(())
 }
+
+#[path = "parity_tests.rs"]
+mod parity;

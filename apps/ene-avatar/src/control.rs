@@ -165,6 +165,7 @@ fn find_target_entity(
         | Command::Expression { character, .. }
         | Command::LipSync { character, .. }
         | Command::LookAt { character, .. }
+        | Command::Resize { character, .. }
         | Command::Place { character, .. } => character.as_str(),
         _ => return None,
     };
@@ -208,6 +209,17 @@ fn apply_command(
             Ok(())
         }
         Command::Center { monitor, .. } => apply_position(world, target, monitor, None),
+        Command::Resize { size_percent, .. } => {
+            anyhow::ensure!(
+                (50.0..=200.0).contains(&size_percent),
+                "invalid avatar scale"
+            );
+            let mut character = world
+                .get_mut::<Character>(target.ok_or_else(|| anyhow::anyhow!("unknown character"))?)
+                .ok_or_else(|| anyhow::anyhow!("unknown character"))?;
+            character.config.size_percent = size_percent;
+            Ok(())
+        }
         Command::Fps { value } => {
             if value > 1000 {
                 return Err(anyhow::anyhow!("FPS must be 0..=1000"));

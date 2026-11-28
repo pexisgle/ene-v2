@@ -1,0 +1,36 @@
+[package]
+name = "ene-plugin-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+ene-plugin.workspace = true
+anyhow = { version = "1" }
+async-task = { version = "4" }
+blocking = { version = "1" }
+cap-fs-ext = { workspace = true }
+cap-std = { workspace = true }
+extism = { version = "1.41.0", default-features = false }
+futures-util = { workspace = true }
+hex = { workspace = true }
+parking_lot = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+wasmtime = { version = "49", default-features = false, features = ["pooling-allocator"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
+wat = "1"

@@ -1,3 +1,8 @@
+mod agent_platform;
+mod response;
+
+pub(crate) use agent_platform::publisher as google_publisher;
+
 use crate::{
     error::{ApiError, invalid},
     plugin_provider::PluginProvider,
@@ -9,20 +14,25 @@ use ene_core::mind::{Prompt, Role};
 use ene_rpc::{Connection, ModelSelection, ProviderKind};
 use futures_util::StreamExt as _;
 use rig_core::{
+    catalog::Catalog,
     completion::{CompletionRequest, CompletionResponse, Message, ToolDefinition},
     error::ProviderError,
     message::{
         DocumentSourceKind, Image, ImageMediaType, StopReason, ToolCall, ToolResultContent,
         UserContent,
     },
-    providers::openai::{OpenAI, OpenAIConfig},
+    providers::{
+        openai::{OpenAI, OpenAIConfig},
+        registry::{ProviderConfig, ProviderId},
+    },
 };
 use std::{future::Future, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub(crate) struct Models {
-    http: reqwest::Client,
+    pub(crate) http: reqwest::Client,
+    voicevox: crate::voicevox::Engine,
     db: sqlx::SqlitePool,
     pub vectors: crate::vectors::Vectors,
 }
@@ -31,20 +41,34 @@ pub(crate) struct Models {
 pub(crate) struct Model {
     pub selection: ModelSelection,
     pub connection: Connection,
-    pub client: OpenAI,
-    pub plugin: Option<PluginProvider>,
+    adapter: Adapter,
+    http: reqwest::Client,
+}
+
+#[derive(Clone)]
+enum Adapter {
+    Compatible(Box<OpenAI>),
+    Native(Box<ProviderConfig>),
+    Plugin {
+        client: Box<OpenAI>,
+        provider: Box<PluginProvider>,
+    },
+    Voicevox(crate::voicevox::Engine),
+    Google(agent_platform::AgentPlatform),
 }
 
 impl Models {
     pub(crate) fn new(db: sqlx::SqlitePool) -> Result<Self> {
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .timeout(Duration::from_secs(90))
+            .build()?;
         Ok(Self {
             db,
             vectors: crate::vectors::Vectors::default(),
-            http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .no_proxy()
-                .timeout(Duration::from_secs(90))
-                .build()?,
+            voicevox: crate::voicevox::Engine::new(http.clone()),
+            http,
         })
     }
 
@@ -112,14 +136,13 @@ impl Models {
         }
         check_endpoint(&connection.endpoint)?;
         let endpoint = connection.endpoint.trim_end_matches('/');
-        let (client, plugin) = match connection.kind.as_known() {
+        let adapter = match connection.kind.as_known() {
             Some(ProviderKind::OpenaiCompatible) => {
                 let secret = self.credential(&connection).await?.unwrap_or_default();
                 let config = OpenAIConfig::new(secret).with_base_url(endpoint);
-                (
+                Adapter::Compatible(Box::new(
                     config.connect(rig_reqwest::ReqwestClient::from(self.http.clone())),
-                    None,
-                )
+                ))
             }
             Some(ProviderKind::Plugin) => {
                 let plugin =
@@ -127,28 +150,60 @@ impl Models {
                 let client = OpenAIConfig::new("plugin")
                     .with_base_url(endpoint)
                     .connect(plugin.clone());
-                (client, Some(plugin))
+                Adapter::Plugin {
+                    client: Box::new(client),
+                    provider: Box::new(plugin),
+                }
             }
+            Some(ProviderKind::Native)
+                if connection.adapter == ene_domain::agent_platform::ADAPTER =>
+            {
+                let secret = self.credential(&connection).await?;
+                Adapter::Google(agent_platform::AgentPlatform::new(
+                    self.http.clone(),
+                    &connection,
+                    secret.as_deref(),
+                )?)
+            }
+            Some(ProviderKind::Native) => {
+                let provider = native_provider(&connection.adapter)?;
+                let secret = self.credential(&connection).await?.unwrap_or_default();
+                let config = provider
+                    .config(secret)
+                    .ok_or_else(|| invalid("unsupported native provider"))?
+                    .with_base_url(endpoint);
+                Adapter::Native(Box::new(config))
+            }
+            Some(ProviderKind::Voicevox) => Adapter::Voicevox(self.voicevox.clone()),
             _ => return Err(invalid("connection cannot serve this model role")),
         };
         Ok(Model {
             selection,
             connection,
-            client,
-            plugin,
+            adapter,
+            http: self.http.clone(),
         })
     }
 }
 
 pub(crate) fn receiver(connection: &Connection) -> Result<String> {
+    let effective_receiver = if connection.kind == ProviderKind::Native
+        && connection.adapter == ene_domain::agent_platform::ADAPTER
+    {
+        Some(google_publisher(connection)?)
+    } else {
+        None
+    };
     store::fingerprint(&(
         &connection.id,
         connection.kind,
+        &connection.adapter,
         &connection.endpoint,
         &connection.plugin_id,
         &connection.entrypoint,
         &connection.command,
         &connection.args,
+        effective_receiver,
     ))
 }
 
@@ -169,11 +224,77 @@ pub(crate) fn check_endpoint(endpoint: &str) -> Result<url::Url> {
     Ok(url)
 }
 
+pub(crate) fn native_provider(adapter: &str) -> Result<ProviderId> {
+    ProviderId::catalog(adapter)
+        .filter(|provider| provider.config("").is_some())
+        .ok_or_else(|| invalid("unknown native provider"))
+}
+
 impl Model {
+    pub(crate) fn openai(&self) -> Result<OpenAI> {
+        match &self.adapter {
+            Adapter::Compatible(client) | Adapter::Plugin { client, .. } => {
+                Ok(client.as_ref().clone())
+            }
+            Adapter::Native(config) => match config.as_ref() {
+                ProviderConfig::OpenAi(config) => Ok(config
+                    .clone()
+                    .connect(rig_reqwest::ReqwestClient::from(self.http.clone()))),
+                _ => Err(invalid("role requires an OpenAI-compatible provider")),
+            },
+            _ => Err(invalid("role requires an OpenAI-compatible provider")),
+        }
+    }
+
+    pub(crate) fn gemini(&self) -> Option<rig_core::providers::gemini::Gemini> {
+        let Adapter::Native(config) = &self.adapter else {
+            return None;
+        };
+        if let ProviderConfig::Gemini(config) = config.as_ref() {
+            return Some(
+                config
+                    .clone()
+                    .connect(rig_reqwest::ReqwestClient::from(self.http.clone())),
+            );
+        }
+        None
+    }
+
+    pub(crate) fn plugin(&self) -> Option<&PluginProvider> {
+        match &self.adapter {
+            Adapter::Plugin { provider, .. } => Some(provider),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn voicevox(&self) -> Option<&crate::voicevox::Engine> {
+        match &self.adapter {
+            Adapter::Voicevox(engine) => Some(engine),
+            _ => None,
+        }
+    }
+
+    fn completion(&self) -> Result<rig_core::DynModel<rig_core::operation::Completion>> {
+        let model = &self.selection.model;
+        match &self.adapter {
+            Adapter::Google(google) => google.completion(model),
+            Adapter::Native(config) => {
+                let provider = native_provider(&self.connection.adapter)?;
+                let http = rig_reqwest::ReqwestClient::from(self.http.clone());
+                let facts = Catalog::builtin().facts(provider, model);
+                Ok(config.completion_model(
+                    model,
+                    rig_core::http_client::DynHttpClient::new(http),
+                    facts,
+                ))
+            }
+            _ => Ok(self.openai()?.chat(model).erase()),
+        }
+    }
+
     pub(crate) async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
         let response = self
-            .client
-            .chat(&self.selection.model)
+            .completion()?
             .call(request)
             .await
             .map_err(provider_error)?;
@@ -196,18 +317,27 @@ impl Model {
     }
 
     pub(crate) async fn models(&self) -> Result<Vec<String>> {
-        if let Some(plugin) = &self.plugin {
+        if let Some(plugin) = self.plugin() {
             return plugin.models().await;
         }
-        Ok(self
-            .client
-            .list_models()
-            .await
-            .map_err(provider_error)?
-            .data
-            .into_iter()
-            .map(|model| model.id)
-            .collect())
+        if let Some(engine) = self.voicevox() {
+            return engine.speakers(&self.connection).await;
+        }
+        if let Adapter::Google(google) = &self.adapter {
+            return google.models().await;
+        }
+        let list = if let Adapter::Native(config) = &self.adapter {
+            let http = rig_reqwest::ReqwestClient::from(self.http.clone());
+            match config.as_ref().clone() {
+                ProviderConfig::OpenAi(config) => config.connect(http).list_models().await,
+                ProviderConfig::Anthropic(config) => config.connect(http).list_models().await,
+                ProviderConfig::Gemini(config) => config.connect(http).list_models().await,
+            }
+        } else {
+            self.openai()?.list_models().await
+        }
+        .map_err(provider_error)?;
+        Ok(list.data.into_iter().map(|model| model.id).collect())
     }
 
     pub(crate) async fn embed(
@@ -215,7 +345,7 @@ impl Model {
         inputs: Vec<String>,
         cancel: &CancellationToken,
     ) -> Result<Vec<Vec<f64>>> {
-        if let Some(plugin) = &self.plugin {
+        if let Some(plugin) = self.plugin() {
             let (value, _) = plugin
                 .invoke(
                     ene_plugin::Operation::Embed {
@@ -237,7 +367,13 @@ impl Model {
                 .map(|vector| vector.into_iter().map(f64::from).collect())
                 .collect());
         }
-        let adapter = self.client.embedding(&self.selection.model, None);
+        let adapter = if let Some(gemini) = self.gemini() {
+            gemini.embedding(&self.selection.model, None).erase()
+        } else {
+            self.openai()?
+                .embedding(&self.selection.model, None)
+                .erase()
+        };
         let vectors = tokio::select! {
             () = cancel.cancelled() => anyhow::bail!("embedding cancelled"),
             reply = adapter.call(inputs) => reply.map_err(provider_error)?,
@@ -254,127 +390,6 @@ impl Model {
             0 => 48_000,
             bytes => (bytes as usize).clamp(4096, 1_048_576),
         }
-    }
-
-    pub(crate) async fn respond<F, O, T>(
-        &self,
-        prompt: Prompt<'_>,
-        tools: Vec<ToolDefinition>,
-        cancel: &CancellationToken,
-        progress: Option<tokio::sync::mpsc::Sender<Option<String>>>,
-        mut invoke: F,
-    ) -> Result<String>
-    where
-        F: FnMut(ToolCall) -> O,
-        O: Future<Output = Result<T>>,
-        T: Into<ToolOutput>,
-    {
-        let tool_bytes = serde_json::to_vec(&tools)?.len();
-        let prompt = prompt.fit(self.budget().saturating_sub(tool_bytes + 2048))?;
-        let mut request = CompletionRequest::new(format!(
-            "[Current context]\n{}\n[Latest input]\n{}",
-            prompt.dynamic, prompt.input
-        ));
-        request.chat_history.splice(
-            0..0,
-            std::iter::once(Message::system(prompt.system))
-                .chain((!prompt.summary.is_empty()).then(|| {
-                    Message::system(format!("Previous conversation summary: {}", prompt.summary))
-                }))
-                .chain(prompt.history.iter().map(|message| match message.role {
-                    Role::User => Message::user(&message.text),
-                    Role::Assistant => Message::assistant(&message.text),
-                    Role::Trigger => Message::user(format!("[Host event] {}", message.text)),
-                }))
-                .map(Arc::new),
-        );
-        request.tools = tools.into_iter().map(Arc::new).collect();
-        request.max_tokens = Some(1024);
-        let mut tool_context = 0;
-        let mut image_message: Option<usize> = None;
-        for _ in 0..12 {
-            let response = tokio::select! {
-                () = cancel.cancelled() => anyhow::bail!("turn cancelled"),
-                response = async {
-                    let Some(progress) = &progress else { return self.complete(request.clone()).await; };
-                    let adapter = self.client.chat(&self.selection.model);
-                    let mut stream = adapter.stream(request.clone()).map_err(provider_error)?;
-                    let mut text = String::new();
-                    while let Some(item) = stream.next().await {
-                        if let rig_core::streaming::Item::Event(rig_core::streaming::StreamEvent::Text { text: delta, .. }) = item.map_err(provider_error)? {
-                            text.push_str(&delta);
-                            if text.len() >= 12 {
-                                let _closed = progress.send(Some(std::mem::take(&mut text))).await;
-                            }
-                        }
-                    }
-                    if !text.is_empty() { let _closed = progress.send(Some(text)).await; }
-                    stream.finish().await.map_err(provider_error)
-                } => response?,
-            };
-            match response.stop() {
-                StopReason::Stop | StopReason::Length => return Ok(response.text()),
-                StopReason::ToolUse => {
-                    if let Some(progress) = &progress {
-                        let _closed = progress.send(None).await;
-                    }
-                    let message = response.message().context("missing tool call message")?;
-                    tool_context += serde_json::to_vec(&message)?.len();
-                    request.chat_history.push(Arc::new(message));
-                    for call in response.tool_calls() {
-                        let output = if request
-                            .tools
-                            .iter()
-                            .any(|tool| tool.name == call.function.name)
-                        {
-                            invoke(call.clone())
-                                .await
-                                .map(Into::into)
-                                .unwrap_or_else(|_| {
-                                    String::from("Operation failed or was refused.").into()
-                                })
-                        } else {
-                            String::from("Tool unavailable for this turn.").into()
-                        };
-                        let text = truncate(&output.text, 12_000);
-                        tool_context += text.len() + 128;
-                        let mut content = vec![ToolResultContent::text(text)];
-                        if let Some(frame) = output.frame {
-                            use base64::Engine as _;
-                            if let Some(index) = image_message.replace(request.chat_history.len())
-                                && let Message::User { content } =
-                                    Arc::make_mut(&mut request.chat_history[index])
-                            {
-                                for part in content {
-                                    if let UserContent::ToolResult(result) = part {
-                                        result.content.retain(|item| {
-                                            !matches!(item, ToolResultContent::Image(_))
-                                        });
-                                    }
-                                }
-                            }
-                            content.push(ToolResultContent::Image(Image {
-                                data: DocumentSourceKind::Base64(
-                                    base64::engine::general_purpose::STANDARD.encode(frame.jpeg),
-                                ),
-                                media_type: Some(ImageMediaType::JPEG),
-                                ..Default::default()
-                            }));
-                        }
-                        request
-                            .chat_history
-                            .push(Arc::new(Message::tool_results(vec![call.result(content)])));
-                    }
-                    ensure!(
-                        tool_context + usize::from(image_message.is_some()) * 8192
-                            <= self.budget() / 2,
-                        "tool outputs exceed context"
-                    );
-                }
-                _ => anyhow::bail!("unhandled completion status"),
-            }
-        }
-        anyhow::bail!("turn exceeded tool-call limit")
     }
 }
 
@@ -393,7 +408,7 @@ pub(crate) fn truncate(text: &str, limit: usize) -> &str {
     &text[..text.floor_char_boundary(text.len().min(limit))]
 }
 
-fn provider_error(error: ProviderError) -> anyhow::Error {
+pub(crate) fn provider_error(error: ProviderError) -> anyhow::Error {
     let status = match error {
         ProviderError::InvalidAuthentication(_) => Some(http::StatusCode::UNAUTHORIZED),
         ProviderError::ProviderResponse(response) => response.status,

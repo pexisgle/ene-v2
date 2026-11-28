@@ -1,8 +1,8 @@
 //! Checks extension semantics independently of the execution backend.
 mod harness;
 
-use crate::plugin_runtime::{Result, limits::MAX_STREAM_EVENTS};
-use crate::*;
+use crate::runtime::{Result, limits::MAX_STREAM_EVENTS};
+use ene_plugin::*;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 enum StreamState {
@@ -64,7 +64,7 @@ impl Events {
                             .map(|(key, value)| key.len().saturating_add(value.len()))
                             .sum::<usize>()
                             > MAX_HTTP_HEADER_BYTES
-                        || chunk.data_base64.len() > crate::plugin_runtime::limits::MAX_CHUNK
+                        || chunk.data_base64.len() > crate::runtime::limits::MAX_CHUNK
                     {
                         return Err(anyhow::anyhow!("invalid_plugin_contract"));
                     }
@@ -100,9 +100,7 @@ impl Events {
                 sample_rate,
                 done,
             } => {
-                if data_base64.len() > crate::plugin_runtime::limits::MAX_CHUNK
-                    || *sample_rate > 192_000
-                {
+                if data_base64.len() > crate::runtime::limits::MAX_CHUNK || *sample_rate > 192_000 {
                     return Err(anyhow::anyhow!("invalid_plugin_contract"));
                 }
                 if *done {
@@ -172,7 +170,7 @@ mod tests {
         assert!(
             events
                 .accept(&Event::Http {
-                    chunk: crate::HttpChunk {
+                    chunk: ene_plugin::HttpChunk {
                         handle: String::new(),
                         status: 200,
                         headers: Default::default(),

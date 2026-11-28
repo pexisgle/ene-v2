@@ -2457,6 +2457,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cap-tempfile"
+version = "4.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "038b3f6a5d4b5641b1bb99d638eb7a22013de84f81c528d8930de06d7383fbd5"
+dependencies = [
+ "cap-std",
+ "rand 0.9.5",
+ "rustix 1.1.6",
+ "rustix-linux-procfs",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "cbc"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3860,13 +3874,13 @@ dependencies = [
  "async-channel",
  "bevy",
  "ene-core",
+ "ene-platform-os",
  "ene-vrm",
  "exwlshellev",
  "raw-window-handle",
  "serde",
  "serde_json",
  "tempfile",
- "windows 0.62.2",
 ]
 
 [[package]]
@@ -3888,25 +3902,40 @@ version = "0.1.8"
 dependencies = [
  "anyhow",
  "ashpd 0.13.13",
+ "base64 0.23.1",
  "buffa",
+ "cap-fs-ext",
+ "cap-std",
+ "cap-tempfile",
  "clap",
  "connectrpc",
  "cpal",
  "directories",
  "embed-resource",
  "ene-core",
+ "ene-domain",
+ "ene-platform-os",
  "ene-plugin",
+ "ene-plugin-runtime",
  "ene-rpc",
  "enigo",
+ "globset",
  "gpui-kit",
+ "hex",
  "image",
  "ksni",
+ "libc",
+ "parking_lot 0.13.0",
  "private-fs",
  "process-wrap",
+ "regex",
  "rustix 1.1.6",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
  "sha2 0.11.2",
+ "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tracing",
@@ -3917,10 +3946,17 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",
- "windows 0.62.2",
  "winit",
  "x11rb 0.14.0",
  "xcap",
+]
+
+[[package]]
+name = "ene-domain"
+version = "0.1.8"
+dependencies = [
+ "serde",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3942,7 +3978,9 @@ dependencies = [
  "croner",
  "directories",
  "ene-core",
+ "ene-domain",
  "ene-plugin",
+ "ene-plugin-runtime",
  "ene-rpc",
  "futures-util",
  "getrandom 0.4.3",
@@ -3956,9 +3994,12 @@ dependencies = [
  "keyring-core",
  "parking_lot 0.13.0",
  "private-fs",
+ "proc-macro2",
  "process-wrap",
+ "regex",
  "reqwest",
  "rig-core",
+ "rig-memory",
  "rig-reqwest",
  "rmcp",
  "serde",
@@ -3967,15 +4008,26 @@ dependencies = [
  "sha2 0.11.2",
  "sqlx",
  "subtle",
+ "syn 2.0.119",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
  "url",
  "uuid",
+ "wav-codec",
  "windows-native-keyring-store",
  "zbus-secret-service-keyring-store",
+]
+
+[[package]]
+name = "ene-platform-os"
+version = "0.1.8"
+dependencies = [
+ "anyhow",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -3983,13 +4035,22 @@ name = "ene-plugin"
 version = "0.1.8"
 dependencies = [
  "agent-client-protocol-schema",
+ "extism-pdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ene-plugin-runtime"
+version = "0.1.8"
+dependencies = [
  "anyhow",
  "async-task",
  "blocking",
  "cap-fs-ext",
  "cap-std",
+ "ene-plugin",
  "extism",
- "extism-pdk",
  "futures-util",
  "hex",
  "parking_lot 0.13.0",
@@ -9827,6 +9888,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -9929,6 +9991,20 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "rig-memory"
+version = "0.47.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a29509f0a89f4f865ecaee6296c8ff48fc39ff23ad0769515f95ea65ca0bb7e"
+dependencies = [
+ "base64 0.23.1",
+ "memchr",
+ "rig-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -12852,6 +12928,12 @@ checksum = "bbc9c5aca783b3f1838be89f3f9937c528b90ec5faa6fb62d809726c16a7d8f7"
 dependencies = [
  "wast 263.0.0",
 ]
+
+[[package]]
+name = "wav-codec"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73c7ca5602a58c74474e2479cacfb5a032757c81e8759551098c42aeec1f027f"
 
 [[package]]
 name = "waycrate_xkbkeycode"

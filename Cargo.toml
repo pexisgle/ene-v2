@@ -4,7 +4,10 @@ members = [
     "apps/ene-desktop",
     "apps/ene-host",
     "crates/ene-core",
+    "crates/ene-domain",
     "crates/ene-plugin",
+    "crates/ene-plugin-runtime",
+    "crates/ene-platform-os",
     "crates/ene-rpc",
     "crates/ene-vrm",
 ]
@@ -33,7 +36,10 @@ clap = { version = "4.6", features = ["derive", "env"] }
 connectrpc = { version = "0.9", default-features = false, features = ["json"] }
 croner = { version = "5", default-features = false, features = ["jiff"] }
 ene-core = { path = "crates/ene-core" }
+ene-domain = { path = "crates/ene-domain" }
+ene-platform-os = { path = "crates/ene-platform-os" }
 ene-plugin = { path = "crates/ene-plugin" }
+ene-plugin-runtime = { path = "crates/ene-plugin-runtime" }
 ene-rpc = { path = "crates/ene-rpc" }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 gpui = { package = "gpui-kit", version = "0.11.0" }
@@ -44,7 +50,7 @@ jiff = "1"
 jsonschema = { version = "0.63", default-features = false, features = ["idna"] }
 parking_lot = "0.13"
 process-wrap = { version = "10.0.2", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop", "creation-flags"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "multipart"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "multipart", "query"] }
 rig-core = { version = "0.47.1", default-features = false }
 rig-reqwest = { version = "0.47.1", features = ["rustls"] }
 rmcp = { version = "3.11.0", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "which-command"] }

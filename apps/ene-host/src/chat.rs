@@ -1,3 +1,11 @@
+use crate::memory::MemoryCommands as _;
+use crate::voice::VoiceCommands as _;
+
+mod dialogue;
+mod tools;
+
+use tools::{dialogue_tools, execute_tool};
+
 use crate::{
     actor::{Actor, Host, Turn, id, now},
     error::{invalid, missing},
@@ -26,6 +34,8 @@ pub(crate) struct Dialogue {
     pub direct: Option<String>,
     pub cancel: CancellationToken,
     grouped: bool,
+    scheduled: bool,
+    deferred: std::sync::atomic::AtomicBool,
 }
 
 struct Conversation {
@@ -44,7 +54,7 @@ impl Actor {
         let mutation = store::key(request.mutation.as_option())?;
         let companion = self.companion(&request.companion_id).await?;
         let hash = store::fingerprint(&("chat", &request))?;
-        self.validate_input(&companion, &request.text)?;
+        Self::validate_input(&request.text)?;
         for journal in self.journals.values() {
             if let Some(id) = journal.receipt(&mutation.request_key, &hash)? {
                 return Ok(w::Receipt {
@@ -77,18 +87,11 @@ impl Actor {
         })
     }
 
-    fn validate_input(&self, companion: &w::Companion, text: &str) -> Result<()> {
-        let configured = companion
-            .models
-            .iter()
-            .find(|model| model.role == model_selection::Role::Dialogue)
-            .map_or(0, |model| model.context_bytes);
-        let limit = if configured == 0 {
-            16_000
-        } else {
-            (configured as usize / 2).clamp(1000, 16_000)
-        };
-        if text.trim().is_empty() || text.len() > limit {
+    fn validate_input(text: &str) -> Result<()> {
+        if text.trim().is_empty()
+            || text.chars().count() > 32_000
+            || rig_memory::estimate_tokens(&[rig_core::completion::Message::user(text)]) > 8_000
+        {
             return Err(invalid("invalid dialogue input size"));
         }
         Ok(())
@@ -120,7 +123,7 @@ impl Actor {
         drop(db);
         self.groups.insert(group.clone(), None);
         for companion in companions {
-            if self.validate_input(&companion, &text).is_err() {
+            if Self::validate_input(&text).is_err() {
                 continue;
             }
             let message = Message {
@@ -169,341 +172,15 @@ impl Actor {
         }
     }
 
-    pub(crate) async fn schedule_event(&mut self, companion_id: &str, text: String) -> Result<()> {
+    pub(crate) async fn schedule_event(
+        &mut self,
+        companion_id: &str,
+        turn_id: String,
+        text: String,
+    ) -> Result<()> {
         let companion = self.companion(companion_id).await?;
-        self.start_dialogue(companion, id(), text, Trigger::Schedule)
+        self.start_dialogue(companion, turn_id, text, Trigger::Schedule)
             .await
-    }
-
-    async fn start_dialogue(
-        &mut self,
-        companion: w::Companion,
-        turn: String,
-        input: String,
-        trigger: Trigger,
-    ) -> Result<()> {
-        self.cancel_turn(&companion.id);
-        let connection = self
-            .selection(&companion, model_selection::Role::Dialogue)
-            .await;
-        let (selection, connection) = match connection {
-            Ok(value) => value,
-            Err(_) => {
-                self.emit(Payload::Notice(Box::new(w::Notice {
-                    companion_id: companion.id.clone(),
-                    text: "対話モデルを設定してください。".into(),
-                    ..Default::default()
-                })));
-                self.turn_state(companion.id, turn, w::Outcome::Failed);
-                return Ok(());
-            }
-        };
-        let mut context = self.conversation(&companion, &turn, input).await?;
-        if trigger == Trigger::Group {
-            context.system.push_str("\n音声は他のコンパニオンにも届いています。自分宛てか、話題と自分の人格から判断してください。自分宛てでなければツールを使わず <silent/> とだけ答えてください。");
-        }
-        let embedding = self
-            .selection(&companion, model_selection::Role::Embedding)
-            .await
-            .ok();
-        let db = self.db.clone();
-        let cancel = self.host.shutdown.child_token();
-        self.turns.insert(
-            companion.id.clone(),
-            Turn {
-                id: turn.clone(),
-                cancel: cancel.clone(),
-            },
-        );
-        self.turn_state(companion.id.clone(), turn.clone(), w::Outcome::Running);
-        let host = self.host.clone();
-        let models = self.models.clone();
-        let dialogue = std::sync::Arc::new(Dialogue {
-            companion: companion.id,
-            turn,
-            direct: matches!(trigger, Trigger::User | Trigger::Group)
-                .then(|| context.input.clone()),
-            cancel,
-            grouped: trigger == Trigger::Group,
-        });
-        self.jobs.spawn(async move {
-            let result = async {
-                if let Some((selection, connection)) = embedding {
-                    let retrieval = async {
-                        let model = models.model(selection, connection).await?;
-                        models
-                            .vectors
-                            .recall(
-                                &db,
-                                &model,
-                                crate::vectors::Recall {
-                                    companion: &dialogue.companion,
-                                    question: &context.input,
-                                    memories: &context.memories,
-                                },
-                                &dialogue.cancel,
-                            )
-                            .await
-                    };
-                    if let Ok(Ok(memories)) =
-                        tokio::time::timeout(std::time::Duration::from_secs(8), retrieval).await
-                    {
-                        let companion = dialogue.companion.clone();
-                        let memories = host
-                            .call(move |actor| {
-                                Box::pin(async move {
-                                    actor.visible_memories(&companion, memories).await
-                                })
-                            })
-                            .await?;
-                        context.memories = memories;
-                        context.dynamic = dynamic(
-                            &context.state,
-                            &context.memories,
-                            context.observation.as_ref(),
-                        )?;
-                    }
-                }
-                let model = models.model(selection, connection).await?;
-                let tools = dialogue_tools(trigger)?;
-                let (output, mut receive) = tokio::sync::mpsc::channel::<Option<String>>(32);
-                let mut combined = String::new();
-                let observed = async {
-                    let mut speech = None::<tokio::sync::mpsc::Sender<String>>;
-                    let mut sentence = String::new();
-                    while let Some(delta) = receive.recv().await {
-                        let cleared = delta.is_none();
-                        if cleared {
-                            combined.clear();
-                            sentence.clear();
-                            speech.take();
-                        }
-                        let text = delta.unwrap_or_default();
-                        let delta = if dialogue.grouped && combined.len() < 9 {
-                            combined.push_str(&text);
-                            if !cleared && "<silent/>".starts_with(combined.trim()) {
-                                continue;
-                            }
-                            combined.clone()
-                        } else {
-                            text
-                        };
-                        sentence.push_str(&delta);
-                        let boundary =
-                            sentence
-                                .rfind(['。', '！', '？', '.', '!', '?', '\n'])
-                                .map(|offset| {
-                                    offset
-                                        + sentence[offset..]
-                                            .chars()
-                                            .next()
-                                            .map_or(0, char::len_utf8)
-                                });
-                        let request_speech = !cleared && speech.is_none() && boundary.is_some();
-                        let dialogue = dialogue.clone();
-                        let result = host
-                            .call(move |actor| {
-                                Box::pin(async move {
-                                    if !actor
-                                        .turns
-                                        .get(&dialogue.companion)
-                                        .is_some_and(|turn| turn.id == dialogue.turn)
-                                        || (!cleared && !actor.claim(&dialogue))
-                                    {
-                                        return Ok((false, None));
-                                    }
-                                    actor.emit(Payload::Delta(Box::new(w::TextDelta {
-                                        companion_id: dialogue.companion.clone(),
-                                        turn_id: dialogue.turn.clone(),
-                                        text: delta,
-                                        reset: cleared,
-                                        ..Default::default()
-                                    })));
-                                    let queue = if request_speech {
-                                        actor.speech_queue(&dialogue.companion).await?
-                                    } else {
-                                        None
-                                    };
-                                    Ok((true, queue))
-                                })
-                            })
-                            .await;
-                        let Ok((true, queue)) = result else {
-                            break;
-                        };
-                        if queue.is_some() {
-                            speech = queue;
-                        }
-                        if let (Some(queue), Some(boundary)) = (&speech, boundary) {
-                            let text = sentence.drain(..boundary).collect::<String>();
-                            if queue.send(text).await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    (speech, sentence)
-                };
-                let generation = model.respond(
-                    context.prompt(),
-                    tools,
-                    &dialogue.cancel,
-                    Some(output),
-                    |call| execute_tool(host.clone(), dialogue.clone(), call),
-                );
-                let (text, (speech, sentence)) = tokio::join!(generation, observed);
-                let text = text?;
-                let streamed = speech.is_some();
-                if let Some(queue) = speech
-                    && !sentence.trim().is_empty()
-                {
-                    let _closed = queue.send(sentence).await;
-                }
-                Ok((text, streamed))
-            }
-            .await;
-            let _closed = host
-                .call(move |actor| {
-                    Box::pin(async move {
-                        actor
-                            .finish_dialogue(&dialogue, context.memories, result)
-                            .await
-                    })
-                })
-                .await;
-        });
-        Ok(())
-    }
-
-    async fn conversation(
-        &mut self,
-        companion: &w::Companion,
-        turn: &str,
-        input: String,
-    ) -> Result<Conversation> {
-        let character = {
-            let mut db = self.db.acquire().await?;
-            store::get::<w::Character>(&mut db, "character", &companion.character_id)
-                .await?
-                .ok_or_else(|| missing("character not found"))?
-        };
-        let mut mind = self.mind(&companion.id).await?;
-        if now().saturating_sub(mind.observed_at) >= 21600 {
-            mind.emotion.clear();
-        }
-        let memories = self.recall(&companion.id, &input).await?;
-        let observation = self.observation.clone();
-        let dynamic = dynamic(&mind, &memories, observation.as_ref())?;
-        self.restore_summary(&companion.id).await?;
-        let journal = self.journal(&companion.id).await?;
-        let summary = journal
-            .summary
-            .as_ref()
-            .map_or("", |summary| summary.text.as_str());
-        let start = journal
-            .summary
-            .as_ref()
-            .map_or(0, |summary| summary.through as usize);
-        let history = &journal.entries[start..];
-        let history = if history.last().is_some_and(|last| last.turn_id == turn) {
-            &history[..history.len() - 1]
-        } else {
-            history
-        };
-        Ok(Conversation {
-            system: format!(
-                "{SYSTEM}\nコンパニオン名: {}\n人格設定: {}",
-                companion.name,
-                serde_json::to_string(&character.profile)?
-            ),
-            summary: summary.into(),
-            history: history.to_vec(),
-            dynamic,
-            state: mind,
-            observation,
-            input,
-            memories,
-        })
-    }
-
-    async fn finish_dialogue(
-        &mut self,
-        dialogue: &Dialogue,
-        memories: Vec<w::Memory>,
-        result: Result<(String, bool)>,
-    ) -> Result<()> {
-        if !self
-            .turns
-            .get(&dialogue.companion)
-            .is_some_and(|turn| turn.id == dialogue.turn)
-        {
-            return Ok(());
-        }
-        let outcome = match result {
-            Ok((text, streamed)) => {
-                if !memories.is_empty() {
-                    self.journal(&dialogue.companion)
-                        .await?
-                        .append(Record::Injection {
-                            turn_id: dialogue.turn.clone(),
-                            memories: memories
-                                .into_iter()
-                                .map(|memory| (memory.id, memory.revision))
-                                .collect(),
-                        })
-                        .await?;
-                }
-                if !text.trim().is_empty() && text.trim() != "<silent/>" && self.claim(dialogue) {
-                    if dialogue.direct.is_none() {
-                        self.append_message(
-                            &dialogue.companion,
-                            Message {
-                                id: id(),
-                                turn_id: dialogue.turn.clone(),
-                                role: Role::Trigger,
-                                text: "ホストからの通知".into(),
-                                time: now(),
-                            },
-                            None,
-                        )
-                        .await?;
-                    }
-                    self.append_message(
-                        &dialogue.companion,
-                        Message {
-                            id: id(),
-                            turn_id: dialogue.turn.clone(),
-                            role: Role::Assistant,
-                            text: text.clone(),
-                            time: now(),
-                        },
-                        None,
-                    )
-                    .await?;
-                    if !streamed {
-                        self.speak_if_configured(&dialogue.companion, text).await?;
-                    }
-                }
-                w::Outcome::Completed
-            }
-            Err(error) => {
-                let message = error
-                    .downcast_ref::<crate::error::ApiError>()
-                    .map_or("応答を生成できませんでした。", |error| {
-                        error.1
-                    });
-                self.emit(Payload::Notice(Box::new(w::Notice {
-                    companion_id: dialogue.companion.clone(),
-                    text: message.into(),
-                    ..Default::default()
-                })));
-                w::Outcome::Failed
-            }
-        };
-        self.turns.remove(&dialogue.companion);
-        self.clean_group(&dialogue.turn);
-        self.turn_state(dialogue.companion.clone(), dialogue.turn.clone(), outcome);
-        self.maybe_reflect(&dialogue.companion).await?;
-        Ok(())
     }
 
     pub(crate) async fn stop_chat(&mut self, request: w::StopRequest) -> Result<w::Empty> {
@@ -514,7 +191,7 @@ impl Actor {
             return Ok(replayed);
         }
         self.cancel_turn(&request.id);
-        self.stop_speech();
+        self.stop_speech(&request.id);
         let reply = w::Empty::default();
         store::acknowledge(&mut tx, &mutation.request_key, &hash, &reply).await?;
         tx.commit().await?;
@@ -697,31 +374,6 @@ async fn reflect(
     Ok(serde_json::from_str(&text)?)
 }
 
-impl Conversation {
-    fn prompt(&self) -> Prompt<'_> {
-        Prompt {
-            system: &self.system,
-            summary: &self.summary,
-            history: &self.history,
-            dynamic: &self.dynamic,
-            input: &self.input,
-        }
-    }
-}
-
-fn dynamic(
-    mind: &w::Mind,
-    memories: &[w::Memory],
-    observation: Option<&(String, String)>,
-) -> Result<String> {
-    Ok(serde_json::to_string(&json!({
-        "time": jiff::ZonedDateTime::now().to_string(),
-        "mind": mind,
-        "perception": observation.map(|(fact, interpretation)| json!({"observation": fact, "interpretation": interpretation})),
-        "memories": memories.iter().map(|memory| json!({"id": memory.id, "text": truncate(&memory.text, 550)})).collect::<Vec<_>>(),
-    }))?)
-}
-
 fn wire_message(companion: &str, message: &Message, index: usize) -> w::Message {
     let role = match message.role {
         Role::User => w::message::Role::User,
@@ -746,154 +398,6 @@ enum Trigger {
     Group,
     Event,
     Schedule,
-}
-
-fn dialogue_tools(trigger: Trigger) -> Result<Vec<ToolDefinition>> {
-    [
-        ("work", "List delegated work, start or update it, or stop a session", json!({"action":{"enum":["list","start","update","stop"]},"session":{"type":"string"},"instruction":{"type":"string"}})),
-        ("schedule", "Create, list or delete once-only and cron schedules", json!({"action":{"enum":["create","list","delete"]},"id":{"type":"string"},"instruction":{"type":"string"},"at":{"type":"string"},"cron":{"type":"string"},"zone":{"type":"string"}})),
-        ("memory", "Search, remember, correct, forget, share or erase memories", json!({"action":{"enum":["search","remember","correct","forget","share","erase"]},"id":{"type":"string"},"revision":{"type":"integer"},"text":{"type":"string"},"importance":{"type":"integer","minimum":0,"maximum":10},"shared":{"type":"boolean"}})),
-        ("policy", "List pending cards or resolve a directly stated approval. Include exact words from the latest user input.", json!({"action":{"enum":["list","allow","deny","add_text"]},"id":{"type":"string"},"quote":{"type":"string"},"text":{"type":"string"}})),
-        ("body", "Request a gesture or expression for this companion", json!({"capability":{"enum":["body.motion","body.expression"]},"name":{"type":"string"}})),
-    ].into_iter().filter(|(name, _, _)| {
-        match trigger {
-            Trigger::Event => *name == "body",
-            Trigger::Schedule => matches!(*name, "work" | "body"),
-            _ => true,
-        }
-    }).map(|(name, description, properties)| Ok(ToolDefinition::new(
-        ToolName::new(name)?, description, json!({"type":"object","properties":properties,"additionalProperties":false}),
-    ))).collect()
-}
-
-async fn execute_tool(
-    host: Host,
-    dialogue: std::sync::Arc<Dialogue>,
-    call: ToolCall,
-) -> Result<String> {
-    let input = call.function.arguments;
-    let name = call.function.name;
-    host.call(move |actor| {
-        Box::pin(async move {
-            if dialogue.cancel.is_cancelled()
-                || !actor
-                    .turns
-                    .get(&dialogue.companion)
-                    .is_some_and(|turn| turn.id == dialogue.turn)
-            {
-                return Err(invalid("dialogue turn is no longer active"));
-            }
-            let text = |key: &str| input.get(key).and_then(Value::as_str).unwrap_or_default();
-            if matches!(name.as_str(), "work" | "policy" | "schedule" | "memory")
-                && !actor.claim(&dialogue)
-            {
-                return Err(invalid("another companion owns this utterance"));
-            }
-            match name.as_str() {
-            "work" if text("action") == "list" => {
-                let mut db = actor.db.acquire().await?;
-                let sessions = store::list::<w::WorkSession>(&mut db, "work").await?;
-                let summary: Vec<_> = sessions.into_iter().filter(|work| work.companion_id == dialogue.companion)
-                    .rev().take(20).map(|work| {
-                        let recent = work.runs.last().map(|run| json!({
-                            "run": run.id, "outcome": run.outcome, "instruction": truncate(&run.instruction, 500),
-                            "report": truncate(&run.report, 500)
-                        }));
-                        json!({"session": work.id, "recent": recent})
-                    }).collect();
-                Ok(serde_json::to_string(&summary)?)
-            }
-                "work" if text("action") == "stop" => {
-                    actor
-                        .stop_session(text("session"), Some(&dialogue.companion))
-                        .await?;
-                    Ok("Work stopped.".into())
-                }
-                "work" => {
-                    let receipt = actor
-                        .send_work(w::WorkInput {
-                            mutation: mutation(),
-                            companion_id: dialogue.companion.clone(),
-                            session_id: text("session").into(),
-                            instruction: text("instruction").into(),
-                            ..Default::default()
-                        })
-                        .await?;
-                    Ok(serde_json::to_string(&receipt)?)
-                }
-                "schedule" => actor.schedule_tool(&dialogue.companion, &input).await,
-                "memory" => {
-                    let query = text("text");
-                    if text("action") == "search" {
-                        return Ok(serde_json::to_string(
-                            &actor
-                                .search_memories(w::MemoryQuery {
-                                    companion_id: dialogue.companion.clone(),
-                                    query: query.into(),
-                                    limit: 10,
-                                    ..Default::default()
-                                })
-                                .await?,
-                        )?);
-                    }
-                    let operation = match text("action") {
-                        "remember" => w::memory_change::Operation::Remember,
-                        "correct" => w::memory_change::Operation::Correct,
-                        "forget" => w::memory_change::Operation::Forget,
-                        "share" => w::memory_change::Operation::Share,
-                        "erase" => w::memory_change::Operation::Erase,
-                        _ => return Err(invalid("invalid memory action")),
-                    };
-                    if dialogue.direct.is_none() {
-                        return Err(invalid("memory changes require user dialogue"));
-                    }
-                    let memory = w::Memory {
-                        id: text("id").into(),
-                        companion_id: dialogue.companion.clone(),
-                        text: query.into(),
-                        provenance: format!("dialogue:{}", dialogue.turn),
-                        importance: input
-                            .get("importance")
-                            .and_then(Value::as_u64)
-                            .and_then(|value| u32::try_from(value).ok())
-                            .unwrap_or(5),
-                        shared: input
-                            .get("shared")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
-                        ..Default::default()
-                    };
-                    Ok(serde_json::to_string(
-                        &actor
-                            .change_memory(w::MemoryChange {
-                                operation: operation.into(),
-                                memory: Some(memory).into(),
-                                mutation: Some(w::Mutation {
-                                    request_key: id(),
-                                    revision: input
-                                        .get("revision")
-                                        .and_then(Value::as_i64)
-                                        .unwrap_or(0),
-                                    ..Default::default()
-                                })
-                                .into(),
-                                ..Default::default()
-                            })
-                            .await?,
-                    )?)
-                }
-                "policy" => actor.policy_tool(&dialogue, &input).await,
-                "body" => {
-                    actor
-                        .gesture(&dialogue.companion, text("capability"), text("name"))
-                        .await?;
-                    Ok("Gesture queued.".into())
-                }
-                _ => Err(invalid("unknown dialogue tool")),
-            }
-        })
-    })
-    .await
 }
 
 pub(crate) fn mutation() -> buffa::MessageField<w::Mutation, buffa::Inline<w::Mutation>> {

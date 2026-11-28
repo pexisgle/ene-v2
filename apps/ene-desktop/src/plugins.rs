@@ -2,10 +2,10 @@ use anyhow::{Result, ensure};
 use ene_core::avatar::Command;
 use ene_plugin::{
     CharacterAction, CharacterEvent, CharacterTarget, Event, Extension, Operation, Target,
-    plugin_runtime::{
-        Package,
-        instance::{DenyServices, Instance},
-    },
+};
+use ene_plugin_runtime::{
+    Package,
+    instance::{DenyServices, Instance},
 };
 use ene_rpc::{Capability, DeviceOperation};
 use serde_json::{Value, json};

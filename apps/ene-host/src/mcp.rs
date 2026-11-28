@@ -16,6 +16,31 @@ use rmcp::{
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+pub(crate) fn permits(connection: &Connection, name: &str) -> bool {
+    connection
+        .mcp_tools
+        .as_option()
+        .is_some_and(|scope| scope.all || scope.names.iter().any(|allowed| allowed == name))
+}
+
+pub(crate) fn validate_scope(connection: &Connection) -> Result<()> {
+    if let Some(scope) = connection.mcp_tools.as_option() {
+        ensure!(
+            !scope.all || scope.names.is_empty(),
+            "a tool scope must select all or list tools"
+        );
+        ensure!(
+            scope.names.len() <= 256
+                && scope
+                    .names
+                    .iter()
+                    .all(|name| !name.trim().is_empty() && name.len() <= 256),
+            "invalid MCP tool names"
+        );
+    }
+    Ok(())
+}
+
 pub(crate) struct Mcp {
     pub connection: Connection,
     pub service: RunningService<RoleClient, ()>,
@@ -81,5 +106,32 @@ impl Mcp {
             tool.name.as_ref(),
             &tool.input_schema,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_explicitly_selected_mcp_tools_are_exposed() {
+        let mut connection = Connection::default();
+        assert!(!permits(&connection, "read"));
+        connection.mcp_tools = Some(ene_rpc::McpToolScope {
+            names: vec!["read".into()],
+            ..Default::default()
+        })
+        .into();
+        assert!(validate_scope(&connection).is_ok());
+        assert!(permits(&connection, "read"));
+        assert!(!permits(&connection, "write"));
+        let mut scope = connection.mcp_tools.as_option().expect("scope").clone();
+        scope.all = true;
+        connection.mcp_tools = Some(scope.clone()).into();
+        assert!(validate_scope(&connection).is_err());
+        scope.names.clear();
+        connection.mcp_tools = Some(scope).into();
+        assert!(validate_scope(&connection).is_ok());
+        assert!(permits(&connection, "write"));
     }
 }

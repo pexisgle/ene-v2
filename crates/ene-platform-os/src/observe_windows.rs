@@ -2,9 +2,7 @@
 //!
 //! Exposes plain data only; no handle or pointer crosses this boundary.
 
-#![cfg(windows)]
-
-use crate::observe_types::{Observation, ObservedWindow, Window};
+use crate::{Observation, ObservedWindow, Window};
 use windows::Win32::{
     Foundation::{HWND, MAX_PATH},
     System::Threading::{
@@ -18,7 +16,7 @@ use windows::Win32::{
 };
 
 pub fn observe() -> Observation {
-    if !crate::computer::unlocked() {
+    if crate::windows::unlocked().is_err() {
         return Observation::default();
     }
     Observation {

@@ -47,7 +47,9 @@ impl Playback {
 
     pub(crate) fn push(&mut self, packet: AudioOutput) -> Result<()> {
         if packet.stop {
-            self.clear();
+            if packet.companion_id.is_empty() || packet.companion_id == self.companion {
+                self.clear();
+            }
             return Ok(());
         }
         if self.utterance != packet.utterance_id {
@@ -154,17 +156,26 @@ pub(crate) struct Capture {
     _stream: cpal::Stream,
     pub held: Signal,
     pub automatic: Signal,
+    pub diagnostic: Signal,
+    meter: Arc<AtomicU32>,
     segments: Arc<Mutex<VecDeque<Segment>>>,
 }
 
 pub(crate) enum Segment {
-    Start,
-    Audio { pcm: Vec<u8>, rate: u32 },
+    Start {
+        diagnostic: bool,
+    },
+    Audio {
+        pcm: Vec<u8>,
+        rate: u32,
+        diagnostic: bool,
+    },
 }
 
 struct Recorder {
     pcm: Vec<u8>,
     quiet: usize,
+    diagnostic: bool,
 }
 
 impl Capture {
@@ -177,7 +188,15 @@ impl Capture {
         let held = Arc::new(AtomicBool::new(false));
         let automatic = Arc::new(AtomicBool::new(false));
         let segments = Arc::new(Mutex::new(VecDeque::new()));
-        let make = (held.clone(), automatic.clone(), segments.clone());
+        let diagnostic = Arc::new(AtomicBool::new(false));
+        let meter = Arc::new(AtomicU32::new(0));
+        let make = CaptureSignals {
+            held: held.clone(),
+            automatic: automatic.clone(),
+            segments: segments.clone(),
+            diagnostic: diagnostic.clone(),
+            meter: meter.clone(),
+        };
         let stream = match format.sample_format() {
             SampleFormat::F32 => input::<f32>(&device, &config, make),
             SampleFormat::I16 => input::<i16>(&device, &config, make),
@@ -189,8 +208,14 @@ impl Capture {
             _stream: stream,
             held,
             automatic,
+            diagnostic,
+            meter,
             segments,
         })
+    }
+
+    pub(crate) fn level(&self) -> u32 {
+        self.meter.load(Ordering::Relaxed)
     }
 
     pub(crate) fn take(&self) -> Vec<Segment> {
@@ -201,32 +226,51 @@ impl Capture {
     }
 }
 
+struct CaptureSignals {
+    held: Signal,
+    automatic: Signal,
+    diagnostic: Signal,
+    meter: Arc<AtomicU32>,
+    segments: Arc<Mutex<VecDeque<Segment>>>,
+}
+
 fn input<T: SizedSample>(
     device: &cpal::Device,
     config: &StreamConfig,
-    signals: (Signal, Signal, Arc<Mutex<VecDeque<Segment>>>),
+    signals: CaptureSignals,
 ) -> Result<cpal::Stream, cpal::Error>
 where
     f32: FromSample<T>,
 {
-    let (held, automatic, segments) = signals;
+    let CaptureSignals {
+        held,
+        automatic,
+        diagnostic,
+        meter,
+        segments,
+    } = signals;
     let channels = usize::from(config.channels);
     let rate = config.sample_rate;
     let mut recorder = Recorder {
         pcm: Vec::new(),
         quiet: 0,
+        diagnostic: false,
     };
     device.build_input_stream(
         *config,
         move |buffer: &[T], _| {
             let frames = buffer.chunks_exact(channels);
-            let voice = frames
+            let level = frames
                 .clone()
                 .take(1024)
                 .map(|frame| frame[0].to_sample::<f32>().abs())
                 .sum::<f32>()
-                / frames.len().clamp(1, 1024) as f32
-                > 0.015;
+                / frames.len().clamp(1, 1024) as f32;
+            meter.store(
+                (level.clamp(0., 1.) * 100.).round() as u32,
+                Ordering::Relaxed,
+            );
+            let voice = level > 0.015;
             let auto = automatic.load(Ordering::Relaxed);
             let manual = held.load(Ordering::Relaxed);
             if !manual && !auto && recorder.pcm.is_empty() {
@@ -244,7 +288,10 @@ where
                 if recorder.pcm.is_empty()
                     && let Ok(mut queue) = segments.lock()
                 {
-                    queue.push_back(Segment::Start);
+                    recorder.diagnostic = diagnostic.load(Ordering::Relaxed);
+                    queue.push_back(Segment::Start {
+                        diagnostic: recorder.diagnostic,
+                    });
                 }
                 for frame in frames {
                     let sample = frame
@@ -264,7 +311,11 @@ where
                     if queue.len() > 8 {
                         queue.pop_front();
                     }
-                    queue.push_back(Segment::Audio { pcm, rate });
+                    queue.push_back(Segment::Audio {
+                        pcm,
+                        rate,
+                        diagnostic: recorder.diagnostic,
+                    });
                 }
             }
         },

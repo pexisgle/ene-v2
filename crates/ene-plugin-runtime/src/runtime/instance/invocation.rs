@@ -1,7 +1,7 @@
 //! Host functions and per-invocation budgets shared by all instances.
 use super::json::{self, BoundedJson};
-use crate::plugin_runtime::{contract::Events, limits::*};
-use crate::*;
+use crate::runtime::{contract::Events, limits::*};
+use ene_plugin::*;
 use extism::convert::FromBytesOwned;
 use futures_util::future::BoxFuture;
 use parking_lot::Mutex;
@@ -99,7 +99,7 @@ pub(super) struct Invocation {
     pub(super) cancel: CancellationToken,
     pub(super) callbacks: mpsc::Sender<Callback>,
 }
-type ServiceResult = crate::plugin_runtime::Result<std::result::Result<Value, Failure>>;
+type ServiceResult = crate::runtime::Result<std::result::Result<Value, Failure>>;
 
 // Extism's callbacks run synchronously on the native worker. At most one
 // request is outstanding, and dropping the invocation closes its response.
@@ -111,7 +111,7 @@ pub(super) enum Callback {
     ),
     Emit(
         Box<Event>,
-        oneshot::Sender<crate::plugin_runtime::Result<()>>,
+        oneshot::Sender<crate::runtime::Result<()>>,
         tracing::Span,
     ),
 }
@@ -134,11 +134,8 @@ impl Invocation {
 
     fn request<T>(
         &self,
-        callback: impl FnOnce(
-            oneshot::Sender<crate::plugin_runtime::Result<T>>,
-            tracing::Span,
-        ) -> Callback,
-    ) -> crate::plugin_runtime::Result<T> {
+        callback: impl FnOnce(oneshot::Sender<crate::runtime::Result<T>>, tracing::Span) -> Callback,
+    ) -> crate::runtime::Result<T> {
         let (reply, response) = oneshot::channel();
         self.callbacks
             .try_send(callback(reply, tracing::Span::current()))
@@ -167,12 +164,12 @@ impl Invocation {
     }
 
     #[tracing::instrument(name = "wasm.host_emit", skip_all)]
-    fn emit(&self, event: Event) -> crate::plugin_runtime::Result<()> {
+    fn emit(&self, event: Event) -> crate::runtime::Result<()> {
         self.validator.lock().accept(&event)?;
         self.request(|reply, span| Callback::Emit(Box::new(event), reply, span))
     }
 
-    async fn send_event(&self, event: Event) -> crate::plugin_runtime::Result<()> {
+    async fn send_event(&self, event: Event) -> crate::runtime::Result<()> {
         self.services.check().await?;
         self.events
             .send(event)
@@ -185,7 +182,7 @@ impl Invocation {
         total: &AtomicUsize,
         bytes: usize,
         limit: usize,
-    ) -> crate::plugin_runtime::Result<()> {
+    ) -> crate::runtime::Result<()> {
         let total = total
             .fetch_add(bytes, Ordering::Relaxed)
             .checked_add(bytes)

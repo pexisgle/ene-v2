@@ -1,4 +1,4 @@
-use crate::plugin_runtime::Result;
+use crate::runtime::Result;
 use extism::convert::{FromBytesOwned, Json, ToBytes};
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -33,7 +33,7 @@ pub(super) fn encode<T: Serialize, const LIMIT: usize>(value: T) -> Result<Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin_runtime::limits::{MAX_CHUNK, MAX_MESSAGE_BYTES};
+    use crate::runtime::limits::{MAX_CHUNK, MAX_MESSAGE_BYTES};
     use serde_json::{Value, json};
 
     fn decode<const LIMIT: usize>(raw: &[u8]) -> Result<Value> {
@@ -94,17 +94,20 @@ mod tests {
 
     #[test]
     fn typed_documents_and_service_failures_keep_their_contract() {
-        assert!(BoundedJson::<crate::LlmCapabilities, MAX_CHUNK>::from_bytes_owned(b"{}").is_err());
         assert!(
-            BoundedJson::<crate::EmbeddingResult, MAX_CHUNK>::from_bytes_owned(
+            BoundedJson::<ene_plugin::LlmCapabilities, MAX_CHUNK>::from_bytes_owned(b"{}").is_err()
+        );
+        assert!(
+            BoundedJson::<ene_plugin::EmbeddingResult, MAX_CHUNK>::from_bytes_owned(
                 b"{\"vectors\":[[1.0]]}"
             )
             .is_ok()
         );
-        let reply: std::result::Result<Value, crate::Failure> = Err(crate::Failure::new("denied"));
+        let reply: std::result::Result<Value, ene_plugin::Failure> =
+            Err(ene_plugin::Failure::new("denied"));
         let bytes = encode::<_, MAX_CHUNK>(reply).unwrap();
         let reply =
-            BoundedJson::<std::result::Result<Value, crate::Failure>, MAX_CHUNK>::from_bytes_owned(
+            BoundedJson::<std::result::Result<Value, ene_plugin::Failure>, MAX_CHUNK>::from_bytes_owned(
                 &bytes,
             )
             .unwrap()

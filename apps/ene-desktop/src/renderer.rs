@@ -37,6 +37,9 @@ impl Renderer {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .env(ene_core::avatar::LAYOUT_FILE_ENV, layout);
+        // The DX12 visual swapchain preserves transparency on the desktop.
+        #[cfg(windows)]
+        command.env("WGPU_DX12_PRESENTATION_SYSTEM", "Visual");
         let mut command = CommandWrap::from(command);
         #[cfg(unix)]
         command.wrap(process_wrap::tokio::ProcessGroup::leader());
@@ -139,6 +142,7 @@ impl Renderer {
         installed: &mut HashMap<String, String>,
         assets: &Path,
         local: bool,
+        avatar_scale: f32,
     ) -> Result<()> {
         let mut live = HashSet::new();
         for companion in &snapshot.companions {
@@ -176,6 +180,7 @@ impl Renderer {
             let config = CharacterConfig {
                 model: model.clone(),
                 motion,
+                size_percent: avatar_scale,
                 ..Default::default()
             };
             let id = companion.id.clone();

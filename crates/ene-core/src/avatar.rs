@@ -116,6 +116,10 @@ pub enum Command {
         character: String,
         rms: f32,
     },
+    Resize {
+        character: String,
+        size_percent: f32,
+    },
     /// Sets or clears direct gaze angles in degrees (`None` returns gaze to animation/neutral).
     LookAt {
         character: String,

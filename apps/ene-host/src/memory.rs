@@ -70,8 +70,27 @@ async fn search(
     .fetch_all(db).await?)
 }
 
-impl Actor {
-    pub(crate) async fn mind(&self, companion: &str) -> Result<w::Mind> {
+pub(crate) trait MemoryCommands {
+    async fn mind(&self, companion: &str) -> Result<w::Mind>;
+    async fn put_mind(&mut self, request: w::MindChange) -> Result<w::Mind>;
+    async fn search_memories(&self, request: w::MemoryQuery) -> Result<w::Memories>;
+    async fn recall(&self, companion: &str, query: &str) -> Result<Vec<w::Memory>>;
+    async fn visible_memories(
+        &self,
+        companion: &str,
+        candidates: Vec<w::Memory>,
+    ) -> Result<Vec<w::Memory>>;
+    async fn change_memory(&mut self, request: w::MemoryChange) -> Result<w::Memory>;
+    async fn commit_reflection(
+        &mut self,
+        companion: &str,
+        progress: ReflectionProgress,
+    ) -> Result<()>;
+    async fn restore_summary(&mut self, companion: &str) -> Result<()>;
+}
+
+impl MemoryCommands for Actor {
+    async fn mind(&self, companion: &str) -> Result<w::Mind> {
         self.companion(companion).await?;
         let mut db = self.db.acquire().await?;
         Ok(store::get(&mut db, "mind", companion)
@@ -79,7 +98,7 @@ impl Actor {
             .unwrap_or_default())
     }
 
-    pub(crate) async fn put_mind(&mut self, request: w::MindChange) -> Result<w::Mind> {
+    async fn put_mind(&mut self, request: w::MindChange) -> Result<w::Mind> {
         self.companion(&request.companion_id).await?;
         let key = store::key(request.mutation.as_option())?;
         let hash = store::fingerprint(&("put_mind", &request))?;
@@ -95,7 +114,7 @@ impl Actor {
         save(&self.db, "mind", key, &request.companion_id, &hash, mind).await
     }
 
-    pub(crate) async fn search_memories(&self, request: w::MemoryQuery) -> Result<w::Memories> {
+    async fn search_memories(&self, request: w::MemoryQuery) -> Result<w::Memories> {
         self.companion(&request.companion_id).await?;
         let mut db = self.db.acquire().await?;
         let rows = search(
@@ -112,7 +131,7 @@ impl Actor {
         })
     }
 
-    pub(crate) async fn recall(&self, companion: &str, query: &str) -> Result<Vec<w::Memory>> {
+    async fn recall(&self, companion: &str, query: &str) -> Result<Vec<w::Memory>> {
         let mut db = self.db.acquire().await?;
         let pinned: Vec<MemoryRow> = sqlx::query_as(
             "SELECT m.id,m.companion_id,m.revision,m.shared,m.text,m.importance,m.provenance,m.superseded_by,m.last_used FROM memories m WHERE (companion_id=? OR shared=1) AND importance=10
@@ -148,7 +167,7 @@ impl Actor {
             .collect())
     }
 
-    pub(crate) async fn visible_memories(
+    async fn visible_memories(
         &self,
         companion: &str,
         mut candidates: Vec<w::Memory>,
@@ -164,7 +183,7 @@ impl Actor {
         Ok(current)
     }
 
-    pub(crate) async fn change_memory(&mut self, request: w::MemoryChange) -> Result<w::Memory> {
+    async fn change_memory(&mut self, request: w::MemoryChange) -> Result<w::Memory> {
         let key = store::key(request.mutation.as_option())?;
         let hash = store::fingerprint(&("change_memory", &request))?;
         let mut value = request
@@ -206,7 +225,7 @@ impl Actor {
         Ok(value)
     }
 
-    pub(crate) async fn commit_reflection(
+    async fn commit_reflection(
         &mut self,
         companion: &str,
         progress: ReflectionProgress,
@@ -252,7 +271,7 @@ impl Actor {
         self.restore_summary(companion).await
     }
 
-    pub(crate) async fn restore_summary(&mut self, companion: &str) -> Result<()> {
+    async fn restore_summary(&mut self, companion: &str) -> Result<()> {
         let checkpoint = sqlx::query_as::<_, (i64, String)>(
             "SELECT through,summary FROM reflection_checkpoints WHERE companion_id=?",
         )

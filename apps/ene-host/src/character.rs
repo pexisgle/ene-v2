@@ -9,11 +9,13 @@ use ene_rpc as w;
 use serde_json::Value;
 use std::path::Path;
 
-impl Actor {
-    pub(crate) async fn export_character(
-        &self,
-        request: w::ExportRequest,
-    ) -> Result<w::CharacterPackage> {
+pub(crate) trait CharacterPackages {
+    async fn export_character(&self, request: w::ExportRequest) -> Result<w::CharacterPackage>;
+    async fn import_character(&mut self, request: w::ImportRequest) -> Result<w::Character>;
+}
+
+impl CharacterPackages for Actor {
+    async fn export_character(&self, request: w::ExportRequest) -> Result<w::CharacterPackage> {
         let mut db = self.db.acquire().await?;
         let character = store::get::<w::Character>(&mut db, "character", &request.id)
             .await?
@@ -46,10 +48,7 @@ impl Actor {
         Ok(package)
     }
 
-    pub(crate) async fn import_character(
-        &mut self,
-        request: w::ImportRequest,
-    ) -> Result<w::Character> {
+    async fn import_character(&mut self, request: w::ImportRequest) -> Result<w::Character> {
         let key = store::key(request.mutation.as_option())?;
         let hash = store::fingerprint(&("import_character", &request))?;
         let mut db = self.db.acquire().await?;

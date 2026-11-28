@@ -1,6 +1,6 @@
 //! File reads and metadata stamps for verified packages.
 use super::paths::relative;
-use crate::plugin_runtime::Result;
+use crate::runtime::Result;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
 use cap_std::{
     ambient_authority,

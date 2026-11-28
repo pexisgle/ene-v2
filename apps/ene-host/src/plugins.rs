@@ -2,8 +2,12 @@ use crate::{actor::Actor, configuration::save, error::invalid, plugin_runtime::P
 use anyhow::Result;
 use ene_rpc as w;
 
-impl Actor {
-    pub(crate) async fn put_plugin(&mut self, request: w::PluginChange) -> Result<w::Plugin> {
+pub(crate) trait PluginCommands {
+    async fn put_plugin(&mut self, request: w::PluginChange) -> Result<w::Plugin>;
+}
+
+impl PluginCommands for Actor {
+    async fn put_plugin(&mut self, request: w::PluginChange) -> Result<w::Plugin> {
         let mutation = store::key(request.mutation.as_option())?;
         let hash = store::fingerprint(&("put_plugin", &request))?;
         let mut plugin = request
@@ -101,8 +105,17 @@ pub(crate) async fn hooks(
     }
 }
 
-impl crate::actor::Host {
-    pub(crate) async fn observe_tool(
+pub(crate) trait ToolObservation {
+    async fn observe_tool(
+        &self,
+        operation: &crate::approval::Operation,
+        tool: &str,
+        result: Option<bool>,
+    );
+}
+
+impl ToolObservation for crate::actor::Host {
+    async fn observe_tool(
         &self,
         operation: &crate::approval::Operation,
         tool: &str,

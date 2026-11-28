@@ -20,7 +20,9 @@ connectrpc = { workspace = true, features = ["axum"] }
 croner.workspace = true
 directories = "6"
 ene-core.workspace = true
-ene-plugin = { workspace = true, features = ["runtime"] }
+ene-domain.workspace = true
+ene-plugin.workspace = true
+ene-plugin-runtime.workspace = true
 ene-rpc.workspace = true
 futures-util.workspace = true
 getrandom = "0.4"
@@ -38,6 +40,7 @@ process-wrap.workspace = true
 reqwest.workspace = true
 rig-core.workspace = true
 rig-reqwest.workspace = true
+rig-memory = "0.47.1"
 rmcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -50,6 +53,8 @@ tokio-util = { workspace = true, features = ["compat"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url.workspace = true
+thiserror = "2"
+wav-codec = "0.1.0"
 uuid.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -62,6 +67,9 @@ apple-native-keyring-store = { version = "1", features = ["keychain"] }
 windows-native-keyring-store = "1"
 
 [dev-dependencies]
+regex = "1"
+syn = { version = "2", features = ["full"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
 tokio = { workspace = true, features = ["test-util"] }
 ene-rpc = { workspace = true, features = ["client"] }
 tempfile = "3"

@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
+
 mod actor;
 mod approval;
 mod character;
@@ -23,6 +25,8 @@ mod skills;
 mod store;
 mod vectors;
 mod voice;
+mod voicevox;
+mod web_search;
 mod work;
 mod workspace;
 
@@ -30,4 +34,4 @@ pub use config::HostArgs;
 pub use server::run;
 
 #[cfg(test)]
-mod verification;
+mod verification_tests;

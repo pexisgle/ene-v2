@@ -1,3 +1,5 @@
+use crate::voice::VoiceCommands as _;
+
 use crate::{
     actor::{Actor, id},
     error::{conflict, invalid, missing},
@@ -10,15 +12,8 @@ use serde::{Serialize, de::DeserializeOwned};
 use sqlx::SqlitePool;
 
 pub(crate) fn identifier(value: &str) -> Result<&str> {
-    if (1..=128).contains(&value.len())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        Ok(value)
-    } else {
-        Err(invalid("invalid identifier"))
-    }
+    ene_domain::validate_id(value).map_err(|_| invalid("invalid identifier"))?;
+    Ok(value)
 }
 
 pub(crate) async fn save<T: Serialize + DeserializeOwned + Send + Sync + Unpin + 'static>(
@@ -39,8 +34,22 @@ pub(crate) async fn save<T: Serialize + DeserializeOwned + Send + Sync + Unpin +
     Ok(value)
 }
 
-impl Actor {
-    pub(crate) async fn settings(&self) -> Result<w::Settings> {
+pub(crate) trait ConfigurationCommands {
+    async fn settings(&self) -> Result<w::Settings>;
+    async fn put_character(&mut self, request: w::CharacterChange) -> Result<w::Character>;
+    async fn put_companion(&mut self, request: w::CompanionChange) -> Result<w::Companion>;
+    async fn put_connection(&mut self, request: w::ConnectionChange) -> Result<w::Connection>;
+    async fn put_policy(&mut self, request: w::PolicyChange) -> Result<w::Policy>;
+    async fn set_credential(&mut self, request: w::CredentialChange) -> Result<w::Empty>;
+    async fn delete_record(
+        &mut self,
+        kind: &'static str,
+        request: w::DeleteRequest,
+    ) -> Result<w::Empty>;
+}
+
+impl ConfigurationCommands for Actor {
+    async fn settings(&self) -> Result<w::Settings> {
         let mut db = self.db.acquire().await?;
         Ok(w::Settings {
             connections: store::list(&mut db, "connection").await?,
@@ -56,10 +65,7 @@ impl Actor {
         })
     }
 
-    pub(crate) async fn put_character(
-        &mut self,
-        request: w::CharacterChange,
-    ) -> Result<w::Character> {
+    async fn put_character(&mut self, request: w::CharacterChange) -> Result<w::Character> {
         let key = store::key(request.mutation.as_option())?;
         let hash = store::fingerprint(&("put_character", &request))?;
         let mut value = request
@@ -82,10 +88,7 @@ impl Actor {
         Ok(saved)
     }
 
-    pub(crate) async fn put_companion(
-        &mut self,
-        request: w::CompanionChange,
-    ) -> Result<w::Companion> {
+    async fn put_companion(&mut self, request: w::CompanionChange) -> Result<w::Companion> {
         let key = store::key(request.mutation.as_option())?;
         let hash = store::fingerprint(&("put_companion", &request))?;
         let mut value = request
@@ -132,10 +135,7 @@ impl Actor {
         Ok(saved)
     }
 
-    pub(crate) async fn put_connection(
-        &mut self,
-        request: w::ConnectionChange,
-    ) -> Result<w::Connection> {
+    async fn put_connection(&mut self, request: w::ConnectionChange) -> Result<w::Connection> {
         let key = store::key(request.mutation.as_option())?;
         let hash = store::fingerprint(&("put_connection", &request))?;
         let mut value = request
@@ -145,7 +145,8 @@ impl Actor {
         if value.id.is_empty() {
             value.id = id();
         }
-        identifier(&value.id)?;
+        let connection_id = ene_domain::ConnectionId::try_from(value.id.clone())
+            .map_err(|_| invalid("invalid connection identifier"))?;
         if value.name.trim().is_empty() {
             return Err(invalid("provider name required"));
         }
@@ -154,8 +155,38 @@ impl Actor {
             return Ok(saved);
         }
         match value.kind.as_known() {
-            Some(w::ProviderKind::OpenaiCompatible | w::ProviderKind::McpHttp) => {
+            Some(
+                w::ProviderKind::OpenaiCompatible
+                | w::ProviderKind::McpHttp
+                | w::ProviderKind::Voicevox,
+            ) => {
                 check_endpoint(&value.endpoint)?;
+            }
+            Some(w::ProviderKind::Search) => {
+                crate::web_search::Adapter::parse(&value.adapter)?;
+                check_endpoint(&value.endpoint)?;
+                if value.enabled
+                    && store::list::<w::Connection>(&mut db, "connection")
+                        .await?
+                        .iter()
+                        .any(|other| {
+                            other.id != value.id
+                                && other.enabled
+                                && other.kind == w::ProviderKind::Search
+                        })
+                {
+                    return Err(crate::error::conflict(
+                        "disable the current search connection first",
+                    ));
+                }
+            }
+            Some(w::ProviderKind::Native) => {
+                if value.adapter == ene_domain::agent_platform::ADAPTER {
+                    crate::model::google_publisher(&value)?;
+                } else {
+                    crate::model::native_provider(&value.adapter)?;
+                    check_endpoint(&value.endpoint)?;
+                }
             }
             Some(w::ProviderKind::Plugin)
                 if !value.plugin_id.is_empty() && !value.entrypoint.is_empty() =>
@@ -167,19 +198,23 @@ impl Actor {
             Some(w::ProviderKind::McpStdio) if !value.command.trim().is_empty() => {}
             _ => return Err(invalid("unsupported provider configuration")),
         }
-        let old = store::get::<w::Connection>(&mut db, "connection", &value.id).await?;
-        value.credential_configured = old.as_ref().is_some_and(|old| {
-            old.credential_configured
-                && old.endpoint == value.endpoint
-                && old.kind == value.kind
-                && old.command == value.command
-                && old.args == value.args
-                && old.plugin_id == value.plugin_id
-                && old.entrypoint == value.entrypoint
+        crate::mcp::validate_scope(&value).map_err(|_| invalid("invalid MCP tool scope"))?;
+        let old =
+            store::get::<w::Connection>(&mut db, "connection", connection_id.as_str()).await?;
+        let changed_receiver = old.as_ref().is_some_and(|old| {
+            crate::model::receiver(old)
+                .ok()
+                .zip(crate::model::receiver(&value).ok())
+                .is_none_or(|(before, after)| before != after)
         });
-        if old.as_ref().is_some_and(|old| {
-            old.credential_env == value.credential_env && old.endpoint != value.endpoint
-        }) {
+        value.credential_configured = old
+            .as_ref()
+            .is_some_and(|old| old.credential_configured && !changed_receiver);
+        if changed_receiver
+            && old
+                .as_ref()
+                .is_some_and(|old| old.credential_env == value.credential_env)
+        {
             value.credential_env = None;
         }
         if !value.options_json.is_empty()
@@ -190,11 +225,18 @@ impl Actor {
         }
         drop(db);
         value.revision = key.revision + 1;
-        let identifier = value.id.clone();
-        save(&self.db, "connection", key, &identifier, &hash, value).await
+        save(
+            &self.db,
+            "connection",
+            key,
+            connection_id.as_str(),
+            &hash,
+            value,
+        )
+        .await
     }
 
-    pub(crate) async fn put_policy(&mut self, request: w::PolicyChange) -> Result<w::Policy> {
+    async fn put_policy(&mut self, request: w::PolicyChange) -> Result<w::Policy> {
         let key = store::key(request.mutation.as_option())?;
         let hash = store::fingerprint(&("put_policy", &request))?;
         let mut value = request
@@ -218,10 +260,7 @@ impl Actor {
         Ok(saved)
     }
 
-    pub(crate) async fn set_credential(
-        &mut self,
-        request: w::CredentialChange,
-    ) -> Result<w::Empty> {
+    async fn set_credential(&mut self, request: w::CredentialChange) -> Result<w::Empty> {
         let key = store::key(request.mutation.as_option())?;
         let hash = store::fingerprint(&(
             "set_credential",
@@ -292,7 +331,7 @@ impl Actor {
         Ok(response)
     }
 
-    pub(crate) async fn delete_record(
+    async fn delete_record(
         &mut self,
         kind: &'static str,
         request: w::DeleteRequest,
@@ -321,6 +360,16 @@ impl Actor {
             return Err(conflict("companion has an active turn"));
         }
         store::delete(&mut tx, kind, &request.id, key.revision).await?;
+        if kind == "companion" {
+            sqlx::query("DELETE FROM schedules WHERE companion_id=?")
+                .bind(&request.id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM records WHERE kind='activation' AND id=?")
+                .bind(&request.id)
+                .execute(&mut *tx)
+                .await?;
+        }
         let retired = if kind == "connection" {
             sqlx::query_scalar::<_, String>(
                 "DELETE FROM credentials WHERE connection_id=? RETURNING slot",
@@ -341,6 +390,11 @@ impl Actor {
                     tracing::warn!("retired credential could not be removed from keychain");
                 }
             });
+        }
+        if kind == "companion" {
+            self.stop_speech(&request.id);
+            self.activations.remove(request.id.as_str());
+            self.observations.remove(&request.id);
         }
         if matches!(kind, "character" | "companion") {
             self.announce_snapshot().await?;

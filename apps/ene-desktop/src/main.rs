@@ -1,19 +1,20 @@
+#![forbid(unsafe_code)]
+#![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod computer;
 mod network;
-#[cfg(windows)]
-mod observe;
 #[cfg(target_os = "linux")]
 mod observe_linux;
-mod observe_types;
 mod onboarding;
 mod plugins;
+mod provider_choices;
 mod renderer;
 mod settings;
 mod sound;
 mod tray;
 mod window;
+mod workspace;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -51,6 +52,8 @@ struct Local {
     input: bool,
     speaker: bool,
     plugins: Vec<PathBuf>,
+    workspace: Option<PathBuf>,
+    avatar_scale: f32,
 }
 
 impl Default for Local {
@@ -61,7 +64,43 @@ impl Default for Local {
             input: false,
             speaker: true,
             plugins: Vec::new(),
+            workspace: None,
+            avatar_scale: 100.0,
         }
+    }
+}
+
+impl Local {
+    fn load(path: &std::path::Path) -> Result<Self> {
+        match std::fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).context("invalid desktop settings"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let local = Self::default();
+                let mut staged = tempfile::NamedTempFile::new_in(
+                    path.parent().context("desktop config path missing")?,
+                )?;
+                serde_json::to_writer(&mut staged, &local)?;
+                staged.as_file().sync_all()?;
+                match staged.persist_noclobber(path) {
+                    Ok(_) => Ok(local),
+                    Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        serde_json::from_slice(&std::fs::read(path)?)
+                            .context("invalid desktop settings")
+                    }
+                    Err(error) => Err(error.into()),
+                }
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn save(&self, path: &std::path::Path) -> Result<()> {
+        let mut staged =
+            tempfile::NamedTempFile::new_in(path.parent().context("desktop config path missing")?)?;
+        serde_json::to_writer(&mut staged, self)?;
+        staged.as_file().sync_all()?;
+        staged.persist(path)?;
+        Ok(())
     }
 }
 
@@ -73,10 +112,7 @@ fn main() -> Result<()> {
     let dirs = ProjectDirs::from("", "", "ene").context("cannot locate user directories")?;
     let config = dirs.config_local_dir().join("desktop-v2.json");
     std::fs::create_dir_all(config.parent().context("desktop config path missing")?)?;
-    let mut local: Local = std::fs::read(&config)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default();
+    let mut local = Local::load(&config)?;
     let using_default = args.connection.is_none();
     let discovery = args
         .connection
@@ -155,6 +191,10 @@ fn main() -> Result<()> {
     if local.input && computer::available() {
         capabilities.push(computer::capability());
     }
+    let workspace = workspace::Workspace::probe(local.workspace.as_deref());
+    if let Some(workspace) = &workspace {
+        capabilities.extend(workspace.specs());
+    }
     let device = w::Device {
         id: local.id.clone(),
         label: "Desktop".into(),
@@ -167,6 +207,7 @@ fn main() -> Result<()> {
     if let Some(notice) = plugin_notice {
         let _sent = updates.try_send(network::Update::Notice(notice.into()));
     }
+    let managed_host = local_host.is_some();
     let network = Network {
         discovery,
         local_host,
@@ -177,6 +218,8 @@ fn main() -> Result<()> {
         plugin_paths: local.plugins.clone(),
         stop: stop.clone(),
         speaker: local.speaker,
+        avatar_scale: local.avatar_scale,
+        workspace: workspace.map(std::sync::Arc::new),
     };
     runtime.spawn(network.run(requests, updates));
     let tray = tray::start(&runtime, stop.clone(), desktop_events);
@@ -209,6 +252,7 @@ fn main() -> Result<()> {
                             renderer,
                             config,
                             local,
+                            managed_host,
                         },
                     )
                 })
@@ -243,4 +287,19 @@ fn main() -> Result<()> {
     stop.cancel();
     runtime.shutdown_timeout(std::time::Duration::from_secs(3));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_install_reuses_its_device_id_before_preferences_are_changed() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("desktop-v2.json");
+        let initial = Local::load(&path)?;
+        let restarted = Local::load(&path)?;
+        assert_eq!(initial.id, restarted.id);
+        Ok(())
+    }
 }

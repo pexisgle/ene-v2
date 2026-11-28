@@ -1,3 +1,5 @@
+use crate::plugins::ToolObservation as _;
+
 use crate::{
     actor::Host,
     approval::Operation,

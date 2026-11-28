@@ -37,11 +37,6 @@ const KEYS: &[&str] = &[
     "Space",
 ];
 
-#[cfg(windows)]
-pub(crate) fn unlocked() -> bool {
-    native::unlocked().is_ok()
-}
-
 pub(crate) fn available() -> bool {
     #[cfg(windows)]
     return true;
@@ -267,7 +262,7 @@ fn capture(run: String) -> Result<(Frame, w::ScreenFrame)> {
     ))
 }
 
-fn encode(pixels: RgbImage) -> Result<w::ScreenFrame> {
+pub(crate) fn encode(pixels: RgbImage) -> Result<w::ScreenFrame> {
     let (pixels, (width, height)) = resize(pixels);
     let mut jpeg = Vec::new();
     for quality in [75, 55, 35] {

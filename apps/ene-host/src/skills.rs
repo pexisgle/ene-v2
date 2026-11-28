@@ -2,8 +2,12 @@ use crate::{actor::Actor, error::invalid};
 use anyhow::Result;
 use serde_json::{Map, Value};
 
-impl Actor {
-    pub(crate) async fn skill(&self, companion: &str, args: &Map<String, Value>) -> Result<String> {
+pub(crate) trait SkillCommands {
+    async fn skill(&self, companion: &str, args: &Map<String, Value>) -> Result<String>;
+}
+
+impl SkillCommands for Actor {
+    async fn skill(&self, companion: &str, args: &Map<String, Value>) -> Result<String> {
         let text = |key: &str| {
             args.get(key)
                 .and_then(Value::as_str)

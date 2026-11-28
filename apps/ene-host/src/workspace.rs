@@ -1,3 +1,5 @@
+use crate::approval::ApprovalCommands as _;
+
 use crate::{
     actor::{Host, id},
     approval::Operation,
