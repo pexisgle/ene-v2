@@ -1,19 +1,18 @@
 mod actor;
 mod snapshot;
 
-use crate::character::{
-    Character, ConfigError, MotionOutcome, Notification, cancel_motion, cancel_motions,
-};
+use crate::character::{Character, MotionOutcome, Notification, cancel_motion, cancel_motions};
 use actor::{
     apply_add_or_set, apply_expression, apply_lip_sync, apply_look_at, apply_motion,
     apply_position, apply_update,
 };
+use anyhow::Result;
 use bevy::{
     app::{AppExit, MainScheduleOrder},
     ecs::schedule::ScheduleLabel,
     prelude::*,
 };
-use ene_avatar_ipc::{AvatarMessage, Command, MAX_LINE, RendererSnapshot, Request};
+use ene_core::avatar::{AvatarMessage, Command, MAX_LINE, RendererSnapshot, Request};
 use snapshot::snapshot;
 use std::{
     io::{BufRead, Read, Write},
@@ -50,41 +49,13 @@ pub fn run(mut app: App) -> AppExit {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-enum ControlError {
-    #[error(transparent)]
-    Config(#[from] ConfigError),
-    #[error(transparent)]
-    Json(#[from] serde_json::Error),
-    #[error("input line exceeds 64 KiB")]
-    InputTooLong,
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error("{0}")]
-    System(String),
-    #[error("unknown character")]
-    UnknownCharacter,
-    #[error("FPS must be 0..=1000")]
-    InvalidFps,
-    #[error("invalid or duplicate character id")]
-    InvalidCharacterId,
-    #[error("invalid expression name")]
-    InvalidExpressionName,
-    #[error("lip_sync requires a finite amplitude")]
-    InvalidLipSync,
-    #[error("look_at requires finite angles within yaw [-90, 90] and pitch [-60, 60]")]
-    InvalidLookAt,
-    #[error("place requires finite logical coordinates")]
-    InvalidPlace,
-}
-
 enum Disposition {
     Reply(Option<RendererSnapshot>),
     Deferred,
 }
 
 /// Reads one bounded JSON line. The flag marks EOF, an overlong line, or an unreadable stream.
-fn read_request(input: &mut impl BufRead) -> (Result<Request, ControlError>, bool) {
+fn read_request(input: &mut impl BufRead) -> (Result<Request>, bool) {
     let mut line = String::new();
     match (&mut *input)
         .take((MAX_LINE + 1) as u64)
@@ -97,12 +68,9 @@ fn read_request(input: &mut impl BufRead) -> (Result<Request, ControlError>, boo
             }),
             true,
         ),
-        Ok(n) if n <= MAX_LINE => (
-            serde_json::from_str(&line).map_err(ControlError::from),
-            false,
-        ),
-        Ok(_) => (Err(ControlError::InputTooLong), true),
-        Err(error) => (Err(ControlError::Io(error)), true),
+        Ok(n) if n <= MAX_LINE => (serde_json::from_str(&line).map_err(Into::into), false),
+        Ok(_) => (Err(anyhow::anyhow!("input line exceeds 64 KiB")), true),
+        Err(error) => (Err(error.into()), true),
     }
 }
 
@@ -156,10 +124,7 @@ pub fn setup(app: &mut App) {
 /// and no artificial one-request-per-frame throttle is needed.
 fn requests(world: &mut World, avatars: &mut QueryState<(Entity, &mut Character)>) {
     for _ in 0..64 {
-        let request = match world
-            .non_send::<Receiver<Result<Request, ControlError>>>()
-            .try_recv()
-        {
+        let request = match world.non_send::<Receiver<Result<Request>>>().try_recv() {
             Ok(request) => request,
             Err(mpsc::TryRecvError::Empty) => break,
             Err(mpsc::TryRecvError::Disconnected) => {
@@ -213,7 +178,7 @@ fn apply_command(
     world: &mut World,
     avatars: &mut QueryState<(Entity, &mut Character)>,
     request: Request,
-) -> Result<Disposition, ControlError> {
+) -> Result<Disposition> {
     let Request { id, command } = request;
     let target = find_target_entity(world, avatars, &command);
     let applied = match command {
@@ -234,10 +199,10 @@ fn apply_command(
             return world
                 .run_system_cached(snapshot)
                 .map(|value| Disposition::Reply(Some(value)))
-                .map_err(|error| ControlError::System(error.to_string()));
+                .map_err(|error| anyhow::anyhow!("{error}"));
         }
         Command::Remove { .. } => {
-            let entity = target.ok_or(ControlError::UnknownCharacter)?;
+            let entity = target.ok_or(anyhow::anyhow!("unknown character"))?;
             cancel_motion(world, entity);
             world.despawn(entity);
             Ok(())
@@ -245,7 +210,7 @@ fn apply_command(
         Command::Center { monitor, .. } => apply_position(world, target, monitor, None),
         Command::Fps { value } => {
             if value > 1000 {
-                return Err(ControlError::InvalidFps);
+                return Err(anyhow::anyhow!("FPS must be 0..=1000"));
             }
             world.resource_mut::<Control>().fps = value;
             Ok(())
@@ -270,7 +235,7 @@ fn apply_command(
 fn send_command_reply(
     world: &mut World,
     id: Option<u64>,
-    result: Result<Option<RendererSnapshot>, ControlError>,
+    result: Result<Option<RendererSnapshot>>,
 ) -> bool {
     match id {
         Some(id) => {
@@ -346,7 +311,7 @@ mod tests {
 
     struct Harness {
         app: App,
-        input: SyncSender<Result<Request, ControlError>>,
+        input: SyncSender<Result<Request>>,
         output: Receiver<AvatarMessage>,
     }
 
@@ -403,7 +368,7 @@ mod tests {
         fn batch(&mut self, commands: &[Value]) -> Vec<Value> {
             for command in commands {
                 self.input
-                    .send(serde_json::from_value(command.clone()).map_err(ControlError::from))
+                    .send(serde_json::from_value(command.clone()).map_err(Into::into))
                     .unwrap();
             }
             self.app.update();

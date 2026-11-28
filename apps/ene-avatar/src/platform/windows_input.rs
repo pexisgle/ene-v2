@@ -174,7 +174,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 clicks,
-                vec![ene_avatar_ipc::AvatarEvent::Click {
+                vec![ene_core::avatar::AvatarEvent::Click {
                     character: if cached { "a" } else { "b" }.into(),
                 }]
             );

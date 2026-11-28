@@ -1,5 +1,13 @@
 [workspace]
-members = ["apps/*", "crates/*", "examples/plugins/*"]
+members = [
+    "apps/ene-avatar",
+    "apps/ene-desktop",
+    "apps/ene-host",
+    "crates/ene-core",
+    "crates/ene-plugin",
+    "crates/ene-rpc",
+    "crates/ene-vrm",
+]
 resolver = "3"
 
 [workspace.package]
@@ -10,120 +18,47 @@ publish = false
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
-missing_debug_implementations = "warn"
-
-[workspace.lints.clippy]
-all = { level = "warn", priority = -1 }
-unwrap_used = "deny"
-expect_used = "deny"
-dbg_macro = "deny"
-todo = "warn"
-unimplemented = "deny"
-large_futures = "warn"
-too_many_lines = "warn"
-cognitive_complexity = "warn"
-rest_pat_in_fully_bound_structs = "warn"
-# Every `unsafe` block must state its invariant in a `// SAFETY:` comment.
-# All FFI now lives in `ene-platform-os`, and every block there documents its
-# invariant, so this is a hard error rather than a staged warning.
-undocumented_unsafe_blocks = "deny"
-# One operation per `unsafe` block keeps each `SAFETY:` claim about a single
-# call, which is why the multi-call blocks in `tray.rs` were split.
-multiple_unsafe_ops_per_block = "deny"
-# Surfaces discarded `#[must_use]` values that `let _ = ...` hides.
-# Every site now names its discard, so this is a hard error.
-let_underscore_must_use = "deny"
-# `pedantic` lints the workspace now satisfies everywhere, promoted out of the
-# group so a new site fails the build instead of waiting for another sweep.
-map_unwrap_or = "warn"
-assert_is_empty = "warn"
-implicit_clone = "warn"
-cloned_instead_of_copied = "warn"
-redundant_closure_for_method_calls = "warn"
-manual_let_else = "warn"
-inefficient_to_string = "warn"
-needless_pass_by_value = "warn"
 
 [workspace.dependencies]
-clap = { version = "4.6", features = ["derive", "env"] }
-ene-rpc = { path = "crates/ene-rpc" }
-ene-avatar-ipc = { path = "crates/ene-avatar-ipc" }
-ene-catalog = { path = "crates/ene-catalog" }
-ene-client-core = { path = "crates/ene-client-core" }
-ene-domain = { path = "crates/ene-domain" }
-ene-keyring = { path = "crates/ene-keyring" }
-ene-mind = { path = "crates/ene-mind" }
-ene-policy = { path = "crates/ene-policy" }
-ene-plugin = { path = "crates/ene-plugin" }
-ene-platform-os = { path = "crates/ene-platform-os" }
-ene-plugin-runtime = { path = "crates/ene-plugin-runtime" }
-ene-store = { path = "crates/ene-store" }
-ene-voice = { path = "crates/ene-voice" }
-ene-work = { path = "crates/ene-work" }
-# Share the ACP wire types with Wasm guests without pulling in the native SDK.
 agent-client-protocol-schema = { version = "1.22.0", default-features = false }
-process-wrap = { version = "10.0.2", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop", "creation-flags"] }
-pulldown-cmark = { version = "0.13", default-features = false }
-parking_lot = "0.13"
-regex = "1"
-globset = "0.4"
-cap-std = "4.0.3"
-cap-fs-ext = "4.0.3"
-tempfile = "3"
 async-stream = "0.3"
 axum = "0.8"
-backon = { version = "1.6.0", default-features = false, features = ["std"] }
 base64 = "0.23"
-bytes = "1"
+bevy = { version = "0.20.1", default-features = false }
 buffa = { version = "0.9", features = ["json"] }
+bytes = "1"
+cap-fs-ext = "4.0.3"
+cap-std = "4.0.3"
+clap = { version = "4.6", features = ["derive", "env"] }
 connectrpc = { version = "0.9", default-features = false, features = ["json"] }
+croner = { version = "5", default-features = false, features = ["jiff"] }
+ene-core = { path = "crates/ene-core" }
+ene-plugin = { path = "crates/ene-plugin" }
+ene-rpc = { path = "crates/ene-rpc" }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 gpui = { package = "gpui-kit", version = "0.11.0" }
+hex = "0.4"
 http = "1"
 http-body-util = "0.1"
-hashlink = "0.12"
-hex = "0.4"
-croner = { version = "5", default-features = false, features = ["jiff"] }
-rubato = "5.1"
-wav-codec = "0.1.0"
-# Domain validation resolves embedded references without filesystem or HTTP access.
-jsonschema = { version = "0.63", default-features = false, features = ["idna"] }
-serde_json_canonicalizer = "0.4"
 jiff = "1"
+jsonschema = { version = "0.63", default-features = false, features = ["idna"] }
+parking_lot = "0.13"
+process-wrap = { version = "10.0.2", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop", "creation-flags"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "multipart"] }
-# Rig's adapters share types from rig-core. Update this release line together.
 rig-core = { version = "0.47.1", default-features = false }
-rig-agent = "0.47.1"
-rig-ecs = "0.47.1"
-rig-memory = { version = "0.47.1", features = ["fs"] }
-rig-rmcp = "0.47.1"
-# The transports rig-rmcp re-exports are behind rmcp features it does not turn on.
-rmcp = { version = "3.11.0", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "which-command"] }
 rig-reqwest = { version = "0.47.1", features = ["rustls"] }
-# rig-ecs sets the exact versions of the Bevy crates it exposes to the host.
-bevy = { version = "0.20.1", default-features = false }
-bevy_ecs = "0.20.1"
-bevy_time = "0.20.1"
-rusqlite = { version = "0.43", features = ["bundled", "fallible_uint"] }
-# Keep the migration library on the rusqlite line used by the store.
+rmcp = { version = "3.11.0", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "which-command"] }
 rustix = { version = "1", features = ["fs", "process"] }
-schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_json_canonicalizer = "0.4"
 sha2 = "0.11"
-thiserror = "2"
+tempfile = "3"
 tokio = { version = "1", default-features = false, features = ["macros", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 url = "2"
-strum = { version = "0.28", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-which = "8"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-indexmap = "2.14"
-tray-icon = { version = "0.27", default-features = false }
-winit = { version = "0.30.13", default-features = false }
-xcap = { version = "0.9.10", default-features = false }
 
 [profile.dev]
 opt-level = 1

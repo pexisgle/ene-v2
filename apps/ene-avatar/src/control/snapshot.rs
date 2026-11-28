@@ -2,7 +2,7 @@
 use super::Control;
 use crate::{character::Character, desktop::Output};
 use bevy::prelude::*;
-use ene_avatar_ipc::{CharacterSnapshot, MonitorSnapshot, RendererSnapshot};
+use ene_core::avatar::{CharacterSnapshot, MonitorSnapshot, RendererSnapshot};
 
 pub(super) fn snapshot(
     views: Query<&Character>,

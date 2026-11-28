@@ -1,1008 +1,506 @@
 syntax = "proto3";
-package ene.host.v1;
+
+package ene.host.v2;
 
 message Empty {}
-message Id { string id = 1; }
-message StringList { repeated string values = 1; }
-// スキーマ識別子付きの自由形式JSON。スキーマはクライアントまたはプラグインが提供する。
-message JsonDocument {
-  string schema = 1; // 例: "ene.body.v1", "ene.mind_state.v1"
-  string json = 2;   // schema に適合する JSON text
+message Id {
+  string id = 1;
 }
-message Cursor { string epoch = 1; uint64 seq = 2; }
-message Failure {
-  string code = 1;
-  string message = 2;
+message Mutation {
+  string request_key = 1;
+  int64 revision = 2;
 }
-
-message HostHealth {
-  bool ready = 1;
-  bool recovery_required = 2;
-  bool stopping = 3;
+message Receipt {
+  string id = 1;
+  string session_id = 2;
 }
-
-message HostCapabilities {
-  JsonDocument limits = 1;
-  repeated string features = 2;
-  repeated string adapters = 3;
-  string transport = 4;
+message Cursor {
+  string epoch = 1;
+  uint64 sequence = 2;
 }
-
 message Snapshot {
-  string server_version = 1;
-  HostHealth health = 2;
-  HostCapabilities capabilities = 3;
-  Settings settings = 4;
-  repeated Companion companions = 5;
-  repeated WorkSession work_sessions = 6;
-  optional string active_companion_id = 7;
-  repeated ApprovalRequest pending_approvals = 8;
-  repeated Client clients = 9;
-  Cursor cursor = 10;
-  repeated PolicyRule policy_rules = 11;
-  repeated Activation activations = 12;  // companion_id ごとの現在のアクティブクライアントとrevision
-}
-
-message SubscribeRequest {
-  string client_id = 1; // 宛て先フィルター。省略時は全端末同報の通知を受信。
-  optional Cursor cursor = 2;
-  bool include_diagnostics = 3; // 目・手・頭の運用イベントを追加する
-}
-
-message Notification {
   Cursor cursor = 1;
-  string kind = 2;
-  string emitted_at = 23; // 時系列表示用のRFC 3339日時。対象イベントのみ。
-  optional string client_id = 17;     // 特定クライアント宛て通知の場合（省略時は全端末同報）
-  optional string companion_id = 18;  // コンパニオン関連通知の場合
-  oneof event {
-    HostHealth health = 3;
-    Companion companion = 4;
-    MindUpdated mind_updated = 5;
-    MessageCreated message_created = 6;
-    MessageDelta message_delta = 7;
-    TurnEvent turn_event = 8;
-    WorkEvent work_event = 9;
-    ApprovalRequested approval_requested = 10;
-    PolicyRulesUpdated policy_rules_updated = 11;
-    SettingsUpdated settings_updated = 12;
-    ClientUpdated client_updated = 13;
-    // デバイス操作の状態観測用。実行指示の配送は ClientService.DeviceStream。
-    DeviceOperation device_operation = 14;
-    DeviceOperationResult device_operation_result = 15;
-    HostEvent generic = 16;
-    Snapshot initial_state = 19;
-    ResyncRequired resync_required = 20;
-    Activation activation_updated = 21;  // Activate によるアクティブクライアント/revisionの変更
-    PolicyTextsUpdated policy_texts_updated = 22;  // UpdatePolicyTexts による自由文ポリシー変更
-    Id companion_removed = 24;
+  repeated Character characters = 2;
+  repeated Companion companions = 3;
+  repeated Approval approvals = 4;
+  repeated Device devices = 5;
+  Activation activation = 6;
+  repeated WorkSession work = 7;
+}
+message SubscribeRequest {
+  Cursor after = 1;
+}
+message Event {
+  Cursor cursor = 1;
+  oneof payload {
+    Snapshot snapshot = 2;
+    Message message = 3;
+    TextDelta delta = 4;
+    TurnState turn = 5;
+    WorkSession work = 6;
+    Approval approval = 7;
+    Activation activation = 8;
+    Notice notice = 9;
   }
 }
-
-message ResyncRequired {
-  string reason = 1;
-  Cursor target_cursor = 2;
+message Notice {
+  string companion_id = 1;
+  string text = 2;
 }
-
-// Model Assignments --------------------------------------------------------
-
-message ModelAssignment { string connection_id = 1; string model_id = 2; }
-message ModelAssignments {
-  ModelAssignment companion = 1;              // 頭（対話・ロールプレイ）: 必須
-  ModelAssignment task = 2;                   // 手（実務タスク）: 必須
-  optional ModelAssignment perception = 3;     // 目（知覚要約、未指定時は companion フォールバック）
-  optional ModelAssignment compaction = 4;     // Compaction要約（未指定時は companion フォールバック）
-  optional ModelAssignment consolidation = 5;  // 記憶整理（未指定時は companion フォールバック）
-  optional ModelAssignment decision = 6;       // 権限判定（未指定時は task フォールバック）
-  optional ModelAssignment embedding = 7;      // 埋め込みモデル
+message Profile {
+  string name = 1;
+  string persona = 2;
+  string speech = 3;
+  repeated string facets = 4;
+  repeated string examples = 5;
+  repeated string background = 6;
+  repeated string expressions = 7;
 }
-
+message Character {
+  string id = 1;
+  int64 revision = 2;
+  Profile profile = 3;
+  string avatar = 4;
+  string voice = 5;
+}
 message Companion {
   string id = 1;
-  string name = 2;
-  string mind = 3;
-  JsonDocument body = 4;
-  JsonDocument voice = 5;
-  ModelAssignments assignments = 6;
-  uint64 revision = 7;
-  string created_at = 8;
-  string updated_at = 9;
-  optional string persona = 10;
-  optional string voice_identifier = 11;
+  int64 revision = 2;
+  string character_id = 3;
+  string name = 4;
+  repeated ModelSelection models = 5;
 }
-message Companions { repeated Companion items = 1; }
-message AssignmentPatch {
-  oneof change {
-    ModelAssignment set = 1;
-    Empty clear = 2;
-  }
+message CharacterChange {
+  Mutation mutation = 1;
+  Character character = 2;
 }
-message CreateCompanionRequest {
-  string name = 1;
-  string mind = 2;
-  JsonDocument body = 3;
-  JsonDocument voice = 4;
-  ModelAssignments assignments = 5;
-  MindProfile profile = 6;
-  optional string persona = 7;
-  optional string voice_identifier = 8;
+message CompanionChange {
+  Mutation mutation = 1;
+  Companion companion = 2;
 }
-message UpdateCompanionRequest {
+message DeleteRequest {
+  Mutation mutation = 1;
+  string id = 2;
+}
+message PreviewRequest {
+  Profile profile = 1;
+  ModelSelection model = 2;
+  string input = 3;
+}
+message Text {
+  string text = 1;
+}
+message CharacterPackage {
+  uint32 version = 1;
+  optional Profile profile = 2;
+  optional string avatar_name = 3;
+  bytes avatar = 4;
+  optional string voice = 5;
+  repeated string warnings = 6;
+}
+message ExportRequest {
   string id = 1;
-  uint64 revision = 2;
-  optional string name = 3;
-  optional string mind = 4;
-  optional JsonDocument body = 5;
-  optional JsonDocument voice = 6;
-  AssignmentPatch companion_assignment = 7;
-  AssignmentPatch task_assignment = 8;
-  AssignmentPatch perception_assignment = 9;
-  AssignmentPatch compaction_assignment = 10;
-  AssignmentPatch consolidation_assignment = 11;
-  AssignmentPatch decision_assignment = 12;
-  AssignmentPatch embedding_assignment = 13;
-  optional string persona = 14;
-  optional string voice_identifier = 15;
+  bool profile = 2;
+  bool avatar = 3;
+  bool voice = 4;
 }
-
-// Mind and Memories --------------------------------------------------------
-
-message MindProfile {
-  string core = 1;
-  uint64 revision = 2;
-  repeated string facets = 3;
-  repeated string examples = 4;
-  repeated string background = 5;
-  repeated string expression = 6;
+message ImportRequest {
+  Mutation mutation = 1;
+  CharacterPackage package = 2;
+  string character_id = 3;
 }
-message MindState {
-  uint64 revision = 1;
-  JsonDocument emotion = 2;
-  JsonDocument relationships = 3;
-  JsonDocument tendencies = 4;
-  JsonDocument concerns = 5;
-  string updated_at = 6;
+message Mind {
+  int64 revision = 1;
+  string emotion = 2;
+  string relationship = 3;
+  repeated string tendencies = 4;
+  repeated string interests = 5;
+  int64 observed_at = 6;
 }
-message MindIndexStatus {
-  uint32 pending_fts_count = 1;
-  uint32 pending_vector_count = 2;
-  string embedding_model = 3;
-  uint64 model_calls = 4;
-  uint64 total_tokens = 5;
+message MindChange {
+  Mutation mutation = 1;
+  string companion_id = 2;
+  Mind mind = 3;
 }
-
-message MindView {
-  string companion_id = 1;
-  MindProfile profile = 2;
-  MindState state = 3;
-  optional MindIndexStatus index = 4;
-}
-message MindUpdated {
-  string companion_id = 1;
-  uint64 profile_revision = 2;
-  uint64 state_revision = 3;
-  string updated_at = 4;
-}
-message UpdateMindProfileRequest {
-  string companion_id = 1;
-  uint64 expected_revision = 2;
-  MindProfile profile = 3;
-}
-enum MemoryAction {
-  MEMORY_ACTION_UNSPECIFIED = 0;
-  MEMORY_ACTION_FORGET = 1;
-  MEMORY_ACTION_REMEMBER = 2;
-  MEMORY_ACTION_SHARE = 3;
-  MEMORY_ACTION_UNSHARE = 4;
-}
-message MemoryControlRequest {
-  string companion_id = 1;
-  string memory_id = 2;
-  MemoryAction action = 3;
-}
-message MemoryControlResult {
-  string memory_id = 1;
-  uint32 importance = 2;
-  string scope = 3;                 // 保存スコープ ('shared' または コンパニオンID)
-  uint64 revision = 4;
-}
-
-message ListMemoriesRequest {
-  string companion_id = 1;
-  optional string cursor = 2;
-  optional uint32 limit = 3;
-}
-message MemoryItem {
+message Memory {
   string id = 1;
-  string scope = 3;                 // 保存スコープ ('shared' または コンパニオンID)
-  string content = 4;
-  uint32 importance = 5;
-  optional string occurred_at = 6;
-  string recorded_at = 7;
-  optional string last_accessed_at = 8;
-  uint64 revision = 9;
+  int64 revision = 2;
+  string companion_id = 3;
+  bool shared = 4;
+  string text = 5;
+  uint32 importance = 6;
+  string provenance = 7;
+  string superseded_by = 8;
+}
+message MemoryQuery {
+  string companion_id = 1;
+  string query = 2;
+  uint32 limit = 3;
 }
 message Memories {
-  repeated MemoryItem items = 1;
-  optional string next_cursor = 2;
+  repeated Memory items = 1;
 }
-
-// Chat ---------------------------------------------------------------------
-
-message SendMessageRequest {
-  string companion_id = 1;
-  string request_key = 2;
+message MemoryChange {
+  Mutation mutation = 1;
+  Memory memory = 2;
+  enum Operation {
+    OPERATION_UNSPECIFIED = 0;
+    OPERATION_REMEMBER = 1;
+    OPERATION_CORRECT = 2;
+    OPERATION_FORGET = 3;
+    OPERATION_SHARE = 4;
+    OPERATION_ERASE = 5;
+  }
+  Operation operation = 3;
+}
+message SendRequest {
+  Mutation mutation = 1;
+  string companion_id = 2;
   string text = 3;
-  string client_id = 4;
-}
-message Acceptance { string request_id = 1; }
-message StopRequest { string companion_id = 1; }
-enum MessageRole {
-  MESSAGE_ROLE_UNSPECIFIED = 0;
-  MESSAGE_ROLE_USER = 1;
-  MESSAGE_ROLE_ASSISTANT = 2;
-  MESSAGE_ROLE_AGENT = 3;
-  MESSAGE_ROLE_CONTEXT = 4;
-}
-enum TurnStatus {
-  TURN_STATUS_UNSPECIFIED = 0;
-  TURN_STATUS_STREAMING = 1;
-  TURN_STATUS_ANSWERED = 2;
-  TURN_STATUS_STOPPED = 3;
-  TURN_STATUS_FAILED = 4;
 }
 message Message {
   string id = 1;
   string companion_id = 2;
-  string work_id = 3;
-  MessageRole role = 4;
+  string turn_id = 3;
+  enum Role {
+    ROLE_UNSPECIFIED = 0;
+    ROLE_USER = 1;
+    ROLE_ASSISTANT = 2;
+    ROLE_TRIGGER = 3;
+  }
+  Role role = 4;
   string text = 5;
-  string created_at = 7;
-  uint64 sequence = 8;
-  optional string request_id = 9;
-  string author = 12;
+  int64 created_at = 6;
+  uint64 position = 7;
 }
-message MessageCreated { Message message = 1; }
-message MessageDelta {
-  string companion_id = 1;
-  string stream_id = 2;
-  string delta = 3;
-}
-message TurnEvent {
+message TextDelta {
   string companion_id = 1;
   string turn_id = 2;
-  TurnStatus status = 3;
-  optional Failure failure = 4;
-  optional EyeReportResult eye_report = 5;
+  string text = 3;
+  bool reset = 4;
 }
-message EyeReportResult {
-  enum Disposition {
-    DISPOSITION_UNSPECIFIED = 0; // Use the turn status for a stop or failure.
-    DISPOSITION_REPLIED = 1;
-    DISPOSITION_WATCHED = 2;
-    DISPOSITION_NO_REPLY = 3;
-  }
-  string report_id = 1;
-  Disposition disposition = 2;
-  optional string reply = 3;
+message StopRequest {
+  Mutation mutation = 1;
+  string id = 2;
+}
+message TurnState {
+  string companion_id = 1;
+  string turn_id = 2;
+  Outcome outcome = 3;
+}
+enum Outcome {
+  OUTCOME_UNSPECIFIED = 0;
+  OUTCOME_RUNNING = 1;
+  OUTCOME_COMPLETED = 2;
+  OUTCOME_STOPPED = 3;
+  OUTCOME_FAILED = 4;
+  OUTCOME_UNKNOWN = 5;
 }
 message HistoryRequest {
   string companion_id = 1;
-  optional string cursor = 2;
-  optional uint32 limit = 3;
-  optional bool include_context = 4;
+  uint64 before = 2;
+  uint32 limit = 3;
 }
 message History {
-  repeated Message items = 1;
-  Cursor observed_at = 2;
+  repeated Message messages = 1;
+  uint64 next_before = 2;
 }
-message MessageRequest { string companion_id = 1; string message_id = 2; }
+enum ProviderKind {
+  PROVIDER_KIND_UNSPECIFIED = 0;
+  PROVIDER_KIND_OPENAI_COMPATIBLE = 1;
+  PROVIDER_KIND_MCP_HTTP = 2;
+  PROVIDER_KIND_MCP_STDIO = 3;
+  PROVIDER_KIND_PLUGIN = 4;
+}
+message Connection {
+  string id = 1;
+  int64 revision = 2;
+  string name = 3;
+  ProviderKind kind = 4;
+  string endpoint = 5;
+  string command = 6;
+  repeated string args = 7;
+  string plugin_id = 8;
+  string entrypoint = 9;
+  bool credential_configured = 10;
+  repeated string send_data = 11;
+  bool enabled = 12;
+  optional string credential_env = 13;
+  string options_json = 14;
+}
+message ModelSelection {
+  enum Role {
+    ROLE_UNSPECIFIED = 0;
+    ROLE_DIALOGUE = 1;
+    ROLE_WORK = 2;
+    ROLE_PERCEPTION = 3;
+    ROLE_REFLECTION = 4;
+    ROLE_POLICY = 5;
+    ROLE_EMBEDDING = 6;
+    ROLE_SYNTHESIS = 7;
+    ROLE_TRANSCRIPTION = 8;
+  }
+  Role role = 1;
+  string connection_id = 2;
+  string model = 3;
+  uint32 context_bytes = 4;
+}
+message Settings {
+  repeated Connection connections = 1;
+  Policy policy = 2;
+  repeated Rule rules = 3;
+  repeated Plugin plugins = 4;
+}
+message ConnectionChange {
+  Mutation mutation = 1;
+  Connection connection = 2;
+}
+message CredentialChange {
+  Mutation mutation = 1;
+  string connection_id = 2;
+  optional string secret = 3;
+}
+message ModelList {
+  repeated string ids = 1;
+}
+message ProbeRequest {
+  string connection_id = 1;
+  ModelSelection model = 2;
+}
+message Policy {
+  int64 revision = 1;
+  string text = 2;
+  bool full_access = 3;
+  repeated string always_confirm = 4;
+}
+message PolicyChange {
+  Mutation mutation = 1;
+  Policy policy = 2;
+}
+message Rule {
+  string digest = 1;
+  string operation = 2;
+  string receiver = 3;
+  string effect = 4;
+  bool allow = 5;
+}
+message AuditQuery {
+  uint64 before = 1;
+  uint32 limit = 2;
+}
+message AuditEntry {
+  uint64 position = 1;
+  int64 time = 2;
+  string operation = 3;
+  string decision = 4;
+  string source = 5;
+}
+message Audit {
+  repeated AuditEntry items = 1;
+}
+message Approval {
+  string id = 1;
+  string companion_id = 2;
+  string run_id = 3;
+  string operation = 4;
+  string receiver = 5;
+  string effect = 6;
+  string arguments_json = 7;
+  string digest = 8;
+  bool card_only = 9;
+  string device_id = 10;
+}
+message ApprovalAnswer {
+  Mutation mutation = 1;
+  string id = 2;
+  string digest = 3;
+  enum Choice {
+    CHOICE_UNSPECIFIED = 0;
+    CHOICE_ALLOW = 1;
+    CHOICE_ALWAYS_ALLOW = 2;
+    CHOICE_DENY = 3;
+  }
+  Choice choice = 4;
+}
+message Plugin {
+  string id = 1;
+  int64 revision = 2;
+  string path = 3;
+  bool enabled = 4;
+  string label = 5;
+  repeated string destinations = 6;
+  repeated string capabilities = 7;
+  string package_digest = 8;
+}
+message PluginChange {
+  Mutation mutation = 1;
+  Plugin plugin = 2;
+}
 
-// Work ---------------------------------------------------------------------
-
-enum RunStatus {
-  RUN_STATUS_UNSPECIFIED = 0;
-  RUN_STATUS_STARTING = 1;
-  RUN_STATUS_RUNNING = 2;
-  RUN_STATUS_WAITING_INPUT = 3;              // ApprovalRequest 待ち
-  RUN_STATUS_COMPLETED = 5;
-  RUN_STATUS_CANCELLED = 6;
-  RUN_STATUS_FAILED = 8;
-}
-enum WorkStatus {
-  WORK_STATUS_UNSPECIFIED = 0;
-  WORK_STATUS_IDLE = 1;
-  WORK_STATUS_ACTIVE = 2;
-  WORK_STATUS_CLOSED = 3;
-}
 message WorkSession {
   string id = 1;
   string companion_id = 2;
-  string title = 3;
-  WorkStatus status = 4;
-  string created_at = 5;
-  string updated_at = 6;
-  string client_id = 7;             // 発注元クライアント
+  repeated Run runs = 3;
 }
-message RunInfo {
-  string run_id = 1;
-  string work_id = 2;
-  RunStatus state = 3;
-  Failure failure = 4;
-  optional string pending_request_id = 5;        // WAITING_INPUT の承認要求
-}
-message WorkView {
-  WorkSession session = 1;
-  repeated RunInfo runs = 2;
-}
-message WorkViews { repeated WorkView items = 1; }
-message ListWorksRequest { string companion_id = 1; }
-message WorkRequest { string work_id = 1; }
-message StartWorkRequest {
-  string companion_id = 1;
-  string title = 2;
-  string instruction = 3;
-  string client_id = 4;
-}
-message SendWorkRequest {
-  string work_id = 1;
-  string request_key = 2;
-  string text = 3;
-  string client_id = 4;
-}
-message WorkAcceptance {
-  string request_id = 1;
-  string run_id = 2;
-}
-message StopWorkRequest { string work_id = 1; }
-message WorkEvent {
-  reserved 3;
-  string work_id = 1;
-  string run_id = 2;
-  oneof detail {
-    WorkStatusChanged status_changed = 4;
-    WorkRunStarted run_started = 5;
-    WorkRunFinished run_finished = 6;
-  }
-}
-message WorkStatusChanged { WorkStatus status = 1; }
-message WorkRunStarted {}
-message WorkRunFinished {
-  RunStatus state = 1;
-  optional Failure failure = 2;
-  optional string pending_request_id = 3;
-}
-
-// Permissions and Approvals ------------------------------------------------
-
-enum ApprovalStatus {
-  APPROVAL_STATUS_UNSPECIFIED = 0;
-  APPROVAL_STATUS_PENDING = 1;
-  APPROVAL_STATUS_APPROVED = 2;
-  APPROVAL_STATUS_DENIED = 3;
-  APPROVAL_STATUS_EXPIRED = 4;
-  APPROVAL_STATUS_EVALUATING = 5;  // 判定中のため、未決承認の一覧には含めない
-}
-enum ApprovalDecision {
-  APPROVAL_DECISION_UNSPECIFIED = 0;
-  APPROVAL_DECISION_APPROVE = 1;
-  APPROVAL_DECISION_ALWAYS_APPROVE = 2;
-  APPROVAL_DECISION_DENY = 3;
-}
-enum PolicyEffect {
-  POLICY_EFFECT_UNSPECIFIED = 0;
-  POLICY_EFFECT_ALLOW = 1;
-  POLICY_EFFECT_DENY = 2;
-  POLICY_EFFECT_CONFIRM = 3;
-  POLICY_EFFECT_ASK_LLM = 4;
-}
-message ApprovalRequest {
-  string request_id = 1;
-  string session_id = 2;
-  string run_id = 3;
-  bytes action_payload_hash = 4;
-  string tool_name = 5;
-  string normalized_arguments = 6;  // 正規化済みJSON object text。action_payload_hashの対象
-  ApprovalStatus status = 7;
-  string created_at = 8;
-  optional string client_id = 9;             // 承認を束縛したクライアント（音声・端末能力）
-  optional string capability = 11;           // device_request の場合の能力名
-  optional string external_destination = 12; // 承認画面に表示する外部送信先。資格情報や URL のクエリは含めない
-  SearchApprovalSummary search_summary = 13;  // 実際に送る検索引数と、接続を特定できる表示
-}
-message SearchApprovalSummary {
-  string provider = 1;
-  string connection_name = 2;
-  string connection_id = 3;
-  string query = 4;
-  uint32 limit = 5;
-}
-message PendingApprovals { repeated ApprovalRequest items = 1; }
-message SubmitApprovalRequest {
-  string request_id = 1;
-  ApprovalDecision decision = 2;
-  optional string reason = 3;
-}
-message SubmitApprovalResponse {
-  bool acknowledged = 1;
-  ApprovalStatus status = 2;
-  bool rule_saved = 3;
-  optional string rule_error = 4;
-}
-message ApprovalRequested { ApprovalRequest request = 1; }
-
-message PolicyRule {
+message Run {
   string id = 1;
-  string tool_name = 2;
-  string pattern = 3;
-  PolicyEffect effect = 4;
-  string created_at = 5;
+  string instruction = 2;
+  string report = 3;
+  Outcome outcome = 4;
+  int64 started_at = 5;
 }
-message PolicyRules { repeated PolicyRule items = 1; }
-message UpdatePolicyRulesRequest {
-  repeated PolicyRule add_or_update = 1;
-  repeated string remove_ids = 2;
+message WorkInput {
+  Mutation mutation = 1;
+  string companion_id = 2;
+  string session_id = 3;
+  string instruction = 4;
 }
-message PolicyRulesUpdated { repeated PolicyRule rules = 1; }
-
-// ユーザーが自由文で書くポリシー。Decision Engine の判定入力（docs/design/work.md）。
-message PolicyText {
-  string id = 1;
-  string text = 2;
-  string created_at = 3;
-}
-message PolicyTexts { repeated PolicyText items = 1; }
-message UpdatePolicyTextsRequest {
-  repeated PolicyText add_or_update = 1;
-  repeated string remove_ids = 2;
-}
-message PolicyTextsUpdated { repeated PolicyText texts = 1; }
-
-// Settings & Connections ---------------------------------------------------
-
-enum ConnectionKind {
-  CONNECTION_KIND_UNSPECIFIED = 0;
-  CONNECTION_KIND_LLM = 1;
-  CONNECTION_KIND_TTS = 2;
-  CONNECTION_KIND_STT = 3;
-  CONNECTION_KIND_EMBEDDING = 4;
-  CONNECTION_KIND_MCP = 5;
-  CONNECTION_KIND_ACP = 6;
-  CONNECTION_KIND_SEARCH = 7;
+message WorkList {
+  repeated WorkSession items = 1;
 }
 
-// 全接続種別に共通のヘッダー。種別固有の設定は ConnectionConfig の oneof で表す。
-message Connection {
-  string id = 1;
-  string name = 2;
-  bool enabled = 3;
-  string credential_state = 4;
-  uint64 revision = 5;
-  ConnectionKind kind = 6;  // 有効な config と一致すること
-  ConnectionCheck last_check = 7;
-  ConnectionConfig config = 8;
+message AudioInput {
+  string device_id = 1;
+  uint64 generation = 2;
+  bytes pcm = 3;
+  uint32 sample_rate = 4;
+  bool commit = 5;
+  bool interrupt = 6;
+  string request_key = 7;
 }
-message ConnectionConfig {
-  oneof config {
-    LlmConnection llm = 1;
-    TtsConnection tts = 2;
-    SttConnection stt = 3;
-    EmbeddingConnection embedding = 4;
-    McpConnection mcp = 5;
-    AcpConnection acp = 6;
-    SearchConnection search = 7;
-  }
+message Transcription {
+  string text = 1;
+  string id = 2;
 }
-message ConnectionEndpoint {
-  string adapter = 1;
-  string endpoint = 2;
-  string options_schema = 3; // JSON Schema object text
-  string options = 4;        // options_schema に適合する JSON object text
+message AudioSubscription {
+  string device_id = 1;
+  uint64 generation = 2;
 }
-message LlmConnection {
-  ConnectionEndpoint endpoint = 1;
-  repeated string model_ids = 2;
-}
-message TtsConnection {
-  ConnectionEndpoint endpoint = 1;
-  repeated string voice_ids = 2;
-}
-message SttConnection {
-  ConnectionEndpoint endpoint = 1;
-  repeated string language_hints = 2;
-}
-message EmbeddingConnection {
-  ConnectionEndpoint endpoint = 1;
-  string model_id = 2;
-  uint32 dimensions = 3;
-}
-message McpConnection {
-  ConnectionEndpoint endpoint = 1;
-  repeated string allowed_tools = 2;
-  string command = 3;        // stdio transport: the program to run
-  repeated string args = 4;  // stdio transport: its arguments
-  string cwd = 5;            // stdio transport: working directory
-  map<string, string> env = 6;        // stdio transport: extra environment variables
-  map<string, string> headers = 7;    // HTTP transport: extra static headers
-  string auth_header = 8;             // HTTP transport: header name for registered secret
-  string secret_env_var = 9;          // stdio transport: env var receiving registered secret
-}
-message AcpConnection {
-  ConnectionEndpoint endpoint = 1;
-  string command = 2;
-  repeated string args = 3;
-}
-message SearchConnection {
-  ConnectionEndpoint endpoint = 1;
-  uint32 max_results = 2;
-}
-message ConnectionCheck {
-  bool healthy = 1;
-  string checked_at = 2;
-  optional Failure failure = 3;
-  repeated string capabilities = 4;
-  repeated string resources = 5;
-  optional string checked_model = 6;
-}
-message Settings {
-  uint64 revision = 1;
-  repeated Connection connections = 2;
-  string updated_at = 3;
-  repeated PolicyText policy_texts = 4;  // 自由文ポリシー。SettingsUpdated でも配信される
-}
-message ConnectionInput {
-  string id = 1;
-  string name = 2;
-  bool enabled = 3;
-  uint64 expected_revision = 4;
-  ConnectionKind kind = 5;  // config の oneof と一致すること
-  ConnectionConfig config = 6;
-}
-message UpdateSettingsRequest {
-  uint64 expected_revision = 1;
-  repeated ConnectionInput connections = 2;
-}
-message DeleteConnectionRequest {
-  string id = 1;
-  uint64 expected_revision = 2;
-}
-message SettingsUpdated { Settings settings = 1; }
-
-message CredentialRequest {
-  string id = 1;
-  optional string secret = 2;
-  optional string source = 3;
-  optional uint64 expected_settings_revision = 4;
-}
-message CredentialResult { string credential_state = 1; }
-message CheckRequest {
-  string id = 1;                    // Connection.id
-  string request_key = 2;
-  optional string companion_id = 3;
-  optional string resource_id = 4;  // モデル・音声・ツール等の種別固有ID
-  optional uint64 expected_settings_revision = 5;
-}
-message CheckResult {
-  string request_id = 1;
-  bool success = 2;
-  optional string resource_id = 3;
-  ConnectionCheck check = 4;
-}
-message FieldSource {
-  string key = 1;
-  string value = 2;
-}
-// LLMモデルのメタデータ。
-message ModelMetadata {
-  string source = 1;
-  string scope = 2;
-  optional uint64 context_window = 3;
-  optional uint64 max_input_tokens = 4;
-  optional uint64 max_output_tokens = 5;
-  StringList input_modalities = 6;
-  StringList output_modalities = 7;
-  StringList supported_parameters = 8;
-  repeated FieldSource field_sources = 9;
-}
-message Model {
-  string id = 1;
-  string name = 2;
-  ModelMetadata metadata = 3;
-}
-message Models { repeated Model items = 1; }
-message ModelsRequest {
-  string id = 1;
-  optional string companion_id = 2;
-}
-message SettingField {
-  string key = 1;
-  string label = 2;
-  string kind = 3;
-  bool required = 4;
-  repeated string choices = 5;
-}
-// LLM接続のプロバイダカタログ。TTS/STT/MCP/ACPはConnection.configのoneofを使う。
-message LlmProviderCapabilities {
-  bool streaming_text = 1;
-  bool model_list = 2;
-}
-message LlmProvider {
-  string id = 1;
-  string name = 2;
-  string adapter = 3;
-  string endpoint = 4;
-  repeated SettingField settings = 5;
-  bool requires_credentials = 6;
-  optional string environment_variable = 7;
-}
-message LlmProviders { repeated LlmProvider items = 1; }
-
-// Voice Service ------------------------------------------------------------
-
-message AudioInputChunk {
-  string client_id = 1;
-  bytes pcm_data = 2; // 24kHz / 16kHz 16-bit mono PCM
-  uint32 sample_rate = 3;
-  bool is_companion_speaking = 4;
-  bool barge_in = 5; // 発話中割り込み検出フラグ (FlushReason::BARGE_IN)
-}
-message TranscriptionEvent {
-  string transcription_id = 1;
-  string text = 2;
-  bool is_final = 3;
-  bool is_speaking = 4;
-}
-message SubscribeAudioRequest {
-  string client_id = 1;
-}
-// 接続確認用の読み上げ。登録済みのTTSで合成し、購読中のクライアントへ流す。
-message SpeakRequest {
-  string client_id = 1;
-  string text = 2;
-  optional string companion_id = 3;
-}
-message AudioOutputEvent {
-  oneof event {
-    AudioChunkEnvelope chunk = 1;
-    FlushControl flush = 2;
-    UtteranceFinished finished = 4;
-  }
-}
-message AudioChunkEnvelope {
+message AudioOutput {
   string utterance_id = 1;
-  uint64 generation_id = 2;
-  uint32 sequence_no = 3;
-  bytes pcm_data = 4;
+  string companion_id = 2;
+  uint64 generation = 3;
+  bytes pcm = 4;
   uint32 sample_rate = 5;
-  bool is_final_chunk = 6;
-  string companion_id = 7;
+  bool stop = 6;
+  bool end = 7;
 }
-enum FlushReason {
-  FLUSH_REASON_UNSPECIFIED = 0;
-  FLUSH_REASON_BARGE_IN = 1;
-  FLUSH_REASON_CANCELLED = 2;
-  FLUSH_REASON_CLIENT_MOVED = 3;
-}
-message FlushControl {
-  string utterance_id = 1;
-  uint64 flush_generation_id = 2;
-  FlushReason reason = 3;
-  string companion_id = 4;
-}
-message UtteranceFinished {
-  string utterance_id = 1;
-  uint64 generation_id = 2;
-  uint32 total_sentences = 3;
-  string companion_id = 4;
+message SpeakRequest {
+  Mutation mutation = 1;
+  string companion_id = 2;
+  string text = 3;
 }
 
-// Client Service -----------------------------------------------------------
-
-enum CapabilityApproval {
-  CAPABILITY_APPROVAL_UNSPECIFIED = 0; // ホストの既定ポリシーに従う。未知の能力はCONFIRM相当
-  CAPABILITY_APPROVAL_AUTO = 1;     // ポリシーで許可されていれば自動実行
-  CAPABILITY_APPROVAL_CONFIRM = 2;  // 操作ごとに Stage::Gate と承認を必須にする
+message Capability {
+  string name = 1;
+  string schema_json = 2;
 }
-message ClientCapabilitySpec {
-  string name = 1;              // 能力名（例: "body.motion"）
-  string tool_name = 2;         // 親エージェントへ公開するツール名。空なら device_request のみ
-  string description = 3;       // モデル向けの説明
-  string input_schema = 4;      // JSON Schema object text
-  repeated string presets = 5;  // 利用可能なプリセット名（モーション・表情等）
-  CapabilityApproval approval = 6;
-  string approval_target = 7;   // 承認カードに表示する対象説明のテンプレート
-  string output_schema = 8;     // JSON Schema object text（結果がJSONの場合）
-  bool requires_body_availability = 9; // この能力は描画準備済みの常駐コンパニオンに限る
-}
-message Client {
+message Device {
   string id = 1;
-  string name = 2;
-  string platform = 3;
-  repeated string capabilities = 4;          // 宣言する能力名の一覧
-  repeated string granted_capabilities = 5;  // ホストが許可した能力名。操作単位の承認を意味しない
-  uint64 revision = 6;
-  string last_seen = 7;
-  bool connected = 8;
-  repeated string active_companions = 9;
-  repeated ClientCapabilitySpec capability_specs = 10;
+  string label = 2;
+  repeated Capability capabilities = 3;
+  bool eyes_enabled = 4;
 }
-message Clients { repeated Client items = 1; }
-message RegisterClientRequest {
-  string id = 1;
-  string name = 2;
-  string platform = 3;
-  repeated string capabilities = 4;  // 能力名の一覧
-  uint64 expected_revision = 5;
-  repeated ClientCapabilitySpec capability_specs = 6;  // capabilities の各能力の仕様
-}
-message SetCapabilitiesRequest {
-  string client_id = 1;
-  repeated string capabilities = 2;
-  repeated string granted_capabilities = 3;  // ホストの許可判断の結果。クライアントからの自己付与は受け付けない
-  uint64 revision = 4;
-  repeated ClientCapabilitySpec capability_specs = 5;
+message DeviceChange {
+  Mutation mutation = 1;
+  Device device = 2;
 }
 message ActivationRequest {
-  string companion_id = 1;
-  string client_id = 2;
-  bool release = 4;
+  Mutation mutation = 1;
+  string device_id = 2;
 }
 message Activation {
-  string companion_id = 1;
-  optional string client_id = 2;
+  string device_id = 1;
+  uint64 generation = 2;
 }
-message ClientUpdated { Client client = 1; }
-enum DeviceOperationStatus {
-  DEVICE_OPERATION_STATUS_UNSPECIFIED = 0;
-  DEVICE_OPERATION_STATUS_PENDING = 1;
-  DEVICE_OPERATION_STATUS_DISPATCHED = 2;
-  DEVICE_OPERATION_STATUS_COMPLETED = 3;
-  DEVICE_OPERATION_STATUS_FAILED = 4;
-  DEVICE_OPERATION_STATUS_UNCERTAIN = 5;
+message Perception {
+  string device_id = 1;
+  uint64 generation = 2;
+  string observation = 3;
+  string interpretation = 4;
 }
 message DeviceOperation {
-  string operation_id = 1;  // 再送・重複排除に使う冪等キー
-  string capability = 2;    // ClientCapabilitySpec.name
-  string input = 3;         // input_schema に適合する JSON object text
-  string subscription_id = 4;
-  string client_id = 5;             // 受付時に束縛した対象クライアント
-  optional string work_id = 7;      // 手からの操作の場合のWorkSession
-  optional string run_id = 8;       // 手からの操作を発行した Run
-  string companion_id = 9;          // 操作を要求したコンパニオン
+  string id = 1;
+  string capability = 2;
+  string arguments_json = 3;
+  uint64 generation = 4;
+  string companion_id = 5;
+  string run_id = 6;
 }
-message DeviceReady { string subscription_id = 1; }
-message BodyAvailability {
-  string client_id = 1;
-  string subscription_id = 2;
-  repeated string ready_companion_ids = 3;
+message DeviceClaim {
+  string device_id = 1;
+  uint64 generation = 2;
+  string operation_id = 3;
 }
-message DeviceEvent {
-  oneof event {
-    DeviceReady ready = 1;
-    DeviceOperation operation = 2;
-  }
+message DeviceResult {
+  string device_id = 1;
+  uint64 generation = 2;
+  string operation_id = 3;
+  Outcome outcome = 4;
+  string result_json = 5;
+  ScreenFrame frame = 6;
 }
-message DeviceOperationResult {
-  string client_id = 1;
-  string operation_id = 2;
-  bool success = 3;
-  string output = 4; // output_schema に適合する JSON object text
-  optional Failure failure = 5;
-  optional string subscription_id = 6; // DeviceOperation で受け取った購読世代
+message ScreenFrame {
+  string id = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  bytes jpeg = 4;
 }
-message DeviceOperationState {
-  string operation_id = 1;
-  string client_id = 2;
-  DeviceOperationStatus status = 3;
-  optional DeviceOperationResult result = 4;
-}
-message HostEvent {
-  string kind = 1;
-  JsonDocument payload = 2;
-}
-
-// Perception (Eyes) --------------------------------------------------------
-
-message PerceptionEvent {
-  string client_id = 1;
-  string timestamp = 2;
-  oneof event {
-    ActiveWindowChanged active_window = 3;
-    UserActivityState user_activity = 4;
-    PerceptionSummary perception_summary = 5;
-    ScreenFrame screen_frame = 6;
-    WatchMatch watch_match = 7;
-    bool enabled = 8;
-    AvatarInteraction avatar_interaction = 11;
-  }
-  string subscription_id = 9; // DeviceReady の購読 ID。旧形式では空。
-  optional string companion_id = 10; // 明示ルーティング先のコンパニオン
-  optional uint64 consent_generation = 12; // 端末の観測許可が変わるたびに進む購読内の世代。
-}
-
-enum AvatarInteractionKind {
-  AVATAR_INTERACTION_KIND_UNSPECIFIED = 0;
-  AVATAR_INTERACTION_KIND_CLICK = 1;
-  AVATAR_INTERACTION_KIND_DOUBLE_CLICK = 2;
-  AVATAR_INTERACTION_KIND_DRAG = 3;
-}
-
-message AvatarInteraction {
-  AvatarInteractionKind kind = 1;
-  string character_id = 2;
-  string region = 3;
-}
-
-message ScreenFrame { bytes jpeg = 1; }
-
-enum WatchTransition {
-  WATCH_TRANSITION_UNSPECIFIED = 0;
-  WATCH_TRANSITION_FOCUS = 1;
-  WATCH_TRANSITION_BLUR = 2;
-  WATCH_TRANSITION_TITLE_CHANGE = 3;
-}
-message WatchMatch {
-  ActiveWindowChanged window = 1;
-  WatchTransition transition = 2;
-}
-
-message ActiveWindowChanged {
-  // Empty title and app_id with no URL clear the current foreground window.
-  string title = 1;
-  string app_id = 2;
-  optional string url = 3;
-}
-
-message UserActivityState {
-  bool is_active = 1;
-  uint64 idle_seconds = 2;
-  // The OS did not provide an activity observation. Ignore the other fields.
-  bool unavailable = 3;
-}
-
-message PerceptionSummary {
-  string summary = 1;
-  repeated string tags = 2;
-}
-
-// Service RPCs -------------------------------------------------------------
-
-message CompanionTemplate {
-  uint32 format_version = 1;
-  string id = 2;
-  string name = 3;
-  string mind = 4;
-  optional string persona = 5;
-  MindProfile profile = 6;
-  JsonDocument body = 7;
-  JsonDocument voice = 8;
-  optional string voice_identifier = 9;
-}
-message CompanionTemplates { repeated CompanionTemplate items = 1; }
-message ImportCompanionRequest {
-  CompanionTemplate template = 1;
-  ModelAssignments assignments = 2;
-}
-message PreviewCompanionRequest {
-  string name = 1;
-  string mind = 2;
-  optional string persona = 3;
-  MindProfile profile = 4;
-  ModelAssignment model = 5;
-  string user_message = 6;
-  optional uint64 expected_settings_revision = 7;
-}
-message PreviewCompanionResponse { string reply = 1; }
 
 service HostService {
   rpc GetSnapshot(Empty) returns (Snapshot);
-  rpc Subscribe(SubscribeRequest) returns (stream Notification);
-  rpc GetPerceptionFrame(Id) returns (ScreenFrame); // 最近の診断フレームをIDで取得
-  rpc ListCompanions(Empty) returns (Companions);
-  rpc GetCompanion(Id) returns (Companion);
-  rpc CreateCompanion(CreateCompanionRequest) returns (Companion);
-  rpc UpdateCompanion(UpdateCompanionRequest) returns (Companion);
-  rpc DeleteCompanion(Id) returns (Empty);
-  rpc ListCompanionTemplates(Empty) returns (CompanionTemplates);
-  rpc ExportCompanion(Id) returns (CompanionTemplate);
-  rpc ImportCompanion(ImportCompanionRequest) returns (Companion);
-  rpc PreviewCompanion(PreviewCompanionRequest) returns (PreviewCompanionResponse);
-  rpc GetMind(Id) returns (MindView);
-  rpc UpdateMindProfile(UpdateMindProfileRequest) returns (MindView);
-  rpc ControlMemory(MemoryControlRequest) returns (MemoryControlResult);
-  rpc ListMemories(ListMemoriesRequest) returns (Memories);
+  rpc Subscribe(SubscribeRequest) returns (stream Event);
+  rpc PutCharacter(CharacterChange) returns (Character);
+  rpc DeleteCharacter(DeleteRequest) returns (Empty);
+  rpc PutCompanion(CompanionChange) returns (Companion);
+  rpc DeleteCompanion(DeleteRequest) returns (Empty);
+  rpc Preview(PreviewRequest) returns (Text);
+  rpc ExportCharacter(ExportRequest) returns (CharacterPackage);
+  rpc ImportCharacter(ImportRequest) returns (Character);
+  rpc GetMind(Id) returns (Mind);
+  rpc PutMind(MindChange) returns (Mind);
+  rpc SearchMemories(MemoryQuery) returns (Memories);
+  rpc ChangeMemory(MemoryChange) returns (Memory);
 }
 
 service ChatService {
-  rpc SendMessage(SendMessageRequest) returns (Acceptance);
+  rpc Send(SendRequest) returns (Receipt);
   rpc Stop(StopRequest) returns (Empty);
   rpc GetHistory(HistoryRequest) returns (History);
-  rpc GetMessage(MessageRequest) returns (Message);
 }
 
 service SettingsService {
-  rpc GetSettings(Empty) returns (Settings);
-  rpc UpdateSettings(UpdateSettingsRequest) returns (Settings);
-  rpc DeleteConnection(DeleteConnectionRequest) returns (Settings);
-  rpc ListPendingApprovals(Empty) returns (PendingApprovals);
-  rpc SubmitApproval(SubmitApprovalRequest) returns (SubmitApprovalResponse);
-  rpc ListPolicyRules(Empty) returns (PolicyRules);
-  rpc UpdatePolicyRules(UpdatePolicyRulesRequest) returns (PolicyRules);
-  rpc ListPolicyTexts(Empty) returns (PolicyTexts);
-  rpc UpdatePolicyTexts(UpdatePolicyTextsRequest) returns (PolicyTexts);
-  // LLM接続のプロバイダカタログ。TTS/STT/MCP/ACPはConnectionのoneofで扱う。
-  rpc ListProviders(Empty) returns (LlmProviders);
-  // LLM接続のモデル一覧。
-  rpc ListModels(ModelsRequest) returns (Models);
-  rpc RegisterCredentials(CredentialRequest) returns (CredentialResult);
-  rpc RevokeCredentials(Id) returns (Empty);
-  // 接続種別（LLM/TTS/STT/Embedding/MCP/ACP）に共通の接続チェック。
-  rpc CheckConnection(CheckRequest) returns (CheckResult);
-  // プラグイン管理 (`F12`)
-  rpc ListPlugins(Empty) returns (PluginList);
-  rpc InstallPlugin(InstallPluginRequest) returns (PluginInfo);
-  rpc SetPluginEnabled(SetPluginEnabledRequest) returns (PluginInfo);
-  rpc RemovePlugin(RemovePluginRequest) returns (Empty);
-}
-
-message PluginInfo {
-  string id = 1;
-  string name = 2;
-  string version = 3;
-  string description = 4;
-  bool enabled = 5;
-  repeated string extensions = 6;
-  string path = 7;
-  string installed_at = 8;
-}
-
-message PluginList {
-  repeated PluginInfo plugins = 1;
-}
-
-message InstallPluginRequest {
-  string source_path = 1;
-}
-
-message SetPluginEnabledRequest {
-  string plugin_id = 1;
-  bool enabled = 2;
-}
-
-message RemovePluginRequest {
-  string plugin_id = 1;
+  rpc Get(Empty) returns (Settings);
+  rpc PutConnection(ConnectionChange) returns (Connection);
+  rpc DeleteConnection(DeleteRequest) returns (Empty);
+  rpc SetCredential(CredentialChange) returns (Empty);
+  rpc Models(Id) returns (ModelList);
+  rpc Probe(ProbeRequest) returns (Empty);
+  rpc PutPolicy(PolicyChange) returns (Policy);
+  rpc DeleteRule(DeleteRequest) returns (Empty);
+  rpc AuditHistory(AuditQuery) returns (Audit);
+  rpc Answer(ApprovalAnswer) returns (Empty);
+  rpc PutPlugin(PluginChange) returns (Plugin);
+  rpc DeletePlugin(DeleteRequest) returns (Empty);
 }
 
 service WorkService {
-  rpc ListWorks(ListWorksRequest) returns (WorkViews);
-  rpc GetWork(WorkRequest) returns (WorkView);
-  // StartWorkは現在のアクティブクライアントを対象端末として束縛する。
-  rpc StartWork(StartWorkRequest) returns (WorkSession);
-  rpc SendWork(SendWorkRequest) returns (WorkAcceptance);
-  rpc StopWork(StopWorkRequest) returns (Empty);
-  rpc CloseWork(WorkRequest) returns (Empty);
+  rpc List(Empty) returns (WorkList);
+  rpc Send(WorkInput) returns (Receipt);
+  rpc Stop(StopRequest) returns (Empty);
 }
 
 service VoiceService {
-  rpc StreamAudioInput(stream AudioInputChunk) returns (stream TranscriptionEvent); // HTTP/2
-  rpc SubscribeAudioOutput(SubscribeAudioRequest) returns (stream AudioOutputEvent);
-  // 音声合成の確認用。会話の文脈・発話権には触れず、合成できなければ失敗を返す。
+  rpc Input(stream AudioInput) returns (stream Transcription);
+  rpc Output(AudioSubscription) returns (stream AudioOutput);
   rpc Speak(SpeakRequest) returns (Empty);
 }
 
 service ClientService {
-  // クライアントは能力名と ClientCapabilitySpec を宣言して登録する。
-  rpc RegisterClient(RegisterClientRequest) returns (Client);
-  rpc List(Empty) returns (Clients);
-  // アクティブクライアントを切り替える。成功時はNotification.activation_updatedを配信し、旧クライアントの進行中処理を失効させる。
+  rpc RegisterDevice(DeviceChange) returns (Device);
   rpc Activate(ActivationRequest) returns (Activation);
-  rpc SetCapabilities(SetCapabilitiesRequest) returns (Client);
-  // ホスト -> クライアントの操作ストリーム。未配送の操作は再接続時に再送される。
-  rpc DeviceStream(Id) returns (stream DeviceEvent);
-  // 描画準備ができている常駐コンパニオン。現在の端末ストリームにのみ適用する。
-  rpc ReportBodyAvailability(BodyAvailability) returns (Empty);
-  rpc ReportPerception(PerceptionEvent) returns (Empty);
-  // クライアントは操作結果を返す。完了済み操作の再送は同じ状態を返す。
-  rpc CompleteOperation(DeviceOperationResult) returns (DeviceOperationState);
-  rpc GetOperation(Id) returns (DeviceOperationState);
+  rpc ReportPerception(Perception) returns (Empty);
+  rpc Operations(AudioSubscription) returns (stream DeviceOperation);
+  rpc Claim(DeviceClaim) returns (DeviceOperation);
+  rpc Complete(DeviceResult) returns (Empty);
 }

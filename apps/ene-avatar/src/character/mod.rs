@@ -1,7 +1,8 @@
 mod motion;
 
+use anyhow::Result;
 pub use motion::notify_finished;
-use motion::{FadingMotion, MotionFailure, Pending, advance_fades, motion_change};
+use motion::{FadingMotion, Pending, advance_fades, motion_change};
 
 use crate::desktop::Output;
 use bevy::{
@@ -13,7 +14,7 @@ use bevy::{
     prelude::*,
     world_serialization::WorldInstanceReady,
 };
-use ene_avatar_ipc::{AvatarEvent, AvatarStatus};
+use ene_core::avatar::{AvatarEvent, AvatarStatus};
 use ene_vrm::{ExpressionWeights, GazeOverride, SpringRig, Vrm, VrmSystems};
 
 #[derive(Component, Default)]
@@ -64,29 +65,18 @@ impl AvatarState {
     }
 }
 
-pub use ene_avatar_ipc::CharacterConfig as Config;
+pub use ene_core::avatar::CharacterConfig as Config;
 
-#[derive(Debug, thiserror::Error)]
-pub enum ConfigError {
-    #[error("{0}")]
-    AssetPath(String),
-    #[error("invalid size or position")]
-    InvalidSizeOrPosition,
-    #[error("expected .vrm or .vrma path")]
-    InvalidExtension,
-}
-
-pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
+pub fn validate_config(config: &Config) -> Result<()> {
     for path in std::iter::once(&config.model).chain(config.motion.iter()) {
-        bevy::asset::AssetPath::try_parse(path)
-            .map_err(|error| ConfigError::AssetPath(error.to_string()))?;
+        bevy::asset::AssetPath::try_parse(path)?;
     }
     if !(50. ..=200.).contains(&config.size_percent)
         || config
             .position
             .is_some_and(|p| p.iter().any(|v| !v.is_finite() || v.abs() > 1_000_000.))
     {
-        return Err(ConfigError::InvalidSizeOrPosition);
+        return Err(anyhow::anyhow!("invalid size or position"));
     }
     if !config.model.ends_with(".vrm")
         || config
@@ -94,7 +84,7 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
             .as_ref()
             .is_some_and(|path| !path.ends_with(".vrma"))
     {
-        return Err(ConfigError::InvalidExtension);
+        return Err(anyhow::anyhow!("expected .vrm or .vrma path"));
     }
     Ok(())
 }
@@ -231,7 +221,8 @@ pub fn cancel_motion(world: &mut World, entity: Entity) {
     if let Some(pending) = world
         .get_mut::<Character>(entity)
         .and_then(|mut c| c.pending.take())
-        && let Some(outcome) = pending.rejected(MotionFailure::Superseded)
+        && let Some(outcome) =
+            pending.rejected(anyhow::anyhow!("a newer operation superseded this motion"))
     {
         world.write_message(outcome);
     }
@@ -241,7 +232,12 @@ pub fn cancel_motions(world: &mut World) {
     let pending: Vec<_> = world
         .query::<&mut Character>()
         .iter_mut(world)
-        .filter_map(|mut actor| actor.pending.take()?.rejected(MotionFailure::ShuttingDown))
+        .filter_map(|mut actor| {
+            actor
+                .pending
+                .take()?
+                .rejected(anyhow::anyhow!("the renderer is shutting down"))
+        })
         .collect();
     world.write_message_batch(pending);
 }

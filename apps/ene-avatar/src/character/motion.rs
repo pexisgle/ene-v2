@@ -2,8 +2,9 @@
 //! systems that apply them.
 
 use super::{AvatarState, Character, Notification, load_error, load_motion};
+use anyhow::Result;
 use bevy::{animation::graph::AnimationNodeType, prelude::*};
-use ene_avatar_ipc::AvatarEvent;
+use ene_core::avatar::AvatarEvent;
 
 const MOTION_FADE_SECS: f32 = 0.3;
 
@@ -29,20 +30,10 @@ enum ClipChange {
     Rest,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum MotionFailure {
-    #[error("the animation asset could not be loaded")]
-    Asset,
-    #[error("a newer operation superseded this motion")]
-    Superseded,
-    #[error("the renderer is shutting down")]
-    ShuttingDown,
-}
-
 #[derive(Message)]
 pub(crate) struct MotionOutcome {
     pub(crate) request: u64,
-    pub(crate) result: Result<(), MotionFailure>,
+    pub(crate) result: Result<()>,
 }
 
 impl Pending {
@@ -63,7 +54,7 @@ impl Pending {
         })
     }
 
-    pub(super) fn rejected(&self, reason: MotionFailure) -> Option<MotionOutcome> {
+    pub(super) fn rejected(&self, reason: anyhow::Error) -> Option<MotionOutcome> {
         let request = match self {
             Self::Initial(request) => Some(*request),
             Self::Change(change) => change.request,
@@ -156,7 +147,10 @@ pub(super) fn motion_change(
                     continue;
                 }
                 AvatarState::Ready | AvatarState::Suspended => (Some(request), Ok(())),
-                AvatarState::Error(_) => (Some(request), Err(MotionFailure::Asset)),
+                AvatarState::Error(_) => (
+                    Some(request),
+                    Err(anyhow::anyhow!("the animation asset could not be loaded")),
+                ),
             },
             Pending::Change(mut change) => {
                 match change.advance(server, &mut graphs, &mut roots, &mut c) {
@@ -181,15 +175,19 @@ impl MotionChange {
         graphs: &mut Assets<AnimationGraph>,
         roots: &mut Query<(&mut AnimationPlayer, &AnimationGraphHandle)>,
         c: &mut Character,
-    ) -> Option<Result<(), MotionFailure>> {
+    ) -> Option<Result<()>> {
         if matches!(c.state, AvatarState::Error(_)) {
-            return Some(Err(MotionFailure::Asset));
+            return Some(Err(anyhow::anyhow!(
+                "the animation asset could not be loaded"
+            )));
         }
         if let ClipChange::Loading(clip) = &self.phase
             && let Some(error) = load_error(server, clip.id().untyped(), false)
         {
             warn!(character = %c.id, %error, "the motion did not load");
-            return Some(Err(MotionFailure::Asset));
+            return Some(Err(anyhow::anyhow!(
+                "the animation asset could not be loaded"
+            )));
         }
         let (mut player, handle) = roots.get_mut(c.root?).ok()?;
         let playing = match &self.phase {

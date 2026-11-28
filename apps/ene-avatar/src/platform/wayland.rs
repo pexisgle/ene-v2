@@ -90,7 +90,7 @@ fn layer_state(app: &mut App) -> Result<WindowState<()>, AppExit> {
     {
         Ok(state) => Ok(state),
         Err(error) => {
-            let message = ene_avatar_ipc::AvatarMessage::Fatal {
+            let message = ene_core::avatar::AvatarMessage::Fatal {
                 error: format!("Wayland layer-shell and xdg-output are required: {error}"),
             };
             let _reported = app.world().resource::<Control>().output.try_send(message);

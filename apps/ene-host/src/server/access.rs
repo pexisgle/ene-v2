@@ -9,16 +9,15 @@ use private_fs::{Durability, FileAccess, FileCreation, OpenOptions, PrivateDir, 
 use std::path::PathBuf;
 use std::{
     fs::{self, File},
-    io::{self, Read},
+    io,
     path::Path,
 };
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+use anyhow::Result;
 
 pub(super) struct Access {
     _locks: [PrivateFile; 2],
     directory: PrivateDir,
-    state: PrivateDir,
     /// The discovery file the tests read back; production code reaches the
     /// same path through `directory` and `publish`.
     #[cfg(test)]
@@ -51,29 +50,9 @@ impl Access {
         Ok(Self {
             _locks: locks,
             directory,
-            state,
             #[cfg(test)]
             connection: runtime.join("connection.json"),
         })
-    }
-
-    pub(super) fn approval_key(&self) -> Result<[u8; 32]> {
-        const NAME: &str = "approval.key";
-        let mut key = [0; 32];
-        match self.state.open_file(NAME) {
-            Ok(mut file) => {
-                file.read_exact(&mut key)?;
-                if file.read(&mut [0; 1])? != 0 {
-                    return Err(io::Error::other("invalid approval key length").into());
-                }
-            }
-            Err(private_fs::Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
-                getrandom::fill(&mut key)?;
-                self.state.write_atomic_durable(NAME, &key)?;
-            }
-            Err(error) => return Err(error.into()),
-        }
-        Ok(key)
     }
 
     pub(super) fn publish(&self, endpoint: &str) -> Result<String> {
@@ -118,8 +97,6 @@ mod tests {
         assert_eq!(value["endpoint"], "http://127.0.0.1:4321/rpc");
         assert!(Access::acquire(&state, &root.join("other-runtime")).is_err());
         assert!(Access::acquire(&root.join("other-state"), &runtime).is_err());
-        let approval_key = first.approval_key().unwrap();
-        private_fs::verify(&File::open(state.join("approval.key")).unwrap()).unwrap();
         let connection = first.connection.clone();
         drop(first);
         assert!(!connection.exists());
@@ -128,9 +105,5 @@ mod tests {
             first_token,
             second.publish("http://127.0.0.1:1234/rpc").unwrap()
         );
-        assert_eq!(approval_key, second.approval_key().unwrap());
-        fs::write(state.join("approval.key"), [0; 33]).unwrap();
-        assert!(second.approval_key().is_err());
-        assert_eq!(fs::metadata(state.join("approval.key")).unwrap().len(), 33);
     }
 }

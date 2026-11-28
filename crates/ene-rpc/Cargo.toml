@@ -1,36 +1,28 @@
 [package]
 name = "ene-rpc"
-description = "Generated ene Connect RPC contract"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-[lints]
-workspace = true
+
 [features]
 client = ["connectrpc/client", "dep:http", "dep:url"]
 client-tls = ["client", "connectrpc/client-tls", "dep:rustls-native-certs"]
 
 [dependencies]
-# Re-exports the built-in tool identifiers so existing `ene_rpc::BUILTIN_TOOLS`
-# call sites keep working. `ene-policy` owns them; the wire crate must not.
-ene-policy.workspace = true
-serde_json.workspace = true
-serde.workspace = true
 buffa.workspace = true
-
-[target.'cfg(not(target_family = "wasm"))'.dependencies]
-ene-domain.workspace = true
-http = { workspace = true, optional = true }
-url = { workspace = true, optional = true }
-rustls-native-certs = { version = "0.8", optional = true }
 connectrpc.workspace = true
+http = { workspace = true, optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+serde.workspace = true
+serde_json.workspace = true
+url = { workspace = true, optional = true }
 
 [build-dependencies]
-buffa-build = "0.9"
 connectrpc-build = "0.9"
 
-# The generated Protobuf/Connect code uses `buffa`, `serde`, and `serde_json`.
-# `*-build` are build-script only, which cargo-machete does not scan.
 [package.metadata.cargo-machete]
-ignored = ["buffa", "serde", "serde_json", "buffa-build", "connectrpc-build"]
+ignored = ["buffa", "serde", "serde_json", "connectrpc-build"]
+
+[lints]
+workspace = true

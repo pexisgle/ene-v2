@@ -8,7 +8,7 @@ Usage:
   connect.py stream SERVICE/Method '<json>' [--connection FILE]
                     [--count N] [--timeout SECS]
 
-  SERVICE   full proto service, e.g. ene.host.v1.HostService
+  SERVICE   full proto service, e.g. ene.host.v2.HostService
   Method    e.g. GetSnapshot, Subscribe
   '<json>'  request body; '@path' reads it from a file
 
@@ -286,7 +286,7 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("rpc", "stream"):
         item = sub.add_parser(name)
-        item.add_argument("method", help="SERVICE/Method, e.g. ene.host.v1.HostService/GetSnapshot")
+        item.add_argument("method", help="SERVICE/Method, e.g. ene.host.v2.HostService/GetSnapshot")
         item.add_argument("body", nargs="?", default="{}", help="request JSON, or @path")
         item.add_argument("--connection", default=None, help="connection.json path")
         item.add_argument("--timeout", type=float, default=10.0)

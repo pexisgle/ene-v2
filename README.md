@@ -1,112 +1,70 @@
 # ene
 
-デスクトップに常駐するキャラクターとの対話から、PC内の作業を任せるAIコンパニオンです。[構想](docs/vision.md)、[全体アーキテクチャ](docs/architecture.md)に実装方針をまとめています。
+デスクトップに常駐するキャラクターとの会話から、調査や作業を依頼できる AI コンパニオンです。ホストが会話・記憶・作業を管理し、デスクトップが文字と音声の入出力、知覚、アバターを担当します。クライアントを閉じてもホストは稼働します。
 
-## 設計文書
+- [構想・仕様](docs/README.md)
+- [ワークスペース再実装の設計](REBUILD.md)
+- [ホスト API](docs/api.md)
 
-全体の案内は[ドキュメント一覧](docs/README.md)にまとめています。現在の採用設計は[全体アーキテクチャ](docs/architecture.md)、[心・記憶・会話圧縮の設計](docs/design/mind.md)、[作業実行・操作確認・接続保護の設計](docs/design/work.md)、[クライアント設計](docs/design/client.md)、[プラグイン拡張の設計](docs/design/plugins.md)、[ホスト API の概要](docs/api.md)を参照してください（[調査・選定根拠](docs/references.md#alpha-design-sources)）。現行の動作・起動方法は各パッケージのドキュメントを参照してください。
+## ビルドと起動
 
-## ワークスペース
-
-実行プロセスのパッケージは`apps/`、内部ライブラリは`crates/`に配置します。
-
-| パッケージ | 役割 |
-| --- | --- |
-| [`ene-host`](apps/ene-host/) | AI接続、会話、タスク、権限、永続化を管理するホスト |
-| [`ene-desktop`](apps/ene-desktop/) | ホストへ接続し、アバター描画・音声デバイス・知覚を担うデスクトップクライアント |
-| [`ene-avatar`](apps/ene-avatar/) | 単一Bevy AppでのVRM描画、透過ウィンドウ、JSON Linesによる表示制御 |
-| [`ene-plugin`](crates/ene-plugin/) | プラグイン作者向けの型定義とRust SDK |
-| [`ene-plugin-runtime`](crates/ene-plugin-runtime/) | ホストに組み込まれたExtism実行、検証、実行制限 |
-
-ホストのアプリケーション処理、許可付きHTTP通信、Connect API、SQLite保存は `ene-host` にまとめています。起動・接続方法と内部構成は [ene-host のクレートドキュメント](apps/ene-host/src/lib.rs) を参照してください。Wasmプラグインは `ene-plugin-runtime` がExtismを直接呼び出します。専用runner・自己再起動・Luau実行はありません。`ene-host` はこの実行基盤をリンクし、有効なプロバイダーを起動してLLM・TTS・STT接続に使用します。型とSDKは `ene-plugin` が提供します。
-
-## Nixで開発する
-
-現在の開発シェルは`x86_64-linux`向けです。Nixのflakesとnix-commandを有効にした環境で、リポジトリのルートから実行します。
+`rust-toolchain.toml` の Rust、Buf、それぞれの OS の開発ライブラリを使います。Linux では Clang、LLD、ALSA、Wayland、X11、xkbcommon、Fontconfig、Vulkan が必要です。Nix では `nix develop` で開発シェルを起動できます。
 
 ```sh
-nix develop
-just verify
+cargo test --workspace
+cargo clippy --workspace
 just run
 ```
 
-direnvを使う場合は、リポジトリのルートで一度`direnv allow`を実行すると、ディレクトリへ入るたびに開発環境が有効になります。
+`just run-host` でホストだけを立ち上げ、別の端末から `just run-desktop` で接続することもできます。デスクトップの設定で、対話のプロバイダーを登録し、利用するコンパニオンへモデルと用途を割り当てます。API キーはホストの OS キーチェーンへ登録できます。ヘッドレス運用では、接続で指定した環境変数から資格情報を読み込みます。
 
-## Nixを使わずに開発する
-
-rustupと`buf`、そのOSでRustプログラムをリンクするための開発ツールを用意します。Linux（x86_64）ではClangとLLD、WindowsではMSVCのC++ビルドツールが必要です。`buf`はプロトコル生成に使い、CIとNixの開発シェルでは1.73.0に固定しています。
-
-リポジトリのルートで固定バージョンのツールチェーンをインストールし、通常のCargoで検査できます。
-
-```sh
-rustup toolchain install 1.100.0 --profile minimal --component rustfmt --component clippy --component rust-analyzer --component rust-src --target wasm32-unknown-unknown
-cargo install cargo-nextest --locked
-cargo fmt --all -- --check
-cargo check --workspace --all-targets --all-features --locked
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo build --release --locked -p ene-reference-wasm -p ene-openrouter-wasm --target wasm32-unknown-unknown
-cargo nextest run --workspace --all-features --locked
-cargo build --workspace --all-targets --all-features --locked
-cargo run --locked -p ene-host
-```
-
-`just verify`は整形とClippy（テストを含む型検査）を実行します。テストは対象の挙動を変更したときに`just test`で実行し、変更していない合格済みのテストを繰り返す必要はありません。成果物が必要なときは`just build`を実行します。
-
-## Windows インストーラーを作る
-
-Windows 10/11 x64 向けのセットアップ EXE を生成します。上記の Windows 開発環境に加え、x64 MSVC の再頒布用ランタイムファイルと [Inno Setup 6.3 以降](https://jrsoftware.org/inno-setup/downloads)を用意し、リポジトリのルートで実行します。
-
-```powershell
-just installer-windows
-```
-
-`target/installer/ene-<バージョン>-windows-x64-setup.exe` が生成されます。インストーラーは管理者権限なしで実行でき、デスクトップ・ローカルホスト・アバター描画の実行ファイル、MSVC ランタイム、`assets/ENE.vrm`、`assets/vrma/` 直下の採用済み VRMA を収録します。
-
-スタートメニューの **ene** またはインストール先の `ene-desktop.exe` を開くと、隣にある `ene-host.exe` も起動します。タスクトレイの **終了** でデスクトップを終了すると、ホストも終了します。`ENE_HOST_CONNECTION` で接続先を指定した場合は、そのホストに接続します。ローカルホストは既定でアバターのモーションと作業フォルダーのファイル操作を許可し、端末で有効にした画面操作も受け付けます。**設定 → この端末 → 許可ルール → すべて省略** で、許可済みツールの既定の確認を省略できます。
-
-会話や設定はユーザーのデータフォルダーに保存されます。公開配布前には、`ENE.vrm` に記録されている作者（pexisgle）と配布条件（`allowRedistribution: false`）を確認してください。
-
-## ビルド高速化
-
-[Bevyのセットアップガイド](https://bevy.org/learn/quick-start/getting-started/setup/)に沿って、次の設定を使います。
-
-- Linux（x86_64）ではClang＋LLDでリンクします。
-- 開発時の最適化はワークスペース内クレートを`opt-level = 1`、依存ライブラリを`opt-level = 3`に設定しています。CIでは依存ライブラリも`opt-level = 0`で検査し、コンパイル時間を優先します。
-
-Nixではrust-overlayが`rust-toolchain.toml`を読み、必要なコンポーネントをまとめて提供します。Nixとrustupで同じツールチェーンを使うため、バージョンを`1.100.0`に固定しています。更新時は`nix flake update rust-overlay`を実行し、`rust-toolchain.toml`と上記インストールコマンドのバージョンを揃えて変更します。
-
-Wasmプラグイン用の `wasm32-unknown-unknown` ターゲットも共通設定に含めます。プラグイン実行にbubblewrapは不要です。
-
-ツールチェーンとビルド設定の変更後は初回に再コンパイルが発生します。キャラクター描画はBevyの必要な機能のみ有効にし、`dynamic_linking`は使っていません。
-
-## テストの方針
-
-- 内部テストは、対象の実装ファイル末尾の `#[cfg(test)] mod tests` に置きます。複数モジュールの連携を検証する内部テストは、構成を担う `lib.rs` などにまとめます。
-- 重大な失敗、状態破壊、参照の混線、数値計算の不変条件を重点的に検証します。設定値の写し合わせや、依存ライブラリの仕様を網羅するためだけのテストは増やしません。
-- 補助コードは利用するテストモジュール内に置きます。テストの配置のために実装を公開したり、Cargoの自動検出を無効にしたりしません。
-- `tests/` は公開APIや実行ファイルへの入出力を外部から検証する結合テストに使います。
-- シェーダーなど通常のCPUテストで確認できない重要な処理は、環境依存のテストとして分け、対応するCIで実行します。
-
-## 開発コマンド
-
-| コマンド | 処理 |
+| 環境変数 | 用途 |
 | --- | --- |
-| `just` | 利用可能なレシピの一覧 |
-| `just fmt` | ワークスペース全体のRustコードを整形 |
-| `just fmt-check` | 整形済みかを確認 |
-| `just check` | 全クレート・ターゲット・機能を型検査 |
-| `just clippy` | 全クレート・ターゲット・機能を検査し、警告をエラーにする |
-| `just test` | テスト用Wasmをビルドし、Nextestでワークスペースのテストを実行 |
-| `just build` | 全クレート・ターゲット・機能をビルド |
-| `just installer-windows` | キャラクターとモーションを同梱した Windows x64 インストーラーを生成 |
-| `just fetch-assets` | 開発用の Seed-san VRM モデルを取得。モーションは `assets/vrma` に同梱 |
-| `just verify` | 整形確認とClippy（テストを含む型検査）を実行 |
-| `just build-test-plugins` | 結合テスト用の参照Wasmをビルド |
-| `just run` | ホストとデスクトップクライアント（アバター描画付き）を同時に起動 |
-| `just run-host` | 認証付きホストAPIを起動 |
-| `just run-desktop` | [ホストへ接続するデスクトップクライアント](apps/ene-desktop/src/lib.rs)を起動 |
-| `just run-avatar` | [JSON Linesで操作する透過描画プロセス](apps/ene-avatar/src/main.rs)を起動 |
-| `just run-avatar-cli` | 本体をビルドし、対話式 CLI からアバターを操作 |
+| `ENE_HOST_STATE_DIR` / `ENE_HOST_RUNTIME_DIR` | ホストの状態と、所有者限定の接続情報の保存先 |
+| `ENE_HOST_BIND` | ループバックの待ち受けアドレス |
+| `ENE_HOST_ALLOWED_HOSTS` | 外部認証を備えたリバースプロキシで許可するホスト名 |
+| `ENE_HOST_CONNECTION` | デスクトップが読む保護された接続ファイル |
+| `ENE_HOST_DEVICE_CAPABILITIES` | ホスト側で許可する端末能力。カンマ区切り |
+| `ENE_DESKTOP_RENDERER` / `ENE_DESKTOP_ASSETS` | アバター実行ファイルとアセットディレクトリ |
 
-このワークスペースで Cargo から起動するホストは、データを既定で `target/run/host/state` に保存し、接続情報を `target/run/host/runtime` に公開します。保存先は `ENE_HOST_STATE_DIR` と `ENE_HOST_RUNTIME_DIR` で上書きできます。別のホストに接続する場合は `ENE_HOST_CONNECTION` で接続情報ファイルを指定します。
+遠隔接続は、[接続保護の設計](docs/design/work.md#ホスト接続とアクセス保護境界)の認証済み HTTPS 経路を用意し、接続情報の `endpoint` にその `/rpc` URL を指定します。履歴と SQLite のバックアップは、ホストを停止して状態ディレクトリごと取得します。
 
+拡張には MCP（stdio / Streamable HTTP）と [プラグイン SDK](crates/ene-plugin/) を使います。Windows でインストーラーを作るには `just installer-windows` を実行します。公開配布前に同梱 VRM の再配布条件を確認してください。
+
+### デスクトップの起動と初回設定
+
+`ene-desktop` は、接続先が指定されていなければ同じディレクトリの
+`ene-host` を必要に応じて起動します。認証情報が必要なプロバイダーではホストの
+OS キーチェーンへキーを保存します。初回画面で接続とモデルを選ぶと、疎通確認後に
+対話・作業・安全判定の初期モデルを登録します。用途別の割り当ては設定で変更できます。
+`--connection` で別のホストを選択でき、`--connect-only` でローカルの自動起動を止められます。
+
+Windows と StatusNotifierItem 対応の Linux では、タスクトレイから対話、設定、
+音声切り替え、アバター位置のリセット、終了を操作できます。デスクトップを閉じても
+ローカルホストは作業やスケジュールを継続します。Windows と X11 の画面取得・入力は
+設定の「この端末の画面取得と操作」で有効にできます。Wayland の画面取得では、
+その都度デスクトップの共有ポータルで送信対象を選びます。画面は作業モデルへ送信されます。
+クリック・スクロール・文字入力・キー操作には、その作業で取得した直近の画面が必要です。
+
+端末専用の Wasm プラグインは、設定の「端末プラグイン」または `ene-desktop --plugin <フォルダー>` で読み込みます。
+見守りが有効な間、知覚プラグインは前面ウィンドウの観測を端末内で解釈できます。
+体の拡張は `body.plugin.<パッケージ ID>.<エントリーポイント ID>` をホストの
+`ENE_HOST_DEVICE_CAPABILITIES` に追加すると使えます。宣言にはパッケージのダイジェストが含まれ、
+アクティブ端末と承認済み引数に結び付けられます。使用例は [参照プラグイン](examples/plugins/reference/) にあります。
+
+### 「手」のワークスペースツール
+
+ホスト起動時に `ENE_WORKSPACE` を作業ディレクトリに設定すると、組み込みの
+`read`、`search`、`edit`、`write` が作業モデルに公開されます。`write` は
+新規作成、`edit` は既存ファイルの一意なテキストを置換します。
+
+`shell` を使う場合は、作業ディレクトリの外に置いた JSON ファイルを
+`ENE_WORKSPACE_TASKS` で指定します。キーはタスク名、値は実行ファイル名と固定引数の配列です。
+コマンドは登録時に指定したアカウント権限で、作業ディレクトリをカレントディレクトリとして実行されます。
+
+```json
+{
+  "test": ["cargo", "test", "--workspace"],
+  "status": ["git", "status", "--short"]
+}
+```

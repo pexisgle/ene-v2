@@ -18,7 +18,7 @@ use bevy::{
     prelude::*,
     window::WindowRef,
 };
-use ene_avatar_ipc::AvatarEvent;
+use ene_core::avatar::AvatarEvent;
 use std::collections::VecDeque;
 
 #[derive(Resource, Default)]

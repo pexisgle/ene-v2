@@ -46,7 +46,7 @@ wait_ready() {
   local deadline=$((SECONDS + 30))
   while [ $SECONDS -lt $deadline ]; do
     if [ -s "$connection" ] \
-      && ENE_HOST_CONNECTION=$connection python3 "$here/connect.py" rpc ene.host.v1.HostService/GetSnapshot >/dev/null 2>&1; then
+      && ENE_HOST_CONNECTION=$connection python3 "$here/connect.py" rpc ene.host.v2.HostService/GetSnapshot >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.1
@@ -65,8 +65,6 @@ launch() {
     rm -f "$pid_file"
     fail "host did not become ready within 30s"
   fi
-  cp "$connection" "$run/evidence/connection.json"
-  chmod 600 "$run/evidence/connection.json"
   echo "$run"
 }
 
@@ -117,13 +115,12 @@ doctor() {
     && status ok "connection.json is 0600" \
     || status bad "connection.json is 0600" "$(stat -c %a "$connection" 2>/dev/null)"
   if [ -s "$connection" ]; then
-    read -r code ready < <(ENE_HOST_CONNECTION=$connection python3 "$here/connect.py" \
-      rpc ene.host.v1.HostService/GetSnapshot 2>/dev/null \
-      | python3 -c 'import json,sys; s=json.load(sys.stdin); print(s.get("serverVersion","?"), s.get("health",{}).get("ready",False))' 2>/dev/null)
-    if [ "${code:-?}" != "?" ] && [ "${ready:-False}" = "True" ]; then
-      status ok "authenticated GetSnapshot reports ready (serverVersion $code)" "ready=$ready"
+    if ENE_HOST_CONNECTION=$connection python3 "$here/connect.py" \
+      rpc ene.host.v2.HostService/GetSnapshot 2>/dev/null \
+      | python3 -c 'import json,sys; s=json.load(sys.stdin); assert s["cursor"]["epoch"] and s["companions"]' 2>/dev/null; then
+      status ok "authenticated GetSnapshot contains the startup snapshot"
     else
-      status bad "authenticated GetSnapshot reports ready" "serverVersion=${code:-?} ready=${ready:-False}"
+      status bad "authenticated GetSnapshot contains the startup snapshot" "the snapshot was invalid or unavailable"
     fi
   fi
   echo "doctor: $run"
@@ -144,7 +141,7 @@ case ${1:-} in
   stop) stop ;;
   path) echo "$run" ;;
   *)
-    echo "usage: $0 {start|doctor|stop|path} [RUN_ID]" >&2
+    echo "usage: $0 {start|restart|doctor|stop|path} [RUN_ID]" >&2
     exit 2
     ;;
 esac

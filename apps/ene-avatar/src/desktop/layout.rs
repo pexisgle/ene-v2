@@ -2,7 +2,7 @@
 
 use crate::character::Config;
 use bevy::prelude::*;
-use ene_avatar_ipc::LAYOUT_FILE_ENV;
+use ene_core::avatar::LAYOUT_FILE_ENV;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
