@@ -25,7 +25,7 @@ pub mod tray;
 pub mod window;
 
 #[cfg(windows)]
-pub use capture::{CapturedFrame, Foreground, MAX_FRAME_EDGE, MAX_JPEG_BYTES};
+pub use capture::CapturedFrame;
 #[cfg(windows)]
 pub use input::{Desktop, Point, Rect};
 #[cfg(windows)]

@@ -73,17 +73,21 @@ fn process_name(pid: u32) -> Option<String> {
     path.rsplit(['\\', '/']).next().map(ToOwned::to_owned)
 }
 
-fn idle_seconds() -> Option<u64> {
+pub(crate) fn last_input_tick() -> Option<u32> {
     let mut info = LASTINPUTINFO {
         cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
         dwTime: 0,
     };
     // SAFETY: `info` is a live `LASTINPUTINFO` whose `cbSize` is set, which is
     // the contract the call documents.
-    if !unsafe { GetLastInputInfo(&mut info) }.as_bool() {
-        return None;
-    }
+    unsafe { GetLastInputInfo(&mut info) }
+        .as_bool()
+        .then_some(info.dwTime)
+}
+
+fn idle_seconds() -> Option<u64> {
+    let last_input = last_input_tick()?;
     // SAFETY: reads the system tick counter; takes no pointer.
     let now = unsafe { windows::Win32::System::SystemInformation::GetTickCount() };
-    Some(u64::from(now.wrapping_sub(info.dwTime)) / 1000)
+    Some(u64::from(now.wrapping_sub(last_input)) / 1000)
 }

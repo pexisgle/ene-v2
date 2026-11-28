@@ -6,9 +6,9 @@
 #![cfg(windows)]
 
 /// Maximum width or height of a reported JPEG frame.
-pub const MAX_FRAME_EDGE: u32 = 1280;
+const MAX_FRAME_EDGE: u32 = 1280;
 /// Maximum encoded JPEG size before it is rejected.
-pub const MAX_JPEG_BYTES: usize = 512 * 1024;
+const MAX_JPEG_BYTES: usize = 512 * 1024;
 
 use crate::Rect;
 use image::{DynamicImage, ExtendedColorType, codecs::jpeg::JpegEncoder};
@@ -56,10 +56,6 @@ pub fn unlocked() -> bool {
             .eq_ignore_ascii_case("default")
 }
 
-pub fn capture() -> Option<Vec<u8>> {
-    capture_frame().map(|frame| frame.jpeg)
-}
-
 #[derive(Clone, Debug)]
 pub struct CapturedFrame {
     pub jpeg: Vec<u8>,
@@ -89,7 +85,7 @@ pub fn physical<T>(action: impl FnOnce() -> T) -> Option<T> {
     Some(action())
 }
 
-fn foreground() -> Option<(HWND, RECT)> {
+pub(crate) fn foreground() -> Option<(HWND, RECT)> {
     // SAFETY: reads the foreground window handle; no pointer is involved.
     let window = unsafe { GetForegroundWindow() };
     // SAFETY: maps a live window handle to its monitor; takes no pointer.
@@ -108,44 +104,13 @@ fn foreground() -> Option<(HWND, RECT)> {
     }
 }
 
-/// The foreground window, with its handle kept opaque.
-///
-/// Only this crate's `input` module needs the raw handle back; it is wrapped
-/// rather than exposed so the type cannot escape into the app.
-#[derive(Clone, Copy, Debug)]
-pub struct Foreground {
-    /// The owning window, as an opaque integer.
-    pub window: isize,
-    rect: RECT,
-}
-
-impl Foreground {
-    /// The monitor rectangle the window occupies.
-    pub fn rect(self) -> RECT {
-        self.rect
-    }
-
-    /// The raw handle, for this crate's own Win32 calls.
-    pub(crate) fn window_handle(self) -> HWND {
-        HWND(self.window as *mut std::ffi::c_void)
-    }
-}
-
-/// The foreground window and the monitor rect it occupies.
-pub fn foreground_rect() -> Option<Foreground> {
-    foreground().map(|(window, rect)| Foreground {
-        window: window.0 as isize,
-        rect,
-    })
-}
-
 pub fn capture_frame() -> Option<CapturedFrame> {
     if !unlocked() {
         return None;
     }
     let (pixels, window, monitor) = physical(|| {
-        let foreground = foreground_rect()?;
-        let bounds = Rect::from(foreground.rect());
+        let (window, rect) = foreground()?;
+        let bounds = Rect::from(rect);
         let monitor = xcap::Monitor::from_point(bounds.left, bounds.top).ok()?;
         let pixels = monitor.capture_image().ok()?;
         if pixels.dimensions()
@@ -156,7 +121,7 @@ pub fn capture_frame() -> Option<CapturedFrame> {
         {
             return None;
         }
-        Some((pixels, foreground.window, bounds))
+        Some((pixels, window.0 as isize, bounds))
     })??;
     let pixels = DynamicImage::ImageRgba8(pixels).into_rgb8();
     let (width, height) = pixels.dimensions();

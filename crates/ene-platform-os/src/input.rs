@@ -12,7 +12,7 @@ use windows::Win32::{
     UI::{Input::KeyboardAndMouse as input, WindowsAndMessaging as window},
 };
 
-use crate::capture;
+use crate::{capture, observe::last_input_tick};
 
 mod actions;
 pub use actions::{Button, Input, InputError, Key, Point, apply_input};
@@ -34,19 +34,12 @@ impl Desktop {
         if !capture::unlocked() {
             return None;
         }
-        let foreground = capture::foreground_rect()?;
+        let (foreground, monitor_rect) = capture::foreground()?;
         let mut window_bounds = RECT::default();
-        let mut activity = input::LASTINPUTINFO {
-            cbSize: std::mem::size_of::<input::LASTINPUTINFO>() as u32,
-            ..Default::default()
-        };
         // SAFETY: the handle came from a live foreground query and `window_bounds`
         // is a local this function owns.
-        unsafe { window::GetWindowRect(foreground.window_handle(), &mut window_bounds).ok()? };
-        // SAFETY: `activity` is a live `LASTINPUTINFO` whose `cbSize` is set.
-        if !unsafe { input::GetLastInputInfo(&mut activity) }.as_bool() {
-            return None;
-        }
+        unsafe { window::GetWindowRect(foreground, &mut window_bounds).ok()? };
+        let last_input = last_input_tick()?;
         // SAFETY: each call reads one virtual-screen metric; no pointer involved.
         let left = unsafe { window::GetSystemMetrics(window::SM_XVIRTUALSCREEN) };
         // SAFETY: as above, for the top edge.
@@ -56,16 +49,16 @@ impl Desktop {
         // SAFETY: as above, for the height.
         let height = unsafe { window::GetSystemMetrics(window::SM_CYVIRTUALSCREEN) };
         (width > 0 && height > 0).then_some(Self {
-            window: foreground.window,
+            window: foreground.0 as isize,
             window_bounds,
-            monitor_rect: foreground.rect(),
+            monitor_rect,
             virtual_screen: RECT {
                 left,
                 top,
                 right: left + width,
                 bottom: top + height,
             },
-            last_input: activity.dwTime,
+            last_input,
         })
     }
 
@@ -107,11 +100,6 @@ impl Desktop {
     /// The whole virtual screen, for absolute pointer addressing.
     pub fn virtual_screen(&self) -> Rect {
         Rect::from(self.virtual_screen)
-    }
-
-    /// The last input tick Windows recorded, used to detect user activity.
-    pub fn last_input(&self) -> u32 {
-        self.last_input
     }
 }
 
