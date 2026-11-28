@@ -135,29 +135,30 @@ mod tests {
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
-    use std::time::Duration;
+    use std::{io::Write as _, time::Duration};
     use tokio::io::{AsyncBufReadExt, BufReader};
+
+    const FIXTURE: &str = "process::windows_tests::job_fixture";
+    const PID_MARKER: &str = "ene-job-child=";
 
     #[tokio::test]
     async fn retiring_a_connector_terminates_its_job_object() -> Result<()> {
-        let args = [
-            "-NoProfile".into(),
-            "-NonInteractive".into(),
-            "-Command".into(),
-            concat!(
-                "$child = Start-Process ping.exe -ArgumentList '-n','60','127.0.0.1' ",
-                "-WindowStyle Hidden -PassThru; ",
-                "[Console]::WriteLine($child.Id); $child.WaitForExit()"
-            )
-            .into(),
-        ];
-        let (process, _input, output) = spawn("powershell.exe", &args)?;
+        let executable = std::env::current_exe()?;
+        let executable = executable.to_str().context("test executable path")?;
+        let args = ["--ignored", "--nocapture", "--exact", FIXTURE].map(str::to_owned);
+        let (process, input, output) = spawn(executable, &args)?;
+        drop(input);
         let mut lines = BufReader::new(output).lines();
-        let pid = tokio::time::timeout(Duration::from_secs(20), lines.next_line())
-            .await??
-            .context("child pid missing")?
-            .trim()
-            .parse::<u32>()?;
+        let pid = tokio::time::timeout(Duration::from_secs(15), async {
+            while let Some(line) = lines.next_line().await? {
+                if let Some((_, value)) = line.split_once(PID_MARKER) {
+                    return Ok::<_, anyhow::Error>(value.trim().parse::<u32>()?);
+                }
+            }
+            anyhow::bail!("fixture exited without reporting its child")
+        })
+        .await
+        .context("fixture did not report its child")??;
         assert!(running(pid).await?);
         drop(process);
         tokio::time::timeout(Duration::from_secs(15), async move {
@@ -166,7 +167,25 @@ mod windows_tests {
             }
             Ok::<(), anyhow::Error>(())
         })
-        .await??;
+        .await
+        .context("fixture child remained alive after the job closed")??;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "launched by the Windows Job Object test"]
+    fn job_fixture() -> Result<()> {
+        if !std::env::args().any(|arg| arg == FIXTURE) {
+            return Ok(());
+        }
+        let mut child = std::process::Command::new("ping.exe")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        writeln!(std::io::stdout().lock(), "{PID_MARKER}{}", child.id())?;
+        child.wait()?;
         Ok(())
     }
 
