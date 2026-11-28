@@ -319,11 +319,6 @@ pub(crate) fn connection_secret(
     credentials: Option<&Credentials>,
     providers: &crate::host::providers::Providers,
 ) -> Result<Option<String>> {
-    if connection.credential_state == CredentialState::RegistrationRequired {
-        return Err(HostError::FailedPrecondition(
-            "この接続の認証情報を再登録してください。".into(),
-        ));
-    }
     let stored = credentials.map_or(Ok(None), |store| {
         store.read_secret(connection.id.as_str(), Some(&connection.config))
     });

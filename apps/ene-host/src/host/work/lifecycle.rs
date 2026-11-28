@@ -100,20 +100,7 @@ pub(crate) fn restore(world: &mut World) -> Result<()> {
         }
         let companion = companions.get(session.companion_id.as_str());
         let active = work.active_run(&session.id)?;
-        let stable = logs.get(&agent::work_agent_id(&session.id));
-        let history = if stable.is_none() || active.is_none() {
-            work.runs(&session.id)?
-        } else {
-            Vec::new()
-        };
-        let restored = stable
-            .or_else(|| {
-                history
-                    .iter()
-                    .rev()
-                    .find_map(|run| logs.get(&agent::work_agent_id(&run.run_id)))
-            })
-            .copied();
+        let restored = logs.get(&agent::work_agent_id(&session.id)).copied();
         let already_attached = attached
             .iter()
             .find(|(_, worker)| {
@@ -127,15 +114,12 @@ pub(crate) fn restore(world: &mut World) -> Result<()> {
             let executor = work.run_executor(&run.run_id)?.ok_or_else(|| {
                 HostError::Storage("the work run disappeared during recovery".into())
             })?;
-            let legacy_run_log = restored.is_some_and(|entity| {
-                logs.get(&agent::work_agent_id(&run.run_id)) == Some(&entity)
-            });
             let available = restored
                 .or(already_attached)
                 .and_then(|entity| {
                     let agent = world.get_entity(entity).ok()?;
                     let turn = world.get_entity(agent.get::<ActiveTurn>()?.turn()).ok()?;
-                    Some(is_live_run(&agent, &turn, run, &executor, legacy_run_log))
+                    Some(is_live_run(&agent, &turn, run, &executor))
                 })
                 .unwrap_or(false);
             if available && companion.is_some() {
@@ -157,8 +141,13 @@ pub(crate) fn restore(world: &mut World) -> Result<()> {
             false
         };
         if let Some(companion) = companion {
+            let last = if restored.is_some() && active.is_none() {
+                work.runs(&session.id)?.pop()
+            } else {
+                None
+            };
             if let Some(entity) = restored
-                && let Some(run) = active.as_ref().or_else(|| history.last())
+                && let Some(run) = active.as_ref().or(last.as_ref())
             {
                 if recoverable {
                     if let Some(turn) = world.get::<ActiveTurn>(entity).map(ActiveTurn::turn) {
@@ -200,26 +189,20 @@ fn is_live_run(
     turn: &EntityRef<'_>,
     run: &super::Run,
     executor: &RunExecutor,
-    legacy_run_log: bool,
 ) -> bool {
-    if matches!(executor, RunExecutor::Harness { .. }) {
-        return false;
-    }
-    if turn.contains::<TurnOutcome>() || turn.contains::<rig_ecs::restore::Restored>() {
-        return false;
-    }
-    legacy_run_log
-        || matches!(executor, RunExecutor::Rig)
-            && turn
-                .get::<Turn>()
-                .and_then(|turn| agent.get::<Conversation>()?.request(turn.start))
-                .is_some_and(|entry| {
-                    entry.is_users_own()
-                        && entry
-                            .author
-                            .and_then(|author| author.request.as_ref())
-                            .is_some_and(|id| id.0 == run.run_id)
-                })
+    matches!(executor, RunExecutor::Rig)
+        && !turn.contains::<TurnOutcome>()
+        && !turn.contains::<rig_ecs::restore::Restored>()
+        && turn
+            .get::<Turn>()
+            .and_then(|turn| agent.get::<Conversation>()?.request(turn.start))
+            .is_some_and(|entry| {
+                entry.is_users_own()
+                    && entry
+                        .author
+                        .and_then(|author| author.request.as_ref())
+                        .is_some_and(|id| id.0 == run.run_id)
+            })
 }
 
 pub(super) fn maintain(world: &mut World) {

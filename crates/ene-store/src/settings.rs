@@ -29,7 +29,11 @@ impl FromRow for Connection {
             enabled: row.get("enabled")?,
             kind,
             config,
-            credential_state: CredentialState::parse(&row.get::<_, String>("credential_state")?),
+            credential_state: enum_name_column(
+                row,
+                "credential_state",
+                "unknown credential state",
+            )?,
             revision: row.get::<_, u64>("revision")?,
             last_check: optional_json_column(
                 row,
@@ -383,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_credential_states_are_tolerated_and_invalid_connections_fail_to_load() {
+    fn invalid_connection_rows_fail_to_load() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
         let repo = store.settings_repo();
@@ -392,7 +396,6 @@ mod tests {
             ("absent", CredentialState::Absent),
             ("registered", CredentialState::Registered),
             ("environment", CredentialState::Environment),
-            ("historical-unknown", CredentialState::Absent),
         ] {
             store
                 .conn()

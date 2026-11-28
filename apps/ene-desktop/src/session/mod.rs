@@ -69,13 +69,11 @@ pub(super) const CAPTURE: Duration = Duration::from_millis(100);
 pub(super) const LIP: Duration = Duration::from_millis(16);
 
 fn client_id_path() -> Option<PathBuf> {
-    #[cfg(windows)]
-    let dir = directories::BaseDirs::new()?.data_local_dir().join("ene");
-    #[cfg(not(windows))]
-    let dir = directories::ProjectDirs::from("", "", "ene")?
-        .config_local_dir()
-        .to_owned();
-    Some(dir.join("desktop-client-id"))
+    Some(
+        directories::ProjectDirs::from("", "", "ene")?
+            .data_local_dir()
+            .join("desktop-client-id"),
+    )
 }
 
 /// Loads or atomically initializes a stable per-install client ID at `path`.

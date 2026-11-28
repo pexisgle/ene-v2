@@ -38,10 +38,7 @@ pub(crate) fn project(
 ) -> w::Settings {
     let mut view = w::Settings::from(settings);
     for (row, connection) in view.connections.iter_mut().zip(&settings.connections) {
-        if matches!(
-            connection.credential_state,
-            CredentialState::Registered | CredentialState::RegistrationRequired
-        ) {
+        if connection.credential_state == CredentialState::Registered {
             continue;
         }
         let state = if environment_secret(connection, loaded).is_some() {

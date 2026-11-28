@@ -1,13 +1,12 @@
 //! Accepts a work input once across both executors and host restarts.
-use super::{ReadyWork, RunState, WorkStatus, agent_of, executor_of, new_run, require_session};
+use super::{ReadyWork, RunState, WorkStatus, executor_of, new_run, require_session};
 use crate::host::{
     db::{Result, Store},
     error::HostError,
 };
 use bevy_ecs::prelude::*;
 use ene_rpc as w;
-use ene_store::work::{AcceptedWorkInput, WorkInputReceipt};
-use rig_ecs::prelude::*;
+use ene_store::work::WorkInputReceipt;
 
 pub(crate) fn send(world: &mut World, request: &w::SendWorkRequest) -> Result<w::WorkAcceptance> {
     let store = world.resource::<Store>().clone();
@@ -15,24 +14,19 @@ pub(crate) fn send(world: &mut World, request: &w::SendWorkRequest) -> Result<w:
     let session = require_session(&store, &request.work_id)?;
     let hash = ene_store::util::digest(format!("{}:{}", session.id, request.text).as_bytes());
     let key = request.request_key.as_str();
-    if !key.is_empty() {
-        let saved = repo.input_receipt(&session.id, key)?;
-        let previous = saved.or_else(|| {
-            let agent = agent_of(world, &session.id)?;
-            legacy_receipt(world.get::<Conversation>(agent), key)
-        });
-        if let Some(previous) = previous {
-            if previous.payload_hash != hash {
-                return Err(HostError::AlreadyExists(
-                    "this request key already accepted different content".into(),
-                ));
-            }
-            return Ok(w::WorkAcceptance {
-                request_id: previous.request_id,
-                run_id: previous.run_id,
-                ..Default::default()
-            });
+    if !key.is_empty()
+        && let Some(previous) = repo.input_receipt(&session.id, key)?
+    {
+        if previous.payload_hash != hash {
+            return Err(HostError::AlreadyExists(
+                "this request key already accepted different content".into(),
+            ));
         }
+        return Ok(w::WorkAcceptance {
+            request_id: previous.request_id,
+            run_id: Some(previous.run_id),
+            ..Default::default()
+        });
     }
     if session.status == WorkStatus::Closed {
         return Err(HostError::Conflict("work session is closed".into()));
@@ -60,24 +54,5 @@ pub(crate) fn send(world: &mut World, request: &w::SendWorkRequest) -> Result<w:
         request_id,
         run_id: Some(run.run_id),
         ..Default::default()
-    })
-}
-
-fn legacy_receipt(conversation: Option<&Conversation>, key: &str) -> Option<AcceptedWorkInput> {
-    conversation?.asides().find_map(|(_, aside)| {
-        if aside.kind != "ene.work_accepted" || aside.value["request_key"].as_str()? != key {
-            return None;
-        }
-        let bytes = aside.value["hash"]
-            .as_array()?
-            .iter()
-            .map(|byte| u8::try_from(byte.as_u64()?).ok())
-            .collect::<Option<Vec<_>>>()?;
-        let id = aside.value["request_id"].as_str()?;
-        Some(AcceptedWorkInput {
-            payload_hash: bytes,
-            request_id: id.to_owned(),
-            run_id: None,
-        })
     })
 }

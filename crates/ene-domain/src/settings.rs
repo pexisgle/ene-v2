@@ -384,8 +384,6 @@ pub enum CredentialState {
     Registered,
     /// The secret comes from an environment variable named by the config.
     Environment,
-    /// The old registration has no verified binding to this host and recipient.
-    RegistrationRequired,
 }
 
 impl CredentialState {
@@ -397,11 +395,6 @@ impl CredentialState {
     /// Returns the canonical snake-case wire/database representation.
     pub fn as_str(self) -> &'static str {
         self.into()
-    }
-
-    /// Parses a stored credential state string, falling back to `Absent` for legacy unknown tags.
-    pub fn parse(text: &str) -> Self {
-        text.parse().unwrap_or_default()
     }
 }
 
@@ -545,13 +538,8 @@ mod tests {
                 serde_json::to_string(&state).unwrap(),
                 format!("\"{text}\"")
             );
-            assert_eq!(CredentialState::parse(text), state);
+            assert_eq!(text.parse::<CredentialState>().unwrap(), state);
         }
-        // A tag this build no longer knows still decodes, to `Absent`.
-        assert_eq!(
-            CredentialState::parse("legacy_unknown"),
-            CredentialState::Absent
-        );
     }
 
     #[test]

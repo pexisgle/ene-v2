@@ -29,9 +29,6 @@ pub enum TemplateError {
 /// Serializes and sanitizes a companion template into wire-compatible pretty JSON.
 pub fn export_template_json(template: &CompanionTemplate) -> Result<String, TemplateError> {
     let mut sanitized = template.clone();
-    if sanitized.format_version == 0 {
-        sanitized.format_version = TEMPLATE_FORMAT_VERSION;
-    }
     sanitize_template(&mut sanitized);
     serde_json::to_string_pretty(&sanitized).map_err(TemplateError::Export)
 }
@@ -43,11 +40,8 @@ pub fn parse_template_json(raw: &str) -> Result<CompanionTemplate, TemplateError
         return Err(TemplateError::EmptyInput);
     }
     let mut template: CompanionTemplate = serde_json::from_str(trimmed)?;
-    if template.format_version > TEMPLATE_FORMAT_VERSION {
+    if template.format_version != TEMPLATE_FORMAT_VERSION {
         return Err(TemplateError::UnsupportedVersion(template.format_version));
-    }
-    if template.format_version == 0 {
-        template.format_version = TEMPLATE_FORMAT_VERSION;
     }
     if template.name.trim().is_empty() {
         return Err(TemplateError::MissingName);
@@ -99,7 +93,7 @@ mod tests {
         assert_eq!(voice.voice_id.as_deref(), Some("3"));
 
         let bad_ver =
-            serde_json::json!({"format_version": 99, "name": "x", "mind": "y"}).to_string();
+            serde_json::json!({"formatVersion": 99, "name": "x", "mind": "y"}).to_string();
         assert!(parse_template_json(&bad_ver).is_err());
         assert!(parse_template_json("").is_err());
     }

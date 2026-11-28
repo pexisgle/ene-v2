@@ -142,7 +142,7 @@ pub(crate) fn import_template(
         .template
         .as_option()
         .ok_or_else(|| HostError::Invalid(("template is required").into()))?;
-    if template.format_version > TEMPLATE_FORMAT_VERSION {
+    if template.format_version != TEMPLATE_FORMAT_VERSION {
         return Err(HostError::Invalid(format!(
             "unsupported companion template version {}",
             template.format_version

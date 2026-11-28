@@ -168,11 +168,6 @@ impl Providers {
         let entries = repo.plugin_entries()?;
         for entry in &entries {
             self.restore_package(state, entry);
-            if entry.revision.is_none()
-                && let Some(loaded) = self.get(&entry.plugin_id)
-            {
-                repo.pin_legacy_plugin_revision(&entry.plugin_id, &loaded.package.revision)?;
-            }
         }
         for id in self
             .adapters()
@@ -199,12 +194,11 @@ impl Providers {
             return;
         }
         let [legacy, managed] = package_locations(state, id);
-        let managed_revision = entry.revision.as_deref().filter(|revision| {
-            revision.len() == 64
-                && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
-                && is_managed_revision(Path::new(&entry.path), id, revision)
-        });
-        let candidate = if let Some(revision) = managed_revision {
+        let revision = &entry.revision;
+        let candidate = if revision.len() == 64
+            && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && is_managed_revision(Path::new(&entry.path), id, revision)
+        {
             load_one(&managed.join(revision))
                 .ok()
                 .map(|(_, loaded)| Arc::new(loaded))
@@ -213,10 +207,7 @@ impl Providers {
         };
         if let Some(loaded) = candidate
             && loaded.package.manifest.id == *id
-            && entry
-                .revision
-                .as_ref()
-                .is_none_or(|revision| *revision == loaded.package.revision)
+            && *revision == loaded.package.revision
         {
             self.install(
                 id.clone(),

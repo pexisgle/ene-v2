@@ -38,9 +38,7 @@ pub enum RunState {
     WaitingInput,
     /// The agent finished and reported.
     Completed,
-    /// A stop reached its final state. A stored row that still spells a state
-    /// this build no longer has decodes here.
-    #[serde(alias = "cancelling", alias = "cancellation_unconfirmed")]
+    /// A stop reached its final state.
     Cancelled,
     /// The agent stopped with an error; see `Run::failure`.
     Failed,
@@ -82,8 +80,6 @@ pub struct WorkSession {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RunExecutor {
-    /// A run recorded before executor identities were saved.
-    Unrecorded,
     /// The host's persistent Rig agent.
     Rig,
     /// A volatile Wasm harness instance.
@@ -123,7 +119,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn work_status_and_run_state_round_trip_and_decode_legacy_aliases() {
+    fn work_status_and_run_state_round_trip() {
         for (status, name) in [
             (WorkStatus::Idle, "idle"),
             (WorkStatus::Active, "active"),
@@ -154,11 +150,6 @@ mod tests {
             let encoded = serde_json::to_string(&state).unwrap();
             assert_eq!(encoded, format!("\"{name}\""));
             assert_eq!(serde_json::from_str::<RunState>(&encoded).unwrap(), state);
-        }
-
-        for alias in ["cancelling", "cancellation_unconfirmed"] {
-            let decoded: RunState = serde_json::from_str(&format!("\"{alias}\"")).unwrap();
-            assert_eq!(decoded, RunState::Cancelled);
         }
     }
 }

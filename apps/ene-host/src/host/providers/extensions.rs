@@ -451,7 +451,7 @@ mod tests {
         let root = temp.path().join(PLUGINS_DIR).join("reference-ext");
         let (entry, package) =
             super::super::install_local_package(&store, temp.path(), &root).unwrap();
-        assert_eq!(Some(package.revision.as_str()), entry.revision.as_deref());
+        assert_eq!(entry.revision, package.revision);
         assert_ne!(
             running.installation_id(),
             Some(entry.installation_id.as_str())

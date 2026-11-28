@@ -22,7 +22,7 @@ pub struct PluginEntry {
     pub enabled: bool,
     pub installed_at: String,
     pub updated_at: String,
-    pub revision: Option<String>,
+    pub revision: String,
     pub installation_id: String,
 }
 
@@ -139,16 +139,6 @@ impl<'a> PluginRepo<'a> {
             invalidate_harness_checks(transaction, plugin_id)?;
             Ok(entry)
         })
-    }
-
-    pub fn pin_legacy_plugin_revision(&self, plugin_id: &str, revision: &str) -> Result<()> {
-        self.0
-            .conn()
-            .prepare_cached(
-                "UPDATE plugin_entries SET revision = ?2 WHERE plugin_id = ?1 AND revision IS NULL",
-            )?
-            .execute(params![plugin_id, revision])?;
-        Ok(())
     }
 
     pub fn set_plugin_enabled(

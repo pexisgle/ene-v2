@@ -170,7 +170,6 @@ pub(super) fn render_credentials_strip(
         CredentialState::Registered => "登録済み",
         CredentialState::Environment => "環境変数",
         CredentialState::Absent => "未登録",
-        CredentialState::RegistrationRequired => "再登録が必要",
     };
 
     div()

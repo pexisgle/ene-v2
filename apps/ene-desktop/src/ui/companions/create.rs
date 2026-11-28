@@ -25,7 +25,7 @@ pub(super) fn render_import_panel(
     let json_d = pane.drafts.description_draft(
         cx,
         "import:json",
-        r#"{"format_version":1,"name":"...", "mind":"..."}"#,
+        r#"{"formatVersion":1,"name":"...", "mind":"..."}"#,
         None,
         theme,
     );

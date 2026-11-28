@@ -104,9 +104,6 @@ pub struct Companion {
 #[serde(rename_all = "camelCase")]
 pub struct CompanionTemplate {
     /// Template format version, so an older or newer export can be refused.
-    // The wire contract emits `formatVersion` and accepts the snake_case
-    // spelling older exports used, so both must keep parsing.
-    #[serde(default, alias = "format_version")]
     pub format_version: u32,
     /// Id the template suggests for the new companion.
     #[serde(default)]
@@ -129,12 +126,8 @@ pub struct CompanionTemplate {
     /// Voice binding to restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<JsonDocument>,
-    /// Voice identifier kept beside the voice binding for older exports.
-    #[serde(
-        default,
-        alias = "voice_identifier",
-        skip_serializing_if = "Option::is_none"
-    )]
+    /// Voice identifier kept beside the voice binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_identifier: Option<String>,
 }
 

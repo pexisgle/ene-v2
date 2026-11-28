@@ -252,7 +252,7 @@ CREATE TABLE work_runs (
     failure TEXT,
     started_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    executor TEXT NOT NULL DEFAULT '{"type":"unrecorded"}'
+    executor TEXT NOT NULL
 );
 
 CREATE INDEX idx_runs_work ON work_runs(work_id, state);
@@ -284,7 +284,7 @@ CREATE TABLE work_input_receipts (
     request_key TEXT NOT NULL,
     payload_hash BLOB NOT NULL CHECK (length(payload_hash) = 32),
     request_id TEXT NOT NULL,
-    run_id TEXT,
+    run_id TEXT NOT NULL,
     PRIMARY KEY (work_id, request_key)
 ) WITHOUT ROWID;
 
@@ -383,8 +383,8 @@ CREATE TABLE plugin_entries (
     enabled INTEGER NOT NULL DEFAULT 1,
     installed_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    revision TEXT,
-    installation_id TEXT NOT NULL DEFAULT ''
+    revision TEXT NOT NULL,
+    installation_id TEXT NOT NULL
 );
 
 PRAGMA user_version = 1;

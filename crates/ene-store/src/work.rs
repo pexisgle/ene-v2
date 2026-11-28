@@ -64,7 +64,7 @@ pub struct WorkInputReceipt<'a> {
 pub struct AcceptedWorkInput {
     pub payload_hash: Vec<u8>,
     pub request_id: String,
-    pub run_id: Option<String>,
+    pub run_id: String,
 }
 
 impl<'a> WorkRepo<'a> {
@@ -326,9 +326,9 @@ mod tests {
         store.conn().execute_batch(
             "INSERT INTO work_sessions (id, companion_id, title, status, created_at, updated_at)
                   VALUES ('work', 'ene', 'with run', 'idle', '2026-01-01', '2026-01-01'),
-                         ('closed', 'ene', 'closed', '2026-01-01', '2026-01-01');
-             INSERT INTO work_runs (run_id, work_id, instruction, state, started_at, updated_at)
-                  VALUES ('run', 'work', 'continue', 'running', '2026-01-01', '2026-01-01');
+                         ('closed', 'ene', 'closed', 'closed', '2026-01-01', '2026-01-01');
+             INSERT INTO work_runs (run_id, work_id, instruction, state, started_at, updated_at, executor)
+                  VALUES ('run', 'work', 'continue', 'running', '2026-01-01', '2026-01-01', '{\"type\":\"rig\"}');
              INSERT INTO approval_requests (request_id, session_id, run_id, work_id,
                           action_payload_hash, tool_name, normalized_arguments, status, created_at)
                   VALUES ('later', 'ene', 'run', 'work', X'01', 'device_request', '{}', 'pending', '2026-01-02'),

@@ -99,12 +99,16 @@ impl Store {
                 .map_err(|error| StoreError::Storage(format!("state directory: {error}")))?;
         }
         let mut connection = open_connection(path)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if schema_version(&transaction)? == 0 {
-            transaction.execute_batch(include_str!("schema.sql"))?;
-        }
-        transaction.commit()?;
+        let version = schema_version(&connection)?;
         configure_connection(&connection)?;
+        if version == 0 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if schema_version(&transaction)? == 0 {
+                transaction.execute_batch(include_str!("schema.sql"))?;
+            }
+            transaction.commit()?;
+        }
         Ok(Self::from_connection(connection, Arc::new(grants)))
     }
 
@@ -481,21 +485,6 @@ mod tests {
             RunState::Cancelled,
             RunState::Failed,
         ]);
-    }
-
-    #[test]
-    fn a_stop_state_this_host_no_longer_writes_decodes_as_cancelled() {
-        use ene_domain::RunState;
-
-        let connection = Connection::open_in_memory().unwrap();
-        for name in ["cancelling", "cancellation_unconfirmed"] {
-            let state: RunState = connection
-                .query_row("SELECT ?1 AS name", [name], |row| {
-                    enum_name_column(row, "name", "unknown run state")
-                })
-                .unwrap();
-            assert_eq!(state, RunState::Cancelled, "{name}");
-        }
     }
 
     #[test]

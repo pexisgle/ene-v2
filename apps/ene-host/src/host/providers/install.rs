@@ -139,7 +139,7 @@ mod tests {
         assert_eq!(entry.plugin_id, "demo-tool");
         assert_eq!(parsed.manifest.version, "0.2.0");
         assert!(entry.enabled);
-        assert_eq!(entry.revision.as_deref(), Some(parsed.revision.as_str()));
+        assert_eq!(entry.revision, parsed.revision);
         assert_eq!(store.plugin_repo().plugin_entries().unwrap().len(), 1);
         let (reused, _) = install_local_package(&store, state.path(), &parsed.root).unwrap();
         assert_eq!(reused.path, entry.path);
