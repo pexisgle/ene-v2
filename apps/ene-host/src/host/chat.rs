@@ -210,7 +210,7 @@ pub(crate) fn history(
     let mut items: Vec<_> = dialogue_entries(world, request.companion_id)?
         .rev()
         .filter(|entry| after.is_none_or(|after| entry.id.get() > after))
-        .filter_map(|entry| dialogue_message(request.companion_id, &entry))
+        .filter_map(|entry| message(request.companion_id, "", &entry))
         .take(limit)
         .collect();
     items.reverse();
@@ -244,27 +244,19 @@ pub(crate) fn message_by_id<'a>(
         .map_err(|_| HostError::Invalid("message id is not a number".into()))?;
     entries
         .filter(|entry| entry.id.get() == wanted)
-        .find_map(|entry| dialogue_message(request.companion_id, &entry))
+        .find_map(|entry| message(request.companion_id, "", &entry))
         .ok_or_else(|| HostError::NotFound("message not found".into()))
 }
 
-fn dialogue_message(companion: &str, entry: &EntryRef<'_>) -> Option<w::Message> {
-    agent::entry_text(entry).map(|text| message(companion, "", entry, text))
-}
-
-pub(crate) fn message(
-    companion: &str,
-    work: &str,
-    entry: &EntryRef<'_>,
-    text: String,
-) -> w::Message {
+pub(crate) fn message(companion: &str, work: &str, entry: &EntryRef<'_>) -> Option<w::Message> {
+    let text = agent::entry_text(entry)?;
     let role = agent::role_of(entry);
     let text = if work.is_empty() && role == w::MessageRole::Assistant {
         super::voice::speech::strip_motion_leak(&text)
     } else {
         text
     };
-    w::Message {
+    Some(w::Message {
         id: entry.id.get().to_string(),
         companion_id: companion.to_owned(),
         work_id: work.to_owned(),
@@ -280,7 +272,7 @@ pub(crate) fn message(
             .author
             .map_or_default(rig_core::conversation::Author::label),
         ..Default::default()
-    }
+    })
 }
 
 #[cfg(test)]

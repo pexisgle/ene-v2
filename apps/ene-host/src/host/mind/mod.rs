@@ -88,10 +88,7 @@ pub(crate) fn create(
     store.companion_repo().insert_companion(&companion)?;
     agent::spawn_companion(world, &companion);
     agent::sync_companion(world, &companion.id)?;
-    {
-        let notifier = world.resource_mut::<Notifier>();
-        notify(&notifier, &companion);
-    }
+    notify(world.resource::<Notifier>(), &companion);
     Ok(wire::companion(&companion))
 }
 
@@ -167,10 +164,7 @@ pub(crate) fn update(
         .companion_repo()
         .update_companion(&companion, request.revision)?;
     agent::sync_companion(world, &companion.id)?;
-    {
-        let notifier = world.resource_mut::<Notifier>();
-        notify(&notifier, &companion);
-    }
+    notify(world.resource::<Notifier>(), &companion);
     Ok(wire::companion(&companion))
 }
 

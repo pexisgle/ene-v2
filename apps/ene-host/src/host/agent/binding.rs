@@ -132,11 +132,7 @@ pub(crate) fn ensure_model(world: &mut World, entity: Entity) -> Result<()> {
 }
 
 /// Tells the clients that a saved companion has no usable model yet.
-pub(super) fn notice_model_unavailable(
-    notifier: &mut Notifier,
-    companion_id: &str,
-    error: &HostError,
-) {
+pub(super) fn notice_model_unavailable(notifier: &Notifier, companion_id: &str, error: &HostError) {
     notifier.notice(
         Some(companion_id),
         "model_unavailable",
@@ -158,7 +154,7 @@ pub(crate) fn deliver(
     author: Author,
 ) -> bool {
     if let Err(error) = ensure_model(world, entity) {
-        notice_model_unavailable(&mut world.resource_mut::<Notifier>(), companion_id, &error);
+        notice_model_unavailable(world.resource::<Notifier>(), companion_id, &error);
         return false;
     }
     world.trigger(Deliver::new(entity, text, mode).with_author(author));

@@ -177,11 +177,7 @@ pub(crate) fn sync_companion(world: &mut World, companion_id: &str) -> Result<()
                 Ok(()) => Ok(()),
                 Err(error) if error.is_storage() => Err(error),
                 Err(error) => {
-                    notice_model_unavailable(
-                        &mut world.resource_mut::<Notifier>(),
-                        companion_id,
-                        &error,
-                    );
+                    notice_model_unavailable(world.resource::<Notifier>(), companion_id, &error);
                     Ok(())
                 }
             }
@@ -225,10 +221,11 @@ pub(crate) fn reconcile(world: &mut World) -> Result<()> {
     };
     for (entity, companion) in agents {
         if let Err(error) = ensure_model(world, entity) {
-            notice_model_unavailable(&mut world.resource_mut::<Notifier>(), &companion, &error);
+            notice_model_unavailable(world.resource::<Notifier>(), &companion, &error);
         }
     }
-    let notifier = world.resource_mut::<Notifier>();
-    notifier.notice(None, "host_ready", "the host restored its state");
+    world
+        .resource::<Notifier>()
+        .notice(None, "host_ready", "the host restored its state");
     Ok(())
 }

@@ -67,7 +67,7 @@ pub(super) fn log_tools(
     tools: Query<LoggedTool, ToolActivity>,
     agents: Query<TurnAgentRows>,
     turns: Query<&WorkTurn>,
-    notifier: ResMut<Notifier>,
+    notifier: Res<Notifier>,
 ) {
     let notifier = notifier.into_inner();
     for (request, target, turn, settled) in &tools {
@@ -109,7 +109,7 @@ pub(super) struct TurnSettledParams<'w, 's> {
     >,
     agents: Query<'w, 's, TurnAgentRows>,
     conversations: Query<'w, 's, &'static Conversation>,
-    notifier: ResMut<'w, Notifier>,
+    notifier: Res<'w, Notifier>,
 }
 
 /// Publishes the final turn event once a companion turn settles, and settles

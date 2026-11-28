@@ -21,24 +21,15 @@ pub(crate) fn entry_text(entry: &EntryRef<'_>) -> Option<String> {
     if entry.author.is_some_and(crate::host::eyes::is_eyes) {
         return None;
     }
-    match entry.message {
+    let text: String = match entry.message {
         CompletionMessage::User { content } => {
-            let mut text = String::new();
-            for item in content {
-                if let UserContent::Text(item) = item {
-                    text.push_str(&item.text);
-                }
-            }
-            let text = text.trim();
-            (!text.is_empty()).then(|| text.to_owned())
+            content.iter().filter_map(UserContent::as_text).collect()
         }
-        CompletionMessage::Assistant(reply) => {
-            let text = reply.text();
-            let text = text.trim();
-            (!text.is_empty()).then(|| text.to_owned())
-        }
-        CompletionMessage::System { .. } => None,
-    }
+        CompletionMessage::Assistant(reply) => reply.text(),
+        CompletionMessage::System { .. } => return None,
+    };
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
 }
 
 pub(crate) fn role_of(entry: &EntryRef<'_>) -> w::MessageRole {
@@ -67,7 +58,7 @@ type UnpublishedMessages = Or<(Changed<Conversation>, Added<LastProjectedEntry>)
 /// and speaks the entries that are a companion's own reply.
 pub(crate) fn publish_messages(
     mut agents: Query<AgentRows, UnpublishedMessages>,
-    notifier: ResMut<Notifier>,
+    notifier: Res<Notifier>,
     mut commands: Commands,
 ) {
     let notifier = notifier.into_inner();
@@ -82,10 +73,9 @@ pub(crate) fn publish_messages(
             .map_or(0, |at| at + 1);
         for entry in conversation.entries().skip(start) {
             published.0 = Some(entry.id.get());
-            let Some(text) = entry_text(&entry) else {
+            let Some(message) = crate::host::chat::message(companion_id, work_id, &entry) else {
                 continue;
             };
-            let message = crate::host::chat::message(companion_id, work_id, &entry, text);
             // Only a companion's own reply is spoken, and only to the user. A
             // whole message is what a sentence-level engine like VOICEVOX wants:
             // the streaming fragments are too small to split into sentences, and
@@ -136,8 +126,8 @@ pub(crate) fn publish_messages(
 pub(super) fn stream_deltas(
     mut deltas: MessageReader<StreamDelta>,
     calls: Query<(), (With<TurnCall>, Without<Settled>)>,
-    agents: Query<(&AgentId, Option<&CompanionAgent>)>,
-    notifier: ResMut<Notifier>,
+    agents: Query<&CompanionAgent, With<AgentId>>,
+    notifier: Res<Notifier>,
 ) {
     let notifier = notifier.into_inner();
     for delta in deltas.read() {
@@ -149,18 +139,14 @@ pub(super) fn stream_deltas(
         };
         // Only a companion speaks to the user; a work agent's text is a report
         // to the head, never a transcript delta of its own.
-        let Some(companion) = delta
-            .agent
-            .and_then(|agent| agents.get(agent).ok())
-            .and_then(|(_, companion)| companion.map(|agent| agent.companion_id.clone()))
-        else {
+        let Some(agent) = delta.agent.and_then(|agent| agents.get(agent).ok()) else {
             continue;
         };
         notifier.push(
-            Some(companion.as_str()),
+            Some(agent.companion_id.as_str()),
             None,
             w::notification::Event::MessageDelta(Box::new(w::MessageDelta {
-                companion_id: companion.clone(),
+                companion_id: agent.companion_id.clone(),
                 stream_id: delta.effect.to_string(),
                 delta: text.clone(),
                 ..Default::default()
