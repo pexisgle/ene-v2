@@ -42,7 +42,8 @@ impl<'a> AgentKernel<'a> {
     }
 
     pub(crate) fn message(&mut self, request: &w::MessageRequestView<'_>) -> Result<w::Message> {
-        chat::message_by_id(self.app.world_mut(), request)
+        let entries = chat::dialogue_entries(self.app.world_mut(), request.companion_id)?;
+        chat::message_by_id(entries, request)
     }
 
     pub(crate) fn create_companion(

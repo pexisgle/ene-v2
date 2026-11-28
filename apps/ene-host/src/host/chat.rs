@@ -6,7 +6,7 @@ use super::{
 };
 use ene_rpc as w;
 use ene_store::util::{digest, now};
-use rig_core::conversation::{Aside, Author, AuthorKind, RequestId};
+use rig_core::conversation::{Aside, Author, AuthorKind, EntryRef, RequestId};
 use rig_ecs::prelude::*;
 use serde::Deserialize;
 use serde_json::json;
@@ -200,24 +200,17 @@ pub(crate) fn history(
     world: &mut World,
     request: &w::HistoryRequestView<'_>,
 ) -> Result<w::History> {
-    let store = world.resource::<Store>().clone();
-    store
+    world
+        .resource::<Store>()
         .companion_repo()
         .companion(request.companion_id)?
-        .ok_or_else(|| HostError::NotFound(("companion not found").into()))?;
-    let agent = agent::agent_of(world, request.companion_id)
-        .ok_or_else(|| HostError::NotFound(("companion agent not found").into()))?;
+        .ok_or_else(|| HostError::NotFound("companion not found".into()))?;
     let after = request.cursor.and_then(|cursor| cursor.parse::<u64>().ok());
     let limit = request.limit.unwrap_or(100).clamp(1, 200) as usize;
-    let mut items: Vec<_> = world
-        .get::<Conversation>(agent)
-        .into_iter()
-        .flat_map(|conversation| conversation.entries().rev())
+    let mut items: Vec<_> = dialogue_entries(world, request.companion_id)?
+        .rev()
         .filter(|entry| after.is_none_or(|after| entry.id.get() > after))
-        .filter_map(|entry| {
-            let text = agent::entry_text(&entry)?;
-            Some(message(request.companion_id, "", &entry, text))
-        })
+        .filter_map(|entry| dialogue_message(request.companion_id, &entry))
         .take(limit)
         .collect();
     items.reverse();
@@ -228,36 +221,41 @@ pub(crate) fn history(
     })
 }
 
+pub(crate) fn dialogue_entries<'a>(
+    world: &'a mut World,
+    companion: &str,
+) -> Result<impl DoubleEndedIterator<Item = EntryRef<'a>>> {
+    let agent = agent::agent_of(world, companion)
+        .ok_or_else(|| HostError::NotFound("companion agent not found".into()))?;
+    Ok(world
+        .get::<Conversation>(agent)
+        .into_iter()
+        .flat_map(|conversation| conversation.entries()))
+}
+
 /// One message by id.
-pub(crate) fn message_by_id(
-    world: &mut World,
+pub(crate) fn message_by_id<'a>(
+    entries: impl Iterator<Item = EntryRef<'a>>,
     request: &w::MessageRequestView<'_>,
 ) -> Result<w::Message> {
-    let agent = agent::agent_of(world, request.companion_id)
-        .ok_or_else(|| HostError::NotFound(("companion agent not found").into()))?;
     let wanted = request
         .message_id
         .parse::<u64>()
-        .map_err(|_| HostError::Invalid(("message id is not a number").into()))?;
-    let conversation = world
-        .get::<Conversation>(agent)
-        .ok_or_else(|| HostError::NotFound(("message not found").into()))?;
-    for entry in conversation.entries() {
-        if entry.id.get() != wanted {
-            continue;
-        }
-        let Some(text) = agent::entry_text(&entry) else {
-            continue;
-        };
-        return Ok(message(request.companion_id, "", &entry, text));
-    }
-    Err(HostError::NotFound(("message not found").into()))
+        .map_err(|_| HostError::Invalid("message id is not a number".into()))?;
+    entries
+        .filter(|entry| entry.id.get() == wanted)
+        .find_map(|entry| dialogue_message(request.companion_id, &entry))
+        .ok_or_else(|| HostError::NotFound("message not found".into()))
+}
+
+fn dialogue_message(companion: &str, entry: &EntryRef<'_>) -> Option<w::Message> {
+    agent::entry_text(entry).map(|text| message(companion, "", entry, text))
 }
 
 pub(crate) fn message(
     companion: &str,
     work: &str,
-    entry: &rig_core::conversation::EntryRef<'_>,
+    entry: &EntryRef<'_>,
     text: String,
 ) -> w::Message {
     let role = agent::role_of(entry);
