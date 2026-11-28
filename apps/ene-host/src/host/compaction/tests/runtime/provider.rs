@@ -150,7 +150,7 @@ fn one_job_covers_the_same_range_for_the_summary_and_the_memories() {
 
     let conversation = world.app.world().get::<Conversation>(world.agent);
     let conversation = conversation.expect("the companion's conversation");
-    assert!(legacy_summary(&conversation.0).is_none());
+    assert_eq!(conversation.0.asides().count(), 0);
     let summary = &world
         .app
         .world()

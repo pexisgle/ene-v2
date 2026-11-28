@@ -13,16 +13,12 @@ message Cursor { string epoch = 1; uint64 seq = 2; }
 message Failure {
   string code = 1;
   string message = 2;
-  reserved 3;
-  reserved "details";
 }
 
 message HostHealth {
   bool ready = 1;
   bool recovery_required = 2;
   bool stopping = 3;
-  reserved 4;
-  reserved "credential_cleanup_pending";
 }
 
 message HostCapabilities {

@@ -293,26 +293,12 @@ fn a_saved_search_approval_requires_the_host_authenticated_scope() {
     let valid = search(Some(original));
     let tag = allow.scope_reference().unwrap();
     assert!(!allow.pattern.contains(tag));
-    let v1 = PolicyRule {
-        pattern: format!("search_hmac_v1:{tag}\nSearch example · test"),
-        ..allow.clone()
-    };
-    assert_eq!(decide_action(&[v1], &valid), Verdict::Allow);
     assert_eq!(
         decide_action(std::slice::from_ref(&allow), &valid),
         Verdict::Allow
     );
     let (canonical, digest) = canonicalise("web_search", &arguments);
-    let legacy_scope = serde_json::json!({ "endpoint": endpoint, "arguments": arguments });
-    let legacy_hash = format!(
-        "search_sha256:{}",
-        hex_digest(&canonicalise("web_search", &legacy_scope).1)
-    );
-    for legacy in [
-        canonical,
-        format!("exact_sha256:{}", hex_digest(&digest)),
-        legacy_hash.clone(),
-    ] {
+    for legacy in [canonical, format!("exact_sha256:{}", hex_digest(&digest))] {
         let old = rule(PolicyEffect::Allow, "web_search", &legacy);
         assert!(old.is_inactive_search_allow());
         assert!(matches!(
@@ -324,7 +310,7 @@ fn a_saved_search_approval_requires_the_host_authenticated_scope() {
         decide_action(
             &[
                 allow.clone(),
-                rule(PolicyEffect::Deny, "web_search", &legacy_hash)
+                rule(PolicyEffect::Deny, "web_search", "search.example")
             ],
             &valid
         ),

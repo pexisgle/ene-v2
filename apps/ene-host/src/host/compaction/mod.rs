@@ -16,14 +16,11 @@ use rig_core::conversation::{
     Author, AuthorKind, Conversation as History, Entry, EntryRef, pairing,
 };
 use rig_ecs::prelude::*;
-use serde::Deserialize;
 use std::{collections::HashMap, sync::Arc};
 
 // Only the tests reach these through `use super::*`.
 #[cfg(test)]
 use super::mind::consolidate;
-#[cfg(test)]
-use rig_core::conversation::Aside;
 #[cfg(test)]
 use rig_core::{DynModel, operation::Completion};
 #[cfg(test)]
@@ -39,21 +36,12 @@ pub(crate) use budget::{FitRequest, RequestStart, fit, input_budget};
 /// boundary starts a rolling summary (doc §3.1). It is the only trigger: no
 /// user action starts, resets or cancels one.
 const THRESHOLD_RATIO: f64 = 0.75;
-const SUMMARY: &str = "ene.summary";
 const NOTICE: &str = "[System Notice: 過去の一部ログを一時的に省略して対話を継続しています]";
 const SUMMARY_HEAD: &str =
     "Earlier messages of this conversation were compacted into the summary below.";
 
 #[derive(Component)]
 pub(crate) struct CurrentSummary(pub(crate) Summary);
-
-fn legacy_summary(conversation: &History) -> Option<Summary> {
-    conversation
-        .asides()
-        .rev()
-        .find(|(_, aside)| aside.kind == SUMMARY)
-        .and_then(|(_, aside)| Summary::deserialize(&aside.value).ok())
-}
 
 fn saved_summary(
     store: &Store,
@@ -92,9 +80,7 @@ pub(crate) fn load_summary(
     companion: &str,
     conversation: &History,
 ) -> ene_store::Result<Option<CurrentSummary>> {
-    Ok(saved_summary(store, companion, conversation)?
-        .or_else(|| legacy_summary(conversation))
-        .map(CurrentSummary))
+    Ok(saved_summary(store, companion, conversation)?.map(CurrentSummary))
 }
 
 /// Injects `summary` at the head of the request view, in place of the messages

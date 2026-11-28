@@ -12,13 +12,17 @@ use tokio::{
 
 #[test]
 fn a_reply_and_a_notification_are_distinguished() {
-    let reply: AvatarMessage = serde_json::from_str(r#"{"id":1,"ok":null}"#).unwrap();
+    let reply: AvatarMessage =
+        serde_json::from_str(r#"{"type":"reply","id":1,"ok":null}"#).unwrap();
     assert!(matches!(reply, AvatarMessage::Reply { id: 1, .. }));
     let failed: AvatarMessage =
-        serde_json::from_str(r#"{"id":2,"error":"unknown character"}"#).unwrap();
+        serde_json::from_str(r#"{"type":"error_reply","id":2,"error":"unknown character"}"#)
+            .unwrap();
     assert!(matches!(failed, AvatarMessage::ErrorReply { id: 2, .. }));
-    let event: AvatarMessage =
-        serde_json::from_str(r#"{"event":"state","character":"ene","status":"ready"}"#).unwrap();
+    let event: AvatarMessage = serde_json::from_str(
+        r#"{"type":"event","event":"state","character":"ene","status":"ready"}"#,
+    )
+    .unwrap();
     assert!(matches!(event, AvatarMessage::Event(_)));
 }
 
@@ -167,13 +171,13 @@ async fn b09_renderer_resolves_replies_and_preserves_events_until_eof() {
     to_renderer.read_exact(&mut line).await.unwrap();
     assert_eq!(&line, b"test\n");
     let output = concat!(
-        r#"{"event":"click","character":"ene"}"#,
+        r#"{"type":"event","event":"click","character":"ene"}"#,
         "\n",
-        r#"{"event":"state","character":"ene","status":"ready"}"#,
+        r#"{"type":"event","event":"state","character":"ene","status":"ready"}"#,
         "\n",
-        r#"{"event":"finished","character":"ene"}"#,
+        r#"{"type":"event","event":"finished","character":"ene"}"#,
         "\n",
-        r#"{"id":7,"ok":{"status":"done"}}"#,
+        r#"{"type":"reply","id":7,"ok":{"status":"done"}}"#,
         "\n",
     );
     from_renderer.write_all(output.as_bytes()).await.unwrap();

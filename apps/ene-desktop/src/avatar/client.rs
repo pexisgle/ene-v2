@@ -1,6 +1,5 @@
 use ene_avatar_ipc::{
-    AvatarEvent, AvatarMessage, AvatarStatus, CharacterConfig, Command, LAYOUT_FILE_ENV,
-    RendererFailure, Request,
+    AvatarEvent, AvatarMessage, AvatarStatus, CharacterConfig, Command, LAYOUT_FILE_ENV, Request,
 };
 use futures_util::StreamExt as _;
 use sha2::{Digest, Sha256};
@@ -342,7 +341,7 @@ fn deliver(
     let (id, result) = match message {
         AvatarMessage::Reply { id, .. } => (id, Ok(())),
         AvatarMessage::ErrorReply { id, error } => (id, Err(AvatarError::Renderer(error))),
-        AvatarMessage::Fatal(RendererFailure::Error { error }) => {
+        AvatarMessage::Fatal { error } => {
             return Err(AvatarError::Renderer(error));
         }
         AvatarMessage::Event(event) => {

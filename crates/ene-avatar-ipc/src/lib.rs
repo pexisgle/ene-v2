@@ -184,7 +184,7 @@ impl AvatarEvent {
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-#[serde(untagged)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum AvatarMessage {
     ErrorReply {
         id: u64,
@@ -196,14 +196,9 @@ pub enum AvatarMessage {
         ok: Option<RendererSnapshot>,
     },
     Event(AvatarEvent),
-    Fatal(RendererFailure),
-}
-
-/// A renderer-wide startup failure before it can address a character.
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
-pub enum RendererFailure {
-    Error { error: String },
+    Fatal {
+        error: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -261,22 +256,20 @@ mod tests {
         let decoded: Request = serde_json::from_str(&line).unwrap();
         assert_eq!(decoded, req);
 
-        let reply: AvatarMessage = serde_json::from_str(r#"{"id":1,"ok":null}"#).unwrap();
+        let reply: AvatarMessage =
+            serde_json::from_str(r#"{"type":"reply","id":1,"ok":null}"#).unwrap();
         assert!(matches!(reply, AvatarMessage::Reply { id: 1, .. }));
         assert_eq!(
             serde_json::to_string(&reply).unwrap(),
-            r#"{"id":1,"ok":null}"#
+            r#"{"type":"reply","id":1,"ok":null}"#
         );
-        let fatal = r#"{"event":"error","error":"missing compositor protocol"}"#;
+        let fatal = r#"{"type":"fatal","error":"missing compositor protocol"}"#;
         let message: AvatarMessage = serde_json::from_str(fatal).unwrap();
-        assert!(matches!(
-            message,
-            AvatarMessage::Fatal(RendererFailure::Error { .. })
-        ));
+        assert!(matches!(message, AvatarMessage::Fatal { .. }));
         assert_eq!(serde_json::to_string(&message).unwrap(), fatal);
 
         let click: AvatarMessage =
-            serde_json::from_str(r#"{"event":"click","character":"ene"}"#).unwrap();
+            serde_json::from_str(r#"{"type":"event","event":"click","character":"ene"}"#).unwrap();
         assert_eq!(
             click,
             AvatarMessage::Event(AvatarEvent::Click {

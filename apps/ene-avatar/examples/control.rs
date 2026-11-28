@@ -290,7 +290,9 @@ fn run() -> Result<(), CliError> {
                 .map_err(CliError::from)
                 .and_then(|line| serde_json::from_str::<Value>(&line).map_err(CliError::from));
             match message {
-                Ok(value) if value.get("event").is_some() => eprintln!("event: {value}"),
+                Ok(value) if matches!(value["type"].as_str(), Some("event" | "fatal")) => {
+                    eprintln!("event: {value}");
+                }
                 Ok(value) => {
                     if reply_tx.send(value).is_err() {
                         break;

@@ -1,6 +1,5 @@
 use crate::{PolicyEffect, PolicyRule, hex_digest};
 
-const LEGACY_SEARCH: &str = "search_hmac_v1:";
 const SEARCH_PATTERN: &str = "search_scope_v2\n";
 const SEARCH_ID: &str = "web-search-";
 const TOOL_PATTERN: &str = "tool_scope_v1\n";
@@ -22,8 +21,7 @@ impl PolicyRule {
                 return Some((kind, self.id.strip_prefix(id)?, label));
             }
         }
-        let (tag, label) = self.pattern.strip_prefix(LEGACY_SEARCH)?.split_once('\n')?;
-        Some((ScopeKind::Search, tag, label))
+        None
     }
 
     /// The reviewable label for a scoped external operation, when present.
@@ -36,13 +34,11 @@ impl PolicyRule {
         self.scope_parts().map(|(_, tag, _)| tag)
     }
 
-    /// Legacy literal Allow rules cannot authorize a Web search.
+    /// Argument-only Allow rules cannot authorize a Web search.
     pub fn is_inactive_search_allow(&self) -> bool {
         self.tool_name == crate::rules::WEB_SEARCH_TOOL
             && self.effect == PolicyEffect::Allow
-            && (self.pattern.starts_with("exact_sha256:")
-                || self.pattern.starts_with("search_sha256:")
-                || self.pattern.starts_with('{'))
+            && (self.pattern.starts_with("exact_sha256:") || self.pattern.starts_with('{'))
     }
 }
 

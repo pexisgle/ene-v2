@@ -66,9 +66,7 @@ pub(super) fn render_remote_host_section(
         .into_any_element();
 
     let status = match saved {
-        Some(Ok(Some(profile))) if !profile.needs_registration() => {
-            format!("遠隔 HTTPS ({})", profile.endpoint)
-        }
+        Some(Ok(Some(profile))) => format!("遠隔 HTTPS ({})", profile.endpoint),
         Some(Ok(None)) => "ローカル（自動検出）".to_owned(),
         None => "接続先を読み込み中…".to_owned(),
         _ => "遠隔設定を再登録してください".to_owned(),

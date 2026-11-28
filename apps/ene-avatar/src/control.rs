@@ -524,7 +524,7 @@ mod tests {
         assert_eq!(run(app), AppExit::Success);
         assert_eq!(
             serde_json::from_slice::<Value>(&writer.join().unwrap()).unwrap(),
-            json!({"id":1,"ok":null})
+            json!({"type":"reply","id":1,"ok":null})
         );
         let (tx, rx) = mpsc::sync_channel(1);
         tx.send(AvatarMessage::Reply { id: 1, ok: None }).unwrap();
@@ -562,7 +562,7 @@ mod tests {
             .iter()
             .filter(|message| message.get("id").is_some())
             .collect();
-        assert_eq!(replies[0], &json!({"id":3,"ok":null}));
+        assert_eq!(replies[0], &json!({"type":"reply","id":3,"ok":null}));
         let actor = &replies[1]["ok"]["characters"][0];
         assert_eq!(actor["expression"], Value::Null);
         // The renderer clamps what a client sends.

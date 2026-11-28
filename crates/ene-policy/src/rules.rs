@@ -214,15 +214,6 @@ pub fn hex_digest(bytes: &[u8]) -> String {
     hex::encode(bytes)
 }
 
-/// An exact Web search rule, scoped to the destination and the arguments the user approved.
-fn legacy_search_pattern(endpoint: &str, arguments: &Value) -> String {
-    let scoped = serde_json::json!({ "endpoint": endpoint, "arguments": arguments });
-    format!(
-        "search_sha256:{}",
-        hex_digest(&canonicalise(WEB_SEARCH_TOOL, &scoped).1)
-    )
-}
-
 #[derive(Clone, Copy)]
 enum DefaultActionApproval {
     Auto,
@@ -425,16 +416,10 @@ fn matches_action(rule: &PolicyRule, action: &ActionMatch<'_>) -> bool {
     if let Some((kind, tag, _)) = rule.scope_parts() {
         return action.scope.is_some_and(|scope| scope.matches(kind, tag));
     }
-    // Legacy argument-only allows did not bind the external receiver.
+    // Argument-only rules cannot authorize an external receiver.
     let argument_allow_is_unscoped = action.scoped_target && rule.effect == PolicyEffect::Allow;
     if let Some(expected_hex) = rule.pattern.strip_prefix("exact_sha256:") {
         return !argument_allow_is_unscoped && expected_hex == action.raw_hash_hex;
-    }
-    if rule.pattern.starts_with("search_sha256:") {
-        return !argument_allow_is_unscoped
-            && action.tool_name == WEB_SEARCH_TOOL
-            && matches!(action.typed_target, ActionTarget::Url { url, .. }
-                if rule.pattern == legacy_search_pattern(url, action.raw_arguments));
     }
     if rule.pattern.starts_with('{') {
         return !argument_allow_is_unscoped

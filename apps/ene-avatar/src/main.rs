@@ -121,17 +121,17 @@
 //!
 //! ## 応答と通知
 //!
-//! 成功は`{"id":1,"ok":null}`、拒否は`{"id":1,"error":"理由"}`です。
+//! 成功は`{"type":"reply","id":1,"ok":null}`、拒否は`{"type":"error_reply","id":1,"error":"理由"}`です。
 //! `get`の`ok`には`characters`、`monitors`、`fps`が入ります。
 //! 読み込み開始の成功は描画完了を意味しません。状態は通知または`get`で確認します。
 //! `motion`はクリップの準備が完了してから応答します。失敗すると以前のクリップを保ち、
 //! 新しい操作が読込中のモーションを置き換えた場合も元の要求へエラーを返します。
 //!
 //! ```json
-//! {"event":"state","character":"ene","status":"ready","error":null}
-//! {"event":"state","character":"ene","status":"error","error":"読み込み失敗の理由"}
-//! {"event":"finished","character":"ene","request_id":9}
-//! {"event":"click","character":"ene"}
+//! {"type":"event","event":"state","character":"ene","status":"ready","error":null}
+//! {"type":"event","event":"state","character":"ene","status":"error","error":"読み込み失敗の理由"}
+//! {"type":"event","event":"finished","character":"ene","request_id":9}
+//! {"type":"event","event":"click","character":"ene"}
 //! ```
 //!
 //! 状態は`loading`、`ready`、`suspended`（出力なし）、`error`です。
