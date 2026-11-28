@@ -35,8 +35,9 @@ pub fn build_search_preset_input(
         .iter()
         .find(|conn| conn.id == provider.preset_id);
     if let Some(conn) = reserved
-        && let Some(ConnectionConfig::Search(search)) = conn.config.as_ref()
-        && let Some(config) = search.endpoint.as_ref()
+        && let Some(ConnectionConfig::Search(SearchConnection {
+            endpoint: config, ..
+        })) = &conn.config
         && ene_catalog::SearchAdapter::parse(&config.adapter) == Some(adapter)
         && (config.endpoint == endpoint
             || (config.endpoint.trim().is_empty() && provider.default_endpoint.is_some()))
@@ -53,7 +54,7 @@ pub fn build_search_preset_input(
         enabled: false,
         expected_revision: 0,
         config: Some(ConnectionConfig::Search(SearchConnection {
-            endpoint: Some(preset_endpoint(provider.adapter_id, endpoint, "{}")),
+            endpoint: preset_endpoint(provider.adapter_id, endpoint, "{}"),
             max_results: 5,
         })),
     };
@@ -96,7 +97,7 @@ pub fn build_llm_provider_input(
         enabled: true,
         expected_revision: 0,
         config: Some(ConnectionConfig::Llm(LlmConnection {
-            endpoint: Some(preset_endpoint(provider.adapter, provider.endpoint, "{}")),
+            endpoint: preset_endpoint(provider.adapter, provider.endpoint, "{}"),
             model_ids,
         })),
     }
@@ -153,7 +154,7 @@ mod tests {
         let Some(ConnectionConfig::Search(config)) = &mut custom.config else {
             panic!("the preset provides a Search config");
         };
-        config.endpoint.as_mut().unwrap().endpoint = "https://custom.example/".into();
+        config.endpoint.endpoint = "https://custom.example/".into();
         let (another_id, new_preset) =
             build_search_preset_input(std::slice::from_ref(&custom), SearchAdapter::Exa);
         assert_ne!(another_id, id);
@@ -206,7 +207,7 @@ mod tests {
             let Some(ConnectionConfig::Tts(tts)) = input.config else {
                 panic!("the preset provides a TTS config");
             };
-            let endpoint = tts.endpoint.unwrap();
+            let endpoint = tts.endpoint;
             assert_eq!(endpoint.adapter, adapter);
             assert_eq!(tts.voice_ids, [voice]);
             assert_eq!(endpoint.options, options.to_string());

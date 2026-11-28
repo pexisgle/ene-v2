@@ -32,7 +32,7 @@ pub fn extract_kind_list_init(cfg: Option<&ConnectionConfig>) -> String {
         Some(ConnectionConfig::Llm(c)) => c.model_ids.join(", "),
         Some(ConnectionConfig::Tts(c)) => c.voice_ids.join(", "),
         Some(ConnectionConfig::Stt(c)) => {
-            configured_stt_model(c.endpoint.as_ref()).unwrap_or_default()
+            configured_stt_model(Some(&c.endpoint)).unwrap_or_default()
         }
         Some(ConnectionConfig::Embedding(c)) => c.model_id.clone(),
         Some(ConnectionConfig::Mcp(c)) => c.allowed_tools.join(", "),
@@ -73,22 +73,9 @@ pub fn toggle_comma_item(items: &[String], item: &str) -> String {
     next.join(", ")
 }
 
-fn updated_endpoint(
-    cur: Option<&ConnectionEndpoint>,
-    endpoint_url: &str,
-    options_json: Option<&str>,
-) -> ConnectionEndpoint {
-    let mut updated = cur.cloned().unwrap_or_default();
-    updated.endpoint = endpoint_url.to_owned();
-    if let Some(opts) = options_json {
-        updated.options = opts.to_owned();
-    }
-    updated
-}
-
-fn apply_tts_edits(tts: &mut TtsConnection, spec: &ConnectionEditSpec<'_>) {
-    let mut ep = updated_endpoint(tts.endpoint.as_ref(), spec.endpoint_url, spec.options_json);
-    let voices = split_comma(spec.list_raw);
+fn apply_tts_edits(tts: &mut TtsConnection, list: &str) {
+    let ep = &mut tts.endpoint;
+    let voices = split_comma(list);
     let sakura =
         ep.adapter.eq_ignore_ascii_case("sakura") || ene_catalog::is_sakura_endpoint(&ep.endpoint);
     if sakura && let Some(first) = voices.first() {
@@ -103,19 +90,16 @@ fn apply_tts_edits(tts: &mut TtsConnection, spec: &ConnectionEditSpec<'_>) {
         opts.set("speaker", speaker_num);
         ep.options = opts.json();
     }
-    tts.endpoint = Some(ep);
     tts.voice_ids = voices;
 }
 
-fn apply_stt_edits(stt: &mut SttConnection, spec: &ConnectionEditSpec<'_>) {
-    let mut ep = updated_endpoint(stt.endpoint.as_ref(), spec.endpoint_url, spec.options_json);
-    let model = spec.list_raw.trim();
+fn apply_stt_edits(stt: &mut SttConnection, list: &str) {
+    let model = list.trim();
     if !model.is_empty() {
-        let mut opts = SpeechOptions::parse(&ep.options);
+        let mut opts = SpeechOptions::parse(&stt.endpoint.options);
         opts.set("model", model);
-        ep.options = opts.json();
+        stt.endpoint.options = opts.json();
     }
-    stt.endpoint = Some(ep);
 }
 
 fn default_embedding_model(endpoint: &ConnectionEndpoint) -> &'static str {
@@ -129,19 +113,17 @@ fn default_embedding_model(endpoint: &ConnectionEndpoint) -> &'static str {
 }
 
 fn apply_embedding_edits(emb: &mut EmbeddingConnection, spec: &ConnectionEditSpec<'_>) {
-    let mut ep = updated_endpoint(emb.endpoint.as_ref(), spec.endpoint_url, spec.options_json);
-    if ep.adapter.trim().is_empty() {
-        ep.adapter = "openai".to_owned();
+    if emb.endpoint.adapter.trim().is_empty() {
+        emb.endpoint.adapter = "openai".to_owned();
     }
     let model_id = spec.list_raw.trim();
     let model_id = if model_id.is_empty() {
-        default_embedding_model(&ep)
+        default_embedding_model(&emb.endpoint)
     } else {
         model_id
     };
     let model_changed = emb.model_id != model_id;
     emb.model_id = model_id.to_owned();
-    emb.endpoint = Some(ep);
     let parsed_dim = spec
         .dimensions_raw
         .and_then(|raw| raw.trim().parse::<u32>().ok())
@@ -154,12 +136,11 @@ fn apply_embedding_edits(emb: &mut EmbeddingConnection, spec: &ConnectionEditSpe
 }
 
 fn apply_mcp_edits(mcp: &mut McpConnection, spec: &ConnectionEditSpec<'_>) {
-    let mut ep = updated_endpoint(mcp.endpoint.as_ref(), spec.endpoint_url, spec.options_json);
-    ep.adapter = "mcp".to_owned();
+    mcp.endpoint.adapter = "mcp".to_owned();
     if let Some((cmd, args)) = spec.process {
         let trimmed = cmd.trim();
         if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-            ep.endpoint = trimmed.to_owned();
+            mcp.endpoint.endpoint = trimmed.to_owned();
             mcp.command.clear();
             mcp.args.clear();
         } else {
@@ -167,7 +148,6 @@ fn apply_mcp_edits(mcp: &mut McpConnection, spec: &ConnectionEditSpec<'_>) {
             mcp.args = args.to_vec();
         }
     }
-    mcp.endpoint = Some(ep);
     mcp.allowed_tools = split_comma(spec.list_raw);
 }
 
@@ -180,17 +160,11 @@ pub fn parse_search_cap(raw: &str) -> Option<u32> {
     raw.parse().ok().filter(|&cap| (1..=20).contains(&cap))
 }
 
-fn apply_search_edits(search: &mut SearchConnection, spec: &ConnectionEditSpec<'_>) {
-    let mut ep = updated_endpoint(
-        search.endpoint.as_ref(),
-        spec.endpoint_url,
-        spec.options_json,
-    );
-    if ep.adapter.trim().is_empty() {
-        ep.adapter = "mwmbl".to_owned();
+fn apply_search_edits(search: &mut SearchConnection, list: &str) {
+    if search.endpoint.adapter.trim().is_empty() {
+        search.endpoint.adapter = "mwmbl".to_owned();
     }
-    search.endpoint = Some(ep);
-    if let Some(cap) = parse_search_cap(spec.list_raw) {
+    if let Some(cap) = parse_search_cap(list) {
         search.max_results = cap;
     }
 }
@@ -199,21 +173,24 @@ fn apply_search_edits(search: &mut SearchConnection, spec: &ConnectionEditSpec<'
 pub fn apply_connection_edits(conn: &Connection, spec: &ConnectionEditSpec<'_>) -> ConnectionInput {
     let mut input = conn.to_input();
     input.name = spec.name.to_owned();
-    match input.config.as_mut() {
-        Some(ConnectionConfig::Llm(llm)) => {
-            llm.endpoint = Some(updated_endpoint(
-                llm.endpoint.as_ref(),
-                spec.endpoint_url,
-                spec.options_json,
-            ));
-            llm.model_ids = split_comma(spec.list_raw);
+    let Some(config) = input.config.as_mut() else {
+        return input;
+    };
+    if !matches!(config, ConnectionConfig::Acp(_)) {
+        let endpoint = config.endpoint_mut();
+        endpoint.endpoint = spec.endpoint_url.to_owned();
+        if let Some(options) = spec.options_json {
+            endpoint.options = options.to_owned();
         }
-        Some(ConnectionConfig::Tts(tts)) => apply_tts_edits(tts, spec),
-        Some(ConnectionConfig::Stt(stt)) => apply_stt_edits(stt, spec),
-        Some(ConnectionConfig::Embedding(emb)) => apply_embedding_edits(emb, spec),
-        Some(ConnectionConfig::Mcp(mcp)) => apply_mcp_edits(mcp, spec),
-        Some(ConnectionConfig::Search(search)) => apply_search_edits(search, spec),
-        Some(ConnectionConfig::Acp(_)) | None => {}
+    }
+    match config {
+        ConnectionConfig::Llm(llm) => llm.model_ids = split_comma(spec.list_raw),
+        ConnectionConfig::Tts(tts) => apply_tts_edits(tts, spec.list_raw),
+        ConnectionConfig::Stt(stt) => apply_stt_edits(stt, spec.list_raw),
+        ConnectionConfig::Embedding(emb) => apply_embedding_edits(emb, spec),
+        ConnectionConfig::Mcp(mcp) => apply_mcp_edits(mcp, spec),
+        ConnectionConfig::Search(search) => apply_search_edits(search, spec.list_raw),
+        ConnectionConfig::Acp(_) => {}
     }
 
     input
@@ -234,15 +211,15 @@ pub fn build_custom_connection_input(
     };
     let config = match kind {
         ConnectionKind::Llm => ConnectionConfig::Llm(LlmConnection {
-            endpoint: Some(ep),
+            endpoint: ep,
             model_ids: Vec::new(),
         }),
         ConnectionKind::Tts => ConnectionConfig::Tts(TtsConnection {
-            endpoint: Some(ep),
+            endpoint: ep,
             voice_ids: Vec::new(),
         }),
         ConnectionKind::Stt => ConnectionConfig::Stt(SttConnection {
-            endpoint: Some(ep),
+            endpoint: ep,
             language_hints: Vec::new(),
         }),
         ConnectionKind::Embedding => {
@@ -253,7 +230,7 @@ pub fn build_custom_connection_input(
             let model_id = default_embedding_model(&emb_ep).to_owned();
             let dimensions = ene_catalog::default_embedding_dimensions(&model_id);
             ConnectionConfig::Embedding(EmbeddingConnection {
-                endpoint: Some(emb_ep),
+                endpoint: emb_ep,
                 model_id,
                 dimensions,
             })
@@ -265,15 +242,15 @@ pub fn build_custom_connection_input(
                 search_ep.adapter = "mwmbl".to_owned();
             }
             ConnectionConfig::Search(SearchConnection {
-                endpoint: Some(search_ep),
+                endpoint: search_ep,
                 max_results: 5,
             })
         }
         ConnectionKind::Acp => ConnectionConfig::Acp(AcpConnection {
-            endpoint: Some(ConnectionEndpoint {
+            endpoint: ConnectionEndpoint {
                 endpoint: String::new(),
                 ..ep
-            }),
+            },
             ..Default::default()
         }),
     };
@@ -302,7 +279,7 @@ mod tests {
         let conn = Connection {
             kind: ConnectionKind::Stt,
             config: Some(ConnectionConfig::Stt(SttConnection {
-                endpoint: Some(endpoint),
+                endpoint,
                 language_hints: vec!["ja".into(), "en".into()],
             })),
             ..Default::default()
@@ -323,8 +300,7 @@ mod tests {
             panic!("expected STT")
         };
         assert_eq!(stt.language_hints, ["ja", "en"]);
-        let options: serde_json::Value =
-            serde_json::from_str(&stt.endpoint.unwrap().options).unwrap();
+        let options: serde_json::Value = serde_json::from_str(&stt.endpoint.options).unwrap();
         assert_eq!(
             options,
             serde_json::json!({"model":"new","language":"ja","custom":true,"speaker":{"preset":1}})

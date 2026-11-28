@@ -116,7 +116,7 @@ pub fn mcp_process_target(command: &str, args: Vec<String>, name: &str) -> (McpC
         McpConnection {
             command: command.to_owned(),
             args,
-            endpoint: Some(mcp_endpoint(String::new())),
+            endpoint: mcp_endpoint(String::new()),
             ..Default::default()
         },
         name.chars().take(128).collect(),
@@ -136,7 +136,7 @@ pub fn mcp_http_target(input: &str) -> McpTargetResult {
         .ok_or("http:// または https:// で始まる URL を入力してください。")?;
     Ok(Some((
         McpConnection {
-            endpoint: Some(mcp_endpoint(url.to_string())),
+            endpoint: mcp_endpoint(url.to_string()),
             ..Default::default()
         },
         name.chars().take(128).collect(),
@@ -363,10 +363,7 @@ mod tests {
     #[test]
     fn remote_and_local_are_independent_connection_modes() {
         let (remote, name) = mcp_http_target("https://example.com/mcp").unwrap().unwrap();
-        assert_eq!(
-            remote.endpoint.as_ref().unwrap().endpoint,
-            "https://example.com/mcp"
-        );
+        assert_eq!(remote.endpoint.endpoint, "https://example.com/mcp");
         assert_eq!(name, "example.com");
         assert_eq!(remote.command.len(), 0);
         assert!(mcp_http_target("file:///tmp/mcp").is_err());

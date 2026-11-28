@@ -9,57 +9,33 @@ from_variants! {
     ]
 }
 
-// Clients can display absent endpoints. Persisted connections always carry
-// one, and a write preserves the legacy interpretation of an omitted endpoint.
 macro_rules! connection_configs {
     ($($variant:ident($config:ident) {
         fields: [$($field:ident),*],
-        scalars: [$($scalar:ident),*],
         maps: [$($map:ident),*]
     }),+ $(,)?) => {
-        fn decode_config<E>(
-            value: w::connection_config::Config,
-            endpoint: impl FnOnce(Option<settings::Endpoint>) -> E,
-        ) -> settings::ConnectionConfig<E> {
-            match value {
-                $(w::connection_config::Config::$variant(config) => settings::ConnectionConfig::$variant(settings::$config {
-                    endpoint: endpoint(config.endpoint.into_option().map(Into::into)),
-                    $($field: config.$field,)*
-                    $($scalar: config.$scalar,)*
-                    $($map: config.$map.into_iter().collect(),)*
-                }),)+
-            }
-        }
+        impl TryFrom<w::connection_config::Config> for settings::ConnectionConfig {
+            type Error = DomainError;
 
-        impl From<w::connection_config::Config> for domain::ConnectionConfig {
-            fn from(value: w::connection_config::Config) -> Self {
-                decode_config(value, std::convert::identity)
-            }
-        }
-
-        impl From<domain::ConnectionConfig> for w::ConnectionConfig {
-            fn from(value: domain::ConnectionConfig) -> Self {
-                let config = match value {
-                    $(settings::ConnectionConfig::$variant(config) => w::connection_config::Config::$variant(Box::new(w::$config {
-                        endpoint: config.endpoint.map(Into::into).into(),
+            fn try_from(value: w::connection_config::Config) -> Result<Self, Self::Error> {
+                Ok(match value {
+                    $(w::connection_config::Config::$variant(config) => Self::$variant(settings::$config {
+                        endpoint: config.endpoint.into_option()
+                            .ok_or_else(|| DomainError::Invalid("connection endpoint is required".into()))?.into(),
                         $($field: config.$field,)*
-                        $($scalar: config.$scalar,)*
                         $($map: config.$map.into_iter().collect(),)*
-                        ..Default::default()
-                    })),)+
-                };
-                Self { config: Some(config), ..Default::default() }
+                    }),)+
+                })
             }
         }
 
-        impl From<&settings::ConnectionConfig> for w::ConnectionConfig {
-            fn from(value: &settings::ConnectionConfig) -> Self {
+        impl From<settings::ConnectionConfig> for w::ConnectionConfig {
+            fn from(value: settings::ConnectionConfig) -> Self {
                 let config = match value {
                     $(settings::ConnectionConfig::$variant(config) => w::connection_config::Config::$variant(Box::new(w::$config {
-                        endpoint: Some((&config.endpoint).into()).into(),
-                        $($field: config.$field.clone(),)*
-                        $($scalar: config.$scalar,)*
-                        $($map: config.$map.iter().map(|(key, value)| (key.clone(), value.clone())).collect(),)*
+                        endpoint: Some(config.endpoint.into()).into(),
+                        $($field: config.$field,)*
+                        $($map: config.$map.into_iter().collect(),)*
                         ..Default::default()
                     })),)+
                 };
@@ -70,17 +46,16 @@ macro_rules! connection_configs {
 }
 
 connection_configs! {
-    Llm(LlmConnection) { fields: [model_ids], scalars: [], maps: [] },
-    Tts(TtsConnection) { fields: [voice_ids], scalars: [], maps: [] },
-    Stt(SttConnection) { fields: [language_hints], scalars: [], maps: [] },
-    Embedding(EmbeddingConnection) { fields: [model_id], scalars: [dimensions], maps: [] },
+    Llm(LlmConnection) { fields: [model_ids], maps: [] },
+    Tts(TtsConnection) { fields: [voice_ids], maps: [] },
+    Stt(SttConnection) { fields: [language_hints], maps: [] },
+    Embedding(EmbeddingConnection) { fields: [model_id, dimensions], maps: [] },
     Mcp(McpConnection) {
         fields: [allowed_tools, command, args, cwd, auth_header, secret_env_var],
-        scalars: [],
         maps: [env, headers]
     },
-    Acp(AcpConnection) { fields: [command, args], scalars: [], maps: [] },
-    Search(SearchConnection) { fields: [], scalars: [max_results], maps: [] },
+    Acp(AcpConnection) { fields: [command, args], maps: [] },
+    Search(SearchConnection) { fields: [max_results], maps: [] },
 }
 
 impl TryFrom<w::ConnectionInput> for settings::Connection {
@@ -102,7 +77,7 @@ impl TryFrom<w::ConnectionInput> for settings::Connection {
             name: input.name,
             enabled: input.enabled,
             kind,
-            config: decode_config(config, Option::unwrap_or_default),
+            config: config.try_into()?,
             credential_state: settings::CredentialState::Absent,
             revision: 0,
             last_check: None,
@@ -120,7 +95,7 @@ impl From<&settings::Connection> for w::Connection {
             revision: value.revision,
             kind: w::ConnectionKind::from(value.kind).into(),
             last_check: value.last_check.as_ref().map(Into::into).into(),
-            config: Some((&value.config).into()).into(),
+            config: Some(value.config.clone().into()).into(),
             ..Default::default()
         }
     }
@@ -143,7 +118,7 @@ from_fields! {
         id, name, enabled, credential_state.parse().unwrap_or_default(), revision,
         kind.as_known().map_or_default(Into::into),
         last_check.into_option().map(Into::into),
-        config.into_option().and_then(|cfg| cfg.config.map(Into::into)),
+        config.into_option().and_then(|cfg| cfg.config?.try_into().ok()),
     }
 }
 

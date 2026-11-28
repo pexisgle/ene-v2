@@ -57,10 +57,7 @@ pub(super) fn is_voicevox_connection(c: &Connection) -> bool {
             || matches!(
                 c.config.as_ref(),
                 Some(ConnectionConfig::Tts(tts))
-                    if tts
-                        .endpoint
-                        .as_ref()
-                        .is_some_and(|ep| ep.adapter == "voicevox")
+                    if tts.endpoint.adapter == "voicevox"
             ))
 }
 

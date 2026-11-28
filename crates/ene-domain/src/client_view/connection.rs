@@ -3,22 +3,10 @@
 use super::{ConnectionCheck, ConnectionEndpoint};
 use crate::{CredentialState, settings};
 
-/// Configuration received from a host that may omit its endpoint metadata.
-pub type ConnectionConfig = settings::ConnectionConfig<Option<ConnectionEndpoint>>;
-/// Agent Client Protocol connection with optional endpoint metadata.
-pub type AcpConnection = settings::AcpConnection<Option<ConnectionEndpoint>>;
-/// Embedding connection with optional endpoint metadata.
-pub type EmbeddingConnection = settings::EmbeddingConnection<Option<ConnectionEndpoint>>;
-/// Language model connection with optional endpoint metadata.
-pub type LlmConnection = settings::LlmConnection<Option<ConnectionEndpoint>>;
-/// Model Context Protocol connection with optional endpoint metadata.
-pub type McpConnection = settings::McpConnection<Option<ConnectionEndpoint>>;
-/// Search connection with optional endpoint metadata.
-pub type SearchConnection = settings::SearchConnection<Option<ConnectionEndpoint>>;
-/// Speech recognition connection with optional endpoint metadata.
-pub type SttConnection = settings::SttConnection<Option<ConnectionEndpoint>>;
-/// Speech synthesis connection with optional endpoint metadata.
-pub type TtsConnection = settings::TtsConnection<Option<ConnectionEndpoint>>;
+pub use settings::{
+    AcpConnection, ConnectionConfig, EmbeddingConnection, LlmConnection, McpConnection,
+    SearchConnection, SttConnection, TtsConnection,
+};
 
 /// Kind of host-managed external connection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -118,15 +106,15 @@ pub struct Connection {
 }
 
 impl Connection {
-    /// Returns the endpoint metadata if the config carries one.
+    /// Returns the endpoint metadata for a configured connection.
     pub fn endpoint(&self) -> Option<&ConnectionEndpoint> {
-        self.config.as_ref()?.endpoint().as_ref()
+        self.config.as_ref().map(ConnectionConfig::endpoint)
     }
 
     /// Returns the endpoint metadata if this is an LLM connection.
     pub fn llm_endpoint(&self) -> Option<&ConnectionEndpoint> {
         match self.config.as_ref()? {
-            ConnectionConfig::Llm(llm) => llm.endpoint.as_ref(),
+            ConnectionConfig::Llm(llm) => Some(&llm.endpoint),
             _ => None,
         }
     }
@@ -144,12 +132,9 @@ impl Connection {
             && matches!(
                 &self.config,
                 Some(ConnectionConfig::Tts(tts))
-                    if tts
-                        .endpoint
-                        .as_ref()
-                        .is_some_and(|ep| ep.adapter.eq_ignore_ascii_case("voicevox")
-                            && (ep.endpoint.trim().is_empty()
-                                || ene_catalog::voicevox_local_address(&ep.endpoint).is_some()))
+                    if tts.endpoint.adapter.eq_ignore_ascii_case("voicevox")
+                        && (tts.endpoint.endpoint.trim().is_empty()
+                            || ene_catalog::voicevox_local_address(&tts.endpoint.endpoint).is_some())
             )
     }
 
@@ -159,11 +144,10 @@ impl Connection {
             return None;
         }
         match self.config.as_ref()? {
-            ConnectionConfig::Search(search) => search
-                .endpoint
-                .as_ref()
-                .map(|ep| ep.adapter.trim())
-                .filter(|adapter| !adapter.is_empty()),
+            ConnectionConfig::Search(search) => {
+                let adapter = search.endpoint.adapter.trim();
+                (!adapter.is_empty()).then_some(adapter)
+            }
             _ => None,
         }
     }

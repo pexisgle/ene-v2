@@ -217,7 +217,7 @@ mod tests {
             );
 
             let saved = McpConnection {
-                endpoint: None,
+                endpoint: Default::default(),
                 allowed_tools: Vec::new(),
                 command: "fixture".into(),
                 args: Vec::new(),

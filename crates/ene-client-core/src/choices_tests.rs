@@ -20,11 +20,11 @@ fn llm_conn(id: &str, adapter: &str, model_ids: Vec<&str>, healthy: bool) -> Con
             ..Default::default()
         }),
         config: Some(ConnectionConfig::Llm(LlmConnection {
-            endpoint: Some(ConnectionEndpoint {
+            endpoint: ConnectionEndpoint {
                 adapter: adapter.into(),
                 endpoint: "https://example.invalid/v1".into(),
                 ..Default::default()
-            }),
+            },
             model_ids: model_ids.into_iter().map(str::to_owned).collect(),
         })),
         ..Default::default()
@@ -56,10 +56,10 @@ fn available_models_merges_configured_fetched_and_checked_with_fallback() {
                         ..Default::default()
                     }),
                     config: Some(ConnectionConfig::Llm(LlmConnection {
-                        endpoint: Some(ConnectionEndpoint {
+                        endpoint: ConnectionEndpoint {
                             adapter: GOOGLE_AGENT_PLATFORM.into(),
                             ..Default::default()
-                        }),
+                        },
                         ..Default::default()
                     })),
                     ..Default::default()
@@ -120,10 +120,10 @@ fn voice_stt_and_embedding_choices_merge_checks_and_vendor_defaults() {
                     enabled: true,
                     kind: ConnectionKind::Tts,
                     config: Some(ConnectionConfig::Tts(TtsConnection {
-                        endpoint: Some(ConnectionEndpoint {
+                        endpoint: ConnectionEndpoint {
                             adapter: "openai".into(),
                             ..Default::default()
-                        }),
+                        },
                         ..Default::default()
                     })),
                     ..Default::default()
@@ -134,11 +134,11 @@ fn voice_stt_and_embedding_choices_merge_checks_and_vendor_defaults() {
                     enabled: true,
                     kind: ConnectionKind::Stt,
                     config: Some(ConnectionConfig::Stt(SttConnection {
-                        endpoint: Some(ConnectionEndpoint {
+                        endpoint: ConnectionEndpoint {
                             adapter: "openai".into(),
                             options: r#"{"model":"custom-stt"}"#.into(),
                             ..Default::default()
-                        }),
+                        },
                         ..Default::default()
                     })),
                     ..Default::default()
@@ -196,10 +196,10 @@ fn enabled_and_all_choice_collectors_distinguish_enabled_connections() {
                     enabled: true,
                     kind: ConnectionKind::Tts,
                     config: Some(ConnectionConfig::Tts(TtsConnection {
-                        endpoint: Some(ConnectionEndpoint {
+                        endpoint: ConnectionEndpoint {
                             adapter: "sakura".into(),
                             ..Default::default()
-                        }),
+                        },
                         voice_ids: vec!["zundamon/normal".into()],
                     })),
                     ..Default::default()

@@ -38,12 +38,7 @@ fn insert_choice(choices: &mut IndexMap<String, String>, id: &str, label: Option
 
 fn llm_config_parts(connection: &Connection) -> (&[String], &str) {
     match connection.config.as_ref() {
-        Some(ConnectionConfig::Llm(llm)) => (
-            &llm.model_ids,
-            llm.endpoint
-                .as_ref()
-                .map_or_default(|ep| ep.adapter.as_str()),
-        ),
+        Some(ConnectionConfig::Llm(llm)) => (&llm.model_ids, llm.endpoint.adapter.as_str()),
         _ => (&[], ""),
     }
 }
@@ -228,12 +223,7 @@ fn voice_choices(conn: &Connection) -> Vec<(String, String)> {
         for id in &tts.voice_ids {
             push_voice_unique(&mut voices, id);
         }
-        if !sakura
-            && tts
-                .endpoint
-                .as_ref()
-                .is_some_and(|ep| ep.adapter.trim().eq_ignore_ascii_case("openai"))
-        {
+        if !sakura && tts.endpoint.adapter.trim().eq_ignore_ascii_case("openai") {
             for voice in OPENAI_TTS_VOICES {
                 push_voice_unique(&mut voices, voice);
             }
@@ -254,8 +244,7 @@ fn voice_choices(conn: &Connection) -> Vec<(String, String)> {
 fn stt_choices(conn: &Connection) -> Vec<(String, String)> {
     let mut models = IndexMap::new();
     if let Some(ConnectionConfig::Stt(stt)) = conn.config.as_ref()
-        && let Some(ep) = stt.endpoint.as_ref()
-        && let Ok(serde_json::Value::Object(opts)) = serde_json::from_str(&ep.options)
+        && let Ok(serde_json::Value::Object(opts)) = serde_json::from_str(&stt.endpoint.options)
         && let Some(model) = opts.get("model").and_then(|v| v.as_str())
     {
         insert_choice(&mut models, model, None);

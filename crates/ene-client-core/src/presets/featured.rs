@@ -126,7 +126,7 @@ impl FeaturedPreset {
 
 fn tts(adapter: &str, endpoint: &str, options: impl Into<String>, voice: &str) -> ConnectionConfig {
     ConnectionConfig::Tts(TtsConnection {
-        endpoint: Some(preset_endpoint(adapter, endpoint, options)),
+        endpoint: preset_endpoint(adapter, endpoint, options),
         voice_ids: vec![voice.into()],
     })
 }
@@ -135,14 +135,14 @@ fn stt(adapter: &str, endpoint: &str, model: &str) -> ConnectionConfig {
     let language = "ja";
     let options = serde_json::json!({"protocol": adapter, "model": model, "language": language});
     ConnectionConfig::Stt(SttConnection {
-        endpoint: Some(preset_endpoint(adapter, endpoint, options.to_string())),
+        endpoint: preset_endpoint(adapter, endpoint, options.to_string()),
         language_hints: vec![language.into()],
     })
 }
 
 fn embedding(adapter: &str, endpoint: &str, model: &str, dimensions: u32) -> ConnectionConfig {
     ConnectionConfig::Embedding(EmbeddingConnection {
-        endpoint: Some(preset_endpoint(adapter, endpoint, "{}")),
+        endpoint: preset_endpoint(adapter, endpoint, "{}"),
         model_id: model.into(),
         dimensions,
     })

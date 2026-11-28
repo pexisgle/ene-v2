@@ -94,8 +94,7 @@ pub fn apply_tts_voice_to_config(cfg: &mut ConnectionConfig, is_sakura: bool, vo
         return;
     };
     tts.voice_ids = vec![voice_clean.to_owned()];
-    let mut ep = tts.endpoint.take().unwrap_or_default();
-    let mut opts = SpeechOptions::parse(&ep.options);
+    let mut opts = SpeechOptions::parse(&tts.endpoint.options);
     if is_sakura {
         opts.set_sakura_voice(voice_clean);
     } else if let Ok(speaker) = voice_clean.parse::<u32>() {
@@ -103,8 +102,7 @@ pub fn apply_tts_voice_to_config(cfg: &mut ConnectionConfig, is_sakura: bool, vo
     } else {
         opts.set("voice", voice_clean);
     }
-    ep.options = opts.json();
-    tts.endpoint = Some(ep);
+    tts.endpoint.options = opts.json();
 }
 
 /// Applies STT model selection onto a domain `ConnectionConfig`.
@@ -112,11 +110,9 @@ pub fn apply_stt_model_to_config(cfg: &mut ConnectionConfig, model_clean: &str) 
     let ConnectionConfig::Stt(stt) = cfg else {
         return;
     };
-    let mut ep = stt.endpoint.take().unwrap_or_default();
-    let mut opts = SpeechOptions::parse(&ep.options);
+    let mut opts = SpeechOptions::parse(&stt.endpoint.options);
     opts.set("model", model_clean);
-    ep.options = opts.json();
-    stt.endpoint = Some(ep);
+    stt.endpoint.options = opts.json();
 }
 
 /// Reads a configured STT model, leaving the fallback to the caller.
@@ -137,7 +133,7 @@ pub fn configured_voicevox_speaker(endpoint: Option<&ConnectionEndpoint>) -> Opt
 /// Resolves the effective STT model identifier configured on a connection.
 pub fn stt_model_of_connection(conn: &Connection) -> String {
     if let Some(ConnectionConfig::Stt(stt)) = &conn.config
-        && let Some(model) = configured_stt_model(stt.endpoint.as_ref())
+        && let Some(model) = configured_stt_model(Some(&stt.endpoint))
     {
         return model;
     }
@@ -163,9 +159,7 @@ pub fn tts_voice_of_connection(conn: &Connection) -> Option<String> {
         let (vid, _) = ene_catalog::parse_voice_resource(first);
         return Some(vid.to_owned());
     }
-    let sakura = conn.is_sakura();
-    let ep = tts.endpoint.as_ref()?;
-    tts_voice_from_endpoint(ep, sakura)
+    tts_voice_from_endpoint(&tts.endpoint, conn.is_sakura())
 }
 
 fn tts_voice_from_endpoint(ep: &ConnectionEndpoint, sakura: bool) -> Option<String> {
@@ -340,11 +334,11 @@ mod tests {
             kind: ConnectionKind::Stt,
             last_check: None,
             config: Some(ConnectionConfig::Stt(SttConnection {
-                endpoint: Some(endpoint(
+                endpoint: endpoint(
                     adapter,
                     ep,
                     &serde_json::json!({ "model": model }).to_string(),
-                )),
+                ),
                 ..Default::default()
             })),
             ..Default::default()
@@ -367,7 +361,7 @@ mod tests {
             kind: ConnectionKind::Tts,
             last_check: None,
             config: Some(ConnectionConfig::Tts(TtsConnection {
-                endpoint: Some(endpoint(adapter, ep, &options.to_string())),
+                endpoint: endpoint(adapter, ep, &options.to_string()),
                 voice_ids: voices.into_iter().map(str::to_owned).collect(),
             })),
             ..Default::default()
@@ -458,8 +452,7 @@ mod tests {
             panic!("expected Stt config");
         };
         let opts: serde_json::Value =
-            serde_json::from_str(&stt.endpoint.as_ref().expect("endpoint").options)
-                .expect("json options");
+            serde_json::from_str(&stt.endpoint.options).expect("json options");
         assert_eq!(opts["model"], "gpt-4o-transcribe");
 
         let off_inputs = build_stt_assignment_inputs(&connections, None);
@@ -510,8 +503,7 @@ mod tests {
         };
         assert_eq!(tts.voice_ids, vec!["shikokumetan/amaama"]);
         let opts: serde_json::Value =
-            serde_json::from_str(&tts.endpoint.as_ref().expect("endpoint").options)
-                .expect("json options");
+            serde_json::from_str(&tts.endpoint.options).expect("json options");
         assert_eq!(opts["model"], "shikokumetan");
         assert_eq!(opts["voice"], "amaama");
         assert_eq!(opts["protocol"], "sakura");
@@ -533,7 +525,7 @@ mod tests {
                 ..Default::default()
             }),
             config: Some(ConnectionConfig::Llm(LlmConnection {
-                endpoint: Some(endpoint("openrouter", "https://openrouter.ai/api/v1", "{}")),
+                endpoint: endpoint("openrouter", "https://openrouter.ai/api/v1", "{}"),
                 ..Default::default()
             })),
             ..Default::default()
@@ -557,7 +549,7 @@ mod tests {
             kind: ConnectionKind::Search,
             last_check: None,
             config: Some(ConnectionConfig::Search(SearchConnection {
-                endpoint: Some(endpoint(adapter, ep, "{}")),
+                endpoint: endpoint(adapter, ep, "{}"),
                 max_results: 5,
             })),
         };
@@ -584,7 +576,7 @@ mod tests {
             enabled: true,
             kind: ConnectionKind::Embedding,
             config: Some(ConnectionConfig::Embedding(EmbeddingConnection {
-                endpoint: Some(endpoint("openai", "https://api.openai.com/v1", "{}")),
+                endpoint: endpoint("openai", "https://api.openai.com/v1", "{}"),
                 model_id: "text-embedding-3-small".into(),
                 dimensions: 1536,
             })),

@@ -297,6 +297,24 @@ mod tests {
     }
 
     #[test]
+    fn connection_input_requires_endpoint_metadata() {
+        let input = w::ConnectionInput {
+            id: "local".into(),
+            kind: w::ConnectionKind::Llm.into(),
+            config: Some(w::ConnectionConfig {
+                config: Some(w::connection_config::Config::Llm(Box::default())),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            ene_domain::settings::Connection::try_from(input),
+            Err(ene_domain::DomainError::Invalid(message)) if message == "connection endpoint is required"
+        ));
+    }
+
+    #[test]
     fn wire_acl_preserves_connection_template_and_policy_round_trips() {
         let mut env = std::collections::BTreeMap::new();
         env.insert("FOO".to_owned(), "bar".to_owned());
@@ -306,12 +324,12 @@ mod tests {
             enabled: true,
             expected_revision: 4,
             config: Some(domain::ConnectionConfig::Mcp(domain::McpConnection {
-                endpoint: Some(domain::ConnectionEndpoint {
+                endpoint: domain::ConnectionEndpoint {
                     adapter: "mcp".into(),
                     endpoint: String::new(),
                     options_schema: String::new(),
                     options: "{}".into(),
-                }),
+                },
                 allowed_tools: vec!["read".into()],
                 command: "npx".into(),
                 args: vec!["-y".into(), "pkg".into()],
