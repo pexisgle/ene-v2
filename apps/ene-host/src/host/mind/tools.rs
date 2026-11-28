@@ -57,7 +57,7 @@ pub(crate) fn register(app: &mut App) {
         |called: On<ToolCalled<RecallArgs>>, mut commands: Commands| {
             let (call, agent, args) = (called.call, called.agent, called.args.clone());
             commands.queue(move |world: &mut World| {
-                let result = companion(world, agent).and_then(|companion| {
+                let result = companion(world.get(agent)).and_then(|companion| {
                     recall(
                         &RecallServices {
                             store: world.resource(),
@@ -66,7 +66,7 @@ pub(crate) fn register(app: &mut App) {
                             runtime: world.resource(),
                             wake: world.get_resource(),
                         },
-                        companion,
+                        companion.to_owned(),
                         args,
                     )
                 });
@@ -94,7 +94,7 @@ pub(crate) fn register(app: &mut App) {
             let citation = format!("{}:{}", agent_id.0, turn.start.get());
             read(
                 world.resource(),
-                &companion(world, agent)?,
+                companion(world.get(agent))?,
                 &args,
                 &citation,
             )
@@ -110,7 +110,7 @@ pub(crate) fn register(app: &mut App) {
             update(
                 world.resource(),
                 world.get_resource(),
-                &companion(world, agent)?,
+                companion(world.get(agent))?,
                 args,
             )
         }),
@@ -118,11 +118,10 @@ pub(crate) fn register(app: &mut App) {
     .add_systems(Update, complete_recall.after(AgentLoop));
 }
 
-fn companion(world: &World, agent: Entity) -> Result<String> {
-    world
-        .get::<CompanionAgent>(agent)
-        .map(|agent| agent.companion_id.clone())
-        .ok_or_else(|| HostError::Internal(("this tool belongs to a companion").into()))
+fn companion(agent: Option<&CompanionAgent>) -> Result<&str> {
+    agent
+        .map(|agent| agent.companion_id.as_str())
+        .ok_or_else(|| HostError::Internal("this tool belongs to a companion".into()))
 }
 
 #[derive(Component)]

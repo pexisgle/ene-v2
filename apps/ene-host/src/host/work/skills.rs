@@ -43,8 +43,8 @@ pub(crate) fn register(app: &mut App) {
         "List saved procedural skills for this companion.",
         ToolOptions::default(),
         run_tool(|world, agent, _, _| {
-            let companion_id = owner_companion(world, agent)?;
-            list_skills_json(world.resource::<Store>(), &companion_id)
+            let companion_id = owner_companion(world.get_entity(agent).ok())?;
+            list_skills_json(world.resource::<Store>(), companion_id)
         }),
     )
     .add_open_tool::<SkillReadArgs, _>(
@@ -52,8 +52,8 @@ pub(crate) fn register(app: &mut App) {
         "Read the full instructions of one saved procedural skill.",
         ToolOptions::default(),
         run_tool(|world, agent, _, args: SkillReadArgs| {
-            let companion_id = owner_companion(world, agent)?;
-            read_skill_json(world.resource::<Store>(), &companion_id, &args.name)
+            let companion_id = owner_companion(world.get_entity(agent).ok())?;
+            read_skill_json(world.resource::<Store>(), companion_id, &args.name)
         }),
     )
     .add_open_tool::<SkillSaveArgs, _>(
@@ -61,18 +61,18 @@ pub(crate) fn register(app: &mut App) {
         "Save or update a reusable procedural skill for this companion.",
         ToolOptions::default(),
         run_tool(|world, agent, _, args| {
-            let companion_id = owner_companion(world, agent)?;
-            save_skill_json(world.resource::<Store>(), &companion_id, &args)
+            let companion_id = owner_companion(world.get_entity(agent).ok())?;
+            save_skill_json(world.resource::<Store>(), companion_id, &args)
         }),
     );
 }
 
-fn owner_companion(world: &World, agent: Entity) -> Result<String> {
-    if let Some(c) = world.get::<CompanionAgent>(agent) {
-        return Ok(c.companion_id.clone());
+fn owner_companion(agent: Option<EntityRef<'_>>) -> Result<&str> {
+    if let Some(owner) = agent.and_then(|agent| agent.get::<CompanionAgent>()) {
+        return Ok(&owner.companion_id);
     }
-    if let Some(w) = world.get::<WorkAgent>(agent) {
-        return Ok(w.companion_id.clone());
+    if let Some(owner) = agent.and_then(|agent| agent.get::<WorkAgent>()) {
+        return Ok(&owner.companion_id);
     }
     Err(HostError::Internal(
         "skill tools belong to a companion or work agent".into(),
