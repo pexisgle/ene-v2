@@ -76,13 +76,11 @@ pub(super) fn finish_run(world: &mut World, mut run: Run, state: RunState, text:
         }
     };
     if let Some(session) = &session {
-        {
-            let mut notifier = world.resource_mut::<Notifier>();
-            if was_active {
-                notify_status(&mut notifier, session);
-            }
-            notify_finished(&mut notifier, session, &run);
+        let notifier = world.resource::<Notifier>();
+        if was_active {
+            notify_status(notifier, session);
         }
+        notify_finished(notifier, session, &run);
         if was_active {
             let raw_report = text.unwrap_or_else(|| {
                 match state {

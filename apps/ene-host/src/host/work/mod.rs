@@ -42,7 +42,7 @@ pub(crate) use ene_work::{STALL_TIMEOUT, new_run};
 pub(crate) use input::send;
 pub(crate) use lifecycle::restore;
 use lifecycle::{agent_of, ensure, maintain, retire};
-use notify::{inform, notify_finished, notify_run, notify_status};
+use notify::{inform, notify_finished, notify_started, notify_status};
 pub(crate) use reads::{get, list};
 pub(crate) use settle::settle_run;
 use settle::{finish_run, note_activity};
@@ -184,9 +184,9 @@ pub(crate) fn start_run(
     if let Err(error) = dispatch_run(world, session, &run, executor) {
         let failed = fail_run(&store, &run, &error)?;
         let session = require_session(&store, &session.id)?;
-        let mut notifier = world.resource_mut::<Notifier>();
-        notify_status(&mut notifier, &session);
-        notify_finished(&mut notifier, &session, &failed);
+        let notifier = world.resource::<Notifier>();
+        notify_status(notifier, &session);
+        notify_finished(notifier, &session, &failed);
         return Err(error);
     }
     Ok(run)
@@ -230,17 +230,9 @@ fn dispatch_run(
     }
     world.resource_mut::<Runs>().begin(&run.run_id);
     let session = require_session(world.resource::<Store>(), &session.id)?;
-    {
-        let mut notifier = world.resource_mut::<Notifier>();
-        notify_status(&mut notifier, &session);
-        notify_run(
-            &mut notifier,
-            &session,
-            run,
-            w::WorkEventKind::RunStarted,
-            w::work_event::Detail::RunStarted(Box::default()),
-        );
-    }
+    let notifier = world.resource::<Notifier>();
+    notify_status(notifier, &session);
+    notify_started(notifier, &session, run);
     Ok(())
 }
 
@@ -289,10 +281,10 @@ pub(crate) fn stop(world: &mut World, work_id: &str, reason: Option<&str>) -> Re
     let waiting = store.work_repo().cancel_starting(work_id)?;
     if !waiting.is_empty() {
         let session = require_session(&store, work_id)?;
-        let mut notifier = world.resource_mut::<Notifier>();
-        notify_status(&mut notifier, &session);
+        let notifier = world.resource::<Notifier>();
+        notify_status(notifier, &session);
         for run in waiting {
-            notify_finished(&mut notifier, &session, &run);
+            notify_finished(notifier, &session, &run);
         }
     }
     let Some(run) = store.work_repo().active_run(work_id)? else {
@@ -321,7 +313,7 @@ pub(crate) fn close(world: &mut World, work_id: &str) -> Result<()> {
     stop(world, work_id, Some("the work session is closing"))?;
     store.work_repo().close_work(work_id)?;
     if let Ok(Some(session)) = store.work_repo().work_session(work_id) {
-        notify_status(&mut world.resource_mut::<Notifier>(), &session);
+        notify_status(world.resource::<Notifier>(), &session);
     }
     if let Some(call) = hand::release(&mut world.resource_mut(), work_id) {
         let _removed = world.try_despawn(call);

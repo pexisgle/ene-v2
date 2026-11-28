@@ -24,21 +24,29 @@ pub(super) fn inform(
     world.trigger(Deliver::new(parent, text, mode).with_author(author));
 }
 
-pub(super) fn notify_finished(notifier: &mut Notifier, session: &WorkSession, run: &Run) {
-    notify_run(
+pub(super) fn notify_started(notifier: &Notifier, session: &WorkSession, run: &Run) {
+    notify_event(
         notifier,
         session,
-        run,
-        w::WorkEventKind::RunFinished,
+        &run.run_id,
+        w::work_event::Detail::RunStarted(Box::default()),
+    );
+}
+
+pub(super) fn notify_finished(notifier: &Notifier, session: &WorkSession, run: &Run) {
+    notify_event(
+        notifier,
+        session,
+        &run.run_id,
         w::work_event::Detail::RunFinished(Box::new(wire::work_run_finished(run))),
     );
 }
 
-pub(super) fn notify_status(notifier: &mut Notifier, session: &WorkSession) {
+pub(super) fn notify_status(notifier: &Notifier, session: &WorkSession) {
     notify_event(
         notifier,
         session,
-        w::WorkEventKind::StatusChanged,
+        "",
         w::work_event::Detail::StatusChanged(Box::new(w::WorkStatusChanged {
             status: w::WorkStatus::from(session.status).into(),
             ..Default::default()
@@ -47,31 +55,19 @@ pub(super) fn notify_status(notifier: &mut Notifier, session: &WorkSession) {
 }
 
 fn notify_event(
-    notifier: &mut Notifier,
+    notifier: &Notifier,
     session: &WorkSession,
-    kind: w::WorkEventKind,
+    run_id: &str,
     detail: w::work_event::Detail,
 ) {
-    let event = wire::work_event(session, kind, detail);
-    push_event(notifier, session.companion_id.as_str(), event);
-}
-
-pub(super) fn notify_run(
-    notifier: &mut Notifier,
-    session: &WorkSession,
-    run: &Run,
-    kind: w::WorkEventKind,
-    detail: w::work_event::Detail,
-) {
-    let mut event = wire::work_event(session, kind, detail);
-    event.run_id = run.run_id.clone();
-    push_event(notifier, session.companion_id.as_str(), event);
-}
-
-fn push_event(notifier: &mut Notifier, companion: &str, event: w::WorkEvent) {
     notifier.push(
-        Some(companion),
+        Some(session.companion_id.as_str()),
         None,
-        w::notification::Event::WorkEvent(Box::new(event)),
+        w::notification::Event::WorkEvent(Box::new(w::WorkEvent {
+            work_id: session.id.clone(),
+            run_id: run_id.to_owned(),
+            detail: Some(detail),
+            ..Default::default()
+        })),
     );
 }

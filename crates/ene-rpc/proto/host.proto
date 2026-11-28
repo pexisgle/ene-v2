@@ -315,12 +315,6 @@ enum WorkStatus {
   WORK_STATUS_ACTIVE = 2;
   WORK_STATUS_CLOSED = 3;
 }
-enum WorkEventKind {
-  WORK_EVENT_KIND_UNSPECIFIED = 0;
-  WORK_EVENT_KIND_STATUS_CHANGED = 1;
-  WORK_EVENT_KIND_RUN_STARTED = 2;
-  WORK_EVENT_KIND_RUN_FINISHED = 3;
-}
 message WorkSession {
   string id = 1;
   string companion_id = 2;
@@ -358,13 +352,13 @@ message SendWorkRequest {
 }
 message WorkAcceptance {
   string request_id = 1;
-  optional string run_id = 2; // 受付に対応する Run。旧ホストでの受付には含まれないことがある
+  string run_id = 2;
 }
 message StopWorkRequest { string work_id = 1; }
 message WorkEvent {
+  reserved 3;
   string work_id = 1;
   string run_id = 2;
-  WorkEventKind kind = 3;  // oneof detail の種別と一致すること
   oneof detail {
     WorkStatusChanged status_changed = 4;
     WorkRunStarted run_started = 5;

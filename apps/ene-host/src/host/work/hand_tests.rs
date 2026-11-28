@@ -179,7 +179,6 @@ impl HandWorld {
         )
         .unwrap()
         .run_id
-        .unwrap()
     }
 
     /// The texts the head's conversation holds from the hand, in order.

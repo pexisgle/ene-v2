@@ -202,19 +202,6 @@ pub(crate) fn work_run_finished(value: &Run) -> w::WorkRunFinished {
     run_wire!(WorkRunFinished, value, {})
 }
 
-pub(crate) fn work_event(
-    session: &WorkSession,
-    kind: w::WorkEventKind,
-    detail: w::work_event::Detail,
-) -> w::WorkEvent {
-    w::WorkEvent {
-        work_id: session.id.clone(),
-        kind: kind.into(),
-        detail: Some(detail),
-        ..Default::default()
-    }
-}
-
 wire_enum!(device_status: DeviceStatus => w::DeviceOperationStatus {
     Pending, Dispatched, Completed, Failed, Uncertain
 });

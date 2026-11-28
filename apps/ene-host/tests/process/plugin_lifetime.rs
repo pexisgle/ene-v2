@@ -292,7 +292,8 @@ async fn unavailable_executor_is_not_recovered_as_rig(
         ..Default::default()
     };
     let accepted = work.send_work(input.clone()).await.unwrap().into_owned();
-    let accepted_run = accepted.run_id.as_deref().unwrap();
+    let accepted_run = accepted.run_id.as_str();
+    assert_ne!(accepted_run, "");
     child.signal(9).unwrap();
     let exit = tokio::time::timeout(Duration::from_secs(5), child.wait())
         .await
@@ -312,7 +313,7 @@ async fn unavailable_executor_is_not_recovered_as_rig(
     let work = w::WorkServiceClient::new(transport, config);
     let retry = work.send_work(input.clone()).await.unwrap();
     assert_eq!(retry.view().request_id, accepted.request_id);
-    assert_eq!(retry.view().run_id, Some(accepted_run));
+    assert_eq!(retry.view().run_id, accepted_run);
     let conflict = work
         .send_work(w::SendWorkRequest {
             text: "Different input".into(),

@@ -130,7 +130,6 @@ mod tests {
         calls.on_notification(&w::Notification {
             event: Some(w::notification::Event::WorkEvent(Box::new(w::WorkEvent {
                 run_id: "first".into(),
-                kind: w::WorkEventKind::RunFinished.into(),
                 detail: Some(w::work_event::Detail::RunFinished(Box::new(
                     w::WorkRunFinished {
                         state: w::RunStatus::Cancelled.into(),

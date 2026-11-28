@@ -24,7 +24,7 @@ pub(crate) fn send(world: &mut World, request: &w::SendWorkRequest) -> Result<w:
         }
         return Ok(w::WorkAcceptance {
             request_id: previous.request_id,
-            run_id: Some(previous.run_id),
+            run_id: previous.run_id,
             ..Default::default()
         });
     }
@@ -52,7 +52,7 @@ pub(crate) fn send(world: &mut World, request: &w::SendWorkRequest) -> Result<w:
     world.resource_mut::<ReadyWork>().0.insert(session.id);
     Ok(w::WorkAcceptance {
         request_id,
-        run_id: Some(run.run_id),
+        run_id: run.run_id,
         ..Default::default()
     })
 }
