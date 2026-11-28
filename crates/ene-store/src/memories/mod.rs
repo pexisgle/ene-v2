@@ -16,7 +16,7 @@ use crate::{
     Store, StoreError,
     error::Result,
     json, to_json,
-    util::{digest, epoch, now, truncate},
+    util::{epoch, now, truncate},
 };
 use ene_mind::MemoryVersion;
 pub use ene_mind::{
@@ -25,7 +25,6 @@ pub use ene_mind::{
     RecallMode, RecallOutcome, SHARED_SCOPE, Scored, StateUpdate, score, validate_citations,
 };
 use rusqlite::{OptionalExtension, params};
-use serde_json::Value;
 use std::collections::HashSet;
 
 const MAX_INJECTED: usize = 64;
@@ -350,9 +349,5 @@ impl<'a> MemoryRepo<'a> {
             }
         }
         Ok(ids)
-    }
-
-    pub fn mind_hash(&self, value: &Value) -> Vec<u8> {
-        digest(to_json(value).unwrap_or_default().as_bytes())
     }
 }

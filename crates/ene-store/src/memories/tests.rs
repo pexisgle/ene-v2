@@ -2,8 +2,7 @@ mod consolidation;
 mod recall;
 
 use super::*;
-use crate::util::digest;
-use serde_json::json as value;
+use serde_json::Value;
 
 fn store() -> Store {
     let temp = tempfile::tempdir().unwrap();
@@ -152,61 +151,6 @@ fn embedding_spaces_share_current_content_without_overwrites() {
     );
 }
 
-#[test]
-fn historical_hash_receipts_replay_after_reopening() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("host.sqlite3");
-    let store = Store::open(&path).unwrap();
-    let repo = store.memory_repo();
-    let fixtures = [
-        ("float", r#"{"n":1.0}"#),
-        ("unicode", "{\"\u{e000}\":1,\"\u{10000}\":2}"),
-    ];
-    for (operation, historical) in fixtures {
-        let request: Value = serde_json::from_str(historical).unwrap();
-        let legacy_hash = digest(historical.as_bytes());
-        assert_eq!(repo.mind_hash(&request), legacy_hash);
-        let canonical = serde_json_canonicalizer::to_string(&request).unwrap();
-        assert_ne!(digest(canonical.as_bytes()), legacy_hash);
-        store
-            .conn()
-            .execute(
-                "INSERT INTO mind_operations (operation_id, companion_id, request_hash, result, created_at) \
-                 VALUES (?1, 'ene', ?2, '{\"replayed\":true}', ?3)",
-                params![operation, legacy_hash, now()],
-            )
-            .unwrap();
-    }
-    drop(store);
-    let store = Store::open(&path).unwrap();
-    let repo = store.memory_repo();
-    for (operation, historical) in fixtures {
-        let request: Value = serde_json::from_str(historical).unwrap();
-        assert_eq!(
-            apply(
-                &store,
-                operation,
-                &repo.mind_hash(&request),
-                Vec::new(),
-                None
-            )
-            .unwrap(),
-            value!({"replayed": true})
-        );
-        let canonical = serde_json_canonicalizer::to_string(&request).unwrap();
-        assert!(matches!(
-            apply(
-                &store,
-                operation,
-                &digest(canonical.as_bytes()),
-                Vec::new(),
-                None
-            ),
-            Err(StoreError::Conflict(_))
-        ));
-    }
-}
-
 fn companion_row(store: &Store) {
     let initial_state = serde_json::to_string(&ene_mind::State::default()).unwrap();
     let document = r#"{"schema":"ene.body.v1","json":{}}"#;
@@ -226,7 +170,7 @@ fn state_only(store: &Store, operation: &str, version: i64) -> Result<Value> {
     apply(
         store,
         operation,
-        &store.memory_repo().mind_hash(&value!({"state": version})),
+        &version.to_le_bytes(),
         Vec::new(),
         Some(MindStateChange {
             expected_revision: 1,
@@ -241,29 +185,23 @@ fn mind_update_is_idempotent_and_corrections_forgets_and_state_use_cas() {
     let repo = store.memory_repo();
     let companions = store.companion_repo();
     companion_row(&store);
-    let hash = repo.mind_hash(&value!({"content": "tea", "v": 1}));
+    let hash = b"tea";
     let write = input("tea", 5);
-    let result = apply(&store, "op-1", &hash, vec![write.clone()], None).unwrap();
+    let result = apply(&store, "op-1", hash, vec![write.clone()], None).unwrap();
     let id = result["memories"][0].as_str().unwrap().to_owned();
     assert_eq!(
-        apply(&store, "op-1", &hash, vec![write], None).unwrap(),
+        apply(&store, "op-1", hash, vec![write], None).unwrap(),
         result
     );
     assert_eq!(repo.list_memories("ene", None, 10).unwrap().0.len(), 1);
     assert!(matches!(
-        apply(
-            &store,
-            "op-1",
-            &repo.mind_hash(&value!({"content": "coffee"})),
-            vec![input("coffee", 5)],
-            None
-        ),
+        apply(&store, "op-1", b"coffee", vec![input("coffee", 5)], None),
         Err(StoreError::Conflict(_))
     ));
     let correction = apply(
         &store,
         "op-2",
-        &repo.mind_hash(&value!({"content": "green tea"})),
+        b"green tea",
         vec![NewMemory {
             id: Some(id.clone()),
             content: "green tea".into(),
@@ -278,7 +216,7 @@ fn mind_update_is_idempotent_and_corrections_forgets_and_state_use_cas() {
         apply(
             &store,
             "op-3",
-            &repo.mind_hash(&value!({"content": "black tea"})),
+            b"black tea",
             vec![NewMemory {
                 id: Some(id.clone()),
                 content: "black tea".into(),
@@ -294,7 +232,7 @@ fn mind_update_is_idempotent_and_corrections_forgets_and_state_use_cas() {
     apply(
         &store,
         "op-4",
-        &repo.mind_hash(&value!({"forget": 1})),
+        b"forget",
         vec![NewMemory {
             id: Some(corrected_id.clone()),
             forget: true,
@@ -335,7 +273,7 @@ fn a_memory_change_needs_one_target_at_its_observed_revision() {
         importance: Some(7),
         ..NewMemory::default()
     };
-    let hash = repo.mind_hash(&value!({"content": "green tea"}));
+    let hash = b"green tea";
     for edit in [
         revise.clone(),
         NewMemory {
@@ -353,7 +291,7 @@ fn a_memory_change_needs_one_target_at_its_observed_revision() {
             apply(
                 &store,
                 "rejected",
-                &hash,
+                hash,
                 vec![input("rolled back", 3), edit],
                 None
             ),
@@ -366,7 +304,7 @@ fn a_memory_change_needs_one_target_at_its_observed_revision() {
     let result = apply(
         &store,
         "accepted",
-        &hash,
+        hash,
         vec![NewMemory {
             expected_revision: Some(old.memory_revision),
             ..revise

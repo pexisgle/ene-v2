@@ -14,6 +14,7 @@ use crate::host::{
 };
 use bevy_ecs::prelude::*;
 use ene_mind::{RecallCandidate, RecallMode};
+use ene_store::util::digest;
 use rig_ecs::prelude::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -256,7 +257,6 @@ fn update(
         "memories": &args.memories,
         "state": &args.state,
     });
-    let hash = store.memory_repo().mind_hash(&request);
     let state = match args.state {
         Some(patch) => {
             let current = store
@@ -275,7 +275,7 @@ fn update(
     let result = store.memory_repo().apply_mind_update(&MindUpdate {
         operation_id: args.operation_id,
         companion_id: companion.to_owned(),
-        request_hash: hash,
+        request_hash: digest(request.to_string().as_bytes()),
         memories: args.memories,
         state,
     })?;
