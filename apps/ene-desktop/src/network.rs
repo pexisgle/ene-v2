@@ -908,13 +908,12 @@ async fn observe_enabled(
                 #[cfg(target_os = "linux")]
                 let observation = {
                     if observer.is_none() { observer = crate::observe_linux::Observer::open(); }
-                    observer.as_mut().map(crate::observe_linux::Observer::observe)
+                    observer.as_mut().map(crate::observe_linux::Observer::observe).unwrap_or_default()
                 };
                 #[cfg(windows)]
-                let observation = Some(crate::observe::observe());
+                let observation = crate::observe::observe();
                 #[cfg(not(any(windows,target_os = "linux")))]
-                let observation = None::<crate::observe_types::Observation>;
-                let observation = observation.unwrap_or_default();
+                let observation = crate::observe_types::Observation::default();
                 let crate::observe_types::ObservedWindow::Window(window) = observation.window else {
                     if previous.is_some() && clients.device.report_perception(w::Perception {
                         device_id: device.clone(), generation: activation.generation, ..Default::default()

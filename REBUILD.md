@@ -8,12 +8,12 @@
 | --- | --- | --- |
 | `ene-core` | 承認境界、人格と心、記憶の順位、文脈の組み立て、アバター IPC | serde、serde_json_canonicalizer、sha2、jiff |
 | `ene-rpc` | 共通のワイヤー型と Connect クライアント | buffa、connectrpc、Buf |
-| `ene-plugin` | Wasm のマニフェストとゲスト SDK | serde、Extism PDK、ACP スキーマ |
-| `ene-host` | 単一状態所有者、HTTP、DB、プロバイダー、手・目・音声 | Tokio、Axum、SQLx、Rig、rmcp、Extism、process-wrap、private-fs、OS キーチェーン |
+| `ene-plugin` | Wasm のマニフェスト、ゲスト SDK、ホストと端末が使う制限付きランタイム | serde、Extism、Extism PDK、ACP スキーマ |
+| `ene-host` | 単一状態所有者、HTTP、DB、プロバイダー、手・目・音声 | Tokio、Axum、SQLx、Rig、rmcp、process-wrap、private-fs、OS キーチェーン |
 | `ene-desktop` | 対話、設定、承認、音声、知覚、端末操作 | GPUI Kit、CPAL、Enigo、OS 知覚アダプター |
 | `ene-avatar` / `ene-vrm` | アバター IPC、透過描画、VRM/VRMA | Bevy、既存 `ene-vrm` |
 
-`ene-domain`、`ene-policy`、`ene-mind`、`ene-avatar-ipc` は必要な部分を `ene-core` へ統合する。LLM をベンダー別に分岐する層、五社の検索アダプター、組み込み VOICEVOX、npx ブートストラップ、デスクトップ作業シェル、旧クライアント reducer と多段 DTO、旧店の手書き行変換、ECS ブリッジとアーキテクチャのラチェットは削除する。資格情報と Extism 実行はホスト側へ、OS 知覚と音声デバイスはデスクトップ側へ統合する。
+`ene-domain`、`ene-policy`、`ene-mind`、`ene-avatar-ipc` は必要な部分を `ene-core` へ統合する。LLM をベンダー別に分岐する層、五社の検索アダプター、組み込み VOICEVOX、npx ブートストラップ、デスクトップ作業シェル、旧クライアント reducer と多段 DTO、旧ストアの手書き行変換、ECS ブリッジとアーキテクチャのラチェットは削除する。資格情報はホスト側へ、OS 知覚と音声デバイスはデスクトップ側へ統合する。
 
 ## 通信契約
 

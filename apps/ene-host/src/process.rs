@@ -131,3 +131,56 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    #[tokio::test]
+    async fn retiring_a_connector_terminates_its_job_object() -> Result<()> {
+        let args = [
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            concat!(
+                "$child = Start-Process ping.exe -ArgumentList '-n','60','127.0.0.1' ",
+                "-WindowStyle Hidden -PassThru; ",
+                "[Console]::WriteLine($child.Id); $child.WaitForExit()"
+            )
+            .into(),
+        ];
+        let (process, _input, output) = spawn("powershell.exe", &args)?;
+        let mut lines = BufReader::new(output).lines();
+        let pid = tokio::time::timeout(Duration::from_secs(20), lines.next_line())
+            .await??
+            .context("child pid missing")?
+            .trim()
+            .parse::<u32>()?;
+        assert!(running(pid).await?);
+        drop(process);
+        tokio::time::timeout(Duration::from_secs(15), async move {
+            while running(pid).await? {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+        Ok(())
+    }
+
+    async fn running(pid: u32) -> Result<bool> {
+        let filter = format!("PID eq {pid}");
+        let output = tokio::process::Command::new("tasklist.exe")
+            .args(["/fi", &filter, "/fo", "csv", "/nh"])
+            .kill_on_drop(true)
+            .output()
+            .await?;
+        anyhow::ensure!(output.status.success(), "tasklist failed");
+        let field = format!("\"{pid}\"");
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.split(',').nth(1) == Some(field.as_str())))
+    }
+}
