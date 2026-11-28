@@ -9,7 +9,7 @@ use crate::host::{
     mind::{ModelAssignment, ModelAssignments as MindAssignments},
     permission,
     permission::{ApprovalDecision, ApprovalStatus},
-    providers::Providers,
+    providers::{Providers, install_local_package},
     resources::HostRuntime,
     tests::{Harness, text_turn},
     work,
@@ -108,19 +108,20 @@ impl HandWorld {
             })
             .to_string(),
         );
-        let providers = Providers::load(root.path());
+        // Enough turns for the head to answer every report the hand files.
+        let mut harness = Harness::new((0..8).map(|_| text_turn("わかった")));
+        let store = harness.store();
+        install_local_package(&store, root.path(), &plugin).unwrap();
+        let providers = Providers::load(root.path(), &store).unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime
             .block_on(providers.start("reference", Extension::Harness))
             .unwrap();
-        // Enough turns for the head to answer every report the hand files.
-        let mut harness = Harness::new((0..8).map(|_| text_turn("わかった")));
         harness.app.world_mut().insert_resource(providers.clone());
         harness
             .app
             .world_mut()
             .insert_resource(HostRuntime(runtime.handle().clone()));
-        let store = harness.store();
         store
             .settings_repo()
             .update_settings(

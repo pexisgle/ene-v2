@@ -246,7 +246,9 @@ pub(crate) fn register_plugin_tools(world: &mut World, tools: PluginTools) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::providers::{PLUGINS_DIR, Providers, character::dispatch_character_event};
+    use crate::host::providers::{
+        PLUGINS_DIR, Providers, character::dispatch_character_event, install_local_package,
+    };
     use crate::host::resources::HostRuntime;
     use crate::host::tests::Harness;
     use ene_plugin::{CharacterAction, CharacterEvent, CharacterTarget, HookEvent};
@@ -310,9 +312,8 @@ mod tests {
             &plugin_dir.join("manifest.json"),
             manifest.to_string().as_bytes(),
         );
-        let providers = Providers::load(state_root);
-        providers.restore_admissions(state_root, store).unwrap();
-        providers
+        install_local_package(store, state_root, &plugin_dir).unwrap();
+        Providers::load(state_root, store).unwrap()
     }
 
     #[tokio::test]

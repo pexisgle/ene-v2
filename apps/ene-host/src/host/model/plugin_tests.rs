@@ -3,8 +3,9 @@
 
 use super::plugin_completion;
 use crate::host::{
+    db::Store,
     model::Credentials,
-    providers::{Grant, Providers, Running, http_broker},
+    providers::{Grant, Providers, Running, http_broker, install_local_package},
     settings::{
         Connection, ConnectionConfig, ConnectionKind, CredentialState, Endpoint, LlmConnection,
     },
@@ -451,7 +452,9 @@ impl Harness {
             })
             .to_string(),
         );
-        let providers = Providers::load(temp.path());
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        install_local_package(&store, temp.path(), &root).unwrap();
+        let providers = Providers::load(temp.path(), &store).unwrap();
         let running = providers.start(provider_id, Extension::Llm).await.unwrap();
         Self {
             fixture,

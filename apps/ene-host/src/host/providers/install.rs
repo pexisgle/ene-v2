@@ -87,8 +87,7 @@ fn package_storage(error: impl std::fmt::Display) -> HostError {
     HostError::Storage(format!("plugin package storage: {error}"))
 }
 
-/// Removes both the managed revisions and the legacy directory. The registry
-/// row stays disabled until filesystem cleanup succeeds.
+/// Removes managed revisions. The registry row stays disabled until cleanup succeeds.
 pub(crate) fn remove_local_package(
     store: &Store,
     state_dir: &Path,
@@ -98,25 +97,18 @@ pub(crate) fn remove_local_package(
         return Err(HostError::Invalid("invalid plugin id".into()));
     }
     let repo = store.plugin_repo();
-    let mut removed = repo.set_plugin_enabled(plugin_id, false)?.is_some();
-    for path in package_locations(state_dir, plugin_id) {
-        match fs::remove_dir_all(path) {
-            Ok(()) => removed = true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(package_storage(error)),
-        }
-    }
+    let registered = repo.set_plugin_enabled(plugin_id, false)?.is_some();
+    let removed = match fs::remove_dir_all(managed_package_dir(state_dir, plugin_id)) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(package_storage(error)),
+    };
     repo.remove_plugin_entry(plugin_id)?;
-    Ok(removed)
+    Ok(registered || removed)
 }
 
-pub(super) fn package_locations(state: &Path, id: &str) -> [PathBuf; 2] {
-    let root = plugins_dir(state);
-    [root.join(id), root.join(MANAGED).join(id)]
-}
-
-pub(super) fn is_managed_directory(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| name == MANAGED)
+pub(super) fn managed_package_dir(state: &Path, id: &str) -> PathBuf {
+    plugins_dir(state).join(MANAGED).join(id)
 }
 
 pub(super) fn is_managed_revision(path: &Path, id: &str, revision: &str) -> bool {
@@ -144,9 +136,7 @@ mod tests {
         let (reused, _) = install_local_package(&store, state.path(), &parsed.root).unwrap();
         assert_eq!(reused.path, entry.path);
         assert!(parsed.root.join("main.wasm").is_file());
-        let registry = super::super::Providers::load(state.path());
-        assert!(registry.get("demo-tool").is_none());
-        registry.restore_admissions(state.path(), &store).unwrap();
+        let registry = super::super::Providers::load(state.path(), &store).unwrap();
         assert_eq!(
             registry.get("demo-tool").unwrap().package.revision,
             parsed.revision
@@ -203,12 +193,19 @@ mod tests {
         state: &Path,
         managed: &Path,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let legacy = plugins_dir(state).join("demo-tool");
-        fs::write(&legacy, b"occupied")?;
+        let directory = managed_package_dir(state, "demo-tool");
+        let held = directory.with_file_name("demo-tool-held");
+        fs::rename(&directory, &held)?;
+        fs::write(&directory, b"occupied")?;
         assert!(remove_local_package(store, state, "demo-tool").is_err());
         assert!(!store.plugin_repo().plugin_entries()?[0].enabled);
-        assert!(managed.join("main.wasm").is_file());
-        fs::remove_file(legacy)?;
+        assert!(
+            held.join(managed.file_name().unwrap())
+                .join("main.wasm")
+                .is_file()
+        );
+        fs::remove_file(&directory)?;
+        fs::rename(held, directory)?;
         Ok(())
     }
 }

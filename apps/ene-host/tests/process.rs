@@ -66,12 +66,9 @@ async fn wait_for_exit(child: &mut Box<dyn ChildWrapper>) {
     assert!(status.success(), "host shutdown failed: {status}");
 }
 
-/// Installs an STT provider under the directory the host reads at startup.
-/// The host refuses a state directory, and the loader a package, that anyone
-/// else may write, so the fixture makes both private, as the host does for a
-/// state directory it creates itself.
+/// Writes a private STT fixture package for the installation RPC.
 #[cfg(unix)]
-fn install_voice_stt(state: &Path) {
+fn write_voice_stt_package(package: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
 
     let wasm = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -81,11 +78,8 @@ fn install_voice_stt(state: &Path) {
         "build the guest first: cargo build --release --target wasm32-unknown-unknown -p ene-reference-wasm ({})",
         wasm.display()
     );
-    let package = state.join("plugins").join("voice-stt");
-    std::fs::create_dir_all(&package).unwrap();
-    for private in [state.to_path_buf(), package.clone()] {
-        std::fs::set_permissions(private, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
+    std::fs::create_dir_all(package).unwrap();
+    std::fs::set_permissions(package, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(package.join("main.wasm"), std::fs::read(&wasm).unwrap()).unwrap();
     std::fs::write(
         package.join("manifest.json"),
@@ -382,7 +376,8 @@ async fn process_transcribes_committed_audio_through_a_wasm_provider() {
     let temp = tempfile::tempdir().unwrap();
     let state = temp.path().join("state");
     let runtime = temp.path().join("runtime");
-    install_voice_stt(&state);
+    let package = temp.path().join("voice-stt");
+    write_voice_stt_package(&package);
     let mut child = spawn(&state, &runtime);
     let (endpoint, token) = discovery(&runtime).await;
     let (transport, config) = ene_rpc::connect(&endpoint, &token).unwrap();
@@ -390,6 +385,13 @@ async fn process_transcribes_committed_audio_through_a_wasm_provider() {
     let host = ene_rpc::HostServiceClient::new(transport.clone(), config.clone());
     let clients = ene_rpc::ClientServiceClient::new(transport.clone(), config.clone());
     let voice = ene_rpc::VoiceServiceClient::new(transport, config);
+    settings
+        .install_plugin(ene_rpc::InstallPluginRequest {
+            source_path: package.display().to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("the STT package is installed");
     settings
         .update_settings(ene_rpc::UpdateSettingsRequest {
             expected_revision: 1,

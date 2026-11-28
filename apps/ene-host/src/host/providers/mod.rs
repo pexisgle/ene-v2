@@ -1,7 +1,7 @@
 //! The provider plugins this host has loaded.
 //!
-//! A plugin package is read from `<state_dir>/plugins/<id>/` at startup and
-//! verified by `ene-plugin-runtime` before anything runs. The registry is then
+//! Startup reads registered revisions and verifies their packages through
+//! `ene-plugin-runtime` before anything runs. The registry is then
 //! a plain map from the adapter name a connection already carries to the
 //! loaded provider, so the synchronous paths that resolve a connection
 //! (`mind::embedding::target`, `model::connect`, `voice::tts_source`) read it
@@ -43,7 +43,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::host::error::HostError;
 use crate::host::settings::ConnectionKind;
-use install::{is_managed_directory, is_managed_revision, package_locations};
+use install::{is_managed_revision, managed_package_dir};
 
 /// Where a host looks for plugin packages unless told otherwise.
 pub(crate) const PLUGINS_DIR: &str = "plugins";
@@ -128,64 +128,13 @@ impl Providers {
         Self::default()
     }
 
-    /// Reads every package under `root`, keeping the ones that verify.
-    ///
-    /// A package that fails to load is reported and skipped: one broken plugin
-    /// must not stop the host, and the connection that named it then resolves
-    /// to nothing rather than to a half-loaded provider.
-    pub(crate) fn load(root: &Path) -> Self {
-        let directory = plugins_dir(root);
-        let Ok(entries) = std::fs::read_dir(&directory) else {
-            return Self::none();
-        };
-        let registry = Self::none();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() || is_managed_directory(&path) {
-                continue;
-            }
-            match load_one(&path) {
-                Ok((id, plugin)) if path.file_name().is_some_and(|name| name == id.as_str()) => {
-                    registry.install(id, Arc::new(plugin), None, true);
-                }
-                Ok((id, _)) => tracing::warn!(plugin = %id, "plugin directory must match its ID"),
-                Err(error) => {
-                    tracing::warn!(plugin = %path.display(), "the plugin was not loaded: {error}");
-                }
-            }
+    /// Restores the host's registered plugin revisions.
+    pub(crate) fn load(state: &Path, store: &crate::host::db::Store) -> ene_store::Result<Self> {
+        let providers = Self::none();
+        for entry in store.plugin_repo().plugin_entries()? {
+            providers.restore_package(state, &entry);
         }
-        registry
-    }
-
-    /// Loads the exact recorded revision before any plugin can start. A loose
-    /// package found in the operator's plugin directory is registered once.
-    pub(crate) fn restore_admissions(
-        &self,
-        state: &Path,
-        store: &crate::host::db::Store,
-    ) -> ene_store::Result<()> {
-        let repo = store.plugin_repo();
-        let entries = repo.plugin_entries()?;
-        for entry in &entries {
-            self.restore_package(state, entry);
-        }
-        for id in self
-            .adapters()
-            .filter(|id| entries.iter().all(|entry| entry.plugin_id != *id))
-        {
-            if let Some(loaded) = self.get(&id) {
-                let package = &loaded.package;
-                let entry = repo.install_plugin_entry(
-                    &id,
-                    &package.manifest.name,
-                    &package.manifest.version,
-                    &package.root.to_string_lossy(),
-                    &package.revision,
-                )?;
-                self.install(id, loaded, Some(entry.installation_id.into()), true);
-            }
-        }
-        Ok(())
+        Ok(providers)
     }
 
     fn restore_package(&self, state: &Path, entry: &ene_store::PluginEntry) {
@@ -193,26 +142,19 @@ impl Providers {
         if !ene_plugin_runtime::package::identifier(id) {
             return;
         }
-        let [legacy, managed] = package_locations(state, id);
         let revision = &entry.revision;
-        let candidate = if revision.len() == 64
+        if revision.len() == 64
             && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
             && is_managed_revision(Path::new(&entry.path), id, revision)
-        {
-            load_one(&managed.join(revision))
-                .ok()
-                .map(|(_, loaded)| Arc::new(loaded))
-        } else {
-            self.get(id).filter(|loaded| loaded.package.root == legacy)
-        };
-        if let Some(loaded) = candidate
-            && loaded.package.manifest.id == *id
-            && *revision == loaded.package.revision
+            && let Ok(package) = Package::load(&managed_package_dir(state, id).join(revision))
+            && package.manifest.id == *id
+            && package.revision == *revision
+            && let Ok(loaded) = load_package(package)
         {
             self.install(
                 id.clone(),
-                loaded,
-                Some(entry.installation_id.as_str().into()),
+                Arc::new(loaded),
+                entry.installation_id.as_str().into(),
                 entry.enabled,
             );
         } else {
@@ -264,19 +206,13 @@ impl Providers {
             .into_iter()
     }
 
-    fn install(
-        &self,
-        id: String,
-        loaded: Arc<Loaded>,
-        installation_id: Option<Arc<str>>,
-        enabled: bool,
-    ) {
+    fn install(&self, id: String, loaded: Arc<Loaded>, installation_id: Arc<str>, enabled: bool) {
         let mut registry = self.installed.write();
         registry.registrations.insert(
             id,
             Registration {
                 loaded: Some(loaded),
-                installation_id,
+                installation_id: Some(installation_id),
                 active: enabled.then(Admission::default),
             },
         );
@@ -286,7 +222,7 @@ impl Providers {
     pub(crate) fn replace(&self, package: Package, installation_id: String) {
         let id = package.manifest.id.clone();
         match load_package(package) {
-            Ok(plugin) => self.install(id, Arc::new(plugin), Some(installation_id.into()), true),
+            Ok(plugin) => self.install(id, Arc::new(plugin), installation_id.into(), true),
             Err(_) => self.remove(&id),
         }
     }
@@ -460,13 +396,6 @@ pub(crate) fn plugins_dir(state: &Path) -> PathBuf {
     }
 }
 
-fn load_one(path: &Path) -> Result<(String, Loaded), HostError> {
-    let package = Package::load(path)
-        .map_err(|error| HostError::Unavailable(format!("plugin package: {error}")))?;
-    let id = package.manifest.id.clone();
-    Ok((id, load_package(package)?))
-}
-
 fn load_package(package: Package) -> Result<Loaded, HostError> {
     if package.manifest.entrypoints.iter().any(|entry| {
         entry
@@ -485,6 +414,7 @@ fn load_package(package: Package) -> Result<Loaded, HostError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::db::Store;
 
     pub(super) fn write(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) {
         let path = path.as_ref();
@@ -529,19 +459,19 @@ mod tests {
     }
 
     #[test]
-    fn a_registry_reads_the_packages_under_its_directory() {
+    fn only_installed_packages_are_restored() {
         let temp = tempfile::tempdir().unwrap();
-        package(
-            &temp.path().join(PLUGINS_DIR).join("voicevox"),
-            "voicevox",
-            "tts",
-        );
-        package(
-            &temp.path().join(PLUGINS_DIR).join("local-embed"),
-            "local-embed",
-            "embedding",
-        );
-        let providers = Providers::load(temp.path());
+        let state = temp.path();
+        let store = Store::open(&state.join("host.sqlite3")).unwrap();
+        let voice = state.join(PLUGINS_DIR).join("voicevox");
+        let embed = state.join(PLUGINS_DIR).join("local-embed");
+        package(&voice, "voicevox", "tts");
+        package(&embed, "local-embed", "embedding");
+        install_local_package(&store, state, &voice).unwrap();
+        let providers = Providers::load(state, &store).unwrap();
+        assert!(providers.get("local-embed").is_none());
+        install_local_package(&store, state, &embed).unwrap();
+        let providers = Providers::load(state, &store).unwrap();
         let mut adapters: Vec<String> = providers.adapters().collect();
         adapters.sort_unstable();
         assert_eq!(adapters, ["local-embed", "voicevox"]);
@@ -600,7 +530,9 @@ mod tests {
             })
             .to_string(),
         );
-        let providers = Providers::load(temp.path());
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        install_local_package(&store, temp.path(), &root).unwrap();
+        let providers = Providers::load(temp.path(), &store).unwrap();
         let loaded = providers.get("multi").unwrap();
         let (entry, llm) = loaded.entry(Extension::Llm).unwrap();
         assert_eq!(
@@ -617,15 +549,17 @@ mod tests {
     #[test]
     fn a_broken_package_is_skipped_and_the_rest_still_load() {
         let temp = tempfile::tempdir().unwrap();
-        package(
-            &temp.path().join(PLUGINS_DIR).join("good"),
-            "good",
-            "embedding",
-        );
-        let broken = temp.path().join(PLUGINS_DIR).join("broken");
-        std::fs::create_dir_all(&broken).unwrap();
-        std::fs::write(broken.join("manifest.json"), b"not json").unwrap();
-        let providers = Providers::load(temp.path());
+        let state = temp.path();
+        let store = Store::open(&state.join("host.sqlite3")).unwrap();
+        for id in ["good", "broken"] {
+            let source = state.join(id);
+            package(&source, id, "embedding");
+            let (_, installed) = install_local_package(&store, state, &source).unwrap();
+            if id == "broken" {
+                write(installed.root.join("manifest.json"), b"not json");
+            }
+        }
+        let providers = Providers::load(state, &store).unwrap();
         assert!(providers.get("good").is_some());
         assert!(providers.get("broken").is_none());
     }
@@ -633,7 +567,8 @@ mod tests {
     #[test]
     fn a_missing_directory_is_an_empty_registry() {
         let temp = tempfile::tempdir().unwrap();
-        let providers = Providers::load(&temp.path().join("absent"));
+        let store = Store::open(&temp.path().join("host.sqlite3")).unwrap();
+        let providers = Providers::load(temp.path(), &store).unwrap();
         assert_eq!(providers.adapters().count(), 0);
     }
 }

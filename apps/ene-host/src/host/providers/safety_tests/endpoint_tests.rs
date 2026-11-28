@@ -726,7 +726,7 @@ async fn b07_embedding_plugin_uses_provider_context_and_broker() {
     manifest["entrypoints"][0]["provider"]["destinations"] =
         json!([upstream_a.base, upstream_b.base]);
     super::tests::write(manifest_path, manifest.to_string());
-    let providers = Providers::load(root.path());
+    let providers = publish_openrouter_fixture(root.path());
 
     let conn_a = Connection {
         id: ene_domain::ConnectionId::parse("emb-a").unwrap(),

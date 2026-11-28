@@ -211,7 +211,13 @@ pub(super) fn installed_providers(
         })
         .to_string(),
     );
-    Providers::load(root)
+    publish_openrouter_fixture(root)
+}
+
+fn publish_openrouter_fixture(root: &Path) -> Providers {
+    let store = Store::open(&root.join("host.sqlite3")).unwrap();
+    install_local_package(&store, root, &root.join(PLUGINS_DIR).join("openrouter")).unwrap();
+    Providers::load(root, &store).unwrap()
 }
 
 pub(super) fn reply(document: &str) -> String {
@@ -522,7 +528,7 @@ async fn p10_listing_initialization_failure_never_selects_native() {
         "(func (export \"ene_initialize\") (result i32) (local $p i64) unreachable",
     );
     super::tests::write(path, wasm);
-    let providers = Providers::load(root.path());
+    let providers = publish_openrouter_fixture(root.path());
     assert!(providers.get("openrouter").is_some());
     let check = model::probe(&Credentials::new(true), &connection, &providers).await;
     assert!(!check.healthy);
