@@ -12,7 +12,6 @@ clap.workspace = true
 connectrpc.workspace = true
 cpal = "0.18"
 directories = "6"
-futures-util.workspace = true
 private-fs = "0.2.1"
 ene-core.workspace = true
 ene-plugin = { workspace = true, features = ["runtime"] }
