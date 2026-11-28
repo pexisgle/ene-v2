@@ -453,10 +453,7 @@ mod tests {
         let (entry, package) =
             super::super::install_local_package(&store, temp.path(), &root).unwrap();
         assert_eq!(entry.revision, package.revision);
-        assert_ne!(
-            running.installation_id(),
-            Some(entry.installation_id.as_str())
-        );
+        assert_ne!(running.installation_id(), entry.installation_id);
         assert!(!running.revoked());
         assert_eq!(
             initial.handle(write(2)).await.unwrap_err().code,

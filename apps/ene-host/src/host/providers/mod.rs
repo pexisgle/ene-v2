@@ -104,10 +104,13 @@ struct Registry {
     revision: u64,
 }
 
-struct Registration {
-    loaded: Option<Arc<Loaded>>,
-    installation_id: Option<Arc<str>>,
-    active: Option<Admission>,
+enum Registration {
+    Unavailable,
+    Installed {
+        loaded: Arc<Loaded>,
+        installation_id: Arc<str>,
+        active: Option<Admission>,
+    },
 }
 
 #[derive(Default)]
@@ -143,33 +146,23 @@ impl Providers {
             return;
         }
         let revision = &entry.revision;
-        if revision.len() == 64
+        let registration = if revision.len() == 64
             && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
             && is_managed_revision(Path::new(&entry.path), id, revision)
             && let Ok(package) = Package::load(&managed_package_dir(state, id).join(revision))
             && package.manifest.id == *id
             && package.revision == *revision
-            && let Ok(loaded) = load_package(package)
-        {
-            self.install(
-                id.clone(),
-                Arc::new(loaded),
+            && let Some(registration) = Registration::from_package(
+                package,
                 entry.installation_id.as_str().into(),
                 entry.enabled,
-            );
+            ) {
+            registration
         } else {
-            let mut installed = self.installed.write();
-            installed.registrations.insert(
-                id.clone(),
-                Registration {
-                    loaded: None,
-                    installation_id: None,
-                    active: None,
-                },
-            );
-            installed.revision += 1;
             tracing::warn!(plugin = %id, "the registered plugin revision is unavailable");
-        }
+            Registration::Unavailable
+        };
+        self.record(id.clone(), registration);
     }
 
     /// The plugin a connection's `adapter` names, when one is installed.
@@ -178,7 +171,8 @@ impl Providers {
             .read()
             .registrations
             .get(adapter)
-            .and_then(|entry| entry.loaded.clone())
+            .and_then(Registration::loaded)
+            .cloned()
     }
 
     /// Runtime revision used by connection caches when plugin admission changes.
@@ -206,34 +200,26 @@ impl Providers {
             .into_iter()
     }
 
-    fn install(&self, id: String, loaded: Arc<Loaded>, installation_id: Arc<str>, enabled: bool) {
+    fn record(&self, id: String, registration: Registration) {
         let mut registry = self.installed.write();
-        registry.registrations.insert(
-            id,
-            Registration {
-                loaded: Some(loaded),
-                installation_id: Some(installation_id),
-                active: enabled.then(Admission::default),
-            },
-        );
+        registry.registrations.insert(id, registration);
         registry.revision += 1;
     }
 
     pub(crate) fn replace(&self, package: Package, installation_id: String) {
         let id = package.manifest.id.clone();
-        match load_package(package) {
-            Ok(plugin) => self.install(id, Arc::new(plugin), installation_id.into(), true),
-            Err(_) => self.remove(&id),
+        match Registration::from_package(package, installation_id.into(), true) {
+            Some(registration) => self.record(id, registration),
+            None => self.remove(&id),
         }
     }
 
     pub(crate) fn set_enabled(&self, id: &str, enabled: bool) {
         let mut installed = self.installed.write();
-        if let Some(entry) = installed.registrations.get_mut(id)
-            && entry.loaded.is_some()
-            && entry.active.is_some() != enabled
+        if let Some(Registration::Installed { active, .. }) = installed.registrations.get_mut(id)
+            && active.is_some() != enabled
         {
-            entry.active = enabled.then(Admission::default);
+            *active = enabled.then(Admission::default);
             installed.revision += 1;
         }
     }
@@ -252,7 +238,7 @@ impl Providers {
             .read()
             .registrations
             .iter()
-            .filter(|(_, entry)| entry.active.is_some() && entry.claims(extension))
+            .filter(|(_, entry)| entry.admits(extension))
             .map(|(id, _)| id.clone())
             .collect();
         ids.sort();
@@ -269,14 +255,17 @@ impl Providers {
         let unavailable = || HostError::Unavailable(format!("plugin `{adapter}` is not enabled"));
         let (loaded, installation_id, cell, lifetime) = {
             let mut installed = self.installed.write();
-            let entry = installed
-                .registrations
-                .get_mut(adapter)
-                .ok_or_else(unavailable)?;
-            let active = entry.active.as_mut().ok_or_else(unavailable)?;
+            let Some(Registration::Installed {
+                loaded,
+                installation_id,
+                active: Some(active),
+            }) = installed.registrations.get_mut(adapter)
+            else {
+                return Err(unavailable());
+            };
             (
-                entry.loaded.clone().ok_or_else(unavailable)?,
-                entry.installation_id.clone(),
+                Arc::clone(loaded),
+                Arc::clone(installation_id),
                 Arc::clone(active.started.entry(extension).or_default()),
                 active.lifetime.clone(),
             )
@@ -333,24 +322,18 @@ impl Providers {
         let Ok(settings) = store.settings_repo().settings() else {
             return;
         };
-        for connection in settings.connections {
-            if !connection.enabled {
-                continue;
-            }
+        for connection in settings.connections.into_iter().filter(|c| c.enabled) {
             let Some(extension) = connection_extension(connection.kind) else {
                 continue;
             };
             let adapter = &connection.endpoint().adapter;
-            if !self
+            let admits = self
                 .installed
                 .read()
                 .registrations
                 .get(adapter)
-                .is_some_and(|entry| entry.active.is_some() && entry.claims(extension))
-            {
-                continue;
-            }
-            if let Err(error) = self.start(adapter, extension).await {
+                .is_some_and(|entry| entry.admits(extension));
+            if admits && let Err(error) = self.start(adapter, extension).await {
                 tracing::warn!(
                     connection = %connection.id,
                     "the plugin provider did not start: {error}"
@@ -372,19 +355,52 @@ pub(crate) fn connection_extension(kind: ConnectionKind) -> Option<Extension> {
 }
 
 impl Registration {
+    fn from_package(package: Package, installation_id: Arc<str>, enabled: bool) -> Option<Self> {
+        let supported = package.manifest.entrypoints.iter().any(|entry| {
+            entry
+                .provides
+                .iter()
+                .any(|&extension| serves(entry, extension))
+        });
+        supported.then(|| Self::Installed {
+            loaded: Arc::new(Loaded { package }),
+            installation_id,
+            active: enabled.then(Admission::default),
+        })
+    }
+
+    fn loaded(&self) -> Option<&Arc<Loaded>> {
+        match self {
+            Self::Unavailable => None,
+            Self::Installed { loaded, .. } => Some(loaded),
+        }
+    }
+
     fn claims(&self, extension: Extension) -> bool {
-        self.loaded
-            .as_ref()
+        // An unavailable registration still reserves the adapter.
+        self.loaded()
             .is_none_or(|loaded| loaded.entrypoint(extension).is_some())
     }
 
+    fn admits(&self, extension: Extension) -> bool {
+        matches!(
+            self,
+            Self::Installed {
+                active: Some(_),
+                ..
+            }
+        ) && self.claims(extension)
+    }
+
     fn started(&self, extension: Extension) -> Option<Arc<Running>> {
-        self.active
-            .as_ref()?
-            .started
-            .get(&extension)?
-            .get()
-            .cloned()
+        let Self::Installed {
+            active: Some(active),
+            ..
+        } = self
+        else {
+            return None;
+        };
+        active.started.get(&extension)?.get().cloned()
     }
 }
 
@@ -394,21 +410,6 @@ pub(crate) fn plugins_dir(state: &Path) -> PathBuf {
         Some(directory) if !directory.is_empty() => PathBuf::from(directory),
         _ => state.join(PLUGINS_DIR),
     }
-}
-
-fn load_package(package: Package) -> Result<Loaded, HostError> {
-    if package.manifest.entrypoints.iter().any(|entry| {
-        entry
-            .provides
-            .iter()
-            .any(|&extension| serves(entry, extension))
-    }) {
-        return Ok(Loaded { package });
-    }
-    Err(HostError::Unavailable(format!(
-        "the plugin `{}` serves no supported host extension",
-        package.manifest.id,
-    )))
 }
 
 #[cfg(test)]

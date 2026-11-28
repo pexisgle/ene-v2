@@ -53,7 +53,7 @@ impl PluginServices {
 impl Services for PluginServices {
     fn check(&self) -> BoxFuture<'_, Result<(), Failure>> {
         Box::pin(async {
-            if self.running.revoked() || self.running.installation_id().is_none() {
+            if self.running.revoked() {
                 return Err(Failure::new("provider_revoked"));
             }
             Ok(())
@@ -64,14 +64,11 @@ impl Services for PluginServices {
         Box::pin(async move {
             let running = &self.running;
             let plugin_id = running.plugin_id();
-            let installation = running
-                .installation_id()
-                .ok_or_else(|| Failure::new("provider_revoked"))?;
             self.store
                 .plugin_repo()
                 .with_installation(
                     plugin_id,
-                    installation,
+                    running.installation_id(),
                     || !running.revoked(),
                     |data| match request {
                         ServiceRequest::Log { message } => {

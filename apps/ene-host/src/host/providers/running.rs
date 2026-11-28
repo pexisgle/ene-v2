@@ -28,7 +28,7 @@ pub(crate) struct Running {
     provider: Option<Box<ProviderRole>>,
     instance: tokio::sync::Mutex<Option<Instance>>,
     loaded: Arc<Loaded>,
-    installation_id: Option<Arc<str>>,
+    installation_id: Arc<str>,
     entrypoint: String,
     runtime: Handle,
     cancel: CancellationToken,
@@ -48,7 +48,7 @@ impl Running {
     /// Starts the entrypoint that serves `extension`.
     pub(super) async fn start(
         loaded: Arc<Loaded>,
-        installation_id: Option<Arc<str>>,
+        installation_id: Arc<str>,
         extension: Extension,
         cancel: CancellationToken,
     ) -> Result<Self, HostError> {
@@ -201,8 +201,8 @@ impl Running {
         &self.loaded.package.manifest.id
     }
 
-    pub(crate) fn installation_id(&self) -> Option<&str> {
-        self.installation_id.as_deref()
+    pub(crate) fn installation_id(&self) -> &str {
+        &self.installation_id
     }
 
     async fn reload(&self) -> Result<Instance, HostError> {

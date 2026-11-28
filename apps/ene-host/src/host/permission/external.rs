@@ -92,7 +92,7 @@ fn plugin_scope(key: &[u8; 32], owner: &Running, call: &GateCall) -> Option<Invo
         [
             plugin_id.as_bytes(),
             revision.as_bytes(),
-            owner.installation_id()?.as_bytes(),
+            owner.installation_id().as_bytes(),
             tool_name.as_bytes(),
             canonical_json(&call.arguments).as_bytes(),
         ],
